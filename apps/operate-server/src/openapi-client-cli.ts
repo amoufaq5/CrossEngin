@@ -15,6 +15,10 @@ export interface OpenApiClientOptions {
   readonly clientName: string | null;
   /** Also produce the sdk-clients `GenerationRun` record (to `<out>.run.json`, or stdout). */
   readonly emitRun: boolean;
+  /** When set, also plan a `ClientRelease` + compatibility entry at this semver (→ `<out>.release.json`/stdout). */
+  readonly releaseVersion: string | null;
+  /** When set with `--release-version`, the release is `published` by this actor (else a `draft`). */
+  readonly publishBy: string | null;
   readonly help: boolean;
 }
 
@@ -31,6 +35,8 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
   let out: string | null = null;
   let clientName: string | null = null;
   let emitRun = false;
+  let releaseVersion: string | null = null;
+  let publishBy: string | null = null;
   let help = false;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -59,6 +65,12 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
       i += consumed();
     } else if (arg === "--emit-run") {
       emitRun = true;
+    } else if (arg === "--release-version" || arg.startsWith("--release-version=")) {
+      releaseVersion = takeValue(arg, next, "--release-version");
+      i += consumed();
+    } else if (arg === "--publish-by" || arg.startsWith("--publish-by=")) {
+      publishBy = takeValue(arg, next, "--publish-by");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown flag: ${arg}`);
     }
@@ -67,7 +79,10 @@ export function parseOpenApiClientArgs(argv: readonly string[]): OpenApiClientOp
   if (!help && (pack === null) === (manifestPath === null)) {
     throw new CliUsageError("exactly one of --pack / --manifest is required");
   }
-  return { pack, manifestPath, lang, out, clientName, emitRun, help };
+  if (publishBy !== null && releaseVersion === null) {
+    throw new CliUsageError("--publish-by requires --release-version");
+  }
+  return { pack, manifestPath, lang, out, clientName, emitRun, releaseVersion, publishBy, help };
 }
 
 export const openApiClientHelpText = `operate-server openapi-client — emit a typed TypeScript client from the OpenAPI document
@@ -82,5 +97,7 @@ Flags:
   --out <file>           write the client module to a file (default: stdout)
   --client-name <name>   factory/class name (ts/python); for go, the package name
   --emit-run             also emit the sdk-clients GenerationRun record (<out>.run.json, or stdout)
+  --release-version <v>  also plan a ClientRelease + compatibility entry at semver <v> (<out>.release.json, or stdout)
+  --publish-by <actor>   with --release-version, mark the release published by <actor> (else a draft)
   --help / -h
 `;

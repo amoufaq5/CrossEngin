@@ -35,6 +35,16 @@ describe("parseOpenApiClientArgs", () => {
     expect(() => parseOpenApiClientArgs(["--pack", "x", "--manifest", "m.json"])).toThrow(CliUsageError);
   });
 
+  it("parses --release-version + --publish-by", () => {
+    const o = parseOpenApiClientArgs(["--pack", "erp-retail", "--release-version", "1.0.0", "--publish-by", "bot"]);
+    expect(o.releaseVersion).toBe("1.0.0");
+    expect(o.publishBy).toBe("bot");
+  });
+
+  it("requires --release-version when --publish-by is given", () => {
+    expect(() => parseOpenApiClientArgs(["--pack", "x", "--publish-by", "bot"])).toThrow(CliUsageError);
+  });
+
   it("does not require a manifest source for --help", () => {
     expect(parseOpenApiClientArgs(["--help"]).help).toBe(true);
   });

@@ -104,6 +104,13 @@ For a release pipeline, add `--emit-run`: it also writes the `@crossengin/sdk-cl
 build-proof, generator config, and spec source) to `<out>.run.json` — so the
 generated client and its contract-typed lifecycle record are produced together.
 
+To go all the way to a release, add `--release-version <semver>` (and
+`--publish-by <actor>` to publish rather than draft): the CLI also emits
+`{ release, compatibility }` to `<out>.release.json` — a `ClientRelease` (semver +
+channel + the artifact sha + a `generationRunId` back-link) plus a
+`fully_compatible` `CompatibilityEntry`. The full chain off one document is:
+OpenAPI → emit → `GenerationRun` → `ClientRelease` + `CompatibilityEntry`.
+
 **Or any OpenAPI 3.1 toolchain** — the document is intentionally vanilla:
 
 ```bash

@@ -26,6 +26,7 @@ import {
   InMemoryEntityStore,
   compileOperateServer,
   generateClient,
+  planClientRelease,
   type EntityStore,
 } from "@crossengin/operate-runtime";
 import {
@@ -323,21 +324,38 @@ export async function executeOpenApiClient(options: OpenApiClientOptions): Promi
   // Run through the sdk-clients generation bridge (P3.42), so the same call yields
   // both the emitted source and a schema-valid GenerationRun lifecycle record.
   const targetLang = options.lang === "ts" ? "typescript" : options.lang;
-  const { run, source } = generateClient(doc, targetLang, {
+  const result = generateClient(doc, targetLang, {
     triggeredBy: "operate-server-cli",
     ...(options.clientName !== null ? { clientName: options.clientName } : {}),
   });
-  const moduleSource = source ?? "";
+  const { run } = result;
+  const moduleSource = result.source ?? "";
+
+  // P3.43: optionally plan a ClientRelease + compatibility entry at the given semver.
+  const plan =
+    options.releaseVersion !== null
+      ? planClientRelease(result, {
+          version: options.releaseVersion,
+          ...(options.publishBy !== null ? { publishedBy: options.publishBy } : {}),
+        })
+      : null;
 
   if (options.out !== null) {
     await writeFile(options.out, moduleSource, "utf8");
+    const extras: string[] = [];
     if (options.emitRun) {
       const runPath = `${options.out}.run.json`;
       await writeFile(runPath, `${JSON.stringify(run, null, 2)}\n`, "utf8");
-      process.stdout.write(`wrote ${options.out} + ${runPath}\n`);
-    } else {
-      process.stdout.write(`wrote ${options.out}\n`);
+      extras.push(runPath);
     }
+    if (plan !== null) {
+      const relPath = `${options.out}.release.json`;
+      await writeFile(relPath, `${JSON.stringify(plan, null, 2)}\n`, "utf8");
+      extras.push(relPath);
+    }
+    process.stdout.write(`wrote ${[options.out, ...extras].join(" + ")}\n`);
+  } else if (plan !== null) {
+    process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
   } else if (options.emitRun) {
     process.stdout.write(`${JSON.stringify(run, null, 2)}\n`);
   } else {

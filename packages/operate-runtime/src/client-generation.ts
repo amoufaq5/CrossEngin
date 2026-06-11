@@ -1,9 +1,14 @@
 import { sha256 } from "@crossengin/crypto";
 import {
+  ClientReleaseSchema,
+  CompatibilityEntrySchema,
   GenerationRunSchema,
   defaultConfigFor,
+  type ClientRelease,
+  type CompatibilityEntry,
   type GenerationRun,
   type GeneratorConfig,
+  type ReleaseChannel,
   type SpecSource,
   type TargetLanguage,
 } from "@crossengin/sdk-clients";
@@ -131,4 +136,74 @@ export function generateClient(
     lintErrors: 0,
   });
   return { run, source };
+}
+
+export interface PlanReleaseOptions {
+  /** The release version (semver; stable channel forbids pre-release/build metadata). */
+  readonly version: string;
+  /** Release channel (default `stable`). */
+  readonly channel?: ReleaseChannel;
+  /** The package registry URL the artifact publishes to (a valid URL). */
+  readonly registryPackageUri?: string;
+  /** The changelog URL (a valid URL). */
+  readonly changelogUrl?: string;
+  /** When set, the release is `published` (stamps `publishedAt`/`publishedBy`); else a `draft`. */
+  readonly publishedBy?: string;
+  /** Marks the release as carrying breaking changes (gated on stable 0.x). */
+  readonly breakingChanges?: boolean;
+  /** Stable release id (default derived from language + version). */
+  readonly id?: string;
+  /** Fixed clock (default `new Date()`). */
+  readonly now?: Date;
+}
+
+export interface ClientReleasePlan {
+  readonly release: ClientRelease;
+  readonly compatibility: CompatibilityEntry;
+}
+
+/**
+ * Closes the publish pipeline (P3.43): turns a **succeeded** `ClientGenerationResult`
+ * into a schema-valid `ClientRelease` (carrying the run's `artifactSha256`
+ * build-proof + the artifact's byte size + a `generationRunId` back-link) plus a
+ * `fully_compatible` `CompatibilityEntry` (the freshly-generated client tracks the
+ * exact API version it was emitted from). Throws on a non-succeeded run.
+ */
+export function planClientRelease(result: ClientGenerationResult, options: PlanReleaseOptions): ClientReleasePlan {
+  if (result.run.status !== "succeeded" || result.source === null || result.run.outputArtifactSha256 === null) {
+    throw new Error(`cannot plan a release from a ${result.run.status} generation run`);
+  }
+  const { run } = result;
+  const iso = (options.now ?? new Date()).toISOString();
+  const channel: ReleaseChannel = options.channel ?? "stable";
+  const published = options.publishedBy !== undefined;
+  const language = run.language;
+  const slug = language === "go" ? "go" : language;
+
+  const release = ClientReleaseSchema.parse({
+    id: options.id ?? `rel-${language}-${options.version}`,
+    language,
+    version: options.version,
+    apiVersion: run.spec.apiVersion,
+    channel,
+    status: published ? "published" : "draft",
+    artifactSha256: run.outputArtifactSha256,
+    artifactSizeBytes: Math.max(1, Buffer.byteLength(result.source, "utf8")),
+    registryPackageUri: options.registryPackageUri ?? `https://registry.crossengin.local/${slug}/operate-client`,
+    generationRunId: run.id,
+    changelogUrl: options.changelogUrl ?? "https://docs.crossengin.local/clients/changelog",
+    breakingChanges: options.breakingChanges ?? false,
+    ...(published ? { publishedAt: iso, publishedBy: options.publishedBy } : {}),
+  });
+
+  const compatibility = CompatibilityEntrySchema.parse({
+    language,
+    clientVersion: options.version,
+    apiVersion: run.spec.apiVersion,
+    level: "fully_compatible",
+    warningCount: 0,
+    determinedAt: iso,
+  });
+
+  return { release, compatibility };
 }
