@@ -3,8 +3,9 @@
 import { CliUsageError, helpText, parseServeArgs } from "../src/cli.js";
 import { incidentsHelpText, parseIncidentsArgs } from "../src/incidents-cli.js";
 import { openApiClientHelpText, parseOpenApiClientArgs } from "../src/openapi-client-cli.js";
+import { parseSdkReleasesArgs, sdkReleasesHelpText } from "../src/sdk-releases-cli.js";
 import { parseSloArgs, sloHelpText } from "../src/slo-cli.js";
-import { executeIncidents, executeOpenApiClient, executeSlo, serve } from "../src/node.js";
+import { executeIncidents, executeOpenApiClient, executeSdkReleases, executeSlo, serve } from "../src/node.js";
 
 const CLI_VERSION = "0.0.0";
 
@@ -44,6 +45,24 @@ async function runSloCommand(argv: readonly string[]): Promise<number> {
   return executeSlo(options);
 }
 
+async function runSdkReleasesCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseSdkReleasesArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${sdkReleasesHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(sdkReleasesHelpText);
+    return 0;
+  }
+  return executeSdkReleases(options);
+}
+
 async function runOpenApiClientCommand(argv: readonly string[]): Promise<number> {
   let options;
   try {
@@ -75,6 +94,9 @@ async function main(): Promise<number> {
   }
   if (process.argv[2] === "openapi-client") {
     return runOpenApiClientCommand(process.argv.slice(3));
+  }
+  if (process.argv[2] === "sdk-releases") {
+    return runSdkReleasesCommand(process.argv.slice(3));
   }
 
   let options;

@@ -10,7 +10,12 @@ import {
   type IncidentsCliOptions,
 } from "@crossengin/incident-response-pg";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
-import { PostgresClientReleaseStore, PostgresSdkCompatibilityStore } from "@crossengin/sdk-clients-pg";
+import {
+  PostgresClientReleaseStore,
+  PostgresSdkCompatibilityStore,
+  runSdkReleases,
+  type SdkLedgerSource,
+} from "@crossengin/sdk-clients-pg";
 import {
   PostgresSloEnforcementActionStore,
   PostgresSloLatencyEvaluationStore,
@@ -39,6 +44,7 @@ import {
 
 import type { ServeOptions } from "./cli.js";
 import type { OpenApiClientOptions } from "./openapi-client-cli.js";
+import type { SdkReleasesCliOptions } from "./sdk-releases-cli.js";
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
@@ -240,6 +246,31 @@ export async function executeSlo(
       new PostgresSloLatencyEvaluationStore(conn),
     );
     const { exitCode } = await runSloQuery(options, source, out);
+    return exitCode;
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * `operate-server sdk-releases <list|compat|verify>` (P3.48): query + verify the
+ * persisted SDK ledger (meta.sdk_client_releases + meta.sdk_compatibility_entries,
+ * populated by `openapi-client --release-version --persist`). Wires the release +
+ * compatibility stores as a `SdkLedgerSource`; `verify` exits 1 on cross-table drift.
+ */
+export async function executeSdkReleases(
+  options: SdkReleasesCliOptions,
+  out: (line: string) => void = (line) => void process.stdout.write(`${line}\n`),
+): Promise<number> {
+  const conn: PgConnection = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const releaseStore = new PostgresClientReleaseStore(conn);
+    const compatStore = new PostgresSdkCompatibilityStore(conn);
+    const source: SdkLedgerSource = {
+      listReleases: (q) => releaseStore.list(q),
+      listCompatibility: (q) => compatStore.list(q),
+    };
+    const { exitCode } = await runSdkReleases(options, source, out);
     return exitCode;
   } finally {
     await conn.close();

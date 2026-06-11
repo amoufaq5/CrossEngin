@@ -76,4 +76,16 @@ export class PostgresSdkCompatibilityStore {
     );
     return res.rows.map((r) => parseRecord(r["record"]));
   }
+
+  /** Lists entries (optionally filtered by api_version), newest-determined first, bounded. */
+  async list(query: { readonly apiVersion?: string; readonly limit?: number } = {}): Promise<readonly CompatibilityEntry[]> {
+    const params: unknown[] = [];
+    const where = query.apiVersion !== undefined ? ` WHERE api_version = $${params.push(query.apiVersion)}` : "";
+    const limit = query.limit !== undefined && query.limit > 0 ? Math.min(query.limit, 1000) : 500;
+    const res = await this.conn.query(
+      `SELECT record FROM ${this.table}${where} ORDER BY determined_at DESC LIMIT $${params.push(limit)}`,
+      params,
+    );
+    return res.rows.map((r) => parseRecord(r["record"]));
+  }
 }
