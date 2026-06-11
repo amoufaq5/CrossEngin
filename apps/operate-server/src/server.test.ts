@@ -1,9 +1,12 @@
 import type { PipelineExecution } from "@crossengin/api-gateway";
 import { InMemoryEntityStore } from "@crossengin/operate-runtime";
+import type { PackInstallation } from "@crossengin/marketplace";
+import type { PostgresPackInstallationStore } from "@crossengin/marketplace-pg";
 import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest } from "./http.js";
 import { loadBuiltinPack } from "./manifest-source.js";
+import { buildMarketplaceRoutes } from "./marketplace-routes.js";
 import { buildPrincipalWiring, parseApiKeySpec } from "./principals.js";
 import { buildManifestReportRunner } from "./reports.js";
 import { OperateHttpServer, buildOperateHttpServer, type ExecutionSink } from "./server.js";
@@ -324,5 +327,46 @@ describe("OperateHttpServer — GET /v1/openapi.json (P3.26)", () => {
     // both can still read products (GET present for each)
     expect(mgrPaths["/v1/products"]?.["get"]).toBeDefined();
     expect(cshPaths["/v1/products"]?.["get"]).toBeDefined();
+  });
+});
+
+describe("marketplace install routes (P5.1) — over the gateway", () => {
+  const INSTALL = {
+    packId: "acme.crm.sales",
+    status: "installed",
+    installedVersion: "1.0.0",
+    tenantId: TENANT,
+  } as unknown as PackInstallation;
+  const fakeStore = {
+    listForTenant: async () => [INSTALL],
+    activeForPack: async () => null,
+    record: async () => {},
+  } as unknown as PostgresPackInstallationStore;
+
+  function makeMarketplaceServer(): OperateHttpServer {
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+      extraRoutes: buildMarketplaceRoutes(fakeStore, { now: () => new Date(), newId: () => "11111111-1111-4111-8111-111111111111" }),
+    });
+    return httpServer;
+  }
+
+  it("GET /v1/marketplace/installations lists the authenticated tenant's installs", async () => {
+    const res = await makeMarketplaceServer().dispatch(req("GET", "/v1/marketplace/installations", "key-manager"), null);
+    expect(res.status).toBe(200);
+    const installations = parse(res.body)["installations"] as Array<Record<string, unknown>>;
+    expect(installations).toHaveLength(1);
+    expect(installations[0]!["packId"]).toBe("acme.crm.sales");
+  });
+
+  it("requires authentication (401 without a key)", async () => {
+    const res = await makeMarketplaceServer().dispatch(
+      { method: "GET", url: "/v1/marketplace/installations", headers: { host: "api.example.com" }, remoteAddress: "203.0.113.1" },
+      null,
+    );
+    expect(res.status).toBe(401);
   });
 });

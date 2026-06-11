@@ -1,5 +1,5 @@
 import type { RoleDefinition, RoleName, SensitiveFieldPolicy } from "@crossengin/auth";
-import type { ResolvedPrincipal } from "@crossengin/api-gateway";
+import type { ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   GatewayRuntime,
@@ -10,6 +10,7 @@ import {
   InMemoryRouteRegistry,
   MapRedactionRegistry,
   redactionRegistryFromManifest,
+  type Handler,
   type IdempotencyStore,
   type JwksProvider,
   type OpaqueTokenLookup,
@@ -61,6 +62,20 @@ export interface OperateRuntimeOptions {
   readonly serveApiDescriptor?: boolean;
   /** Info block for the served OpenAPI document (defaults to a generic title). */
   readonly openApiInfo?: { readonly title: string; readonly version: string };
+  /**
+   * Additional non-entity gateway routes to register (e.g. a marketplace install
+   * surface). Each rides the full pipeline (auth, RBAC scopes, rate-limit, audit)
+   * exactly like the entity routes; the handler reads the resolved principal +
+   * tenant. Keeps operate-runtime free of any app-specific route logic.
+   */
+  readonly extraRoutes?: readonly ExtraRoute[];
+}
+
+/** A custom gateway route + its handler, dispatched by `operationId`. */
+export interface ExtraRoute {
+  readonly definition: RouteDefinition;
+  readonly operationId: string;
+  readonly handler: Handler;
 }
 
 export interface CompiledOperateServer {
@@ -104,6 +119,13 @@ export function compileOperateServer(
   if (options.reportRunner !== undefined) {
     routes.register(reportRouteDefinition());
     handlers.register(REPORT_RUN_OPERATION_ID, buildReportHandler(options.reportRunner));
+  }
+
+  // Additional non-entity routes (e.g. the marketplace install surface) ride the
+  // same pipeline as the entity routes.
+  for (const extra of options.extraRoutes ?? []) {
+    routes.register(extra.definition);
+    handlers.register(extra.operationId, extra.handler);
   }
 
   const apiDescriptor = buildApiDescriptor(manifest, routeSpecs, { includeReportRoute: hasReportRoute });

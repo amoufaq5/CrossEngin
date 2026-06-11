@@ -4,6 +4,7 @@ import type { RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import {
   buildOperateGateway,
   type EntityStore,
+  type ExtraRoute,
   type OperateServer,
   type ReportRunner,
 } from "@crossengin/operate-runtime";
@@ -168,6 +169,8 @@ export interface BuildOperateHttpServerOptions {
   readonly serveApiDescriptor?: boolean;
   /** Info block for the served OpenAPI document. */
   readonly openApiInfo?: { readonly title: string; readonly version: string };
+  /** Additional non-entity gateway routes (e.g. the marketplace install surface). */
+  readonly extraRoutes?: readonly ExtraRoute[];
 }
 
 export interface BuiltOperateHttpServer {
@@ -199,6 +202,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.reportRunner !== undefined ? { reportRunner: options.reportRunner } : {}),
     ...(options.serveApiDescriptor !== undefined ? { serveApiDescriptor: options.serveApiDescriptor } : {}),
     ...(options.openApiInfo !== undefined ? { openApiInfo: options.openApiInfo } : {}),
+    ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
   });
   const httpServer = new OperateHttpServer({
     gateway,

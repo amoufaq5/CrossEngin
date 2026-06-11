@@ -47,6 +47,11 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--persist-executions"]).persistExecutions).toBe(true);
   });
 
+  it("parses --marketplace (default off)", () => {
+    expect(parseServeArgs(["--pack", "erp-core"]).marketplace).toBe(false);
+    expect(parseServeArgs(["--pack", "erp-core", "--marketplace"]).marketplace).toBe(true);
+  });
+
   it("rejects an invalid --slo-latency-budget", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--slo-latency-budget", "fast"]),

@@ -84,6 +84,9 @@ importers:
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../../packages/kernel-pg
+      '@crossengin/marketplace':
+        specifier: workspace:*
+        version: link:../../packages/marketplace
       '@crossengin/marketplace-pg':
         specifier: workspace:*
         version: link:../../packages/marketplace-pg

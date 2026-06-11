@@ -18,6 +18,8 @@ import {
   type SdkLedgerSource,
 } from "@crossengin/sdk-clients-pg";
 import { PostgresPackInstallationStore, runMarketplace } from "@crossengin/marketplace-pg";
+
+import { buildMarketplaceRoutes } from "./marketplace-routes.js";
 import {
   PostgresSloEnforcementActionStore,
   PostgresSloLatencyEvaluationStore,
@@ -496,6 +498,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ? new PostgresRateLimitChecker({ conn: executionConn, limit: 10_000, windowSeconds: 60 })
       : null;
 
+  // Optional tenant-facing marketplace install surface (P5.1): GET/POST/DELETE
+  // /v1/marketplace/installations, riding the same gateway pipeline as the entity
+  // routes. The tenant is the authenticated principal's tenant (RLS-scoped store).
+  let marketplaceConn: PgConnection | null = null;
+  let extraRoutes: readonly import("@crossengin/operate-runtime").ExtraRoute[] = [];
+  if (options.marketplace) {
+    marketplaceConn = createNodePgConnection(parsePgEnvConfig());
+    extraRoutes = buildMarketplaceRoutes(new PostgresPackInstallationStore(marketplaceConn), {
+      now: () => new Date(),
+      newId: () => randomUUID(),
+    });
+  }
+
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -506,6 +521,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(jwt !== null ? { jwt } : {}),
     ...(executionSink !== null ? { executionSink } : {}),
     ...(rateLimitChecker !== null ? { rateLimitChecker } : {}),
+    ...(extraRoutes.length > 0 ? { extraRoutes } : {}),
   });
   poller?.start();
 
@@ -580,6 +596,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             storeConn !== null ? storeConn.close() : Promise.resolve(),
             incidentConn !== null ? incidentConn.close() : Promise.resolve(),
             executionConn !== null ? executionConn.close() : Promise.resolve(),
+            marketplaceConn !== null ? marketplaceConn.close() : Promise.resolve(),
           ]).then(() => (err ? reject(err) : resolve()));
         });
       }),

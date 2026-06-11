@@ -19,6 +19,7 @@ export interface ServeOptions {
   readonly jwtAudience: string | null;
   readonly defaultScheme: "http" | "https";
   readonly persistExecutions: boolean;
+  readonly marketplace: boolean;
   readonly slo: boolean;
   readonly sloPersist: boolean;
   readonly sloActor: string | null;
@@ -56,6 +57,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
   let persistExecutions = false;
+  let marketplace = false;
   const apiKeys: string[] = [];
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
@@ -135,6 +137,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--persist-executions") {
       persistExecutions = true;
+    } else if (arg === "--marketplace") {
+      marketplace = true;
     } else if (arg === "--slo") {
       slo = true;
     } else if (arg === "--slo-persist") {
@@ -193,6 +197,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jwtAudience,
     defaultScheme,
     persistExecutions,
+    marketplace,
     slo,
     sloPersist,
     sloActor,
