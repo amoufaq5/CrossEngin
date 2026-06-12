@@ -123,4 +123,19 @@ describe("buildMarketplaceRoutes", () => {
     const out = (await handlerFor(routes, "marketplace.list")(input({ principal: null }))) as Extract<HandlerOutput, { kind: "json" }>;
     expect(out.status).toBe(401);
   });
+
+  it("registers GET /v1/marketplace/surface only when a resolver is supplied (P5.3)", async () => {
+    const withoutResolver = buildMarketplaceRoutes(fakeStore().store, DEPS);
+    expect(withoutResolver.some((r) => r.operationId === "marketplace.surface")).toBe(false);
+
+    const resolver = {
+      async resolve() {
+        return { manifestVersion: "1.0", meta: { name: "X", slug: "x/y", version: "1.0.0" }, entities: [{ name: "Lead" }], views: {} } as never;
+      },
+    };
+    const routes = buildMarketplaceRoutes(fakeStore(null, [installed({ packId: "acme.crm.sales" })]).store, { ...DEPS, resolver });
+    const out = (await handlerFor(routes, "marketplace.surface")(input({}))) as Extract<HandlerOutput, { kind: "json" }>;
+    expect(out.status).toBe(200);
+    expect((out.body as { surface: { entities: string[] } }).surface.entities).toEqual(["Lead"]);
+  });
 });

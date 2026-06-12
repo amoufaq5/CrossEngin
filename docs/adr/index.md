@@ -262,3 +262,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 176 | 0081 | 2,500 | Drafted alongside the marketplace install runtime — marketplace-pg (Phase 3 P5) |
 | 177 | 0207 | 2,000 | Drafted alongside the marketplace install CLI (Phase 3 P5.1) |
 | 178 | 0208 | 2,000 | Drafted alongside the marketplace install HTTP surface (Phase 3 P5.2) |
+| 179 | 0209 | 2,000 | Drafted alongside marketplace tenant surface resolution (Phase 3 P5.3) |

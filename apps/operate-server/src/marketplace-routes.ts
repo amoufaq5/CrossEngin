@@ -11,9 +11,12 @@ import {
 } from "@crossengin/marketplace-pg";
 import { routeId, type ExtraRoute } from "@crossengin/operate-runtime";
 
+import { resolveTenantSurface, type PackManifestResolver } from "./tenant-surface.js";
+
 const MARKETPLACE_LIST_OP = "marketplace.list";
 const MARKETPLACE_INSTALL_OP = "marketplace.install";
 const MARKETPLACE_UNINSTALL_OP = "marketplace.uninstall";
+const MARKETPLACE_SURFACE_OP = "marketplace.surface";
 
 const VALID_STATUSES: ReadonlySet<string> = new Set([
   "requested",
@@ -64,6 +67,12 @@ function firstQuery(query: Readonly<Record<string, string | string[]>>, key: str
 export interface MarketplaceRouteDeps {
   readonly now: () => Date;
   readonly newId: () => string;
+  /**
+   * Optional pack-manifest resolver. When set, a `GET /v1/marketplace/surface`
+   * route composes the tenant's installed packs into their effective entity/view
+   * surface (resolving each pack's manifest via the seam).
+   */
+  readonly resolver?: PackManifestResolver;
 }
 
 /**
@@ -138,7 +147,7 @@ export function buildMarketplaceRoutes(
     return json(200, { installation: uninstalled });
   };
 
-  return [
+  const routes: ExtraRoute[] = [
     {
       definition: routeDef(MARKETPLACE_LIST_OP, "GET", [lit("v1"), lit("marketplace"), lit("installations")]),
       operationId: MARKETPLACE_LIST_OP,
@@ -155,4 +164,23 @@ export function buildMarketplaceRoutes(
       handler: uninstallHandler,
     },
   ];
+
+  // P5.3: resolve the tenant's installed packs into their effective surface.
+  if (deps.resolver !== undefined) {
+    const resolver = deps.resolver;
+    const surfaceHandler: Handler = async ({ principal }) => {
+      const tenantId = principal?.tenantId ?? null;
+      if (tenantId === null) return json(401, { error: "tenant_required", detail: "request principal has no tenant" });
+      const installed = await store.listForTenant(tenantId, { status: "installed" });
+      const surface = await resolveTenantSurface(installed, resolver);
+      return json(200, { surface });
+    };
+    routes.push({
+      definition: routeDef(MARKETPLACE_SURFACE_OP, "GET", [lit("v1"), lit("marketplace"), lit("surface")]),
+      operationId: MARKETPLACE_SURFACE_OP,
+      handler: surfaceHandler,
+    });
+  }
+
+  return routes;
 }

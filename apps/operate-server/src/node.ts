@@ -20,6 +20,7 @@ import {
 import { PostgresPackInstallationStore, runMarketplace } from "@crossengin/marketplace-pg";
 
 import { buildMarketplaceRoutes } from "./marketplace-routes.js";
+import { buildBuiltinPackResolver } from "./tenant-surface.js";
 import {
   PostgresSloEnforcementActionStore,
   PostgresSloLatencyEvaluationStore,
@@ -508,6 +509,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     extraRoutes = buildMarketplaceRoutes(new PostgresPackInstallationStore(marketplaceConn), {
       now: () => new Date(),
       newId: () => randomUUID(),
+      resolver: buildBuiltinPackResolver(),
     });
   }
 
