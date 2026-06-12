@@ -21,6 +21,13 @@ import { PostgresPackInstallationStore, runMarketplace } from "@crossengin/marke
 
 import { buildMarketplaceRoutes } from "./marketplace-routes.js";
 import { buildBuiltinPackResolver } from "./tenant-surface.js";
+import { composeTenantManifest } from "./tenant-compile.js";
+import {
+  TenantDispatcher,
+  apiKeyTenantResolver,
+  buildPgTenantPackSource,
+  type OperateDispatcher,
+} from "./tenant-dispatcher.js";
 import {
   PostgresSloEnforcementActionStore,
   PostgresSloLatencyEvaluationStore,
@@ -63,7 +70,7 @@ import {
   type JwtVerifyConfig,
 } from "./principals.js";
 import { buildManifestReportRunner, type ReportExecutor } from "./reports.js";
-import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
+import { buildOperateHttpServer } from "./server.js";
 import {
   OperateSloMonitor,
   buildServingLatencyEngineForManifest,
@@ -107,7 +114,7 @@ async function readBody(req: NodeReqLike): Promise<Uint8Array | null> {
  * dispatch throw becomes a 500 problem document rather than a hung socket.
  */
 export function createNodeRequestListener(
-  server: OperateHttpServer,
+  server: OperateDispatcher,
   onRequest?: (status: number, latencyMs: number, surface: string | null) => void,
 ): (req: NodeReqLike, res: NodeResLike) => Promise<void> {
   return async (req, res) => {
@@ -526,6 +533,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(rateLimitChecker !== null ? { rateLimitChecker } : {}),
     ...(extraRoutes.length > 0 ? { extraRoutes } : {}),
   });
+
+  // P5.5: under --marketplace, route each request to the gateway serving its
+  // tenant's composed surface (base + the tenant's installed packs), so installed
+  // pack entities are servable per-tenant. The base server handles tenants with no
+  // installs (and credentials that can't be pre-resolved, e.g. JWT).
+  let dispatchTarget: OperateDispatcher = httpServer;
+  if (options.marketplace && marketplaceConn !== null) {
+    const source = buildPgTenantPackSource(new PostgresPackInstallationStore(marketplaceConn), buildBuiltinPackResolver());
+    dispatchTarget = new TenantDispatcher({
+      base: httpServer,
+      tenantOf: apiKeyTenantResolver(apiKeys),
+      source,
+      buildFor: (packs) =>
+        buildOperateHttpServer({
+          manifest: composeTenantManifest(manifest, packs),
+          store,
+          apiKeys,
+          defaultScheme: options.defaultScheme,
+          serveApiDescriptor: true,
+          ...(jwt !== null ? { jwt } : {}),
+        }).httpServer,
+    });
+  }
   poller?.start();
 
   // Optional serving-availability SLO loop: feed each request's outcome into the
@@ -575,7 +605,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   }
 
   const listener = createNodeRequestListener(
-    httpServer,
+    dispatchTarget,
     sloMonitor !== null
       ? (status, latencyMs, surface) =>
           sloMonitor?.recordRequest(status, latencyMs, surface ?? undefined)
