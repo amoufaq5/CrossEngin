@@ -6,9 +6,11 @@ import { describe, expect, it } from "vitest";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { buildPrincipalWiring, parseApiKeySpec } from "./principals.js";
 import { buildManifestReportRunner } from "./reports.js";
+import { composeTenantManifest } from "./tenant-compile.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const baseManifest = await loadBuiltinPack("erp-retail");
+const educationPack = await loadBuiltinPack("erp-education");
 
 // Add a synthetic report referencing the commercial_sensitive Product.unit_cost,
 // so a cashier (no unit_cost read grant) is fail-closed.
@@ -97,5 +99,39 @@ describe("buildManifestReportRunner (in-memory path)", () => {
     // manager can read unit_cost → real aggregate
     const mgr = await runnerOver(store).run("costSum", { tenantId: TENANT, principal: principal("store_manager"), query: {} });
     expect(mgr).toMatchObject({ kind: "kpi", name: "cost", value: 18 });
+  });
+});
+
+// P5.8: the per-tenant report runner over the *composed* (base + installed pack)
+// manifest resolves an installed pack's report — the base manifest's runner doesn't.
+describe("buildManifestReportRunner over a composed (base + installed pack) manifest", () => {
+  const composed = composeTenantManifest(baseManifest, [educationPack]);
+  const eduRoles = buildPrincipalWiring([parseApiKeySpec(`k-e:education_admin:${TENANT}`)]).principalRoles;
+
+  async function seedCourses(store: InMemoryEntityStore): Promise<void> {
+    for (const c of [
+      { account_id: TENANT, code: "CS101", title: "Intro", department: "cs", credits: 3, capacity: 40, state: "open" },
+      { account_id: TENANT, code: "CS201", title: "Data", department: "cs", credits: 4, capacity: 60, state: "open" },
+    ]) {
+      await store.create(TENANT, "Course", c);
+    }
+  }
+
+  it("resolves the installed pack's report (education courseCapacity → 100)", async () => {
+    const store = new InMemoryEntityStore();
+    await seedCourses(store);
+    const runner = buildManifestReportRunner({ manifest: composed, store, principalRoles: eduRoles });
+    const out = await runner.run("courseCapacity", {
+      tenantId: TENANT,
+      principal: principal("education_admin"),
+      query: {},
+    });
+    expect(out).toMatchObject({ kind: "kpi", name: "total_capacity", value: 100 });
+  });
+
+  it("the base manifest's runner returns null for the installed pack's report (fail-closed)", async () => {
+    const store = new InMemoryEntityStore();
+    const base = buildManifestReportRunner({ manifest: baseManifest, store, principalRoles: eduRoles });
+    expect(await base.run("courseCapacity", { tenantId: TENANT, principal: principal("education_admin"), query: {} })).toBeNull();
   });
 });

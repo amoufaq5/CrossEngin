@@ -48,6 +48,7 @@ import {
   generateClient,
   planClientRelease,
   type EntityStore,
+  type ReportRunner,
 } from "@crossengin/operate-runtime";
 import {
   ColumnMappedEntityStore,
@@ -463,14 +464,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // bounded in-memory engine inside the runner. The runner derives the caller's
   // field-readability gate from the same principal→role bridge the gateway uses,
   // so report redaction is identical to the entity routes (fail-closed).
-  const reportExecutor: ReportExecutor | undefined =
+  // Built per-manifest so the per-tenant composed gateway (base + installed packs)
+  // gets a runner over *its* manifest — an installed pack's reports/dashboards
+  // resolve too, not just the base manifest's. The JSONB / in-memory executors are
+  // store-shape-agnostic; the column executor needs the target manifest for the
+  // typed entity-table plans.
+  const principalRoles = buildPrincipalWiring(apiKeys).principalRoles;
+  const makeReportExecutor = (target: Manifest): ReportExecutor | undefined =>
     storeConn === null
       ? undefined
       : options.store === "pg-columns"
         ? (r, t, c) =>
             new PostgresColumnReportExecutor(
               storeConn,
-              manifest,
+              target,
               options.schema !== null ? { schema: options.schema } : {},
             ).execute(r, t, c)
         : (r, t, c) =>
@@ -478,12 +485,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               storeConn,
               options.schema !== null ? { schema: options.schema } : {},
             ).execute(r, t, c);
-  const reportRunner = buildManifestReportRunner({
-    manifest,
-    store,
-    principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
-    ...(reportExecutor !== undefined ? { executor: reportExecutor } : {}),
-  });
+  const makeReportRunner = (target: Manifest): ReportRunner => {
+    const executor = makeReportExecutor(target);
+    return buildManifestReportRunner({
+      manifest: target,
+      store,
+      principalRoles,
+      ...(executor !== undefined ? { executor } : {}),
+    });
+  };
+  const reportRunner = makeReportRunner(manifest);
 
   // Optional gateway request-audit persistence (P2.45 / ADR-0153): record each
   // request's PipelineExecution to meta.gateway_pipeline_executions via the
@@ -554,19 +565,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // header (the same tenantHint the gateway resolves a JWT caller's tenant from).
       tenantOf: firstTenantOf([apiKeyTenantResolver(apiKeys), bearerJwtTenantResolver()]),
       source,
-      buildFor: (packs) =>
-        buildOperateHttpServer({
-          manifest: composeTenantManifest(manifest, packs),
+      buildFor: (packs) => {
+        const composed = composeTenantManifest(manifest, packs);
+        return buildOperateHttpServer({
+          manifest: composed,
           store,
           apiKeys,
           defaultScheme: options.defaultScheme,
           serveApiDescriptor: true,
+          // Report runner over the *composed* manifest, so an installed pack's
+          // reports/dashboards serve at GET /v1/reports/:report for this tenant.
+          reportRunner: makeReportRunner(composed),
           // The per-tenant gateway keeps the marketplace routes so a tenant that
           // already has installs can still list/install/uninstall (and trigger the
           // cache eviction above) without falling back to the base server.
           ...(extraRoutes.length > 0 ? { extraRoutes } : {}),
           ...(jwt !== null ? { jwt } : {}),
-        }).httpServer,
+        }).httpServer;
+      },
     });
     dispatchTarget = tenantDispatcher;
   }

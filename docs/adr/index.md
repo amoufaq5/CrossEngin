@@ -267,3 +267,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 181 | 0211 | 2,500 | Drafted alongside per-tenant gateway dispatch (Phase 3 P5.5) |
 | 182 | 0212 | 2,000 | Drafted alongside per-tenant cache invalidation (Phase 3 P5.6) |
 | 183 | 0213 | 2,000 | Drafted alongside JWT tenant pre-resolution (Phase 3 P5.7) |
+| 184 | 0214 | 2,000 | Drafted alongside the per-tenant report runner (Phase 3 P5.8) |
