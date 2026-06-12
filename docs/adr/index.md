@@ -270,3 +270,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 184 | 0214 | 2,000 | Drafted alongside the per-tenant report runner (Phase 3 P5.8) |
 | 185 | 0215 | 2,000 | Drafted alongside the gated per-tenant dispatch test (Phase 3 P5.9) |
 | 186 | 0216 | 2,000 | Drafted alongside cross-process cache invalidation (Phase 3 P5.10) |
+| 187 | 0217 | 2,000 | Drafted alongside the reconnecting PG listener (Phase 3 P5.11) |
