@@ -123,8 +123,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 126 tables", () => {
-    expect(META_TABLES).toHaveLength(126);
+  it("contains 128 tables", () => {
+    expect(META_TABLES).toHaveLength(128);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -228,6 +228,8 @@ describe("META_TABLES", () => {
       "rate_limit_exceptions",
       "rate_limit_policies",
       "regions",
+      "replication_conflicts",
+      "replication_events",
       "report_runs",
       "scheduled_exports",
       "scim_clients",

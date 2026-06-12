@@ -9496,6 +9496,58 @@ export const META_SDK_COMPATIBILITY_ENTRIES: TableDefinition = {
   ],
 };
 
+export const META_REPLICATION_EVENTS: TableDefinition = {
+  schema: "meta",
+  name: "replication_events",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "event_kind",
+      type: "TEXT",
+      notNull: true,
+      check: "event_kind IN ('local_write', 'remote_applied', 'concurrent_merged', 'stale_ignored')",
+    },
+    { name: "record_key", type: "TEXT", notNull: true, check: "char_length(record_key) BETWEEN 1 AND 512" },
+    { name: "region", type: "TEXT", notNull: true },
+    { name: "from_region", type: "TEXT" },
+    {
+      name: "causal_relation",
+      type: "TEXT",
+      check: "causal_relation IN ('equal', 'before', 'after', 'concurrent')",
+    },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_replication_events_key", columns: ["record_key"] },
+    { name: "idx_replication_events_region", columns: ["region"] },
+    { name: "idx_replication_events_occurred", columns: ["occurred_at"] },
+  ],
+};
+
+export const META_REPLICATION_CONFLICTS: TableDefinition = {
+  schema: "meta",
+  name: "replication_conflicts",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "record_key", type: "TEXT", notNull: true, check: "char_length(record_key) BETWEEN 1 AND 512" },
+    { name: "conflict_kind", type: "TEXT", notNull: true },
+    { name: "resolution_strategy", type: "TEXT", notNull: true },
+    { name: "auto_resolved", type: "BOOLEAN", notNull: true },
+    { name: "region_a", type: "TEXT", notNull: true },
+    { name: "region_b", type: "TEXT", notNull: true },
+    { name: "resolved_value", type: "JSONB", notNull: true },
+    { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_replication_conflicts_key", columns: ["record_key"] },
+    { name: "idx_replication_conflicts_occurred", columns: ["occurred_at"] },
+  ],
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9623,4 +9675,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_WORKER_HEARTBEATS,
   META_INCIDENT_METRIC_SNAPSHOTS,
   META_SDK_COMPATIBILITY_ENTRIES,
+  META_REPLICATION_EVENTS,
+  META_REPLICATION_CONFLICTS,
 ];
