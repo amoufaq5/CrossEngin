@@ -44,6 +44,7 @@
     "@crossengin/pack-erp-education": "workspace:*",
     "@crossengin/pack-erp-grocery": "workspace:*",
     "@crossengin/pack-erp-healthcare": "workspace:*",
+    "@crossengin/residency": "workspace:*",
     "@crossengin/pack-erp-retail": "workspace:*",
     "@crossengin/sdk-clients-pg": "workspace:*",
     "zod": "^3.23.0"

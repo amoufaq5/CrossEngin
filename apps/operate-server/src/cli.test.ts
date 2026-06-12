@@ -60,6 +60,18 @@ describe("parseServeArgs", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--invalidation-channel"])).toThrow(/requires --marketplace/);
   });
 
+  it("parses --region + repeatable --tenant-residency (residency requires region)", () => {
+    const o = parseServeArgs([
+      "--pack", "erp-core",
+      "--region", "eu-central",
+      "--tenant-residency", "t1:eu-only",
+      "--tenant-residency", "t2:us-only",
+    ]);
+    expect(o.region).toBe("eu-central");
+    expect(o.tenantResidency).toEqual(["t1:eu-only", "t2:us-only"]);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--tenant-residency", "t1:eu-only"])).toThrow(/requires --region/);
+  });
+
   it("rejects an invalid --slo-latency-budget", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--slo-latency-budget", "fast"]),

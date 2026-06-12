@@ -126,6 +126,9 @@ importers:
       '@crossengin/pack-erp-retail':
         specifier: workspace:*
         version: link:../../packages/pack-erp-retail
+      '@crossengin/residency':
+        specifier: workspace:*
+        version: link:../../packages/residency
       '@crossengin/sdk-clients-pg':
         specifier: workspace:*
         version: link:../../packages/sdk-clients-pg

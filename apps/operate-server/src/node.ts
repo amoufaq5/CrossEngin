@@ -21,6 +21,7 @@ import { PostgresPackInstallationStore, runMarketplace } from "@crossengin/marke
 
 import { buildMarketplaceRoutes } from "./marketplace-routes.js";
 import { PostgresTenantInvalidationChannel, type TenantInvalidationChannel } from "./invalidation-channel.js";
+import { ResidencyGuard, parseRegion, parseTenantResidencySpec } from "./residency-guard.js";
 import { buildBuiltinPackResolver } from "./tenant-surface.js";
 import { composeTenantManifest } from "./tenant-compile.js";
 import {
@@ -629,6 +630,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       const dispatcher = tenantDispatcher;
       await invalidationChannel.start((tenantId) => dispatcher.invalidate(tenantId));
     }
+  }
+
+  // P6.2: residency enforcement at the serving edge. With --region + --tenant-residency,
+  // wrap the dispatcher in a ResidencyGuard (outermost) that pre-resolves the request's
+  // tenant and short-circuits a residency-bound tenant whose profile forbids this
+  // instance's region with a 421 Misdirected Request naming the region it should route
+  // to (the profile's primary), before the gateway pipeline runs. Unbound tenants pass
+  // through unchanged.
+  if (options.region !== null && options.tenantResidency.length > 0) {
+    const region = parseRegion(options.region);
+    const profiles = new Map(
+      options.tenantResidency.map(parseTenantResidencySpec).map((s) => [s.tenantId, s.profile] as const),
+    );
+    dispatchTarget = new ResidencyGuard({
+      region,
+      inner: dispatchTarget,
+      tenantOf: firstTenantOf([apiKeyTenantResolver(apiKeys), bearerJwtTenantResolver()]),
+      profiles,
+    });
   }
   poller?.start();
 

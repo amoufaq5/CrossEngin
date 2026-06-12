@@ -21,6 +21,8 @@ export interface ServeOptions {
   readonly persistExecutions: boolean;
   readonly marketplace: boolean;
   readonly invalidationChannel: boolean;
+  readonly region: string | null;
+  readonly tenantResidency: readonly string[];
   readonly slo: boolean;
   readonly sloPersist: boolean;
   readonly sloActor: string | null;
@@ -60,6 +62,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let persistExecutions = false;
   let marketplace = false;
   let invalidationChannel = false;
+  let region: string | null = null;
+  const tenantResidency: string[] = [];
   const apiKeys: string[] = [];
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
@@ -143,6 +147,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       marketplace = true;
     } else if (arg === "--invalidation-channel") {
       invalidationChannel = true;
+    } else if (arg === "--region" || arg.startsWith("--region=")) {
+      region = takeValue(arg, next, "--region");
+      i += consumed();
+    } else if (arg === "--tenant-residency" || arg.startsWith("--tenant-residency=")) {
+      tenantResidency.push(takeValue(arg, next, "--tenant-residency"));
+      i += consumed();
     } else if (arg === "--slo") {
       slo = true;
     } else if (arg === "--slo-persist") {
@@ -187,6 +197,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     if (invalidationChannel && !marketplace) {
       throw new CliUsageError("--invalidation-channel requires --marketplace");
     }
+    if (tenantResidency.length > 0 && region === null) {
+      throw new CliUsageError("--tenant-residency requires --region (the region this instance serves)");
+    }
   }
 
   return {
@@ -206,6 +219,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     persistExecutions,
     marketplace,
     invalidationChannel,
+    region,
+    tenantResidency,
     slo,
     sloPersist,
     sloActor,
@@ -256,6 +271,13 @@ Options:
                        Broadcast per-tenant cache evictions over a Postgres
                        LISTEN/NOTIFY channel so an install/uninstall on one
                        instance is reflected fleet-wide (requires --marketplace)
+  --region <region>    The region this instance serves (one of the 8 regions);
+                       enables residency enforcement
+  --tenant-residency <tenantId>:<template>
+                       Bind a tenant to a residency profile
+                       (eu-only|us-only|me-only|unrestricted); a bound tenant
+                       whose profile forbids --region gets a 421 redirect
+                       (repeatable; requires --region)
   --slo                Watch serving availability; declare an incident on a
                        burn-rate breach (via @crossengin/incident-response-pg)
   --slo-persist        Persist SLO incidents to meta.incidents (needs Postgres;
