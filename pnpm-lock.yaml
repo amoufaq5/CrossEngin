@@ -470,6 +470,9 @@ importers:
       '@crossengin/ai-providers':
         specifier: workspace:*
         version: link:../ai-providers
+      '@crossengin/residency':
+        specifier: workspace:*
+        version: link:../residency
       zod:
         specifier: ^3.23.0
         version: 3.25.76

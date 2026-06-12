@@ -1,5 +1,6 @@
 export * from "./cost-tracker.js";
 export * from "./latency-tracker.js";
 export * from "./resolve.js";
+export * from "./residency-profile.js";
 export * from "./retry.js";
 export * from "./router.js";
