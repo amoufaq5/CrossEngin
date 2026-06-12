@@ -63,6 +63,45 @@ export function apiKeyTenantResolver(apiKeys: readonly ApiKeySpec[]): (raw: RawH
   };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Pre-resolves a **Bearer-JWT** request's tenant for the dispatcher. operate-server's
+ * gateway resolves a JWT caller's tenant from the `x-tenant-id` header (the tenantHint
+ * threaded into `principalFromJwtClaims`), so this reads that same header — picking the
+ * gateway the request will actually *run as*. It only fires for a request carrying a
+ * 3-segment Bearer JWT (so an opaque API key still resolves via the key map), and
+ * pre-resolution is purely **gateway selection**: the chosen gateway still verifies the
+ * JWT signature + iss/aud/exp/nbf and runs RBAC, so a forged `x-tenant-id` only mis-picks
+ * a gateway that then 401s the bad token — no data is served on an unverified claim.
+ */
+export function bearerJwtTenantResolver(): (raw: RawHttpRequest) => string | null {
+  return (raw) => {
+    const auth = raw.headers["authorization"];
+    const isJwt =
+      typeof auth === "string" && auth.toLowerCase().startsWith("bearer ") && auth.slice(7).trim().split(".").length === 3;
+    if (!isJwt) return null;
+    const tenant = raw.headers["x-tenant-id"];
+    return typeof tenant === "string" && UUID_RE.test(tenant) ? tenant.toLowerCase() : null;
+  };
+}
+
+/**
+ * Composes tenant resolvers, returning the first non-null result. Used to try the
+ * API-key map first, then the Bearer-JWT header path.
+ */
+export function firstTenantOf(
+  resolvers: ReadonlyArray<(raw: RawHttpRequest) => string | null>,
+): (raw: RawHttpRequest) => string | null {
+  return (raw) => {
+    for (const resolve of resolvers) {
+      const tenant = resolve(raw);
+      if (tenant !== null) return tenant;
+    }
+    return null;
+  };
+}
+
 export interface TenantDispatcherOptions {
   /** The no-install server (also used for tenants with zero installs / unknown credentials). */
   readonly base: OperateDispatcher;

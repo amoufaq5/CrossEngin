@@ -25,7 +25,9 @@ import { composeTenantManifest } from "./tenant-compile.js";
 import {
   TenantDispatcher,
   apiKeyTenantResolver,
+  bearerJwtTenantResolver,
   buildPgTenantPackSource,
+  firstTenantOf,
   type OperateDispatcher,
 } from "./tenant-dispatcher.js";
 import {
@@ -548,7 +550,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const source = buildPgTenantPackSource(new PostgresPackInstallationStore(marketplaceConn), buildBuiltinPackResolver());
     tenantDispatcher = new TenantDispatcher({
       base: httpServer,
-      tenantOf: apiKeyTenantResolver(apiKeys),
+      // API key (token → tenant) first, then a Bearer-JWT request's x-tenant-id
+      // header (the same tenantHint the gateway resolves a JWT caller's tenant from).
+      tenantOf: firstTenantOf([apiKeyTenantResolver(apiKeys), bearerJwtTenantResolver()]),
       source,
       buildFor: (packs) =>
         buildOperateHttpServer({

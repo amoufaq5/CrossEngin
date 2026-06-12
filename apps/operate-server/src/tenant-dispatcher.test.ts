@@ -7,7 +7,13 @@ import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";
 import { buildOperateHttpServer } from "./server.js";
 import { composeTenantManifest } from "./tenant-compile.js";
-import { TenantDispatcher, apiKeyTenantResolver, type TenantPackSource } from "./tenant-dispatcher.js";
+import {
+  TenantDispatcher,
+  apiKeyTenantResolver,
+  bearerJwtTenantResolver,
+  firstTenantOf,
+  type TenantPackSource,
+} from "./tenant-dispatcher.js";
 
 const T_EDU = "00000000-0000-4000-8000-0000000000e1";
 const T_BASE = "00000000-0000-4000-8000-0000000000b1";
@@ -51,6 +57,41 @@ describe("apiKeyTenantResolver", () => {
     expect(r(req("GET", "/x", "key-base"))).toBe(T_BASE);
     expect(r(req("GET", "/x", "unknown"))).toBeNull();
     expect(r({ method: "GET", url: "/x", headers: { authorization: "Bearer aaa.bbb.ccc", host: "h" }, remoteAddress: "1.1.1.1" })).toBeNull();
+  });
+});
+
+describe("bearerJwtTenantResolver", () => {
+  const r = bearerJwtTenantResolver();
+  function jwtReq(headers: Record<string, string>): RawHttpRequest {
+    return { method: "GET", url: "/x", headers, remoteAddress: "1.1.1.1" };
+  }
+
+  it("resolves a JWT request's tenant from the x-tenant-id header", () => {
+    expect(r(jwtReq({ authorization: "Bearer aaa.bbb.ccc", "x-tenant-id": T_EDU }))).toBe(T_EDU);
+  });
+
+  it("is null without a 3-segment Bearer JWT (an opaque api key isn't a JWT)", () => {
+    expect(r(jwtReq({ "x-api-key": "key-edu", "x-tenant-id": T_EDU }))).toBeNull();
+    expect(r(jwtReq({ authorization: "Bearer opaque-token", "x-tenant-id": T_EDU }))).toBeNull();
+  });
+
+  it("is null when the x-tenant-id header is missing or not a UUID", () => {
+    expect(r(jwtReq({ authorization: "Bearer aaa.bbb.ccc" }))).toBeNull();
+    expect(r(jwtReq({ authorization: "Bearer aaa.bbb.ccc", "x-tenant-id": "not-a-uuid" }))).toBeNull();
+  });
+});
+
+describe("firstTenantOf", () => {
+  it("returns the first non-null resolver result (api key wins over the JWT header)", () => {
+    const tenantOf = firstTenantOf([apiKeyTenantResolver(API_KEYS), bearerJwtTenantResolver()]);
+    // api-key request → resolved from the key map
+    expect(tenantOf(req("GET", "/x", "key-edu"))).toBe(T_EDU);
+    // JWT request → resolved from the x-tenant-id header
+    expect(
+      tenantOf({ method: "GET", url: "/x", headers: { authorization: "Bearer aaa.bbb.ccc", "x-tenant-id": T_BASE }, remoteAddress: "1.1.1.1" }),
+    ).toBe(T_BASE);
+    // neither → null
+    expect(tenantOf(req("GET", "/x", "unknown"))).toBeNull();
   });
 });
 
