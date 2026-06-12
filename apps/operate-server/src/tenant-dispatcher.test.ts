@@ -84,6 +84,34 @@ describe("TenantDispatcher — per-tenant served routes", () => {
     expect(res.status).toBe(401);
   });
 
+  it("invalidate() forces a rebuild so an install is reflected before the TTL", async () => {
+    const installs: Record<string, Manifest[]> = { [T_EDU]: [] };
+    const store = new InMemoryEntityStore();
+    const base = buildOperateHttpServer({ manifest: retail, store, apiKeys: API_KEYS }).httpServer;
+    const source: TenantPackSource = {
+      async installedManifests(tenantId: string) {
+        return installs[tenantId] ?? [];
+      },
+    };
+    const d = new TenantDispatcher({
+      base,
+      tenantOf: apiKeyTenantResolver(API_KEYS),
+      source,
+      buildFor: (packs) =>
+        buildOperateHttpServer({ manifest: composeTenantManifest(retail, packs), store, apiKeys: API_KEYS }).httpServer,
+      cacheTtlMs: 10_000_000, // effectively no TTL expiry, so only invalidate() can rebuild
+    });
+    // before install: no Course route (cached base), 404
+    expect((await d.dispatchWithMatch(req("GET", "/v1/courses", "key-edu"), null)).response.status).not.toBe(200);
+    // simulate an install landing in the source
+    installs[T_EDU] = [education];
+    // without eviction the cached base server still 404s
+    expect((await d.dispatchWithMatch(req("GET", "/v1/courses", "key-edu"), null)).response.status).not.toBe(200);
+    // evict → next request rebuilds the composed gateway → 200
+    d.invalidate(T_EDU);
+    expect((await d.dispatchWithMatch(req("GET", "/v1/courses", "key-edu"), null)).response.status).toBe(200);
+  });
+
   it("matches the OperateDispatcher shape (drop-in for the base server)", async () => {
     const base = baseServer();
     const out = await base.dispatchWithMatch(req("GET", "/v1/products", "key-base"), null);

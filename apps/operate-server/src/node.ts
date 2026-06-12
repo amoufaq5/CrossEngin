@@ -511,6 +511,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // routes. The tenant is the authenticated principal's tenant (RLS-scoped store).
   let marketplaceConn: PgConnection | null = null;
   let extraRoutes: readonly import("@crossengin/operate-runtime").ExtraRoute[] = [];
+  // Late-bound so the install/uninstall handlers can evict the affected tenant's
+  // cached per-tenant server immediately (the dispatcher is built further down,
+  // after the base server; the callback only fires at request time).
+  let tenantDispatcher: TenantDispatcher | null = null;
   if (options.marketplace) {
     marketplaceConn = createNodePgConnection(parsePgEnvConfig());
     extraRoutes = buildMarketplaceRoutes(new PostgresPackInstallationStore(marketplaceConn), {
@@ -518,6 +522,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       newId: () => randomUUID(),
       resolver: buildBuiltinPackResolver(),
       baseManifest: manifest,
+      onInstallChange: (tenantId) => tenantDispatcher?.invalidate(tenantId),
     });
   }
 
@@ -541,7 +546,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let dispatchTarget: OperateDispatcher = httpServer;
   if (options.marketplace && marketplaceConn !== null) {
     const source = buildPgTenantPackSource(new PostgresPackInstallationStore(marketplaceConn), buildBuiltinPackResolver());
-    dispatchTarget = new TenantDispatcher({
+    tenantDispatcher = new TenantDispatcher({
       base: httpServer,
       tenantOf: apiKeyTenantResolver(apiKeys),
       source,
@@ -552,9 +557,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           apiKeys,
           defaultScheme: options.defaultScheme,
           serveApiDescriptor: true,
+          // The per-tenant gateway keeps the marketplace routes so a tenant that
+          // already has installs can still list/install/uninstall (and trigger the
+          // cache eviction above) without falling back to the base server.
+          ...(extraRoutes.length > 0 ? { extraRoutes } : {}),
           ...(jwt !== null ? { jwt } : {}),
         }).httpServer,
     });
+    dispatchTarget = tenantDispatcher;
   }
   poller?.start();
 

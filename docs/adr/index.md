@@ -265,3 +265,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 179 | 0209 | 2,000 | Drafted alongside marketplace tenant surface resolution (Phase 3 P5.3) |
 | 180 | 0210 | 2,000 | Drafted alongside per-tenant route composition (Phase 3 P5.4) |
 | 181 | 0211 | 2,500 | Drafted alongside per-tenant gateway dispatch (Phase 3 P5.5) |
+| 182 | 0212 | 2,000 | Drafted alongside per-tenant cache invalidation (Phase 3 P5.6) |

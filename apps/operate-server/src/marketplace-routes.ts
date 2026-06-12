@@ -81,6 +81,12 @@ export interface MarketplaceRouteDeps {
    * would serve — derived from the same `manifestRouteSpecs` the gateway compiles.
    */
   readonly baseManifest?: Manifest;
+  /**
+   * Notified with the affected tenant after a successful install/uninstall write.
+   * The per-tenant dispatcher wires this to `TenantDispatcher.invalidate` so a
+   * write is reflected on the next request instead of after the cache TTL.
+   */
+  readonly onInstallChange?: (tenantId: string) => void;
 }
 
 /**
@@ -138,6 +144,7 @@ export function buildMarketplaceRoutes(
     }
     const installed = completeInstall(beginInstall(requested), { version, installedBy: by, at: now });
     await store.record(installed);
+    deps.onInstallChange?.(tenantId);
     return json(201, { installation: installed });
   };
 
@@ -152,6 +159,7 @@ export function buildMarketplaceRoutes(
     }
     const uninstalled = completeUninstall(requestUninstall(active), { uninstalledBy: by, at: deps.now().toISOString() });
     await store.record(uninstalled);
+    deps.onInstallChange?.(tenantId);
     return json(200, { installation: uninstalled });
   };
 

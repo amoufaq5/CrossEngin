@@ -105,6 +105,15 @@ export class TenantDispatcher implements OperateDispatcher {
     return server.dispatchWithMatch(raw, body);
   }
 
+  /**
+   * Drops a tenant's cached server so the next request rebuilds it from the
+   * current install set. Wired into the marketplace install/uninstall handlers so
+   * a write is reflected immediately rather than only after the TTL bound.
+   */
+  invalidate(tenantId: string): void {
+    this.cache.delete(tenantId);
+  }
+
   private async serverFor(tenantId: string): Promise<OperateDispatcher> {
     const cached = this.cache.get(tenantId);
     if (cached !== undefined && this.now() - cached.at < this.ttl) return cached.server;

@@ -118,6 +118,29 @@ describe("buildMarketplaceRoutes", () => {
     expect(out404.status).toBe(404);
   });
 
+  it("notifies onInstallChange with the tenant after a successful install + uninstall", async () => {
+    const changed: string[] = [];
+    const onInstallChange = (t: string): void => void changed.push(t);
+
+    const installRoutes = buildMarketplaceRoutes(fakeStore(null).store, { ...DEPS, onInstallChange });
+    await handlerFor(installRoutes, "marketplace.install")(input({ parsedBody: { packId: "acme.crm.sales", version: "2.0.0" } }));
+    expect(changed).toEqual([TENANT]);
+
+    const uninstallRoutes = buildMarketplaceRoutes(fakeStore(installed()).store, { ...DEPS, onInstallChange });
+    await handlerFor(uninstallRoutes, "marketplace.uninstall")(input({ params: { packId: "acme.crm.sales" } }));
+    expect(changed).toEqual([TENANT, TENANT]);
+  });
+
+  it("does not notify onInstallChange on a rejected install (409)", async () => {
+    const changed: string[] = [];
+    const routes = buildMarketplaceRoutes(fakeStore(installed()).store, { ...DEPS, onInstallChange: (t) => void changed.push(t) });
+    const out = (await handlerFor(routes, "marketplace.install")(
+      input({ parsedBody: { packId: "acme.crm.sales", version: "2.0.0" } }),
+    )) as Extract<HandlerOutput, { kind: "json" }>;
+    expect(out.status).toBe(409);
+    expect(changed).toEqual([]);
+  });
+
   it("returns 401 when the principal has no tenant", async () => {
     const routes = buildMarketplaceRoutes(fakeStore().store, DEPS);
     const out = (await handlerFor(routes, "marketplace.list")(input({ principal: null }))) as Extract<HandlerOutput, { kind: "json" }>;
