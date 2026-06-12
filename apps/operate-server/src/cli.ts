@@ -20,6 +20,7 @@ export interface ServeOptions {
   readonly defaultScheme: "http" | "https";
   readonly persistExecutions: boolean;
   readonly marketplace: boolean;
+  readonly invalidationChannel: boolean;
   readonly slo: boolean;
   readonly sloPersist: boolean;
   readonly sloActor: string | null;
@@ -58,6 +59,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let defaultScheme: "http" | "https" = "http";
   let persistExecutions = false;
   let marketplace = false;
+  let invalidationChannel = false;
   const apiKeys: string[] = [];
   const jwksKeys: string[] = [];
   let jwksFile: string | null = null;
@@ -139,6 +141,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       persistExecutions = true;
     } else if (arg === "--marketplace") {
       marketplace = true;
+    } else if (arg === "--invalidation-channel") {
+      invalidationChannel = true;
     } else if (arg === "--slo") {
       slo = true;
     } else if (arg === "--slo-persist") {
@@ -180,6 +184,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     if (pack !== null && manifestPath !== null) {
       throw new CliUsageError("--pack and --manifest are mutually exclusive");
     }
+    if (invalidationChannel && !marketplace) {
+      throw new CliUsageError("--invalidation-channel requires --marketplace");
+    }
   }
 
   return {
@@ -198,6 +205,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     defaultScheme,
     persistExecutions,
     marketplace,
+    invalidationChannel,
     slo,
     sloPersist,
     sloActor,
@@ -242,6 +250,12 @@ Options:
   --jwks-refresh-ms <n> Background JWKS refresh interval (with --jwks-url; >=1000)
   --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
+  --marketplace        Serve the per-tenant marketplace install surface +
+                       per-tenant composed gateways (needs Postgres)
+  --invalidation-channel
+                       Broadcast per-tenant cache evictions over a Postgres
+                       LISTEN/NOTIFY channel so an install/uninstall on one
+                       instance is reflected fleet-wide (requires --marketplace)
   --slo                Watch serving availability; declare an incident on a
                        burn-rate breach (via @crossengin/incident-response-pg)
   --slo-persist        Persist SLO incidents to meta.incidents (needs Postgres;

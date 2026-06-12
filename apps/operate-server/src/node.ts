@@ -10,7 +10,7 @@ import {
   runIncidents,
   type IncidentsCliOptions,
 } from "@crossengin/incident-response-pg";
-import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
+import { createNodePgConnection, createNodePgListener, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 import {
   PostgresClientReleaseStore,
   PostgresSdkCompatibilityStore,
@@ -20,6 +20,7 @@ import {
 import { PostgresPackInstallationStore, runMarketplace } from "@crossengin/marketplace-pg";
 
 import { buildMarketplaceRoutes } from "./marketplace-routes.js";
+import { PostgresTenantInvalidationChannel, type TenantInvalidationChannel } from "./invalidation-channel.js";
 import { buildBuiltinPackResolver } from "./tenant-surface.js";
 import { composeTenantManifest } from "./tenant-compile.js";
 import {
@@ -526,8 +527,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let extraRoutes: readonly import("@crossengin/operate-runtime").ExtraRoute[] = [];
   // Late-bound so the install/uninstall handlers can evict the affected tenant's
   // cached per-tenant server immediately (the dispatcher is built further down,
-  // after the base server; the callback only fires at request time).
+  // after the base server; the callbacks only fire at request time).
   let tenantDispatcher: TenantDispatcher | null = null;
+  let invalidationChannel: TenantInvalidationChannel | null = null;
   if (options.marketplace) {
     marketplaceConn = createNodePgConnection(parsePgEnvConfig());
     extraRoutes = buildMarketplaceRoutes(new PostgresPackInstallationStore(marketplaceConn), {
@@ -535,7 +537,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       newId: () => randomUUID(),
       resolver: buildBuiltinPackResolver(),
       baseManifest: manifest,
-      onInstallChange: (tenantId) => tenantDispatcher?.invalidate(tenantId),
+      // Evict this instance's cache immediately, and — when a cross-process
+      // channel is wired (--invalidation-channel) — broadcast so peer instances
+      // evict too. The broadcast also returns to this instance's own listener
+      // (a harmless second evict).
+      onInstallChange: (tenantId) => {
+        tenantDispatcher?.invalidate(tenantId);
+        void invalidationChannel?.publish(tenantId);
+      },
     });
   }
 
@@ -585,6 +594,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       },
     });
     dispatchTarget = tenantDispatcher;
+
+    // P5.10: cross-process cache invalidation. With --invalidation-channel, LISTEN
+    // on a Postgres NOTIFY channel and evict the named tenant on every broadcast,
+    // so an install/uninstall on any instance is reflected fleet-wide (not just on
+    // the instance that handled the write). The publish side rides marketplaceConn;
+    // the listener needs its own long-lived connection.
+    if (options.invalidationChannel && marketplaceConn !== null) {
+      const listener = createNodePgListener(parsePgEnvConfig(), {
+        onError: (err) => console.error(`[operate-server] tenant invalidation listener error: ${String(err)}`),
+      });
+      invalidationChannel = new PostgresTenantInvalidationChannel(marketplaceConn, listener);
+      const dispatcher = tenantDispatcher;
+      await invalidationChannel.start((tenantId) => dispatcher.invalidate(tenantId));
+    }
   }
   poller?.start();
 
@@ -656,6 +679,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         sloMonitor?.stop();
         server.close((err) => {
           void Promise.all([
+            invalidationChannel !== null ? invalidationChannel.close() : Promise.resolve(),
             storeConn !== null ? storeConn.close() : Promise.resolve(),
             incidentConn !== null ? incidentConn.close() : Promise.resolve(),
             executionConn !== null ? executionConn.close() : Promise.resolve(),

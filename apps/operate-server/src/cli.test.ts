@@ -52,6 +52,14 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--marketplace"]).marketplace).toBe(true);
   });
 
+  it("parses --invalidation-channel (default off, requires --marketplace)", () => {
+    expect(parseServeArgs(["--pack", "erp-core"]).invalidationChannel).toBe(false);
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--marketplace", "--invalidation-channel"]).invalidationChannel,
+    ).toBe(true);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--invalidation-channel"])).toThrow(/requires --marketplace/);
+  });
+
   it("rejects an invalid --slo-latency-budget", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--slo-latency-budget", "fast"]),

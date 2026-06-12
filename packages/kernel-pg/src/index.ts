@@ -6,5 +6,6 @@ export * from "./encryption-migration.js";
 export * from "./introspection.js";
 export * from "./migration-log.js";
 export * from "./node-pg.js";
+export * from "./node-pg-listener.js";
 export * from "./preconditions.js";
 export * from "./statement-hash.js";
