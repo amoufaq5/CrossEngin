@@ -532,10 +532,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let invalidationChannel: TenantInvalidationChannel | null = null;
   if (options.marketplace) {
     marketplaceConn = createNodePgConnection(parsePgEnvConfig());
+    // Column-store only: provision an installed pack's typed per-entity tables.
+    // The JSONB / in-memory document stores need no per-entity DDL (any entity is
+    // stored as a document), so they get no `onPackInstalled`. The DDL is global +
+    // idempotent (CREATE TABLE IF NOT EXISTS; FKs DROP IF EXISTS → ADD), and the
+    // composed manifest (base + the pack) gives `ensureSchema` the full topological
+    // graph so a pack's cross-pack FK (e.g. education Course.account_id → core
+    // Account) resolves against the already-provisioned base tables.
+    const packResolver = buildBuiltinPackResolver();
+    const onPackInstalled =
+      options.store === "pg-columns" && storeConn !== null
+        ? async (packId: string, version: string): Promise<void> => {
+            const packManifest = await packResolver.resolve(packId, version);
+            if (packManifest === null) return;
+            await new ColumnMappedEntityStore(
+              storeConn,
+              composeTenantManifest(manifest, [packManifest]),
+              options.schema !== null ? { schema: options.schema } : {},
+            ).ensureSchema();
+          }
+        : undefined;
     extraRoutes = buildMarketplaceRoutes(new PostgresPackInstallationStore(marketplaceConn), {
       now: () => new Date(),
       newId: () => randomUUID(),
-      resolver: buildBuiltinPackResolver(),
+      resolver: packResolver,
       baseManifest: manifest,
       // Evict this instance's cache immediately, and — when a cross-process
       // channel is wired (--invalidation-channel) — broadcast so peer instances
@@ -545,6 +565,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         tenantDispatcher?.invalidate(tenantId);
         void invalidationChannel?.publish(tenantId);
       },
+      ...(onPackInstalled !== undefined ? { onPackInstalled } : {}),
     });
   }
 

@@ -87,6 +87,15 @@ export interface MarketplaceRouteDeps {
    * write is reflected on the next request instead of after the cache TTL.
    */
   readonly onInstallChange?: (tenantId: string) => void;
+  /**
+   * Notified (and **awaited**) with the installed pack id + version after a
+   * successful install write, before the 201 response. Under `--store pg-columns`
+   * this provisions the installed pack's typed per-entity tables (an idempotent
+   * `ensureSchema` over the composed manifest), so the per-tenant column-store
+   * CRUD that the 201's caller is about to drive can't race ahead of the DDL.
+   * Not fired on the 409/422 rejection paths.
+   */
+  readonly onPackInstalled?: (packId: string, version: string) => Promise<void> | void;
 }
 
 /**
@@ -145,6 +154,9 @@ export function buildMarketplaceRoutes(
     const installed = completeInstall(beginInstall(requested), { version, installedBy: by, at: now });
     await store.record(installed);
     deps.onInstallChange?.(tenantId);
+    // Provision the installed pack's typed per-entity tables (column store only) —
+    // awaited so the tables exist before the 201, ahead of the caller's next CRUD.
+    await deps.onPackInstalled?.(packId, version);
     return json(201, { installation: installed });
   };
 

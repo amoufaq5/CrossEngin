@@ -131,6 +131,55 @@ describe("buildMarketplaceRoutes", () => {
     expect(changed).toEqual([TENANT, TENANT]);
   });
 
+  it("invokes onPackInstalled with (packId, version) after a successful install", async () => {
+    const provisioned: Array<[string, string]> = [];
+    const onPackInstalled = (packId: string, version: string): void => void provisioned.push([packId, version]);
+    const routes = buildMarketplaceRoutes(fakeStore(null).store, { ...DEPS, onPackInstalled });
+    const out = (await handlerFor(routes, "marketplace.install")(
+      input({ parsedBody: { packId: "acme.crm.sales", version: "2.0.0" } }),
+    )) as Extract<HandlerOutput, { kind: "json" }>;
+    expect(out.status).toBe(201);
+    expect(provisioned).toEqual([["acme.crm.sales", "2.0.0"]]);
+  });
+
+  it("awaits onPackInstalled before returning the 201 (provisioning can't race the response)", async () => {
+    const events: string[] = [];
+    const onPackInstalled = async (): Promise<void> => {
+      await Promise.resolve();
+      events.push("provisioned");
+    };
+    const routes = buildMarketplaceRoutes(fakeStore(null).store, { ...DEPS, onPackInstalled });
+    await handlerFor(routes, "marketplace.install")(input({ parsedBody: { packId: "acme.crm.sales", version: "2.0.0" } }));
+    events.push("returned");
+    expect(events).toEqual(["provisioned", "returned"]);
+  });
+
+  it("does not invoke onPackInstalled on a rejected install (409)", async () => {
+    const provisioned: string[] = [];
+    const routes = buildMarketplaceRoutes(fakeStore(installed()).store, {
+      ...DEPS,
+      onPackInstalled: (packId) => void provisioned.push(packId),
+    });
+    const out = (await handlerFor(routes, "marketplace.install")(
+      input({ parsedBody: { packId: "acme.crm.sales", version: "2.0.0" } }),
+    )) as Extract<HandlerOutput, { kind: "json" }>;
+    expect(out.status).toBe(409);
+    expect(provisioned).toEqual([]);
+  });
+
+  it("does not invoke onPackInstalled on an invalid install (422)", async () => {
+    const provisioned: string[] = [];
+    const routes = buildMarketplaceRoutes(fakeStore(null).store, {
+      ...DEPS,
+      onPackInstalled: (packId) => void provisioned.push(packId),
+    });
+    const out = (await handlerFor(routes, "marketplace.install")(
+      input({ parsedBody: { packId: "acme.crm.sales" } }),
+    )) as Extract<HandlerOutput, { kind: "json" }>;
+    expect(out.status).toBe(422);
+    expect(provisioned).toEqual([]);
+  });
+
   it("does not notify onInstallChange on a rejected install (409)", async () => {
     const changed: string[] = [];
     const routes = buildMarketplaceRoutes(fakeStore(installed()).store, { ...DEPS, onInstallChange: (t) => void changed.push(t) });
