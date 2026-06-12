@@ -273,3 +273,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 187 | 0217 | 2,000 | Drafted alongside the reconnecting PG listener (Phase 3 P5.11) |
 | 188 | 0218 | 2,000 | Drafted alongside per-tenant column-store provisioning (Phase 3 P5.12) |
 | 189 | 0083 | 3,000 | Drafted alongside the multi-region active-active runtime — active-active-runtime (Phase 3 P6) |
+| 190 | 0219 | 2,500 | Drafted alongside the edge runtime — edge-runtime region routing + latency budgets (Phase 3 P6.1) |
