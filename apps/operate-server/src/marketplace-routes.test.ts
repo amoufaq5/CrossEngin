@@ -138,4 +138,28 @@ describe("buildMarketplaceRoutes", () => {
     expect(out.status).toBe(200);
     expect((out.body as { surface: { entities: string[] } }).surface.entities).toEqual(["Lead"]);
   });
+
+  it("surface includes the composed per-tenant routes when a baseManifest is supplied (P5.4)", async () => {
+    const resolver = {
+      async resolve() {
+        return {
+          manifestVersion: "1.0",
+          meta: { name: "CRM", slug: "acme/crm", version: "1.0.0" },
+          entities: [{ name: "Lead", traits: ["auditable"], fields: [{ name: "name", type: { kind: "text" }, required: true }] }],
+          views: {},
+        } as never;
+      },
+    };
+    const base = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base/x", version: "1.0.0" },
+      entities: [{ name: "Account", traits: ["auditable"], fields: [{ name: "name", type: { kind: "text" }, required: true }] }],
+    } as never;
+    const routes = buildMarketplaceRoutes(fakeStore(null, [installed({ packId: "acme.crm.sales" })]).store, { ...DEPS, resolver, baseManifest: base });
+    const out = (await handlerFor(routes, "marketplace.surface")(input({}))) as Extract<HandlerOutput, { kind: "json" }>;
+    const surfaceRoutes = (out.body as { surface: { routes: Array<{ path: string; entity: string }> } }).surface.routes;
+    // the installed Lead entity contributes CRUD routes, alongside the base Account routes
+    expect(surfaceRoutes.some((r) => r.path === "/v1/leads" && r.entity === "Lead")).toBe(true);
+    expect(surfaceRoutes.some((r) => r.entity === "Account")).toBe(true);
+  });
 });

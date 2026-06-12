@@ -9,9 +9,11 @@ import {
   newInstallationRequest,
   requestUninstall,
 } from "@crossengin/marketplace-pg";
+import type { Manifest } from "@crossengin/kernel/manifest";
 import { routeId, type ExtraRoute } from "@crossengin/operate-runtime";
 
-import { resolveTenantSurface, type PackManifestResolver } from "./tenant-surface.js";
+import { resolveInstalledManifests, surfaceFromResolved, type PackManifestResolver } from "./tenant-surface.js";
+import { tenantRouteSummaries } from "./tenant-compile.js";
 
 const MARKETPLACE_LIST_OP = "marketplace.list";
 const MARKETPLACE_INSTALL_OP = "marketplace.install";
@@ -73,6 +75,12 @@ export interface MarketplaceRouteDeps {
    * surface (resolving each pack's manifest via the seam).
    */
   readonly resolver?: PackManifestResolver;
+  /**
+   * The base served manifest. When supplied with a `resolver`, the surface also
+   * reports the per-tenant REST `routes` the composed (base + installs) manifest
+   * would serve — derived from the same `manifestRouteSpecs` the gateway compiles.
+   */
+  readonly baseManifest?: Manifest;
 }
 
 /**
@@ -165,15 +173,25 @@ export function buildMarketplaceRoutes(
     },
   ];
 
-  // P5.3: resolve the tenant's installed packs into their effective surface.
+  // P5.3/P5.4: resolve the tenant's installed packs into their effective surface
+  // (entities/views) + the per-tenant REST routes the composed manifest would serve.
   if (deps.resolver !== undefined) {
     const resolver = deps.resolver;
+    const baseManifest = deps.baseManifest;
     const surfaceHandler: Handler = async ({ principal }) => {
       const tenantId = principal?.tenantId ?? null;
       if (tenantId === null) return json(401, { error: "tenant_required", detail: "request principal has no tenant" });
       const installed = await store.listForTenant(tenantId, { status: "installed" });
-      const surface = await resolveTenantSurface(installed, resolver);
-      return json(200, { surface });
+      const resolved = await resolveInstalledManifests(installed, resolver);
+      const surface = surfaceFromResolved(resolved);
+      const routes =
+        baseManifest !== undefined
+          ? tenantRouteSummaries(
+              baseManifest,
+              resolved.flatMap((r) => (r.manifest !== null ? [r.manifest] : [])),
+            )
+          : [];
+      return json(200, { surface: { ...surface, routes } });
     };
     routes.push({
       definition: routeDef(MARKETPLACE_SURFACE_OP, "GET", [lit("v1"), lit("marketplace"), lit("surface")]),

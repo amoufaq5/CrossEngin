@@ -510,6 +510,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       now: () => new Date(),
       newId: () => randomUUID(),
       resolver: buildBuiltinPackResolver(),
+      baseManifest: manifest,
     });
   }
 

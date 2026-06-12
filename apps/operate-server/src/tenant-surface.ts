@@ -58,6 +58,50 @@ export interface TenantSurface {
   readonly views: readonly string[];
 }
 
+/** One installed pack's resolved manifest (or `null` when the pack id is unknown). */
+export interface ResolvedInstalledPack {
+  readonly packId: string;
+  readonly version: string | null;
+  readonly manifest: Manifest | null;
+}
+
+/**
+ * Resolves a tenant's **installed** pack installations to their manifests via the
+ * seam (a non-`installed` pack isn't live yet, so it's skipped). One resolve per
+ * installed pack — the caller can compute both the surface and the route set from
+ * the result without resolving twice.
+ */
+export async function resolveInstalledManifests(
+  installations: readonly PackInstallation[],
+  resolver: PackManifestResolver,
+): Promise<readonly ResolvedInstalledPack[]> {
+  const out: ResolvedInstalledPack[] = [];
+  for (const inst of installations) {
+    if (inst.status !== "installed") continue;
+    out.push({ packId: inst.packId, version: inst.installedVersion, manifest: await resolver.resolve(inst.packId, inst.installedVersion) });
+  }
+  return out;
+}
+
+/** Composes resolved installed packs into the entity/view surface union. */
+export function surfaceFromResolved(resolved: readonly ResolvedInstalledPack[]): TenantSurface {
+  const packs: ResolvedSurfacePack[] = [];
+  const entities = new Set<string>();
+  const views = new Set<string>();
+  for (const r of resolved) {
+    if (r.manifest === null) {
+      packs.push({ packId: r.packId, version: r.version, resolved: false, entities: [], views: [] });
+      continue;
+    }
+    const packEntities = (r.manifest.entities ?? []).map((e) => e.name);
+    const packViews = Object.keys(r.manifest.views ?? {});
+    for (const e of packEntities) entities.add(e);
+    for (const v of packViews) views.add(v);
+    packs.push({ packId: r.packId, version: r.version, resolved: true, entities: packEntities, views: packViews });
+  }
+  return { packs, entities: [...entities].sort(), views: [...views].sort() };
+}
+
 /**
  * Composes a tenant's **installed** pack installations into a surface descriptor:
  * each pack's manifest is resolved (via the seam) and the union of entity + view
@@ -69,29 +113,5 @@ export async function resolveTenantSurface(
   installations: readonly PackInstallation[],
   resolver: PackManifestResolver,
 ): Promise<TenantSurface> {
-  const packs: ResolvedSurfacePack[] = [];
-  const entities = new Set<string>();
-  const views = new Set<string>();
-
-  for (const inst of installations) {
-    if (inst.status !== "installed") continue;
-    const manifest = await resolver.resolve(inst.packId, inst.installedVersion);
-    if (manifest === null) {
-      packs.push({ packId: inst.packId, version: inst.installedVersion, resolved: false, entities: [], views: [] });
-      continue;
-    }
-    const packEntities = (manifest.entities ?? []).map((e) => e.name);
-    const packViews = Object.keys(manifest.views ?? {});
-    for (const e of packEntities) entities.add(e);
-    for (const v of packViews) views.add(v);
-    packs.push({
-      packId: inst.packId,
-      version: inst.installedVersion,
-      resolved: true,
-      entities: packEntities,
-      views: packViews,
-    });
-  }
-
-  return { packs, entities: [...entities].sort(), views: [...views].sort() };
+  return surfaceFromResolved(await resolveInstalledManifests(installations, resolver));
 }
