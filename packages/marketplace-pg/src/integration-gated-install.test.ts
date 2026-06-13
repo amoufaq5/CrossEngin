@@ -39,14 +39,14 @@ suite("gated pack install (real Postgres)", () => {
   const deps = { now: () => new Date(), newId: () => randomUUID() };
 
   it("installs on allow + reads the row back; refuses without installing", async () => {
-    const refusedPack = `acme.refused.${Math.random().toString(36).slice(2, 8)}`;
+    const refusedPack = `acme.refused.v${Math.random().toString(36).slice(2, 8)}`;
     const refused = await installPackGated(store, {
       verdict: { decision: "refuse" }, tenantId: tenant, packId: refusedPack, version: "1.0.0", installedBy: user, ...deps,
     });
     expect(refused).toEqual({ installed: false, reason: "refused" });
     expect(await store.activeForPack(tenant, refusedPack)).toBeNull();
 
-    const allowedPack = `acme.allowed.${Math.random().toString(36).slice(2, 8)}`;
+    const allowedPack = `acme.allowed.v${Math.random().toString(36).slice(2, 8)}`;
     const allowed = await installPackGated(store, {
       verdict: { decision: "allow" }, tenantId: tenant, packId: allowedPack, version: "2.1.0", installedBy: user, ...deps,
     });

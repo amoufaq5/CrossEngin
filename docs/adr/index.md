@@ -286,3 +286,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 200 | 0228 | 2,000 | Drafted alongside the gated pack install (Phase 3 P7.4) |
 | 201 | 0229 | 2,000 | Drafted alongside the architect-cli install command (Phase 3 P7.5) |
 | 202 | 0230 | 2,000 | Drafted alongside the chat-tool pack install (Phase 3 P7.6) |
+| 203 | 0231 | 2,500 | Drafted alongside the marketplace publish registry (Phase 3 P7.7) |
