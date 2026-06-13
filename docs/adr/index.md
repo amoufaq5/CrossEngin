@@ -288,3 +288,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 202 | 0230 | 2,000 | Drafted alongside the chat-tool pack install (Phase 3 P7.6) |
 | 203 | 0231 | 2,500 | Drafted alongside the marketplace publish registry (Phase 3 P7.7) |
 | 204 | 0085 | 2,500 | Drafted alongside the DR runtime — dr-runtime (Phase 3 P8) |
+| 205 | 0232 | 2,000 | Drafted alongside PHI column key rotation (Phase 3 P8.1) |

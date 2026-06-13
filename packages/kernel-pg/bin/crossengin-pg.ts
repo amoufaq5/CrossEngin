@@ -20,6 +20,7 @@ import {
 import {
   EncryptionMigrator,
   formatEncryptionPlan,
+  formatRotationPlan,
 } from "../src/encryption-migration.js";
 import { introspectSchema } from "../src/introspection.js";
 import { createNodePgConnection } from "../src/node-pg.js";
@@ -69,6 +70,8 @@ function printHelp(): void {
       "  encrypt --verify     Report at-rest encryption coverage for hinted columns",
       "  encrypt --plan       Print the encrypt-on-write migration SQL (dry-run)",
       "  encrypt --apply      Run the encrypt-on-write migration",
+      "  encrypt --rotate --old-key-ref=<sql> [--apply]",
+      "                       Re-encrypt encrypted columns old→new key (--key-ref = new)",
       "  version              Print the applier version and META_TABLES count",
       "  help                 Show this help text",
       "",
@@ -179,6 +182,31 @@ async function runEncrypt(
     }
 
     const migrator = new EncryptionMigrator(conn);
+    if (flags.has("--rotate")) {
+      const oldKeyRef = flagValue(argv, "old-key-ref");
+      if (oldKeyRef === undefined || oldKeyRef === null) {
+        process.stderr.write("encrypt --rotate requires --old-key-ref=<sql>.\n");
+        return 2;
+      }
+      if (flags.has("--apply")) {
+        if (looksLikeProductionDatabase(config.database) && !flags.has("--confirm")) {
+          process.stderr.write(
+            `Refusing to rotate keys against production-looking database '${config.database}' without --confirm.\n`,
+          );
+          return 2;
+        }
+        const rotated = await migrator.rotateSchema(schema, oldKeyRef, keyRef);
+        process.stdout.write(
+          rotated.length === 0
+            ? "No encrypted-at-rest columns to rotate.\n"
+            : `Re-encrypted ${rotated.length.toString()} column(s) in schema "${schema}".\n`,
+        );
+        return 0;
+      }
+      const rotationPlans = await migrator.planRotation(schema, oldKeyRef, keyRef);
+      process.stdout.write(formatRotationPlan(rotationPlans) + "\n");
+      return 0;
+    }
     if (flags.has("--apply")) {
       if (looksLikeProductionDatabase(config.database) && !flags.has("--confirm")) {
         process.stderr.write(

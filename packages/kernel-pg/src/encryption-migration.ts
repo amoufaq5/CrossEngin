@@ -4,6 +4,7 @@ import {
   ENCRYPT_AT_REST_VALUE,
   ENCRYPT_KEY,
   introspectEncryptedColumns,
+  pgpSymDecryptExpr,
   pgpSymEncryptExpr,
   type EncryptedColumn,
 } from "./encryption.js";
@@ -152,4 +153,86 @@ export class EncryptionMigrator {
     }
     return plans;
   }
+
+  /** Plans key rotation for every already-encrypted (BYTEA) hinted column in the schema. */
+  async planRotation(schema: string, oldKeyRef: string, newKeyRef: string): Promise<readonly ColumnRotationPlan[]> {
+    const columns = await introspectEncryptedColumns(this.conn, schema);
+    return columns.filter((c) => c.encryptedStorage).map((c) => planColumnRotation(c, oldKeyRef, newKeyRef));
+  }
+
+  /** Plans + executes the key rotation. Each column rotates in its own transaction. */
+  async rotateSchema(schema: string, oldKeyRef: string, newKeyRef: string): Promise<readonly ColumnRotationPlan[]> {
+    const plans = await this.planRotation(schema, oldKeyRef, newKeyRef);
+    for (const plan of plans) {
+      await this.conn.transaction(async (tx) => {
+        for (const statement of plan.statements) {
+          await tx.query(statement);
+        }
+      });
+    }
+    return plans;
+  }
+}
+
+export interface ReencryptColumnInput {
+  readonly schema: string;
+  readonly table: string;
+  readonly column: string;
+  readonly oldKeyRef: string;
+  readonly newKeyRef: string;
+}
+
+/**
+ * Emits the DDL that re-encrypts an already-encrypted `BYTEA` column from `oldKeyRef`
+ * to `newKeyRef` **in place** (key rotation): decrypt with the old key, re-encrypt with
+ * the new one, in a single `UPDATE`. NULLs stay NULL. The column type is unchanged (it
+ * is already `BYTEA`), so reads through the decrypting view keep working once the
+ * deployment's key reference points at the new key. Both keys are SQL *references*,
+ * never inlined.
+ */
+export function reencryptColumnSql(input: ReencryptColumnInput): string[] {
+  const table = qualify(input.schema, input.table);
+  const col = quoteIdent(input.column);
+  const reencrypt = pgpSymEncryptExpr(pgpSymDecryptExpr(col, input.oldKeyRef), input.newKeyRef);
+  return [`UPDATE ${table} SET ${col} = CASE WHEN ${col} IS NULL THEN NULL ELSE ${reencrypt} END;`];
+}
+
+export interface ColumnRotationPlan {
+  readonly schema: string;
+  readonly table: string;
+  readonly column: string;
+  readonly dataClass: string | null;
+  readonly statements: readonly string[];
+}
+
+export function planColumnRotation(
+  column: EncryptedColumn,
+  oldKeyRef: string,
+  newKeyRef: string,
+): ColumnRotationPlan {
+  return {
+    schema: column.schema,
+    table: column.table,
+    column: column.column,
+    dataClass: column.dataClass,
+    statements: reencryptColumnSql({
+      schema: column.schema,
+      table: column.table,
+      column: column.column,
+      oldKeyRef,
+      newKeyRef,
+    }),
+  };
+}
+
+export function formatRotationPlan(plans: readonly ColumnRotationPlan[]): string {
+  if (plans.length === 0) {
+    return "No encrypted-at-rest columns to rotate.";
+  }
+  const lines: string[] = [`Key rotation plan: ${plans.length.toString()} column(s) to re-encrypt`];
+  for (const plan of plans) {
+    lines.push(`-- ${plan.table}.${plan.column} (${plan.dataClass ?? "?"})`);
+    for (const statement of plan.statements) lines.push(statement);
+  }
+  return lines.join("\n");
 }

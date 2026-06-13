@@ -6,8 +6,14 @@ import {
   emitDecryptingViewSql,
   emitEncryptColumnSql,
   formatEncryptionPlan,
+  formatRotationPlan,
   planColumnEncryption,
+  planColumnRotation,
+  reencryptColumnSql,
 } from "./encryption-migration.js";
+
+const OLD_KEY = "current_setting('app.column_encryption_key_old')";
+const NEW_KEY = "current_setting('app.column_encryption_key')";
 
 const KEY_REF = "current_setting('app.column_encryption_key')";
 
@@ -157,5 +163,72 @@ describe("EncryptionMigrator", () => {
     const plans = await migrator.migrateSchema("t_clinic", KEY_REF);
     expect(plans).toEqual([]);
     expect(observed.some((s) => s.startsWith("ALTER TABLE"))).toBe(false);
+  });
+});
+
+describe("reencryptColumnSql (key rotation)", () => {
+  it("emits a single NULL-safe UPDATE re-encrypting old → new (keys by reference)", () => {
+    const sql = reencryptColumnSql({ schema: "t", table: "patient", column: "mrn", oldKeyRef: OLD_KEY, newKeyRef: NEW_KEY });
+    expect(sql).toHaveLength(1);
+    expect(sql[0]).toContain("UPDATE \"t\".\"patient\"");
+    expect(sql[0]).toContain("pgp_sym_decrypt(\"mrn\", current_setting('app.column_encryption_key_old'))");
+    expect(sql[0]).toContain("pgp_sym_encrypt(");
+    expect(sql[0]).toContain("CASE WHEN \"mrn\" IS NULL THEN NULL");
+    // the raw keys are never inlined — only references appear
+    expect(sql[0]).not.toMatch(/[0-9a-f]{32}/);
+  });
+});
+
+describe("planColumnRotation / formatRotationPlan", () => {
+  it("builds a rotation plan from an encrypted column", () => {
+    const plan = planColumnRotation(
+      { schema: "s", table: "t", column: "c", dataType: "bytea", dataClass: "phi", encryptedStorage: true },
+      OLD_KEY,
+      NEW_KEY,
+    );
+    expect(plan).toMatchObject({ schema: "s", table: "t", column: "c", dataClass: "phi" });
+    expect(plan.statements).toHaveLength(1);
+  });
+
+  it("renders a no-op message + a listing", () => {
+    expect(formatRotationPlan([])).toContain("No encrypted-at-rest columns to rotate");
+    const out = formatRotationPlan([
+      planColumnRotation({ schema: "t", table: "patient", column: "mrn", dataType: "bytea", dataClass: "phi", encryptedStorage: true }, OLD_KEY, NEW_KEY),
+    ]);
+    expect(out).toContain("1 column(s) to re-encrypt");
+    expect(out).toContain("-- patient.mrn (phi)");
+  });
+});
+
+describe("EncryptionMigrator.rotateSchema", () => {
+  const ciphertextRow: EncryptedColumnRow = {
+    schema: "t_clinic",
+    table_name: "observation",
+    column_name: "value_text",
+    data_type: "bytea",
+    comment: "crossengin.data_class=phi; crossengin.encrypt=at_rest",
+  };
+  const plaintextRow: EncryptedColumnRow = {
+    schema: "t_clinic",
+    table_name: "patient",
+    column_name: "mrn",
+    data_type: "text",
+    comment: "crossengin.data_class=phi; crossengin.encrypt=at_rest",
+  };
+
+  it("rotates only already-encrypted (bytea) columns, in a transaction", async () => {
+    const observed: string[] = [];
+    const migrator = new EncryptionMigrator(mockConn([ciphertextRow, plaintextRow], observed));
+    const plans = await migrator.rotateSchema("t_clinic", OLD_KEY, NEW_KEY);
+    expect(plans).toHaveLength(1); // only the bytea column
+    expect(plans[0]?.column).toBe("value_text");
+    expect(observed.some((s) => s.startsWith("UPDATE") && s.includes("pgp_sym_decrypt"))).toBe(true);
+  });
+
+  it("is a no-op when there are no encrypted columns to rotate", async () => {
+    const observed: string[] = [];
+    const migrator = new EncryptionMigrator(mockConn([plaintextRow], observed));
+    expect(await migrator.rotateSchema("t_clinic", OLD_KEY, NEW_KEY)).toEqual([]);
+    expect(observed.some((s) => s.startsWith("UPDATE"))).toBe(false);
   });
 });
