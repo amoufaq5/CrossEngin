@@ -292,3 +292,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 206 | 0233 | 2,000 | Drafted alongside DR persistence — dr-runtime-pg (Phase 3 P8.2) |
 | 207 | 0234 | 2,000 | Drafted alongside the access-review campaign runtime (Phase 3 P8.3) |
 | 208 | 0235 | 2,000 | Drafted alongside access-review decision application (Phase 3 P8.4) |
+| 209 | 0236 | 2,000 | Drafted alongside access-review persistence — access-reviews-pg (Phase 3 P8.5) |
