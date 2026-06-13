@@ -33,6 +33,7 @@
     "@crossengin/ai-router": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
+    "@crossengin/marketplace-pg": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

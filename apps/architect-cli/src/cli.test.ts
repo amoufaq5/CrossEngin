@@ -22,6 +22,7 @@ describe("SUBCOMMANDS", () => {
       "patch",
       "hash",
       "apply",
+      "install",
       "chat",
       "version",
       "help",

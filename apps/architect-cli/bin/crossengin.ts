@@ -3,6 +3,7 @@
 import { META_TABLES } from "@crossengin/kernel/bootstrap";
 
 import { runApply } from "../src/apply.js";
+import { runInstall } from "../src/install.js";
 import { helpText, parseArgs } from "../src/cli.js";
 import {
   runChat,
@@ -56,6 +57,8 @@ async function main(): Promise<number> {
       return runHash(command, ctx);
     case "apply":
       return runApply(command, ctx);
+    case "install":
+      return runInstall(command, ctx);
     case "chat":
       return runChat(command, ctx);
   }

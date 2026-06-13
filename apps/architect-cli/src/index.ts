@@ -1,4 +1,5 @@
 export * from "./apply.js";
+export * from "./install.js";
 export * from "./chat.js";
 export * from "./cli.js";
 export * from "./commands.js";
