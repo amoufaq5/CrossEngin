@@ -45,8 +45,11 @@ import {
   autoApprover,
   buildToolCatalog,
   type ChatToolDefinition,
+  type PackInstaller,
   type WriteApprover,
 } from "./tools.js";
+import { PostgresPackInstallationStore, installPackGated } from "@crossengin/marketplace-pg";
+import { randomUUID } from "node:crypto";
 import type { ParsedCommand } from "./cli.js";
 import { getBooleanFlag, getStringFlag } from "./cli.js";
 import {
@@ -412,12 +415,40 @@ export async function runChat(
       approver = interactiveApprover({ io: ctx.io, reader: lines });
     }
   }
+  // --allow-install exposes an install_pack tool backed by the gated install runtime
+  // over a dedicated Postgres connection (operator-authorized: verdict allow).
+  let installConn: PgConnection | null = null;
+  let installer: PackInstaller | undefined;
+  if (!toolsDisabled && getBooleanFlag(command, "allow-install")) {
+    try {
+      installConn = createNodePgConnection(parsePgEnvConfig(ctx.env));
+    } catch (err) {
+      printError(ctx.io, `chat: --allow-install requires PG env vars: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+    const store = new PostgresPackInstallationStore(installConn);
+    installer = {
+      async install(input) {
+        const result = await installPackGated(store, {
+          verdict: { decision: "allow" },
+          tenantId: input.tenantId,
+          packId: input.packId,
+          version: input.version,
+          installedBy: input.installedBy,
+          now: () => new Date(),
+          newId: () => randomUUID(),
+        });
+        return result.installed ? { installed: true } : { installed: false, reason: result.reason };
+      },
+    };
+  }
   let toolCatalog: readonly ChatToolDefinition[] | undefined;
   if (!toolsDisabled) {
     toolCatalog = buildToolCatalog({
       allowFileRead,
       allowFileWrite,
       approver,
+      ...(installer !== undefined ? { installer } : {}),
     });
   }
 
@@ -493,6 +524,11 @@ export async function runChat(
   } finally {
     if (pgConnection !== null) {
       await pgConnection.close().catch(() => {
+        // Best-effort close; ignore errors during cleanup.
+      });
+    }
+    if (installConn !== null) {
+      await installConn.close().catch(() => {
         // Best-effort close; ignore errors during cleanup.
       });
     }

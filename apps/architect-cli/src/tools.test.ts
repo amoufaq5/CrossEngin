@@ -286,6 +286,57 @@ describe("autoApprover", () => {
   });
 });
 
+describe("install_pack tool", () => {
+  const TID = "00000000-0000-4000-8000-0000000000c1";
+  const ACTOR = "00000000-0000-4000-8000-0000000000c2";
+
+  it("is absent unless an installer is supplied", () => {
+    expect(buildToolCatalog().map((t) => t.name)).not.toContain("install_pack");
+    expect(buildToolCatalog({ installer: { install: async () => ({ installed: true }) } }).map((t) => t.name)).toContain("install_pack");
+  });
+
+  it("drives the installer with the parsed fields + returns its result", async () => {
+    const calls: Array<{ packId: string; version: string; tenantId: string; installedBy: string }> = [];
+    const tools = buildToolCatalog({
+      installer: {
+        async install(input) {
+          calls.push(input);
+          return { installed: true };
+        },
+      },
+    });
+    const result = await executeToolCall(tools, {
+      id: "i1",
+      name: "install_pack",
+      input: { pack_id: "crossengin.erp.education", version: "1.0.0", tenant_id: TID, installed_by: ACTOR },
+    });
+    expect(result.isError).toBe(false);
+    expect(JSON.parse(result.output)).toEqual({ installed: true });
+    expect(calls).toEqual([{ packId: "crossengin.erp.education", version: "1.0.0", tenantId: TID, installedBy: ACTOR }]);
+  });
+
+  it("surfaces a refusal result from the installer", async () => {
+    const tools = buildToolCatalog({ installer: { install: async () => ({ installed: false, reason: "already_installed" }) } });
+    const result = await executeToolCall(tools, {
+      id: "i1",
+      name: "install_pack",
+      input: { pack_id: "p", version: "1.0.0", tenant_id: TID, installed_by: ACTOR },
+    });
+    expect(JSON.parse(result.output)).toEqual({ installed: false, reason: "already_installed" });
+  });
+
+  it("errors on a non-UUID tenant_id", async () => {
+    const tools = buildToolCatalog({ installer: { install: async () => ({ installed: true }) } });
+    const result = await executeToolCall(tools, {
+      id: "i1",
+      name: "install_pack",
+      input: { pack_id: "p", version: "1.0.0", tenant_id: "nope", installed_by: ACTOR },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.output).toMatch(/tenant_id must be a UUID/);
+  });
+});
+
 describe("buildToolCatalog — propose_manifest_edit gating", () => {
   it("is absent unless allowFileWrite + approver are both set", () => {
     expect(buildToolCatalog().map((t) => t.name)).not.toContain("propose_manifest_edit");

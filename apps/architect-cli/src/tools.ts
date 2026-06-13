@@ -28,6 +28,24 @@ export interface ChatToolOptions {
   readonly fileRootDir?: string;
   readonly maxFileBytes?: number;
   readonly approver?: WriteApprover;
+  /** When set, an `install_pack` tool is exposed that drives this installer. */
+  readonly installer?: PackInstaller;
+}
+
+/** The result of installing a pack into a tenant (a thin projection of the gated-install result). */
+export interface InstallToolResult {
+  readonly installed: boolean;
+  readonly reason?: string;
+}
+
+/** A pack installer the chat loop can drive — satisfied by a PG-backed gated install. */
+export interface PackInstaller {
+  install(input: {
+    readonly packId: string;
+    readonly version: string;
+    readonly tenantId: string;
+    readonly installedBy: string;
+  }): Promise<InstallToolResult>;
 }
 
 export interface WriteApprovalRequest {
@@ -188,7 +206,46 @@ export function buildToolCatalog(opts: ChatToolOptions = {}): readonly ChatToolD
       execute: async (input) => proposeManifestEditTool(input, root, approver),
     });
   }
+  if (opts.installer !== undefined) {
+    const installer = opts.installer;
+    tools.push({
+      name: "install_pack",
+      description:
+        "Install a marketplace pack into a tenant through the gated install runtime. Use after a manifest edit has been approved. Reports installed / already_installed / a refusal reason; never overwrites an existing active install.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          pack_id: { type: "string", description: "The marketplace pack id (e.g. crossengin.erp.education)." },
+          version: { type: "string", description: "The pack version to install (semver)." },
+          tenant_id: { type: "string", description: "The target tenant UUID." },
+          installed_by: { type: "string", description: "The actor UUID performing the install." },
+        },
+        required: ["pack_id", "version", "tenant_id", "installed_by"],
+      },
+      execute: async (input) => installPackTool(input, installer),
+    });
+  }
   return tools;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function requireStringField(input: ToolInput, key: string): string {
+  const raw = input[key];
+  if (typeof raw !== "string" || raw.length === 0) {
+    throw new ToolExecutionError(`tool input missing string field "${key}"`);
+  }
+  return raw;
+}
+
+async function installPackTool(input: ToolInput, installer: PackInstaller): Promise<unknown> {
+  const packId = requireStringField(input, "pack_id");
+  const version = requireStringField(input, "version");
+  const tenantId = requireStringField(input, "tenant_id");
+  const installedBy = requireStringField(input, "installed_by");
+  if (!UUID_RE.test(tenantId)) throw new ToolExecutionError(`install_pack: tenant_id must be a UUID`);
+  if (!UUID_RE.test(installedBy)) throw new ToolExecutionError(`install_pack: installed_by must be a UUID`);
+  return installer.install({ packId, version, tenantId, installedBy });
 }
 
 function parseManifestArg(input: ToolInput, key: string): Manifest {
