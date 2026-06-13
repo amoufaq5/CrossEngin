@@ -429,6 +429,9 @@ importers:
       '@crossengin/ai-architect':
         specifier: workspace:*
         version: link:../ai-architect
+      '@crossengin/types':
+        specifier: workspace:*
+        version: link:../types
       zod:
         specifier: ^3.23.0
         version: 3.25.76
