@@ -2,6 +2,7 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import type { LlmTool } from "@crossengin/ai-providers";
+import { evaluateProposalGate, formatProposalGate, scanProposalRefusalRequest } from "@crossengin/ai-architect-runtime";
 import {
   computeManifestDiff,
   manifestHash,
@@ -302,6 +303,26 @@ async function proposeManifestEditTool(
     entitiesRemoved: diff.removedEntities.length,
     entitiesModified: diff.modifiedEntities.length,
   };
+  // P7.2: enforce the AI-Architect safety policy before asking for approval. A hard
+  // refusal (e.g. removing audit from a phi-carrying entity, weakening encryption
+  // below a pack minimum) is non-overridable — reject it without offering the write.
+  if (existing !== null) {
+    const refusalRequest = scanProposalRefusalRequest(
+      { entities: existing.entities ?? [] },
+      { entities: proposed.entities ?? [] },
+      { requester: "ai_architect", tenantId: "architect-cli", attemptedAt: new Date().toISOString() },
+    );
+    if (refusalRequest !== null) {
+      const decision = evaluateProposalGate({ hardRefusal: { request: refusalRequest } });
+      return {
+        applied: false,
+        reason: "safety_refused",
+        path: absolute,
+        refusal: refusalRequest.refusal,
+        message: formatProposalGate(decision),
+      };
+    }
+  }
   const approved = await approver.approve({
     path: absolute,
     isNew,

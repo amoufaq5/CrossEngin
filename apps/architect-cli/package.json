@@ -26,6 +26,7 @@
   "dependencies": {
     "@crossengin/ai-architect": "workspace:*",
     "@crossengin/ai-architect-pg": "workspace:*",
+    "@crossengin/ai-architect-runtime": "workspace:*",
     "@crossengin/ai-providers": "workspace:*",
     "@crossengin/ai-providers-anthropic": "workspace:*",
     "@crossengin/ai-providers-openai": "workspace:*",

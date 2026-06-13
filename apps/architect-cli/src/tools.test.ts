@@ -2,6 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { ManifestSchema } from "@crossengin/kernel/manifest";
 import { describe, expect, it } from "vitest";
 
 import { emptyManifest, type Manifest } from "./manifest-io.js";
@@ -393,6 +394,45 @@ describe("executeToolCall — propose_manifest_edit", () => {
     expect(parsed.applied).toBe(false);
     expect(parsed.reason).toBe("no_changes");
     expect(approver.requests).toHaveLength(0);
+  });
+
+  it("REFUSES (safety) an edit weakening a phi field's encryption — without asking for approval (P7.2)", async () => {
+    const dir = await tempDir();
+    const withMrn = (mrnClass: string): Manifest =>
+      ManifestSchema.parse({
+        manifestVersion: "1.0",
+        meta: { name: "Health", slug: "health", version: "1.0.0" },
+        entities: [
+          {
+            name: "Patient",
+            traits: ["auditable"],
+            fields: [
+              { name: "name", type: { kind: "text" }, required: true },
+              { name: "mrn", type: { kind: "text" }, classification: mrnClass },
+            ],
+          },
+        ],
+      });
+    // before: mrn is phi (encryption-at-rest required). after: downgraded to pii — a
+    // still-valid manifest, but a hard refusal the kernel validator alone wouldn't catch.
+    await writeFile(join(dir, "m.json"), JSON.stringify(withMrn("phi"), null, 2), "utf8");
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: dir });
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: { path: "m.json", new_manifest_json: JSON.stringify(withMrn("pii")) },
+    });
+    const parsed = JSON.parse(result.output) as { applied: boolean; reason: string; refusal: string; message: string };
+    expect(parsed.applied).toBe(false);
+    expect(parsed.reason).toBe("safety_refused");
+    expect(parsed.refusal).toBe("weaken_encryption_below_pack_minimum");
+    expect(parsed.message).toContain("REFUSED");
+    // the forbidden edit was rejected before the approver was ever consulted
+    expect(approver.requests).toHaveLength(0);
+    // and nothing was written (the file still has the phi classification)
+    const onDisk = JSON.parse(await readFile(join(dir, "m.json"), "utf8")) as Manifest;
+    expect(onDisk.entities?.[0]?.fields.find((f) => f.name === "mrn")?.classification).toBe("phi");
   });
 
   it("returns invalid_manifest when the proposal fails schema validation", async () => {

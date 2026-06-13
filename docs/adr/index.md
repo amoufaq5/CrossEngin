@@ -281,3 +281,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 195 | 0224 | 2,000 | Drafted alongside the persisting replication engine (Phase 3 P6.6) |
 | 196 | 0084 | 2,500 | Drafted alongside the AI Architect production safety runtime — ai-architect-runtime (Phase 3 P7) |
 | 197 | 0225 | 2,000 | Drafted alongside hard-refusal detection from a manifest edit (Phase 3 P7.1) |
+| 198 | 0226 | 2,000 | Drafted alongside the safety gate in architect-cli's authoring loop (Phase 3 P7.2) |

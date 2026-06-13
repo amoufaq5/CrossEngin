@@ -23,6 +23,9 @@ importers:
       '@crossengin/ai-architect-pg':
         specifier: workspace:*
         version: link:../../packages/ai-architect-pg
+      '@crossengin/ai-architect-runtime':
+        specifier: workspace:*
+        version: link:../../packages/ai-architect-runtime
       '@crossengin/ai-providers':
         specifier: workspace:*
         version: link:../../packages/ai-providers
