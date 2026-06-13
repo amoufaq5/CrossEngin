@@ -79,6 +79,7 @@ jobs:
           pnpm --filter @crossengin/workflow-worker-app test
           pnpm --filter @crossengin/operate-server test
           pnpm --filter @crossengin/operate-web-app test
+          pnpm --filter @crossengin/active-active-runtime-pg test
       - name: Incident timeline drift gate
         # The gated suites above declare/escalate/resolve/ack/mitigate real
         # incidents in meta.incidents. `incidents verify` runs the timeline drift
@@ -128,3 +129,15 @@ jobs:
         # suite's draft release + fully_compatible entry are consistent, so this is
         # non-vacuous yet green. Run after the gated suites so it sees what they wrote.
         run: node apps/operate-server/dist/bin/operate-server.js sdk-releases verify --limit 1000
+      - name: Replication ledger drift gate
+        # The active-active-runtime-pg gated suite (integration.test.ts, P6.4) drives a
+        # concurrent two-region write through real ReplicationEngines and persists the
+        # events + concurrent-resolution to meta.replication_events /
+        # meta.replication_conflicts. `replication verify` runs the pure
+        # verifyReplicationLedger cross-table sweep (P6.5) and EXITS 1 on any drift: a
+        # concurrent_merged event without a matching conflict (or vice versa), a
+        # non-auto-resolved or same-region conflict, or a concurrent event with the wrong
+        # causal relation. An empty ledger verifies clean (exit 0); the gated suite's
+        # concurrent write + its auto-resolved conflict are consistent, so this is
+        # non-vacuous yet green. Run after the gated suites so it sees what they wrote.
+        run: node packages/active-active-runtime-pg/dist/bin/crossengin-replication.js verify --since 2000-01-01

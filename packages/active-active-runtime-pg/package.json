@@ -4,15 +4,18 @@
   "private": true,
   "license": "SEE LICENSE IN ../../LICENSE",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
     }
   },
-  "files": ["dist", "src"],
+  "bin": {
+    "crossengin-replication": "./dist/bin/crossengin-replication.js"
+  },
+  "files": ["dist", "src", "bin"],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",

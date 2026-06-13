@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PostgresReplicationConflictStore } from "./conflict-store.js";
 import { PostgresReplicationEventStore } from "./event-store.js";
+import { verifyReplicationLedger } from "./query.js";
 
 /**
  * Real-Postgres integration test (gated on `CROSSENGIN_PG_TEST=1`, skipped
@@ -58,5 +59,8 @@ suite("replication persistence (real Postgres)", () => {
       autoResolved: true,
     });
     expect(conflicts[0]!.resolvedValue).toMatchObject({ key });
+
+    // the persisted ledger is internally consistent (the verify CI-gate contract)
+    expect(verifyReplicationLedger(events, conflicts)).toEqual([]);
   });
 });

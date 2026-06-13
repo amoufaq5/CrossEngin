@@ -277,3 +277,4 @@ The 25 initial + 12 follow-up ADRs are written in 11 review-sized batches across
 | 191 | 0220 | 2,500 | Drafted alongside residency enforcement at the serving edge — operate-server ResidencyGuard (Phase 3 P6.2) |
 | 192 | 0221 | 2,500 | Drafted alongside AI-provider residency via the residency profile — ai-router bridge (Phase 3 P6.3) |
 | 193 | 0222 | 2,500 | Drafted alongside replication persistence — active-active-runtime-pg (Phase 3 P6.4) |
+| 194 | 0223 | 2,500 | Drafted alongside the replication ledger read + verify CLI + 7th CI gate (Phase 3 P6.5) |
