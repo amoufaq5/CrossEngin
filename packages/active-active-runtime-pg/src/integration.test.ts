@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { PostgresReplicationConflictStore } from "./conflict-store.js";
 import { PostgresReplicationEventStore } from "./event-store.js";
+import { buildPersistentReplicationEngine } from "./persisting-engine.js";
 import { verifyReplicationLedger } from "./query.js";
 
 /**
@@ -61,6 +62,25 @@ suite("replication persistence (real Postgres)", () => {
     expect(conflicts[0]!.resolvedValue).toMatchObject({ key });
 
     // the persisted ledger is internally consistent (the verify CI-gate contract)
+    expect(verifyReplicationLedger(events, conflicts)).toEqual([]);
+  });
+
+  it("auto-persists a live engine's events + resolution via the persisting wrapper", async () => {
+    const autoKey = `auto-${Math.random().toString(36).slice(2, 10)}`;
+    const eventStore = new PostgresReplicationEventStore(conn);
+    const conflictStore = new PostgresReplicationConflictStore(conn);
+    const a = buildPersistentReplicationEngine({ region: "us-east" }, { eventStore, conflictStore });
+    const b = new ReplicationEngine({ region: "eu-west" });
+
+    await a.localWrite(autoKey, pn({ "us-east": 1 }));
+    const msgB = b.localWrite(autoKey, pn({ "eu-west": 1 }));
+    await a.receive(msgB); // concurrent → persists the remote event + the resolution
+
+    // nothing was persisted by hand — the wrapper drained the engine as it ran
+    const events = await eventStore.listForKey(autoKey);
+    expect(events.some((e) => e.eventKind === "concurrent_merged")).toBe(true);
+    const conflicts = await conflictStore.listForKey(autoKey);
+    expect(conflicts).toHaveLength(1);
     expect(verifyReplicationLedger(events, conflicts)).toEqual([]);
   });
 });
