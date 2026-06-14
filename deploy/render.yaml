@@ -1,0 +1,70 @@
+# Render.com blueprint — launches the WHOLE stack from one file: a managed
+# Postgres + the operate-server API (web) + the workflow-worker (background).
+#
+#   1. Push this repo to GitHub.
+#   2. Render Dashboard → New → Blueprint → pick the repo (it reads this file).
+#   3. Set CROSSENGIN_API_KEY on the api service (it's sync:false), then deploy.
+#
+# The api service's preDeployCommand applies prereqs + the 128-table schema +
+# the demo tenant before going live. Swap the demo API key / tenant for real
+# ones (docs/deploy-online.md §2, §6d).
+databases:
+  - name: crossengin-db
+    postgresMajorVersion: "16"
+    plan: free
+
+services:
+  - type: web
+    name: crossengin-api
+    runtime: docker
+    dockerfilePath: deploy/Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /v1/openapi.json
+    preDeployCommand: >-
+      sh -c "node deploy/scripts/prereqs.mjs &&
+      node packages/kernel-pg/dist/bin/crossengin-pg.js apply &&
+      node deploy/scripts/seed-demo.mjs"
+    dockerCommand: >-
+      node apps/operate-server/dist/bin/operate-server.js
+      --pack erp-retail --store pg --port 8080 --scheme https
+      --api-key $CROSSENGIN_API_KEY
+    envVars:
+      - key: PGHOST
+        fromDatabase: { name: crossengin-db, property: host }
+      - key: PGPORT
+        fromDatabase: { name: crossengin-db, property: port }
+      - key: PGUSER
+        fromDatabase: { name: crossengin-db, property: user }
+      - key: PGPASSWORD
+        fromDatabase: { name: crossengin-db, property: password }
+      - key: PGDATABASE
+        fromDatabase: { name: crossengin-db, property: database }
+      - key: PGSSLMODE
+        value: require
+      - key: CROSSENGIN_API_KEY
+        sync: false
+
+  - type: worker
+    name: crossengin-worker
+    runtime: docker
+    dockerfilePath: deploy/Dockerfile
+    dockerContext: .
+    plan: starter
+    dockerCommand: >-
+      sh -c "echo '[]' > /app/workflows.json &&
+      node apps/workflow-worker/dist/bin/workflow-worker.js
+      --mode all --monitor --persist-incidents --definitions /app/workflows.json"
+    envVars:
+      - key: PGHOST
+        fromDatabase: { name: crossengin-db, property: host }
+      - key: PGPORT
+        fromDatabase: { name: crossengin-db, property: port }
+      - key: PGUSER
+        fromDatabase: { name: crossengin-db, property: user }
+      - key: PGPASSWORD
+        fromDatabase: { name: crossengin-db, property: password }
+      - key: PGDATABASE
+        fromDatabase: { name: crossengin-db, property: database }
+      - key: PGSSLMODE
+        value: require

@@ -1,0 +1,93 @@
+# All-in-one CrossEngin stack on a single host: Postgres + schema migrate/seed +
+# the operate-server API + the workflow-worker, one `docker compose up`.
+#
+#   cd deploy && docker compose up --build
+#   # then (demo creds seeded automatically):
+#   curl -H "x-api-key: devkey" \
+#        http://localhost:8080/v1/openapi.json
+#
+# DEMO defaults below (password, API key, fixed demo tenant) — change them for
+# anything real. See docs/deploy-online.md.
+name: crossengin
+
+x-pg-env: &pg-env
+  PGHOST: db
+  PGPORT: "5432"
+  PGUSER: postgres
+  PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+  PGDATABASE: crossengin
+  PGSSLMODE: disable
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: crossengin
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d crossengin"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - crossengin-pgdata:/var/lib/postgresql/data
+
+  # one-shot: prereqs (pgcrypto + uuid shim) -> apply the 128-table schema -> seed demo tenant
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *pg-env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - >
+        node deploy/scripts/prereqs.mjs &&
+        node packages/kernel-pg/dist/bin/crossengin-pg.js apply &&
+        node deploy/scripts/seed-demo.mjs
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *pg-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    command:
+      - node
+      - apps/operate-server/dist/bin/operate-server.js
+      - --pack=erp-retail
+      - --store=pg
+      - --port=8080
+      - --scheme=http
+      - --api-key=${CROSSENGIN_API_KEY:-devkey:retail_admin:00000000-0000-4000-8000-000000000001}
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *pg-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - >
+        echo '[]' > /app/workflows.json &&
+        node apps/workflow-worker/dist/bin/workflow-worker.js
+        --mode all --monitor --persist-incidents --definitions /app/workflows.json
+
+volumes:
+  crossengin-pgdata:

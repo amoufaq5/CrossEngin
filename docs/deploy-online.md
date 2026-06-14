@@ -34,6 +34,43 @@ Two hard constraints, learned the hard way:
 
 ---
 
+## 0b. Launch it all in one place (Render or Docker Compose)
+
+Prefer one platform, one bill, one config file? Because `operate-server` and
+`workflow-worker` are ordinary long-running processes (no Edge/serverless
+constraints), any host that runs **containers + managed Postgres together** can
+run the whole stack. This repo ships two turnkey paths:
+
+**A) One VM with Docker Compose** — Postgres + schema migrate/seed + API + worker
+in a single command:
+```bash
+cd deploy && docker compose up --build
+# demo tenant + key are seeded automatically:
+curl -H "x-api-key: devkey" \
+     http://localhost:8080/v1/openapi.json
+```
+`deploy/docker-compose.yml` brings up `db` → `migrate` (runs
+`deploy/scripts/prereqs.mjs` → `crossengin-pg apply` → `deploy/scripts/seed-demo.mjs`)
+→ `api` → `worker`. Override `POSTGRES_PASSWORD` / `CROSSENGIN_API_KEY` for real
+use. Put it on a Hetzner/Lightsail/EC2 box behind a TLS reverse proxy and you're
+live.
+
+**B) Render blueprint** — `deploy/render.yaml` declares a managed Postgres + a web
+service (API) + a background worker. In Render: New → Blueprint → pick the repo →
+set `CROSSENGIN_API_KEY` → deploy. The API's `preDeployCommand` runs prereqs +
+schema + seed before going live.
+
+Other one-platform homes that fit the same shape: **Railway** (Postgres plugin +
+two services from `deploy/Dockerfile`, different start commands), **Fly.io** (Fly
+Postgres + a `[processes]` app + worker), **DigitalOcean App Platform** (managed
+PG + service + worker). All use the shared `deploy/Dockerfile`.
+
+> Choose this (single platform) for simplicity/control; choose the Vercel +
+> Supabase split (below) for a serverless API + a managed Auth/DB you don't run.
+> The admin operations in §6 are identical either way.
+
+---
+
 ## 1. Supabase — the database
 
 1. Create a Supabase project. Note the project ref `<proj>` and the database
@@ -141,13 +178,13 @@ The repo already contains the entrypoint (`api/index.ts`) and `vercel.json`
    ```bash
    BASE=https://<your-app>.vercel.app
    # API description (RBAC-filtered to the caller)
-   curl -s -H "x-api-key: acme-admin-7f3c9d:retail_admin:<TENANT>" $BASE/v1/openapi.json | head
+   curl -s -H "x-api-key: acme-admin-7f3c9d" $BASE/v1/openapi.json | head
    # create + list a record (retail pack → products)
    curl -s -X POST $BASE/v1/products \
-     -H "x-api-key: acme-admin-7f3c9d:retail_admin:<TENANT>" \
+     -H "x-api-key: acme-admin-7f3c9d" \
      -H "content-type: application/json" \
      -d '{"sku":"SKU-1","name":"Widget","unit_cost":4.20,"category":"grocery","status":"active"}'
-   curl -s -H "x-api-key: acme-admin-7f3c9d:retail_admin:<TENANT>" $BASE/v1/products
+   curl -s -H "x-api-key: acme-admin-7f3c9d" $BASE/v1/products
    ```
 4. (Optional) attach a custom domain in Vercel.
 
@@ -200,7 +237,7 @@ build:client`. (A turnkey `api/` for operate-web is not bundled here yet — clo
 
 **API keys (recommended to start, and for service/admin automation).** Format
 `token:role:tenant`, registered via `CROSSENGIN_API_KEYS`. Sent as
-`x-api-key: <token>:<role>:<tenant>` or `Authorization: Bearer <…>`. Fail-closed:
+the bare token as `x-api-key: <token>` (or `Authorization: Bearer <token>`). Fail-closed:
 an unknown token → 401. An admin key uses the pack's admin role.
 
 **EdDSA JWTs (for end-user auth in production).** The gateway accepts only
@@ -255,7 +292,7 @@ deployment serves all of them — the credential's `tenant` segment (API key) or
 ### 6e. Driving the API as admin
 
 ```bash
-H="x-api-key: acme-admin-7f3c9d:retail_admin:<TENANT>"
+H="x-api-key: acme-admin-7f3c9d"
 # CRUD
 curl -X POST  $BASE/v1/products -H "$H" -H 'content-type: application/json' -d '{…}'
 curl          $BASE/v1/products -H "$H"                 # keyset-paginated list
