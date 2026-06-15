@@ -1,0 +1,24 @@
+# Auth proxy for the operate-web UI: gives the browser a real login (HTTP Basic
+# Auth) and injects the operate-web API token the user never sees, then proxies
+# to the UI. operate-web has no built-in login screen — this proxy IS the login.
+#
+# Demo credentials: admin / crossengin. Regenerate the hash for production:
+#   docker run --rm caddy:2 caddy hash-password --plaintext '<newpass>'
+# then set PROXY_USERNAME / PROXY_PASSWORD_HASH (or replace the default below).
+#
+# CROSSENGIN_UI_TOKEN must equal the TOKEN segment of the ui service's --api-key
+# (default token "devkey"). UI_UPSTREAM points at the operate-web service.
+{
+	admin off
+	auto_https off
+}
+
+:{$PORT:80} {
+	basic_auth {
+		{$PROXY_USERNAME:admin} {$PROXY_PASSWORD_HASH:$2a$14$JJwsTlWzvevGp9VKz6O9n.sg/a4UPXqyR0gt0GbV6YpDakoIVEgTO}
+	}
+
+	reverse_proxy {$UI_UPSTREAM:ui:8090} {
+		header_up x-api-key {$CROSSENGIN_UI_TOKEN:devkey}
+	}
+}

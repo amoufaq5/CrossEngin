@@ -291,14 +291,40 @@ it usable by humans, put a credential in front of it:
 - **Quickest (demo):** hit it with a header-injecting client — a browser
   extension that adds `x-api-key: <token>`, or `curl`/Postman for the JSON `/ui/*`
   routes. Good enough to see it work, not for real users.
-- **Production:** front `operate-web` with an **auth proxy** that authenticates the
-  human (your IdP / Supabase Auth / Cloudflare Access / oauth2-proxy) and injects
-  `Authorization: Bearer <EdDSA JWT>` (claims: `iss`/`aud`/`tenant_id`/`roles`) or
-  `x-api-key` on each request. The proxy is the login screen; `operate-web` stays
-  the redaction-aware renderer behind it.
+- **Supported path:** front `operate-web` with the **auth proxy** this repo ships
+  (`deploy/proxy/`) — see §5b. The proxy authenticates the human and injects the
+  credential; `operate-web` stays the redaction-aware renderer behind it. (For a
+  bigger org, swap Caddy Basic Auth for your IdP / Cloudflare Access / oauth2-proxy
+  and have it inject an EdDSA `Bearer` JWT with `iss`/`aud`/`tenant_id`/`roles`.)
 
 A built-in login page is a known product gap (see CLAUDE.md's deferred UI
-follow-ups) — until then, the proxy pattern is the supported path.
+follow-ups) — the proxy is the supported path until then.
+
+### 5b. Browser login via the auth proxy (Caddy)
+
+`deploy/proxy/` is a tiny Caddy proxy that **is** the login screen: it prompts the
+browser for HTTP Basic Auth, and on success injects the operate-web `x-api-key`
+(which the user never sees) and proxies to the UI. Demo credentials: **`admin` /
+`crossengin`** (regenerate for production —
+`docker run --rm caddy:2 caddy hash-password --plaintext '<newpass>'` → set
+`PROXY_PASSWORD_HASH`). `CROSSENGIN_UI_TOKEN` must equal the **token segment** of
+the UI service's `--api-key`.
+
+**Docker Compose:** the `proxy` service is already wired on **port 8088** →
+browse `http://localhost:8088`, log in, and you're in the UI. (Verified: no creds
+→ 401, `admin:crossengin` → 200, and the injected key renders the page
+redaction-aware.)
+
+**Railway / managed:** add the proxy as a **fourth service** built from
+`deploy/proxy/Dockerfile`, with variables:
+```
+UI_UPSTREAM=<ui-service>.railway.internal:<ui-PORT>   # the operate-web service, private networking
+CROSSENGIN_UI_TOKEN=<the ui --api-key token>
+PROXY_USERNAME=admin
+PROXY_PASSWORD_HASH=<bcrypt hash>
+```
+Caddy binds Railway's `$PORT` automatically. Point your public domain at this
+proxy service (not at the UI service directly).
 
 ---
 

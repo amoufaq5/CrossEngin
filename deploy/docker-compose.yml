@@ -90,6 +90,20 @@ services:
       - --port=8090
       - --api-key=${CROSSENGIN_API_KEY:-devkey:retail_admin:00000000-0000-4000-8000-000000000001}
 
+  # Browser login for the UI: HTTP Basic Auth (demo admin / crossengin) → injects
+  # the operate-web x-api-key the user never sees → proxies to the ui service.
+  # Browse http://localhost:8088 and log in. operate-web has no built-in login.
+  proxy:
+    image: caddy:2
+    depends_on:
+      - ui
+    ports:
+      - "8088:80"
+    volumes:
+      - ./proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+    environment:
+      CROSSENGIN_UI_TOKEN: ${CROSSENGIN_UI_TOKEN:-devkey}
+
   worker:
     build:
       context: ..
