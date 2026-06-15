@@ -9,7 +9,7 @@ import {
   type ReportRunner,
 } from "@crossengin/operate-runtime";
 
-import { parseMethod, rawToIncoming, type RawHttpRequest, type RawHttpResponse } from "./http.js";
+import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
 
 let requestCounter = 0;
@@ -88,6 +88,19 @@ export class OperateHttpServer {
     raw: RawHttpRequest,
     body: Uint8Array | null,
   ): Promise<{ response: RawHttpResponse; matchedOperationId: string | null }> {
+    // Public, unauthenticated liveness probe (no tenant data) — served before the
+    // gateway so platform health checks get a 200 without hitting an authed route.
+    if (raw.method.toUpperCase() === "GET" && splitTarget(raw.url).path === "/healthz") {
+      const body = new TextEncoder().encode(JSON.stringify({ status: "ok" }));
+      return {
+        response: {
+          status: 200,
+          headers: { "content-type": "application/json", "content-length": body.byteLength.toString() },
+          body,
+        },
+        matchedOperationId: null,
+      };
+    }
     const method = parseMethod(raw.method);
     if (method === null) {
       return {

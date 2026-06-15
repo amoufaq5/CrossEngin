@@ -653,3 +653,19 @@ describe("write method guards", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("public routes (no auth)", () => {
+  it("GET /healthz → 200 ok without a credential", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch(req("/healthz"));
+    expect(res.status).toBe(200);
+    expect(JSON.parse(new TextDecoder().decode(res.body!))).toEqual({ status: "ok" });
+  });
+
+  it("GET / → 302 redirect to /app", async () => {
+    const server = await makeServer();
+    const res = await server.dispatch(req("/"));
+    expect(res.status).toBe(302);
+    expect(res.headers["location"]).toBe("/app");
+  });
+});

@@ -370,3 +370,14 @@ describe("marketplace install routes (P5.1) — over the gateway", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("public health route", () => {
+  it("GET /healthz → 200 ok without a credential", async () => {
+    const res = await makeServer().dispatch(
+      { method: "GET", url: "/healthz", headers: { host: "api.example.com" } },
+      null,
+    );
+    expect(res.status).toBe(200);
+    expect(parse(res.body)).toEqual({ status: "ok" });
+  });
+});

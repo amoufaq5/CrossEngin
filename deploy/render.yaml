@@ -20,9 +20,9 @@ services:
     dockerfilePath: deploy/Dockerfile
     dockerContext: .
     plan: starter
-    # No healthCheckPath: every operate-server route requires auth (/v1/openapi.json
-    # returns 401 unauthenticated), so a health check there would fail. Render's
-    # default port check is sufficient.
+    # /healthz is a public, unauthenticated 200 (no tenant data) — safe for the
+    # platform health check (every /v1/* route requires auth and would 401).
+    healthCheckPath: /healthz
     preDeployCommand: >-
       sh -c "node deploy/scripts/prereqs.mjs &&
       node packages/kernel-pg/dist/bin/crossengin-pg.js apply &&

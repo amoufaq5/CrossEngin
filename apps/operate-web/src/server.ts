@@ -147,6 +147,18 @@ export class OperateWebServer {
         : serveClientBundle();
     }
 
+    // Public, unauthenticated liveness probe (carries no tenant data) — gives
+    // platform health checks a 200 without an authed route 401ing them.
+    if (method === "GET" && rawPath === "/healthz") {
+      return jsonResponse(200, { status: "ok" });
+    }
+
+    // The bare root has no content of its own; send the browser to the UI home
+    // so opening the domain lands on `/app` instead of a 404.
+    if (method === "GET" && (rawPath === "/" || rawPath === "")) {
+      return { status: 302, headers: { location: "/app" }, body: null };
+    }
+
     if (method !== "GET" && method !== "POST" && method !== "PATCH" && method !== "DELETE") {
       return problemResponse(405, "Method not allowed", `unsupported method ${req.method}`);
     }

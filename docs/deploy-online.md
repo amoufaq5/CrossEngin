@@ -86,6 +86,8 @@ and the monorepo build fails. Then:
    `RAILWAY_DOCKERFILE_PATH=deploy/Dockerfile`, the same `PG*` references, and a
    start command of
    `sh -c "echo '[]' > /app/workflows.json && node apps/workflow-worker/dist/bin/workflow-worker.js --mode all --monitor --persist-incidents --definitions /app/workflows.json"`.
+6. On the API service set Railway's **Healthcheck Path** to `/healthz` (a public
+   200; don't use `/` — it 404s by design — or a `/v1/*` route, which 401s).
 
 Other one-platform homes that fit the same shape: **Fly.io** (Fly Postgres + a
 `[processes]` app + worker), **DigitalOcean App Platform** (managed PG + service +
@@ -460,6 +462,7 @@ operate-server openapi-client --pack erp-retail --lang python --out client.py
 | `unsupported alg …; only EdDSA is accepted` | you sent a Supabase/HS256/RS256 token — use an API key or an Ed25519 JWT (§6a) |
 | Cannot find module `pg` on Vercel | add `pg` to a root `package.json` `dependencies`, redeploy |
 | 401 on every request | API key not in `CROSSENGIN_API_KEYS`, or tenant/role segment wrong |
+| `404 no route for GET /` | expected — there is no root route. Use `/v1/...` (API) or `/app` (UI); the UI redirects `/`→`/app`. Both apps expose a public `GET /healthz` (200) for health checks |
 | Workflows never advance | the `workflow-worker` host isn't running (§4) |
 | Cross-tenant data leak suspected | confirm the API role is not BYPASSRLS; RLS is the boundary |
 ```
