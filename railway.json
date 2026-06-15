@@ -1,11 +1,11 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
-    "builder": "DOCKERFILE",
-    "dockerfilePath": "deploy/Dockerfile"
+    "buildCommand": "pnpm install --frozen-lockfile && pnpm -r build"
   },
   "deploy": {
-    "startCommand": "node apps/operate-server/dist/bin/operate-server.js --pack erp-retail --store pg --port $PORT --scheme https --api-key $CROSSENGIN_API_KEY",
+    "startCommand": "node apps/operate-server/dist/bin/operate-server.js --pack ${CROSSENGIN_PACK:-erp-retail} --store ${CROSSENGIN_STORE:-pg} --port $PORT --scheme https --api-key ${CROSSENGIN_API_KEY:-devkey:retail_admin:00000000-0000-4000-8000-000000000001}",
+    "healthcheckPath": "/healthz",
     "restartPolicyType": "ON_FAILURE"
   }
 }

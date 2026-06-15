@@ -11,6 +11,7 @@
   "packageManager": "pnpm@9.12.0",
   "scripts": {
     "build": "turbo run build",
+    "start": "node apps/operate-server/dist/bin/operate-server.js --pack ${CROSSENGIN_PACK:-erp-retail} --store ${CROSSENGIN_STORE:-pg} --port ${PORT:-8080} --scheme https --api-key ${CROSSENGIN_API_KEY:-devkey:retail_admin:00000000-0000-4000-8000-000000000001}",
     "lint": "turbo run lint",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",

@@ -60,14 +60,19 @@ service (API) + a background worker. In Render: New → Blueprint → pick the r
 set `CROSSENGIN_API_KEY` → deploy. The API's `preDeployCommand` runs prereqs +
 schema + seed before going live.
 
-**C) Railway** (step by step). Railway must be told to use the Dockerfile (the
-repo's root `railway.json` does this — `builder: DOCKERFILE`,
-`dockerfilePath: deploy/Dockerfile`); without it Railway falls back to Nixpacks
-and the monorepo build fails. Then:
+**C) Railway** (step by step). Railway's default builder (Railpack) needs an
+explicit **build** and **start** command — the repo's root `railway.json`
+supplies both (`build.buildCommand` + `deploy.startCommand`), and the root
+`package.json` now has a `start` script too, so Railpack stops failing with
+"cannot determine a start command". (If you'd rather build the container, point
+the service at `deploy/Dockerfile` via `RAILWAY_DOCKERFILE_PATH` instead.) Then:
 
 1. New Project → **Add a PostgreSQL** database.
-2. **Deploy from the repo** → it picks up `railway.json` and builds
-   `deploy/Dockerfile`.
+2. **Deploy from the repo.** If you set the commands in the Railway UI instead of
+   using `railway.json`, paste:
+   - **Build Command:** `pnpm install --frozen-lockfile && pnpm -r build`
+   - **Start Command:** `node apps/operate-server/dist/bin/operate-server.js --pack erp-retail --store pg --port $PORT --scheme https --api-key $CROSSENGIN_API_KEY`
+   - **Healthcheck Path:** `/healthz`
 3. On the API service, add variables that **reference the database** (Railway
    variable references), plus the SSL mode and your key:
    ```
@@ -93,11 +98,14 @@ Other one-platform homes that fit the same shape: **Fly.io** (Fly Postgres + a
 `[processes]` app + worker), **DigitalOcean App Platform** (managed PG + service +
 worker). All use the shared `deploy/Dockerfile`.
 
-> Build-fails checklist (any platform): a root `.dockerignore` keeps the host
-> `node_modules`/`.git` out of the context; `railway.json` (or
-> `RAILWAY_DOCKERFILE_PATH`) points at `deploy/Dockerfile`; the image pins
-> `pnpm@9.12.0` via corepack and sets `NODE_OPTIONS=--max-old-space-size=4096`
-> so the workspace `tsc` build doesn't OOM. All three are in the repo.
+> Build-fails checklist (any platform):
+> - **Railpack (Railway default):** needs a build + start command — both are in
+>   the root `railway.json` and `package.json` (`scripts.start`). If the workspace
+>   `tsc` build OOMs, set a service variable `NODE_OPTIONS=--max-old-space-size=4096`.
+> - **Docker build path:** the root `.dockerignore` keeps the host
+>   `node_modules`/`.git` out of the context; point the service at
+>   `deploy/Dockerfile` (`RAILWAY_DOCKERFILE_PATH=deploy/Dockerfile`); the image
+>   installs `pnpm@9.12.0` via npm and sets the heap bump itself.
 
 > Choose this (single platform) for simplicity/control; choose the Vercel +
 > Supabase split (below) for a serverless API + a managed Auth/DB you don't run.
