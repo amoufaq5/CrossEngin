@@ -252,14 +252,53 @@ in); `[]` is valid if your manifest has no workflows yet.
 
 ---
 
-## 5. (Optional) the `operate-web` UI
+## 5. Deploy the UI (`operate-web`)
 
-`operate-web` serves redaction-aware view models + SSR pages. Deploy it the same
-way as §3 with a second Vercel project (or a second function) wrapping
-`@crossengin/operate-web-app`'s edge handler, pointed at the same Supabase DB.
-Build its browser bundle with `pnpm --filter @crossengin/operate-web-app
-build:client`. (A turnkey `api/` for operate-web is not bundled here yet — clone
-`api/index.ts` and swap the imports for the operate-web equivalents.)
+`operate-server` (§3/§0b) is the JSON/REST API only. The browser UI is a
+**separate app**, `operate-web`: it serves SSR HTML at `/app/*` (table / detail /
+form / kanban / calendar / dashboard …) and view-model JSON at `/ui/*`, with the
+same per-caller redaction + RBAC. Same store, same DB, same flags as
+`operate-server` (`--pack`/`--manifest`, `--store`, `--schema`, `--api-key`,
+`--jwks-*`) — just a different bin and port.
+
+The shared `deploy/Dockerfile` already builds its interactive browser bundle
+(`build:client` → `/assets/operate-web-client.js`), so you only need to run it as
+another service.
+
+**Docker Compose (all-in-one):** the `ui` service is already in
+`deploy/docker-compose.yml` on **port 8090** — `docker compose up` starts it
+alongside the API + worker.
+
+**Railway:** add a **third service** on the same repo:
+- Variable `RAILWAY_DOCKERFILE_PATH=deploy/Dockerfile`, the same `PG*` references
+  as the API, and `PGSSLMODE=require`.
+- Start command:
+  `node apps/operate-web/dist/bin/operate-web.js --pack erp-retail --store pg --port $PORT --api-key $CROSSENGIN_API_KEY`
+- No Pre-Deploy Command (the API service already applied the schema).
+
+**Vercel:** clone `api/index.ts` and swap the imports for
+`@crossengin/operate-web-app`'s server/edge equivalents (a turnkey operate-web
+`api/` isn't bundled yet). The container path above is simpler.
+
+### ⚠️ Browser login — read this
+
+`operate-web`'s `/app/*` pages are **auth-gated**, and the app has **no built-in
+login screen**: it authenticates a request from an `x-api-key` header or an EdDSA
+`Authorization: Bearer` JWT, not a cookie/session. So a plain browser hitting
+`/app` gets a 401 — which is why it "doesn't run the UI" out of the box. To make
+it usable by humans, put a credential in front of it:
+
+- **Quickest (demo):** hit it with a header-injecting client — a browser
+  extension that adds `x-api-key: <token>`, or `curl`/Postman for the JSON `/ui/*`
+  routes. Good enough to see it work, not for real users.
+- **Production:** front `operate-web` with an **auth proxy** that authenticates the
+  human (your IdP / Supabase Auth / Cloudflare Access / oauth2-proxy) and injects
+  `Authorization: Bearer <EdDSA JWT>` (claims: `iss`/`aud`/`tenant_id`/`roles`) or
+  `x-api-key` on each request. The proxy is the login screen; `operate-web` stays
+  the redaction-aware renderer behind it.
+
+A built-in login page is a known product gap (see CLAUDE.md's deferred UI
+follow-ups) — until then, the proxy pattern is the supported path.
 
 ---
 

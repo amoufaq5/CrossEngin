@@ -71,6 +71,25 @@ services:
       - --scheme=http
       - --api-key=${CROSSENGIN_API_KEY:-devkey:retail_admin:00000000-0000-4000-8000-000000000001}
 
+  ui:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      <<: *pg-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8090:8090"
+    command:
+      - node
+      - apps/operate-web/dist/bin/operate-web.js
+      - --pack=erp-retail
+      - --store=pg
+      - --port=8090
+      - --api-key=${CROSSENGIN_API_KEY:-devkey:retail_admin:00000000-0000-4000-8000-000000000001}
+
   worker:
     build:
       context: ..

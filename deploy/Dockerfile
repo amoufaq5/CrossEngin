@@ -21,6 +21,10 @@ ENV NODE_OPTIONS=--max-old-space-size=4096
 COPY . .
 RUN pnpm install --frozen-lockfile && pnpm -r build
 
+# Bundle the operate-web browser client (esbuild → dist/assets/operate-web-client.js)
+# so the UI's /app/* pages are interactive. Harmless for the API/worker roles.
+RUN pnpm --filter @crossengin/operate-web-app build:client
+
 EXPOSE 8080
 
 CMD ["node", "apps/operate-server/dist/bin/operate-server.js", \
