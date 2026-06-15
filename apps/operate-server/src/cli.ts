@@ -42,6 +42,24 @@ function takeValue(arg: string, next: string | undefined, flag: string): string 
   return next;
 }
 
+/**
+ * Repeatable token flags (`--api-key`, `--jwks-key`) tolerate a missing or empty
+ * value instead of being fatal — so a deploy start command whose `--api-key
+ * $VAR` expanded to nothing boots key-less (and 401s requests) rather than
+ * crash-looping. Pushes the value when present + non-empty; returns how many
+ * extra argv tokens were consumed (so the loop index advances correctly).
+ */
+function pushOptionalToken(arg: string, next: string | undefined, into: string[]): number {
+  if (arg.includes("=")) {
+    const v = arg.slice(arg.indexOf("=") + 1);
+    if (v !== "") into.push(v);
+    return 0;
+  }
+  if (next === undefined || next === "" || next.startsWith("--")) return 0;
+  into.push(next);
+  return 1;
+}
+
 function isInline(arg: string): boolean {
   return arg.includes("=");
 }
@@ -118,11 +136,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       defaultScheme = raw;
       i += consumed();
     } else if (arg === "--api-key" || arg.startsWith("--api-key=")) {
-      apiKeys.push(takeValue(arg, next, "--api-key"));
-      i += consumed();
+      i += pushOptionalToken(arg, next, apiKeys);
     } else if (arg === "--jwks-key" || arg.startsWith("--jwks-key=")) {
-      jwksKeys.push(takeValue(arg, next, "--jwks-key"));
-      i += consumed();
+      i += pushOptionalToken(arg, next, jwksKeys);
     } else if (arg === "--jwks-file" || arg.startsWith("--jwks-file=")) {
       jwksFile = takeValue(arg, next, "--jwks-file");
       i += consumed();

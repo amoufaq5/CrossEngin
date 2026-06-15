@@ -157,3 +157,22 @@ describe("parseServeArgs", () => {
     expect(opts.jwksUrl).toBe("https://idp/.well-known/jwks.json");
   });
 });
+
+describe("tolerant token flags", () => {
+  it("skips a trailing --api-key with no value instead of throwing", () => {
+    const opts = parseServeArgs(["--pack", "erp-retail", "--store", "pg", "--api-key"]);
+    expect(opts.apiKeys).toEqual([]);
+    expect(opts.pack).toBe("erp-retail");
+  });
+
+  it("does not swallow the next flag when --api-key has no value", () => {
+    const opts = parseServeArgs(["--pack", "erp-retail", "--api-key", "--store", "pg"]);
+    expect(opts.apiKeys).toEqual([]);
+    expect(opts.store).toBe("pg");
+  });
+
+  it("skips an empty inline --api-key= but keeps real ones", () => {
+    const opts = parseServeArgs(["--pack", "erp-retail", "--api-key=", "--api-key", "k:role:t"]);
+    expect(opts.apiKeys).toEqual(["k:role:t"]);
+  });
+});
