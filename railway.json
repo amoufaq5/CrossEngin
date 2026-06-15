@@ -4,7 +4,7 @@
     "buildCommand": "pnpm install --frozen-lockfile && pnpm -r build"
   },
   "deploy": {
-    "startCommand": "node apps/operate-server/dist/bin/operate-server.js --pack ${CROSSENGIN_PACK:-erp-retail} --store ${CROSSENGIN_STORE:-pg} --port $PORT --scheme https --api-key ${CROSSENGIN_API_KEY:-devkey:retail_admin:00000000-0000-4000-8000-000000000001}",
+    "startCommand": "node deploy/scripts/start-operate-server.mjs",
     "healthcheckPath": "/healthz",
     "restartPolicyType": "ON_FAILURE"
   }

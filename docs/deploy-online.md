@@ -71,16 +71,22 @@ the service at `deploy/Dockerfile` via `RAILWAY_DOCKERFILE_PATH` instead.) Then:
 2. **Deploy from the repo.** If you set the commands in the Railway UI instead of
    using `railway.json`, paste:
    - **Build Command:** `pnpm install --frozen-lockfile && pnpm -r build`
-   - **Start Command:** `node apps/operate-server/dist/bin/operate-server.js --pack erp-retail --store pg --port $PORT --scheme https --api-key $CROSSENGIN_API_KEY`
+   - **Start Command:** `node deploy/scripts/start-operate-server.mjs`
    - **Healthcheck Path:** `/healthz`
+
+   The start entrypoint reads config from env (no shell `${VAR}` expansion — which
+   Railpack does not do) and **boots even with zero API keys** (requests then 401),
+   so a missing key never crash-loops the deploy.
 3. On the API service, add variables that **reference the database** (Railway
    variable references), plus the SSL mode and your key:
    ```
    PGHOST=${{Postgres.PGHOST}}      PGPORT=${{Postgres.PGPORT}}
    PGUSER=${{Postgres.PGUSER}}      PGPASSWORD=${{Postgres.PGPASSWORD}}
    PGDATABASE=${{Postgres.PGDATABASE}}   PGSSLMODE=require
-   CROSSENGIN_API_KEY=<token>:retail_admin:00000000-0000-4000-8000-000000000001
+   CROSSENGIN_API_KEYS=<token>:retail_admin:00000000-0000-4000-8000-000000000001
    ```
+   (`CROSSENGIN_API_KEYS` is a comma-separated list of `token:role:tenant`. Send the
+   bare `token` as `x-api-key` per §6a.)
 4. Set the service's **Pre-Deploy Command** to run prereqs + schema + seed once
    per deploy:
    ```
@@ -282,8 +288,8 @@ alongside the API + worker.
 **Railway:** add a **third service** on the same repo:
 - Variable `RAILWAY_DOCKERFILE_PATH=deploy/Dockerfile`, the same `PG*` references
   as the API, and `PGSSLMODE=require`.
-- Start command:
-  `node apps/operate-web/dist/bin/operate-web.js --pack erp-retail --store pg --port $PORT --api-key $CROSSENGIN_API_KEY`
+- Start command: `node deploy/scripts/start-operate-web.mjs` (env-driven, same
+  `CROSSENGIN_*` vars + `CROSSENGIN_API_KEYS`; binds `$PORT`).
 - No Pre-Deploy Command (the API service already applied the schema).
 
 **Vercel:** clone `api/index.ts` and swap the imports for
