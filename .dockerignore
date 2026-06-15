@@ -1,0 +1,12 @@
+# Keep the Docker build context small + correct. Without this, `COPY . .` drags
+# the host node_modules (pnpm symlinks with absolute paths) and stale dist into
+# the image, which bloats and can break the in-image `pnpm install` / build.
+**/node_modules
+**/dist
+.git
+.github
+**/*.log
+**/.turbo
+**/coverage
+.DS_Store
+*.local

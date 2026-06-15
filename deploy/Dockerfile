@@ -8,8 +8,15 @@
 # or the migrate step (see deploy/docker-compose.yml).
 FROM node:20-slim
 
-RUN corepack enable
+# Install the exact pnpm from the repo's packageManager field via npm. This is
+# more robust than `corepack prepare` on managed build platforms (corepack's
+# download/signature step is a common, flaky point of failure).
+RUN npm install -g pnpm@9.12.0
 WORKDIR /app
+
+# Build with more headroom — `pnpm -r build` runs tsc across the whole workspace,
+# which can OOM a small build container with the default heap.
+ENV NODE_OPTIONS=--max-old-space-size=4096
 
 COPY . .
 RUN pnpm install --frozen-lockfile && pnpm -r build

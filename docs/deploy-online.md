@@ -60,10 +60,42 @@ service (API) + a background worker. In Render: New → Blueprint → pick the r
 set `CROSSENGIN_API_KEY` → deploy. The API's `preDeployCommand` runs prereqs +
 schema + seed before going live.
 
-Other one-platform homes that fit the same shape: **Railway** (Postgres plugin +
-two services from `deploy/Dockerfile`, different start commands), **Fly.io** (Fly
-Postgres + a `[processes]` app + worker), **DigitalOcean App Platform** (managed
-PG + service + worker). All use the shared `deploy/Dockerfile`.
+**C) Railway** (step by step). Railway must be told to use the Dockerfile (the
+repo's root `railway.json` does this — `builder: DOCKERFILE`,
+`dockerfilePath: deploy/Dockerfile`); without it Railway falls back to Nixpacks
+and the monorepo build fails. Then:
+
+1. New Project → **Add a PostgreSQL** database.
+2. **Deploy from the repo** → it picks up `railway.json` and builds
+   `deploy/Dockerfile`.
+3. On the API service, add variables that **reference the database** (Railway
+   variable references), plus the SSL mode and your key:
+   ```
+   PGHOST=${{Postgres.PGHOST}}      PGPORT=${{Postgres.PGPORT}}
+   PGUSER=${{Postgres.PGUSER}}      PGPASSWORD=${{Postgres.PGPASSWORD}}
+   PGDATABASE=${{Postgres.PGDATABASE}}   PGSSLMODE=require
+   CROSSENGIN_API_KEY=<token>:retail_admin:00000000-0000-4000-8000-000000000001
+   ```
+4. Set the service's **Pre-Deploy Command** to run prereqs + schema + seed once
+   per deploy:
+   ```
+   sh -c "node deploy/scripts/prereqs.mjs && node packages/kernel-pg/dist/bin/crossengin-pg.js apply && node deploy/scripts/seed-demo.mjs"
+   ```
+   (The start command in `railway.json` binds Railway's `$PORT` automatically.)
+5. **Worker** = a *second* service on the same repo: set its variable
+   `RAILWAY_DOCKERFILE_PATH=deploy/Dockerfile`, the same `PG*` references, and a
+   start command of
+   `sh -c "echo '[]' > /app/workflows.json && node apps/workflow-worker/dist/bin/workflow-worker.js --mode all --monitor --persist-incidents --definitions /app/workflows.json"`.
+
+Other one-platform homes that fit the same shape: **Fly.io** (Fly Postgres + a
+`[processes]` app + worker), **DigitalOcean App Platform** (managed PG + service +
+worker). All use the shared `deploy/Dockerfile`.
+
+> Build-fails checklist (any platform): a root `.dockerignore` keeps the host
+> `node_modules`/`.git` out of the context; `railway.json` (or
+> `RAILWAY_DOCKERFILE_PATH`) points at `deploy/Dockerfile`; the image pins
+> `pnpm@9.12.0` via corepack and sets `NODE_OPTIONS=--max-old-space-size=4096`
+> so the workspace `tsc` build doesn't OOM. All three are in the repo.
 
 > Choose this (single platform) for simplicity/control; choose the Vercel +
 > Supabase split (below) for a serverless API + a managed Auth/DB you don't run.

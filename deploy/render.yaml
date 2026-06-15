@@ -20,14 +20,16 @@ services:
     dockerfilePath: deploy/Dockerfile
     dockerContext: .
     plan: starter
-    healthCheckPath: /v1/openapi.json
+    # No healthCheckPath: every operate-server route requires auth (/v1/openapi.json
+    # returns 401 unauthenticated), so a health check there would fail. Render's
+    # default port check is sufficient.
     preDeployCommand: >-
       sh -c "node deploy/scripts/prereqs.mjs &&
       node packages/kernel-pg/dist/bin/crossengin-pg.js apply &&
       node deploy/scripts/seed-demo.mjs"
     dockerCommand: >-
       node apps/operate-server/dist/bin/operate-server.js
-      --pack erp-retail --store pg --port 8080 --scheme https
+      --pack erp-retail --store pg --port $PORT --scheme https
       --api-key $CROSSENGIN_API_KEY
     envVars:
       - key: PGHOST
