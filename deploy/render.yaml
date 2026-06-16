@@ -23,10 +23,7 @@ services:
     # /healthz is a public, unauthenticated 200 (no tenant data) — safe for the
     # platform health check (every /v1/* route requires auth and would 401).
     healthCheckPath: /healthz
-    preDeployCommand: >-
-      sh -c "node deploy/scripts/prereqs.mjs &&
-      node packages/kernel-pg/dist/bin/crossengin-pg.js apply &&
-      node deploy/scripts/seed-demo.mjs"
+    preDeployCommand: node deploy/scripts/migrate.mjs
     dockerCommand: >-
       node apps/operate-server/dist/bin/operate-server.js
       --pack erp-retail --store pg --port $PORT --scheme https

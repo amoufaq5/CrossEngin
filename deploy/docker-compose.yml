@@ -44,12 +44,8 @@ services:
         condition: service_healthy
     restart: "no"
     command:
-      - sh
-      - -c
-      - >
-        node deploy/scripts/prereqs.mjs &&
-        node packages/kernel-pg/dist/bin/crossengin-pg.js apply &&
-        node deploy/scripts/seed-demo.mjs
+      - node
+      - deploy/scripts/migrate.mjs
 
   api:
     build:

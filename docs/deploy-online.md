@@ -50,7 +50,7 @@ curl -H "x-api-key: devkey" \
      http://localhost:8080/v1/openapi.json
 ```
 `deploy/docker-compose.yml` brings up `db` → `migrate` (runs
-`deploy/scripts/prereqs.mjs` → `crossengin-pg apply` → `deploy/scripts/seed-demo.mjs`)
+`deploy/scripts/migrate.mjs`: pgcrypto + uuid shim → meta-schema → demo tenant)
 → `api` → `worker`. Override `POSTGRES_PASSWORD` / `CROSSENGIN_API_KEY` for real
 use. Put it on a Hetzner/Lightsail/EC2 box behind a TLS reverse proxy and you're
 live.
@@ -87,12 +87,16 @@ the service at `deploy/Dockerfile` via `RAILWAY_DOCKERFILE_PATH` instead.) Then:
    ```
    (`CROSSENGIN_API_KEYS` is a comma-separated list of `token:role:tenant`. Send the
    bare `token` as `x-api-key` per §6a.)
-4. Set the service's **Pre-Deploy Command** to run prereqs + schema + seed once
-   per deploy:
+4. Set the service's **Pre-Deploy Command** to apply the schema once per deploy:
    ```
-   sh -c "node deploy/scripts/prereqs.mjs && node packages/kernel-pg/dist/bin/crossengin-pg.js apply && node deploy/scripts/seed-demo.mjs"
+   node deploy/scripts/migrate.mjs
    ```
-   (The start command in `railway.json` binds Railway's `$PORT` automatically.)
+   It is idempotent (pgcrypto + uuid shim → meta-schema → demo tenant) and works
+   on managed Postgres — it applies the bootstrap DDL directly over the
+   `uuid_generate_v7()` shim, so it does **not** need the `pg_uuidv7` extension
+   that `crossengin-pg apply` requires. (The start command binds `$PORT`
+   automatically.) If the Pre-Deploy can't reach the DB, run the same command
+   once from your laptop against the public connection string instead.
 5. **Worker** = a *second* service on the same repo: set its variable
    `RAILWAY_DOCKERFILE_PATH=deploy/Dockerfile`, the same `PG*` references, and a
    start command of
@@ -124,24 +128,23 @@ worker). All use the shared `deploy/Dockerfile`.
 1. Create a Supabase project. Note the project ref `<proj>` and the database
    password.
 2. Grab two connection strings (Project → Settings → Database):
-   - **Direct** (port 5432) — for one-time admin work (`crossengin-pg apply`).
+   - **Direct** (port 5432) — for one-time admin work (the migrate step below).
    - **Pooler / transaction mode** (port 6543) — for the serverless API
      (handles per-invocation fan-out). Safe here because every store op sets
      `app.current_tenant_id` with a *transaction-local* `set_config`.
-3. Install the prerequisites. Open the SQL Editor and run
-   `deploy/supabase/migrations/20260614000000_crossengin_prereqs.sql`
-   (pgcrypto + the `uuid_generate_v7()` shim — see the file's header for the
-   `pg_uuidv7` caveat).
-4. Apply the meta-schema from your machine, pointed at the **direct** string:
+3. Apply the schema from your machine, pointed at the **direct** string:
    ```bash
    pnpm install && pnpm -r build
    export PGHOST=db.<proj>.supabase.co PGPORT=5432 PGUSER=postgres \
           PGPASSWORD='<db-password>' PGDATABASE=postgres PGSSLMODE=require
-   node packages/kernel-pg/dist/bin/crossengin-pg.js apply
-   # verify it matches the catalog (exits 1 on drift):
-   node packages/kernel-pg/dist/bin/crossengin-pg.js drift
+   node deploy/scripts/migrate.mjs
    ```
-   You now have 128 `meta.*` tables with RLS enabled.
+   `migrate.mjs` installs pgcrypto + the `uuid_generate_v7()` shim, applies the
+   bootstrap DDL directly (so it does **not** need the `pg_uuidv7` extension that
+   managed Postgres lacks — that's why we don't use `crossengin-pg apply` here),
+   and seeds the demo tenant. Idempotent. You now have 128 `meta.*` tables with
+   RLS enabled. (`deploy/supabase/migrations/…_crossengin_prereqs.sql` is the
+   SQL-editor equivalent of just the prereqs step, if you prefer that route.)
 
 > Tip: `pnpm link --global` inside `packages/kernel-pg` and `apps/*` puts
 > `crossengin-pg`, `crossengin`, `operate-server`, `workflow-worker` on your PATH
@@ -395,6 +398,10 @@ crossengin-pg apply --dry-run # show the SQL
 crossengin-pg drift           # exits 1 if the live schema diverges from META_TABLES
 crossengin-pg inspect         # introspect the live catalog
 ```
+`crossengin-pg apply` requires the `pg_uuidv7` extension. On **managed Postgres**
+(Railway / Supabase) that lacks it, use `node deploy/scripts/migrate.mjs` instead
+(it applies the same DDL over the `uuid_generate_v7()` shim). `drift` / `inspect`
+work against any target.
 
 ### 6d. Provisioning more tenants & users
 
@@ -470,7 +477,8 @@ operate-server openapi-client --pack erp-retail --lang python --out client.py
 
 | Symptom | Cause / fix |
 |---|---|
-| `relation "meta.…" does not exist` | schema not applied — run `crossengin-pg apply` (§1.4) |
+| `relation "meta.…" does not exist` | schema not applied — run `node deploy/scripts/migrate.mjs` (§1) |
+| pre-deploy / apply fails: `pg_uuidv7 extension is required` | managed PG (Railway/Supabase) lacks it — use `node deploy/scripts/migrate.mjs` (applies DDL over the uuid shim), not `crossengin-pg apply` |
 | `function uuid_generate_v7() does not exist` | run the prereqs migration (§1.3) |
 | Vercel function errors opening a socket | function set to Edge runtime — must be Node (don't set `runtime:"edge"`) |
 | `unsupported alg …; only EdDSA is accepted` | you sent a Supabase/HS256/RS256 token — use an API key or an Ed25519 JWT (§6a) |
