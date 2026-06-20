@@ -96,7 +96,7 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
 
   return (
     <>
-      <Topbar title={entity.label} subtitle={`${entity.fields.length} fields · ${entity.slug}`} />
+      <Topbar title={entity.label} subtitle={`${entity.module} · ${entity.fields.length} fields`} />
       <div className="px-8 py-6">
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <input

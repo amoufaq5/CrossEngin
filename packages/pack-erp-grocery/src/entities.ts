@@ -81,7 +81,12 @@ export const PERISHABLE_LOT_ENTITY: Entity = {
   indexes: [{ fields: ["state", "expiration_date"] }],
 };
 
+const GROCERY_MODULES: Readonly<Record<string, string>> = {
+  Supplier: "Procurement",
+  PerishableLot: "Supply Chain & Inventory",
+};
+
 export const ERP_GROCERY_ENTITIES: readonly Entity[] = [
   SUPPLIER_ENTITY,
   PERISHABLE_LOT_ENTITY,
-];
+].map((e) => (GROCERY_MODULES[e.name] !== undefined ? { ...e, module: GROCERY_MODULES[e.name] } : e));

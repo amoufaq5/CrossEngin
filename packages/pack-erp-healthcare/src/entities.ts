@@ -152,4 +152,4 @@ export const ERP_HEALTHCARE_ENTITIES: readonly Entity[] = [
   PATIENT_ENTITY,
   ENCOUNTER_ENTITY,
   OBSERVATION_ENTITY,
-];
+].map((e) => ({ ...e, module: "Clinical" }));

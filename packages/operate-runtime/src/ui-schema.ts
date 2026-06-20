@@ -43,6 +43,8 @@ export interface UiEntitySchema {
   readonly slug: string;
   readonly label: string;
   readonly singular: string;
+  /** Functional department this entity belongs to (UI grouping). */
+  readonly module: string;
   readonly fields: readonly UiFieldSchema[];
   readonly listColumns: readonly string[];
   readonly sortableFields: readonly string[];
@@ -161,6 +163,7 @@ export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSch
       slug: resourceSlug(entity.name),
       label: pluralLabel(entity.name),
       singular: titleCase(entity.name.replace(/([a-z0-9])([A-Z])/g, "$1 $2")),
+      module: entity.module ?? "General",
       fields: entity.fields.map(uiField),
       listColumns: pickListColumns(entity, []),
       sortableFields: [...config.sortableFields],

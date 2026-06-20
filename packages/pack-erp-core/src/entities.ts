@@ -181,7 +181,73 @@ export const ERP_CORE_CRM_ENTITIES: readonly Entity[] = [
   INVOICE_LINE_ENTITY,
 ];
 
-export const ERP_CORE_ENTITIES: readonly Entity[] = [
+/** Department/module each core entity belongs to (drives the grouped console UI). */
+export const ERP_CORE_MODULE_BY_ENTITY: Readonly<Record<string, string>> = {
+  // Sales & CRM
+  Account: "Sales & CRM",
+  Contact: "Sales & CRM",
+  Lead: "Sales & CRM",
+  Opportunity: "Sales & CRM",
+  Quote: "Sales & CRM",
+  QuoteLine: "Sales & CRM",
+  SalesOrder: "Sales & CRM",
+  SalesOrderLine: "Sales & CRM",
+  Shipment: "Sales & CRM",
+  // Finance (AR/AP/Treasury)
+  Invoice: "Finance",
+  InvoiceLine: "Finance",
+  Payment: "Finance",
+  Bill: "Finance",
+  BillLine: "Finance",
+  Expense: "Finance",
+  // Accounting & GL
+  LedgerAccount: "Accounting & GL",
+  JournalEntry: "Accounting & GL",
+  JournalLine: "Accounting & GL",
+  // Procurement
+  Vendor: "Procurement",
+  PurchaseOrder: "Procurement",
+  PurchaseOrderLine: "Procurement",
+  GoodsReceipt: "Procurement",
+  // Supply Chain & Inventory
+  Item: "Supply Chain & Inventory",
+  Warehouse: "Supply Chain & Inventory",
+  StockLevel: "Supply Chain & Inventory",
+  StockMovement: "Supply Chain & Inventory",
+  // Manufacturing
+  BillOfMaterials: "Manufacturing",
+  BomLine: "Manufacturing",
+  WorkOrder: "Manufacturing",
+  // Projects & Services
+  Project: "Projects & Services",
+  ProjectTask: "Projects & Services",
+  Timesheet: "Projects & Services",
+  // Assets & Maintenance
+  FixedAsset: "Assets & Maintenance",
+  MaintenanceOrder: "Assets & Maintenance",
+  // Pricing & Tax
+  TaxCode: "Pricing & Tax",
+  PriceList: "Pricing & Tax",
+  PriceListItem: "Pricing & Tax",
+  // Human Resources
+  Department: "Human Resources",
+  Position: "Human Resources",
+  Employee: "Human Resources",
+  LeaveRequest: "Human Resources",
+};
+
+/** Tags an entity with its `module` from a name→department map (UI grouping only). */
+export function withModules(
+  entities: readonly Entity[],
+  moduleByEntity: Readonly<Record<string, string>>,
+): readonly Entity[] {
+  return entities.map((e) => {
+    const module = moduleByEntity[e.name] ?? e.module;
+    return module !== undefined ? { ...e, module } : e;
+  });
+}
+
+const ERP_CORE_ENTITIES_RAW: readonly Entity[] = [
   ...ERP_CORE_CRM_ENTITIES,
   ...ERP_CORE_INVENTORY_ENTITIES,
   ...ERP_CORE_PROCUREMENT_ENTITIES,
@@ -193,3 +259,8 @@ export const ERP_CORE_ENTITIES: readonly Entity[] = [
   ...ERP_CORE_ASSET_ENTITIES,
   ...ERP_CORE_PRICING_ENTITIES,
 ];
+
+export const ERP_CORE_ENTITIES: readonly Entity[] = withModules(
+  ERP_CORE_ENTITIES_RAW,
+  ERP_CORE_MODULE_BY_ENTITY,
+);

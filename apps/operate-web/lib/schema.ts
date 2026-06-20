@@ -39,6 +39,7 @@ export interface UiEntitySchema {
   readonly slug: string;
   readonly label: string;
   readonly singular: string;
+  readonly module: string;
   readonly fields: readonly UiFieldSchema[];
   readonly listColumns: readonly string[];
   readonly sortableFields: readonly string[];
@@ -123,4 +124,42 @@ export function entityByName(schema: UiSchema | null, name: string): UiEntitySch
 /** A reference field's value points at another entity; resolve its slug for deep links. */
 export function slugForEntityName(schema: UiSchema | null, name: string): string | undefined {
   return entityByName(schema, name)?.slug;
+}
+
+/** Preferred department display order; anything else sorts after, alphabetically. */
+export const DEPARTMENT_ORDER: readonly string[] = [
+  "Sales & CRM",
+  "Finance",
+  "Accounting & GL",
+  "Procurement",
+  "Supply Chain & Inventory",
+  "Manufacturing",
+  "Projects & Services",
+  "Assets & Maintenance",
+  "Pricing & Tax",
+  "Human Resources",
+  "Clinical",
+  "General",
+];
+
+export interface DepartmentGroup {
+  readonly module: string;
+  readonly entities: readonly UiEntitySchema[];
+}
+
+/** Groups entities by their `module`, ordered by DEPARTMENT_ORDER then alphabetically. */
+export function groupByModule(entities: readonly UiEntitySchema[]): readonly DepartmentGroup[] {
+  const byModule = new Map<string, UiEntitySchema[]>();
+  for (const e of entities) {
+    const list = byModule.get(e.module) ?? [];
+    list.push(e);
+    byModule.set(e.module, list);
+  }
+  const rank = (m: string): number => {
+    const i = DEPARTMENT_ORDER.indexOf(m);
+    return i === -1 ? DEPARTMENT_ORDER.length : i;
+  };
+  return [...byModule.entries()]
+    .map(([module, list]) => ({ module, entities: [...list].sort((a, b) => a.label.localeCompare(b.label)) }))
+    .sort((a, b) => rank(a.module) - rank(b.module) || a.module.localeCompare(b.module));
 }

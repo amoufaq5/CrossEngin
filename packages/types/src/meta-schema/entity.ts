@@ -14,6 +14,8 @@ export const EntitySchema = z
     fields: z.array(FieldSchema).min(1),
     traits: z.array(z.string().min(1)).optional(),
     indexes: z.array(IndexDefinitionSchema).optional(),
+    /** Functional department/module this entity belongs to (e.g. "Finance", "Human Resources"). UI grouping only. */
+    module: z.string().min(1).optional(),
   })
   .refine(
     (v) => {
