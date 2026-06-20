@@ -4,19 +4,25 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 
-import { useSchema } from "@/lib/schema";
+import { groupByModule, useSchema } from "@/lib/schema";
 
 export function Sidebar() {
   const pathname = usePathname();
   const { schema } = useSchema();
   const [q, setQ] = useState("");
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
-  const entities = useMemo(() => {
+  const groups = useMemo(() => {
     const all = schema?.entities ?? [];
     const needle = q.trim().toLowerCase();
-    if (needle === "") return all;
-    return all.filter((e) => e.label.toLowerCase().includes(needle) || e.name.toLowerCase().includes(needle));
+    const filtered =
+      needle === ""
+        ? all
+        : all.filter((e) => e.label.toLowerCase().includes(needle) || e.module.toLowerCase().includes(needle));
+    return groupByModule(filtered);
   }, [schema, q]);
+
+  const searching = q.trim() !== "";
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-line bg-white">
@@ -42,33 +48,48 @@ export function Sidebar() {
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Filter entities…"
+          placeholder="Search…"
           className="w-full rounded-lg border border-line px-3 py-1.5 text-sm outline-none focus:border-brand"
         />
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 pb-6">
-        <div className="px-3 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
-          Entities <span className="text-ink-faint/70">({entities.length})</span>
-        </div>
-        {entities.map((e) => {
-          const href = `/e/${e.slug}`;
-          const active = pathname === href || pathname.startsWith(`${href}/`);
+        {groups.map((group) => {
+          const open = searching || collapsed[group.module] !== true;
           return (
-            <Link
-              key={e.slug}
-              href={href}
-              className={`block rounded-lg px-3 py-1.5 text-sm transition ${
-                active ? "bg-brand-50 font-semibold text-brand-700" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
-              }`}
-            >
-              {e.label}
-            </Link>
+            <div key={group.module} className="mt-3">
+              <button
+                onClick={() => setCollapsed((c) => ({ ...c, [group.module]: !(c[group.module] !== true) }))}
+                className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-[11px] font-semibold uppercase tracking-wider text-ink-faint hover:text-ink-muted"
+              >
+                <span className={`transition ${open ? "rotate-90" : ""}`}>›</span>
+                <span>{group.module}</span>
+                <span className="ml-auto text-ink-faint/70">{group.entities.length}</span>
+              </button>
+              {open &&
+                group.entities.map((e) => {
+                  const href = `/e/${e.slug}`;
+                  const active = pathname === href || pathname.startsWith(`${href}/`);
+                  return (
+                    <Link
+                      key={e.slug}
+                      href={href}
+                      className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+                        active
+                          ? "bg-brand-50 font-semibold text-brand-700"
+                          : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+                      }`}
+                    >
+                      {e.label}
+                    </Link>
+                  );
+                })}
+            </div>
           );
         })}
 
-        <div className="mt-5">
-          <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Admin</div>
+        <div className="mt-5 border-t border-line pt-3">
+          <div className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Administration</div>
           <Link
             href="/admin/settings"
             className={`block rounded-lg px-3 py-1.5 text-sm transition ${

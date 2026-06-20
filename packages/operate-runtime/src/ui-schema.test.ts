@@ -57,6 +57,14 @@ describe("buildUiSchema", () => {
     expect(entity("Quote").operationIds.list).toBe("quote.list");
   });
 
+  it("groups entities by department module", () => {
+    expect(entity("Invoice").module).toBe("Finance");
+    expect(entity("LedgerAccount").module).toBe("Accounting & GL");
+    expect(entity("Employee").module).toBe("Human Resources");
+    expect(entity("Vendor").module).toBe("Procurement");
+    for (const e of schema.entities) expect(e.module.length).toBeGreaterThan(0);
+  });
+
   it("picks a bounded set of list columns", () => {
     for (const e of schema.entities) {
       expect(e.listColumns.length).toBeGreaterThan(0);

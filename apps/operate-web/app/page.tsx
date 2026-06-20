@@ -3,13 +3,13 @@
 import Link from "next/link";
 
 import { Topbar } from "@/components/Topbar";
-import { useSchema } from "@/lib/schema";
+import { groupByModule, useSchema } from "@/lib/schema";
 
 export default function DashboardPage() {
   const { schema, loading, error } = useSchema();
   const entities = schema?.entities ?? [];
+  const groups = groupByModule(entities);
   const withLifecycle = entities.filter((e) => e.transitions.length > 0).length;
-  const totalTransitions = entities.reduce((n, e) => n + e.transitions.length, 0);
 
   return (
     <>
@@ -25,29 +25,39 @@ export default function DashboardPage() {
         {schema && (
           <>
             <section className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <Stat label="Entities" value={String(entities.length)} accent />
+              <Stat label="Departments" value={String(groups.length)} accent />
+              <Stat label="Entities" value={String(entities.length)} />
               <Stat label="With lifecycle" value={String(withLifecycle)} />
-              <Stat label="Transitions" value={String(totalTransitions)} />
               <Stat label="Generated" value={schema.generatedAt.slice(0, 10)} />
             </section>
 
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {entities.map((e) => (
-                <Link
-                  key={e.slug}
-                  href={`/e/${e.slug}`}
-                  className="card group p-5 transition hover:border-brand-300 hover:shadow-sm"
-                >
-                  <div className="flex items-center gap-2">
+            <div className="space-y-7">
+              {groups.map((group) => (
+                <section key={group.module}>
+                  <div className="mb-3 flex items-center gap-2">
                     <span className="h-2.5 w-2.5 rounded-full bg-brand" />
-                    <h2 className="text-sm font-bold text-ink group-hover:text-brand-700">{e.label}</h2>
-                    <span className="ml-auto text-ink-faint transition group-hover:translate-x-0.5">→</span>
+                    <h2 className="text-sm font-bold uppercase tracking-wide text-ink">{group.module}</h2>
+                    <span className="text-xs text-ink-faint">{group.entities.length}</span>
                   </div>
-                  <p className="mt-2 text-xs text-ink-faint">
-                    {e.fields.length} fields
-                    {e.transitions.length > 0 ? ` · ${e.transitions.length} transitions` : ""}
-                  </p>
-                </Link>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                    {group.entities.map((e) => (
+                      <Link
+                        key={e.slug}
+                        href={`/e/${e.slug}`}
+                        className="card group p-4 transition hover:border-brand-300 hover:shadow-sm"
+                      >
+                        <div className="flex items-center gap-2">
+                          <h3 className="text-sm font-semibold text-ink group-hover:text-brand-700">{e.label}</h3>
+                          <span className="ml-auto text-ink-faint transition group-hover:translate-x-0.5">→</span>
+                        </div>
+                        <p className="mt-1.5 text-xs text-ink-faint">
+                          {e.fields.length} fields
+                          {e.transitions.length > 0 ? ` · ${e.transitions.length} actions` : ""}
+                        </p>
+                      </Link>
+                    ))}
+                  </div>
+                </section>
               ))}
             </div>
           </>

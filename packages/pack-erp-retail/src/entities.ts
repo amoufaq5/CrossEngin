@@ -160,9 +160,16 @@ export const ORDER_LINE_ENTITY: Entity = {
   ],
 };
 
+const RETAIL_MODULES: Readonly<Record<string, string>> = {
+  Product: "Supply Chain & Inventory",
+  Store: "Sales & CRM",
+  SalesOrder: "Sales & CRM",
+  OrderLine: "Sales & CRM",
+};
+
 export const ERP_RETAIL_ENTITIES: readonly Entity[] = [
   PRODUCT_ENTITY,
   STORE_ENTITY,
   SALES_ORDER_ENTITY,
   ORDER_LINE_ENTITY,
-];
+].map((e) => (RETAIL_MODULES[e.name] !== undefined ? { ...e, module: RETAIL_MODULES[e.name] } : e));
