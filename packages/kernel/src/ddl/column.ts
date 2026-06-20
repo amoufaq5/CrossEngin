@@ -23,7 +23,10 @@ export function emitColumn(field: Field, options: EmitColumnOptions): string {
   }
 
   if (field.default !== undefined) {
-    parts.push("DEFAULT", emitDefault(field.default));
+    const rendered = emitDefault(field.default);
+    if (rendered !== null) {
+      parts.push("DEFAULT", rendered);
+    }
   }
 
   if (field.type.kind === "enum") {
@@ -68,8 +71,11 @@ function emitRangeCheck(
   return null;
 }
 
-function emitDefault(value: DefaultValue): string {
+function emitDefault(value: DefaultValue): string | null {
   if (value.kind === "expression") return value.expression;
+  // Sequence defaults are allocated by the serving runtime, not the database,
+  // so they emit no column DEFAULT clause.
+  if (value.kind === "sequence") return null;
   return emitLiteral(value.value);
 }
 

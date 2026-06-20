@@ -84,6 +84,12 @@ export const INVOICE_ENTITY: Entity = {
       type: { kind: "text", maxLength: 50 },
       required: true,
       unique: true,
+      default: {
+        kind: "sequence",
+        sequence: "erp.invoice",
+        format: "INV-{YYYY}-{SEQ:5}",
+        resetPeriod: "yearly",
+      },
     },
     {
       name: "state",

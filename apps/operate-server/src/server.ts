@@ -1,6 +1,12 @@
 import type { ForwardedProto } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { buildOperateGateway, type EntityStore, type OperateServer } from "@crossengin/operate-runtime";
+import {
+  buildOperateGateway,
+  type EntityStore,
+  type OperateServer,
+  type SequenceAllocator,
+  type SettingsStore,
+} from "@crossengin/operate-runtime";
 
 import { parseMethod, rawToIncoming, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
@@ -81,6 +87,12 @@ export interface BuildOperateHttpServerOptions {
   readonly apiKeys: readonly ApiKeySpec[];
   /** Optional production identity: verify Bearer JWTs against a JWKS. */
   readonly jwt?: JwtVerifyConfig;
+  /** Allocates document numbers for sequence-defaulted fields on create. */
+  readonly allocator?: SequenceAllocator;
+  /** Backs the `/v1/admin/settings` endpoints + runtime numbering overrides. */
+  readonly settingsStore?: SettingsStore;
+  /** Roles permitted to manage tenant settings. */
+  readonly adminRoles?: readonly string[];
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -110,6 +122,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
           jwtAudience: options.jwt.audience,
         }
       : {}),
+    ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
+    ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
+    ...(options.adminRoles !== undefined ? { adminRoles: options.adminRoles as never } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

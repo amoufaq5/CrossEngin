@@ -39,6 +39,22 @@ export async function deleteRecord(slug: string, id: string): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(`${res.status}: ${await safeText(res)}`);
 }
 
+export async function getSettings(): Promise<Record<string, unknown>> {
+  const res = await fetch("/api/v1/admin/settings", { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
+export async function putSettings(settings: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const res = await fetch("/api/v1/admin/settings", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  return (await res.json()) as Record<string, unknown>;
+}
+
 async function safeText(res: Response): Promise<string> {
   try {
     return await res.text();

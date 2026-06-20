@@ -30,7 +30,13 @@ export const JOURNAL_ENTRY_ENTITY: Entity = {
   name: "JournalEntry",
   traits: [...AUDITABLE],
   fields: [
-    { name: "entry_number", type: { kind: "text", maxLength: 50 }, required: true, unique: true },
+    {
+      name: "entry_number",
+      type: { kind: "text", maxLength: 50 },
+      required: true,
+      unique: true,
+      default: { kind: "sequence", sequence: "erp.journal_entry", format: "JE-{YYYY}-{SEQ:5}", resetPeriod: "yearly" },
+    },
     { name: "entry_date", type: { kind: "date" }, required: true, indexed: true },
     {
       name: "source",
@@ -68,7 +74,13 @@ export const PAYMENT_ENTITY: Entity = {
   name: "Payment",
   traits: [...AUDITABLE],
   fields: [
-    { name: "payment_number", type: { kind: "text", maxLength: 50 }, required: true, unique: true },
+    {
+      name: "payment_number",
+      type: { kind: "text", maxLength: 50 },
+      required: true,
+      unique: true,
+      default: { kind: "sequence", sequence: "erp.payment", format: "PAY-{YYYY}-{SEQ:5}", resetPeriod: "yearly" },
+    },
     {
       name: "direction",
       type: { kind: "enum", values: ["inbound", "outbound"] },
@@ -102,7 +114,13 @@ export const EXPENSE_ENTITY: Entity = {
   name: "Expense",
   traits: [...AUDITABLE],
   fields: [
-    { name: "expense_number", type: { kind: "text", maxLength: 50 }, required: true, unique: true },
+    {
+      name: "expense_number",
+      type: { kind: "text", maxLength: 50 },
+      required: true,
+      unique: true,
+      default: { kind: "sequence", sequence: "erp.expense", format: "EXP-{YYYY}-{SEQ:5}", resetPeriod: "yearly" },
+    },
     { name: "employee_id", type: { kind: "reference", target: "Employee" }, required: true, indexed: true },
     {
       name: "category",
@@ -130,7 +148,13 @@ export const BILL_ENTITY: Entity = {
   name: "Bill",
   traits: [...AUDITABLE],
   fields: [
-    { name: "bill_number", type: { kind: "text", maxLength: 50 }, required: true, unique: true },
+    {
+      name: "bill_number",
+      type: { kind: "text", maxLength: 50 },
+      required: true,
+      unique: true,
+      default: { kind: "sequence", sequence: "erp.bill", format: "BILL-{YYYY}-{SEQ:5}", resetPeriod: "yearly" },
+    },
     { name: "vendor_id", type: { kind: "reference", target: "Vendor" }, required: true, indexed: true },
     { name: "purchase_order_id", type: { kind: "reference", target: "PurchaseOrder" }, indexed: true },
     { name: "bill_date", type: { kind: "date" }, required: true, indexed: true },

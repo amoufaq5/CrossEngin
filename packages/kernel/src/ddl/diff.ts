@@ -275,6 +275,7 @@ export function emitDiff(diff: EntityDiff, context: DiffEmitContext): string[] {
 
 function renderDefault(value: DefaultValue): string {
   if (value.kind === "expression") return value.expression;
+  if (value.kind === "sequence") return `sequence:${value.sequence}`;
   return renderLiteral(value.value);
 }
 

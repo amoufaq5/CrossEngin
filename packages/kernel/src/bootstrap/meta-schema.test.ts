@@ -121,8 +121,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 123 tables", () => {
-    expect(META_TABLES).toHaveLength(123);
+  it("contains 125 tables", () => {
+    expect(META_TABLES).toHaveLength(125);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -214,6 +214,8 @@ describe("META_TABLES", () => {
       "notification_templates",
       "onboarding_runs",
       "operate_entity_records",
+      "operate_sequences",
+      "operate_tenant_settings",
       "pack_installations",
       "pack_reviews",
       "pack_versions",

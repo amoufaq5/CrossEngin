@@ -3,8 +3,20 @@ import { readFile } from "node:fs/promises";
 
 import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { InMemoryEntityStore, type EntityStore } from "@crossengin/operate-runtime";
-import { ColumnMappedEntityStore, PostgresEntityStore } from "@crossengin/operate-runtime-pg";
+import {
+  InMemoryEntityStore,
+  InMemorySequenceAllocator,
+  InMemorySettingsStore,
+  type EntityStore,
+  type SequenceAllocator,
+  type SettingsStore,
+} from "@crossengin/operate-runtime";
+import {
+  ColumnMappedEntityStore,
+  PostgresEntityStore,
+  PostgresSequenceAllocator,
+  PostgresSettingsStore,
+} from "@crossengin/operate-runtime-pg";
 
 import type { ServeOptions } from "./cli.js";
 import type { RawHttpRequest } from "./http.js";
@@ -122,15 +134,31 @@ async function resolveJwtConfig(
   return { config: { jwksProvider, issuer: options.jwtIssuer, audience: options.jwtAudience }, poller };
 }
 
-async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<EntityStore> {
-  if (options.store === "memory") return new InMemoryEntityStore();
+interface ResolvedStores {
+  readonly store: EntityStore;
+  readonly allocator: SequenceAllocator;
+  readonly settingsStore: SettingsStore;
+}
+
+async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<ResolvedStores> {
+  if (options.store === "memory") {
+    return {
+      store: new InMemoryEntityStore(),
+      allocator: new InMemorySequenceAllocator(),
+      settingsStore: new InMemorySettingsStore(),
+    };
+  }
   const conn = createNodePgConnection(parsePgEnvConfig());
+  const schema = options.schema ?? undefined;
+  const allocator = new PostgresSequenceAllocator(conn, schema);
+  const settingsStore = new PostgresSettingsStore(conn, schema);
   if (options.store === "pg-columns") {
     const store = new ColumnMappedEntityStore(conn, manifest, options.schema !== null ? { schema: options.schema } : {});
     await store.ensureSchema();
-    return store;
+    return { store, allocator, settingsStore };
   }
-  return new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
+  const store = new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
+  return { store, allocator, settingsStore };
 }
 
 export interface RunningServer {
@@ -149,13 +177,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.manifestPath !== null
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
-  const store = await resolveStore(options, manifest);
+  const { store, allocator, settingsStore } = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
     apiKeys,
+    allocator,
+    settingsStore,
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
   });

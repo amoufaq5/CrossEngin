@@ -55,6 +55,20 @@ export function Sidebar() {
             })}
           </div>
         ))}
+
+        <div className="mt-5">
+          <div className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Admin</div>
+          <Link
+            href="/admin/settings"
+            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+              pathname === "/admin/settings"
+                ? "bg-brand-50 font-semibold text-brand-700"
+                : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+            }`}
+          >
+            Settings
+          </Link>
+        </div>
       </nav>
     </aside>
   );

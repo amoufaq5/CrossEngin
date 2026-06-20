@@ -9349,6 +9349,47 @@ export const META_OPERATE_ENTITY_RECORDS: TableDefinition = {
   },
 };
 
+export const META_OPERATE_SEQUENCES: TableDefinition = {
+  schema: "meta",
+  name: "operate_sequences",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "sequence_name", type: "TEXT", notNull: true, check: "char_length(sequence_name) BETWEEN 1 AND 120" },
+    { name: "period_key", type: "TEXT", notNull: true, check: "char_length(period_key) BETWEEN 1 AND 32" },
+    { name: "current_value", type: "BIGINT", notNull: true, default: "0" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "operate_sequences_tenant_name_period_key",
+      columns: ["tenant_id", "sequence_name", "period_key"],
+    },
+  ],
+  indexes: [{ name: "idx_operate_sequences_tenant_name", columns: ["tenant_id", "sequence_name"] }],
+  rls: {
+    enabled: true,
+    policies: [{ name: "operate_sequences_tenant_isolation", using: TENANT_ISOLATION_USING }],
+  },
+};
+
+export const META_OPERATE_TENANT_SETTINGS: TableDefinition = {
+  schema: "meta",
+  name: "operate_tenant_settings",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "settings", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_by", type: "TEXT" },
+  ],
+  primaryKey: ["tenant_id"],
+  rls: {
+    enabled: true,
+    policies: [{ name: "operate_tenant_settings_tenant_isolation", using: TENANT_ISOLATION_USING }],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9473,4 +9514,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_LATENCY_EVALUATIONS,
   META_OPERATE_ENTITY_RECORDS,
+  META_OPERATE_SEQUENCES,
+  META_OPERATE_TENANT_SETTINGS,
 ];
