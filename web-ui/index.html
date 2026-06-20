@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CrossEngin · Products</title>
+    <style>
+      :root {
+        --bg: #0f1117;
+        --panel: #171a23;
+        --line: #262b38;
+        --text: #e7eaf0;
+        --muted: #9aa3b2;
+        --accent: #6c8cff;
+        --danger: #ff6b6b;
+        --ok: #46d39a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        padding: 20px 28px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+      header .tag {
+        font-size: 12px;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 2px 10px;
+      }
+      main { max-width: 1000px; margin: 0 auto; padding: 24px 28px 60px; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 18px 20px;
+        margin-bottom: 22px;
+      }
+      .panel h2 { margin: 0 0 14px; font-size: 14px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+      form.grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+      }
+      label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+      input, select {
+        background: #0e1018;
+        border: 1px solid var(--line);
+        color: var(--text);
+        border-radius: 8px;
+        padding: 8px 10px;
+        font: inherit;
+      }
+      input:focus, select:focus { outline: none; border-color: var(--accent); }
+      .actions { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; }
+      button {
+        background: var(--accent);
+        color: #0b0d13;
+        border: none;
+        border-radius: 8px;
+        padding: 9px 16px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+      button.link { background: none; color: var(--danger); padding: 4px 8px; font-weight: 500; }
+      button:active { transform: translateY(1px); }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); font-size: 14px; }
+      th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+      td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--muted); }
+      .redacted { color: var(--muted); font-style: italic; }
+      .empty { color: var(--muted); padding: 18px 0; }
+      #banner {
+        display: none;
+        padding: 10px 14px;
+        border-radius: 8px;
+        margin-bottom: 16px;
+        font-size: 14px;
+      }
+      #banner.ok { display: block; background: rgba(70,211,154,0.12); color: var(--ok); border: 1px solid rgba(70,211,154,0.3); }
+      #banner.err { display: block; background: rgba(255,107,107,0.12); color: var(--danger); border: 1px solid rgba(255,107,107,0.3); }
+      .row-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+      .hint { font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+      code { background: #0e1018; border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>CrossEngin · Operate</h1>
+      <span class="tag">pack: erp-retail</span>
+      <span class="tag" id="roleTag">role: —</span>
+    </header>
+
+    <main>
+      <div id="banner"></div>
+
+      <section class="panel">
+        <h2>New product</h2>
+        <form class="grid" id="createForm">
+          <label>SKU <input name="sku" required placeholder="A1" /></label>
+          <label>Name <input name="name" required placeholder="Widget" /></label>
+          <label>Category
+            <select name="category">
+              <option>other</option><option>apparel</option><option>grocery</option>
+              <option>electronics</option><option>home</option>
+            </select>
+          </label>
+          <label>Unit price <input name="unit_price" type="number" step="0.01" min="0" required placeholder="9.99" /></label>
+          <label>Unit cost <input name="unit_cost" type="number" step="0.01" min="0" required placeholder="4.50" /></label>
+          <label>Status
+            <select name="status"><option>active</option><option>discontinued</option></select>
+          </label>
+          <label>Barcode (optional) <input name="barcode" placeholder="0123456789" /></label>
+          <div class="actions">
+            <button type="submit">Create product</button>
+            <button type="button" class="ghost" id="seedBtn">Add sample data</button>
+          </div>
+        </form>
+        <p class="hint">
+          <strong>unit_cost</strong> is classified <code>commercial_sensitive</code>. Start the server with role
+          <code>cashier</code> and it will show as “🔒 redacted” below; with <code>store_manager</code> it shows the value.
+        </p>
+      </section>
+
+      <section class="panel">
+        <div class="row-head">
+          <h2 style="margin:0">Products</h2>
+          <button class="ghost" id="refreshBtn">Refresh</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>SKU</th><th>Name</th><th>Category</th>
+              <th>Price</th><th>Cost</th><th>Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="empty" id="empty" style="display:none">No products yet — create one above.</div>
+      </section>
+    </main>
+
+    <script>
+      const PATH = "/v1/products";
+      const banner = document.getElementById("banner");
+      const rows = document.getElementById("rows");
+      const empty = document.getElementById("empty");
+
+      function flash(msg, kind) {
+        banner.textContent = msg;
+        banner.className = kind;
+        if (kind === "ok") setTimeout(() => (banner.className = ""), 2500);
+      }
+
+      function cell(v) {
+        const td = document.createElement("td");
+        td.textContent = v ?? "";
+        return td;
+      }
+
+      async function load() {
+        try {
+          const res = await fetch(PATH, { headers: { accept: "application/json" } });
+          if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+          const json = await res.json();
+          const data = Array.isArray(json) ? json : (json.data ?? []);
+          render(data);
+        } catch (e) {
+          flash("Failed to load products: " + e.message, "err");
+        }
+      }
+
+      function render(items) {
+        rows.innerHTML = "";
+        empty.style.display = items.length ? "none" : "block";
+        // Detect whether the server redacted unit_cost (classification demo).
+        const redacted = items.length > 0 && items.every((p) => p.unit_cost === undefined);
+        document.getElementById("roleTag").textContent =
+          "unit_cost: " + (redacted ? "🔒 redacted" : "visible");
+
+        for (const p of items) {
+          const tr = document.createElement("tr");
+          const id = cell(p.id);
+          id.className = "mono";
+          tr.appendChild(id);
+          tr.appendChild(cell(p.sku));
+          tr.appendChild(cell(p.name));
+          tr.appendChild(cell(p.category));
+          tr.appendChild(cell(p.unit_price));
+
+          const cost = document.createElement("td");
+          if (p.unit_cost === undefined) {
+            cost.innerHTML = '<span class="redacted">🔒 redacted</span>';
+          } else {
+            cost.textContent = p.unit_cost;
+          }
+          tr.appendChild(cost);
+          tr.appendChild(cell(p.status));
+
+          const del = document.createElement("td");
+          const btn = document.createElement("button");
+          btn.className = "link";
+          btn.textContent = "Delete";
+          btn.onclick = () => remove(p.id);
+          del.appendChild(btn);
+          tr.appendChild(del);
+
+          rows.appendChild(tr);
+        }
+      }
+
+      async function create(payload) {
+        const res = await fetch(PATH, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+        return res.json();
+      }
+
+      async function remove(id) {
+        try {
+          const res = await fetch(`${PATH}/${encodeURIComponent(id)}`, { method: "DELETE" });
+          if (!res.ok && res.status !== 204) throw new Error(`${res.status} ${await res.text()}`);
+          flash("Deleted " + id, "ok");
+          load();
+        } catch (e) {
+          flash("Delete failed: " + e.message, "err");
+        }
+      }
+
+      document.getElementById("createForm").addEventListener("submit", async (ev) => {
+        ev.preventDefault();
+        const fd = new FormData(ev.target);
+        const payload = {
+          sku: fd.get("sku"),
+          name: fd.get("name"),
+          category: fd.get("category"),
+          unit_price: Number(fd.get("unit_price")),
+          unit_cost: Number(fd.get("unit_cost")),
+          status: fd.get("status"),
+        };
+        const barcode = fd.get("barcode");
+        if (barcode) payload.barcode = barcode;
+        try {
+          await create(payload);
+          flash("Created " + payload.sku, "ok");
+          ev.target.reset();
+          load();
+        } catch (e) {
+          flash("Create failed: " + e.message, "err");
+        }
+      });
+
+      document.getElementById("refreshBtn").onclick = load;
+
+      document.getElementById("seedBtn").onclick = async () => {
+        const samples = [
+          { sku: "TSHIRT-01", name: "Cotton T-Shirt", category: "apparel", unit_price: 19.99, unit_cost: 6.5, status: "active" },
+          { sku: "MILK-1L", name: "Whole Milk 1L", category: "grocery", unit_price: 1.49, unit_cost: 0.8, status: "active" },
+          { sku: "USB-C-2M", name: "USB-C Cable 2m", category: "electronics", unit_price: 12.0, unit_cost: 3.25, status: "active" },
+        ];
+        try {
+          for (const s of samples) await create(s);
+          flash("Added sample data", "ok");
+          load();
+        } catch (e) {
+          flash("Seeding failed: " + e.message, "err");
+        }
+      };
+
+      load();
+    </script>
+  </body>
+</html>
