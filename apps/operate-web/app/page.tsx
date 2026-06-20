@@ -1,48 +1,57 @@
+"use client";
+
 import Link from "next/link";
 
 import { Topbar } from "@/components/Topbar";
-import { navGroups, hrefFor } from "@/lib/nav";
+import { useSchema } from "@/lib/schema";
 
 export default function DashboardPage() {
-  const groups = navGroups();
-  const total = groups.reduce((n, g) => n + g.resources.length, 0);
+  const { schema, loading, error } = useSchema();
+  const entities = schema?.entities ?? [];
+  const withLifecycle = entities.filter((e) => e.transitions.length > 0).length;
+  const totalTransitions = entities.reduce((n, e) => n + e.transitions.length, 0);
 
   return (
     <>
-      <Topbar title="Dashboard" subtitle="Enterprise ERP — CRM, Inventory, Procurement, Finance, People" />
+      <Topbar title="Dashboard" subtitle="Manifest-driven enterprise ERP console" />
       <div className="px-8 py-6">
-        <section className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-          <Stat label="Domains" value={String(groups.length)} accent />
-          <Stat label="Entities" value={String(total)} />
-          <Stat label="Workflows" value="7" />
-          <Stat label="Roles" value="9" />
-          <Stat label="Views" value="17" />
-        </section>
+        {loading && <p className="text-sm text-ink-muted">Loading schema…</p>}
+        {error && (
+          <div className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
+            Could not load schema: {error}. Is operate-server running?
+          </div>
+        )}
 
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 xl:grid-cols-3">
-          {groups.map((group) => (
-            <div key={group.key} className="card p-5">
-              <div className="mb-3 flex items-center gap-2">
-                <span className="h-2.5 w-2.5 rounded-full bg-brand" />
-                <h2 className="text-sm font-bold uppercase tracking-wide text-ink">{group.label}</h2>
-                <span className="ml-auto text-xs text-ink-faint">{group.resources.length}</span>
-              </div>
-              <ul className="space-y-1">
-                {group.resources.map((res) => (
-                  <li key={res.slug}>
-                    <Link
-                      href={hrefFor(res)}
-                      className="flex items-center justify-between rounded-lg px-3 py-1.5 text-sm text-ink-muted transition hover:bg-surface-soft hover:text-ink"
-                    >
-                      <span>{res.title}</span>
-                      <span className="text-ink-faint">→</span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
+        {schema && (
+          <>
+            <section className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
+              <Stat label="Entities" value={String(entities.length)} accent />
+              <Stat label="With lifecycle" value={String(withLifecycle)} />
+              <Stat label="Transitions" value={String(totalTransitions)} />
+              <Stat label="Generated" value={schema.generatedAt.slice(0, 10)} />
+            </section>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {entities.map((e) => (
+                <Link
+                  key={e.slug}
+                  href={`/e/${e.slug}`}
+                  className="card group p-5 transition hover:border-brand-300 hover:shadow-sm"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="h-2.5 w-2.5 rounded-full bg-brand" />
+                    <h2 className="text-sm font-bold text-ink group-hover:text-brand-700">{e.label}</h2>
+                    <span className="ml-auto text-ink-faint transition group-hover:translate-x-0.5">→</span>
+                  </div>
+                  <p className="mt-2 text-xs text-ink-faint">
+                    {e.fields.length} fields
+                    {e.transitions.length > 0 ? ` · ${e.transitions.length} transitions` : ""}
+                  </p>
+                </Link>
+              ))}
             </div>
-          ))}
-        </div>
+          </>
+        )}
       </div>
     </>
   );

@@ -30,6 +30,7 @@ import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } fr
 import type { SettingsStore } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
+import { buildUiSchema, buildUiSchemaHandler } from "./ui-schema.js";
 
 export interface OperateRuntimeOptions {
   readonly store: EntityStore;
@@ -47,12 +48,12 @@ export interface OperateRuntimeOptions {
 
 const DEFAULT_ADMIN_ROLES: readonly RoleName[] = ["erp_admin" as RoleName];
 
-function adminRoute(operationId: string, method: RouteDefinition["method"]): RouteDefinition {
-  const pathSegments: PathSegment[] = [
-    { kind: "literal", value: "v1" },
-    { kind: "literal", value: "admin" },
-    { kind: "literal", value: "settings" },
-  ];
+function literalRoute(
+  operationId: string,
+  method: RouteDefinition["method"],
+  segments: readonly string[],
+): RouteDefinition {
+  const pathSegments: PathSegment[] = segments.map((value) => ({ kind: "literal", value }));
   return {
     id: `rt_${operationId.replace(/[^a-z0-9]+/gi, "_")}`,
     operationId,
@@ -117,14 +118,21 @@ export function compileOperateServer(
     handlers.register(spec.operationId, buildSpecHandler(spec, ctx));
   }
 
+  // Manifest-driven UI metadata: any authenticated principal may read the shape.
+  routes.register(literalRoute("meta.schema.read", "GET", ["v1", "meta", "schema"]));
+  handlers.register(
+    "meta.schema.read",
+    buildUiSchemaHandler({ schema: buildUiSchema(manifest), principalRoles: options.principalRoles }),
+  );
+
   if (options.settingsStore !== undefined) {
     const adminCtx: AdminContext = {
       settingsStore: options.settingsStore,
       principalRoles: options.principalRoles,
       adminRoles: new Set(options.adminRoles ?? DEFAULT_ADMIN_ROLES),
     };
-    routes.register(adminRoute("admin.settings.read", "GET"));
-    routes.register(adminRoute("admin.settings.update", "PUT"));
+    routes.register(literalRoute("admin.settings.read", "GET", ["v1", "admin", "settings"]));
+    routes.register(literalRoute("admin.settings.update", "PUT", ["v1", "admin", "settings"]));
     handlers.register("admin.settings.read", buildAdminSettingsReadHandler(adminCtx));
     handlers.register("admin.settings.update", buildAdminSettingsUpdateHandler(adminCtx));
   }
