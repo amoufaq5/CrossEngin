@@ -47,12 +47,31 @@ describe("INVOICE_PERMISSIONS", () => {
 });
 
 describe("ERP_CORE_PERMISSIONS", () => {
-  it("covers all 4 entities", () => {
+  it("covers all 23 entities", () => {
     expect(Object.keys(ERP_CORE_PERMISSIONS).sort()).toEqual([
       "Account",
+      "Bill",
+      "BillLine",
       "Contact",
+      "Department",
+      "Employee",
+      "Expense",
+      "GoodsReceipt",
       "Invoice",
       "InvoiceLine",
+      "Item",
+      "JournalEntry",
+      "JournalLine",
+      "LeaveRequest",
+      "LedgerAccount",
+      "Payment",
+      "Position",
+      "PurchaseOrder",
+      "PurchaseOrderLine",
+      "StockLevel",
+      "StockMovement",
+      "Vendor",
+      "Warehouse",
     ]);
   });
 });

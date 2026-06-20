@@ -44,7 +44,15 @@ describe("INVOICE_LIFECYCLE_WORKFLOW", () => {
 });
 
 describe("ERP_CORE_WORKFLOWS", () => {
-  it("exposes invoice_lifecycle", () => {
-    expect(Object.keys(ERP_CORE_WORKFLOWS)).toEqual(["invoice_lifecycle"]);
+  it("exposes all lifecycle workflows", () => {
+    expect(Object.keys(ERP_CORE_WORKFLOWS).sort()).toEqual([
+      "bill_lifecycle",
+      "expense_lifecycle",
+      "invoice_lifecycle",
+      "journal_entry_lifecycle",
+      "leave_request_lifecycle",
+      "payment_lifecycle",
+      "purchase_order_lifecycle",
+    ]);
   });
 });

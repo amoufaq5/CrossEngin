@@ -25,7 +25,7 @@ export function buildErpCorePack(opts: BuildErpCorePackOptions = {}): Manifest {
       version: ERP_CORE_PACK_VERSION,
       description:
         opts.description ??
-        "Core ERP entities (Account, Contact, Invoice, InvoiceLine) with billing workflow + scheduled overdue sweep + payment event handler.",
+        "Enterprise ERP core: CRM (Account, Contact, Invoice), Inventory (Item, Warehouse, StockLevel, StockMovement), Procurement (Vendor, PurchaseOrder, GoodsReceipt), Finance (LedgerAccount, JournalEntry, Payment, Expense, Bill), and HR (Department, Position, Employee, LeaveRequest) — with lifecycle workflows, RBAC, and scheduled jobs.",
       ...(opts.compliancePacks !== undefined
         ? { compliancePacks: [...opts.compliancePacks] }
         : {}),

@@ -65,32 +65,32 @@ describe("buildErpCorePack — full kernel cross-validation", () => {
 });
 
 describe("buildErpCorePack — counts", () => {
-  it("has 4 entities", () => {
-    expect(buildErpCorePack().entities).toHaveLength(4);
+  it("has 23 entities", () => {
+    expect(buildErpCorePack().entities).toHaveLength(23);
   });
 
-  it("has 3 relations", () => {
-    expect(buildErpCorePack().relations).toHaveLength(3);
+  it("has 23 relations", () => {
+    expect(buildErpCorePack().relations).toHaveLength(23);
   });
 
-  it("has 3 roles", () => {
-    expect(Object.keys(buildErpCorePack().roles ?? {})).toHaveLength(3);
+  it("has 9 roles", () => {
+    expect(Object.keys(buildErpCorePack().roles ?? {})).toHaveLength(9);
   });
 
-  it("has 4 entity permission sets", () => {
-    expect(Object.keys(buildErpCorePack().permissions ?? {})).toHaveLength(4);
+  it("has 23 entity permission sets", () => {
+    expect(Object.keys(buildErpCorePack().permissions ?? {})).toHaveLength(23);
   });
 
-  it("has 1 workflow", () => {
-    expect(Object.keys(buildErpCorePack().workflows ?? {})).toHaveLength(1);
+  it("has 7 workflows", () => {
+    expect(Object.keys(buildErpCorePack().workflows ?? {})).toHaveLength(7);
   });
 
   it("has 2 jobs", () => {
     expect(Object.keys(buildErpCorePack().jobs ?? {})).toHaveLength(2);
   });
 
-  it("has 2 views", () => {
-    expect(Object.keys(buildErpCorePack().views ?? {})).toHaveLength(2);
+  it("has 17 views", () => {
+    expect(Object.keys(buildErpCorePack().views ?? {})).toHaveLength(17);
   });
 });
 

@@ -1,5 +1,10 @@
 import type { Entity } from "@crossengin/types/meta-schema";
 
+import { ERP_CORE_FINANCE_ENTITIES } from "./entities-finance.js";
+import { ERP_CORE_HR_ENTITIES } from "./entities-hr.js";
+import { ERP_CORE_INVENTORY_ENTITIES } from "./entities-inventory.js";
+import { ERP_CORE_PROCUREMENT_ENTITIES } from "./entities-procurement.js";
+
 const AUDITABLE = ["auditable"] as const;
 
 export const ACCOUNT_ENTITY: Entity = {
@@ -158,9 +163,17 @@ export const INVOICE_LINE_ENTITY: Entity = {
   ],
 };
 
-export const ERP_CORE_ENTITIES: readonly Entity[] = [
+export const ERP_CORE_CRM_ENTITIES: readonly Entity[] = [
   ACCOUNT_ENTITY,
   CONTACT_ENTITY,
   INVOICE_ENTITY,
   INVOICE_LINE_ENTITY,
+];
+
+export const ERP_CORE_ENTITIES: readonly Entity[] = [
+  ...ERP_CORE_CRM_ENTITIES,
+  ...ERP_CORE_INVENTORY_ENTITIES,
+  ...ERP_CORE_PROCUREMENT_ENTITIES,
+  ...ERP_CORE_FINANCE_ENTITIES,
+  ...ERP_CORE_HR_ENTITIES,
 ];
