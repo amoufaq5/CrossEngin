@@ -15,6 +15,7 @@ import {
   isOpenAiChatModel,
   type OpenAiChatModel,
 } from "@crossengin/ai-providers-openai";
+import { LocalLlmProvider } from "@crossengin/ai-providers-local";
 import { DefaultLlmRouter, type RouterResolution } from "@crossengin/ai-router";
 import {
   computeManifestDiff,
@@ -255,7 +256,13 @@ export async function runPatch(
 }
 
 export const DEFAULT_CHAT_OPENAI_MODEL: OpenAiChatModel = "gpt-4o";
-export const CHAT_PROVIDER_CHOICES: ReadonlySet<string> = new Set(["auto", "anthropic", "openai"]);
+export const DEFAULT_CHAT_LOCAL_MODEL = "llama3.1";
+export const CHAT_PROVIDER_CHOICES: ReadonlySet<string> = new Set([
+  "auto",
+  "anthropic",
+  "openai",
+  "local",
+]);
 
 type ProviderBuild =
   | { readonly provider: CompletionProvider; readonly describeLastTurn: () => string | null }
@@ -308,10 +315,29 @@ function describeResolution(r: RouterResolution | null): string | null {
  */
 export function buildChatProvider(
   ctx: RunContext,
-  opts: { model: AnthropicModel; openaiModel: OpenAiChatModel; choice: string },
+  opts: {
+    model: AnthropicModel;
+    openaiModel: OpenAiChatModel;
+    choice: string;
+    localModel?: string;
+    localBaseUrl?: string;
+  },
 ): ProviderBuild {
   if (ctx.providerOverride !== undefined) {
     return { provider: ctx.providerOverride, describeLastTurn: () => null };
+  }
+
+  if (opts.choice === "local") {
+    const localModel = opts.localModel ?? DEFAULT_CHAT_LOCAL_MODEL;
+    const baseUrl =
+      opts.localBaseUrl ?? ctx.env["LOCAL_LLM_BASE_URL"] ?? ctx.env["OLLAMA_BASE_URL"];
+    const apiKey = ctx.env["LOCAL_LLM_API_KEY"];
+    const provider = new LocalLlmProvider({
+      defaultModel: localModel,
+      ...(baseUrl !== undefined ? { baseUrl } : {}),
+      ...(apiKey !== undefined ? { apiKey } : {}),
+    });
+    return { provider, describeLastTurn: () => `local/${localModel}` };
   }
 
   const anthropicKey = ctx.env["ANTHROPIC_API_KEY"];
@@ -423,7 +449,10 @@ export async function runChat(
 
   const providerChoice = getStringFlag(command, "provider") ?? "auto";
   if (!CHAT_PROVIDER_CHOICES.has(providerChoice)) {
-    printError(ctx.io, `chat: invalid --provider '${providerChoice}' (expected auto, anthropic, or openai).`);
+    printError(
+      ctx.io,
+      `chat: invalid --provider '${providerChoice}' (expected auto, anthropic, openai, or local).`,
+    );
     return 2;
   }
   const openaiModelFlag = getStringFlag(command, "openai-model") ?? DEFAULT_CHAT_OPENAI_MODEL;
@@ -431,8 +460,16 @@ export async function runChat(
     printError(ctx.io, `chat: unsupported --openai-model: ${openaiModelFlag}`);
     return 2;
   }
+  const localModelFlag = getStringFlag(command, "local-model") ?? undefined;
+  const localBaseUrlFlag = getStringFlag(command, "local-url") ?? undefined;
 
-  const built = buildChatProvider(ctx, { model, openaiModel: openaiModelFlag, choice: providerChoice });
+  const built = buildChatProvider(ctx, {
+    model,
+    openaiModel: openaiModelFlag,
+    choice: providerChoice,
+    localModel: localModelFlag,
+    localBaseUrl: localBaseUrlFlag,
+  });
   if ("error" in built) {
     printError(ctx.io, built.error);
     return built.code;

@@ -1,4 +1,5 @@
 import { AnthropicProvider } from "@crossengin/ai-providers-anthropic";
+import { LocalLlmProvider } from "@crossengin/ai-providers-local";
 import { OpenAiProvider } from "@crossengin/ai-providers-openai";
 import { DefaultLlmRouter } from "@crossengin/ai-router";
 import type { CompletionRequest, CompletionChunk } from "@crossengin/ai-providers";
@@ -82,5 +83,20 @@ describe("buildChatProvider", () => {
   it("labels the router as null until a turn resolves", () => {
     const built = buildChatProvider(ctx({ ANTHROPIC_API_KEY: "sk-ant", OPENAI_API_KEY: "sk-oai" }), opts);
     expect("describeLastTurn" in built && built.describeLastTurn()).toBeNull();
+  });
+
+  it("builds a local provider with --provider local and needs no API key", () => {
+    const built = buildChatProvider(ctx({}), { ...opts, choice: "local" });
+    expect("provider" in built && built.provider).toBeInstanceOf(LocalLlmProvider);
+    expect("describeLastTurn" in built && built.describeLastTurn()).toBe("local/llama3.1");
+  });
+
+  it("honors --local-model for the local provider label", () => {
+    const built = buildChatProvider(ctx({}), {
+      ...opts,
+      choice: "local",
+      localModel: "qwen2.5",
+    });
+    expect("describeLastTurn" in built && built.describeLastTurn()).toBe("local/qwen2.5");
   });
 });
