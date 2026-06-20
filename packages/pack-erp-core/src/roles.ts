@@ -55,6 +55,36 @@ export const ROLE_HR_MANAGER: RoleDefinition = {
   description: "Manages departments, positions, employees, and leave requests (incl. PII).",
 };
 
+export const ROLE_SALES_MANAGER: RoleDefinition = {
+  name: "sales_manager",
+  label: { en: "Sales Manager" },
+  description: "Owns the sales pipeline — leads, opportunities, quotes, sales orders, and shipments.",
+};
+
+export const ROLE_SALES_REP: RoleDefinition = {
+  name: "sales_rep",
+  label: { en: "Sales Representative" },
+  description: "Works leads, opportunities, and quotes; reads accounts and price lists.",
+};
+
+export const ROLE_PRODUCTION_MANAGER: RoleDefinition = {
+  name: "production_manager",
+  label: { en: "Production Manager" },
+  description: "Manages bills of materials and work orders on the shop floor.",
+};
+
+export const ROLE_PROJECT_MANAGER: RoleDefinition = {
+  name: "project_manager",
+  label: { en: "Project Manager" },
+  description: "Manages projects, tasks, and timesheets for services delivery.",
+};
+
+export const ROLE_ASSET_MANAGER: RoleDefinition = {
+  name: "asset_manager",
+  label: { en: "Asset Manager" },
+  description: "Manages fixed assets and maintenance orders.",
+};
+
 export const ERP_CORE_ROLES: Readonly<Record<string, RoleDefinition>> = {
   erp_admin: ROLE_ADMIN,
   erp_accountant: ROLE_ACCOUNTANT,
@@ -65,4 +95,9 @@ export const ERP_CORE_ROLES: Readonly<Record<string, RoleDefinition>> = {
   ap_clerk: ROLE_AP_CLERK,
   controller: ROLE_CONTROLLER,
   hr_manager: ROLE_HR_MANAGER,
+  sales_manager: ROLE_SALES_MANAGER,
+  sales_rep: ROLE_SALES_REP,
+  production_manager: ROLE_PRODUCTION_MANAGER,
+  project_manager: ROLE_PROJECT_MANAGER,
+  asset_manager: ROLE_ASSET_MANAGER,
 };

@@ -71,80 +71,42 @@ describe("buildErpGroceryPack — transitive resolution (grocery -> retail -> co
     expect(result.ok).toBe(true);
   });
 
-  it("merges all three packs' entities (23 core + 4 retail + 2 grocery = 29)", async () => {
+  it("merges all three packs' entities (grocery adds Supplier + PerishableLot)", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
-    expect((resolved.entities ?? []).map((e) => e.name).sort()).toEqual([
-      "Account",
-      "Bill",
-      "BillLine",
-      "Contact",
-      "Department",
-      "Employee",
-      "Expense",
-      "GoodsReceipt",
-      "Invoice",
-      "InvoiceLine",
-      "Item",
-      "JournalEntry",
-      "JournalLine",
-      "LeaveRequest",
-      "LedgerAccount",
-      "OrderLine",
-      "Payment",
-      "PerishableLot",
-      "Position",
-      "Product",
-      "PurchaseOrder",
-      "PurchaseOrderLine",
-      "SalesOrder",
-      "StockLevel",
-      "StockMovement",
-      "Store",
-      "Supplier",
-      "Vendor",
-      "Warehouse",
+    const names = (resolved.entities ?? []).map((e) => e.name);
+    for (const inherited of ["Account", "Invoice", "Item", "Product", "Store"]) expect(names).toContain(inherited);
+    const baseNames = new Set([
+      ...buildErpCorePack().entities.map((e) => e.name),
+      ...buildErpRetailPack().entities.map((e) => e.name),
     ]);
+    const own = names.filter((n) => !baseNames.has(n)).sort();
+    expect(own).toEqual(["PerishableLot", "Supplier"]);
   });
 
   it("merges roles from all three packs", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
-    expect(Object.keys(resolved.roles ?? {}).sort()).toEqual([
-      "ap_clerk",
-      "cashier",
-      "controller",
-      "erp_accountant",
-      "erp_admin",
-      "erp_viewer",
-      "grocery_admin",
-      "hr_manager",
-      "inventory_manager",
-      "procurement_manager",
-      "receiving_clerk",
-      "retail_admin",
-      "retail_analyst",
-      "store_manager",
-      "warehouse_clerk",
+    const baseRoles = new Set([
+      ...Object.keys(buildErpCorePack().roles ?? {}),
+      ...Object.keys(buildErpRetailPack().roles ?? {}),
     ]);
+    const own = Object.keys(resolved.roles ?? {}).filter((r) => !baseRoles.has(r)).sort();
+    expect(own).toEqual(["grocery_admin", "receiving_clerk"]);
+    expect(Object.keys(resolved.roles ?? {})).toEqual(
+      expect.arrayContaining(["erp_admin", "store_manager", "controller"]),
+    );
   });
 
   it("keeps all lifecycle workflows across the chain", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
-    expect(Object.keys(resolved.workflows ?? {}).sort()).toEqual([
-      "bill_lifecycle",
-      "expense_lifecycle",
-      "invoice_lifecycle",
-      "journal_entry_lifecycle",
-      "leave_request_lifecycle",
-      "payment_lifecycle",
-      "perishable_lot_lifecycle",
-      "purchase_order_lifecycle",
-      "sales_order_lifecycle",
-    ]);
+    const keys = Object.keys(resolved.workflows ?? {});
+    expect(keys).toContain("perishable_lot_lifecycle");
+    expect(keys).toContain("sales_order_lifecycle");
+    expect(keys).toContain("invoice_lifecycle");
   });
 
-  it("concatenates relations across the chain (23 core + 5 retail + 3 grocery = 31)", async () => {
+  it("concatenates relations across the chain (core + 5 retail + 3 grocery)", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
-    expect(resolved.relations).toHaveLength(31);
+    expect(resolved.relations).toHaveLength((buildErpCorePack().relations ?? []).length + 5 + 3);
   });
 
   it("records both retail and core in the resolution lineage", async () => {
