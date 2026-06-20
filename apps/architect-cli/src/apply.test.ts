@@ -44,7 +44,7 @@ describe("runApply --dry-run", () => {
       statements: string[];
     };
     expect(result.schema).toBe("meta");
-    expect(result.tableCount).toBe(123);
+    expect(result.tableCount).toBe(125);
     expect(result.statementCount).toBeGreaterThan(100);
     expect(result.statements.length).toBe(result.statementCount);
   });

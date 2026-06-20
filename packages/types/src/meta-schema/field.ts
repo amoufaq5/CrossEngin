@@ -34,6 +34,9 @@ export const ValidationRuleSchema = z.discriminatedUnion("kind", [
 
 export type ValidationRule = z.infer<typeof ValidationRuleSchema>;
 
+export const SEQUENCE_RESET_PERIODS = ["never", "yearly", "monthly", "daily"] as const;
+export type SequenceResetPeriod = (typeof SEQUENCE_RESET_PERIODS)[number];
+
 export const DefaultValueSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("literal"),
@@ -43,9 +46,18 @@ export const DefaultValueSchema = z.discriminatedUnion("kind", [
     kind: z.literal("expression"),
     expression: z.string().min(1),
   }),
+  z.object({
+    kind: z.literal("sequence"),
+    sequence: z.string().min(1),
+    format: z.string().min(1).optional(),
+    resetPeriod: z.enum(SEQUENCE_RESET_PERIODS).optional(),
+    start: z.number().int().min(0).optional(),
+  }),
 ]);
 
 export type DefaultValue = z.infer<typeof DefaultValueSchema>;
+
+export type SequenceDefault = Extract<DefaultValue, { kind: "sequence" }>;
 
 export const DATA_CLASSIFICATIONS = [
   "public",

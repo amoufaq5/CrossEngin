@@ -35,7 +35,13 @@ export const PURCHASE_ORDER_ENTITY: Entity = {
   name: "PurchaseOrder",
   traits: [...AUDITABLE],
   fields: [
-    { name: "po_number", type: { kind: "text", maxLength: 50 }, required: true, unique: true },
+    {
+      name: "po_number",
+      type: { kind: "text", maxLength: 50 },
+      required: true,
+      unique: true,
+      default: { kind: "sequence", sequence: "erp.purchase_order", format: "PO-{YYYY}-{SEQ:5}", resetPeriod: "yearly" },
+    },
     { name: "vendor_id", type: { kind: "reference", target: "Vendor" }, required: true, indexed: true },
     { name: "warehouse_id", type: { kind: "reference", target: "Warehouse" }, indexed: true },
     {
@@ -98,7 +104,13 @@ export const GOODS_RECEIPT_ENTITY: Entity = {
   name: "GoodsReceipt",
   traits: [...AUDITABLE],
   fields: [
-    { name: "grn_number", type: { kind: "text", maxLength: 50 }, required: true, unique: true },
+    {
+      name: "grn_number",
+      type: { kind: "text", maxLength: 50 },
+      required: true,
+      unique: true,
+      default: { kind: "sequence", sequence: "erp.goods_receipt", format: "GRN-{YYYY}-{SEQ:5}", resetPeriod: "yearly" },
+    },
     { name: "purchase_order_id", type: { kind: "reference", target: "PurchaseOrder" }, required: true, indexed: true },
     { name: "warehouse_id", type: { kind: "reference", target: "Warehouse" }, required: true, indexed: true },
     { name: "received_date", type: { kind: "date" }, required: true, indexed: true },

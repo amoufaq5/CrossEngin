@@ -9,6 +9,8 @@ import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, parseFields, parseListQuery, type ListConfig } from "./list-query.js";
+import { applySequenceDefaults, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
+import { sequenceSpecResolver, type SettingsStore } from "./settings.js";
 import { projectRecord, type EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
@@ -25,6 +27,13 @@ export interface HandlerContext {
   readonly permissions: PermissionMap;
   readonly roles: ReadonlyMap<RoleName, RoleDefinition>;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
+  /** Allocates document numbers for `default.kind === "sequence"` fields on create. */
+  readonly allocator?: SequenceAllocator;
+  /** Per-entity sequence-field plans, keyed by entity name. */
+  readonly sequencePlans?: ReadonlyMap<string, readonly SequenceFieldPlan[]>;
+  /** Lets tenant settings override a sequence's format/start/resetPeriod at runtime. */
+  readonly settingsStore?: SettingsStore;
+  readonly clock?: { now(): Date };
 }
 
 function authPrincipal(
@@ -90,8 +99,10 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         const fields = parseFields(request.query);
         return json(200, fields === null ? record : projectRecord(record, fields));
       }
-      case "create":
-        return json(201, await ctx.store.create(tenantId, spec.entity, parsedBody ?? {}));
+      case "create": {
+        const body = await applyEntitySequences(ctx, spec.entity, tenantId, parsedBody ?? {});
+        return json(201, await ctx.store.create(tenantId, spec.entity, body));
+      }
       case "update": {
         const record = await ctx.store.update(tenantId, spec.entity, id, parsedBody ?? {});
         return record === null ? json(404, { error: "not_found" }) : json(200, record);
@@ -104,6 +115,27 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         return applyTransition(spec, ctx, tenantId, id);
     }
   };
+}
+
+async function applyEntitySequences(
+  ctx: HandlerContext,
+  entity: string,
+  tenantId: string,
+  body: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const plans = ctx.sequencePlans?.get(entity);
+  if (ctx.allocator === undefined || plans === undefined || plans.length === 0) {
+    return body;
+  }
+  const settings = ctx.settingsStore !== undefined ? await ctx.settingsStore.get(tenantId) : undefined;
+  return applySequenceDefaults({
+    record: body,
+    plans,
+    allocator: ctx.allocator,
+    tenantId,
+    now: ctx.clock?.now() ?? new Date(),
+    ...(settings !== undefined ? { resolveSpec: sequenceSpecResolver(settings) } : {}),
+  });
 }
 
 async function applyTransition(

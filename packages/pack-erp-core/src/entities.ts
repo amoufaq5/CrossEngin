@@ -1,9 +1,14 @@
 import type { Entity } from "@crossengin/types/meta-schema";
 
+import { ERP_CORE_ASSET_ENTITIES } from "./entities-assets.js";
 import { ERP_CORE_FINANCE_ENTITIES } from "./entities-finance.js";
 import { ERP_CORE_HR_ENTITIES } from "./entities-hr.js";
 import { ERP_CORE_INVENTORY_ENTITIES } from "./entities-inventory.js";
+import { ERP_CORE_MANUFACTURING_ENTITIES } from "./entities-manufacturing.js";
+import { ERP_CORE_PRICING_ENTITIES } from "./entities-pricing.js";
 import { ERP_CORE_PROCUREMENT_ENTITIES } from "./entities-procurement.js";
+import { ERP_CORE_PROJECT_ENTITIES } from "./entities-projects.js";
+import { ERP_CORE_SALES_ENTITIES } from "./entities-sales.js";
 
 const AUDITABLE = ["auditable"] as const;
 
@@ -84,6 +89,12 @@ export const INVOICE_ENTITY: Entity = {
       type: { kind: "text", maxLength: 50 },
       required: true,
       unique: true,
+      default: {
+        kind: "sequence",
+        sequence: "erp.invoice",
+        format: "INV-{YYYY}-{SEQ:5}",
+        resetPeriod: "yearly",
+      },
     },
     {
       name: "state",
@@ -176,4 +187,9 @@ export const ERP_CORE_ENTITIES: readonly Entity[] = [
   ...ERP_CORE_PROCUREMENT_ENTITIES,
   ...ERP_CORE_FINANCE_ENTITIES,
   ...ERP_CORE_HR_ENTITIES,
+  ...ERP_CORE_SALES_ENTITIES,
+  ...ERP_CORE_MANUFACTURING_ENTITIES,
+  ...ERP_CORE_PROJECT_ENTITIES,
+  ...ERP_CORE_ASSET_ENTITIES,
+  ...ERP_CORE_PRICING_ENTITIES,
 ];

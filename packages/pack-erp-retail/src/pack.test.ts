@@ -67,75 +67,36 @@ describe("buildErpRetailPack — resolved against core", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("merges core + retail entities (23 + 4 = 27)", async () => {
+  it("merges core entities with retail's own (retail overrides SalesOrder)", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
-    expect((resolved.entities ?? []).map((e) => e.name).sort()).toEqual([
-      "Account",
-      "Bill",
-      "BillLine",
-      "Contact",
-      "Department",
-      "Employee",
-      "Expense",
-      "GoodsReceipt",
-      "Invoice",
-      "InvoiceLine",
-      "Item",
-      "JournalEntry",
-      "JournalLine",
-      "LeaveRequest",
-      "LedgerAccount",
-      "OrderLine",
-      "Payment",
-      "Position",
-      "Product",
-      "PurchaseOrder",
-      "PurchaseOrderLine",
-      "SalesOrder",
-      "StockLevel",
-      "StockMovement",
-      "Store",
-      "Vendor",
-      "Warehouse",
-    ]);
+    const names = (resolved.entities ?? []).map((e) => e.name);
+    for (const core of ["Account", "Invoice", "Item", "Employee"]) expect(names).toContain(core);
+    const coreNames = new Set(buildErpCorePack().entities.map((e) => e.name));
+    const retailOwn = names.filter((n) => !coreNames.has(n)).sort();
+    expect(retailOwn).toEqual(["OrderLine", "Product", "Store"]);
+    expect(names).toContain("SalesOrder");
   });
 
   it("merges roles from both packs", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
-    expect(Object.keys(resolved.roles ?? {}).sort()).toEqual([
-      "ap_clerk",
-      "cashier",
-      "controller",
-      "erp_accountant",
-      "erp_admin",
-      "erp_viewer",
-      "hr_manager",
-      "inventory_manager",
-      "procurement_manager",
-      "retail_admin",
-      "retail_analyst",
-      "store_manager",
-      "warehouse_clerk",
-    ]);
+    const coreRoles = new Set(Object.keys(buildErpCorePack().roles ?? {}));
+    const own = Object.keys(resolved.roles ?? {}).filter((r) => !coreRoles.has(r)).sort();
+    expect(own).toEqual(["cashier", "retail_admin", "retail_analyst", "store_manager"]);
+    expect(Object.keys(resolved.roles ?? {})).toEqual(expect.arrayContaining(["erp_admin", "controller"]));
   });
 
-  it("concatenates relations across packs (23 core + 5 retail)", async () => {
+  it("concatenates relations across packs (core + 5 retail)", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
-    expect(resolved.relations).toHaveLength(28);
+    expect(resolved.relations).toHaveLength((buildErpCorePack().relations ?? []).length + 5);
   });
 
-  it("keeps all lifecycle workflows", async () => {
+  it("keeps all lifecycle workflows (retail overrides sales_order_lifecycle)", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
-    expect(Object.keys(resolved.workflows ?? {}).sort()).toEqual([
-      "bill_lifecycle",
-      "expense_lifecycle",
-      "invoice_lifecycle",
-      "journal_entry_lifecycle",
-      "leave_request_lifecycle",
-      "payment_lifecycle",
-      "purchase_order_lifecycle",
-      "sales_order_lifecycle",
-    ]);
+    const keys = Object.keys(resolved.workflows ?? {});
+    expect(keys).toContain("sales_order_lifecycle");
+    expect(keys).toContain("invoice_lifecycle");
+    // retail's only workflow overrides an existing core key, so the count is unchanged
+    expect(keys).toHaveLength(Object.keys(buildErpCorePack().workflows ?? {}).length);
   });
 
   it("records the core pack in the resolution lineage", async () => {

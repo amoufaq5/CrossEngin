@@ -74,83 +74,42 @@ describe("buildErpHealthcarePack — resolved against core", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("merges core + healthcare entities (23 + 3 = 26)", async () => {
+  it("merges core entities with healthcare's own (3 clinical entities)", async () => {
     const resolved = await resolveManifest(buildErpHealthcarePack(), {
       registry: coreRegistry(),
     });
-    const names = (resolved.entities ?? []).map((e) => e.name).sort();
-    expect(names).toEqual([
-      "Account",
-      "Bill",
-      "BillLine",
-      "Contact",
-      "Department",
-      "Employee",
-      "Encounter",
-      "Expense",
-      "GoodsReceipt",
-      "Invoice",
-      "InvoiceLine",
-      "Item",
-      "JournalEntry",
-      "JournalLine",
-      "LeaveRequest",
-      "LedgerAccount",
-      "Observation",
-      "Patient",
-      "Payment",
-      "Position",
-      "PurchaseOrder",
-      "PurchaseOrderLine",
-      "StockLevel",
-      "StockMovement",
-      "Vendor",
-      "Warehouse",
-    ]);
+    const names = (resolved.entities ?? []).map((e) => e.name);
+    for (const core of ["Account", "Invoice", "Item", "Employee"]) expect(names).toContain(core);
+    const coreNames = new Set(buildErpCorePack().entities.map((e) => e.name));
+    const own = names.filter((n) => !coreNames.has(n)).sort();
+    expect(own).toEqual(["Encounter", "Observation", "Patient"]);
   });
 
   it("merges roles from both packs", async () => {
     const resolved = await resolveManifest(buildErpHealthcarePack(), {
       registry: coreRegistry(),
     });
-    expect(Object.keys(resolved.roles ?? {}).sort()).toEqual([
-      "ap_clerk",
-      "clinical_admin",
-      "clinician",
-      "controller",
-      "erp_accountant",
-      "erp_admin",
-      "erp_viewer",
-      "front_desk",
-      "hipaa_auditor",
-      "hr_manager",
-      "inventory_manager",
-      "procurement_manager",
-      "warehouse_clerk",
-    ]);
+    const coreRoles = new Set(Object.keys(buildErpCorePack().roles ?? {}));
+    const own = Object.keys(resolved.roles ?? {}).filter((r) => !coreRoles.has(r)).sort();
+    expect(own).toEqual(["clinical_admin", "clinician", "front_desk", "hipaa_auditor"]);
+    expect(Object.keys(resolved.roles ?? {})).toEqual(expect.arrayContaining(["erp_admin", "controller"]));
   });
 
-  it("concatenates relations across packs (23 core + 4 healthcare)", async () => {
+  it("concatenates relations across packs (core + 4 healthcare)", async () => {
     const resolved = await resolveManifest(buildErpHealthcarePack(), {
       registry: coreRegistry(),
     });
-    expect(resolved.relations).toHaveLength(27);
+    expect(resolved.relations).toHaveLength((buildErpCorePack().relations ?? []).length + 4);
   });
 
-  it("keeps all lifecycle workflows", async () => {
+  it("keeps all lifecycle workflows (adds encounter_lifecycle)", async () => {
     const resolved = await resolveManifest(buildErpHealthcarePack(), {
       registry: coreRegistry(),
     });
-    expect(Object.keys(resolved.workflows ?? {}).sort()).toEqual([
-      "bill_lifecycle",
-      "encounter_lifecycle",
-      "expense_lifecycle",
-      "invoice_lifecycle",
-      "journal_entry_lifecycle",
-      "leave_request_lifecycle",
-      "payment_lifecycle",
-      "purchase_order_lifecycle",
-    ]);
+    const coreWf = new Set(Object.keys(buildErpCorePack().workflows ?? {}));
+    const own = Object.keys(resolved.workflows ?? {}).filter((w) => !coreWf.has(w)).sort();
+    expect(own).toEqual(["encounter_lifecycle"]);
+    expect(Object.keys(resolved.workflows ?? {})).toContain("invoice_lifecycle");
   });
 
   it("records the core pack in the resolution lineage", async () => {
