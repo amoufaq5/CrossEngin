@@ -85,6 +85,13 @@ export const ROLE_ASSET_MANAGER: RoleDefinition = {
   description: "Manages fixed assets and maintenance orders.",
 };
 
+export const ROLE_TAX_MANAGER: RoleDefinition = {
+  name: "tax_manager",
+  label: { en: "Tax Manager" },
+  description:
+    "Owns indirect-tax configuration and compliance — jurisdictions, country tax rules, and periodic VAT/GST/withholding returns.",
+};
+
 export const ERP_CORE_ROLES: Readonly<Record<string, RoleDefinition>> = {
   erp_admin: ROLE_ADMIN,
   erp_accountant: ROLE_ACCOUNTANT,
@@ -100,4 +107,5 @@ export const ERP_CORE_ROLES: Readonly<Record<string, RoleDefinition>> = {
   production_manager: ROLE_PRODUCTION_MANAGER,
   project_manager: ROLE_PROJECT_MANAGER,
   asset_manager: ROLE_ASSET_MANAGER,
+  tax_manager: ROLE_TAX_MANAGER,
 };

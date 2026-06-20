@@ -21,6 +21,12 @@ const ASSET_WRITERS = ["erp_admin", "asset_manager"];
 const PRICING_READERS = ["erp_admin", "erp_viewer", "controller", "sales_manager", "procurement_manager"];
 const PRICING_WRITERS = ["erp_admin", "controller"];
 
+const GL_READERS = ["erp_admin", "erp_viewer", "controller", "erp_accountant"];
+const GL_WRITERS = ["erp_admin", "controller"];
+
+const TAX_READERS = ["erp_admin", "erp_viewer", "controller", "tax_manager", "erp_accountant"];
+const TAX_WRITERS = ["erp_admin", "controller", "tax_manager"];
+
 interface CrudOpts {
   readonly admins?: readonly string[];
   /** Entity name whose ERP_EXT_TRANSITIONS are granted to the writer set. */
@@ -70,4 +76,15 @@ export const ERP_EXT_PERMISSIONS: Readonly<Record<string, EntityPermissions>> = 
   TaxCode: crud(PRICING_READERS, PRICING_WRITERS),
   PriceList: crud(PRICING_READERS, PRICING_WRITERS),
   PriceListItem: crud(PRICING_READERS, PRICING_WRITERS),
+  // Accounting depth — multi-currency, fiscal calendar, parallel books, dimensions
+  Currency: crud(GL_READERS, GL_WRITERS),
+  ExchangeRate: crud(GL_READERS, GL_WRITERS),
+  FiscalYear: crud(GL_READERS, GL_WRITERS),
+  FiscalPeriod: crud(GL_READERS, GL_WRITERS),
+  AccountingBook: crud(GL_READERS, GL_WRITERS),
+  CostCenter: crud(GL_READERS, GL_WRITERS),
+  // Country tax rules + filing
+  TaxJurisdiction: crud(TAX_READERS, TAX_WRITERS),
+  TaxRule: crud(TAX_READERS, TAX_WRITERS),
+  TaxReturn: crud(TAX_READERS, TAX_WRITERS, { transitionsFor: "TaxReturn" }),
 };

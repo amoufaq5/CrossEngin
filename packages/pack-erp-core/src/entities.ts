@@ -1,5 +1,6 @@
 import type { Entity } from "@crossengin/types/meta-schema";
 
+import { ERP_CORE_ACCOUNTING_ENTITIES } from "./entities-accounting.js";
 import { ERP_CORE_ASSET_ENTITIES } from "./entities-assets.js";
 import { ERP_CORE_FINANCE_ENTITIES } from "./entities-finance.js";
 import { ERP_CORE_HR_ENTITIES } from "./entities-hr.js";
@@ -234,6 +235,17 @@ export const ERP_CORE_MODULE_BY_ENTITY: Readonly<Record<string, string>> = {
   Position: "Human Resources",
   Employee: "Human Resources",
   LeaveRequest: "Human Resources",
+  // Accounting depth — multi-currency, fiscal calendar, parallel books, dimensions
+  Currency: "Accounting & GL",
+  ExchangeRate: "Accounting & GL",
+  FiscalYear: "Accounting & GL",
+  FiscalPeriod: "Accounting & GL",
+  AccountingBook: "Accounting & GL",
+  CostCenter: "Accounting & GL",
+  // Country tax rules + filing
+  TaxJurisdiction: "Pricing & Tax",
+  TaxRule: "Pricing & Tax",
+  TaxReturn: "Pricing & Tax",
 };
 
 /** Tags an entity with its `module` from a name→department map (UI grouping only). */
@@ -258,6 +270,7 @@ const ERP_CORE_ENTITIES_RAW: readonly Entity[] = [
   ...ERP_CORE_PROJECT_ENTITIES,
   ...ERP_CORE_ASSET_ENTITIES,
   ...ERP_CORE_PRICING_ENTITIES,
+  ...ERP_CORE_ACCOUNTING_ENTITIES,
 ];
 
 export const ERP_CORE_ENTITIES: readonly Entity[] = withModules(

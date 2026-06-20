@@ -43,4 +43,21 @@ export const ERP_EXT_RELATIONS: readonly Relation[] = [
   // Pricing
   m2o("PriceListItem", "price_list_id", "PriceList", "cascade"),
   m2o("PriceListItem", "item_id", "Item", "restrict"),
+  // Accounting depth — multi-currency
+  m2o("ExchangeRate", "from_currency_id", "Currency", "restrict"),
+  m2o("ExchangeRate", "to_currency_id", "Currency", "restrict"),
+  // Fiscal calendar
+  m2o("FiscalPeriod", "fiscal_year_id", "FiscalYear", "cascade"),
+  // Dimensions (cost centers form a hierarchy)
+  m2o("CostCenter", "parent_id", "CostCenter", "set_null"),
+  m2o("CostCenter", "manager_id", "Employee", "set_null"),
+  // GL postings → book / period / cost center (IFRS parallel books)
+  m2o("JournalEntry", "book_id", "AccountingBook", "set_null"),
+  m2o("JournalEntry", "fiscal_period_id", "FiscalPeriod", "restrict"),
+  m2o("JournalLine", "cost_center_id", "CostCenter", "set_null"),
+  // Country tax rules + filing
+  m2o("TaxRule", "jurisdiction_id", "TaxJurisdiction", "cascade"),
+  m2o("TaxRule", "tax_code_id", "TaxCode", "restrict"),
+  m2o("TaxReturn", "jurisdiction_id", "TaxJurisdiction", "restrict"),
+  m2o("TaxReturn", "fiscal_period_id", "FiscalPeriod", "restrict"),
 ];

@@ -38,9 +38,11 @@ export const JOURNAL_ENTRY_ENTITY: Entity = {
       default: { kind: "sequence", sequence: "erp.journal_entry", format: "JE-{YYYY}-{SEQ:5}", resetPeriod: "yearly" },
     },
     { name: "entry_date", type: { kind: "date" }, required: true, indexed: true },
+    { name: "book_id", type: { kind: "reference", target: "AccountingBook" }, indexed: true },
+    { name: "fiscal_period_id", type: { kind: "reference", target: "FiscalPeriod" }, indexed: true },
     {
       name: "source",
-      type: { kind: "enum", values: ["manual", "invoice", "bill", "payment", "payroll", "system"] },
+      type: { kind: "enum", values: ["manual", "invoice", "bill", "payment", "payroll", "fx_revaluation", "depreciation", "system"] },
       required: true,
       default: { kind: "literal", value: "manual" },
     },
@@ -63,11 +65,16 @@ export const JOURNAL_LINE_ENTITY: Entity = {
   fields: [
     { name: "journal_entry_id", type: { kind: "reference", target: "JournalEntry" }, required: true, indexed: true },
     { name: "ledger_account_id", type: { kind: "reference", target: "LedgerAccount" }, required: true, indexed: true },
+    { name: "cost_center_id", type: { kind: "reference", target: "CostCenter" }, indexed: true },
     { name: "description", type: { kind: "text", maxLength: 300 } },
     { name: "debit", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true, default: { kind: "literal", value: 0 } },
     { name: "credit", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true, default: { kind: "literal", value: 0 } },
+    { name: "currency", type: { kind: "text", maxLength: 3 }, required: true, default: { kind: "literal", value: "USD" } },
+    { name: "fx_rate", type: { kind: "decimal", precision: 20, scale: 10, min: 0 }, required: true, default: { kind: "literal", value: 1 } },
+    { name: "functional_debit", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true, default: { kind: "literal", value: 0 } },
+    { name: "functional_credit", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true, default: { kind: "literal", value: 0 } },
   ],
-  indexes: [{ fields: ["journal_entry_id"] }],
+  indexes: [{ fields: ["journal_entry_id"] }, { fields: ["cost_center_id"] }],
 };
 
 export const PAYMENT_ENTITY: Entity = {
