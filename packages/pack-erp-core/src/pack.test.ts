@@ -65,24 +65,24 @@ describe("buildErpCorePack — full kernel cross-validation", () => {
 });
 
 describe("buildErpCorePack — counts", () => {
-  it("has 41 entities", () => {
-    expect(buildErpCorePack().entities).toHaveLength(41);
+  it("has 50 entities", () => {
+    expect(buildErpCorePack().entities).toHaveLength(50);
   });
 
-  it("has 54 relations", () => {
-    expect(buildErpCorePack().relations).toHaveLength(54);
+  it("has 66 relations", () => {
+    expect(buildErpCorePack().relations).toHaveLength(66);
   });
 
-  it("has 14 roles", () => {
-    expect(Object.keys(buildErpCorePack().roles ?? {})).toHaveLength(14);
+  it("has 15 roles", () => {
+    expect(Object.keys(buildErpCorePack().roles ?? {})).toHaveLength(15);
   });
 
-  it("has 41 entity permission sets", () => {
-    expect(Object.keys(buildErpCorePack().permissions ?? {})).toHaveLength(41);
+  it("has 50 entity permission sets", () => {
+    expect(Object.keys(buildErpCorePack().permissions ?? {})).toHaveLength(50);
   });
 
-  it("has 18 workflows", () => {
-    expect(Object.keys(buildErpCorePack().workflows ?? {})).toHaveLength(18);
+  it("has 19 workflows", () => {
+    expect(Object.keys(buildErpCorePack().workflows ?? {})).toHaveLength(19);
   });
 
   it("has 14 jobs", () => {

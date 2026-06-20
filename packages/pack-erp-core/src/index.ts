@@ -8,6 +8,7 @@ export * from "./entities-manufacturing.js";
 export * from "./entities-projects.js";
 export * from "./entities-assets.js";
 export * from "./entities-pricing.js";
+export * from "./entities-accounting.js";
 export * from "./jobs.js";
 export * from "./jobs-ext.js";
 export * from "./pack.js";

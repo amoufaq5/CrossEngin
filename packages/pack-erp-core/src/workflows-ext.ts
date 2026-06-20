@@ -197,6 +197,21 @@ export const MAINTENANCE_ORDER_LIFECYCLE = lifecycle(
   ],
 );
 
+export const TAX_RETURN_LIFECYCLE = lifecycle(
+  "TaxReturn",
+  "state",
+  "draft",
+  ["draft", "ready", "filed", "paid", "amended"],
+  ["paid"],
+  [
+    { name: "mark_ready", from: "draft", to: "ready" },
+    { name: "file", from: "ready", to: "filed" },
+    { name: "mark_paid", from: "filed", to: "paid" },
+    { name: "amend", from: "filed", to: "amended" },
+    { name: "refile", from: "amended", to: "filed" },
+  ],
+);
+
 export const ERP_EXT_WORKFLOWS: Readonly<Record<string, Workflow>> = {
   lead_lifecycle: LEAD_LIFECYCLE,
   opportunity_lifecycle: OPPORTUNITY_LIFECYCLE,
@@ -209,6 +224,7 @@ export const ERP_EXT_WORKFLOWS: Readonly<Record<string, Workflow>> = {
   timesheet_lifecycle: TIMESHEET_LIFECYCLE,
   fixed_asset_lifecycle: FIXED_ASSET_LIFECYCLE,
   maintenance_order_lifecycle: MAINTENANCE_ORDER_LIFECYCLE,
+  tax_return_lifecycle: TAX_RETURN_LIFECYCLE,
 };
 
 /** Transition names per entity, so the permission sets can grant them. */
@@ -224,4 +240,5 @@ export const ERP_EXT_TRANSITIONS: Readonly<Record<string, readonly string[]>> = 
   Timesheet: ["submit", "approve", "reject"],
   FixedAsset: ["send_to_maintenance", "return_to_service", "retire", "dispose"],
   MaintenanceOrder: ["schedule", "start", "complete", "cancel"],
+  TaxReturn: ["mark_ready", "file", "mark_paid", "amend", "refile"],
 };
