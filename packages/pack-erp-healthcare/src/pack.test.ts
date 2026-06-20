@@ -74,19 +74,38 @@ describe("buildErpHealthcarePack — resolved against core", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("merges core + healthcare entities (4 + 3 = 7)", async () => {
+  it("merges core + healthcare entities (23 + 3 = 26)", async () => {
     const resolved = await resolveManifest(buildErpHealthcarePack(), {
       registry: coreRegistry(),
     });
     const names = (resolved.entities ?? []).map((e) => e.name).sort();
     expect(names).toEqual([
       "Account",
+      "Bill",
+      "BillLine",
       "Contact",
+      "Department",
+      "Employee",
       "Encounter",
+      "Expense",
+      "GoodsReceipt",
       "Invoice",
       "InvoiceLine",
+      "Item",
+      "JournalEntry",
+      "JournalLine",
+      "LeaveRequest",
+      "LedgerAccount",
       "Observation",
       "Patient",
+      "Payment",
+      "Position",
+      "PurchaseOrder",
+      "PurchaseOrderLine",
+      "StockLevel",
+      "StockMovement",
+      "Vendor",
+      "Warehouse",
     ]);
   });
 
@@ -95,30 +114,42 @@ describe("buildErpHealthcarePack — resolved against core", () => {
       registry: coreRegistry(),
     });
     expect(Object.keys(resolved.roles ?? {}).sort()).toEqual([
+      "ap_clerk",
       "clinical_admin",
       "clinician",
+      "controller",
       "erp_accountant",
       "erp_admin",
       "erp_viewer",
       "front_desk",
       "hipaa_auditor",
+      "hr_manager",
+      "inventory_manager",
+      "procurement_manager",
+      "warehouse_clerk",
     ]);
   });
 
-  it("concatenates relations across packs (3 core + 4 healthcare)", async () => {
+  it("concatenates relations across packs (23 core + 4 healthcare)", async () => {
     const resolved = await resolveManifest(buildErpHealthcarePack(), {
       registry: coreRegistry(),
     });
-    expect(resolved.relations).toHaveLength(7);
+    expect(resolved.relations).toHaveLength(27);
   });
 
-  it("keeps both lifecycle workflows", async () => {
+  it("keeps all lifecycle workflows", async () => {
     const resolved = await resolveManifest(buildErpHealthcarePack(), {
       registry: coreRegistry(),
     });
     expect(Object.keys(resolved.workflows ?? {}).sort()).toEqual([
+      "bill_lifecycle",
       "encounter_lifecycle",
+      "expense_lifecycle",
       "invoice_lifecycle",
+      "journal_entry_lifecycle",
+      "leave_request_lifecycle",
+      "payment_lifecycle",
+      "purchase_order_lifecycle",
     ]);
   });
 

@@ -71,49 +71,80 @@ describe("buildErpGroceryPack — transitive resolution (grocery -> retail -> co
     expect(result.ok).toBe(true);
   });
 
-  it("merges all three packs' entities (4 core + 4 retail + 2 grocery = 10)", async () => {
+  it("merges all three packs' entities (23 core + 4 retail + 2 grocery = 29)", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
     expect((resolved.entities ?? []).map((e) => e.name).sort()).toEqual([
       "Account",
+      "Bill",
+      "BillLine",
       "Contact",
+      "Department",
+      "Employee",
+      "Expense",
+      "GoodsReceipt",
       "Invoice",
       "InvoiceLine",
+      "Item",
+      "JournalEntry",
+      "JournalLine",
+      "LeaveRequest",
+      "LedgerAccount",
       "OrderLine",
+      "Payment",
       "PerishableLot",
+      "Position",
       "Product",
+      "PurchaseOrder",
+      "PurchaseOrderLine",
       "SalesOrder",
+      "StockLevel",
+      "StockMovement",
       "Store",
       "Supplier",
+      "Vendor",
+      "Warehouse",
     ]);
   });
 
   it("merges roles from all three packs", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
     expect(Object.keys(resolved.roles ?? {}).sort()).toEqual([
+      "ap_clerk",
       "cashier",
+      "controller",
       "erp_accountant",
       "erp_admin",
       "erp_viewer",
       "grocery_admin",
+      "hr_manager",
+      "inventory_manager",
+      "procurement_manager",
       "receiving_clerk",
       "retail_admin",
       "retail_analyst",
       "store_manager",
+      "warehouse_clerk",
     ]);
   });
 
-  it("keeps all three lifecycle workflows", async () => {
+  it("keeps all lifecycle workflows across the chain", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
     expect(Object.keys(resolved.workflows ?? {}).sort()).toEqual([
+      "bill_lifecycle",
+      "expense_lifecycle",
       "invoice_lifecycle",
+      "journal_entry_lifecycle",
+      "leave_request_lifecycle",
+      "payment_lifecycle",
       "perishable_lot_lifecycle",
+      "purchase_order_lifecycle",
       "sales_order_lifecycle",
     ]);
   });
 
-  it("concatenates relations across the chain (3 core + 5 retail + 3 grocery = 11)", async () => {
+  it("concatenates relations across the chain (23 core + 5 retail + 3 grocery = 31)", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
-    expect(resolved.relations).toHaveLength(11);
+    expect(resolved.relations).toHaveLength(31);
   });
 
   it("records both retail and core in the resolution lineage", async () => {

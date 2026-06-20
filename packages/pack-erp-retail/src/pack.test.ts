@@ -67,42 +67,73 @@ describe("buildErpRetailPack — resolved against core", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("merges core + retail entities (4 + 4 = 8)", async () => {
+  it("merges core + retail entities (23 + 4 = 27)", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
     expect((resolved.entities ?? []).map((e) => e.name).sort()).toEqual([
       "Account",
+      "Bill",
+      "BillLine",
       "Contact",
+      "Department",
+      "Employee",
+      "Expense",
+      "GoodsReceipt",
       "Invoice",
       "InvoiceLine",
+      "Item",
+      "JournalEntry",
+      "JournalLine",
+      "LeaveRequest",
+      "LedgerAccount",
       "OrderLine",
+      "Payment",
+      "Position",
       "Product",
+      "PurchaseOrder",
+      "PurchaseOrderLine",
       "SalesOrder",
+      "StockLevel",
+      "StockMovement",
       "Store",
+      "Vendor",
+      "Warehouse",
     ]);
   });
 
   it("merges roles from both packs", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
     expect(Object.keys(resolved.roles ?? {}).sort()).toEqual([
+      "ap_clerk",
       "cashier",
+      "controller",
       "erp_accountant",
       "erp_admin",
       "erp_viewer",
+      "hr_manager",
+      "inventory_manager",
+      "procurement_manager",
       "retail_admin",
       "retail_analyst",
       "store_manager",
+      "warehouse_clerk",
     ]);
   });
 
-  it("concatenates relations across packs (3 core + 5 retail)", async () => {
+  it("concatenates relations across packs (23 core + 5 retail)", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
-    expect(resolved.relations).toHaveLength(8);
+    expect(resolved.relations).toHaveLength(28);
   });
 
-  it("keeps both lifecycle workflows", async () => {
+  it("keeps all lifecycle workflows", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
     expect(Object.keys(resolved.workflows ?? {}).sort()).toEqual([
+      "bill_lifecycle",
+      "expense_lifecycle",
       "invoice_lifecycle",
+      "journal_entry_lifecycle",
+      "leave_request_lifecycle",
+      "payment_lifecycle",
+      "purchase_order_lifecycle",
       "sales_order_lifecycle",
     ]);
   });
