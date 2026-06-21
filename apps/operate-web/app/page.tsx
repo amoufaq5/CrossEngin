@@ -7,6 +7,7 @@ import { useInbox } from "@/lib/inbox";
 import {
   accessibleEntities,
   canAccess,
+  featureEnabled,
   groupByModule,
   roleLabel,
   useSchema,
@@ -15,7 +16,8 @@ import {
 
 export default function DashboardPage() {
   const { schema, loading, error } = useSchema();
-  const { items: inboxItems } = useInbox(schema);
+  const inboxEnabled = featureEnabled(schema, "approvals_inbox", true);
+  const { items: inboxItems } = useInbox(inboxEnabled ? schema : null);
 
   const entities = accessibleEntities(schema);
   const groups = groupByModule(entities);

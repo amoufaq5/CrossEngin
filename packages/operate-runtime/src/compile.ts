@@ -28,6 +28,7 @@ import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
 import { literalDefaultPlans, type LiteralDefaultPlan } from "./defaults.js";
 import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
+import { planHasSettingsDefaults, settingsDefaultPlan, type SettingsDefaultPlan } from "./settings-defaults.js";
 import type { SettingsStore } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -91,6 +92,15 @@ function buildDefaultPlans(manifest: Manifest): Map<string, readonly LiteralDefa
   return plans;
 }
 
+function buildSettingsDefaultPlans(manifest: Manifest): Map<string, SettingsDefaultPlan> {
+  const plans = new Map<string, SettingsDefaultPlan>();
+  for (const entity of manifest.entities ?? []) {
+    const p = settingsDefaultPlan(entity);
+    if (planHasSettingsDefaults(p)) plans.set(entity.name, p);
+  }
+  return plans;
+}
+
 export interface CompiledOperateServer {
   readonly routes: InMemoryRouteRegistry;
   readonly handlers: HandlerRegistry;
@@ -118,6 +128,7 @@ export function compileOperateServer(
     principalRoles: options.principalRoles,
     sequencePlans: buildSequencePlans(manifest),
     defaultPlans: buildDefaultPlans(manifest),
+    settingsDefaultPlans: buildSettingsDefaultPlans(manifest),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
@@ -133,7 +144,11 @@ export function compileOperateServer(
   routes.register(literalRoute("meta.schema.read", "GET", ["v1", "meta", "schema"]));
   handlers.register(
     "meta.schema.read",
-    buildUiSchemaHandler({ schema: buildUiSchema(manifest), principalRoles: options.principalRoles }),
+    buildUiSchemaHandler({
+      schema: buildUiSchema(manifest),
+      principalRoles: options.principalRoles,
+      ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
+    }),
   );
 
   if (options.settingsStore !== undefined) {

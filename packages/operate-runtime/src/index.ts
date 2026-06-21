@@ -5,6 +5,7 @@ export * from "./operations.js";
 export * from "./sequences.js";
 export * from "./defaults.js";
 export * from "./settings.js";
+export * from "./settings-defaults.js";
 export * from "./handlers.js";
 export * from "./admin-handlers.js";
 export * from "./ui-schema.js";

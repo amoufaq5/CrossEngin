@@ -70,15 +70,32 @@ export interface UiViewer {
   readonly roles: readonly string[];
 }
 
+export interface UiFormatting {
+  readonly currency?: string;
+  readonly locale?: string;
+  readonly dateFormat?: string;
+  readonly numberFormat?: string;
+  readonly weekStartDay?: number;
+}
+
 export interface UiSchema {
   readonly entities: readonly UiEntitySchema[];
   readonly roles: readonly UiRoleSchema[];
   readonly generatedAt: string;
   readonly viewer?: UiViewer;
+  readonly formatting?: UiFormatting;
+  readonly features?: Readonly<Record<string, boolean>>;
 }
 
 let cache: UiSchema | null = null;
 let inflight: Promise<UiSchema> | null = null;
+
+/** Module-level mirror of the tenant's formatting, so pure formatters can read it. */
+let activeFormatting: UiFormatting = {};
+
+export function getActiveFormatting(): UiFormatting {
+  return activeFormatting;
+}
 
 export async function fetchSchema(): Promise<UiSchema> {
   if (cache !== null) return cache;
@@ -88,6 +105,7 @@ export async function fetchSchema(): Promise<UiSchema> {
     if (!res.ok) throw new Error(`schema ${res.status}: ${await res.text().catch(() => res.statusText)}`);
     const schema = (await res.json()) as UiSchema;
     cache = schema;
+    activeFormatting = schema.formatting ?? {};
     return schema;
   })();
   try {
@@ -206,6 +224,12 @@ export function viewerActions(schema: UiSchema | null): readonly ViewerAction[] 
     }
   }
   return out;
+}
+
+/** A feature flag's state, defaulting to `fallback` when the tenant hasn't set it. */
+export function featureEnabled(schema: UiSchema | null, key: string, fallback = true): boolean {
+  const v = schema?.features?.[key];
+  return v === undefined ? fallback : v;
 }
 
 export function roleLabel(schema: UiSchema | null, name: string): string {
