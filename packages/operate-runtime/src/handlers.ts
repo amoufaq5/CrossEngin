@@ -118,6 +118,8 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         }
         body = applyLiteralDefaults(body, ctx.defaultPlans?.get(spec.entity) ?? []);
         body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
+        const createdAt = nowIso(ctx);
+        body = { created_at: createdAt, ...body, updated_at: createdAt };
         const createBlock = await guard(ctx, {
           operation: "create",
           entity: spec.entity,
@@ -131,7 +133,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         return json(201, await ctx.store.create(tenantId, spec.entity, body));
       }
       case "update": {
-        const patch = parsedBody ?? {};
+        const patch = { ...(parsedBody ?? {}), updated_at: nowIso(ctx) };
         if (ctx.writeGuards !== undefined && ctx.writeGuards.length > 0) {
           const before = await ctx.store.get(tenantId, spec.entity, id);
           if (before === null) return json(404, { error: "not_found" });
@@ -201,18 +203,24 @@ async function applyTransition(
       allowedFrom: t.fromStates,
     });
   }
+  const patch = { [t.stateField]: t.toState, updated_at: nowIso(ctx) };
   const block = await guard(ctx, {
     operation: "transition",
     entity: spec.entity,
     tenantId,
     id,
     before: record,
-    after: { ...record, [t.stateField]: t.toState },
+    after: { ...record, ...patch },
     store: ctx.store,
   });
   if (block !== null) return block;
-  const updated = await ctx.store.update(tenantId, spec.entity, id, { [t.stateField]: t.toState });
+  const updated = await ctx.store.update(tenantId, spec.entity, id, patch);
   return json(200, updated ?? record);
+}
+
+/** Current time as an ISO string, honoring an injected clock for deterministic tests. */
+function nowIso(ctx: HandlerContext): string {
+  return (ctx.clock?.now() ?? new Date()).toISOString();
 }
 
 /** Runs the configured write guards; returns a problem HandlerOutput on the first block, else null. */

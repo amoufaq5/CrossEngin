@@ -18,16 +18,38 @@ export interface InboxItem {
   readonly label: string;
   readonly state: string;
   readonly actions: readonly UiTransitionSchema[];
+  /** When the item began waiting (last update, falling back to creation); null if unknown. */
+  readonly waitingSince: string | null;
+  /** Milliseconds the item has been waiting, or null when no timestamp is available. */
+  readonly ageMs: number | null;
 }
 
-const PER_ENTITY_LIMIT = 100;
+const PER_ENTITY_LIMIT = 200;
+
+function waitingSinceOf(rec: Record<string, unknown>): string | null {
+  const u = rec["updated_at"];
+  if (typeof u === "string" && u.length > 0) return u;
+  const c = rec["created_at"];
+  return typeof c === "string" && c.length > 0 ? c : null;
+}
+
+/** Builds a list query that pushes the state filter server-side when the column is filterable. */
+function inboxQuery(spec: ReturnType<typeof inboxEntitySpecs>[number]): string {
+  const stateField = spec.entity.stateField;
+  const params = [`limit=${PER_ENTITY_LIMIT}`];
+  if (stateField !== null && spec.entity.filterableFields.includes(stateField) && spec.fromStates.length > 0) {
+    params.push(`${encodeURIComponent(stateField)}[in]=${spec.fromStates.map(encodeURIComponent).join(",")}`);
+  }
+  return `?${params.join("&")}`;
+}
 
 /**
  * Cross-department work queue: every record sitting in a state the viewer's role
- * can advance. One list call per actionable entity, filtered client-side to the
- * states with a fireable transition (so it works regardless of filterability).
+ * can advance. One list call per actionable entity — the state filter is pushed
+ * server-side when the column is filterable, and always re-checked client-side so
+ * the result is correct regardless. Sorted oldest-waiting first.
  */
-export async function fetchInbox(schema: UiSchema | null): Promise<readonly InboxItem[]> {
+export async function fetchInbox(schema: UiSchema | null, now: number = Date.now()): Promise<readonly InboxItem[]> {
   const specs = inboxEntitySpecs(schema);
   const items: InboxItem[] = [];
   const results = await Promise.all(
@@ -35,7 +57,7 @@ export async function fetchInbox(schema: UiSchema | null): Promise<readonly Inbo
       const stateField = spec.entity.stateField;
       if (stateField === null) return [] as InboxItem[];
       try {
-        const page = await listRecords(spec.entity.slug, `?limit=${PER_ENTITY_LIMIT}`);
+        const page = await listRecords(spec.entity.slug, inboxQuery(spec));
         const out: InboxItem[] = [];
         for (const rec of page.data) {
           const state = String(rec[stateField] ?? "");
@@ -44,7 +66,9 @@ export async function fetchInbox(schema: UiSchema | null): Promise<readonly Inbo
           if (actions.length === 0) continue;
           const id = String(rec["id"] ?? "");
           if (id === "") continue;
-          out.push({ entity: spec.entity, id, label: recordLabel(spec.entity, rec), state, actions });
+          const waitingSince = waitingSinceOf(rec);
+          const ageMs = waitingSince !== null ? Math.max(0, now - Date.parse(waitingSince)) : null;
+          out.push({ entity: spec.entity, id, label: recordLabel(spec.entity, rec), state, actions, waitingSince, ageMs });
         }
         return out;
       } catch {
@@ -54,7 +78,13 @@ export async function fetchInbox(schema: UiSchema | null): Promise<readonly Inbo
     }),
   );
   for (const batch of results) items.push(...batch);
-  items.sort((a, b) => a.entity.label.localeCompare(b.entity.label) || a.label.localeCompare(b.label));
+  // Oldest-waiting first; items without a timestamp sort last.
+  items.sort((a, b) => {
+    if (a.ageMs === null && b.ageMs === null) return a.entity.label.localeCompare(b.entity.label);
+    if (a.ageMs === null) return 1;
+    if (b.ageMs === null) return -1;
+    return b.ageMs - a.ageMs;
+  });
   return items;
 }
 
