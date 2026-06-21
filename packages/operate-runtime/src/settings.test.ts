@@ -39,6 +39,7 @@ describe("TenantSettingsSchema", () => {
         revenueAccountCode: "4000",
         apAccountCode: "2000",
         expenseAccountCode: "5000",
+        cashAccountCode: "1000",
       },
       features: { approvals_inbox: true, beta_reports: false },
     });

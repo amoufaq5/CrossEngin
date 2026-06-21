@@ -64,6 +64,8 @@ export const FinanceSettingsSchema = z
     apAccountCode: z.string().max(32).optional(),
     /** LedgerAccount.account_code mapped to expense (drives the AP↔GL bridge). */
     expenseAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code mapped to cash/bank (drives payment-time GL postings). */
+    cashAccountCode: z.string().max(32).optional(),
   })
   .strict();
 

@@ -569,3 +569,111 @@ export function billGlPostingEffect(config: BillGlConfig = {}): WriteEffect {
     });
   };
 }
+
+export interface PaymentGlConfig {
+  readonly entity: string;
+  readonly entryEntity?: string;
+  readonly lineEntity?: string;
+  readonly stateField?: string;
+  /** The state whose →edge triggers the posting (e.g. "paid" to settle, "sent" to recognize). */
+  readonly paidState?: string;
+  /** JournalEntry.source tag for the posting (e.g. "payment", "invoice"). */
+  readonly sourceValue?: string;
+  readonly numberField: string;
+  readonly totalField?: string;
+  readonly currencyField?: string;
+  readonly ledgerAccountEntity?: string;
+  readonly accountCodeField?: string;
+  /** Skip the posting when the document is of this type (e.g. a credit note isn't "paid" like an invoice). */
+  readonly skipDocumentType?: { readonly field: string; readonly value: string };
+  /** Resolves the debit + credit LedgerAccount codes for the payment (typically from settings). */
+  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ debit?: string; credit?: string }>;
+  readonly debitAccountRef: string;
+  readonly creditAccountRef: string;
+  readonly debitDescription: string;
+  readonly creditDescription: string;
+  readonly entrySuffix?: string;
+  readonly clock?: { now(): Date };
+}
+
+const PAYMENT_GL_FALLBACKS = {
+  entryEntity: "JournalEntry",
+  lineEntity: "JournalLine",
+  stateField: "state",
+  paidState: "paid",
+  sourceValue: "payment",
+  totalField: "total",
+  currencyField: "currency",
+  ledgerAccountEntity: "LedgerAccount",
+  accountCodeField: "account_code",
+  entrySuffix: "-PAY",
+} as const;
+
+/**
+ * Generic balanced GL posting on a document state edge: when a document reaches a
+ * target state, auto-posts a `JournalEntry` `<number><suffix>` with a debit and a
+ * credit line for the document total. Drives both invoice/bill recognition (→sent
+ * / →approved: debit AR / credit revenue, debit expense / credit AP) and cash
+ * settlement (→paid: debit cash / credit AR, debit AP / credit cash) by configuring
+ * the two accounts + `sourceValue`. Account codes resolve to real `LedgerAccount`
+ * ids (else placeholder refs). Fires once on the target-state edge, written through
+ * the store inside the same transaction (atomic, balanced by construction).
+ */
+export function paymentGlPostingEffect(config: PaymentGlConfig): WriteEffect {
+  const c = { ...PAYMENT_GL_FALLBACKS, ...config };
+  return async (input) => {
+    if (input.entity !== c.entity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    const wasPaid = input.before?.[c.stateField] === c.paidState;
+    const nowPaid = input.after[c.stateField] === c.paidState;
+    if (wasPaid || !nowPaid) return;
+    if (c.skipDocumentType !== undefined && input.after[c.skipDocumentType.field] === c.skipDocumentType.value) return;
+
+    const doc = input.after;
+    const docId = input.id;
+    if (docId === null) return;
+    const amount = num(doc[c.totalField]);
+    if (amount <= 0) return;
+
+    const now = c.clock?.now() ?? new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.slice(0, 10);
+    const docNumber = typeof doc[c.numberField] === "string" ? (doc[c.numberField] as string) : docId;
+    const currency = typeof doc[c.currencyField] === "string" ? (doc[c.currencyField] as string) : "USD";
+
+    const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
+    const debitAccount = (await resolveAccountId(input, c, codes.debit)) ?? c.debitAccountRef;
+    const creditAccount = (await resolveAccountId(input, c, codes.credit)) ?? c.creditAccountRef;
+
+    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+      entry_number: `${docNumber}${c.entrySuffix}`,
+      entry_date: today,
+      source: c.sourceValue,
+      state: "posted",
+      memo: `GL posting for ${docNumber}`,
+      posted_at: nowIso,
+      created_at: nowIso,
+      updated_at: nowIso,
+    });
+    const entryId = String(entry["id"]);
+    const baseLine = { journal_entry_id: entryId, currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
+    await input.store.create(input.tenantId, c.lineEntity, {
+      ...baseLine,
+      ledger_account_id: debitAccount,
+      description: c.debitDescription,
+      debit: amount,
+      credit: 0,
+      functional_debit: amount,
+      functional_credit: 0,
+    });
+    await input.store.create(input.tenantId, c.lineEntity, {
+      ...baseLine,
+      ledger_account_id: creditAccount,
+      description: c.creditDescription,
+      debit: 0,
+      credit: amount,
+      functional_debit: 0,
+      functional_credit: amount,
+    });
+  };
+}

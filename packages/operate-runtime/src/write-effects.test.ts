@@ -6,6 +6,7 @@ import {
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
+  paymentGlPostingEffect,
   runWriteEffects,
   type WriteEffectInput,
 } from "./write-effects.js";
@@ -314,6 +315,68 @@ describe("billGlPostingEffect (AP↔GL bridge)", () => {
     const store = new InMemoryEntityStore();
     const bill = await store.create(TENANT, "Bill", { state: "approved", total: 90 });
     await effect(approve(store, String(bill.id), bill)); // already approved → no-op
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+});
+
+describe("paymentGlPostingEffect", () => {
+  const invoicePay = paymentGlPostingEffect({
+    entity: "Invoice",
+    numberField: "invoice_number",
+    skipDocumentType: { field: "document_type", value: "credit_note" },
+    debitAccountRef: "cash",
+    creditAccountRef: "accounts_receivable",
+    debitDescription: "Payment — cash",
+    creditDescription: "Payment — AR",
+    clock,
+  });
+  const pay = (entity: string, eff: typeof invoicePay) => async (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
+    eff({ operation: "transition", entity, tenantId: TENANT, id, before, after: { ...before, state: "paid" }, store });
+
+  it("posts debit cash / credit AR when an invoice is paid", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-P", state: "sent", document_type: "invoice", total: 120 });
+    await pay("Invoice", invoicePay)(store, String(inv.id), inv);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    expect(entry.entry_number).toBe("INV-P-PAY");
+    expect(entry.source).toBe("payment");
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => Number(l.debit) > 0)!.ledger_account_id).toBe("cash");
+    expect(lines.find((l) => Number(l.credit) > 0)!.ledger_account_id).toBe("accounts_receivable");
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(120);
+    expect(lines.reduce((s, l) => s + Number(l.credit), 0)).toBe(120);
+  });
+
+  it("skips a credit note reaching paid (only real invoices settle to cash)", async () => {
+    const store = new InMemoryEntityStore();
+    const cn = await store.create(TENANT, "Invoice", { invoice_number: "CN-P", state: "sent", document_type: "credit_note", total: 50 });
+    await pay("Invoice", invoicePay)(store, String(cn.id), cn);
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+
+  it("posts debit AP / credit cash when a bill is paid", async () => {
+    const billPay = paymentGlPostingEffect({
+      entity: "Bill",
+      numberField: "bill_number",
+      debitAccountRef: "accounts_payable",
+      creditAccountRef: "cash",
+      debitDescription: "Payment — AP",
+      creditDescription: "Payment — cash",
+      clock,
+    });
+    const store = new InMemoryEntityStore();
+    const bill = await store.create(TENANT, "Bill", { bill_number: "BILL-P", state: "approved", total: 80 });
+    await pay("Bill", billPay)(store, String(bill.id), bill);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => Number(l.debit) > 0)!.ledger_account_id).toBe("accounts_payable");
+    expect(lines.find((l) => Number(l.credit) > 0)!.ledger_account_id).toBe("cash");
+  });
+
+  it("does nothing unless the document moves into paid", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-Q", state: "paid", document_type: "invoice", total: 10 });
+    await pay("Invoice", invoicePay)(store, String(inv.id), inv);
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 });
