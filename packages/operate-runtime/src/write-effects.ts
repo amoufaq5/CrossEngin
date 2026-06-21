@@ -466,3 +466,106 @@ async function resolveAccountId(
   const rec = page.records.find((r) => String(r[c.accountCodeField] ?? "") === code) ?? page.records[0];
   return rec !== undefined ? String(rec["id"]) : null;
 }
+
+export interface BillGlConfig {
+  readonly billEntity?: string;
+  readonly entryEntity?: string;
+  readonly lineEntity?: string;
+  readonly stateField?: string;
+  readonly approvedState?: string;
+  readonly numberField?: string;
+  readonly totalField?: string;
+  readonly currencyField?: string;
+  readonly ledgerAccountEntity?: string;
+  readonly accountCodeField?: string;
+  /** Resolves the tenant's AP/expense LedgerAccount codes (typically from settings). */
+  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ ap?: string; expense?: string }>;
+  readonly apAccountRef?: string;
+  readonly expenseAccountRef?: string;
+  readonly clock?: { now(): Date };
+}
+
+const BILL_GL_DEFAULTS = {
+  billEntity: "Bill",
+  entryEntity: "JournalEntry",
+  lineEntity: "JournalLine",
+  stateField: "state",
+  approvedState: "approved",
+  numberField: "bill_number",
+  totalField: "total",
+  currencyField: "currency",
+  ledgerAccountEntity: "LedgerAccount",
+  accountCodeField: "account_code",
+  apAccountRef: "accounts_payable",
+  expenseAccountRef: "expense",
+} as const;
+
+/**
+ * AP↔GL bridge: when a vendor bill is approved (draft→approved), auto-posts the
+ * payable recognition — a posted `JournalEntry` numbered `<bill>-GL` with two
+ * balanced lines (debit expense, credit AP) for the bill total. AP and expense
+ * lines use the tenant's configured chart-of-accounts entries
+ * (`finance.apAccountCode` / `expenseAccountCode` resolved to `LedgerAccount`
+ * ids), falling back to placeholder refs when unconfigured. The symmetric AR-side
+ * counterpart of `creditNoteGlPostingEffect`. Fires only when the manifest models
+ * a GL; written directly through the store (balanced by construction) inside the
+ * approval transaction, so the bill and its GL entry move atomically.
+ */
+export function billGlPostingEffect(config: BillGlConfig = {}): WriteEffect {
+  const c = { ...BILL_GL_DEFAULTS, ...config };
+  return async (input) => {
+    if (input.entity !== c.billEntity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    const wasApproved = input.before?.[c.stateField] === c.approvedState;
+    const nowApproved = input.after[c.stateField] === c.approvedState;
+    if (wasApproved || !nowApproved) return; // fire once, on the →approved edge
+
+    const bill = input.after;
+    const billId = input.id;
+    if (billId === null) return;
+    const amount = num(bill[c.totalField]);
+    if (amount <= 0) return;
+
+    const now = c.clock?.now() ?? new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.slice(0, 10);
+    const billNumber = typeof bill[c.numberField] === "string" ? (bill[c.numberField] as string) : billId;
+    const currency = typeof bill[c.currencyField] === "string" ? (bill[c.currencyField] as string) : "USD";
+
+    const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
+    const apAccount = (await resolveAccountId(input, c, codes.ap)) ?? c.apAccountRef;
+    const expenseAccount = (await resolveAccountId(input, c, codes.expense)) ?? c.expenseAccountRef;
+
+    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+      entry_number: `${billNumber}-GL`,
+      entry_date: today,
+      source: "bill",
+      state: "posted",
+      memo: `Bill GL posting for ${billNumber}`,
+      posted_at: nowIso,
+      created_at: nowIso,
+      updated_at: nowIso,
+    });
+    const entryId = String(entry["id"]);
+    const baseLine = { journal_entry_id: entryId, currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
+    // Recognize the payable: debit expense, credit AP — balanced by construction.
+    await input.store.create(input.tenantId, c.lineEntity, {
+      ...baseLine,
+      ledger_account_id: expenseAccount,
+      description: "Bill — expense",
+      debit: amount,
+      credit: 0,
+      functional_debit: amount,
+      functional_credit: 0,
+    });
+    await input.store.create(input.tenantId, c.lineEntity, {
+      ...baseLine,
+      ledger_account_id: apAccount,
+      description: "Bill — accounts payable",
+      debit: 0,
+      credit: amount,
+      functional_debit: 0,
+      functional_credit: amount,
+    });
+  };
+}

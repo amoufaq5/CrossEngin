@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { InMemoryEntityStore } from "./store.js";
 import {
+  billGlPostingEffect,
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
@@ -275,6 +276,45 @@ describe("creditNoteGlPostingEffect (AR↔GL bridge)", () => {
     const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
     expect(lines.find((l) => Number(l.credit) > 0)!.ledger_account_id).toBe("accounts_receivable");
     expect(lines.find((l) => Number(l.debit) > 0)!.ledger_account_id).toBe("revenue");
+  });
+});
+
+describe("billGlPostingEffect (AP↔GL bridge)", () => {
+  const effect = billGlPostingEffect({ clock });
+  const approve = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>): WriteEffectInput =>
+    ({ operation: "transition", entity: "Bill", tenantId: TENANT, id, before, after: { ...before, state: "approved" }, store });
+
+  it("posts a balanced debit-expense / credit-AP entry on bill approval", async () => {
+    const store = new InMemoryEntityStore();
+    const bill = await store.create(TENANT, "Bill", { bill_number: "BILL-77", state: "draft", currency: "USD", total: 300 });
+    await effect(approve(store, String(bill.id), bill));
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    expect(entry.entry_number).toBe("BILL-77-GL");
+    expect(entry.state).toBe("posted");
+    expect(entry.source).toBe("bill");
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(300);
+    expect(lines.reduce((s, l) => s + Number(l.credit), 0)).toBe(300);
+  });
+
+  it("resolves AP/expense codes to real LedgerAccount ids", async () => {
+    const store = new InMemoryEntityStore();
+    const ap = await store.create(TENANT, "LedgerAccount", { account_code: "2000", name: "AP" });
+    const exp = await store.create(TENANT, "LedgerAccount", { account_code: "5000", name: "Expense" });
+    const bill = await store.create(TENANT, "Bill", { bill_number: "BILL-78", state: "draft", total: 90 });
+    const resolving = billGlPostingEffect({ clock, resolveAccountCodes: async () => ({ ap: "2000", expense: "5000" }) });
+    await resolving(approve(store, String(bill.id), bill));
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => Number(l.debit) > 0)!.ledger_account_id).toBe(String(exp.id));
+    expect(lines.find((l) => Number(l.credit) > 0)!.ledger_account_id).toBe(String(ap.id));
+  });
+
+  it("does nothing unless the bill moves into approved", async () => {
+    const store = new InMemoryEntityStore();
+    const bill = await store.create(TENANT, "Bill", { state: "approved", total: 90 });
+    await effect(approve(store, String(bill.id), bill)); // already approved → no-op
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 });
 

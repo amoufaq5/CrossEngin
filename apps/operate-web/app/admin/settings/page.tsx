@@ -193,9 +193,11 @@ export default function SettingsPage() {
               <Toggle label="Prices include tax" checked={finance.pricesIncludeTax === "true"} onChange={(b) => setD(setFinance, "pricesIncludeTax", b ? "true" : "")} />
               <Text label="AR account code" value={finance.arAccountCode ?? ""} onChange={(v) => setD(setFinance, "arAccountCode", v)} />
               <Text label="Revenue account code" value={finance.revenueAccountCode ?? ""} onChange={(v) => setD(setFinance, "revenueAccountCode", v)} />
+              <Text label="AP account code" value={finance.apAccountCode ?? ""} onChange={(v) => setD(setFinance, "apAccountCode", v)} />
+              <Text label="Expense account code" value={finance.expenseAccountCode ?? ""} onChange={(v) => setD(setFinance, "expenseAccountCode", v)} />
             </div>
             <p className="mt-3 text-xs text-ink-faint">
-              AR &amp; revenue account codes map to your chart of accounts (LedgerAccount) and drive the GL entry posted when a credit note is issued.
+              Account codes map to your chart of accounts (LedgerAccount): AR &amp; revenue drive the GL entry posted on credit-note issuance; AP &amp; expense drive the entry posted when a vendor bill is approved.
             </p>
           </Section>
 
@@ -342,6 +344,8 @@ function buildFinance(f: StrMap): Record<string, unknown> {
   if (f.pricesIncludeTax === "true") out.pricesIncludeTax = true;
   if (f.arAccountCode?.trim()) out.arAccountCode = f.arAccountCode.trim();
   if (f.revenueAccountCode?.trim()) out.revenueAccountCode = f.revenueAccountCode.trim();
+  if (f.apAccountCode?.trim()) out.apAccountCode = f.apAccountCode.trim();
+  if (f.expenseAccountCode?.trim()) out.expenseAccountCode = f.expenseAccountCode.trim();
   return out;
 }
 

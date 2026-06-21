@@ -36,6 +36,7 @@ import {
   type WriteGuard,
 } from "./write-guards.js";
 import {
+  billGlPostingEffect,
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
@@ -214,6 +215,25 @@ function defaultWriteEffects(
         }),
       );
     }
+  }
+  // AP↔GL bridge: post the payable recognition when a vendor bill is approved.
+  if (names.has("Bill") && names.has("JournalEntry") && names.has("JournalLine") && names.has("LedgerAccount")) {
+    effects.push(
+      billGlPostingEffect({
+        ...(clock !== undefined ? { clock } : {}),
+        ...(settingsStore !== undefined
+          ? {
+              resolveAccountCodes: async (tenantId) => {
+                const finance = (await settingsStore.get(tenantId)).finance;
+                return {
+                  ...(finance?.apAccountCode !== undefined ? { ap: finance.apAccountCode } : {}),
+                  ...(finance?.expenseAccountCode !== undefined ? { expense: finance.expenseAccountCode } : {}),
+                };
+              },
+            }
+          : {}),
+      }),
+    );
   }
   return effects;
 }

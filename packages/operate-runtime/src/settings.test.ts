@@ -37,6 +37,8 @@ describe("TenantSettingsSchema", () => {
         defaultTaxJurisdiction: "AE-VAT",
         arAccountCode: "1100",
         revenueAccountCode: "4000",
+        apAccountCode: "2000",
+        expenseAccountCode: "5000",
       },
       features: { approvals_inbox: true, beta_reports: false },
     });
