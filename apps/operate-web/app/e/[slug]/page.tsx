@@ -8,7 +8,7 @@ import { FieldInput } from "@/components/FieldInput";
 import { Topbar } from "@/components/Topbar";
 import { createRecord, listRecords, type ListResult } from "@/lib/api";
 import { formatCell } from "@/lib/format";
-import { entityBySlug, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
+import { canAccess, entityBySlug, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
 
 function cellKind(field: UiFieldSchema | undefined): string | undefined {
   if (field === undefined) return undefined;
@@ -45,7 +45,10 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<{ field: string; order: "asc" | "desc" } | null>(null);
   const [filters, setFilters] = useState<Record<string, string>>({});
-  const [showNew, setShowNew] = useState(false);
+  const canCreate = canAccess(schema, entity, "create");
+  const [showNew, setShowNew] = useState(
+    () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
+  );
 
   const fieldByName = useMemo(() => {
     const m = new Map<string, UiFieldSchema>();
@@ -116,15 +119,17 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
           <button onClick={load} className="rounded-lg border border-line px-3 py-2 text-sm text-ink-muted hover:bg-surface-soft">
             Refresh
           </button>
-          <button
-            onClick={() => setShowNew((s) => !s)}
-            className="ml-auto rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600"
-          >
-            {showNew ? "Close" : `New ${entity.singular}`}
-          </button>
+          {canCreate && (
+            <button
+              onClick={() => setShowNew((s) => !s)}
+              className="ml-auto rounded-lg bg-brand px-4 py-2 text-sm font-semibold text-white hover:bg-brand-600"
+            >
+              {showNew ? "Close" : `New ${entity.singular}`}
+            </button>
+          )}
         </div>
 
-        {showNew && (
+        {showNew && canCreate && (
           <CreateForm
             entity={entity}
             onDone={() => {

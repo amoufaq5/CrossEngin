@@ -71,4 +71,24 @@ describe("buildUiSchema", () => {
       expect(e.listColumns.length).toBeLessThanOrEqual(7);
     }
   });
+
+  it("exposes per-entity access roles from manifest permissions", () => {
+    const inv = entity("Invoice");
+    expect(inv.access.read).toContain("erp_admin");
+    // A cashier-style role must not appear on a finance entity it can't see.
+    expect(inv.access.read).not.toContain("warehouse_clerk");
+    const tax = entity("TaxReturn");
+    expect(tax.access.create).toContain("tax_manager");
+  });
+
+  it("carries the roles catalog with labels", () => {
+    const tax = schema.roles.find((r) => r.name === "tax_manager");
+    expect(tax?.label).toBe("Tax Manager");
+    expect(schema.roles.length).toBe(Object.keys(buildErpCorePack().roles ?? {}).length);
+  });
+
+  it("tags each lifecycle transition with the roles that may fire it", () => {
+    const file = entity("TaxReturn").transitions.find((t) => t.name === "file");
+    expect(file?.roles).toContain("tax_manager");
+  });
 });

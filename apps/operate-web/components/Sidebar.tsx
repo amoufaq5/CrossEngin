@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 
-import { groupByModule, useSchema } from "@/lib/schema";
+import { accessibleEntities, groupByModule, roleLabel, useSchema } from "@/lib/schema";
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -13,7 +13,7 @@ export function Sidebar() {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
   const groups = useMemo(() => {
-    const all = schema?.entities ?? [];
+    const all = accessibleEntities(schema);
     const needle = q.trim().toLowerCase();
     const filtered =
       needle === ""
@@ -23,6 +23,7 @@ export function Sidebar() {
   }, [schema, q]);
 
   const searching = q.trim() !== "";
+  const primaryRole = schema?.viewer?.primaryRole;
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-line bg-white">
@@ -32,7 +33,13 @@ export function Sidebar() {
         </span>
         <div className="leading-tight">
           <div className="text-sm font-bold text-ink">CrossEngin</div>
-          <div className="text-[11px] font-medium uppercase tracking-wider text-brand-600">Operate</div>
+          {primaryRole ? (
+            <div className="text-[11px] font-medium text-brand-600" title="Your role">
+              {roleLabel(schema, primaryRole)}
+            </div>
+          ) : (
+            <div className="text-[11px] font-medium uppercase tracking-wider text-brand-600">Operate</div>
+          )}
         </div>
       </div>
 
