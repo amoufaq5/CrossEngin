@@ -60,6 +60,10 @@ export const FinanceSettingsSchema = z
     arAccountCode: z.string().max(32).optional(),
     /** LedgerAccount.account_code mapped to sales revenue (drives the AR↔GL bridge). */
     revenueAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code mapped to accounts-payable (drives the AP↔GL bridge). */
+    apAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code mapped to expense (drives the AP↔GL bridge). */
+    expenseAccountCode: z.string().max(32).optional(),
   })
   .strict();
 
