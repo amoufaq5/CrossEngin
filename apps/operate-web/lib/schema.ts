@@ -32,6 +32,15 @@ export interface UiTransitionSchema {
   readonly stateField: string;
   readonly from: readonly string[];
   readonly to: string;
+  readonly roles: readonly string[];
+}
+
+export interface UiEntityAccess {
+  readonly list: readonly string[];
+  readonly read: readonly string[];
+  readonly create: readonly string[];
+  readonly update: readonly string[];
+  readonly delete: readonly string[];
 }
 
 export interface UiEntitySchema {
@@ -40,6 +49,7 @@ export interface UiEntitySchema {
   readonly label: string;
   readonly singular: string;
   readonly module: string;
+  readonly access: UiEntityAccess;
   readonly fields: readonly UiFieldSchema[];
   readonly listColumns: readonly string[];
   readonly sortableFields: readonly string[];
@@ -49,9 +59,22 @@ export interface UiEntitySchema {
   readonly operationIds: Record<"list" | "read" | "create" | "update" | "delete", string>;
 }
 
+export interface UiRoleSchema {
+  readonly name: string;
+  readonly label: string;
+  readonly description?: string;
+}
+
+export interface UiViewer {
+  readonly primaryRole: string;
+  readonly roles: readonly string[];
+}
+
 export interface UiSchema {
   readonly entities: readonly UiEntitySchema[];
+  readonly roles: readonly UiRoleSchema[];
   readonly generatedAt: string;
+  readonly viewer?: UiViewer;
 }
 
 let cache: UiSchema | null = null;
@@ -141,6 +164,54 @@ export const DEPARTMENT_ORDER: readonly string[] = [
   "Clinical",
   "General",
 ];
+
+// ---- Role-based access -------------------------------------------------------
+
+export type AccessOp = "list" | "read" | "create" | "update" | "delete";
+
+/** The roles the current viewer holds; empty when unauthenticated (dev fallback → show all). */
+export function viewerRoles(schema: UiSchema | null): readonly string[] {
+  return schema?.viewer?.roles ?? [];
+}
+
+function intersects(a: readonly string[], b: readonly string[]): boolean {
+  return a.some((x) => b.includes(x));
+}
+
+/** Can the viewer perform `op` on this entity? With no viewer (dev mode), everything is visible. */
+export function canAccess(schema: UiSchema | null, entity: UiEntitySchema, op: AccessOp = "read"): boolean {
+  const roles = viewerRoles(schema);
+  if (roles.length === 0) return true;
+  return intersects(roles, entity.access[op]);
+}
+
+/** Entities the viewer may at least read, preserving schema order. */
+export function accessibleEntities(schema: UiSchema | null): readonly UiEntitySchema[] {
+  if (schema === null) return [];
+  return schema.entities.filter((e) => canAccess(schema, e, "read") || canAccess(schema, e, "list"));
+}
+
+/** Lifecycle transitions the viewer's role may fire, across all readable entities. */
+export interface ViewerAction {
+  readonly entity: UiEntitySchema;
+  readonly transition: UiTransitionSchema;
+}
+
+export function viewerActions(schema: UiSchema | null): readonly ViewerAction[] {
+  const roles = viewerRoles(schema);
+  const out: ViewerAction[] = [];
+  for (const e of accessibleEntities(schema)) {
+    for (const t of e.transitions) {
+      if (roles.length === 0 || intersects(roles, t.roles)) out.push({ entity: e, transition: t });
+    }
+  }
+  return out;
+}
+
+export function roleLabel(schema: UiSchema | null, name: string): string {
+  const r = schema?.roles.find((x) => x.name === name);
+  return r?.label ?? name.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 export interface DepartmentGroup {
   readonly module: string;

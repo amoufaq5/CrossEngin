@@ -36,6 +36,15 @@ export interface UiTransitionSchema {
   readonly stateField: string;
   readonly from: readonly string[];
   readonly to: string;
+  readonly roles: readonly string[];
+}
+
+export interface UiEntityAccess {
+  readonly list: readonly string[];
+  readonly read: readonly string[];
+  readonly create: readonly string[];
+  readonly update: readonly string[];
+  readonly delete: readonly string[];
 }
 
 export interface UiEntitySchema {
@@ -45,6 +54,8 @@ export interface UiEntitySchema {
   readonly singular: string;
   /** Functional department this entity belongs to (UI grouping). */
   readonly module: string;
+  /** Roles permitted per operation (drives role-based navigation + dashboards). */
+  readonly access: UiEntityAccess;
   readonly fields: readonly UiFieldSchema[];
   readonly listColumns: readonly string[];
   readonly sortableFields: readonly string[];
@@ -60,9 +71,22 @@ export interface UiEntitySchema {
   };
 }
 
+export interface UiRoleSchema {
+  readonly name: string;
+  readonly label: string;
+  readonly description?: string;
+}
+
+export interface UiViewer {
+  readonly primaryRole: string;
+  readonly roles: readonly string[];
+}
+
 export interface UiSchema {
   readonly entities: readonly UiEntitySchema[];
+  readonly roles: readonly UiRoleSchema[];
   readonly generatedAt: string;
+  readonly viewer?: UiViewer;
 }
 
 function titleCase(s: string): string {
@@ -128,10 +152,29 @@ function pickListColumns(entity: Entity, configColumns: readonly string[]): read
   return chosen.length > 0 ? chosen : names.slice(0, 6);
 }
 
-function transitionsFor(manifest: Manifest, entityName: string): {
+function rolesFor(grant: { roles?: readonly string[] } | undefined): readonly string[] {
+  return grant?.roles ? [...grant.roles] : [];
+}
+
+function accessFor(manifest: Manifest, entityName: string): UiEntityAccess {
+  const perms = (manifest.permissions ?? {})[entityName];
+  return {
+    list: rolesFor(perms?.list),
+    read: rolesFor(perms?.read),
+    create: rolesFor(perms?.create),
+    update: rolesFor(perms?.update),
+    delete: rolesFor(perms?.delete),
+  };
+}
+
+function transitionsFor(
+  manifest: Manifest,
+  entityName: string,
+): {
   stateField: string | null;
   transitions: UiTransitionSchema[];
 } {
+  const perms = (manifest.permissions ?? {})[entityName];
   const transitions: UiTransitionSchema[] = [];
   let stateField: string | null = null;
   for (const wf of Object.values(manifest.workflows ?? {})) {
@@ -145,6 +188,7 @@ function transitionsFor(manifest: Manifest, entityName: string): {
         stateField: wf.stateField,
         from: Array.isArray(t.from) ? [...t.from] : [t.from],
         to: t.to,
+        roles: rolesFor(perms?.transitions?.[t.name]),
       });
     }
   }
@@ -164,6 +208,7 @@ export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSch
       label: pluralLabel(entity.name),
       singular: titleCase(entity.name.replace(/([a-z0-9])([A-Z])/g, "$1 $2")),
       module: entity.module ?? "General",
+      access: accessFor(manifest, entity.name),
       fields: entity.fields.map(uiField),
       listColumns: pickListColumns(entity, []),
       sortableFields: [...config.sortableFields],
@@ -180,7 +225,14 @@ export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSch
     });
   }
   entities.sort((a, b) => a.label.localeCompare(b.label));
-  return { entities, generatedAt: now.toISOString() };
+  const roles: UiRoleSchema[] = Object.entries(manifest.roles ?? {})
+    .map(([name, def]) => ({
+      name,
+      label: def.label?.en ?? titleCase(name),
+      ...(def.description !== undefined ? { description: def.description } : {}),
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+  return { entities, roles, generatedAt: now.toISOString() };
 }
 
 function json(status: number, body: unknown): HandlerOutput {
@@ -198,6 +250,9 @@ export function buildUiSchemaHandler(ctx: UiSchemaContext): Handler {
     if ((principal?.tenantId ?? null) === null) {
       return Promise.resolve(json(401, { error: "tenant_required" }));
     }
-    return Promise.resolve(json(200, ctx.schema));
+    const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
+    const all = [primaryRole, ...(secondaryRoles ?? [])].map((r) => String(r)).filter((r) => r.length > 0);
+    const viewer: UiViewer = { primaryRole: String(primaryRole), roles: [...new Set(all)] };
+    return Promise.resolve(json(200, { ...ctx.schema, viewer }));
   };
 }
