@@ -29,6 +29,7 @@ import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.
 import { literalDefaultPlans, type LiteralDefaultPlan } from "./defaults.js";
 import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { planHasSettingsDefaults, settingsDefaultPlan, type SettingsDefaultPlan } from "./settings-defaults.js";
+import { journalPostingGuard, type WriteGuard } from "./write-guards.js";
 import type { SettingsStore } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -45,6 +46,8 @@ export interface OperateRuntimeOptions {
   readonly settingsStore?: SettingsStore;
   /** Roles permitted to read/write tenant settings. Defaults to {"erp_admin"}. */
   readonly adminRoles?: readonly RoleName[];
+  /** Runtime data invariants checked before each write (e.g. balanced journal postings). */
+  readonly writeGuards?: readonly WriteGuard[];
   readonly clock?: { now(): Date };
 }
 
@@ -92,6 +95,14 @@ function buildDefaultPlans(manifest: Manifest): Map<string, readonly LiteralDefa
   return plans;
 }
 
+/** Guards inferred from the manifest's shape; opt out by passing `writeGuards: []`. */
+function defaultWriteGuards(manifest: Manifest): readonly WriteGuard[] {
+  const names = new Set((manifest.entities ?? []).map((e) => e.name));
+  const guards: WriteGuard[] = [];
+  if (names.has("JournalEntry") && names.has("JournalLine")) guards.push(journalPostingGuard());
+  return guards;
+}
+
 function buildSettingsDefaultPlans(manifest: Manifest): Map<string, SettingsDefaultPlan> {
   const plans = new Map<string, SettingsDefaultPlan>();
   for (const entity of manifest.entities ?? []) {
@@ -129,6 +140,7 @@ export function compileOperateServer(
     sequencePlans: buildSequencePlans(manifest),
     defaultPlans: buildDefaultPlans(manifest),
     settingsDefaultPlans: buildSettingsDefaultPlans(manifest),
+    writeGuards: options.writeGuards ?? defaultWriteGuards(manifest),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),

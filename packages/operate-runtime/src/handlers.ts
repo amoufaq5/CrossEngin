@@ -13,6 +13,7 @@ import { applyLiteralDefaults, type LiteralDefaultPlan } from "./defaults.js";
 import { applySequenceDefaults, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { applySettingsDefaults, type SettingsDefaultPlan } from "./settings-defaults.js";
 import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from "./settings.js";
+import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { projectRecord, type EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
@@ -37,6 +38,8 @@ export interface HandlerContext {
   readonly defaultPlans?: ReadonlyMap<string, readonly LiteralDefaultPlan[]>;
   /** Per-entity settings-driven default plans (currency, payment terms), keyed by entity name. */
   readonly settingsDefaultPlans?: ReadonlyMap<string, SettingsDefaultPlan>;
+  /** Runtime data invariants (e.g. balanced journal postings) checked before each write. */
+  readonly writeGuards?: readonly WriteGuard[];
   /** Lets tenant settings override a sequence's format/start/resetPeriod at runtime. */
   readonly settingsStore?: SettingsStore;
   readonly clock?: { now(): Date };
@@ -115,10 +118,35 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         }
         body = applyLiteralDefaults(body, ctx.defaultPlans?.get(spec.entity) ?? []);
         body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
+        const createBlock = await guard(ctx, {
+          operation: "create",
+          entity: spec.entity,
+          tenantId,
+          id: null,
+          before: null,
+          after: body,
+          store: ctx.store,
+        });
+        if (createBlock !== null) return createBlock;
         return json(201, await ctx.store.create(tenantId, spec.entity, body));
       }
       case "update": {
-        const record = await ctx.store.update(tenantId, spec.entity, id, parsedBody ?? {});
+        const patch = parsedBody ?? {};
+        if (ctx.writeGuards !== undefined && ctx.writeGuards.length > 0) {
+          const before = await ctx.store.get(tenantId, spec.entity, id);
+          if (before === null) return json(404, { error: "not_found" });
+          const updateBlock = await guard(ctx, {
+            operation: "update",
+            entity: spec.entity,
+            tenantId,
+            id,
+            before,
+            after: { ...before, ...patch },
+            store: ctx.store,
+          });
+          if (updateBlock !== null) return updateBlock;
+        }
+        const record = await ctx.store.update(tenantId, spec.entity, id, patch);
         return record === null ? json(404, { error: "not_found" }) : json(200, record);
       }
       case "delete": {
@@ -173,6 +201,27 @@ async function applyTransition(
       allowedFrom: t.fromStates,
     });
   }
+  const block = await guard(ctx, {
+    operation: "transition",
+    entity: spec.entity,
+    tenantId,
+    id,
+    before: record,
+    after: { ...record, [t.stateField]: t.toState },
+    store: ctx.store,
+  });
+  if (block !== null) return block;
   const updated = await ctx.store.update(tenantId, spec.entity, id, { [t.stateField]: t.toState });
   return json(200, updated ?? record);
+}
+
+/** Runs the configured write guards; returns a problem HandlerOutput on the first block, else null. */
+async function guard(
+  ctx: HandlerContext,
+  input: Parameters<WriteGuard>[0],
+): Promise<HandlerOutput | null> {
+  if (ctx.writeGuards === undefined || ctx.writeGuards.length === 0) return null;
+  const block = await runWriteGuards(ctx.writeGuards, input);
+  if (block === null) return null;
+  return json(block.status, { error: block.error, ...(block.detail !== undefined ? { detail: block.detail } : {}) });
 }
