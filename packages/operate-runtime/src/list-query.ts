@@ -38,11 +38,38 @@ interface ListViewLike {
   readonly columns?: ReadonlyArray<{ field: string; sortable?: boolean; filterable?: boolean; hidden?: boolean }>;
 }
 
+interface LifecycleLike {
+  readonly kind: string;
+  readonly entity: string;
+  readonly stateField: string;
+}
+
+/** The lifecycle `stateField` for an entity, if a workflow declares one. */
+function lifecycleStateField(manifest: Manifest, entity: string): string | null {
+  for (const wf of Object.values(manifest.workflows ?? {}) as ReadonlyArray<LifecycleLike>) {
+    if (wf.kind === "entityLifecycle" && wf.entity === entity) return wf.stateField;
+  }
+  return null;
+}
+
+/** Ensures the lifecycle state field is filterable so the work-queue inbox can push `?state[in]=…` server-side. */
+function withLifecycleStateFilter(
+  manifest: Manifest,
+  entity: string,
+  filterableFields: readonly string[],
+): readonly string[] {
+  const sf = lifecycleStateField(manifest, entity);
+  if (sf === null || filterableFields.includes(sf)) return filterableFields;
+  return [...filterableFields, sf];
+}
+
 /**
  * Derives the `ListConfig` for an entity from the first `ListView` in the
  * manifest that targets it: default page size + default sort + the set of
  * sortable / filterable column fields. With no matching view, lists still
- * paginate at the default size but expose no sort/filter surface.
+ * paginate at the default size but expose no sort/filter surface — except the
+ * lifecycle `stateField`, which is always filterable so the inbox's work-queue
+ * filter is pushed into SQL rather than scanned client-side.
  */
 export function listConfigForEntity(manifest: Manifest, entity: string): ListConfig {
   const views = Object.values(manifest.views ?? {}) as ReadonlyArray<ListViewLike>;
@@ -53,7 +80,7 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
       maxLimit: MAX_PAGE_SIZE,
       defaultSort: [],
       sortableFields: [],
-      filterableFields: [],
+      filterableFields: withLifecycleStateFilter(manifest, entity, []),
     };
   }
   const columns = view.columns ?? [];
@@ -65,7 +92,7 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
     maxLimit: MAX_PAGE_SIZE,
     defaultSort,
     sortableFields,
-    filterableFields,
+    filterableFields: withLifecycleStateFilter(manifest, entity, filterableFields),
   };
 }
 

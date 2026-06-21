@@ -212,6 +212,61 @@ describe("lockedDocumentGuard — filed tax return", () => {
   });
 });
 
+describe("lockedDocumentGuard — committed sales / purchase orders", () => {
+  const store = new InMemoryEntityStore();
+  const so = lockedDocumentGuard({
+    entity: "SalesOrder",
+    lockedStates: ["confirmed", "fulfilled", "invoiced", "closed", "placed", "returned"],
+    childEntity: "SalesOrderLine",
+    childParentField: "sales_order_id",
+    lockedError: "sales_order_locked",
+    childLockedError: "sales_order_locked_lines",
+  });
+  const po = lockedDocumentGuard({
+    entity: "PurchaseOrder",
+    lockedStates: ["submitted", "approved", "received", "closed"],
+    childEntity: "PurchaseOrderLine",
+    childParentField: "purchase_order_id",
+    lockedError: "purchase_order_locked",
+    childLockedError: "purchase_order_locked_lines",
+  });
+  const inp = (entity: string, op: WriteGuardInput["operation"], before: Record<string, unknown>, after: Record<string, unknown>): WriteGuardInput =>
+    ({ operation: op, entity, tenantId: TENANT, id: "x1", before, after, store });
+
+  it("allows editing a draft order, blocks editing/deleting a committed one", async () => {
+    expect(await so(inp("SalesOrder", "update", { state: "draft" }, { state: "draft", total: 5 }))).toBeNull();
+    expect((await so(inp("SalesOrder", "update", { state: "confirmed" }, { state: "confirmed", total: 9 })))?.error).toBe("sales_order_locked");
+    expect((await po(inp("PurchaseOrder", "delete", { state: "approved" }, { state: "approved" })))?.error).toBe("purchase_order_locked");
+  });
+
+  it("allows lifecycle transitions (e.g. cancel) on a committed order", async () => {
+    expect(await so(inp("SalesOrder", "transition", { state: "confirmed" }, { state: "cancelled" }))).toBeNull();
+    expect(await po(inp("PurchaseOrder", "transition", { state: "approved" }, { state: "cancelled" }))).toBeNull();
+  });
+
+  it("locks the lines of a committed order", async () => {
+    const s = new InMemoryEntityStore();
+    const order = await s.create(TENANT, "PurchaseOrder", { state: "approved" });
+    const g = lockedDocumentGuard({
+      entity: "PurchaseOrder",
+      lockedStates: ["approved"],
+      childEntity: "PurchaseOrderLine",
+      childParentField: "purchase_order_id",
+      childLockedError: "purchase_order_locked_lines",
+    });
+    const line: WriteGuardInput = {
+      operation: "update",
+      entity: "PurchaseOrderLine",
+      tenantId: TENANT,
+      id: "pl1",
+      before: { purchase_order_id: String(order.id), qty: 1 },
+      after: { purchase_order_id: String(order.id), qty: 2 },
+      store: s,
+    };
+    expect((await g(line))?.error).toBe("purchase_order_locked_lines");
+  });
+});
+
 describe("runWriteGuards", () => {
   it("returns the first block and short-circuits", async () => {
     const calls: string[] = [];
