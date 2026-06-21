@@ -6,8 +6,12 @@ import { useState } from "react";
 import { Badge } from "@/components/Badge";
 import { Topbar } from "@/components/Topbar";
 import { runTransition } from "@/lib/api";
+import { formatAge } from "@/lib/format";
 import { useInbox, type InboxItem } from "@/lib/inbox";
 import { roleLabel, useSchema } from "@/lib/schema";
+
+/** Items older than this are visually flagged as overdue. */
+const STALE_MS = 3 * 24 * 60 * 60 * 1000;
 
 export default function InboxPage() {
   const { schema } = useSchema();
@@ -93,6 +97,7 @@ export default function InboxPage() {
               <div className="overflow-hidden rounded-xl border border-line bg-white">
                 {list.map((item, i) => {
                   const key = `${item.entity.slug}/${item.id}`;
+                  const stale = item.ageMs !== null && item.ageMs >= STALE_MS;
                   return (
                     <div
                       key={key}
@@ -105,6 +110,15 @@ export default function InboxPage() {
                         <div className="truncate text-sm font-medium text-ink hover:text-brand-700">{item.label}</div>
                         <div className="text-xs text-ink-faint">{item.entity.singular}</div>
                       </Link>
+                      <span
+                        title={item.waitingSince ?? "age unknown"}
+                        className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+                          stale ? "bg-brand-50 text-brand-700" : "text-ink-faint"
+                        }`}
+                      >
+                        {stale ? "⏰ " : ""}
+                        {formatAge(item.ageMs)}
+                      </span>
                       <Badge value={item.state} />
                       <div className="flex flex-wrap gap-1.5">
                         {item.actions.map((a) => (

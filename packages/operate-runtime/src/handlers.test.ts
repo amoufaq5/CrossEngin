@@ -110,6 +110,16 @@ describe("operate handlers — CRUD", () => {
     expect((await invoke("product.read", { role: "retail_admin", params: { id } })).status).toBe(404);
   });
 
+  it("stamps created_at + updated_at on create and bumps updated_at on update", async () => {
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "TS", name: "A" } }));
+    expect(typeof created["created_at"]).toBe("string");
+    expect(created["updated_at"]).toBe(created["created_at"]);
+    const id = created["id"] as string;
+    const updated = bodyOf(await invoke("product.update", { role: "retail_admin", params: { id }, body: { name: "B" } }));
+    expect(updated["created_at"]).toBe(created["created_at"]);
+    expect(typeof updated["updated_at"]).toBe("string");
+  });
+
   it("404s reading a missing record", async () => {
     expect((await invoke("product.read", { role: "retail_admin", params: { id: "nope" } })).status).toBe(404);
   });

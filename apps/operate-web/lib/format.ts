@@ -49,6 +49,19 @@ export function formatCell(value: unknown, kind?: string): string {
   return String(value);
 }
 
+/** Compact human age from a millisecond duration: "just now", "5m", "3h", "4d", "2w". */
+export function formatAge(ms: number | null): string {
+  if (ms === null) return "—";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  if (d < 14) return `${d}d`;
+  return `${Math.floor(d / 7)}w`;
+}
+
 /** A deterministic surface tone for an enum/badge value. */
 export function badgeTone(value: string): string {
   const v = value.toLowerCase();
