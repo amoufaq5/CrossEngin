@@ -36,17 +36,40 @@ export const OperationalDefaultsSchema = z
     locale: z.string().max(35).optional(),
     timezone: z.string().max(60).optional(),
     fiscalYearStartMonth: z.number().int().min(1).max(12).optional(),
+    dateFormat: z.enum(["YYYY-MM-DD", "DD/MM/YYYY", "MM/DD/YYYY", "DD.MM.YYYY"]).optional(),
+    numberFormat: z.enum(["1,234.56", "1.234,56", "1 234,56", "1234.56"]).optional(),
+    weekStartDay: z.number().int().min(0).max(6).optional(),
   })
   .strict();
 
 export type OperationalDefaults = z.infer<typeof OperationalDefaultsSchema>;
 
+export const ACCOUNTING_STANDARDS = ["ifrs", "us_gaap", "local_gaap"] as const;
+export const ROUNDING_MODES = ["half_up", "half_even", "down", "up"] as const;
+
+/** Finance & tax posture an admin sets per tenant (drives accounting + tax behavior). */
+export const FinanceSettingsSchema = z
+  .object({
+    accountingStandard: z.enum(ACCOUNTING_STANDARDS).optional(),
+    multiCurrencyEnabled: z.boolean().optional(),
+    pricesIncludeTax: z.boolean().optional(),
+    defaultTaxJurisdiction: z.string().max(32).optional(),
+    defaultPaymentTermsDays: z.number().int().min(0).max(365).optional(),
+    rounding: z.enum(ROUNDING_MODES).optional(),
+  })
+  .strict();
+
+export type FinanceSettings = z.infer<typeof FinanceSettingsSchema>;
+
 export const TenantSettingsSchema = z
   .object({
     company: CompanyProfileSchema.optional(),
     defaults: OperationalDefaultsSchema.optional(),
+    finance: FinanceSettingsSchema.optional(),
     /** Keyed by sequence name (matches a field's `default.sequence`). */
     numbering: z.record(z.string().min(1), NumberingOverrideSchema).optional(),
+    /** Per-tenant feature toggles, keyed by a stable feature id. */
+    features: z.record(z.string().min(1).max(80), z.boolean()).optional(),
   })
   .strict();
 
