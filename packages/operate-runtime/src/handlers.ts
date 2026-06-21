@@ -14,6 +14,7 @@ import { applySequenceDefaults, type SequenceAllocator, type SequenceFieldPlan }
 import { applySettingsDefaults, type SettingsDefaultPlan } from "./settings-defaults.js";
 import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from "./settings.js";
 import { runWriteGuards, type WriteGuard } from "./write-guards.js";
+import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { projectRecord, type EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
@@ -40,6 +41,8 @@ export interface HandlerContext {
   readonly settingsDefaultPlans?: ReadonlyMap<string, SettingsDefaultPlan>;
   /** Runtime data invariants (e.g. balanced journal postings) checked before each write. */
   readonly writeGuards?: readonly WriteGuard[];
+  /** Side effects run after a successful write (e.g. auto-generating a reversal entry). */
+  readonly writeEffects?: readonly WriteEffect[];
   /** Lets tenant settings override a sequence's format/start/resetPeriod at runtime. */
   readonly settingsStore?: SettingsStore;
   readonly clock?: { now(): Date };
@@ -134,22 +137,31 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
       }
       case "update": {
         const patch = { ...(parsedBody ?? {}), updated_at: nowIso(ctx) };
-        if (ctx.writeGuards !== undefined && ctx.writeGuards.length > 0) {
-          const before = await ctx.store.get(tenantId, spec.entity, id);
-          if (before === null) return json(404, { error: "not_found" });
-          const updateBlock = await guard(ctx, {
-            operation: "update",
-            entity: spec.entity,
-            tenantId,
-            id,
-            before,
-            after: { ...before, ...patch },
-            store: ctx.store,
-          });
-          if (updateBlock !== null) return updateBlock;
-        }
+        const needsBefore = hasGuards(ctx) || hasEffects(ctx);
+        const before = needsBefore ? await ctx.store.get(tenantId, spec.entity, id) : null;
+        if (needsBefore && before === null) return json(404, { error: "not_found" });
+        const updateBlock = await guard(ctx, {
+          operation: "update",
+          entity: spec.entity,
+          tenantId,
+          id,
+          before,
+          after: { ...(before ?? {}), ...patch },
+          store: ctx.store,
+        });
+        if (updateBlock !== null) return updateBlock;
         const record = await ctx.store.update(tenantId, spec.entity, id, patch);
-        return record === null ? json(404, { error: "not_found" }) : json(200, record);
+        if (record === null) return json(404, { error: "not_found" });
+        const effectErr = await effects(ctx, {
+          operation: "update",
+          entity: spec.entity,
+          tenantId,
+          id,
+          before,
+          after: record,
+          store: ctx.store,
+        });
+        return effectErr ?? json(200, record);
       }
       case "delete": {
         if (ctx.writeGuards !== undefined && ctx.writeGuards.length > 0) {
@@ -229,12 +241,44 @@ async function applyTransition(
   });
   if (block !== null) return block;
   const updated = await ctx.store.update(tenantId, spec.entity, id, patch);
-  return json(200, updated ?? record);
+  const after = updated ?? record;
+  const effectErr = await effects(ctx, {
+    operation: "transition",
+    entity: spec.entity,
+    tenantId,
+    id,
+    before: record,
+    after,
+    store: ctx.store,
+  });
+  return effectErr ?? json(200, after);
 }
 
 /** Current time as an ISO string, honoring an injected clock for deterministic tests. */
 function nowIso(ctx: HandlerContext): string {
   return (ctx.clock?.now() ?? new Date()).toISOString();
+}
+
+function hasGuards(ctx: HandlerContext): boolean {
+  return ctx.writeGuards !== undefined && ctx.writeGuards.length > 0;
+}
+
+function hasEffects(ctx: HandlerContext): boolean {
+  return ctx.writeEffects !== undefined && ctx.writeEffects.length > 0;
+}
+
+/** Runs post-write effects; on failure returns a 500 (the write itself already committed). */
+async function effects(
+  ctx: HandlerContext,
+  input: Parameters<WriteEffect>[0],
+): Promise<HandlerOutput | null> {
+  if (!hasEffects(ctx)) return null;
+  try {
+    await runWriteEffects(ctx.writeEffects!, input);
+    return null;
+  } catch (e) {
+    return json(500, { error: "write_effect_failed", detail: e instanceof Error ? e.message : String(e) });
+  }
 }
 
 /** Runs the configured write guards; returns a problem HandlerOutput on the first block, else null. */
