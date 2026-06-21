@@ -364,3 +364,30 @@ describe("ColumnMappedEntityStore — unknown entity", () => {
     await expect(store(cap).get(TENANT, "Ghost", "x")).rejects.toThrow(/no column plan/);
   });
 });
+
+describe("ColumnMappedEntityStore — withTransaction", () => {
+  it("runs ops on the shared transaction store and returns the result", async () => {
+    const cap = capturePg();
+    const created = await store(cap).withTransaction(TENANT, async (tx) => {
+      return tx.create(TENANT, "Widget", { sku: "TXN-1" });
+    });
+    expect(created.sku).toBe("TXN-1");
+    expect(cap.calls.some((c) => c.sql.includes('INSERT INTO "tenant_app"."widget"'))).toBe(true);
+  });
+
+  it("propagates a throw from the unit of work (so the tx rolls back)", async () => {
+    const cap = capturePg();
+    await expect(
+      store(cap).withTransaction(TENANT, async () => {
+        throw new Error("boom");
+      }),
+    ).rejects.toThrow("boom");
+  });
+
+  it("rejects cross-tenant access inside the transaction", async () => {
+    const cap = capturePg();
+    await expect(
+      store(cap).withTransaction(TENANT, async (tx) => tx.get("99999999-0000-4000-8000-000000000002", "Widget", "x")),
+    ).rejects.toThrow(/cross-tenant/);
+  });
+});
