@@ -4,6 +4,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Field } from "@crossengin/types/meta-schema";
 
 import { listConfigForEntity } from "./list-query.js";
+import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityCamel, resourceSlug } from "./slugs.js";
 
 export type UiInputType =
@@ -82,11 +83,22 @@ export interface UiViewer {
   readonly roles: readonly string[];
 }
 
+/** Tenant display preferences safe to share with every authenticated caller. */
+export interface UiFormatting {
+  readonly currency?: string;
+  readonly locale?: string;
+  readonly dateFormat?: string;
+  readonly numberFormat?: string;
+  readonly weekStartDay?: number;
+}
+
 export interface UiSchema {
   readonly entities: readonly UiEntitySchema[];
   readonly roles: readonly UiRoleSchema[];
   readonly generatedAt: string;
   readonly viewer?: UiViewer;
+  readonly formatting?: UiFormatting;
+  readonly features?: Readonly<Record<string, boolean>>;
 }
 
 function titleCase(s: string): string {
@@ -242,17 +254,39 @@ function json(status: number, body: unknown): HandlerOutput {
 export interface UiSchemaContext {
   readonly schema: UiSchema;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
+  /** Optional: surfaces per-tenant formatting + feature flags so the UI can adapt. */
+  readonly settingsStore?: SettingsStore;
+}
+
+function formattingFromSettings(settings: TenantSettings): UiFormatting {
+  const d = settings.defaults ?? {};
+  return {
+    ...(d.currency !== undefined ? { currency: d.currency } : {}),
+    ...(d.locale !== undefined ? { locale: d.locale } : {}),
+    ...(d.dateFormat !== undefined ? { dateFormat: d.dateFormat } : {}),
+    ...(d.numberFormat !== undefined ? { numberFormat: d.numberFormat } : {}),
+    ...(d.weekStartDay !== undefined ? { weekStartDay: d.weekStartDay } : {}),
+  };
 }
 
 /** Read-only schema endpoint: any authenticated principal may read the UI shape. */
 export function buildUiSchemaHandler(ctx: UiSchemaContext): Handler {
-  return ({ principal }) => {
-    if ((principal?.tenantId ?? null) === null) {
-      return Promise.resolve(json(401, { error: "tenant_required" }));
+  return async ({ principal }) => {
+    const tenantId = principal?.tenantId ?? null;
+    if (tenantId === null) {
+      return json(401, { error: "tenant_required" });
     }
     const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
     const all = [primaryRole, ...(secondaryRoles ?? [])].map((r) => String(r)).filter((r) => r.length > 0);
     const viewer: UiViewer = { primaryRole: String(primaryRole), roles: [...new Set(all)] };
-    return Promise.resolve(json(200, { ...ctx.schema, viewer }));
+    let extra: { formatting?: UiFormatting; features?: Readonly<Record<string, boolean>> } = {};
+    if (ctx.settingsStore !== undefined) {
+      const settings = await ctx.settingsStore.get(tenantId);
+      extra = {
+        formatting: formattingFromSettings(settings),
+        ...(settings.features !== undefined ? { features: settings.features } : {}),
+      };
+    }
+    return json(200, { ...ctx.schema, viewer, ...extra });
   };
 }

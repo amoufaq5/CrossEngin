@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 
 import { useInbox } from "@/lib/inbox";
-import { accessibleEntities, groupByModule, roleLabel, useSchema } from "@/lib/schema";
+import { accessibleEntities, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -25,7 +25,8 @@ export function Sidebar() {
 
   const searching = q.trim() !== "";
   const primaryRole = schema?.viewer?.primaryRole;
-  const { items: inboxItems } = useInbox(schema);
+  const inboxEnabled = featureEnabled(schema, "approvals_inbox", true);
+  const { items: inboxItems } = useInbox(inboxEnabled ? schema : null);
   const inboxCount = inboxItems.length;
 
   return (
@@ -55,19 +56,21 @@ export function Sidebar() {
         >
           Dashboard
         </Link>
-        <Link
-          href="/inbox"
-          className={`mb-2 flex items-center rounded-lg px-3 py-2 text-sm font-medium transition ${
-            pathname === "/inbox" ? "bg-brand-50 text-brand-700" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
-          }`}
-        >
-          My Inbox
-          {inboxCount > 0 && (
-            <span className="ml-auto rounded-full bg-brand px-2 py-0.5 text-[11px] font-bold text-white">
-              {inboxCount}
-            </span>
-          )}
-        </Link>
+        {inboxEnabled && (
+          <Link
+            href="/inbox"
+            className={`mb-2 flex items-center rounded-lg px-3 py-2 text-sm font-medium transition ${
+              pathname === "/inbox" ? "bg-brand-50 text-brand-700" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+            }`}
+          >
+            My Inbox
+            {inboxCount > 0 && (
+              <span className="ml-auto rounded-full bg-brand px-2 py-0.5 text-[11px] font-bold text-white">
+                {inboxCount}
+              </span>
+            )}
+          </Link>
+        )}
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
