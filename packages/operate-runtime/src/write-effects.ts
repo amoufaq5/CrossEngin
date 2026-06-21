@@ -677,3 +677,235 @@ export function paymentGlPostingEffect(config: PaymentGlConfig): WriteEffect {
     });
   };
 }
+
+type GlSide = "debit" | "credit";
+
+function glLine(
+  base: Record<string, unknown>,
+  account: string,
+  description: string,
+  side: GlSide,
+  amount: number,
+): Record<string, unknown> {
+  const debit = side === "debit" ? amount : 0;
+  const credit = side === "credit" ? amount : 0;
+  return { ...base, ledger_account_id: account, description, debit, credit, functional_debit: debit, functional_credit: credit };
+}
+
+export interface RecognitionGlConfig {
+  readonly entity: string;
+  readonly entryEntity?: string;
+  readonly lineEntity?: string;
+  readonly stateField?: string;
+  readonly triggerState: string;
+  readonly sourceValue?: string;
+  readonly entrySuffix?: string;
+  readonly numberField: string;
+  readonly totalField?: string;
+  readonly subtotalField?: string;
+  readonly taxField?: string;
+  readonly currencyField?: string;
+  readonly ledgerAccountEntity?: string;
+  readonly accountCodeField?: string;
+  /** Which side the control account (AR for sales, AP for purchases) sits on. */
+  readonly controlSide: GlSide;
+  readonly controlAccountRef: string;
+  readonly netAccountRef: string;
+  readonly taxAccountRef: string;
+  readonly controlDescription: string;
+  readonly netDescription: string;
+  readonly taxDescription: string;
+  readonly skipDocumentType?: { readonly field: string; readonly value: string };
+  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ control?: string; net?: string; tax?: string }>;
+  readonly clock?: { now(): Date };
+}
+
+const RECOGNITION_FALLBACKS = {
+  entryEntity: "JournalEntry",
+  lineEntity: "JournalLine",
+  stateField: "state",
+  sourceValue: "system",
+  entrySuffix: "-GL",
+  totalField: "total",
+  subtotalField: "subtotal",
+  taxField: "tax_total",
+  currencyField: "currency",
+  ledgerAccountEntity: "LedgerAccount",
+  accountCodeField: "account_code",
+} as const;
+
+const EPSILON = 0.005;
+
+/**
+ * Recognition GL posting with a tax split: when a document reaches its recognized
+ * state, posts the control account (AR/AP) at the gross total on `controlSide`,
+ * and the net (revenue/expense) + tax lines on the opposite side at subtotal and
+ * tax. When subtotal+tax doesn't reconcile to total (or tax is zero) it degrades
+ * to a single net line at the total. Drives invoice issue (debit AR; credit
+ * revenue + tax payable) and bill approval (credit AP; debit expense + input tax).
+ * Balanced by construction, written inside the triggering transaction.
+ */
+export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEffect {
+  const c = { ...RECOGNITION_FALLBACKS, ...config };
+  const opposite: GlSide = c.controlSide === "debit" ? "credit" : "debit";
+  return async (input) => {
+    if (input.entity !== c.entity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    if (input.before?.[c.stateField] === c.triggerState || input.after[c.stateField] !== c.triggerState) return;
+    if (c.skipDocumentType !== undefined && input.after[c.skipDocumentType.field] === c.skipDocumentType.value) return;
+
+    const doc = input.after;
+    const docId = input.id;
+    if (docId === null) return;
+    const total = num(doc[c.totalField]);
+    if (total <= 0) return;
+    let subtotal = num(doc[c.subtotalField]);
+    let tax = num(doc[c.taxField]);
+    // Reconcile: fall back to a single net line at total when the split doesn't add up.
+    if (subtotal <= 0 || Math.abs(subtotal + tax - total) > EPSILON) {
+      subtotal = total;
+      tax = 0;
+    }
+
+    const now = c.clock?.now() ?? new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.slice(0, 10);
+    const docNumber = typeof doc[c.numberField] === "string" ? (doc[c.numberField] as string) : docId;
+    const currency = typeof doc[c.currencyField] === "string" ? (doc[c.currencyField] as string) : "USD";
+
+    const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
+    const controlAccount = (await resolveAccountId(input, c, codes.control)) ?? c.controlAccountRef;
+    const netAccount = (await resolveAccountId(input, c, codes.net)) ?? c.netAccountRef;
+    const taxAccount = (await resolveAccountId(input, c, codes.tax)) ?? c.taxAccountRef;
+
+    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+      entry_number: `${docNumber}${c.entrySuffix}`,
+      entry_date: today,
+      source: c.sourceValue,
+      state: "posted",
+      memo: `GL posting for ${docNumber}`,
+      posted_at: nowIso,
+      created_at: nowIso,
+      updated_at: nowIso,
+    });
+    const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
+    await input.store.create(input.tenantId, c.lineEntity, glLine(base, controlAccount, c.controlDescription, c.controlSide, total));
+    await input.store.create(input.tenantId, c.lineEntity, glLine(base, netAccount, c.netDescription, opposite, subtotal));
+    if (tax > EPSILON) {
+      await input.store.create(input.tenantId, c.lineEntity, glLine(base, taxAccount, c.taxDescription, opposite, tax));
+    }
+  };
+}
+
+export interface PaymentSettlementGlConfig {
+  readonly paymentEntity?: string;
+  readonly entryEntity?: string;
+  readonly lineEntity?: string;
+  readonly stateField?: string;
+  readonly completedState?: string;
+  readonly directionField?: string;
+  readonly inboundValue?: string;
+  readonly amountField?: string;
+  readonly cashAmountField?: string;
+  readonly numberField?: string;
+  readonly currencyField?: string;
+  readonly entrySuffix?: string;
+  readonly ledgerAccountEntity?: string;
+  readonly accountCodeField?: string;
+  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ cash?: string; ar?: string; ap?: string; fx?: string }>;
+  readonly cashAccountRef?: string;
+  readonly arAccountRef?: string;
+  readonly apAccountRef?: string;
+  readonly fxAccountRef?: string;
+  readonly clock?: { now(): Date };
+}
+
+const SETTLEMENT_FALLBACKS = {
+  paymentEntity: "Payment",
+  entryEntity: "JournalEntry",
+  lineEntity: "JournalLine",
+  stateField: "state",
+  completedState: "completed",
+  directionField: "direction",
+  inboundValue: "inbound",
+  amountField: "amount",
+  cashAmountField: "cash_amount",
+  numberField: "payment_number",
+  currencyField: "currency",
+  entrySuffix: "-SETTLE",
+  ledgerAccountEntity: "LedgerAccount",
+  accountCodeField: "account_code",
+  cashAccountRef: "cash",
+  arAccountRef: "accounts_receivable",
+  apAccountRef: "accounts_payable",
+  fxAccountRef: "fx_gain_loss",
+} as const;
+
+/**
+ * Payment-driven settlement: when a Payment completes, posts a balanced entry for
+ * its amount — inbound (customer) → debit cash, credit AR; outbound (vendor) →
+ * debit AP, credit cash. Because each Payment carries its own amount, **partial
+ * payments** settle naturally (one entry per payment). When `cash_amount` (the
+ * reporting-currency cash actually moved) differs from `amount` (the receivable/
+ * payable cleared), the gap is booked to the **FX gain/loss** account so the
+ * entry stays balanced — realized FX on settlement. Account codes resolve to real
+ * `LedgerAccount` ids; runs inside the completion transaction.
+ */
+export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConfig = {}): WriteEffect {
+  const c = { ...SETTLEMENT_FALLBACKS, ...config };
+  return async (input) => {
+    if (input.entity !== c.paymentEntity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    if (input.before?.[c.stateField] === c.completedState || input.after[c.stateField] !== c.completedState) return;
+
+    const pay = input.after;
+    const payId = input.id;
+    if (payId === null) return;
+    const amount = num(pay[c.amountField]);
+    if (amount <= 0) return;
+    const cashAmount = pay[c.cashAmountField] !== undefined ? num(pay[c.cashAmountField]) : amount;
+    const inbound = pay[c.directionField] === c.inboundValue;
+
+    const now = c.clock?.now() ?? new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.slice(0, 10);
+    const payNumber = typeof pay[c.numberField] === "string" ? (pay[c.numberField] as string) : payId;
+    const currency = typeof pay[c.currencyField] === "string" ? (pay[c.currencyField] as string) : "USD";
+
+    const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
+    const cashAccount = (await resolveAccountId(input, c, codes.cash)) ?? c.cashAccountRef;
+    const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
+    const apAccount = (await resolveAccountId(input, c, codes.ap)) ?? c.apAccountRef;
+    const fxAccount = (await resolveAccountId(input, c, codes.fx)) ?? c.fxAccountRef;
+
+    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+      entry_number: `${payNumber}${c.entrySuffix}`,
+      entry_date: today,
+      source: "payment",
+      state: "posted",
+      memo: `Settlement GL posting for ${payNumber}`,
+      posted_at: nowIso,
+      created_at: nowIso,
+      updated_at: nowIso,
+    });
+    const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
+    const lines: Record<string, unknown>[] = [];
+    const fxDiff = cashAmount - amount; // cash moved minus balance cleared
+    if (inbound) {
+      lines.push(glLine(base, cashAccount, "Settlement — cash", "debit", cashAmount));
+      lines.push(glLine(base, arAccount, "Settlement — accounts receivable", "credit", amount));
+      if (Math.abs(fxDiff) > EPSILON) {
+        // more cash than AR cleared → FX gain (credit); less → FX loss (debit)
+        lines.push(glLine(base, fxAccount, "Realized FX gain/loss", fxDiff > 0 ? "credit" : "debit", Math.abs(fxDiff)));
+      }
+    } else {
+      lines.push(glLine(base, apAccount, "Settlement — accounts payable", "debit", amount));
+      lines.push(glLine(base, cashAccount, "Settlement — cash", "credit", cashAmount));
+      if (Math.abs(fxDiff) > EPSILON) {
+        // more cash paid than AP cleared → FX loss (debit); less → FX gain (credit)
+        lines.push(glLine(base, fxAccount, "Realized FX gain/loss", fxDiff > 0 ? "debit" : "credit", Math.abs(fxDiff)));
+      }
+    }
+    for (const line of lines) await input.store.create(input.tenantId, c.lineEntity, line);
+  };
+}
