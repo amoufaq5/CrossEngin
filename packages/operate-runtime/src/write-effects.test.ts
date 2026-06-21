@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { InMemoryEntityStore } from "./store.js";
-import { journalReversalEffect, runWriteEffects, type WriteEffectInput } from "./write-effects.js";
+import {
+  invoiceVoidCreditNoteEffect,
+  journalReversalEffect,
+  runWriteEffects,
+  type WriteEffectInput,
+} from "./write-effects.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 const clock = { now: () => new Date("2026-06-21T00:00:00.000Z") };
@@ -92,6 +97,75 @@ describe("journalReversalEffect", () => {
     const debit = revLines.reduce((s, l) => s + Number(l.debit), 0);
     const credit = revLines.reduce((s, l) => s + Number(l.credit), 0);
     expect(debit).toBe(credit);
+  });
+});
+
+describe("invoiceVoidCreditNoteEffect", () => {
+  const effect = invoiceVoidCreditNoteEffect({ lineEntity: "InvoiceLine", clock });
+
+  async function issuedInvoice(state = "sent") {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-2026-00005",
+      state,
+      document_type: "invoice",
+      account_id: "acct1",
+      currency: "USD",
+      subtotal: 100,
+      tax_total: 5,
+      total: 105,
+    });
+    const id = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", {
+      invoice_id: id,
+      position: 1,
+      description: "Widget",
+      quantity: 2,
+      unit_price: 50,
+      tax_rate_pct: 5,
+      line_total: 105,
+    });
+    return { store, id, inv };
+  }
+
+  function voidInput(store: InMemoryEntityStore, id: string, before: Record<string, unknown>): WriteEffectInput {
+    return { operation: "transition", entity: "Invoice", tenantId: TENANT, id, before, after: { ...before, state: "void" }, store };
+  }
+
+  it("creates a credit note linked to the voided invoice with mirrored totals", async () => {
+    const { store, id, inv } = await issuedInvoice();
+    await effect(voidInput(store, id, inv));
+    const invoices = await store.list(TENANT, "Invoice");
+    expect(invoices.length).toBe(2);
+    const cn = invoices.find((i) => i.document_type === "credit_note")!;
+    expect(cn.invoice_number).toBe("INV-2026-00005-CN");
+    expect(cn.credit_note_of).toBe(id);
+    expect(cn.account_id).toBe("acct1");
+    expect(cn.total).toBe(105);
+    expect(cn.state).toBe("sent");
+    expect(cn.notes).toBe("Credit note for INV-2026-00005");
+  });
+
+  it("mirrors each invoice line onto the credit note", async () => {
+    const { store, id, inv } = await issuedInvoice();
+    await effect(voidInput(store, id, inv));
+    const cn = (await store.list(TENANT, "Invoice")).find((i) => i.document_type === "credit_note")!;
+    const cnLines = (await store.list(TENANT, "InvoiceLine")).filter((l) => l.invoice_id === cn.id);
+    expect(cnLines.length).toBe(1);
+    expect(cnLines[0]?.line_total).toBe(105);
+    expect(cnLines[0]?.description).toBe("Credit: Widget");
+  });
+
+  it("does nothing when voiding a never-issued draft", async () => {
+    const { store, id, inv } = await issuedInvoice("draft");
+    await effect(voidInput(store, id, inv));
+    expect((await store.list(TENANT, "Invoice")).length).toBe(1);
+  });
+
+  it("never credit-notes a credit note", async () => {
+    const { store, id, inv } = await issuedInvoice();
+    await effect(voidInput(store, id, { ...inv, document_type: "credit_note" }));
+    expect((await store.list(TENANT, "Invoice")).length).toBe(1);
   });
 });
 

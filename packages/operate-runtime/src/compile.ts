@@ -35,7 +35,7 @@ import {
   postedEntryImmutabilityGuard,
   type WriteGuard,
 } from "./write-guards.js";
-import { journalReversalEffect, type WriteEffect } from "./write-effects.js";
+import { invoiceVoidCreditNoteEffect, journalReversalEffect, type WriteEffect } from "./write-effects.js";
 import type { SettingsStore } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -147,6 +147,14 @@ function defaultWriteEffects(manifest: Manifest, clock?: { now(): Date }): reado
   const effects: WriteEffect[] = [];
   if (names.has("JournalEntry") && names.has("JournalLine")) {
     effects.push(journalReversalEffect(clock !== undefined ? { clock } : {}));
+  }
+  if (names.has("Invoice")) {
+    effects.push(
+      invoiceVoidCreditNoteEffect({
+        ...(names.has("InvoiceLine") ? { lineEntity: "InvoiceLine" } : {}),
+        ...(clock !== undefined ? { clock } : {}),
+      }),
+    );
   }
   return effects;
 }
