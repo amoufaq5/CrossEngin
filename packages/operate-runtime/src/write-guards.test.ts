@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { InMemoryEntityStore } from "./store.js";
-import { journalPostingGuard, runWriteGuards, type WriteGuardInput } from "./write-guards.js";
+import {
+  journalPostingGuard,
+  postedEntryImmutabilityGuard,
+  runWriteGuards,
+  type WriteGuardInput,
+} from "./write-guards.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 
@@ -83,6 +88,55 @@ describe("journalPostingGuard", () => {
     await store.create(TENANT, "JournalLine", { journal_entry_id: entryId, debit: 100, credit: 0 });
     await store.create(TENANT, "JournalLine", { journal_entry_id: entryId, debit: 0, credit: 100.004 });
     expect(await guard(postInput(store, entryId, { fiscal_period_id: "p_open" }))).toBeNull();
+  });
+});
+
+describe("postedEntryImmutabilityGuard", () => {
+  const guard = postedEntryImmutabilityGuard();
+  const store = new InMemoryEntityStore();
+
+  function entryInput(op: WriteGuardInput["operation"], before: Record<string, unknown>, after: Record<string, unknown>): WriteGuardInput {
+    return { operation: op, entity: "JournalEntry", tenantId: TENANT, id: "e1", before, after, store };
+  }
+
+  it("ignores entries that aren't posted", async () => {
+    expect(await guard(entryInput("update", { state: "draft" }, { state: "draft", memo: "x" }))).toBeNull();
+  });
+
+  it("blocks deleting a posted entry", async () => {
+    const r = await guard(entryInput("delete", { state: "posted" }, { state: "posted" }));
+    expect(r?.error).toBe("posted_entry_immutable");
+  });
+
+  it("blocks editing a posted entry's fields", async () => {
+    const r = await guard(entryInput("update", { state: "posted", memo: "a" }, { state: "posted", memo: "b", updated_at: "t" }));
+    expect(r?.error).toBe("posted_entry_immutable");
+  });
+
+  it("allows reversing a posted entry (state -> reversed, nothing else)", async () => {
+    expect(await guard(entryInput("update", { state: "posted", memo: "a" }, { state: "reversed", memo: "a", updated_at: "t" }))).toBeNull();
+  });
+
+  it("blocks a reversal that also edits other fields", async () => {
+    const r = await guard(entryInput("update", { state: "posted", memo: "a" }, { state: "reversed", memo: "b" }));
+    expect(r?.error).toBe("posted_entry_immutable");
+  });
+
+  it("locks lines of a posted parent entry", async () => {
+    const s = new InMemoryEntityStore();
+    const posted = await s.create(TENANT, "JournalEntry", { state: "posted" });
+    const draft = await s.create(TENANT, "JournalEntry", { state: "draft" });
+    const lineInput = (entryId: string): WriteGuardInput => ({
+      operation: "create",
+      entity: "JournalLine",
+      tenantId: TENANT,
+      id: null,
+      before: null,
+      after: { journal_entry_id: entryId, debit: 10, credit: 0 },
+      store: s,
+    });
+    expect((await postedEntryImmutabilityGuard()(lineInput(String(posted.id))))?.error).toBe("posted_entry_locked_lines");
+    expect(await postedEntryImmutabilityGuard()(lineInput(String(draft.id)))).toBeNull();
   });
 });
 
