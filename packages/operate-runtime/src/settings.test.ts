@@ -24,6 +24,31 @@ describe("TenantSettingsSchema", () => {
     expect(TenantSettingsSchema.safeParse({ defaults: { currency: "USDX" } }).success).toBe(false);
     expect(TenantSettingsSchema.safeParse({ defaults: { fiscalYearStartMonth: 13 } }).success).toBe(false);
   });
+
+  it("accepts finance, feature, and richer default settings", () => {
+    const parsed = TenantSettingsSchema.parse({
+      defaults: { dateFormat: "DD/MM/YYYY", numberFormat: "1.234,56", weekStartDay: 1 },
+      finance: {
+        accountingStandard: "ifrs",
+        multiCurrencyEnabled: true,
+        pricesIncludeTax: false,
+        defaultPaymentTermsDays: 30,
+        rounding: "half_even",
+        defaultTaxJurisdiction: "AE-VAT",
+      },
+      features: { approvals_inbox: true, beta_reports: false },
+    });
+    expect(parsed.finance?.accountingStandard).toBe("ifrs");
+    expect(parsed.features?.approvals_inbox).toBe(true);
+    expect(parsed.defaults?.weekStartDay).toBe(1);
+  });
+
+  it("rejects invalid finance/feature/default values", () => {
+    expect(TenantSettingsSchema.safeParse({ finance: { accountingStandard: "gaap_xx" } }).success).toBe(false);
+    expect(TenantSettingsSchema.safeParse({ finance: { defaultPaymentTermsDays: -1 } }).success).toBe(false);
+    expect(TenantSettingsSchema.safeParse({ defaults: { dateFormat: "bogus" } }).success).toBe(false);
+    expect(TenantSettingsSchema.safeParse({ features: { f1: "yes" } }).success).toBe(false);
+  });
 });
 
 describe("InMemorySettingsStore", () => {
