@@ -241,6 +241,41 @@ describe("creditNoteGlPostingEffect (AR↔GL bridge)", () => {
     await effect(voidIt(store, String(inv.id), inv));
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
+
+  it("posts to the resolved chart-of-accounts ids when codes are configured", async () => {
+    const store = new InMemoryEntityStore();
+    const ar = await store.create(TENANT, "LedgerAccount", { account_code: "1100", name: "AR" });
+    const rev = await store.create(TENANT, "LedgerAccount", { account_code: "4000", name: "Revenue" });
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-X",
+      state: "sent",
+      document_type: "invoice",
+      currency: "USD",
+      total: 50,
+    });
+    const resolving = creditNoteGlPostingEffect({
+      clock,
+      resolveAccountCodes: async () => ({ ar: "1100", revenue: "4000" }),
+    });
+    await resolving(voidIt(store, String(inv.id), inv));
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    const arLine = lines.find((l) => Number(l.credit) > 0)!;
+    const revLine = lines.find((l) => Number(l.debit) > 0)!;
+    expect(arLine.ledger_account_id).toBe(String(ar.id));
+    expect(revLine.ledger_account_id).toBe(String(rev.id));
+  });
+
+  it("falls back to placeholder refs when a code resolves to no account", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-Y", state: "sent", document_type: "invoice", total: 50 });
+    const resolving = creditNoteGlPostingEffect({ clock, resolveAccountCodes: async () => ({ ar: "9999", revenue: "8888" }) });
+    await resolving(voidIt(store, String(inv.id), inv));
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => Number(l.credit) > 0)!.ledger_account_id).toBe("accounts_receivable");
+    expect(lines.find((l) => Number(l.debit) > 0)!.ledger_account_id).toBe("revenue");
+  });
 });
 
 describe("runWriteEffects", () => {

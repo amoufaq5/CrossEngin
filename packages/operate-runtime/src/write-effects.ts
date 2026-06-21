@@ -339,7 +339,16 @@ export interface CreditNoteGlConfig {
   readonly totalField?: string;
   readonly creditAmountField?: string;
   readonly currencyField?: string;
-  /** SQL-less placeholder account references (real account determination is out of scope). */
+  /** Ledger account entity + its code field, used to resolve configured account codes to ids. */
+  readonly ledgerAccountEntity?: string;
+  readonly accountCodeField?: string;
+  /**
+   * Resolves the tenant's AR/revenue LedgerAccount *codes* (typically from tenant
+   * settings). When a code resolves to a real account it's used as the posting
+   * line's `ledger_account_id`; otherwise the placeholder ref below is used.
+   */
+  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ ar?: string; revenue?: string }>;
+  /** Fallback placeholder account references when no code is configured/found. */
   readonly arAccountRef?: string;
   readonly revenueAccountRef?: string;
   readonly clock?: { now(): Date };
@@ -358,6 +367,8 @@ const GL_DEFAULTS = {
   totalField: "total",
   creditAmountField: "credit_amount",
   currencyField: "currency",
+  ledgerAccountEntity: "LedgerAccount",
+  accountCodeField: "account_code",
   arAccountRef: "accounts_receivable",
   revenueAccountRef: "revenue",
 } as const;
@@ -367,11 +378,13 @@ const GL_DEFAULTS = {
  * credit note), auto-posts the matching balanced GL entry — a posted
  * `JournalEntry` numbered `<invoice>-CN-GL` with two lines that reverse the sale
  * (debit revenue, credit AR) for the credited amount (partial when the invoice
- * carries `credit_amount`). Account references are configurable placeholders;
- * real per-tenant account determination (chart-of-accounts mapping) is out of
- * scope here. Fires only when the manifest models a GL (JournalEntry + line).
- * Written directly through the store (bypasses guards/effects; balanced by
- * construction) inside the void transaction, so AR and GL move atomically.
+ * carries `credit_amount`). The AR and revenue lines use the tenant's configured
+ * chart-of-accounts entries (`finance.arAccountCode` / `revenueAccountCode`
+ * resolved to `LedgerAccount` ids); when a code isn't configured/found, a
+ * placeholder ref is used so the bridge still posts. Fires only when the manifest
+ * models a GL (JournalEntry + line). Written directly through the store (bypasses
+ * guards/effects; balanced by construction) inside the void transaction, so AR and
+ * GL move atomically.
  */
 export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): WriteEffect {
   const c = { ...GL_DEFAULTS, ...config };
@@ -398,6 +411,11 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
     const origNumber = typeof original[c.numberField] === "string" ? (original[c.numberField] as string) : originalId;
     const currency = typeof original[c.currencyField] === "string" ? (original[c.currencyField] as string) : "USD";
 
+    // Resolve configured account codes to real LedgerAccount ids; fall back to placeholders.
+    const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
+    const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
+    const revenueAccount = (await resolveAccountId(input, c, codes.revenue)) ?? c.revenueAccountRef;
+
     const entry = await input.store.create(input.tenantId, c.entryEntity, {
       entry_number: `${origNumber}-CN-GL`,
       entry_date: today,
@@ -413,7 +431,7 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
     // Reverse the sale: debit revenue, credit AR — balanced by construction.
     await input.store.create(input.tenantId, c.lineEntity, {
       ...baseLine,
-      ledger_account_id: c.revenueAccountRef,
+      ledger_account_id: revenueAccount,
       description: "Credit note — revenue reversal",
       debit: amount,
       credit: 0,
@@ -422,7 +440,7 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
     });
     await input.store.create(input.tenantId, c.lineEntity, {
       ...baseLine,
-      ledger_account_id: c.arAccountRef,
+      ledger_account_id: arAccount,
       description: "Credit note — AR reversal",
       debit: 0,
       credit: amount,
@@ -430,4 +448,21 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
       functional_credit: amount,
     });
   };
+}
+
+/** Resolves a LedgerAccount `account_code` to its record id within the tenant, or null. */
+async function resolveAccountId(
+  input: WriteEffectInput,
+  c: { ledgerAccountEntity: string; accountCodeField: string },
+  code: string | undefined,
+): Promise<string | null> {
+  if (code === undefined || code.length === 0) return null;
+  const page = await input.store.listPage(input.tenantId, c.ledgerAccountEntity, {
+    limit: 1,
+    cursor: null,
+    sort: [],
+    filters: [{ field: c.accountCodeField, op: "eq", value: code }],
+  });
+  const rec = page.records.find((r) => String(r[c.accountCodeField] ?? "") === code) ?? page.records[0];
+  return rec !== undefined ? String(rec["id"]) : null;
 }
