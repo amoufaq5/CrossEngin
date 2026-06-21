@@ -66,6 +66,12 @@ export const FinanceSettingsSchema = z
     expenseAccountCode: z.string().max(32).optional(),
     /** LedgerAccount.account_code mapped to cash/bank (drives payment-time GL postings). */
     cashAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code for output (sales) tax payable — the tax line on invoice recognition. */
+    taxPayableAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code for input (purchase) tax — the tax line on bill recognition. */
+    taxInputAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code for realized FX gain/loss on payment settlement. */
+    fxGainLossAccountCode: z.string().max(32).optional(),
   })
   .strict();
 

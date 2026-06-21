@@ -196,9 +196,12 @@ export default function SettingsPage() {
               <Text label="AP account code" value={finance.apAccountCode ?? ""} onChange={(v) => setD(setFinance, "apAccountCode", v)} />
               <Text label="Expense account code" value={finance.expenseAccountCode ?? ""} onChange={(v) => setD(setFinance, "expenseAccountCode", v)} />
               <Text label="Cash / bank account code" value={finance.cashAccountCode ?? ""} onChange={(v) => setD(setFinance, "cashAccountCode", v)} />
+              <Text label="Tax payable (output) code" value={finance.taxPayableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxPayableAccountCode", v)} />
+              <Text label="Input tax code" value={finance.taxInputAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxInputAccountCode", v)} />
+              <Text label="FX gain/loss code" value={finance.fxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "fxGainLossAccountCode", v)} />
             </div>
             <p className="mt-3 text-xs text-ink-faint">
-              Account codes map to your chart of accounts (LedgerAccount): AR &amp; revenue post on credit-note issuance; AP &amp; expense post when a vendor bill is approved; cash settles invoices and bills when they&apos;re paid.
+              Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss.
             </p>
           </Section>
 
@@ -348,6 +351,9 @@ function buildFinance(f: StrMap): Record<string, unknown> {
   if (f.apAccountCode?.trim()) out.apAccountCode = f.apAccountCode.trim();
   if (f.expenseAccountCode?.trim()) out.expenseAccountCode = f.expenseAccountCode.trim();
   if (f.cashAccountCode?.trim()) out.cashAccountCode = f.cashAccountCode.trim();
+  if (f.taxPayableAccountCode?.trim()) out.taxPayableAccountCode = f.taxPayableAccountCode.trim();
+  if (f.taxInputAccountCode?.trim()) out.taxInputAccountCode = f.taxInputAccountCode.trim();
+  if (f.fxGainLossAccountCode?.trim()) out.fxGainLossAccountCode = f.fxGainLossAccountCode.trim();
   return out;
 }
 

@@ -7,6 +7,8 @@ import {
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
   paymentGlPostingEffect,
+  paymentSettlementGlPostingEffect,
+  recognitionGlPostingEffect,
   runWriteEffects,
   type WriteEffectInput,
 } from "./write-effects.js";
@@ -377,6 +379,131 @@ describe("paymentGlPostingEffect", () => {
     const store = new InMemoryEntityStore();
     const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-Q", state: "paid", document_type: "invoice", total: 10 });
     await pay("Invoice", invoicePay)(store, String(inv.id), inv);
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+});
+
+describe("recognitionGlPostingEffect (tax split)", () => {
+  const invoiceRec = recognitionGlPostingEffect({
+    entity: "Invoice",
+    triggerState: "sent",
+    controlSide: "debit",
+    numberField: "invoice_number",
+    skipDocumentType: { field: "document_type", value: "credit_note" },
+    controlAccountRef: "ar",
+    netAccountRef: "revenue",
+    taxAccountRef: "tax_payable",
+    controlDescription: "AR",
+    netDescription: "Revenue",
+    taxDescription: "Tax payable",
+    clock,
+  });
+  const issue = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
+    invoiceRec({ operation: "transition", entity: "Invoice", tenantId: TENANT, id, before, after: { ...before, state: "sent" }, store });
+
+  it("splits revenue and tax on a taxed invoice (AR = subtotal + tax)", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-T", state: "draft", document_type: "invoice", subtotal: 100, tax_total: 20, total: 120 });
+    await issue(store, String(inv.id), inv);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.length).toBe(3);
+    expect(lines.find((l) => l.ledger_account_id === "ar")!.debit).toBe(120);
+    expect(lines.find((l) => l.ledger_account_id === "revenue")!.credit).toBe(100);
+    expect(lines.find((l) => l.ledger_account_id === "tax_payable")!.credit).toBe(20);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+  });
+
+  it("degrades to a single net line when there's no tax / the split doesn't reconcile", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-U", state: "draft", document_type: "invoice", total: 50 });
+    await issue(store, String(inv.id), inv);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.length).toBe(2);
+    expect(lines.find((l) => l.ledger_account_id === "ar")!.debit).toBe(50);
+    expect(lines.find((l) => l.ledger_account_id === "revenue")!.credit).toBe(50);
+  });
+
+  it("credits AP and debits expense + input tax for a bill (control on credit side)", async () => {
+    const billRec = recognitionGlPostingEffect({
+      entity: "Bill",
+      triggerState: "approved",
+      controlSide: "credit",
+      numberField: "bill_number",
+      controlAccountRef: "ap",
+      netAccountRef: "expense",
+      taxAccountRef: "tax_input",
+      controlDescription: "AP",
+      netDescription: "Expense",
+      taxDescription: "Input tax",
+      clock,
+    });
+    const store = new InMemoryEntityStore();
+    const bill = await store.create(TENANT, "Bill", { bill_number: "BILL-T", state: "draft", subtotal: 200, tax_total: 10, total: 210 });
+    await billRec({ operation: "transition", entity: "Bill", tenantId: TENANT, id: String(bill.id), before: bill, after: { ...bill, state: "approved" }, store });
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => l.ledger_account_id === "ap")!.credit).toBe(210);
+    expect(lines.find((l) => l.ledger_account_id === "expense")!.debit).toBe(200);
+    expect(lines.find((l) => l.ledger_account_id === "tax_input")!.debit).toBe(10);
+  });
+});
+
+describe("paymentSettlementGlPostingEffect (partial + FX)", () => {
+  const effect = paymentSettlementGlPostingEffect({ clock });
+  const complete = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
+    effect({ operation: "transition", entity: "Payment", tenantId: TENANT, id, before, after: { ...before, state: "completed" }, store });
+
+  it("settles an inbound payment: debit cash, credit AR (partial amount)", async () => {
+    const store = new InMemoryEntityStore();
+    const pay = await store.create(TENANT, "Payment", { payment_number: "PAY-1", state: "pending", direction: "inbound", amount: 40 });
+    await complete(store, String(pay.id), pay);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.length).toBe(2);
+    expect(lines.find((l) => l.ledger_account_id === "cash")!.debit).toBe(40);
+    expect(lines.find((l) => l.ledger_account_id === "accounts_receivable")!.credit).toBe(40);
+  });
+
+  it("books a realized FX gain when cash received exceeds the AR cleared", async () => {
+    const store = new InMemoryEntityStore();
+    const pay = await store.create(TENANT, "Payment", { payment_number: "PAY-2", state: "pending", direction: "inbound", amount: 100, cash_amount: 105 });
+    await complete(store, String(pay.id), pay);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => l.ledger_account_id === "cash")!.debit).toBe(105);
+    expect(lines.find((l) => l.ledger_account_id === "accounts_receivable")!.credit).toBe(100);
+    const fx = lines.find((l) => l.ledger_account_id === "fx_gain_loss")!;
+    expect(fx.credit).toBe(5); // gain
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+  });
+
+  it("books a realized FX loss when cash received is short of the AR cleared", async () => {
+    const store = new InMemoryEntityStore();
+    const pay = await store.create(TENANT, "Payment", { payment_number: "PAY-3", state: "pending", direction: "inbound", amount: 100, cash_amount: 95 });
+    await complete(store, String(pay.id), pay);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    const fx = lines.find((l) => l.ledger_account_id === "fx_gain_loss")!;
+    expect(fx.debit).toBe(5); // loss
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+  });
+
+  it("settles an outbound payment: debit AP, credit cash", async () => {
+    const store = new InMemoryEntityStore();
+    const pay = await store.create(TENANT, "Payment", { payment_number: "PAY-4", state: "pending", direction: "outbound", amount: 80 });
+    await complete(store, String(pay.id), pay);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => l.ledger_account_id === "accounts_payable")!.debit).toBe(80);
+    expect(lines.find((l) => l.ledger_account_id === "cash")!.credit).toBe(80);
+  });
+
+  it("does nothing unless the payment moves into completed", async () => {
+    const store = new InMemoryEntityStore();
+    const pay = await store.create(TENANT, "Payment", { state: "completed", direction: "inbound", amount: 10 });
+    await complete(store, String(pay.id), pay);
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 });

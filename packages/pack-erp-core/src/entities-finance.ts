@@ -102,6 +102,9 @@ export const PAYMENT_ENTITY: Entity = {
     },
     { name: "account_id", type: { kind: "reference", target: "Account" }, indexed: true },
     { name: "amount", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true },
+    // Cash actually moved (reporting currency). When it differs from `amount`, the
+    // gap is booked as realized FX gain/loss on settlement.
+    { name: "cash_amount", type: { kind: "decimal", precision: 16, scale: 2, min: 0 } },
     { name: "currency", type: { kind: "text", maxLength: 3 }, required: true, default: { kind: "literal", value: "USD" } },
     {
       name: "state",
