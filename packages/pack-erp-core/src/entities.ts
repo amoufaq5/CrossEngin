@@ -107,6 +107,14 @@ export const INVOICE_ENTITY: Entity = {
       default: { kind: "literal", value: "draft" },
       indexed: true,
     },
+    {
+      name: "document_type",
+      type: { kind: "enum", values: ["invoice", "credit_note"] },
+      required: true,
+      default: { kind: "literal", value: "invoice" },
+      indexed: true,
+    },
+    { name: "credit_note_of", type: { kind: "reference", target: "Invoice" }, indexed: true },
     { name: "currency", type: { kind: "text", maxLength: 3 }, required: true },
     {
       name: "subtotal",

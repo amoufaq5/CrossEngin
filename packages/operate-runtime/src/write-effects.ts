@@ -146,3 +146,132 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
     }
   };
 }
+
+export interface InvoiceCreditNoteConfig {
+  readonly invoiceEntity?: string;
+  /** Line entity to mirror; when omitted, no credit-note lines are written. */
+  readonly lineEntity?: string;
+  readonly stateField?: string;
+  readonly voidState?: string;
+  /** Only an invoice voided from one of these (issued) states gets a credit note. */
+  readonly issuedStates?: readonly string[];
+  readonly numberField?: string;
+  readonly documentTypeField?: string;
+  readonly creditNoteType?: string;
+  readonly creditNoteRefField?: string;
+  readonly issuedState?: string;
+  readonly lineInvoiceRefField?: string;
+  readonly notesField?: string;
+  readonly issueDateField?: string;
+  readonly dueDateField?: string;
+  readonly sentAtField?: string;
+  readonly descriptionField?: string;
+  readonly maxLines?: number;
+  readonly clock?: { now(): Date };
+}
+
+const CN_DEFAULTS = {
+  invoiceEntity: "Invoice",
+  stateField: "state",
+  voidState: "void",
+  issuedStates: ["sent", "overdue"] as readonly string[],
+  numberField: "invoice_number",
+  documentTypeField: "document_type",
+  creditNoteType: "credit_note",
+  creditNoteRefField: "credit_note_of",
+  issuedState: "sent",
+  lineInvoiceRefField: "invoice_id",
+  notesField: "notes",
+  issueDateField: "issue_date",
+  dueDateField: "due_date",
+  sentAtField: "sent_at",
+  descriptionField: "description",
+  maxLines: 1000,
+} as const;
+
+/**
+ * On voiding an *issued* invoice (state `sent`/`overdue` → `void`), auto-creates a
+ * credit note: a `document_type = credit_note` invoice numbered `<original>-CN`,
+ * linked back via `credit_note_of`, carrying the original's account/currency/totals
+ * (positive — the `credit_note` type denotes the reduction), issued today, with a
+ * line per original line. Voiding a never-issued draft creates nothing, and a
+ * credit note is never itself credit-noted. Written directly through the store, so
+ * it bypasses the handler's guards/effects (no recursion) and rides the same
+ * transaction as the void (atomic).
+ */
+export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}): WriteEffect {
+  const c = { ...CN_DEFAULTS, ...config };
+  return async (input) => {
+    if (input.entity !== c.invoiceEntity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    const beforeState = input.before?.[c.stateField];
+    const wasIssued = typeof beforeState === "string" && c.issuedStates.includes(beforeState);
+    const nowVoid = input.after[c.stateField] === c.voidState;
+    if (!wasIssued || !nowVoid) return;
+    if (input.before?.[c.documentTypeField] === c.creditNoteType) return; // never credit-note a credit note
+
+    const original = input.after;
+    const originalId = input.id;
+    if (originalId === null) return;
+
+    const now = c.clock?.now() ?? new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.slice(0, 10);
+    const origNumber = typeof original[c.numberField] === "string" ? (original[c.numberField] as string) : originalId;
+
+    const headerSkip = new Set([
+      "id",
+      c.numberField,
+      c.stateField,
+      c.documentTypeField,
+      c.creditNoteRefField,
+      c.issueDateField,
+      c.dueDateField,
+      c.notesField,
+      c.sentAtField,
+      "paid_at",
+      "created_at",
+      "updated_at",
+    ]);
+    const creditNote: EntityRecord = {};
+    for (const [k, v] of Object.entries(original)) {
+      if (!headerSkip.has(k)) creditNote[k] = v;
+    }
+    creditNote[c.documentTypeField] = c.creditNoteType;
+    creditNote[c.creditNoteRefField] = originalId;
+    creditNote[c.numberField] = `${origNumber}-CN`;
+    creditNote[c.stateField] = c.issuedState;
+    creditNote[c.issueDateField] = today;
+    creditNote[c.dueDateField] = today;
+    creditNote[c.sentAtField] = nowIso;
+    creditNote[c.notesField] = `Credit note for ${origNumber}`;
+    creditNote.created_at = nowIso;
+    creditNote.updated_at = nowIso;
+    const created = await input.store.create(input.tenantId, c.invoiceEntity, creditNote);
+    const newId = String(created["id"]);
+
+    if (config.lineEntity === undefined) return;
+    const lineEntity = config.lineEntity;
+    const filter: ListFilter = { field: c.lineInvoiceRefField, op: "eq", value: originalId };
+    const page = await input.store.listPage(input.tenantId, lineEntity, {
+      limit: c.maxLines,
+      cursor: null,
+      sort: [],
+      filters: [filter],
+    });
+    const lines = page.records.filter((r) => String(r[c.lineInvoiceRefField] ?? "") === originalId);
+    const lineSkip = new Set(["id", c.lineInvoiceRefField, c.descriptionField, "created_at", "updated_at"]);
+    for (const line of lines) {
+      const cnLine: EntityRecord = {};
+      for (const [k, v] of Object.entries(line)) {
+        if (!lineSkip.has(k)) cnLine[k] = v;
+      }
+      cnLine[c.lineInvoiceRefField] = newId;
+      const desc = typeof line[c.descriptionField] === "string" ? (line[c.descriptionField] as string) : "";
+      cnLine[c.descriptionField] = `Credit: ${desc}`.trim();
+      cnLine.created_at = nowIso;
+      cnLine.updated_at = nowIso;
+      await input.store.create(input.tenantId, lineEntity, cnLine);
+    }
+  };
+}
