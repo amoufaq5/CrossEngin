@@ -213,6 +213,54 @@ export function roleLabel(schema: UiSchema | null, name: string): string {
   return r?.label ?? name.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+/** An entity the viewer can advance, plus the states from which they can act. */
+export interface InboxEntitySpec {
+  readonly entity: UiEntitySchema;
+  readonly transitions: readonly UiTransitionSchema[];
+  readonly fromStates: readonly string[];
+}
+
+/** Entities with at least one lifecycle transition the viewer's role may fire. */
+export function inboxEntitySpecs(schema: UiSchema | null): readonly InboxEntitySpec[] {
+  const roles = viewerRoles(schema);
+  const byEntity = new Map<string, { entity: UiEntitySchema; transitions: UiTransitionSchema[] }>();
+  for (const { entity, transition } of viewerActions(schema)) {
+    if (entity.stateField === null) continue;
+    const slot = byEntity.get(entity.name) ?? { entity, transitions: [] };
+    slot.transitions.push(transition);
+    byEntity.set(entity.name, slot);
+  }
+  return [...byEntity.values()].map(({ entity, transitions }) => ({
+    entity,
+    transitions,
+    fromStates: [...new Set(transitions.flatMap((t) => [...t.from]))],
+  }));
+}
+
+/** Transitions the viewer may fire on a record currently in `state`. */
+export function actionsForState(
+  spec: InboxEntitySpec,
+  state: string,
+): readonly UiTransitionSchema[] {
+  return spec.transitions.filter((t) => t.from.includes(state));
+}
+
+/** Best human label for a record: a name/number/code/title, falling back to id. */
+export function recordLabel(entity: UiEntitySchema, record: Record<string, unknown>): string {
+  const prefer = ["name", "title", `${entity.name.toLowerCase()}_number`];
+  for (const key of prefer) {
+    const v = record[key];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  for (const f of entity.fields) {
+    if (/(_number$|^code$|_code$|^sku$|^title$|^name$)/.test(f.name)) {
+      const v = record[f.name];
+      if (typeof v === "string" && v.length > 0) return v;
+    }
+  }
+  return String(record["id"] ?? "—");
+}
+
 export interface DepartmentGroup {
   readonly module: string;
   readonly entities: readonly UiEntitySchema[];

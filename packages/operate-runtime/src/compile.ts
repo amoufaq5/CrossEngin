@@ -26,6 +26,7 @@ import {
 } from "./admin-handlers.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
+import { literalDefaultPlans, type LiteralDefaultPlan } from "./defaults.js";
 import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import type { SettingsStore } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
@@ -81,6 +82,15 @@ function buildSequencePlans(manifest: Manifest): Map<string, readonly SequenceFi
   return plans;
 }
 
+function buildDefaultPlans(manifest: Manifest): Map<string, readonly LiteralDefaultPlan[]> {
+  const plans = new Map<string, readonly LiteralDefaultPlan[]>();
+  for (const entity of manifest.entities ?? []) {
+    const p = literalDefaultPlans(entity);
+    if (p.length > 0) plans.set(entity.name, p);
+  }
+  return plans;
+}
+
 export interface CompiledOperateServer {
   readonly routes: InMemoryRouteRegistry;
   readonly handlers: HandlerRegistry;
@@ -107,6 +117,7 @@ export function compileOperateServer(
     roles,
     principalRoles: options.principalRoles,
     sequencePlans: buildSequencePlans(manifest),
+    defaultPlans: buildDefaultPlans(manifest),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
