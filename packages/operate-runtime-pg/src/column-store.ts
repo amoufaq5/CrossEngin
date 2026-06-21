@@ -13,6 +13,7 @@ import {
   type EntityStore,
   type ListPage,
   type ListQuery,
+  type TransactionalEntityStore,
 } from "@crossengin/operate-runtime";
 
 import type { OnDelete } from "@crossengin/types/meta-schema";
@@ -57,7 +58,7 @@ export interface ColumnMappedEntityStoreOptions {
  * by SQL reference; encrypted columns are excluded from sort/filter (you can't
  * meaningfully order ciphertext).
  */
-export class ColumnMappedEntityStore implements EntityStore {
+export class ColumnMappedEntityStore implements TransactionalEntityStore {
   private readonly conn: PgConnection;
   private readonly plans: ReadonlyMap<string, EntityTablePlan>;
   private readonly indexes: Map<string, ReadonlyMap<string, ColumnMapping>> = new Map();
@@ -148,65 +149,79 @@ export class ColumnMappedEntityStore implements EntityStore {
     return page.records;
   }
 
-  async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
+  private async listPageOn(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    query: ListQuery,
+  ): Promise<ListPage> {
     const plan = this.planFor(entity);
     const idx = this.indexFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
-      const params: unknown[] = [tenantId];
-      // Compare on the native column type (typed cast); an unknown or encrypted
-      // column is dropped from filter/sort (can't order ciphertext).
-      const adapter: ListSqlAdapter = {
-        columnExpr: (field) => {
-          const m = idx.get(field);
-          return m === undefined || m.encryptAtRest ? null : quoteIdent(m.column);
-        },
-        castSuffix: (field) => {
-          const m = idx.get(field);
-          return m === undefined ? "" : `::${m.sqlType}`;
-        },
-        idExpr: quoteIdent("id"),
-      };
-      const { where, orderBy } = buildListSql(query, adapter, [`${quoteIdent("tenant_id")} = $1`], params);
-      const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
-      // ?fields pushdown: SELECT only the requested columns + the sort columns
-      // (needed to build the keyset cursor). The handler re-projects to the
-      // exact requested set, so selecting sort columns isn't visible to clients.
-      const only = this.projectionColumns(query, idx);
-      const res = await tx.query<Record<string, unknown>>(
-        `SELECT ${this.selectList(plan, only)}
-           FROM ${qualified}
-          WHERE ${where}
-          ORDER BY ${orderBy}
-          LIMIT ${limitParam}`,
-        params,
-      );
-      const rows = res.rows.map((r) => rowToRecord(plan, r));
-      const hasMore = rows.length > query.limit;
-      const records = hasMore ? rows.slice(0, query.limit) : rows;
-      const last = records[records.length - 1];
-      const nextCursor = hasMore && last !== undefined ? encodeKeyset(keysetOf(last, query.sort)) : null;
-      return { records, nextCursor };
-    });
+    const params: unknown[] = [tenantId];
+    // Compare on the native column type (typed cast); an unknown or encrypted
+    // column is dropped from filter/sort (can't order ciphertext).
+    const adapter: ListSqlAdapter = {
+      columnExpr: (field) => {
+        const m = idx.get(field);
+        return m === undefined || m.encryptAtRest ? null : quoteIdent(m.column);
+      },
+      castSuffix: (field) => {
+        const m = idx.get(field);
+        return m === undefined ? "" : `::${m.sqlType}`;
+      },
+      idExpr: quoteIdent("id"),
+    };
+    const { where, orderBy } = buildListSql(query, adapter, [`${quoteIdent("tenant_id")} = $1`], params);
+    const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
+    // ?fields pushdown: SELECT only the requested columns + the sort columns
+    // (needed to build the keyset cursor). The handler re-projects to the
+    // exact requested set, so selecting sort columns isn't visible to clients.
+    const only = this.projectionColumns(query, idx);
+    const res = await tx.query<Record<string, unknown>>(
+      `SELECT ${this.selectList(plan, only)}
+         FROM ${qualified}
+        WHERE ${where}
+        ORDER BY ${orderBy}
+        LIMIT ${limitParam}`,
+      params,
+    );
+    const rows = res.rows.map((r) => rowToRecord(plan, r));
+    const hasMore = rows.length > query.limit;
+    const records = hasMore ? rows.slice(0, query.limit) : rows;
+    const last = records[records.length - 1];
+    const nextCursor = hasMore && last !== undefined ? encodeKeyset(keysetOf(last, query.sort)) : null;
+    return { records, nextCursor };
+  }
+
+  async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
+    return withTenantContext(this.conn, tenantId, (tx) => this.listPageOn(tx, tenantId, entity, query));
+  }
+
+  private async getOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
+    const plan = this.planFor(entity);
+    const qualified = qualifyTable(plan.schema, plan.table);
+    const res = await tx.query<Record<string, unknown>>(
+      `SELECT ${this.selectList(plan)}
+         FROM ${qualified}
+        WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2
+        LIMIT 1`,
+      [tenantId, id],
+    );
+    const row = res.rows[0];
+    return row === undefined ? null : rowToRecord(plan, row);
   }
 
   async get(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
-    const plan = this.planFor(entity);
-    const qualified = qualifyTable(plan.schema, plan.table);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
-      const res = await tx.query<Record<string, unknown>>(
-        `SELECT ${this.selectList(plan)}
-           FROM ${qualified}
-          WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2
-          LIMIT 1`,
-        [tenantId, id],
-      );
-      const row = res.rows[0];
-      return row === undefined ? null : rowToRecord(plan, row);
-    });
+    return withTenantContext(this.conn, tenantId, (tx) => this.getOn(tx, tenantId, entity, id));
   }
 
-  async create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
+  private async createOn(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    record: EntityRecord,
+  ): Promise<EntityRecord> {
     const plan = this.planFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
     const id = resolveRecordId(record);
@@ -221,13 +236,43 @@ export class ColumnMappedEntityStore implements EntityStore {
       placeholders.push(this.writePlaceholder(mapping, v, values));
       stored[mapping.field] = v;
     }
-    await withTenantContext(this.conn, tenantId, async (tx) => {
-      await tx.query(
-        `INSERT INTO ${qualified} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`,
-        values,
-      );
-    });
+    await tx.query(
+      `INSERT INTO ${qualified} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`,
+      values,
+    );
     return stored;
+  }
+
+  async create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
+    return withTenantContext(this.conn, tenantId, (tx) => this.createOn(tx, tenantId, entity, record));
+  }
+
+  private async updateOn(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+  ): Promise<EntityRecord | null> {
+    const plan = this.planFor(entity);
+    const qualified = qualifyTable(plan.schema, plan.table);
+    const sets: string[] = [];
+    const params: unknown[] = [tenantId, id];
+    for (const mapping of plan.columns) {
+      const v = patch[mapping.field];
+      if (v === undefined) continue;
+      sets.push(`${quoteIdent(mapping.column)} = ${this.writePlaceholder(mapping, v, params)}`);
+    }
+    sets.push(`${quoteIdent("updated_at")} = now()`);
+    const res = await tx.query<Record<string, unknown>>(
+      `UPDATE ${qualified}
+          SET ${sets.join(", ")}
+        WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2
+        RETURNING ${this.selectList(plan)}`,
+      params,
+    );
+    const row = res.rows[0];
+    return row === undefined ? null : rowToRecord(plan, row);
   }
 
   async update(
@@ -236,38 +281,60 @@ export class ColumnMappedEntityStore implements EntityStore {
     id: string,
     patch: EntityRecord,
   ): Promise<EntityRecord | null> {
+    return withTenantContext(this.conn, tenantId, (tx) => this.updateOn(tx, tenantId, entity, id, patch));
+  }
+
+  private async removeOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<boolean> {
     const plan = this.planFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
-      const sets: string[] = [];
-      const params: unknown[] = [tenantId, id];
-      for (const mapping of plan.columns) {
-        const v = patch[mapping.field];
-        if (v === undefined) continue;
-        sets.push(`${quoteIdent(mapping.column)} = ${this.writePlaceholder(mapping, v, params)}`);
-      }
-      sets.push(`${quoteIdent("updated_at")} = now()`);
-      const res = await tx.query<Record<string, unknown>>(
-        `UPDATE ${qualified}
-            SET ${sets.join(", ")}
-          WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2
-          RETURNING ${this.selectList(plan)}`,
-        params,
-      );
-      const row = res.rows[0];
-      return row === undefined ? null : rowToRecord(plan, row);
-    });
+    const res = await tx.query(
+      `DELETE FROM ${qualified} WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2`,
+      [tenantId, id],
+    );
+    return res.rowCount > 0;
   }
 
   async remove(tenantId: string, entity: string, id: string): Promise<boolean> {
-    const plan = this.planFor(entity);
-    const qualified = qualifyTable(plan.schema, plan.table);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
-      const res = await tx.query(
-        `DELETE FROM ${qualified} WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2`,
-        [tenantId, id],
-      );
-      return res.rowCount > 0;
+    return withTenantContext(this.conn, tenantId, (tx) => this.removeOn(tx, tenantId, entity, id));
+  }
+
+  /**
+   * Runs `fn` in one tenant-scoped transaction; every EntityStore op on the
+   * supplied store shares it (so a handler's guard → write → effect unit commits
+   * or rolls back atomically). A cross-tenant call inside is rejected.
+   */
+  withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
+    return withTenantContext(this.conn, tenantId, (tx) => {
+      const assertTenant = (t: string): void => {
+        if (t !== tenantId) throw new Error("cross-tenant access inside a transaction is not allowed");
+      };
+      const bound: EntityStore = {
+        list: (t, entity) => {
+          assertTenant(t);
+          return this.listPageOn(tx, t, entity, { limit: 1_000_000, cursor: null, sort: [], filters: [] }).then((p) => p.records);
+        },
+        listPage: (t, entity, query) => {
+          assertTenant(t);
+          return this.listPageOn(tx, t, entity, query);
+        },
+        get: (t, entity, id) => {
+          assertTenant(t);
+          return this.getOn(tx, t, entity, id);
+        },
+        create: (t, entity, record) => {
+          assertTenant(t);
+          return this.createOn(tx, t, entity, record);
+        },
+        update: (t, entity, id, patch) => {
+          assertTenant(t);
+          return this.updateOn(tx, t, entity, id, patch);
+        },
+        remove: (t, entity, id) => {
+          assertTenant(t);
+          return this.removeOn(tx, t, entity, id);
+        },
+      };
+      return fn(bound);
     });
   }
 
