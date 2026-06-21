@@ -909,3 +909,86 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
     for (const line of lines) await input.store.create(input.tenantId, c.lineEntity, line);
   };
 }
+
+export interface PaymentApplicationConfig {
+  readonly paymentEntity?: string;
+  readonly documentEntity: string;
+  /** The Payment field referencing the document (e.g. "invoice_id"). */
+  readonly refField: string;
+  readonly stateField?: string;
+  readonly completedState?: string;
+  readonly amountField?: string;
+  readonly documentTotalField?: string;
+  readonly documentStateField?: string;
+  readonly paidState?: string;
+  readonly paidAtField?: string;
+  /** Document states from which auto-settlement is allowed (issued/approved, not draft/void). */
+  readonly settleableStates?: readonly string[];
+  readonly maxPayments?: number;
+  readonly clock?: { now(): Date };
+}
+
+const APPLICATION_FALLBACKS = {
+  paymentEntity: "Payment",
+  stateField: "state",
+  completedState: "completed",
+  amountField: "amount",
+  documentTotalField: "total",
+  documentStateField: "state",
+  paidState: "paid",
+  paidAtField: "paid_at",
+  maxPayments: 1000,
+} as const;
+
+const APPLY_EPSILON = 0.005;
+
+/**
+ * Per-document payment application: when a Payment completes against a linked
+ * document (`refField`), sums all completed payments for that document and — once
+ * they cover its total — auto-transitions the document to paid. So partial
+ * payments accumulate against a specific invoice/bill and settle it when fully
+ * covered. The document is updated directly through the store (bypassing the
+ * issued-document lock) inside the payment transaction, so application is atomic
+ * with settlement.
+ */
+export function paymentApplicationEffect(config: PaymentApplicationConfig): WriteEffect {
+  const c = { ...APPLICATION_FALLBACKS, ...config };
+  return async (input) => {
+    if (input.entity !== c.paymentEntity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    if (input.before?.[c.stateField] === c.completedState || input.after[c.stateField] !== c.completedState) return;
+
+    const docId = input.after[c.refField];
+    if (typeof docId !== "string" || docId.length === 0) return;
+    const doc = await input.store.get(input.tenantId, c.documentEntity, docId);
+    if (doc === null) return;
+    const docState = doc[c.documentStateField];
+    if (docState === c.paidState) return; // already settled
+    if (c.settleableStates !== undefined && (typeof docState !== "string" || !c.settleableStates.includes(docState))) {
+      return;
+    }
+    const total = num(doc[c.documentTotalField]);
+    if (total <= 0) return;
+
+    const page = await input.store.listPage(input.tenantId, c.paymentEntity, {
+      limit: c.maxPayments,
+      cursor: null,
+      sort: [],
+      filters: [{ field: c.refField, op: "eq", value: docId }],
+    });
+    let applied = 0;
+    for (const p of page.records) {
+      if (String(p[c.refField] ?? "") === docId && p[c.stateField] === c.completedState) {
+        applied += num(p[c.amountField]);
+      }
+    }
+    if (applied + APPLY_EPSILON < total) return; // not yet fully covered
+
+    const nowIso = (c.clock?.now() ?? new Date()).toISOString();
+    await input.store.update(input.tenantId, c.documentEntity, docId, {
+      [c.documentStateField]: c.paidState,
+      [c.paidAtField]: nowIso,
+      updated_at: nowIso,
+    });
+  };
+}
