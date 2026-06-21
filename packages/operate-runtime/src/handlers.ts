@@ -15,7 +15,7 @@ import { applySettingsDefaults, type SettingsDefaultPlan } from "./settings-defa
 import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from "./settings.js";
 import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { runWriteEffects, type WriteEffect } from "./write-effects.js";
-import { projectRecord, type EntityStore } from "./store.js";
+import { isTransactional, projectRecord, type EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
@@ -123,63 +123,88 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
         const createdAt = nowIso(ctx);
         body = { created_at: createdAt, ...body, updated_at: createdAt };
-        const createBlock = await guard(ctx, {
-          operation: "create",
-          entity: spec.entity,
-          tenantId,
-          id: null,
-          before: null,
-          after: body,
-          store: ctx.store,
+        return writeTxn(ctx, tenantId, async (store) => {
+          const block = await guard(ctx, {
+            operation: "create",
+            entity: spec.entity,
+            tenantId,
+            id: null,
+            before: null,
+            after: body,
+            store,
+          });
+          if (block !== null) return block;
+          const created = await store.create(tenantId, spec.entity, body);
+          await runEffects(ctx, {
+            operation: "create",
+            entity: spec.entity,
+            tenantId,
+            id: typeof created["id"] === "string" ? (created["id"] as string) : null,
+            before: null,
+            after: created,
+            store,
+          });
+          return json(201, created);
         });
-        if (createBlock !== null) return createBlock;
-        return json(201, await ctx.store.create(tenantId, spec.entity, body));
       }
       case "update": {
         const patch = { ...(parsedBody ?? {}), updated_at: nowIso(ctx) };
-        const needsBefore = hasGuards(ctx) || hasEffects(ctx);
-        const before = needsBefore ? await ctx.store.get(tenantId, spec.entity, id) : null;
-        if (needsBefore && before === null) return json(404, { error: "not_found" });
-        const updateBlock = await guard(ctx, {
-          operation: "update",
-          entity: spec.entity,
-          tenantId,
-          id,
-          before,
-          after: { ...(before ?? {}), ...patch },
-          store: ctx.store,
+        return writeTxn(ctx, tenantId, async (store) => {
+          const needsBefore = hasGuards(ctx) || hasEffects(ctx);
+          const before = needsBefore ? await store.get(tenantId, spec.entity, id) : null;
+          if (needsBefore && before === null) return json(404, { error: "not_found" });
+          const block = await guard(ctx, {
+            operation: "update",
+            entity: spec.entity,
+            tenantId,
+            id,
+            before,
+            after: { ...(before ?? {}), ...patch },
+            store,
+          });
+          if (block !== null) return block;
+          const record = await store.update(tenantId, spec.entity, id, patch);
+          if (record === null) return json(404, { error: "not_found" });
+          await runEffects(ctx, {
+            operation: "update",
+            entity: spec.entity,
+            tenantId,
+            id,
+            before,
+            after: record,
+            store,
+          });
+          return json(200, record);
         });
-        if (updateBlock !== null) return updateBlock;
-        const record = await ctx.store.update(tenantId, spec.entity, id, patch);
-        if (record === null) return json(404, { error: "not_found" });
-        const effectErr = await effects(ctx, {
-          operation: "update",
-          entity: spec.entity,
-          tenantId,
-          id,
-          before,
-          after: record,
-          store: ctx.store,
-        });
-        return effectErr ?? json(200, record);
       }
       case "delete": {
-        if (ctx.writeGuards !== undefined && ctx.writeGuards.length > 0) {
-          const before = await ctx.store.get(tenantId, spec.entity, id);
-          if (before === null) return json(404, { error: "not_found" });
-          const deleteBlock = await guard(ctx, {
+        return writeTxn(ctx, tenantId, async (store) => {
+          const needsBefore = hasGuards(ctx) || hasEffects(ctx);
+          const before = needsBefore ? await store.get(tenantId, spec.entity, id) : null;
+          if (needsBefore && before === null) return json(404, { error: "not_found" });
+          const block = await guard(ctx, {
             operation: "delete",
             entity: spec.entity,
             tenantId,
             id,
             before,
-            after: before,
-            store: ctx.store,
+            after: before ?? {},
+            store,
           });
-          if (deleteBlock !== null) return deleteBlock;
-        }
-        const removed = await ctx.store.remove(tenantId, spec.entity, id);
-        return removed ? { kind: "empty", status: 204 } : json(404, { error: "not_found" });
+          if (block !== null) return block;
+          const removed = await store.remove(tenantId, spec.entity, id);
+          if (!removed) return json(404, { error: "not_found" });
+          await runEffects(ctx, {
+            operation: "delete",
+            entity: spec.entity,
+            tenantId,
+            id,
+            before,
+            after: before ?? {},
+            store,
+          });
+          return { kind: "empty", status: 204 };
+        });
       }
       case "transition":
         return applyTransition(spec, ctx, tenantId, id);
@@ -219,39 +244,41 @@ async function applyTransition(
 ): Promise<HandlerOutput> {
   const t = spec.transition;
   if (t === undefined) return json(500, { error: "missing_transition_spec" });
-  const record = await ctx.store.get(tenantId, spec.entity, id);
-  if (record === null) return json(404, { error: "not_found" });
-  const current = record[t.stateField];
-  if (typeof current === "string" && !t.fromStates.includes(current)) {
-    return json(409, {
-      error: "invalid_transition",
-      detail: `'${t.name}' cannot fire from '${current}'`,
-      allowedFrom: t.fromStates,
+  return writeTxn(ctx, tenantId, async (store) => {
+    const record = await store.get(tenantId, spec.entity, id);
+    if (record === null) return json(404, { error: "not_found" });
+    const current = record[t.stateField];
+    if (typeof current === "string" && !t.fromStates.includes(current)) {
+      return json(409, {
+        error: "invalid_transition",
+        detail: `'${t.name}' cannot fire from '${current}'`,
+        allowedFrom: t.fromStates,
+      });
+    }
+    const patch = { [t.stateField]: t.toState, updated_at: nowIso(ctx) };
+    const block = await guard(ctx, {
+      operation: "transition",
+      entity: spec.entity,
+      tenantId,
+      id,
+      before: record,
+      after: { ...record, ...patch },
+      store,
     });
-  }
-  const patch = { [t.stateField]: t.toState, updated_at: nowIso(ctx) };
-  const block = await guard(ctx, {
-    operation: "transition",
-    entity: spec.entity,
-    tenantId,
-    id,
-    before: record,
-    after: { ...record, ...patch },
-    store: ctx.store,
+    if (block !== null) return block;
+    const updated = await store.update(tenantId, spec.entity, id, patch);
+    const after = updated ?? record;
+    await runEffects(ctx, {
+      operation: "transition",
+      entity: spec.entity,
+      tenantId,
+      id,
+      before: record,
+      after,
+      store,
+    });
+    return json(200, after);
   });
-  if (block !== null) return block;
-  const updated = await ctx.store.update(tenantId, spec.entity, id, patch);
-  const after = updated ?? record;
-  const effectErr = await effects(ctx, {
-    operation: "transition",
-    entity: spec.entity,
-    tenantId,
-    id,
-    before: record,
-    after,
-    store: ctx.store,
-  });
-  return effectErr ?? json(200, after);
 }
 
 /** Current time as an ISO string, honoring an injected clock for deterministic tests. */
@@ -267,18 +294,31 @@ function hasEffects(ctx: HandlerContext): boolean {
   return ctx.writeEffects !== undefined && ctx.writeEffects.length > 0;
 }
 
-/** Runs post-write effects; on failure returns a 500 (the write itself already committed). */
-async function effects(
+/**
+ * Runs a write unit (guard → store write → effects) atomically when the store
+ * supports transactions: the body runs against a transaction-bound store and an
+ * effect that throws rolls the whole unit back. On a non-transactional store the
+ * body runs directly (best-effort). Either way a thrown error maps to 500.
+ */
+async function writeTxn(
   ctx: HandlerContext,
-  input: Parameters<WriteEffect>[0],
-): Promise<HandlerOutput | null> {
-  if (!hasEffects(ctx)) return null;
+  tenantId: string,
+  body: (store: EntityStore) => Promise<HandlerOutput>,
+): Promise<HandlerOutput> {
   try {
-    await runWriteEffects(ctx.writeEffects!, input);
-    return null;
+    if (isTransactional(ctx.store)) {
+      return await ctx.store.withTransaction(tenantId, (tx) => body(tx));
+    }
+    return await body(ctx.store);
   } catch (e) {
-    return json(500, { error: "write_effect_failed", detail: e instanceof Error ? e.message : String(e) });
+    return json(500, { error: "write_failed", detail: e instanceof Error ? e.message : String(e) });
   }
+}
+
+/** Runs post-write effects; a throw propagates so `writeTxn` rolls back + maps to 500. */
+async function runEffects(ctx: HandlerContext, input: Parameters<WriteEffect>[0]): Promise<void> {
+  if (!hasEffects(ctx)) return;
+  await runWriteEffects(ctx.writeEffects!, input);
 }
 
 /** Runs the configured write guards; returns a problem HandlerOutput on the first block, else null. */

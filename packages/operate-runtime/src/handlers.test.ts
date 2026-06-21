@@ -143,3 +143,39 @@ describe("operate handlers — lifecycle transitions", () => {
     expect(again.status).toBe(409);
   });
 });
+
+describe("operate handlers — transactional effects", () => {
+  it("rolls back the primary write when a post-write effect fails (transactional store)", async () => {
+    const store = new InMemoryEntityStore();
+    const failing = compileOperateServer(resolved, {
+      store,
+      principalRoles,
+      writeEffects: [
+        async () => {
+          throw new Error("effect boom");
+        },
+      ],
+    });
+    const spec = failing.routeSpecs.find((s) => s.operationId === "product.create")!;
+    const out = await failing.handlers.resolve("product.create")!({
+      request: buildIncomingRequest({
+        id: "req_tx0000000001",
+        receivedAt: "2026-06-03T12:00:00.000Z",
+        method: spec.method,
+        path: "/v1/x",
+        headers: {},
+        host: "api.example.com",
+        scheme: "https",
+        bodyBytes: null,
+        clientIp: "203.0.113.1",
+      }),
+      route: routeFromSpec(spec),
+      principal: principal("retail_admin"),
+      params: {},
+      parsedBody: { sku: "ROLL", name: "RolledBack" },
+    });
+    expect(out.status).toBe(500);
+    // The create was rolled back: nothing persisted for Product.
+    expect((await store.list(TENANT, "Product")).length).toBe(0);
+  });
+});
