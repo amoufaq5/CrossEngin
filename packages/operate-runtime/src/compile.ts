@@ -40,6 +40,7 @@ import {
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
+  paymentGlPostingEffect,
   type WriteEffect,
 } from "./write-effects.js";
 import type { SettingsStore } from "./settings.js";
@@ -198,6 +199,33 @@ function defaultWriteEffects(
     // AR↔GL bridge: post the matching GL entry when a credit note is issued,
     // using the tenant's configured AR/revenue chart-of-accounts codes.
     if (names.has("JournalEntry") && names.has("JournalLine") && names.has("LedgerAccount")) {
+      // Recognition: invoice issued (→sent) → debit AR, credit revenue.
+      effects.push(
+        paymentGlPostingEffect({
+          entity: "Invoice",
+          paidState: "sent",
+          sourceValue: "invoice",
+          entrySuffix: "-AR",
+          numberField: "invoice_number",
+          skipDocumentType: { field: "document_type", value: "credit_note" },
+          debitAccountRef: "accounts_receivable",
+          creditAccountRef: "revenue",
+          debitDescription: "Invoice — accounts receivable",
+          creditDescription: "Invoice — revenue",
+          ...(clock !== undefined ? { clock } : {}),
+          ...(settingsStore !== undefined
+            ? {
+                resolveAccountCodes: async (tenantId) => {
+                  const finance = (await settingsStore.get(tenantId)).finance;
+                  return {
+                    ...(finance?.arAccountCode !== undefined ? { debit: finance.arAccountCode } : {}),
+                    ...(finance?.revenueAccountCode !== undefined ? { credit: finance.revenueAccountCode } : {}),
+                  };
+                },
+              }
+            : {}),
+        }),
+      );
       effects.push(
         creditNoteGlPostingEffect({
           ...(clock !== undefined ? { clock } : {}),
@@ -214,10 +242,34 @@ function defaultWriteEffects(
             : {}),
         }),
       );
+      // Payment settlement: invoice paid → debit cash, credit AR.
+      effects.push(
+        paymentGlPostingEffect({
+          entity: "Invoice",
+          numberField: "invoice_number",
+          skipDocumentType: { field: "document_type", value: "credit_note" },
+          debitAccountRef: "cash",
+          creditAccountRef: "accounts_receivable",
+          debitDescription: "Payment — cash",
+          creditDescription: "Payment — accounts receivable",
+          ...(clock !== undefined ? { clock } : {}),
+          ...(settingsStore !== undefined
+            ? {
+                resolveAccountCodes: async (tenantId) => {
+                  const finance = (await settingsStore.get(tenantId)).finance;
+                  return {
+                    ...(finance?.cashAccountCode !== undefined ? { debit: finance.cashAccountCode } : {}),
+                    ...(finance?.arAccountCode !== undefined ? { credit: finance.arAccountCode } : {}),
+                  };
+                },
+              }
+            : {}),
+        }),
+      );
     }
   }
-  // AP↔GL bridge: post the payable recognition when a vendor bill is approved.
   if (names.has("Bill") && names.has("JournalEntry") && names.has("JournalLine") && names.has("LedgerAccount")) {
+    // AP↔GL bridge: post the payable recognition when a vendor bill is approved.
     effects.push(
       billGlPostingEffect({
         ...(clock !== undefined ? { clock } : {}),
@@ -228,6 +280,29 @@ function defaultWriteEffects(
                 return {
                   ...(finance?.apAccountCode !== undefined ? { ap: finance.apAccountCode } : {}),
                   ...(finance?.expenseAccountCode !== undefined ? { expense: finance.expenseAccountCode } : {}),
+                };
+              },
+            }
+          : {}),
+      }),
+    );
+    // Payment settlement: bill paid → debit AP, credit cash.
+    effects.push(
+      paymentGlPostingEffect({
+        entity: "Bill",
+        numberField: "bill_number",
+        debitAccountRef: "accounts_payable",
+        creditAccountRef: "cash",
+        debitDescription: "Payment — accounts payable",
+        creditDescription: "Payment — cash",
+        ...(clock !== undefined ? { clock } : {}),
+        ...(settingsStore !== undefined
+          ? {
+              resolveAccountCodes: async (tenantId) => {
+                const finance = (await settingsStore.get(tenantId)).finance;
+                return {
+                  ...(finance?.apAccountCode !== undefined ? { debit: finance.apAccountCode } : {}),
+                  ...(finance?.cashAccountCode !== undefined ? { credit: finance.cashAccountCode } : {}),
                 };
               },
             }

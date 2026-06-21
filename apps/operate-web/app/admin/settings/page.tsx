@@ -195,9 +195,10 @@ export default function SettingsPage() {
               <Text label="Revenue account code" value={finance.revenueAccountCode ?? ""} onChange={(v) => setD(setFinance, "revenueAccountCode", v)} />
               <Text label="AP account code" value={finance.apAccountCode ?? ""} onChange={(v) => setD(setFinance, "apAccountCode", v)} />
               <Text label="Expense account code" value={finance.expenseAccountCode ?? ""} onChange={(v) => setD(setFinance, "expenseAccountCode", v)} />
+              <Text label="Cash / bank account code" value={finance.cashAccountCode ?? ""} onChange={(v) => setD(setFinance, "cashAccountCode", v)} />
             </div>
             <p className="mt-3 text-xs text-ink-faint">
-              Account codes map to your chart of accounts (LedgerAccount): AR &amp; revenue drive the GL entry posted on credit-note issuance; AP &amp; expense drive the entry posted when a vendor bill is approved.
+              Account codes map to your chart of accounts (LedgerAccount): AR &amp; revenue post on credit-note issuance; AP &amp; expense post when a vendor bill is approved; cash settles invoices and bills when they&apos;re paid.
             </p>
           </Section>
 
@@ -346,6 +347,7 @@ function buildFinance(f: StrMap): Record<string, unknown> {
   if (f.revenueAccountCode?.trim()) out.revenueAccountCode = f.revenueAccountCode.trim();
   if (f.apAccountCode?.trim()) out.apAccountCode = f.apAccountCode.trim();
   if (f.expenseAccountCode?.trim()) out.expenseAccountCode = f.expenseAccountCode.trim();
+  if (f.cashAccountCode?.trim()) out.cashAccountCode = f.cashAccountCode.trim();
   return out;
 }
 
