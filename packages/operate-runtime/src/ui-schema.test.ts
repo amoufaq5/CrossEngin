@@ -91,4 +91,12 @@ describe("buildUiSchema", () => {
     const file = entity("TaxReturn").transitions.find((t) => t.name === "file");
     expect(file?.roles).toContain("tax_manager");
   });
+
+  it("exposes the lifecycle state field as filterable even without a list view (inbox pushdown)", () => {
+    // TaxReturn has a lifecycle but no list view; SalesOrder likewise in core.
+    expect(entity("TaxReturn").filterableFields).toContain("state");
+    expect(entity("SalesOrder").filterableFields).toContain("state");
+    // Invoice has a list view AND a lifecycle — still filterable on state.
+    expect(entity("Invoice").filterableFields).toContain("state");
+  });
 });

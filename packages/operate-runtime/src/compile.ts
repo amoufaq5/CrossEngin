@@ -35,7 +35,12 @@ import {
   postedEntryImmutabilityGuard,
   type WriteGuard,
 } from "./write-guards.js";
-import { invoiceVoidCreditNoteEffect, journalReversalEffect, type WriteEffect } from "./write-effects.js";
+import {
+  creditNoteGlPostingEffect,
+  invoiceVoidCreditNoteEffect,
+  journalReversalEffect,
+  type WriteEffect,
+} from "./write-effects.js";
 import type { SettingsStore } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -138,6 +143,36 @@ function defaultWriteGuards(manifest: Manifest): readonly WriteGuard[] {
       }),
     );
   }
+  // A committed sales order is a customer commitment: once it leaves draft it
+  // can't be edited or deleted out of band (cancel via the lifecycle instead).
+  // States span the core (confirmed→…→closed) and retail (placed/returned) lifecycles.
+  if (names.has("SalesOrder")) {
+    guards.push(
+      lockedDocumentGuard({
+        entity: "SalesOrder",
+        lockedStates: ["confirmed", "fulfilled", "invoiced", "closed", "placed", "returned"],
+        ...(names.has("SalesOrderLine") ? { childEntity: "SalesOrderLine", childParentField: "sales_order_id" } : {}),
+        lockedError: "sales_order_locked",
+        childLockedError: "sales_order_locked_lines",
+        noun: "committed sales order",
+        reverseHint: "cancel it instead",
+      }),
+    );
+  }
+  // An approved purchase order is a supplier commitment: locked once submitted.
+  if (names.has("PurchaseOrder")) {
+    guards.push(
+      lockedDocumentGuard({
+        entity: "PurchaseOrder",
+        lockedStates: ["submitted", "approved", "received", "closed"],
+        ...(names.has("PurchaseOrderLine") ? { childEntity: "PurchaseOrderLine", childParentField: "purchase_order_id" } : {}),
+        lockedError: "purchase_order_locked",
+        childLockedError: "purchase_order_locked_lines",
+        noun: "approved purchase order",
+        reverseHint: "cancel it instead",
+      }),
+    );
+  }
   return guards;
 }
 
@@ -155,6 +190,10 @@ function defaultWriteEffects(manifest: Manifest, clock?: { now(): Date }): reado
         ...(clock !== undefined ? { clock } : {}),
       }),
     );
+    // AR↔GL bridge: post the matching GL entry when a credit note is issued.
+    if (names.has("JournalEntry") && names.has("JournalLine")) {
+      effects.push(creditNoteGlPostingEffect(clock !== undefined ? { clock } : {}));
+    }
   }
   return effects;
 }

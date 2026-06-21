@@ -138,6 +138,9 @@ export const INVOICE_ENTITY: Entity = {
     { name: "due_date", type: { kind: "date" }, required: true, indexed: true },
     { name: "sent_at", type: { kind: "datetime" } },
     { name: "paid_at", type: { kind: "datetime" } },
+    // Optional partial-credit amount: when set below `total` and the invoice is
+    // voided, the auto credit note (and its GL posting) are for this amount.
+    { name: "credit_amount", type: { kind: "decimal", precision: 14, scale: 2, min: 0 } },
     { name: "notes", type: { kind: "long_text" } },
   ],
   indexes: [{ fields: ["state", "due_date"] }],

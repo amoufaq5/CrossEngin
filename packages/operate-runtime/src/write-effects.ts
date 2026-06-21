@@ -166,6 +166,16 @@ export interface InvoiceCreditNoteConfig {
   readonly dueDateField?: string;
   readonly sentAtField?: string;
   readonly descriptionField?: string;
+  /** Optional invoice field carrying a partial credit amount (< total → partial credit note). */
+  readonly creditAmountField?: string;
+  readonly totalField?: string;
+  readonly subtotalField?: string;
+  readonly taxTotalField?: string;
+  readonly linePositionField?: string;
+  readonly lineQuantityField?: string;
+  readonly lineUnitPriceField?: string;
+  readonly lineTaxRateField?: string;
+  readonly lineTotalField?: string;
   readonly maxLines?: number;
   readonly clock?: { now(): Date };
 }
@@ -186,6 +196,15 @@ const CN_DEFAULTS = {
   dueDateField: "due_date",
   sentAtField: "sent_at",
   descriptionField: "description",
+  creditAmountField: "credit_amount",
+  totalField: "total",
+  subtotalField: "subtotal",
+  taxTotalField: "tax_total",
+  linePositionField: "position",
+  lineQuantityField: "quantity",
+  lineUnitPriceField: "unit_price",
+  lineTaxRateField: "tax_rate_pct",
+  lineTotalField: "line_total",
   maxLines: 1000,
 } as const;
 
@@ -244,7 +263,22 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
     creditNote[c.issueDateField] = today;
     creditNote[c.dueDateField] = today;
     creditNote[c.sentAtField] = nowIso;
-    creditNote[c.notesField] = `Credit note for ${origNumber}`;
+
+    // Partial credit: when the invoice carries a `credit_amount` below its total,
+    // the credit note is for that amount (single summary line); otherwise the
+    // full invoice is credited (every line mirrored).
+    const total = num(original[c.totalField]);
+    const requested = original[c.creditAmountField];
+    const isPartial = typeof requested === "number" && requested > 0 && requested < total;
+    const amount = isPartial ? (requested as number) : total;
+    if (isPartial) {
+      creditNote[c.totalField] = amount;
+      creditNote[c.subtotalField] = amount;
+      creditNote[c.taxTotalField] = 0;
+      creditNote[c.notesField] = `Partial credit note for ${origNumber}`;
+    } else {
+      creditNote[c.notesField] = `Credit note for ${origNumber}`;
+    }
     creditNote.created_at = nowIso;
     creditNote.updated_at = nowIso;
     const created = await input.store.create(input.tenantId, c.invoiceEntity, creditNote);
@@ -252,6 +286,22 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
 
     if (config.lineEntity === undefined) return;
     const lineEntity = config.lineEntity;
+
+    if (isPartial) {
+      await input.store.create(input.tenantId, lineEntity, {
+        [c.lineInvoiceRefField]: newId,
+        [c.linePositionField]: 1,
+        [c.descriptionField]: "Partial credit",
+        [c.lineQuantityField]: 1,
+        [c.lineUnitPriceField]: amount,
+        [c.lineTaxRateField]: 0,
+        [c.lineTotalField]: amount,
+        created_at: nowIso,
+        updated_at: nowIso,
+      });
+      return;
+    }
+
     const filter: ListFilter = { field: c.lineInvoiceRefField, op: "eq", value: originalId };
     const page = await input.store.listPage(input.tenantId, lineEntity, {
       limit: c.maxLines,
@@ -273,5 +323,111 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
       cnLine.updated_at = nowIso;
       await input.store.create(input.tenantId, lineEntity, cnLine);
     }
+  };
+}
+
+export interface CreditNoteGlConfig {
+  readonly invoiceEntity?: string;
+  readonly entryEntity?: string;
+  readonly lineEntity?: string;
+  readonly stateField?: string;
+  readonly voidState?: string;
+  readonly issuedStates?: readonly string[];
+  readonly documentTypeField?: string;
+  readonly creditNoteType?: string;
+  readonly numberField?: string;
+  readonly totalField?: string;
+  readonly creditAmountField?: string;
+  readonly currencyField?: string;
+  /** SQL-less placeholder account references (real account determination is out of scope). */
+  readonly arAccountRef?: string;
+  readonly revenueAccountRef?: string;
+  readonly clock?: { now(): Date };
+}
+
+const GL_DEFAULTS = {
+  invoiceEntity: "Invoice",
+  entryEntity: "JournalEntry",
+  lineEntity: "JournalLine",
+  stateField: "state",
+  voidState: "void",
+  issuedStates: ["sent", "overdue"] as readonly string[],
+  documentTypeField: "document_type",
+  creditNoteType: "credit_note",
+  numberField: "invoice_number",
+  totalField: "total",
+  creditAmountField: "credit_amount",
+  currencyField: "currency",
+  arAccountRef: "accounts_receivable",
+  revenueAccountRef: "revenue",
+} as const;
+
+/**
+ * AR↔GL bridge: when an issued invoice is voided (the same edge that issues a
+ * credit note), auto-posts the matching balanced GL entry — a posted
+ * `JournalEntry` numbered `<invoice>-CN-GL` with two lines that reverse the sale
+ * (debit revenue, credit AR) for the credited amount (partial when the invoice
+ * carries `credit_amount`). Account references are configurable placeholders;
+ * real per-tenant account determination (chart-of-accounts mapping) is out of
+ * scope here. Fires only when the manifest models a GL (JournalEntry + line).
+ * Written directly through the store (bypasses guards/effects; balanced by
+ * construction) inside the void transaction, so AR and GL move atomically.
+ */
+export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): WriteEffect {
+  const c = { ...GL_DEFAULTS, ...config };
+  return async (input) => {
+    if (input.entity !== c.invoiceEntity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    const beforeState = input.before?.[c.stateField];
+    const wasIssued = typeof beforeState === "string" && c.issuedStates.includes(beforeState);
+    const nowVoid = input.after[c.stateField] === c.voidState;
+    if (!wasIssued || !nowVoid) return;
+    if (input.before?.[c.documentTypeField] === c.creditNoteType) return;
+
+    const original = input.after;
+    const originalId = input.id;
+    if (originalId === null) return;
+    const total = num(original[c.totalField]);
+    const requested = original[c.creditAmountField];
+    const amount = typeof requested === "number" && requested > 0 && requested < total ? requested : total;
+    if (amount <= 0) return;
+
+    const now = c.clock?.now() ?? new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.slice(0, 10);
+    const origNumber = typeof original[c.numberField] === "string" ? (original[c.numberField] as string) : originalId;
+    const currency = typeof original[c.currencyField] === "string" ? (original[c.currencyField] as string) : "USD";
+
+    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+      entry_number: `${origNumber}-CN-GL`,
+      entry_date: today,
+      source: "system",
+      state: "posted",
+      memo: `Credit note GL posting for ${origNumber}`,
+      posted_at: nowIso,
+      created_at: nowIso,
+      updated_at: nowIso,
+    });
+    const entryId = String(entry["id"]);
+    const baseLine = { journal_entry_id: entryId, currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
+    // Reverse the sale: debit revenue, credit AR — balanced by construction.
+    await input.store.create(input.tenantId, c.lineEntity, {
+      ...baseLine,
+      ledger_account_id: c.revenueAccountRef,
+      description: "Credit note — revenue reversal",
+      debit: amount,
+      credit: 0,
+      functional_debit: amount,
+      functional_credit: 0,
+    });
+    await input.store.create(input.tenantId, c.lineEntity, {
+      ...baseLine,
+      ledger_account_id: c.arAccountRef,
+      description: "Credit note — AR reversal",
+      debit: 0,
+      credit: amount,
+      functional_debit: 0,
+      functional_credit: amount,
+    });
   };
 }

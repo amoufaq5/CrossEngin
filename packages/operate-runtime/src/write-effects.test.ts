@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { InMemoryEntityStore } from "./store.js";
 import {
+  creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
   runWriteEffects,
@@ -166,6 +167,79 @@ describe("invoiceVoidCreditNoteEffect", () => {
     const { store, id, inv } = await issuedInvoice();
     await effect(voidInput(store, id, { ...inv, document_type: "credit_note" }));
     expect((await store.list(TENANT, "Invoice")).length).toBe(1);
+  });
+
+  it("issues a partial credit note for a credit_amount below the total", async () => {
+    const { store, id, inv } = await issuedInvoice();
+    await effect(voidInput(store, id, { ...inv, credit_amount: 40 }));
+    const cn = (await store.list(TENANT, "Invoice")).find((i) => i.document_type === "credit_note")!;
+    expect(cn.total).toBe(40);
+    expect(cn.notes).toBe("Partial credit note for INV-2026-00005");
+    const cnLines = (await store.list(TENANT, "InvoiceLine")).filter((l) => l.invoice_id === cn.id);
+    expect(cnLines.length).toBe(1);
+    expect(cnLines[0]?.description).toBe("Partial credit");
+    expect(cnLines[0]?.line_total).toBe(40);
+  });
+
+  it("credits the full total when credit_amount >= total", async () => {
+    const { store, id, inv } = await issuedInvoice();
+    await effect(voidInput(store, id, { ...inv, credit_amount: 999 }));
+    const cn = (await store.list(TENANT, "Invoice")).find((i) => i.document_type === "credit_note")!;
+    expect(cn.total).toBe(105);
+    expect(cn.notes).toBe("Credit note for INV-2026-00005");
+  });
+});
+
+describe("creditNoteGlPostingEffect (AR↔GL bridge)", () => {
+  const effect = creditNoteGlPostingEffect({ clock });
+
+  async function issued(amountField?: number) {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-2026-00009",
+      state: "sent",
+      document_type: "invoice",
+      currency: "EUR",
+      total: 200,
+      ...(amountField !== undefined ? { credit_amount: amountField } : {}),
+    });
+    return { store, id: String(inv.id), inv };
+  }
+  const voidIt = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>): WriteEffectInput =>
+    ({ operation: "transition", entity: "Invoice", tenantId: TENANT, id, before, after: { ...before, state: "void" }, store });
+
+  it("posts a balanced journal entry reversing revenue and AR for the full credit", async () => {
+    const { store, id, inv } = await issued();
+    await effect(voidIt(store, id, inv));
+    const entries = await store.list(TENANT, "JournalEntry");
+    expect(entries.length).toBe(1);
+    const entry = entries[0]!;
+    expect(entry.entry_number).toBe("INV-2026-00009-CN-GL");
+    expect(entry.state).toBe("posted");
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.length).toBe(2);
+    const debit = lines.reduce((s, l) => s + Number(l.debit), 0);
+    const credit = lines.reduce((s, l) => s + Number(l.credit), 0);
+    expect(debit).toBe(200);
+    expect(credit).toBe(200);
+    expect(debit).toBe(credit); // balanced
+    expect(lines.every((l) => l.currency === "EUR")).toBe(true);
+  });
+
+  it("posts for the partial amount when credit_amount is set", async () => {
+    const { store, id, inv } = await issued(75);
+    await effect(voidIt(store, id, inv));
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(75);
+    expect(lines.reduce((s, l) => s + Number(l.credit), 0)).toBe(75);
+  });
+
+  it("does nothing when voiding a draft invoice", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { state: "draft", total: 200 });
+    await effect(voidIt(store, String(inv.id), inv));
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 });
 
