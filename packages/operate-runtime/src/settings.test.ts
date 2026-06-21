@@ -35,10 +35,14 @@ describe("TenantSettingsSchema", () => {
         defaultPaymentTermsDays: 30,
         rounding: "half_even",
         defaultTaxJurisdiction: "AE-VAT",
+        arAccountCode: "1100",
+        revenueAccountCode: "4000",
       },
       features: { approvals_inbox: true, beta_reports: false },
     });
     expect(parsed.finance?.accountingStandard).toBe("ifrs");
+    expect(parsed.finance?.arAccountCode).toBe("1100");
+    expect(parsed.finance?.revenueAccountCode).toBe("4000");
     expect(parsed.features?.approvals_inbox).toBe(true);
     expect(parsed.defaults?.weekStartDay).toBe(1);
   });

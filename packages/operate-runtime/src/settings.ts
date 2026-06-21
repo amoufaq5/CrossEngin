@@ -56,6 +56,10 @@ export const FinanceSettingsSchema = z
     defaultTaxJurisdiction: z.string().max(32).optional(),
     defaultPaymentTermsDays: z.number().int().min(0).max(365).optional(),
     rounding: z.enum(ROUNDING_MODES).optional(),
+    /** LedgerAccount.account_code mapped to accounts-receivable (drives the AR↔GL bridge). */
+    arAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code mapped to sales revenue (drives the AR↔GL bridge). */
+    revenueAccountCode: z.string().max(32).optional(),
   })
   .strict();
 

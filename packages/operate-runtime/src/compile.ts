@@ -177,7 +177,11 @@ function defaultWriteGuards(manifest: Manifest): readonly WriteGuard[] {
 }
 
 /** Effects inferred from the manifest's shape; opt out by passing `writeEffects: []`. */
-function defaultWriteEffects(manifest: Manifest, clock?: { now(): Date }): readonly WriteEffect[] {
+function defaultWriteEffects(
+  manifest: Manifest,
+  clock?: { now(): Date },
+  settingsStore?: SettingsStore,
+): readonly WriteEffect[] {
   const names = new Set((manifest.entities ?? []).map((e) => e.name));
   const effects: WriteEffect[] = [];
   if (names.has("JournalEntry") && names.has("JournalLine")) {
@@ -190,9 +194,25 @@ function defaultWriteEffects(manifest: Manifest, clock?: { now(): Date }): reado
         ...(clock !== undefined ? { clock } : {}),
       }),
     );
-    // AR↔GL bridge: post the matching GL entry when a credit note is issued.
-    if (names.has("JournalEntry") && names.has("JournalLine")) {
-      effects.push(creditNoteGlPostingEffect(clock !== undefined ? { clock } : {}));
+    // AR↔GL bridge: post the matching GL entry when a credit note is issued,
+    // using the tenant's configured AR/revenue chart-of-accounts codes.
+    if (names.has("JournalEntry") && names.has("JournalLine") && names.has("LedgerAccount")) {
+      effects.push(
+        creditNoteGlPostingEffect({
+          ...(clock !== undefined ? { clock } : {}),
+          ...(settingsStore !== undefined
+            ? {
+                resolveAccountCodes: async (tenantId) => {
+                  const finance = (await settingsStore.get(tenantId)).finance;
+                  return {
+                    ...(finance?.arAccountCode !== undefined ? { ar: finance.arAccountCode } : {}),
+                    ...(finance?.revenueAccountCode !== undefined ? { revenue: finance.revenueAccountCode } : {}),
+                  };
+                },
+              }
+            : {}),
+        }),
+      );
     }
   }
   return effects;
@@ -236,7 +256,7 @@ export function compileOperateServer(
     defaultPlans: buildDefaultPlans(manifest),
     settingsDefaultPlans: buildSettingsDefaultPlans(manifest),
     writeGuards: options.writeGuards ?? defaultWriteGuards(manifest),
-    writeEffects: options.writeEffects ?? defaultWriteEffects(manifest, options.clock),
+    writeEffects: options.writeEffects ?? defaultWriteEffects(manifest, options.clock, options.settingsStore),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),

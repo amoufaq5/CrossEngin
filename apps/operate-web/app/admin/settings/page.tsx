@@ -191,7 +191,12 @@ export default function SettingsPage() {
               <Text label="Payment terms (days)" value={finance.defaultPaymentTermsDays ?? ""} onChange={(v) => setD(setFinance, "defaultPaymentTermsDays", v)} />
               <Toggle label="Multi-currency enabled" checked={finance.multiCurrencyEnabled === "true"} onChange={(b) => setD(setFinance, "multiCurrencyEnabled", b ? "true" : "")} />
               <Toggle label="Prices include tax" checked={finance.pricesIncludeTax === "true"} onChange={(b) => setD(setFinance, "pricesIncludeTax", b ? "true" : "")} />
+              <Text label="AR account code" value={finance.arAccountCode ?? ""} onChange={(v) => setD(setFinance, "arAccountCode", v)} />
+              <Text label="Revenue account code" value={finance.revenueAccountCode ?? ""} onChange={(v) => setD(setFinance, "revenueAccountCode", v)} />
             </div>
+            <p className="mt-3 text-xs text-ink-faint">
+              AR &amp; revenue account codes map to your chart of accounts (LedgerAccount) and drive the GL entry posted when a credit note is issued.
+            </p>
           </Section>
 
           <Section title="Feature toggles">
@@ -335,6 +340,8 @@ function buildFinance(f: StrMap): Record<string, unknown> {
   }
   if (f.multiCurrencyEnabled === "true") out.multiCurrencyEnabled = true;
   if (f.pricesIncludeTax === "true") out.pricesIncludeTax = true;
+  if (f.arAccountCode?.trim()) out.arAccountCode = f.arAccountCode.trim();
+  if (f.revenueAccountCode?.trim()) out.revenueAccountCode = f.revenueAccountCode.trim();
   return out;
 }
 
