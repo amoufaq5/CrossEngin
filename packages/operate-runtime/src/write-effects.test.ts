@@ -6,6 +6,7 @@ import {
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
+  paymentApplicationEffect,
   paymentGlPostingEffect,
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
@@ -505,6 +506,54 @@ describe("paymentSettlementGlPostingEffect (partial + FX)", () => {
     const pay = await store.create(TENANT, "Payment", { state: "completed", direction: "inbound", amount: 10 });
     await complete(store, String(pay.id), pay);
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+});
+
+describe("paymentApplicationEffect", () => {
+  const effect = paymentApplicationEffect({
+    documentEntity: "Invoice",
+    refField: "invoice_id",
+    settleableStates: ["sent", "overdue"],
+    clock,
+  });
+  async function setup() {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-A", state: "sent", total: 120 });
+    return { store, invId: String(inv.id) };
+  }
+  const completePayment = async (store: InMemoryEntityStore, invId: string, amount: number) => {
+    const pay = await store.create(TENANT, "Payment", { invoice_id: invId, direction: "inbound", amount, state: "completed" });
+    return effect({ operation: "transition", entity: "Payment", tenantId: TENANT, id: String(pay.id), before: { state: "pending" }, after: { ...(await store.get(TENANT, "Payment", String(pay.id)))! }, store });
+  };
+
+  it("leaves the invoice unsettled while partial payments don't cover the total", async () => {
+    const { store, invId } = await setup();
+    await completePayment(store, invId, 60);
+    expect((await store.get(TENANT, "Invoice", invId))!.state).toBe("sent");
+  });
+
+  it("auto-settles the invoice once accumulated payments cover the total", async () => {
+    const { store, invId } = await setup();
+    await completePayment(store, invId, 60);
+    await completePayment(store, invId, 60); // now 120 == total
+    const inv = (await store.get(TENANT, "Invoice", invId))!;
+    expect(inv.state).toBe("paid");
+    expect(typeof inv.paid_at).toBe("string");
+  });
+
+  it("does not settle a document in a non-settleable state", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", { state: "draft", total: 50 });
+    await completePayment(store, String(inv.id), 50);
+    expect((await store.get(TENANT, "Invoice", String(inv.id)))!.state).toBe("draft");
+  });
+
+  it("ignores a payment with no document link", async () => {
+    const store = new InMemoryEntityStore();
+    const pay = await store.create(TENANT, "Payment", { direction: "inbound", amount: 10, state: "completed" });
+    await effect({ operation: "transition", entity: "Payment", tenantId: TENANT, id: String(pay.id), before: { state: "pending" }, after: { ...pay }, store });
+    // no throw, nothing to settle
+    expect((await store.list(TENANT, "Invoice")).length).toBe(0);
   });
 });
 

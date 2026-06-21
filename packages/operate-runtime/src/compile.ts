@@ -39,6 +39,7 @@ import {
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
+  paymentApplicationEffect,
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
   type WriteEffect,
@@ -277,6 +278,28 @@ function defaultWriteEffects(
           ...(f.apAccountCode !== undefined ? { ap: f.apAccountCode } : {}),
           ...(f.fxGainLossAccountCode !== undefined ? { fx: f.fxGainLossAccountCode } : {}),
         })),
+      }),
+    );
+  }
+  // Per-document application: a completed payment linked to an invoice/bill
+  // accumulates and auto-settles the document once fully covered.
+  if (names.has("Payment") && names.has("Invoice")) {
+    effects.push(
+      paymentApplicationEffect({
+        documentEntity: "Invoice",
+        refField: "invoice_id",
+        settleableStates: ["sent", "overdue"],
+        ...clockOpt,
+      }),
+    );
+  }
+  if (names.has("Payment") && names.has("Bill")) {
+    effects.push(
+      paymentApplicationEffect({
+        documentEntity: "Bill",
+        refField: "bill_id",
+        settleableStates: ["approved", "overdue"],
+        ...clockOpt,
       }),
     );
   }
