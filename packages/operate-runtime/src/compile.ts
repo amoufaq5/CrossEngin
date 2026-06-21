@@ -29,7 +29,7 @@ import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.
 import { literalDefaultPlans, type LiteralDefaultPlan } from "./defaults.js";
 import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { planHasSettingsDefaults, settingsDefaultPlan, type SettingsDefaultPlan } from "./settings-defaults.js";
-import { journalPostingGuard, type WriteGuard } from "./write-guards.js";
+import { journalPostingGuard, postedEntryImmutabilityGuard, type WriteGuard } from "./write-guards.js";
 import type { SettingsStore } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -99,7 +99,9 @@ function buildDefaultPlans(manifest: Manifest): Map<string, readonly LiteralDefa
 function defaultWriteGuards(manifest: Manifest): readonly WriteGuard[] {
   const names = new Set((manifest.entities ?? []).map((e) => e.name));
   const guards: WriteGuard[] = [];
-  if (names.has("JournalEntry") && names.has("JournalLine")) guards.push(journalPostingGuard());
+  if (names.has("JournalEntry") && names.has("JournalLine")) {
+    guards.push(journalPostingGuard(), postedEntryImmutabilityGuard());
+  }
   return guards;
 }
 

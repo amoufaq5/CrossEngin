@@ -152,6 +152,20 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         return record === null ? json(404, { error: "not_found" }) : json(200, record);
       }
       case "delete": {
+        if (ctx.writeGuards !== undefined && ctx.writeGuards.length > 0) {
+          const before = await ctx.store.get(tenantId, spec.entity, id);
+          if (before === null) return json(404, { error: "not_found" });
+          const deleteBlock = await guard(ctx, {
+            operation: "delete",
+            entity: spec.entity,
+            tenantId,
+            id,
+            before,
+            after: before,
+            store: ctx.store,
+          });
+          if (deleteBlock !== null) return deleteBlock;
+        }
         const removed = await ctx.store.remove(tenantId, spec.entity, id);
         return removed ? { kind: "empty", status: 204 } : json(404, { error: "not_found" });
       }

@@ -2,14 +2,14 @@ import type { EntityStore, ListFilter } from "./store.js";
 
 /** A write the guard is asked to vet, just before it is persisted. */
 export interface WriteGuardInput {
-  readonly operation: "create" | "update" | "transition";
+  readonly operation: "create" | "update" | "transition" | "delete";
   readonly entity: string;
   readonly tenantId: string;
-  /** Record id for update/transition; null on create. */
+  /** Record id for update/transition/delete; null on create. */
   readonly id: string | null;
   /** Stored record before the write (null on create). */
   readonly before: Record<string, unknown> | null;
-  /** Record as it will be after the write (merged for update/transition, body for create). */
+  /** Record as it will be after the write (merged for update/transition, body for create, = before for delete). */
   readonly after: Record<string, unknown>;
   readonly store: EntityStore;
 }
@@ -43,6 +43,7 @@ export interface JournalPostingGuardConfig {
   readonly lineEntity?: string;
   readonly stateField?: string;
   readonly postedState?: string;
+  readonly reversedState?: string;
   readonly lineEntryRefField?: string;
   readonly debitField?: string;
   readonly creditField?: string;
@@ -61,6 +62,7 @@ const DEFAULTS = {
   lineEntity: "JournalLine",
   stateField: "state",
   postedState: "posted",
+  reversedState: "reversed",
   lineEntryRefField: "journal_entry_id",
   debitField: "debit",
   creditField: "credit",
@@ -133,6 +135,58 @@ export function journalPostingGuard(config: JournalPostingGuardConfig = {}): Wri
         detail: `debits (${debit.toFixed(2)}) must equal credits (${credit.toFixed(2)})`,
       };
     }
+    return null;
+  };
+}
+
+/** Fields whose change is always allowed (audit/lifecycle), so they don't count as an "edit". */
+const IMMUTABILITY_IGNORED_FIELDS = new Set(["updated_at", "created_at"]);
+
+function onlyChange(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+): boolean {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const k of keys) {
+    if (allowed.has(k) || IMMUTABILITY_IGNORED_FIELDS.has(k)) continue;
+    if (before[k] !== after[k]) return false;
+  }
+  return true;
+}
+
+/**
+ * Makes a posted journal entry immutable: once `state === posted`, the entry can
+ * only be reversed (a state change to `reversed`, with no other field edits) — no
+ * other update, and no delete — and its lines can't be created, edited, or deleted
+ * while the parent entry is posted. The accounting rule is "post then reverse,
+ * never edit". Field/entity names are configurable, mirroring the posting guard.
+ */
+export function postedEntryImmutabilityGuard(config: JournalPostingGuardConfig = {}): WriteGuard {
+  const c = { ...DEFAULTS, ...config };
+  return async (input) => {
+    if (input.entity === c.entryEntity) {
+      if (input.before?.[c.stateField] !== c.postedState) return null;
+      if (input.operation === "delete") {
+        return { status: 422, error: "posted_entry_immutable", detail: "a posted journal entry cannot be deleted; reverse it instead" };
+      }
+      const becomingReversed = input.after[c.stateField] === c.reversedState;
+      if (becomingReversed && onlyChange(input.before, input.after, new Set([c.stateField, "posted_at"]))) {
+        return null;
+      }
+      return { status: 422, error: "posted_entry_immutable", detail: "a posted journal entry cannot be edited; reverse it instead" };
+    }
+
+    if (input.entity === c.lineEntity) {
+      const ref = input.after[c.lineEntryRefField] ?? input.before?.[c.lineEntryRefField];
+      if (typeof ref !== "string" || ref.length === 0) return null;
+      const entry = await input.store.get(input.tenantId, c.entryEntity, ref);
+      if (entry?.[c.stateField] === c.postedState) {
+        return { status: 422, error: "posted_entry_locked_lines", detail: "cannot modify the lines of a posted journal entry" };
+      }
+      return null;
+    }
+
     return null;
   };
 }
