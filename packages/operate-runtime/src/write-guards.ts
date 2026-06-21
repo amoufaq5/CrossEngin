@@ -160,31 +160,103 @@ function onlyChange(
  * only be reversed (a state change to `reversed`, with no other field edits) — no
  * other update, and no delete — and its lines can't be created, edited, or deleted
  * while the parent entry is posted. The accounting rule is "post then reverse,
- * never edit". Field/entity names are configurable, mirroring the posting guard.
+ * never edit". Implemented on the generic `lockedDocumentGuard`.
  */
 export function postedEntryImmutabilityGuard(config: JournalPostingGuardConfig = {}): WriteGuard {
   const c = { ...DEFAULTS, ...config };
-  return async (input) => {
-    if (input.entity === c.entryEntity) {
-      if (input.before?.[c.stateField] !== c.postedState) return null;
-      if (input.operation === "delete") {
-        return { status: 422, error: "posted_entry_immutable", detail: "a posted journal entry cannot be deleted; reverse it instead" };
-      }
-      const becomingReversed = input.after[c.stateField] === c.reversedState;
-      if (becomingReversed && onlyChange(input.before, input.after, new Set([c.stateField, "posted_at"]))) {
-        return null;
-      }
-      return { status: 422, error: "posted_entry_immutable", detail: "a posted journal entry cannot be edited; reverse it instead" };
-    }
+  return lockedDocumentGuard({
+    entity: c.entryEntity,
+    stateField: c.stateField,
+    lockedStates: [c.postedState],
+    allowedUpdateTransitions: { [c.postedState]: [c.reversedState] },
+    ignoredFields: ["posted_at"],
+    childEntity: c.lineEntity,
+    childParentField: c.lineEntryRefField,
+    lockedError: "posted_entry_immutable",
+    childLockedError: "posted_entry_locked_lines",
+    noun: "posted journal entry",
+    reverseHint: "reverse it instead",
+  });
+}
 
-    if (input.entity === c.lineEntity) {
-      const ref = input.after[c.lineEntryRefField] ?? input.before?.[c.lineEntryRefField];
+export interface LockedDocumentConfig {
+  readonly entity: string;
+  readonly stateField?: string;
+  /** States in which the document is immutable (e.g. ["posted"], ["sent","paid"]). */
+  readonly lockedStates: readonly string[];
+  /**
+   * State changes a *plain update* may still make while locked, `from → [to]`.
+   * Used where a lifecycle move isn't a transition op (e.g. a journal reversal
+   * done via `update state=reversed`). Documents with lifecycle transition ops
+   * leave this empty — their state moves go through the (allowed) transition path.
+   */
+  readonly allowedUpdateTransitions?: Readonly<Record<string, readonly string[]>>;
+  /** Extra fields ignored when deciding "only the state changed" (besides audit fields). */
+  readonly ignoredFields?: readonly string[];
+  /** Child line entity locked while its parent is locked. */
+  readonly childEntity?: string;
+  /** The child's FK field pointing at the parent's id. */
+  readonly childParentField?: string;
+  readonly lockedError?: string;
+  readonly childLockedError?: string;
+  /** Human noun for the detail message, e.g. "issued invoice", "filed tax return". */
+  readonly noun?: string;
+  /** Suffix appended to the "cannot be edited" detail (e.g. "reverse it instead"). */
+  readonly reverseHint?: string;
+}
+
+/**
+ * Generic "locked document" immutability: once a record's `state` enters a locked
+ * set, a plain `update` (field edit) and a `delete` are rejected, and — if a child
+ * line entity is configured — its lines can't be created/edited/deleted while the
+ * parent is locked. Declared lifecycle `transition` ops are always allowed (they
+ * carry their own RBAC + from-state guard), so the document still advances; an
+ * `allowedUpdateTransitions` entry additionally permits a pure state change via
+ * `update` for documents that lack a transition op. Captures the legal-record
+ * pattern shared by posted journal entries, issued invoices, and filed tax returns.
+ */
+export function lockedDocumentGuard(config: LockedDocumentConfig): WriteGuard {
+  const stateField = config.stateField ?? "state";
+  const lockedError = config.lockedError ?? "document_locked";
+  const childLockedError = config.childLockedError ?? "document_locked_lines";
+  const noun = config.noun ?? "document";
+  const lockedStates = new Set(config.lockedStates);
+  const editHint = config.reverseHint !== undefined ? `; ${config.reverseHint}` : "";
+
+  return async (input) => {
+    if (config.childEntity !== undefined && config.childParentField !== undefined && input.entity === config.childEntity) {
+      const ref = input.after[config.childParentField] ?? input.before?.[config.childParentField];
       if (typeof ref !== "string" || ref.length === 0) return null;
-      const entry = await input.store.get(input.tenantId, c.entryEntity, ref);
-      if (entry?.[c.stateField] === c.postedState) {
-        return { status: 422, error: "posted_entry_locked_lines", detail: "cannot modify the lines of a posted journal entry" };
+      const parent = await input.store.get(input.tenantId, config.entity, ref);
+      const parentState = parent?.[stateField];
+      if (typeof parentState === "string" && lockedStates.has(parentState)) {
+        return { status: 422, error: childLockedError, detail: `cannot modify the lines of a ${noun}` };
       }
       return null;
+    }
+
+    if (input.entity !== config.entity) return null;
+    const beforeState = input.before?.[stateField];
+    if (typeof beforeState !== "string" || !lockedStates.has(beforeState)) return null;
+
+    // Declared lifecycle transitions advance a locked document (RBAC + from-state enforce validity).
+    if (input.operation === "transition") return null;
+
+    if (input.operation === "delete") {
+      return { status: 422, error: lockedError, detail: `a ${noun} cannot be deleted${editHint}` };
+    }
+
+    if (input.operation === "update") {
+      const target = input.after[stateField];
+      const allowed = config.allowedUpdateTransitions?.[beforeState] ?? [];
+      if (
+        typeof target === "string" &&
+        allowed.includes(target) &&
+        onlyChange(input.before ?? {}, input.after, new Set([stateField, ...(config.ignoredFields ?? [])]))
+      ) {
+        return null;
+      }
+      return { status: 422, error: lockedError, detail: `a ${noun} cannot be edited${editHint}` };
     }
 
     return null;

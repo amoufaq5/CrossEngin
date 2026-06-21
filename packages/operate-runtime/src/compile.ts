@@ -29,7 +29,12 @@ import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.
 import { literalDefaultPlans, type LiteralDefaultPlan } from "./defaults.js";
 import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { planHasSettingsDefaults, settingsDefaultPlan, type SettingsDefaultPlan } from "./settings-defaults.js";
-import { journalPostingGuard, postedEntryImmutabilityGuard, type WriteGuard } from "./write-guards.js";
+import {
+  journalPostingGuard,
+  lockedDocumentGuard,
+  postedEntryImmutabilityGuard,
+  type WriteGuard,
+} from "./write-guards.js";
 import { journalReversalEffect, type WriteEffect } from "./write-effects.js";
 import type { SettingsStore } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
@@ -104,6 +109,34 @@ function defaultWriteGuards(manifest: Manifest): readonly WriteGuard[] {
   const guards: WriteGuard[] = [];
   if (names.has("JournalEntry") && names.has("JournalLine")) {
     guards.push(journalPostingGuard(), postedEntryImmutabilityGuard());
+  }
+  // Issued invoices are legal records: once out of draft they can't be edited or
+  // deleted (correct by void/credit note); their lines lock with them.
+  if (names.has("Invoice")) {
+    guards.push(
+      lockedDocumentGuard({
+        entity: "Invoice",
+        lockedStates: ["sent", "overdue", "paid", "void"],
+        ...(names.has("InvoiceLine") ? { childEntity: "InvoiceLine", childParentField: "invoice_id" } : {}),
+        lockedError: "invoice_locked",
+        childLockedError: "invoice_locked_lines",
+        noun: "issued invoice",
+        reverseHint: "void it instead",
+      }),
+    );
+  }
+  // Filed tax returns are submitted to authorities: once filed/paid they can't be
+  // edited or deleted (correct via the amend transition).
+  if (names.has("TaxReturn")) {
+    guards.push(
+      lockedDocumentGuard({
+        entity: "TaxReturn",
+        lockedStates: ["filed", "paid"],
+        lockedError: "tax_return_locked",
+        noun: "filed tax return",
+        reverseHint: "amend it instead",
+      }),
+    );
   }
   return guards;
 }
