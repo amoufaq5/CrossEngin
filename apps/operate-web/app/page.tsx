@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { Topbar } from "@/components/Topbar";
+import { useInbox } from "@/lib/inbox";
 import {
   accessibleEntities,
   canAccess,
@@ -14,6 +15,7 @@ import {
 
 export default function DashboardPage() {
   const { schema, loading, error } = useSchema();
+  const { items: inboxItems } = useInbox(schema);
 
   const entities = accessibleEntities(schema);
   const groups = groupByModule(entities);
@@ -44,6 +46,23 @@ export default function DashboardPage() {
 
         {schema && (
           <>
+            {inboxItems.length > 0 && (
+              <Link
+                href="/inbox"
+                className="mb-6 flex items-center gap-3 rounded-xl border border-brand-200 bg-brand-50 px-5 py-4 transition hover:bg-brand-100"
+              >
+                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-brand text-sm font-black text-white">
+                  {inboxItems.length}
+                </span>
+                <div className="leading-tight">
+                  <div className="text-sm font-semibold text-brand-700">
+                    {inboxItems.length} item{inboxItems.length === 1 ? "" : "s"} awaiting your action
+                  </div>
+                  <div className="text-xs text-brand-600">Across all departments — open My Inbox →</div>
+                </div>
+              </Link>
+            )}
+
             <section className="mb-8 grid grid-cols-2 gap-4 sm:grid-cols-4">
               <Stat label="Departments" value={String(groups.length)} accent />
               <Stat label="Your areas" value={String(entities.length)} />

@@ -9,6 +9,7 @@ import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, parseFields, parseListQuery, type ListConfig } from "./list-query.js";
+import { applyLiteralDefaults, type LiteralDefaultPlan } from "./defaults.js";
 import { applySequenceDefaults, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { sequenceSpecResolver, type SettingsStore } from "./settings.js";
 import { projectRecord, type EntityStore } from "./store.js";
@@ -31,6 +32,8 @@ export interface HandlerContext {
   readonly allocator?: SequenceAllocator;
   /** Per-entity sequence-field plans, keyed by entity name. */
   readonly sequencePlans?: ReadonlyMap<string, readonly SequenceFieldPlan[]>;
+  /** Per-entity literal-default plans (lifecycle state, enums, flags), keyed by entity name. */
+  readonly defaultPlans?: ReadonlyMap<string, readonly LiteralDefaultPlan[]>;
   /** Lets tenant settings override a sequence's format/start/resetPeriod at runtime. */
   readonly settingsStore?: SettingsStore;
   readonly clock?: { now(): Date };
@@ -100,7 +103,8 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         return json(200, fields === null ? record : projectRecord(record, fields));
       }
       case "create": {
-        const body = await applyEntitySequences(ctx, spec.entity, tenantId, parsedBody ?? {});
+        const withDefaults = applyLiteralDefaults(parsedBody ?? {}, ctx.defaultPlans?.get(spec.entity) ?? []);
+        const body = await applyEntitySequences(ctx, spec.entity, tenantId, withDefaults);
         return json(201, await ctx.store.create(tenantId, spec.entity, body));
       }
       case "update": {
