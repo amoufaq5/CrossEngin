@@ -12,10 +12,15 @@ export default function AgingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  // Empty string = "today" (server clock); a YYYY-MM-DD value pulls a back-dated snapshot.
+  const [asOf, setAsOf] = useState("");
 
   useEffect(() => {
     let alive = true;
-    fetchAging()
+    setLoading(true);
+    setError(null);
+    setForbidden(false);
+    fetchAging(asOf || undefined)
       .then((res) => {
         if (!alive) return;
         setData(res);
@@ -31,7 +36,7 @@ export default function AgingPage() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [asOf]);
 
   const sections: ReadonlyArray<{ key: "ar" | "ap"; label: string; report: AgingReport }> = data
     ? ([
@@ -47,6 +52,27 @@ export default function AgingPage() {
         subtitle={data ? `Receivables & payables as of ${formatCell(data.asOf, "date")}` : "Receivables & payables aging"}
       />
       <div className="px-8 py-6">
+        <div className="mb-6 flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-ink-faint">
+            As of
+            <input
+              type="date"
+              value={asOf}
+              onChange={(e) => setAsOf(e.target.value)}
+              className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-normal normal-case text-ink"
+            />
+          </label>
+          {asOf && (
+            <button
+              type="button"
+              onClick={() => setAsOf("")}
+              className="rounded-lg border border-line bg-surface-soft px-3 py-1.5 text-sm text-ink-muted hover:text-ink"
+            >
+              Today
+            </button>
+          )}
+        </div>
+
         {loading && <p className="text-sm text-ink-muted">Loading aging report…</p>}
 
         {forbidden && (
