@@ -1,6 +1,8 @@
 // Client-side API helper. All requests go to this Next app's /api proxy,
 // which forwards to operate-server with auth. Same-origin, so no CORS.
 
+import type { AgingResponse } from "@/lib/aging";
+
 export interface ListResult {
   readonly data: ReadonlyArray<Record<string, unknown>>;
   readonly nextCursor: string | null;
@@ -89,6 +91,12 @@ export async function putSettings(settings: Record<string, unknown>): Promise<Re
   });
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   return (await res.json()) as Record<string, unknown>;
+}
+
+export async function fetchAging(): Promise<AgingResponse> {
+  const res = await fetch("/api/v1/meta/aging", { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  return (await res.json()) as AgingResponse;
 }
 
 async function safeText(res: Response): Promise<string> {

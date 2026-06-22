@@ -39,6 +39,14 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+const AS_OF_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** First value of a query param (arrays carry the first), or undefined. */
+function firstQuery(value: string | readonly string[] | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === "string" ? value : value[0];
+}
+
 /**
  * `GET /v1/meta/aging` — an AR/AP aging report computed from the live store:
  * open documents (issued, unpaid) minus their applied completed payments, bucketed
@@ -52,7 +60,7 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
   const amountField = ctx.paymentAmountField ?? "amount";
   const maxRows = ctx.maxRows ?? 5000;
 
-  return async ({ principal }) => {
+  return async ({ principal, request }) => {
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
     const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
@@ -60,7 +68,13 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
     if (!roles.some((r) => ctx.viewerRoles.has(r as RoleName))) {
       return json(403, { error: "forbidden", detail: "finance role required" });
     }
-    const asOf = (ctx.clock?.now() ?? new Date()).toISOString();
+    // An optional `?asOf=YYYY-MM-DD` pulls a historical aging snapshot; a malformed
+    // value is ignored (fall back to the clock), so the param never widens/breaks the report.
+    const asOfParam = firstQuery(request.query["asOf"]);
+    const asOf =
+      asOfParam !== undefined && AS_OF_PATTERN.test(asOfParam)
+        ? `${asOfParam}T00:00:00.000Z`
+        : (ctx.clock?.now() ?? new Date()).toISOString();
 
     // Sum completed payments once, grouped by each section's ref field.
     const payments = await ctx.store.listPage(tenantId, paymentEntity, {
