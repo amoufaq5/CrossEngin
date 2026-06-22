@@ -212,6 +212,8 @@ function defaultWriteEffects(
       : { resolveFunctionalCurrency: async (tenantId: string) => (await settingsStore.get(tenantId)).defaults?.currency };
   // Multi-currency booking-rate capture is possible only when the rate tables exist.
   const hasFx = names.has("Currency") && names.has("ExchangeRate");
+  // Line-level tax codes drive a per-code recognition split only when TaxCode exists.
+  const hasTaxCodes = names.has("TaxCode");
 
   if (names.has("JournalEntry") && names.has("JournalLine")) {
     effects.push(journalReversalEffect(clockOpt));
@@ -240,6 +242,9 @@ function defaultWriteEffects(
           controlDescription: "Invoice — accounts receivable",
           netDescription: "Invoice — revenue",
           taxDescription: "Invoice — tax payable",
+          ...(hasTaxCodes && names.has("InvoiceLine")
+            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" } }
+            : {}),
           ...clockOpt,
           ...codeResolver((f) => ({
             ...(f.arAccountCode !== undefined ? { control: f.arAccountCode } : {}),
@@ -288,6 +293,9 @@ function defaultWriteEffects(
         controlDescription: "Bill — accounts payable",
         netDescription: "Bill — expense",
         taxDescription: "Bill — input tax",
+        ...(hasTaxCodes && names.has("BillLine")
+          ? { taxLines: { entity: "BillLine", refField: "bill_id", netField: "amount" } }
+          : {}),
         ...clockOpt,
         ...codeResolver((f) => ({
           ...(f.apAccountCode !== undefined ? { control: f.apAccountCode } : {}),
