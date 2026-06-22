@@ -44,6 +44,7 @@ import {
   recognitionGlPostingEffect,
   type WriteEffect,
 } from "./write-effects.js";
+import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -60,6 +61,8 @@ export interface OperateRuntimeOptions {
   readonly settingsStore?: SettingsStore;
   /** Roles permitted to read/write tenant settings. Defaults to {"erp_admin"}. */
   readonly adminRoles?: readonly RoleName[];
+  /** Roles permitted to read finance reports (e.g. aging). Defaults to a finance-role set. */
+  readonly financeRoles?: readonly RoleName[];
   /** Runtime data invariants checked before each write (e.g. balanced journal postings). */
   readonly writeGuards?: readonly WriteGuard[];
   /** Side effects run after a successful write (e.g. auto-generating a reversal entry). */
@@ -68,6 +71,12 @@ export interface OperateRuntimeOptions {
 }
 
 const DEFAULT_ADMIN_ROLES: readonly RoleName[] = ["erp_admin" as RoleName];
+const DEFAULT_FINANCE_ROLES: readonly RoleName[] = [
+  "erp_admin",
+  "controller",
+  "erp_accountant",
+  "ap_clerk",
+].map((r) => r as RoleName);
 
 function literalRoute(
   operationId: string,
@@ -377,6 +386,39 @@ export function compileOperateServer(
     routes.register(literalRoute("admin.settings.update", "PUT", ["v1", "admin", "settings"]));
     handlers.register("admin.settings.read", buildAdminSettingsReadHandler(adminCtx));
     handlers.register("admin.settings.update", buildAdminSettingsUpdateHandler(adminCtx));
+  }
+
+  // AR/AP aging report, when the manifest models invoices/bills + payments.
+  const agingNames = new Set((manifest.entities ?? []).map((e) => e.name));
+  const agingSections: Record<string, AgingSpec> = {};
+  if (agingNames.has("Invoice") && agingNames.has("Payment")) {
+    agingSections["ar"] = {
+      entity: "Invoice",
+      openStates: ["sent", "overdue"],
+      paymentRefField: "invoice_id",
+      numberField: "invoice_number",
+    };
+  }
+  if (agingNames.has("Bill") && agingNames.has("Payment")) {
+    agingSections["ap"] = {
+      entity: "Bill",
+      openStates: ["approved", "overdue"],
+      paymentRefField: "bill_id",
+      numberField: "bill_number",
+    };
+  }
+  if (Object.keys(agingSections).length > 0) {
+    routes.register(literalRoute("meta.aging.read", "GET", ["v1", "meta", "aging"]));
+    handlers.register(
+      "meta.aging.read",
+      buildAgingHandler({
+        store: options.store,
+        principalRoles: options.principalRoles,
+        viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
+        sections: agingSections,
+        ...(options.clock !== undefined ? { clock: options.clock } : {}),
+      }),
+    );
   }
 
   const redactionRegistry = redactionRegistryFromManifest(manifest, {
