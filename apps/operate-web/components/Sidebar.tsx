@@ -131,6 +131,16 @@ export function Sidebar() {
             >
               Aging
             </Link>
+            <Link
+              href="/reports/period-close"
+              className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+                pathname === "/reports/period-close"
+                  ? "bg-brand-50 font-semibold text-brand-700"
+                  : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+              }`}
+            >
+              Period Close
+            </Link>
           </div>
         )}
 
