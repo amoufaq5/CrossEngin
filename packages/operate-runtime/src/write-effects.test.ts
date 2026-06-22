@@ -471,21 +471,43 @@ describe("computeLineTaxBreakdown", () => {
     expect(b.netTotal).toBe(400);
     expect(b.taxTotal).toBe(65); // (300×20%) + (100×5%) = 60 + 5
     expect(b.groups).toEqual([
-      { label: "VAT20", tax: 60, accountCode: null },
-      { label: "VAT5", tax: 5, accountCode: null },
+      { label: "VAT20", tax: 60, accountCode: null, withholding: false },
+      { label: "VAT5", tax: 5, accountCode: null, withholding: false },
     ]);
   });
 
   it("carries the per-code GL account code onto its group", () => {
     const codes = new Map([["wht", { rate: 10, label: "WHT10", accountCode: "2155" }]]);
     const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: "wht", flatRatePct: null }], codes);
-    expect(b.groups).toEqual([{ label: "WHT10", tax: 10, accountCode: "2155" }]);
+    expect(b.groups).toEqual([{ label: "WHT10", tax: 10, accountCode: "2155", withholding: false }]);
+  });
+
+  it("separates withholding tax from regular tax in the totals", () => {
+    const codes = new Map([
+      ["vat", { rate: 20, label: "VAT20", accountCode: null, withholding: false }],
+      ["wht", { rate: 10, label: "WHT10", accountCode: "2155", withholding: true }],
+    ]);
+    const b = computeLineTaxBreakdown(
+      [
+        { net: 1000, taxCodeId: "vat", flatRatePct: null },
+        { net: 1000, taxCodeId: "wht", flatRatePct: null },
+      ],
+      codes,
+    );
+    expect(b.netTotal).toBe(2000);
+    expect(b.taxTotal).toBe(200); // VAT only, part of total
+    expect(b.withholdingTotal).toBe(100); // WHT contra, not part of total
+    expect(b.groups).toEqual([
+      { label: "VAT20", tax: 200, accountCode: null, withholding: false },
+      { label: "WHT10", tax: 100, accountCode: "2155", withholding: true },
+    ]);
   });
 
   it("falls back to the flat rate when no code, labelled by rate", () => {
     const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: null, flatRatePct: 10 }], new Map());
     expect(b.taxTotal).toBe(10);
-    expect(b.groups).toEqual([{ label: "10%", tax: 10, accountCode: null }]);
+    expect(b.withholdingTotal).toBe(0);
+    expect(b.groups).toEqual([{ label: "10%", tax: 10, accountCode: null, withholding: false }]);
   });
 
   it("ignores zero-rate lines", () => {
@@ -554,6 +576,25 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
     const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
     const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
     expect(lines.find((l) => l.description === "Tax payable (VAT20)")!.ledger_account_id).toBe("tax_payable");
+  });
+
+  it("withholds from AR as a control-side contra when a withholding code is applied", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "LedgerAccount", { id: "acc_wht", account_code: "1450" });
+    await store.create(TENANT, "TaxCode", { id: "wht", code: "WHT5", rate_pct: 5, kind: "withholding", gl_account_code: "1450" });
+    // Net 1000, no VAT → total = 1000. WHT 5% = 50 withheld: AR 950 + WHT receivable 50.
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-W2", state: "draft", document_type: "invoice", subtotal: 1000, tax_total: 0, total: 1000 });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 1000, tax_code_id: "wht" });
+    await issue(store, invId, inv);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => l.ledger_account_id === "ar")!.debit).toBe(950);
+    const wht = lines.find((l) => l.description === "Withholding (WHT5)")!;
+    expect(wht.ledger_account_id).toBe("acc_wht");
+    expect(wht.debit).toBe(50); // same side as the control (debit), a contra asset
+    expect(lines.find((l) => l.ledger_account_id === "revenue")!.credit).toBe(1000);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
   });
 });
 

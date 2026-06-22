@@ -744,6 +744,9 @@ export interface RecognitionTaxLinesConfig {
   readonly codeLabelField?: string;
   /** Optional TaxCode field naming a LedgerAccount account_code for this code's tax line. */
   readonly codeAccountField?: string;
+  /** TaxCode field carrying its kind + the value that marks a withholding code. */
+  readonly codeKindField?: string;
+  readonly withholdingKind?: string;
   readonly maxRows?: number;
 }
 
@@ -754,6 +757,8 @@ const TAX_LINES_FALLBACKS = {
   codeRateField: "rate_pct",
   codeLabelField: "code",
   codeAccountField: "gl_account_code",
+  codeKindField: "kind",
+  withholdingKind: "withholding",
   maxRows: 500,
 } as const;
 
@@ -765,36 +770,53 @@ export interface TaxBreakdownLine {
 
 export interface TaxBreakdown {
   readonly netTotal: number;
+  /** Sum of regular (non-withholding) tax — the part included in the document total. */
   readonly taxTotal: number;
+  /** Sum of withholding tax — a contra to the control account, NOT part of the total. */
+  readonly withholdingTotal: number;
   /** One entry per distinct tax label with non-zero tax, in first-seen order. */
-  readonly groups: readonly { readonly label: string; readonly tax: number; readonly accountCode: string | null }[];
+  readonly groups: readonly {
+    readonly label: string;
+    readonly tax: number;
+    readonly accountCode: string | null;
+    readonly withholding: boolean;
+  }[];
 }
 
 /**
- * Pure: given document lines + a resolved `taxCodeId → {rate, label, accountCode?}` map,
- * sums the net, computes each line's tax (`net × rate%`, rounded to the cent), and groups
- * the tax by label (the TaxCode's label, or `<rate>%` for an unlabeled flat-rate line).
- * Each group carries the first-seen account code for that label (null when none / flat-rate).
+ * Pure: given document lines + a resolved `taxCodeId → {rate, label, accountCode?,
+ * withholding?}` map, sums the net, computes each line's tax (`net × rate%`, rounded to
+ * the cent), and groups the tax by label (the TaxCode's label, or `<rate>%` for an
+ * unlabeled flat-rate line). `taxTotal` sums regular tax (added on top of net, part of
+ * the document total); `withholdingTotal` sums withholding tax (a contra to the control
+ * account, deducted from what's paid — not part of the total). Each group carries the
+ * first-seen account code + withholding flag for its label.
  */
 export function computeLineTaxBreakdown(
   lines: readonly TaxBreakdownLine[],
-  rateByCode: ReadonlyMap<string, { readonly rate: number; readonly label: string; readonly accountCode?: string | null }>,
+  rateByCode: ReadonlyMap<
+    string,
+    { readonly rate: number; readonly label: string; readonly accountCode?: string | null; readonly withholding?: boolean }
+  >,
 ): TaxBreakdown {
   let netTotal = 0;
   const order: string[] = [];
   const taxByLabel = new Map<string, number>();
   const accountByLabel = new Map<string, string | null>();
+  const withholdingByLabel = new Map<string, boolean>();
   for (const line of lines) {
     const net = Math.round(line.net * 100) / 100;
     netTotal += net;
     let rate = 0;
     let label: string | null = null;
     let accountCode: string | null = null;
+    let withholding = false;
     if (line.taxCodeId !== null && rateByCode.has(line.taxCodeId)) {
       const resolved = rateByCode.get(line.taxCodeId)!;
       rate = resolved.rate;
       label = resolved.label;
       accountCode = resolved.accountCode ?? null;
+      withholding = resolved.withholding ?? false;
     } else if (line.flatRatePct !== null) {
       rate = line.flatRatePct;
     }
@@ -805,17 +827,26 @@ export function computeLineTaxBreakdown(
     if (!taxByLabel.has(key)) {
       order.push(key);
       accountByLabel.set(key, accountCode);
+      withholdingByLabel.set(key, withholding);
     }
     taxByLabel.set(key, (taxByLabel.get(key) ?? 0) + tax);
   }
   netTotal = Math.round(netTotal * 100) / 100;
   let taxTotal = 0;
+  let withholdingTotal = 0;
   const groups = order.map((label) => {
     const tax = Math.round((taxByLabel.get(label) ?? 0) * 100) / 100;
-    taxTotal += tax;
-    return { label, tax, accountCode: accountByLabel.get(label) ?? null };
+    const withholding = withholdingByLabel.get(label) ?? false;
+    if (withholding) withholdingTotal += tax;
+    else taxTotal += tax;
+    return { label, tax, accountCode: accountByLabel.get(label) ?? null, withholding };
   });
-  return { netTotal, taxTotal: Math.round(taxTotal * 100) / 100, groups };
+  return {
+    netTotal,
+    taxTotal: Math.round(taxTotal * 100) / 100,
+    withholdingTotal: Math.round(withholdingTotal * 100) / 100,
+    groups,
+  };
 }
 
 const RECOGNITION_FALLBACKS = {
@@ -867,7 +898,10 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
 
     // Line-level tax codes: when configured and the line-derived split reconciles to
     // the document total, post one tax line per TaxCode instead of one aggregate line.
+    // Withholding codes are a contra to the control account (deducted from what's paid),
+    // so they reduce the control line rather than adding an opposite-side tax line.
     let taxGroups: TaxBreakdown["groups"] | null = null;
+    let withholdingTotal = 0;
     if (config.taxLines !== undefined) {
       const tc = { ...TAX_LINES_FALLBACKS, ...config.taxLines };
       const page = await input.store.listPage(input.tenantId, tc.entity, {
@@ -879,7 +913,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       const lineRows = page.records.filter((r) => String(r[tc.refField] ?? "") === docId);
       if (lineRows.length > 0) {
         // Resolve each distinct TaxCode once.
-        const rateByCode = new Map<string, { rate: number; label: string; accountCode: string | null }>();
+        const rateByCode = new Map<string, { rate: number; label: string; accountCode: string | null; withholding: boolean }>();
         const codeIds = new Set<string>();
         for (const r of lineRows) {
           const id = r[tc.taxCodeField];
@@ -894,6 +928,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
               rate: num(code[tc.codeRateField]),
               label,
               accountCode: typeof acct === "string" && acct.length > 0 ? acct : null,
+              withholding: code[tc.codeKindField] === tc.withholdingKind,
             });
           }
         }
@@ -909,10 +944,12 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
           }),
           rateByCode,
         );
-        // Accept the line-derived split only when it reconciles to the document total.
+        // Accept the line-derived split only when its regular (non-withholding) tax
+        // reconciles to the document total — withholding is a contra, not part of total.
         if (breakdown.netTotal > 0 && Math.abs(breakdown.netTotal + breakdown.taxTotal - total) <= EPSILON) {
           subtotal = breakdown.netTotal;
           tax = breakdown.taxTotal;
+          withholdingTotal = breakdown.withholdingTotal;
           taxGroups = breakdown.groups;
         }
       }
@@ -940,11 +977,17 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       updated_at: nowIso,
     });
     const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
-    await input.store.create(input.tenantId, c.lineEntity, glLine(base, controlAccount, c.controlDescription, c.controlSide, total));
+    // Withholding is deducted from the control account (the customer pays / vendor is paid
+    // less), so the control line is the total net of withholding; the withheld amount goes
+    // to the WHT account on the *same* side as the control.
+    const controlAmount = Math.round((total - withholdingTotal) * 100) / 100;
+    await input.store.create(input.tenantId, c.lineEntity, glLine(base, controlAccount, c.controlDescription, c.controlSide, controlAmount));
     await input.store.create(input.tenantId, c.lineEntity, glLine(base, netAccount, c.netDescription, opposite, subtotal));
     if (taxGroups !== null && taxGroups.length > 0) {
-      // One tax line per TaxCode, each tagged with the code in its description and
-      // posted to the code's own GL account when it carries one (else the default).
+      // One tax line per TaxCode, each tagged with the code in its description and posted
+      // to the code's own GL account when it carries one (else the default tax account).
+      // Regular tax sits opposite the control (adds to it); withholding sits on the
+      // control side (a contra that reduced the control line above).
       const acctCache = new Map<string, string>();
       for (const group of taxGroups) {
         if (group.tax <= EPSILON) continue;
@@ -959,11 +1002,9 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
             account = resolved;
           }
         }
-        await input.store.create(
-          input.tenantId,
-          c.lineEntity,
-          glLine(base, account, `${c.taxDescription} (${group.label})`, opposite, group.tax),
-        );
+        const side: GlSide = group.withholding ? c.controlSide : opposite;
+        const desc = group.withholding ? `Withholding (${group.label})` : `${c.taxDescription} (${group.label})`;
+        await input.store.create(input.tenantId, c.lineEntity, glLine(base, account, desc, side, group.tax));
       }
     } else if (tax > EPSILON) {
       await input.store.create(input.tenantId, c.lineEntity, glLine(base, taxAccount, c.taxDescription, opposite, tax));
