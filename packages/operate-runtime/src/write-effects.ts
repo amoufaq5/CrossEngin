@@ -1022,6 +1022,8 @@ export interface UnrealizedFxRevaluationConfig {
   readonly paymentAmountField?: string;
   readonly totalField?: string;
   readonly currencyField?: string;
+  /** Document field carrying the rate it was booked at (absent → treated as 1). */
+  readonly bookingRateField?: string;
   readonly currencyEntity?: string;
   readonly currencyCodeField?: string;
   readonly exchangeRateEntity?: string;
@@ -1059,6 +1061,7 @@ const FX_REVAL_FALLBACKS = {
   paymentAmountField: "amount",
   totalField: "total",
   currencyField: "currency",
+  bookingRateField: "booking_rate",
   currencyEntity: "Currency",
   currencyCodeField: "code",
   exchangeRateEntity: "ExchangeRate",
@@ -1145,7 +1148,10 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     const completed = payments.records.filter((p) => p[c.paymentStateField] === c.paymentCompletedState);
 
     // Accumulate the open foreign balance per (currency, side); then one rate lookup per currency.
+    // We also accumulate Σ(open × bookingRate) so the revaluation compares against each
+    // document's *original booking rate* rather than a flat rate of 1.
     const openByCurrencySide = new Map<string, number>(); // key `${currency}|${side}`
+    const bookedByCurrencySide = new Map<string, number>(); // Σ(open × booking_rate) in functional terms
     const rateCache = new Map<string, number | null>();
 
     for (const doc of c.documents) {
@@ -1171,8 +1177,11 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
         const total = num(record[c.totalField]);
         const open = Math.round((total - (applied.get(docId) ?? 0)) * 100) / 100;
         if (open <= 0) continue; // fully paid → nothing to revalue
+        // The rate the document was booked at; absent → 1 (matching the legacy approximation).
+        const bookingRate = record[c.bookingRateField] !== undefined ? num(record[c.bookingRateField]) : 1;
         const key = `${currency}|${doc.side}`;
         openByCurrencySide.set(key, (openByCurrencySide.get(key) ?? 0) + open);
+        bookedByCurrencySide.set(key, (bookedByCurrencySide.get(key) ?? 0) + open * bookingRate);
       }
     }
 
@@ -1193,8 +1202,10 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
       }
       if (rate === null) continue; // no rate for this currency → skip
 
-      // Approximation: foreign balance carried at rate 1, revalued to period-end rate.
-      const delta = Math.round(open * (rate - 1) * 100) / 100;
+      // Unrealized = (open × period-end rate) − Σ(open × booking rate). With no booking
+      // rate stored this collapses to open × (rate − 1) — the prior behavior.
+      const booked = bookedByCurrencySide.get(key) ?? open;
+      const delta = Math.round((open * rate - booked) * 100) / 100;
       if (Math.abs(delta) < FX_EPSILON) continue;
 
       const controlAccount = side === "ar" ? arAccount : apAccount;
@@ -1232,6 +1243,82 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     for (const line of lines) {
       await input.store.create(input.tenantId, c.lineEntity, { ...line, journal_entry_id: entryId });
     }
+  };
+}
+
+export interface BookingRateStampConfig {
+  readonly entity: string;
+  readonly stateField?: string;
+  readonly triggerState: string;
+  /** The document's recognition date field (issue/bill date) used to pick the booking rate. */
+  readonly dateField: string;
+  readonly currencyField?: string;
+  readonly bookingRateField?: string;
+  readonly functionalCurrency?: string;
+  readonly resolveFunctionalCurrency?: (tenantId: string) => Promise<string | undefined>;
+  readonly currencyEntity?: string;
+  readonly currencyCodeField?: string;
+  readonly exchangeRateEntity?: string;
+  readonly rateFromField?: string;
+  readonly rateToField?: string;
+  readonly rateField?: string;
+  readonly rateDateField?: string;
+  readonly maxRows?: number;
+  readonly clock?: { now(): Date };
+}
+
+const BOOKING_RATE_FALLBACKS = {
+  stateField: "state",
+  currencyField: "currency",
+  bookingRateField: "booking_rate",
+  functionalCurrency: "USD",
+  currencyEntity: "Currency",
+  currencyCodeField: "code",
+  exchangeRateEntity: "ExchangeRate",
+  rateFromField: "from_currency_id",
+  rateToField: "to_currency_id",
+  rateField: "rate",
+  rateDateField: "rate_date",
+  maxRows: 5000,
+} as const;
+
+/**
+ * Captures the foreign→functional exchange rate a document is booked at, on its
+ * recognition edge (invoice →sent, bill →approved). When the document currency
+ * differs from the tenant's functional currency, it looks up the latest
+ * `ExchangeRate` on/before the document's date and stamps it on `booking_rate` —
+ * the rate period-close revaluation later compares the period-end rate against. A
+ * functional-currency document, an already-stamped one, or a missing rate is left
+ * untouched. Runs inside the recognition transaction.
+ */
+export function bookingRateStampEffect(config: BookingRateStampConfig): WriteEffect {
+  const c = { ...BOOKING_RATE_FALLBACKS, ...config };
+  return async (input) => {
+    if (input.entity !== c.entity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    if (input.before?.[c.stateField] === c.triggerState || input.after[c.stateField] !== c.triggerState) return;
+
+    const doc = input.after;
+    const docId = input.id;
+    if (docId === null) return;
+    if (doc[c.bookingRateField] !== undefined && num(doc[c.bookingRateField]) > 0) return; // already stamped
+
+    const resolved = config.resolveFunctionalCurrency ? await config.resolveFunctionalCurrency(input.tenantId) : undefined;
+    const functional = (resolved ?? c.functionalCurrency).toUpperCase();
+    const currency = typeof doc[c.currencyField] === "string" ? (doc[c.currencyField] as string).toUpperCase() : functional;
+    if (currency === functional) return; // functional-currency document → rate 1, nothing to stamp
+
+    const dateRaw = doc[c.dateField];
+    const date = typeof dateRaw === "string" && dateRaw.length > 0 ? dateRaw.slice(0, 10) : null;
+    if (date === null) return;
+
+    const functionalCurrencyId = await resolveCurrencyId(input, c, functional);
+    if (functionalCurrencyId === null) return;
+    const rate = await lookupPeriodEndRate(input, c, currency, functionalCurrencyId, date);
+    if (rate === null) return;
+
+    const nowIso = (c.clock?.now() ?? new Date()).toISOString();
+    await input.store.update(input.tenantId, c.entity, docId, { [c.bookingRateField]: rate, updated_at: nowIso });
   };
 }
 

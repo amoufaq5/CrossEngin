@@ -116,6 +116,9 @@ export const INVOICE_ENTITY: Entity = {
     },
     { name: "credit_note_of", type: { kind: "reference", target: "Invoice" }, indexed: true },
     { name: "currency", type: { kind: "text", maxLength: 3 }, required: true },
+    // Foreign→functional rate captured at issue; period-close revaluation compares the
+    // period-end rate against this (absent → treated as 1).
+    { name: "booking_rate", type: { kind: "decimal", precision: 20, scale: 10, min: 0 } },
     {
       name: "subtotal",
       type: { kind: "decimal", precision: 14, scale: 2, min: 0 },
