@@ -742,6 +742,8 @@ export interface RecognitionTaxLinesConfig {
   readonly codeEntity?: string;
   readonly codeRateField?: string;
   readonly codeLabelField?: string;
+  /** Optional TaxCode field naming a LedgerAccount account_code for this code's tax line. */
+  readonly codeAccountField?: string;
   readonly maxRows?: number;
 }
 
@@ -751,6 +753,7 @@ const TAX_LINES_FALLBACKS = {
   codeEntity: "TaxCode",
   codeRateField: "rate_pct",
   codeLabelField: "code",
+  codeAccountField: "gl_account_code",
   maxRows: 500,
 } as const;
 
@@ -764,30 +767,34 @@ export interface TaxBreakdown {
   readonly netTotal: number;
   readonly taxTotal: number;
   /** One entry per distinct tax label with non-zero tax, in first-seen order. */
-  readonly groups: readonly { readonly label: string; readonly tax: number }[];
+  readonly groups: readonly { readonly label: string; readonly tax: number; readonly accountCode: string | null }[];
 }
 
 /**
- * Pure: given document lines + a resolved `taxCodeId → {rate, label}` map, sums the
- * net, computes each line's tax (`net × rate%`, rounded to the cent), and groups the
- * tax by label (the TaxCode's label, or `<rate>%` for an unlabeled flat-rate line).
+ * Pure: given document lines + a resolved `taxCodeId → {rate, label, accountCode?}` map,
+ * sums the net, computes each line's tax (`net × rate%`, rounded to the cent), and groups
+ * the tax by label (the TaxCode's label, or `<rate>%` for an unlabeled flat-rate line).
+ * Each group carries the first-seen account code for that label (null when none / flat-rate).
  */
 export function computeLineTaxBreakdown(
   lines: readonly TaxBreakdownLine[],
-  rateByCode: ReadonlyMap<string, { readonly rate: number; readonly label: string }>,
+  rateByCode: ReadonlyMap<string, { readonly rate: number; readonly label: string; readonly accountCode?: string | null }>,
 ): TaxBreakdown {
   let netTotal = 0;
   const order: string[] = [];
   const taxByLabel = new Map<string, number>();
+  const accountByLabel = new Map<string, string | null>();
   for (const line of lines) {
     const net = Math.round(line.net * 100) / 100;
     netTotal += net;
     let rate = 0;
     let label: string | null = null;
+    let accountCode: string | null = null;
     if (line.taxCodeId !== null && rateByCode.has(line.taxCodeId)) {
       const resolved = rateByCode.get(line.taxCodeId)!;
       rate = resolved.rate;
       label = resolved.label;
+      accountCode = resolved.accountCode ?? null;
     } else if (line.flatRatePct !== null) {
       rate = line.flatRatePct;
     }
@@ -795,7 +802,10 @@ export function computeLineTaxBreakdown(
     const tax = Math.round(net * (rate / 100) * 100) / 100;
     if (tax <= 0) continue;
     const key = label !== null && label.length > 0 ? label : `${rate}%`;
-    if (!taxByLabel.has(key)) order.push(key);
+    if (!taxByLabel.has(key)) {
+      order.push(key);
+      accountByLabel.set(key, accountCode);
+    }
     taxByLabel.set(key, (taxByLabel.get(key) ?? 0) + tax);
   }
   netTotal = Math.round(netTotal * 100) / 100;
@@ -803,7 +813,7 @@ export function computeLineTaxBreakdown(
   const groups = order.map((label) => {
     const tax = Math.round((taxByLabel.get(label) ?? 0) * 100) / 100;
     taxTotal += tax;
-    return { label, tax };
+    return { label, tax, accountCode: accountByLabel.get(label) ?? null };
   });
   return { netTotal, taxTotal: Math.round(taxTotal * 100) / 100, groups };
 }
@@ -857,7 +867,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
 
     // Line-level tax codes: when configured and the line-derived split reconciles to
     // the document total, post one tax line per TaxCode instead of one aggregate line.
-    let taxGroups: readonly { readonly label: string; readonly tax: number }[] | null = null;
+    let taxGroups: TaxBreakdown["groups"] | null = null;
     if (config.taxLines !== undefined) {
       const tc = { ...TAX_LINES_FALLBACKS, ...config.taxLines };
       const page = await input.store.listPage(input.tenantId, tc.entity, {
@@ -869,7 +879,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       const lineRows = page.records.filter((r) => String(r[tc.refField] ?? "") === docId);
       if (lineRows.length > 0) {
         // Resolve each distinct TaxCode once.
-        const rateByCode = new Map<string, { rate: number; label: string }>();
+        const rateByCode = new Map<string, { rate: number; label: string; accountCode: string | null }>();
         const codeIds = new Set<string>();
         for (const r of lineRows) {
           const id = r[tc.taxCodeField];
@@ -879,7 +889,12 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
           const code = await input.store.get(input.tenantId, tc.codeEntity, id);
           if (code !== null) {
             const label = typeof code[tc.codeLabelField] === "string" ? (code[tc.codeLabelField] as string) : id;
-            rateByCode.set(id, { rate: num(code[tc.codeRateField]), label });
+            const acct = code[tc.codeAccountField];
+            rateByCode.set(id, {
+              rate: num(code[tc.codeRateField]),
+              label,
+              accountCode: typeof acct === "string" && acct.length > 0 ? acct : null,
+            });
           }
         }
         const breakdown = computeLineTaxBreakdown(
@@ -928,13 +943,26 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     await input.store.create(input.tenantId, c.lineEntity, glLine(base, controlAccount, c.controlDescription, c.controlSide, total));
     await input.store.create(input.tenantId, c.lineEntity, glLine(base, netAccount, c.netDescription, opposite, subtotal));
     if (taxGroups !== null && taxGroups.length > 0) {
-      // One tax line per TaxCode, each tagged with the code in its description.
+      // One tax line per TaxCode, each tagged with the code in its description and
+      // posted to the code's own GL account when it carries one (else the default).
+      const acctCache = new Map<string, string>();
       for (const group of taxGroups) {
         if (group.tax <= EPSILON) continue;
+        let account = taxAccount;
+        if (group.accountCode !== null) {
+          const cached = acctCache.get(group.accountCode);
+          if (cached !== undefined) {
+            account = cached;
+          } else {
+            const resolved = (await resolveAccountId(input, c, group.accountCode)) ?? taxAccount;
+            acctCache.set(group.accountCode, resolved);
+            account = resolved;
+          }
+        }
         await input.store.create(
           input.tenantId,
           c.lineEntity,
-          glLine(base, taxAccount, `${c.taxDescription} (${group.label})`, opposite, group.tax),
+          glLine(base, account, `${c.taxDescription} (${group.label})`, opposite, group.tax),
         );
       }
     } else if (tax > EPSILON) {

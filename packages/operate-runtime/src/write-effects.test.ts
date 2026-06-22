@@ -471,15 +471,21 @@ describe("computeLineTaxBreakdown", () => {
     expect(b.netTotal).toBe(400);
     expect(b.taxTotal).toBe(65); // (300×20%) + (100×5%) = 60 + 5
     expect(b.groups).toEqual([
-      { label: "VAT20", tax: 60 },
-      { label: "VAT5", tax: 5 },
+      { label: "VAT20", tax: 60, accountCode: null },
+      { label: "VAT5", tax: 5, accountCode: null },
     ]);
+  });
+
+  it("carries the per-code GL account code onto its group", () => {
+    const codes = new Map([["wht", { rate: 10, label: "WHT10", accountCode: "2155" }]]);
+    const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: "wht", flatRatePct: null }], codes);
+    expect(b.groups).toEqual([{ label: "WHT10", tax: 10, accountCode: "2155" }]);
   });
 
   it("falls back to the flat rate when no code, labelled by rate", () => {
     const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: null, flatRatePct: 10 }], new Map());
     expect(b.taxTotal).toBe(10);
-    expect(b.groups).toEqual([{ label: "10%", tax: 10 }]);
+    expect(b.groups).toEqual([{ label: "10%", tax: 10, accountCode: null }]);
   });
 
   it("ignores zero-rate lines", () => {
@@ -493,6 +499,61 @@ describe("computeLineTaxBreakdown", () => {
     expect(b.netTotal).toBe(150);
     expect(b.taxTotal).toBe(0);
     expect(b.groups).toEqual([]);
+  });
+});
+
+describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
+  const invoiceRec = recognitionGlPostingEffect({
+    entity: "Invoice",
+    triggerState: "sent",
+    controlSide: "debit",
+    numberField: "invoice_number",
+    controlAccountRef: "ar",
+    netAccountRef: "revenue",
+    taxAccountRef: "tax_payable",
+    controlDescription: "AR",
+    netDescription: "Revenue",
+    taxDescription: "Tax payable",
+    taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+    clock,
+  });
+  const issue = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
+    invoiceRec({ operation: "transition", entity: "Invoice", tenantId: TENANT, id, before, after: { ...before, state: "sent" }, store });
+
+  it("posts a code's tax line to its own GL account, others to the default", async () => {
+    const store = new InMemoryEntityStore();
+    // The output-VAT code carries its own liability account; the reduced code doesn't.
+    await store.create(TENANT, "LedgerAccount", { id: "acc_vat_out", account_code: "2150" });
+    await store.create(TENANT, "TaxCode", { id: "std", code: "VAT20", rate_pct: 20, gl_account_code: "2150" });
+    await store.create(TENANT, "TaxCode", { id: "red", code: "VAT5", rate_pct: 5 });
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-PA", state: "draft", document_type: "invoice", subtotal: 400, tax_total: 65, total: 465 });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 300, tax_code_id: "std" });
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 100, tax_code_id: "red" });
+
+    await issue(store, invId, inv);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    // VAT20 → its own account; VAT5 → the default tax_payable.
+    const vat20 = lines.find((l) => l.description === "Tax payable (VAT20)")!;
+    const vat5 = lines.find((l) => l.description === "Tax payable (VAT5)")!;
+    expect(vat20.ledger_account_id).toBe("acc_vat_out");
+    expect(vat20.credit).toBe(60);
+    expect(vat5.ledger_account_id).toBe("tax_payable");
+    expect(vat5.credit).toBe(5);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+  });
+
+  it("falls back to the default tax account when the code's gl_account_code doesn't resolve", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "TaxCode", { id: "std", code: "VAT20", rate_pct: 20, gl_account_code: "9999" });
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-PB", state: "draft", document_type: "invoice", subtotal: 100, tax_total: 20, total: 120 });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 100, tax_code_id: "std" });
+    await issue(store, invId, inv);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => l.description === "Tax payable (VAT20)")!.ledger_account_id).toBe("tax_payable");
   });
 });
 
