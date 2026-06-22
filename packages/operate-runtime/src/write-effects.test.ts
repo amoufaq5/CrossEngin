@@ -11,6 +11,7 @@ import {
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
   runWriteEffects,
+  unrealizedFxRevaluationEffect,
   type WriteEffectInput,
 } from "./write-effects.js";
 
@@ -554,6 +555,135 @@ describe("paymentApplicationEffect", () => {
     await effect({ operation: "transition", entity: "Payment", tenantId: TENANT, id: String(pay.id), before: { state: "pending" }, after: { ...pay }, store });
     // no throw, nothing to settle
     expect((await store.list(TENANT, "Invoice")).length).toBe(0);
+  });
+});
+
+describe("unrealizedFxRevaluationEffect", () => {
+  const effect = unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock });
+
+  async function fxStore() {
+    const store = new InMemoryEntityStore();
+    const usd = await store.create(TENANT, "Currency", { code: "USD", name: "US Dollar" });
+    const eur = await store.create(TENANT, "Currency", { code: "EUR", name: "Euro" });
+    return { store, usdId: String(usd.id), eurId: String(eur.id) };
+  }
+
+  function closeInput(store: InMemoryEntityStore, id: string, extra: Record<string, unknown> = {}): WriteEffectInput {
+    return {
+      operation: "transition",
+      entity: "FiscalPeriod",
+      tenantId: TENANT,
+      id,
+      before: { status: "closing", end_date: "2026-06-30", name: "2026-06" },
+      after: { status: "closed", end_date: "2026-06-30", name: "2026-06", ...extra },
+      store,
+    };
+  }
+
+  it("does nothing unless a period moves into closed", async () => {
+    const { store } = await fxStore();
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "open", end_date: "2026-06-30", name: "2026-06" });
+    await effect({
+      operation: "transition",
+      entity: "FiscalPeriod",
+      tenantId: TENANT,
+      id: String(period.id),
+      before: { status: "open" },
+      after: { status: "closing", end_date: "2026-06-30", name: "2026-06" },
+      store,
+    });
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+
+  it("posts a balanced FXREVAL entry for an open foreign-currency invoice (rate > 1)", async () => {
+    const { store, usdId, eurId } = await fxStore();
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-06-29" });
+    await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR" });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+
+    await effect(closeInput(store, String(period.id)));
+
+    const entries = await store.list(TENANT, "JournalEntry");
+    expect(entries.length).toBe(1);
+    const entry = entries[0]!;
+    expect(entry.entry_number).toBe("2026-06-FXREVAL");
+    expect(entry.state).toBe("posted");
+    expect(entry.source).toBe("fx_revaluation");
+    expect(entry.entry_date).toBe("2026-06-30");
+
+    const lines = await store.list(TENANT, "JournalLine");
+    expect(lines.length).toBe(2);
+    const totalDebit = lines.reduce((s, l) => s + Number(l.debit), 0);
+    const totalCredit = lines.reduce((s, l) => s + Number(l.credit), 0);
+    expect(totalDebit).toBeCloseTo(totalCredit, 6);
+    // AR gain (rate 1.1 → +100): debit AR, credit unrealized FX.
+    const arLine = lines.find((l) => Number(l.debit) > 0)!;
+    expect(Number(arLine.debit)).toBeCloseTo(100, 6);
+  });
+
+  it("uses the latest rate on/before the period end date", async () => {
+    const { store, usdId, eurId } = await fxStore();
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-05-01" });
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.2, rate_date: "2026-06-29" });
+    // A later rate after the period end must be ignored.
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 2.0, rate_date: "2026-07-15" });
+    await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR" });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+
+    await effect(closeInput(store, String(period.id)));
+    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.debit) > 0)!;
+    expect(Number(arLine.debit)).toBeCloseTo(200, 6); // 1000 × (1.2 − 1)
+  });
+
+  it("posts no entry when there are no foreign-currency documents", async () => {
+    const { store, usdId, eurId } = await fxStore();
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-06-29" });
+    await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "USD" });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+
+    await effect(closeInput(store, String(period.id)));
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+
+  it("skips a currency with no eligible period-end rate (no entry)", async () => {
+    const { store } = await fxStore();
+    // No ExchangeRate rows at all → the EUR balance cannot be revalued.
+    await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR" });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+
+    await effect(closeInput(store, String(period.id)));
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+
+  it("nets open balance against completed payments before revaluing", async () => {
+    const { store, usdId, eurId } = await fxStore();
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-06-29" });
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR" });
+    await store.create(TENANT, "Payment", { invoice_id: String(inv.id), amount: 400, state: "completed" });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+
+    await effect(closeInput(store, String(period.id)));
+    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.debit) > 0)!;
+    expect(Number(arLine.debit)).toBeCloseTo(60, 6); // open 600 × (1.1 − 1)
+  });
+
+  it("mirrors AP: a higher rate raises a foreign payable → loss → debit unrealized FX, credit AP", async () => {
+    const { store, usdId, eurId } = await fxStore();
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-06-29" });
+    await store.create(TENANT, "Bill", { bill_number: "BILL-1", state: "approved", total: 1000, currency: "EUR" });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+
+    await effect(closeInput(store, String(period.id)));
+    const lines = await store.list(TENANT, "JournalLine");
+    expect(lines.length).toBe(2);
+    const totalDebit = lines.reduce((s, l) => s + Number(l.debit), 0);
+    const totalCredit = lines.reduce((s, l) => s + Number(l.credit), 0);
+    expect(totalDebit).toBeCloseTo(totalCredit, 6);
+    // AP control credited (liability grows), unrealized FX debited (loss).
+    const apLine = lines.find((l) => l.description === "Unrealized FX revaluation — AP EUR")!;
+    expect(Number(apLine.credit)).toBeCloseTo(100, 6);
+    const fxLine = lines.find((l) => l.description === "Unrealized FX gain/loss — EUR")!;
+    expect(Number(fxLine.debit)).toBeCloseTo(100, 6);
   });
 });
 

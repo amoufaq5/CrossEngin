@@ -992,3 +992,306 @@ export function paymentApplicationEffect(config: PaymentApplicationConfig): Writ
     });
   };
 }
+
+/** One open foreign-currency document side (receivable or payable) for revaluation. */
+interface FxRevalDocSpec {
+  readonly entity: string;
+  readonly openStates: readonly string[];
+  readonly paymentRefField: string;
+  /** "ar" → control is AR (asset); "ap" → control is AP (liability). */
+  readonly side: "ar" | "ap";
+}
+
+export interface UnrealizedFxRevaluationConfig {
+  readonly periodEntity?: string;
+  readonly periodStateField?: string;
+  readonly closedState?: string;
+  readonly periodNumberField?: string;
+  readonly periodEndDateField?: string;
+  readonly entryEntity?: string;
+  readonly lineEntity?: string;
+  /** Functional/reporting currency the open foreign balances are revalued into. */
+  readonly functionalCurrency?: string;
+  /** Per-tenant functional currency (from `defaults.currency`); overrides `functionalCurrency` when it returns a value. */
+  readonly resolveFunctionalCurrency?: (tenantId: string) => Promise<string | undefined>;
+  /** Receivable/payable document sides to revalue (default Invoice + Bill). */
+  readonly documents?: readonly FxRevalDocSpec[];
+  readonly paymentEntity?: string;
+  readonly paymentStateField?: string;
+  readonly paymentCompletedState?: string;
+  readonly paymentAmountField?: string;
+  readonly totalField?: string;
+  readonly currencyField?: string;
+  readonly currencyEntity?: string;
+  readonly currencyCodeField?: string;
+  readonly exchangeRateEntity?: string;
+  readonly rateFromField?: string;
+  readonly rateToField?: string;
+  readonly rateField?: string;
+  readonly rateDateField?: string;
+  readonly ledgerAccountEntity?: string;
+  readonly accountCodeField?: string;
+  /** Resolves the unrealized-FX + AR + AP LedgerAccount codes (typically from settings). */
+  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ fx?: string; ar?: string; ap?: string }>;
+  readonly fxAccountRef?: string;
+  readonly arAccountRef?: string;
+  readonly apAccountRef?: string;
+  readonly maxRows?: number;
+  readonly clock?: { now(): Date };
+}
+
+const FX_REVAL_FALLBACKS = {
+  periodEntity: "FiscalPeriod",
+  periodStateField: "status",
+  closedState: "closed",
+  periodNumberField: "name",
+  periodEndDateField: "end_date",
+  entryEntity: "JournalEntry",
+  lineEntity: "JournalLine",
+  functionalCurrency: "USD",
+  documents: [
+    { entity: "Invoice", openStates: ["sent", "overdue"], paymentRefField: "invoice_id", side: "ar" },
+    { entity: "Bill", openStates: ["approved", "overdue"], paymentRefField: "bill_id", side: "ap" },
+  ] as readonly FxRevalDocSpec[],
+  paymentEntity: "Payment",
+  paymentStateField: "state",
+  paymentCompletedState: "completed",
+  paymentAmountField: "amount",
+  totalField: "total",
+  currencyField: "currency",
+  currencyEntity: "Currency",
+  currencyCodeField: "code",
+  exchangeRateEntity: "ExchangeRate",
+  rateFromField: "from_currency_id",
+  rateToField: "to_currency_id",
+  rateField: "rate",
+  rateDateField: "rate_date",
+  ledgerAccountEntity: "LedgerAccount",
+  accountCodeField: "account_code",
+  fxAccountRef: "unrealized_fx_gain_loss",
+  arAccountRef: "accounts_receivable",
+  apAccountRef: "accounts_payable",
+  maxRows: 5000,
+} as const;
+
+const FX_EPSILON = 0.005;
+
+/**
+ * Unrealized FX revaluation at period close: when a `FiscalPeriod` transitions into
+ * `closed` (status edge), revalues every open foreign-currency receivable/payable to
+ * the period-end exchange rate and posts ONE balanced adjusting `JournalEntry`
+ * (`<period>-FXREVAL`, posted, source `fx_revaluation`).
+ *
+ * Model assumptions (the entity model lacks per-line functional-currency tracking,
+ * so the convention is deliberately simple and documented here):
+ *  - "Functional currency" is the tenant's reporting currency (`config.functionalCurrency`,
+ *    from `defaults.currency`); only documents whose `currency` differs are revalued.
+ *  - Open balance = document total − sum of completed linked payments (same approach
+ *    as the aging report); fully-paid documents are skipped.
+ *  - Period-end rate: the `ExchangeRate` (document-currency → functional-currency) with
+ *    the latest `rate_date` ≤ the period `end_date`. Currencies are matched by resolving
+ *    the `Currency` whose `code` equals the document/functional currency to its id, then
+ *    finding an `ExchangeRate` (from_currency_id → to_currency_id) at that rate. When no
+ *    rate is found for a currency, that currency is skipped (it cannot be revalued).
+ *  - Because the model does not store the original booking rate, the unrealized delta is
+ *    approximated as `open × (periodEndRate − 1)` — i.e. the foreign open balance is
+ *    treated as if carried at rate 1, and revalued to the period-end rate. This is an
+ *    approximation; the offset is booked to the unrealized-FX account so the entry stays
+ *    balanced regardless.
+ *
+ * AR gain (foreign asset worth more) debits AR, credits unrealized FX; an AR loss is the
+ * mirror. AP is the inverse (a higher rate increases a foreign liability → loss → debit
+ * unrealized FX, credit AP). One combined entry carries a balanced line pair per revalued
+ * currency/side, so total debits == total credits by construction. Written directly through
+ * the store (bypasses guards/effects) inside the close transaction (atomic with the close).
+ */
+export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationConfig = {}): WriteEffect {
+  const c = { ...FX_REVAL_FALLBACKS, ...config };
+  return async (input) => {
+    if (input.entity !== c.periodEntity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    const wasClosed = input.before?.[c.periodStateField] === c.closedState;
+    const nowClosed = input.after[c.periodStateField] === c.closedState;
+    if (wasClosed || !nowClosed) return; // fire once, on the →closed edge
+
+    const period = input.after;
+    const periodId = input.id;
+    if (periodId === null) return;
+
+    const resolvedFunctional = config.resolveFunctionalCurrency
+      ? await config.resolveFunctionalCurrency(input.tenantId)
+      : undefined;
+    const functional = (resolvedFunctional ?? c.functionalCurrency).toUpperCase();
+    const endDateRaw = period[c.periodEndDateField];
+    const endDate = typeof endDateRaw === "string" && endDateRaw.length > 0 ? endDateRaw.slice(0, 10) : null;
+    if (endDate === null) return;
+
+    // Resolve the functional currency's Currency id once (period-end rates target it).
+    const functionalCurrencyId = await resolveCurrencyId(input, c, functional);
+    if (functionalCurrencyId === null) return; // can't revalue without a functional currency record
+
+    const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
+    const fxAccount = (await resolveAccountId(input, c, codes.fx)) ?? c.fxAccountRef;
+    const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
+    const apAccount = (await resolveAccountId(input, c, codes.ap)) ?? c.apAccountRef;
+
+    // Sum completed payments once, grouped by each document side's ref field.
+    const payments = await input.store.listPage(input.tenantId, c.paymentEntity, {
+      limit: c.maxRows,
+      cursor: null,
+      sort: [],
+      filters: [{ field: c.paymentStateField, op: "eq", value: c.paymentCompletedState }],
+    });
+    const completed = payments.records.filter((p) => p[c.paymentStateField] === c.paymentCompletedState);
+
+    // Accumulate the open foreign balance per (currency, side); then one rate lookup per currency.
+    const openByCurrencySide = new Map<string, number>(); // key `${currency}|${side}`
+    const rateCache = new Map<string, number | null>();
+
+    for (const doc of c.documents) {
+      const applied = new Map<string, number>();
+      for (const p of completed) {
+        const ref = p[doc.paymentRefField];
+        if (typeof ref === "string" && ref.length > 0) {
+          applied.set(ref, (applied.get(ref) ?? 0) + num(p[c.paymentAmountField]));
+        }
+      }
+      const page = await input.store.listPage(input.tenantId, doc.entity, {
+        limit: c.maxRows,
+        cursor: null,
+        sort: [],
+        filters: [{ field: "state", op: "in", value: [...doc.openStates] }],
+      });
+      for (const record of page.records) {
+        if (!doc.openStates.includes(String(record["state"] ?? ""))) continue;
+        const docId = String(record["id"] ?? "");
+        if (docId === "") continue;
+        const currency = typeof record[c.currencyField] === "string" ? (record[c.currencyField] as string).toUpperCase() : functional;
+        if (currency === functional) continue; // only foreign-currency documents are revalued
+        const total = num(record[c.totalField]);
+        const open = Math.round((total - (applied.get(docId) ?? 0)) * 100) / 100;
+        if (open <= 0) continue; // fully paid → nothing to revalue
+        const key = `${currency}|${doc.side}`;
+        openByCurrencySide.set(key, (openByCurrencySide.get(key) ?? 0) + open);
+      }
+    }
+
+    const now = c.clock?.now() ?? new Date();
+    const nowIso = now.toISOString();
+    const periodLabel = typeof period[c.periodNumberField] === "string" ? (period[c.periodNumberField] as string) : periodId;
+
+    const lines: Record<string, unknown>[] = [];
+    for (const [key, open] of openByCurrencySide) {
+      const sep = key.lastIndexOf("|");
+      const currency = key.slice(0, sep);
+      const side = key.slice(sep + 1) as "ar" | "ap";
+
+      let rate = rateCache.get(currency);
+      if (rate === undefined) {
+        rate = await lookupPeriodEndRate(input, c, currency, functionalCurrencyId, endDate);
+        rateCache.set(currency, rate);
+      }
+      if (rate === null) continue; // no rate for this currency → skip
+
+      // Approximation: foreign balance carried at rate 1, revalued to period-end rate.
+      const delta = Math.round(open * (rate - 1) * 100) / 100;
+      if (Math.abs(delta) < FX_EPSILON) continue;
+
+      const controlAccount = side === "ar" ? arAccount : apAccount;
+      const controlDesc = side === "ar"
+        ? `Unrealized FX revaluation — AR ${currency}`
+        : `Unrealized FX revaluation — AP ${currency}`;
+      const fxDesc = `Unrealized FX gain/loss — ${currency}`;
+      const base = { journal_entry_id: "", currency, fx_rate: rate, created_at: nowIso, updated_at: nowIso };
+
+      // AR: a positive delta is a gain → debit AR, credit unrealized FX (mirror when negative).
+      // AP: a higher rate raises a foreign liability → loss → debit unrealized FX, credit AP
+      //     (so the AP control moves opposite to AR for the same delta sign).
+      const amount = Math.abs(delta);
+      const arGain = side === "ar" ? delta > 0 : delta < 0; // does the control account get debited?
+      const controlSide: GlSide = arGain ? "debit" : "credit";
+      const fxSide: GlSide = arGain ? "credit" : "debit";
+      lines.push(glLine(base, controlAccount, controlDesc, controlSide, amount));
+      lines.push(glLine(base, fxAccount, fxDesc, fxSide, amount));
+    }
+
+    if (lines.length === 0) return; // nothing to revalue → no entry
+
+    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+      entry_number: `${periodLabel}-FXREVAL`,
+      entry_date: endDate,
+      source: "fx_revaluation",
+      state: "posted",
+      memo: `Unrealized FX revaluation for period ${periodLabel}`,
+      posted_at: nowIso,
+      fiscal_period_id: periodId,
+      created_at: nowIso,
+      updated_at: nowIso,
+    });
+    const entryId = String(entry["id"]);
+    for (const line of lines) {
+      await input.store.create(input.tenantId, c.lineEntity, { ...line, journal_entry_id: entryId });
+    }
+  };
+}
+
+/** Resolves a Currency `code` to its record id within the tenant, or null. */
+async function resolveCurrencyId(
+  input: WriteEffectInput,
+  c: { currencyEntity: string; currencyCodeField: string },
+  code: string,
+): Promise<string | null> {
+  const page = await input.store.listPage(input.tenantId, c.currencyEntity, {
+    limit: 50,
+    cursor: null,
+    sort: [],
+    filters: [{ field: c.currencyCodeField, op: "eq", value: code }],
+  });
+  const rec =
+    page.records.find((r) => String(r[c.currencyCodeField] ?? "").toUpperCase() === code) ?? undefined;
+  return rec !== undefined ? String(rec["id"]) : null;
+}
+
+/**
+ * Period-end rate for (docCurrency → functional): the ExchangeRate from the doc currency's
+ * Currency id to the functional currency id with the latest `rate_date` ≤ `endDate`. Returns
+ * null when the doc currency has no Currency record or no eligible rate.
+ */
+async function lookupPeriodEndRate(
+  input: WriteEffectInput,
+  c: {
+    currencyEntity: string;
+    currencyCodeField: string;
+    exchangeRateEntity: string;
+    rateFromField: string;
+    rateToField: string;
+    rateField: string;
+    rateDateField: string;
+    maxRows: number;
+  },
+  docCurrency: string,
+  functionalCurrencyId: string,
+  endDate: string,
+): Promise<number | null> {
+  const fromId = await resolveCurrencyId(input, c, docCurrency);
+  if (fromId === null) return null;
+  const page = await input.store.listPage(input.tenantId, c.exchangeRateEntity, {
+    limit: c.maxRows,
+    cursor: null,
+    sort: [],
+    filters: [
+      { field: c.rateFromField, op: "eq", value: fromId },
+      { field: c.rateToField, op: "eq", value: functionalCurrencyId },
+    ],
+  });
+  let best: { date: string; rate: number } | null = null;
+  for (const r of page.records) {
+    if (String(r[c.rateFromField] ?? "") !== fromId) continue;
+    if (String(r[c.rateToField] ?? "") !== functionalCurrencyId) continue;
+    const dateRaw = r[c.rateDateField];
+    const date = typeof dateRaw === "string" && dateRaw.length > 0 ? dateRaw.slice(0, 10) : null;
+    if (date === null || date > endDate) continue; // rate must be on/before the period end
+    if (best === null || date > best.date) best = { date, rate: num(r[c.rateField]) };
+  }
+  return best !== null ? best.rate : null;
+}

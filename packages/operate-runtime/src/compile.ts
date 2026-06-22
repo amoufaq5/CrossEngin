@@ -42,6 +42,7 @@ import {
   paymentApplicationEffect,
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
+  unrealizedFxRevaluationEffect,
   type WriteEffect,
 } from "./write-effects.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
@@ -309,6 +310,43 @@ function defaultWriteEffects(
         refField: "bill_id",
         settleableStates: ["approved", "overdue"],
         ...clockOpt,
+      }),
+    );
+  }
+  // Unrealized FX revaluation at period close: when a FiscalPeriod closes, revalue every
+  // open foreign-currency receivable/payable to the period-end rate and post one balanced
+  // adjusting entry. Needs the GL, the fiscal calendar, the FX rate tables, and at least
+  // one of Invoice/Bill to revalue.
+  if (
+    names.has("FiscalPeriod") &&
+    hasGl &&
+    names.has("Currency") &&
+    names.has("ExchangeRate") &&
+    (names.has("Invoice") || names.has("Bill"))
+  ) {
+    const fxDocuments = [
+      ...(names.has("Invoice")
+        ? [{ entity: "Invoice", openStates: ["sent", "overdue"], paymentRefField: "invoice_id", side: "ar" as const }]
+        : []),
+      ...(names.has("Bill")
+        ? [{ entity: "Bill", openStates: ["approved", "overdue"], paymentRefField: "bill_id", side: "ap" as const }]
+        : []),
+    ];
+    effects.push(
+      unrealizedFxRevaluationEffect({
+        documents: fxDocuments,
+        ...(settingsStore !== undefined
+          ? {
+              resolveFunctionalCurrency: async (tenantId: string) =>
+                (await settingsStore.get(tenantId)).defaults?.currency,
+            }
+          : {}),
+        ...clockOpt,
+        ...codeResolver((f) => ({
+          ...(f.unrealizedFxGainLossAccountCode !== undefined ? { fx: f.unrealizedFxGainLossAccountCode } : {}),
+          ...(f.arAccountCode !== undefined ? { ar: f.arAccountCode } : {}),
+          ...(f.apAccountCode !== undefined ? { ap: f.apAccountCode } : {}),
+        })),
       }),
     );
   }

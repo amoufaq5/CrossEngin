@@ -199,6 +199,7 @@ export default function SettingsPage() {
               <Text label="Tax payable (output) code" value={finance.taxPayableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxPayableAccountCode", v)} />
               <Text label="Input tax code" value={finance.taxInputAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxInputAccountCode", v)} />
               <Text label="FX gain/loss code" value={finance.fxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "fxGainLossAccountCode", v)} />
+              <Text label="Unrealized FX code" value={finance.unrealizedFxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "unrealizedFxGainLossAccountCode", v)} />
             </div>
             <p className="mt-3 text-xs text-ink-faint">
               Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss.
@@ -354,6 +355,7 @@ function buildFinance(f: StrMap): Record<string, unknown> {
   if (f.taxPayableAccountCode?.trim()) out.taxPayableAccountCode = f.taxPayableAccountCode.trim();
   if (f.taxInputAccountCode?.trim()) out.taxInputAccountCode = f.taxInputAccountCode.trim();
   if (f.fxGainLossAccountCode?.trim()) out.fxGainLossAccountCode = f.fxGainLossAccountCode.trim();
+  if (f.unrealizedFxGainLossAccountCode?.trim()) out.unrealizedFxGainLossAccountCode = f.unrealizedFxGainLossAccountCode.trim();
   return out;
 }
 

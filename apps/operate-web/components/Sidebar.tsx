@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useMemo, useState } from "react";
 
+import { FINANCE_ROLES } from "@/lib/aging";
 import { useInbox } from "@/lib/inbox";
 import { accessibleEntities, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
 
@@ -25,6 +26,9 @@ export function Sidebar() {
 
   const searching = q.trim() !== "";
   const primaryRole = schema?.viewer?.primaryRole;
+  const viewerRoleList = schema?.viewer?.roles;
+  // No viewer (dev) → show; otherwise gate on holding a finance role.
+  const showReports = viewerRoleList === undefined || viewerRoleList.some((r) => FINANCE_ROLES.includes(r));
   const inboxEnabled = featureEnabled(schema, "approvals_inbox", true);
   const { items: inboxItems } = useInbox(inboxEnabled ? schema : null);
   const inboxCount = inboxItems.length;
@@ -113,6 +117,22 @@ export function Sidebar() {
             </div>
           );
         })}
+
+        {showReports && (
+          <div className="mt-5 border-t border-line pt-3">
+            <div className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Reports</div>
+            <Link
+              href="/reports/aging"
+              className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+                pathname === "/reports/aging"
+                  ? "bg-brand-50 font-semibold text-brand-700"
+                  : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+              }`}
+            >
+              Aging
+            </Link>
+          </div>
+        )}
 
         <div className="mt-5 border-t border-line pt-3">
           <div className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Administration</div>

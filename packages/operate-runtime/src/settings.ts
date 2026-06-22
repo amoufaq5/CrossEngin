@@ -72,6 +72,8 @@ export const FinanceSettingsSchema = z
     taxInputAccountCode: z.string().max(32).optional(),
     /** LedgerAccount.account_code for realized FX gain/loss on payment settlement. */
     fxGainLossAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code for unrealized FX gain/loss booked at period close (revaluation). */
+    unrealizedFxGainLossAccountCode: z.string().max(32).optional(),
   })
   .strict();
 
