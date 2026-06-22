@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
+import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
 import { deleteRecord, getRecord, runTransition, updateRecord } from "@/lib/api";
 import { formatCell } from "@/lib/format";
@@ -227,7 +228,7 @@ function ReadValue({
     if (slug) {
       return (
         <Link href={`/e/${slug}/${encodeURIComponent(String(value))}`} className="text-brand-600 hover:text-brand-700">
-          {String(value)}
+          <ReferenceLabel schema={schema} target={field.referenceTarget} id={String(value)} />
         </Link>
       );
     }
