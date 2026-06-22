@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { InMemoryEntityStore } from "./store.js";
 import {
   billGlPostingEffect,
+  bookingRateStampEffect,
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
@@ -684,6 +685,75 @@ describe("unrealizedFxRevaluationEffect", () => {
     expect(Number(apLine.credit)).toBeCloseTo(100, 6);
     const fxLine = lines.find((l) => l.description === "Unrealized FX gain/loss — EUR")!;
     expect(Number(fxLine.debit)).toBeCloseTo(100, 6);
+  });
+});
+
+describe("unrealizedFxRevaluationEffect — booking rate", () => {
+  const effect = unrealizedFxRevaluationEffect({ functionalCurrency: "USD", clock });
+
+  async function fxStore() {
+    const store = new InMemoryEntityStore();
+    const usd = await store.create(TENANT, "Currency", { code: "USD", name: "US Dollar" });
+    const eur = await store.create(TENANT, "Currency", { code: "EUR", name: "Euro" });
+    return { store, usdId: String(usd.id), eurId: String(eur.id) };
+  }
+  const close = (store: InMemoryEntityStore, id: string): WriteEffectInput => ({
+    operation: "transition",
+    entity: "FiscalPeriod",
+    tenantId: TENANT,
+    id,
+    before: { status: "closing" },
+    after: { status: "closed", end_date: "2026-06-30", name: "2026-06" },
+    store,
+  });
+
+  it("revalues against the document's booking_rate, not a flat 1", async () => {
+    const { store, usdId, eurId } = await fxStore();
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.2, rate_date: "2026-06-29" });
+    // Booked at 1.1; period-end 1.2 → delta = 1000 × (1.2 − 1.1) = 100 (not 200).
+    await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR", booking_rate: 1.1 });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+    await effect(close(store, String(period.id)));
+    const arLine = (await store.list(TENANT, "JournalLine")).find((l) => Number(l.debit) > 0)!;
+    expect(Number(arLine.debit)).toBeCloseTo(100, 6);
+  });
+
+  it("posts no entry when the period-end rate equals the booking rate (no movement)", async () => {
+    const { store, usdId, eurId } = await fxStore();
+    await store.create(TENANT, "ExchangeRate", { from_currency_id: eurId, to_currency_id: usdId, rate: 1.1, rate_date: "2026-06-29" });
+    await store.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "sent", total: 1000, currency: "EUR", booking_rate: 1.1 });
+    const period = await store.create(TENANT, "FiscalPeriod", { status: "closing", end_date: "2026-06-30", name: "2026-06" });
+    await effect(close(store, String(period.id)));
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+  });
+});
+
+describe("bookingRateStampEffect", () => {
+  const effect = bookingRateStampEffect({ entity: "Invoice", triggerState: "sent", dateField: "issue_date", functionalCurrency: "USD", clock });
+
+  async function store() {
+    const s = new InMemoryEntityStore();
+    const usd = await s.create(TENANT, "Currency", { code: "USD", name: "USD" });
+    const eur = await s.create(TENANT, "Currency", { code: "EUR", name: "EUR" });
+    await s.create(TENANT, "ExchangeRate", { from_currency_id: String(eur.id), to_currency_id: String(usd.id), rate: 1.15, rate_date: "2026-05-20" });
+    await s.create(TENANT, "ExchangeRate", { from_currency_id: String(eur.id), to_currency_id: String(usd.id), rate: 1.25, rate_date: "2026-07-01" });
+    return s;
+  }
+  const issue = (s: InMemoryEntityStore, id: string, before: Record<string, unknown>): WriteEffectInput =>
+    ({ operation: "transition", entity: "Invoice", tenantId: TENANT, id, before, after: { ...before, state: "sent" }, store: s });
+
+  it("stamps the latest rate on/before the issue date for a foreign invoice", async () => {
+    const s = await store();
+    const inv = await s.create(TENANT, "Invoice", { invoice_number: "INV-1", state: "draft", currency: "EUR", issue_date: "2026-06-01", total: 100 });
+    await effect(issue(s, String(inv.id), { invoice_number: "INV-1", state: "draft", currency: "EUR", issue_date: "2026-06-01", total: 100 }));
+    expect(Number((await s.get(TENANT, "Invoice", String(inv.id)))!.booking_rate)).toBeCloseTo(1.15, 6); // not the 2026-07 rate
+  });
+
+  it("leaves a functional-currency invoice unstamped", async () => {
+    const s = await store();
+    const inv = await s.create(TENANT, "Invoice", { invoice_number: "INV-2", state: "draft", currency: "USD", issue_date: "2026-06-01", total: 100 });
+    await effect(issue(s, String(inv.id), { invoice_number: "INV-2", state: "draft", currency: "USD", issue_date: "2026-06-01", total: 100 }));
+    expect((await s.get(TENANT, "Invoice", String(inv.id)))!.booking_rate).toBeUndefined();
   });
 });
 

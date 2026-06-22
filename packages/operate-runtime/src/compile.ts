@@ -36,6 +36,7 @@ import {
   type WriteGuard,
 } from "./write-guards.js";
 import {
+  bookingRateStampEffect,
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
@@ -204,6 +205,13 @@ function defaultWriteEffects(
     settingsStore === undefined
       ? {}
       : { resolveAccountCodes: async (tenantId: string) => pick((await settingsStore.get(tenantId)).finance ?? {}) };
+  // The tenant's functional (reporting) currency, from defaults.currency.
+  const functionalResolver =
+    settingsStore === undefined
+      ? {}
+      : { resolveFunctionalCurrency: async (tenantId: string) => (await settingsStore.get(tenantId)).defaults?.currency };
+  // Multi-currency booking-rate capture is possible only when the rate tables exist.
+  const hasFx = names.has("Currency") && names.has("ExchangeRate");
 
   if (names.has("JournalEntry") && names.has("JournalLine")) {
     effects.push(journalReversalEffect(clockOpt));
@@ -250,6 +258,18 @@ function defaultWriteEffects(
           })),
         }),
       );
+      // Capture the booking rate at issue so period-close revaluation is exact.
+      if (hasFx) {
+        effects.push(
+          bookingRateStampEffect({
+            entity: "Invoice",
+            triggerState: "sent",
+            dateField: "issue_date",
+            ...clockOpt,
+            ...functionalResolver,
+          }),
+        );
+      }
     }
   }
   if (names.has("Bill") && hasGl) {
@@ -276,6 +296,17 @@ function defaultWriteEffects(
         })),
       }),
     );
+    if (hasFx) {
+      effects.push(
+        bookingRateStampEffect({
+          entity: "Bill",
+          triggerState: "approved",
+          dateField: "bill_date",
+          ...clockOpt,
+          ...functionalResolver,
+        }),
+      );
+    }
   }
   // Payment-driven settlement (supports partial payments + realized FX gain/loss).
   if (names.has("Payment") && hasGl) {
