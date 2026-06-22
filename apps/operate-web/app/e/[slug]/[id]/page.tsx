@@ -195,7 +195,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
                   </dt>
                   <dd>
                     {editing && f.readOnly !== true ? (
-                      <FieldInput field={f} value={draft[f.name] ?? ""} onChange={(v) => setDraft((p) => ({ ...p, [f.name]: v }))} />
+                      <FieldInput field={f} value={draft[f.name] ?? ""} schema={schema} onChange={(v) => setDraft((p) => ({ ...p, [f.name]: v }))} />
                     ) : (
                       <ReadValue field={f} value={record[f.name]} schema={schema} />
                     )}
