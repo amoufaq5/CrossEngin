@@ -93,8 +93,9 @@ export async function putSettings(settings: Record<string, unknown>): Promise<Re
   return (await res.json()) as Record<string, unknown>;
 }
 
-export async function fetchAging(): Promise<AgingResponse> {
-  const res = await fetch("/api/v1/meta/aging", { headers: { accept: "application/json" } });
+export async function fetchAging(asOf?: string): Promise<AgingResponse> {
+  const query = asOf ? `?asOf=${encodeURIComponent(asOf)}` : "";
+  const res = await fetch(`/api/v1/meta/aging${query}`, { headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   return (await res.json()) as AgingResponse;
 }
