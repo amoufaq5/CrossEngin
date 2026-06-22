@@ -181,6 +181,9 @@ export const INVOICE_LINE_ENTITY: Entity = {
       required: true,
       default: { kind: "literal", value: 0 },
     },
+    // Optional per-line TaxCode: when set, drives a per-code tax line in the
+    // recognition GL posting (VAT/GST breakdown), overriding the flat tax_rate_pct.
+    { name: "tax_code_id", type: { kind: "reference", target: "TaxCode" }, indexed: true },
     {
       name: "line_total",
       type: { kind: "decimal", precision: 14, scale: 2, min: 0 },

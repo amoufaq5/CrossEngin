@@ -4,6 +4,7 @@ import { InMemoryEntityStore } from "./store.js";
 import {
   billGlPostingEffect,
   bookingRateStampEffect,
+  computeLineTaxBreakdown,
   creditNoteGlPostingEffect,
   invoiceVoidCreditNoteEffect,
   journalReversalEffect,
@@ -450,6 +451,104 @@ describe("recognitionGlPostingEffect (tax split)", () => {
     expect(lines.find((l) => l.ledger_account_id === "ap")!.credit).toBe(210);
     expect(lines.find((l) => l.ledger_account_id === "expense")!.debit).toBe(200);
     expect(lines.find((l) => l.ledger_account_id === "tax_input")!.debit).toBe(10);
+  });
+});
+
+describe("computeLineTaxBreakdown", () => {
+  it("groups tax by TaxCode label and sums net", () => {
+    const codes = new Map([
+      ["std", { rate: 20, label: "VAT20" }],
+      ["red", { rate: 5, label: "VAT5" }],
+    ]);
+    const b = computeLineTaxBreakdown(
+      [
+        { net: 100, taxCodeId: "std", flatRatePct: null },
+        { net: 200, taxCodeId: "std", flatRatePct: null },
+        { net: 100, taxCodeId: "red", flatRatePct: null },
+      ],
+      codes,
+    );
+    expect(b.netTotal).toBe(400);
+    expect(b.taxTotal).toBe(65); // (300×20%) + (100×5%) = 60 + 5
+    expect(b.groups).toEqual([
+      { label: "VAT20", tax: 60 },
+      { label: "VAT5", tax: 5 },
+    ]);
+  });
+
+  it("falls back to the flat rate when no code, labelled by rate", () => {
+    const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: null, flatRatePct: 10 }], new Map());
+    expect(b.taxTotal).toBe(10);
+    expect(b.groups).toEqual([{ label: "10%", tax: 10 }]);
+  });
+
+  it("ignores zero-rate lines", () => {
+    const b = computeLineTaxBreakdown(
+      [
+        { net: 100, taxCodeId: null, flatRatePct: 0 },
+        { net: 50, taxCodeId: null, flatRatePct: null },
+      ],
+      new Map(),
+    );
+    expect(b.netTotal).toBe(150);
+    expect(b.taxTotal).toBe(0);
+    expect(b.groups).toEqual([]);
+  });
+});
+
+describe("recognitionGlPostingEffect — line-level tax codes", () => {
+  const invoiceRec = recognitionGlPostingEffect({
+    entity: "Invoice",
+    triggerState: "sent",
+    controlSide: "debit",
+    numberField: "invoice_number",
+    controlAccountRef: "ar",
+    netAccountRef: "revenue",
+    taxAccountRef: "tax_payable",
+    controlDescription: "AR",
+    netDescription: "Revenue",
+    taxDescription: "Tax payable",
+    taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+    clock,
+  });
+  const issue = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
+    invoiceRec({ operation: "transition", entity: "Invoice", tenantId: TENANT, id, before, after: { ...before, state: "sent" }, store });
+
+  it("posts one tax line per TaxCode from the invoice's lines", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "TaxCode", { id: "std", code: "VAT20", rate_pct: 20 });
+    await store.create(TENANT, "TaxCode", { id: "red", code: "VAT5", rate_pct: 5 });
+    // 300 @ 20% = 60, 100 @ 5% = 5 → subtotal 400, tax 65, total 465
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-LT", state: "draft", document_type: "invoice", subtotal: 400, tax_total: 65, total: 465 });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 300, tax_code_id: "std" });
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 100, tax_code_id: "red" });
+
+    await issue(store, invId, inv);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.length).toBe(4); // AR + revenue + 2 tax lines
+    expect(lines.find((l) => l.ledger_account_id === "ar")!.debit).toBe(465);
+    expect(lines.find((l) => l.ledger_account_id === "revenue")!.credit).toBe(400);
+    const taxLines = lines.filter((l) => l.ledger_account_id === "tax_payable");
+    expect(taxLines.map((l) => l.description).sort()).toEqual(["Tax payable (VAT20)", "Tax payable (VAT5)"]);
+    expect(taxLines.reduce((s, l) => s + Number(l.credit), 0)).toBe(65);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+  });
+
+  it("falls back to the document-level split when lines don't reconcile to total", async () => {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "TaxCode", { id: "std", code: "VAT20", rate_pct: 20 });
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-MM", state: "draft", document_type: "invoice", subtotal: 100, tax_total: 20, total: 120 });
+    const invId = String(inv.id);
+    // A line that doesn't add up to the document total → use the document split.
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 999, tax_code_id: "std" });
+    await issue(store, invId, inv);
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.length).toBe(3);
+    expect(lines.find((l) => l.ledger_account_id === "tax_payable")!.credit).toBe(20);
+    expect(lines.find((l) => l.ledger_account_id === "tax_payable")!.description).toBe("Tax payable");
   });
 });
 

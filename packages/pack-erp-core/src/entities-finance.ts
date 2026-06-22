@@ -201,6 +201,9 @@ export const BILL_LINE_ENTITY: Entity = {
     { name: "quantity", type: { kind: "decimal", precision: 16, scale: 3, min: 0 }, required: true, default: { kind: "literal", value: 1 } },
     { name: "unit_price", type: { kind: "decimal", precision: 14, scale: 4, min: 0 }, required: true },
     { name: "amount", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true, default: { kind: "literal", value: 0 } },
+    // Optional per-line TaxCode: drives a per-code input-tax line in the bill's
+    // recognition GL posting (VAT/GST breakdown).
+    { name: "tax_code_id", type: { kind: "reference", target: "TaxCode" }, indexed: true },
   ],
   indexes: [{ fields: ["bill_id"] }],
 };
