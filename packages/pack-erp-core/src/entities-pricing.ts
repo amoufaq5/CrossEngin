@@ -16,6 +16,10 @@ export const TAX_CODE_ENTITY: Entity = {
       default: { kind: "literal", value: "sales" },
     },
     { name: "jurisdiction", type: { kind: "text", maxLength: 120 } },
+    // Optional GL liability/asset account this code's tax posts to (a LedgerAccount
+    // account_code). When set, recognition posts this code's tax line to that account
+    // instead of the document's default tax-payable / tax-input account.
+    { name: "gl_account_code", type: { kind: "text", maxLength: 32 } },
     { name: "is_active", type: { kind: "boolean" }, required: true, default: { kind: "literal", value: true } },
   ],
   indexes: [{ fields: ["kind", "is_active"] }],
