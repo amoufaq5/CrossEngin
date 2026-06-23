@@ -2,6 +2,7 @@
 // which forwards to operate-server with auth. Same-origin, so no CORS.
 
 import type { AgingResponse } from "@/lib/aging";
+import type { WhtReconciliation } from "@/lib/wht";
 
 export interface ListResult {
   readonly data: ReadonlyArray<Record<string, unknown>>;
@@ -98,6 +99,12 @@ export async function fetchAging(asOf?: string): Promise<AgingResponse> {
   const res = await fetch(`/api/v1/meta/aging${query}`, { headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   return (await res.json()) as AgingResponse;
+}
+
+export async function fetchWhtReconciliation(): Promise<WhtReconciliation> {
+  const res = await fetch("/api/v1/meta/wht-reconciliation", { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  return (await res.json()) as WhtReconciliation;
 }
 
 async function safeText(res: Response): Promise<string> {

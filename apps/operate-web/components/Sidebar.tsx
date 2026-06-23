@@ -6,7 +6,7 @@ import { useMemo, useState } from "react";
 
 import { FINANCE_ROLES } from "@/lib/aging";
 import { useInbox } from "@/lib/inbox";
-import { accessibleEntities, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
+import { accessibleEntities, entityByName, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -29,6 +29,7 @@ export function Sidebar() {
   const viewerRoleList = schema?.viewer?.roles;
   // No viewer (dev) → show; otherwise gate on holding a finance role.
   const showReports = viewerRoleList === undefined || viewerRoleList.some((r) => FINANCE_ROLES.includes(r));
+  const hasWht = entityByName(schema, "WhtCertificate") !== undefined;
   const inboxEnabled = featureEnabled(schema, "approvals_inbox", true);
   const { items: inboxItems } = useInbox(inboxEnabled ? schema : null);
   const inboxCount = inboxItems.length;
@@ -141,6 +142,18 @@ export function Sidebar() {
             >
               Period Close
             </Link>
+            {hasWht && (
+              <Link
+                href="/reports/wht"
+                className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+                  pathname === "/reports/wht"
+                    ? "bg-brand-50 font-semibold text-brand-700"
+                    : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+                }`}
+              >
+                Withholding Tax
+              </Link>
+            )}
           </div>
         )}
 
