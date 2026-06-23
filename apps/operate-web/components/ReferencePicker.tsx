@@ -38,11 +38,12 @@ export function ReferencePicker({
   const targetEntity = entityByName(schema, target);
   const [options, setOptions] = useState<readonly Option[] | null>(null);
   const [failed, setFailed] = useState(false);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     if (slug === undefined || targetEntity === undefined) return;
     let alive = true;
-    listRecords(slug, "?limit=200")
+    listRecords(slug, "?limit=500")
       .then((res) => {
         if (!alive) return;
         const opts = res.data
@@ -77,16 +78,36 @@ export function ReferencePicker({
   // explicit option so the picker never silently drops an existing value.
   const hasValue = value !== "" && (options?.some((o) => o.id === value) ?? false);
 
+  // Client-side filter for large lists; the selected option is always kept visible.
+  const needle = query.trim().toLowerCase();
+  const visible =
+    options === null || needle === ""
+      ? (options ?? [])
+      : options.filter((o) => o.id === value || o.label.toLowerCase().includes(needle));
+  const showFilter = (options?.length ?? 0) > 12;
+
   return (
-    <select className={INPUT_CLASS} value={value} disabled={disabled || options === null} onChange={(e) => onChange(e.target.value)}>
-      {!required && <option value="">—</option>}
-      {options === null && <option value={value}>{value === "" ? "Loading…" : value}</option>}
-      {value !== "" && options !== null && !hasValue && <option value={value}>{value}</option>}
-      {(options ?? []).map((o) => (
-        <option key={o.id} value={o.id}>
-          {o.label}
-        </option>
-      ))}
-    </select>
+    <div className="space-y-1.5">
+      {showFilter && (
+        <input
+          type="text"
+          className={INPUT_CLASS}
+          value={query}
+          disabled={disabled}
+          placeholder={`Filter ${target.toLowerCase()}…`}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+      )}
+      <select className={INPUT_CLASS} value={value} disabled={disabled || options === null} onChange={(e) => onChange(e.target.value)}>
+        {!required && <option value="">—</option>}
+        {options === null && <option value={value}>{value === "" ? "Loading…" : value}</option>}
+        {value !== "" && options !== null && !hasValue && <option value={value}>{value}</option>}
+        {visible.map((o) => (
+          <option key={o.id} value={o.id}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </div>
   );
 }
