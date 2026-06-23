@@ -44,6 +44,7 @@ import {
   paymentSettlementGlPostingEffect,
   recognitionGlPostingEffect,
   unrealizedFxRevaluationEffect,
+  whtCertificateClearingEffect,
   type WriteEffect,
 } from "./write-effects.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
@@ -385,6 +386,19 @@ function defaultWriteEffects(
           ...(f.unrealizedFxGainLossAccountCode !== undefined ? { fx: f.unrealizedFxGainLossAccountCode } : {}),
           ...(f.arAccountCode !== undefined ? { ar: f.arAccountCode } : {}),
           ...(f.apAccountCode !== undefined ? { ap: f.apAccountCode } : {}),
+        })),
+      }),
+    );
+  }
+  // WHT certificate clearing: confirming a certificate reclasses the withheld tax from a
+  // receivable into an income-tax-recoverable credit (needs the GL).
+  if (names.has("WhtCertificate") && hasGl) {
+    effects.push(
+      whtCertificateClearingEffect({
+        ...clockOpt,
+        ...codeResolver((f) => ({
+          ...(f.whtReceivableAccountCode !== undefined ? { whtReceivable: f.whtReceivableAccountCode } : {}),
+          ...(f.taxRecoverableAccountCode !== undefined ? { taxRecoverable: f.taxRecoverableAccountCode } : {}),
         })),
       }),
     );

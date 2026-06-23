@@ -74,6 +74,10 @@ export const FinanceSettingsSchema = z
     fxGainLossAccountCode: z.string().max(32).optional(),
     /** LedgerAccount.account_code for unrealized FX gain/loss booked at period close (revaluation). */
     unrealizedFxGainLossAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code for the WHT receivable cleared when a WHT certificate is confirmed. */
+    whtReceivableAccountCode: z.string().max(32).optional(),
+    /** LedgerAccount.account_code for income tax recoverable — debited when a WHT certificate clears. */
+    taxRecoverableAccountCode: z.string().max(32).optional(),
   })
   .strict();
 
