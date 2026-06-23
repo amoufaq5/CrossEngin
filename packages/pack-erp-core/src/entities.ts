@@ -137,6 +137,10 @@ export const INVOICE_ENTITY: Entity = {
       required: true,
       default: { kind: "literal", value: 0 },
     },
+    // Tax withheld by the customer at recognition (a contra to AR; not part of `total`).
+    // Stamped by the recognition effect from the lines' withholding TaxCodes; used to
+    // prefill a WHT certificate's amount.
+    { name: "withholding_total", type: { kind: "decimal", precision: 14, scale: 2, min: 0 } },
     { name: "issue_date", type: { kind: "date" }, required: true },
     { name: "due_date", type: { kind: "date" }, required: true, indexed: true },
     { name: "sent_at", type: { kind: "datetime" } },

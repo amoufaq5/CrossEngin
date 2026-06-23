@@ -724,6 +724,8 @@ export interface RecognitionGlConfig {
    * document-level split when the line-derived net+tax doesn't reconcile to total.
    */
   readonly taxLines?: RecognitionTaxLinesConfig;
+  /** When set, the computed withholding total is stamped onto this document field after posting. */
+  readonly stampWithholdingField?: string;
   readonly clock?: { now(): Date };
 }
 
@@ -1008,6 +1010,15 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       }
     } else if (tax > EPSILON) {
       await input.store.create(input.tenantId, c.lineEntity, glLine(base, taxAccount, c.taxDescription, opposite, tax));
+    }
+
+    // Stamp the withholding total back onto the document (informational + prefills a WHT
+    // certificate's amount). Direct store write — bypasses guards/effects, no recursion.
+    if (config.stampWithholdingField !== undefined && withholdingTotal > EPSILON) {
+      await input.store.update(input.tenantId, c.entity, docId, {
+        [config.stampWithholdingField]: withholdingTotal,
+        updated_at: nowIso,
+      });
     }
   };
 }

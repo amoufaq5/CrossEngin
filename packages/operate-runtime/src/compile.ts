@@ -244,7 +244,7 @@ function defaultWriteEffects(
           netDescription: "Invoice — revenue",
           taxDescription: "Invoice — tax payable",
           ...(hasTaxCodes && names.has("InvoiceLine")
-            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" } }
+            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" }, stampWithholdingField: "withholding_total" }
             : {}),
           ...clockOpt,
           ...codeResolver((f) => ({
