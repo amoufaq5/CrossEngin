@@ -65,8 +65,8 @@ describe("buildErpCorePack — full kernel cross-validation", () => {
 });
 
 describe("buildErpCorePack — counts", () => {
-  it("has 50 entities", () => {
-    expect(buildErpCorePack().entities).toHaveLength(50);
+  it("has 51 entities", () => {
+    expect(buildErpCorePack().entities).toHaveLength(51);
   });
 
   it("has 66 relations", () => {

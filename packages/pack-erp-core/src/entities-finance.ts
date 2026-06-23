@@ -208,6 +208,37 @@ export const BILL_LINE_ENTITY: Entity = {
   indexes: [{ fields: ["bill_id"] }],
 };
 
+export const WHT_CERTIFICATE_ENTITY: Entity = {
+  name: "WhtCertificate",
+  traits: [...AUDITABLE],
+  fields: [
+    {
+      name: "certificate_number",
+      type: { kind: "text", maxLength: 50 },
+      required: true,
+      unique: true,
+      default: { kind: "sequence", sequence: "erp.wht_certificate", format: "WHT-{YYYY}-{SEQ:5}", resetPeriod: "yearly" },
+    },
+    // The sale the tax was withheld on, and the customer who withheld it.
+    { name: "invoice_id", type: { kind: "reference", target: "Invoice" }, indexed: true },
+    { name: "account_id", type: { kind: "reference", target: "Account" }, indexed: true },
+    // The authority/customer's certificate reference proving remittance.
+    { name: "certificate_ref", type: { kind: "text", maxLength: 120 } },
+    { name: "amount", type: { kind: "decimal", precision: 16, scale: 2, min: 0 }, required: true },
+    { name: "currency", type: { kind: "text", maxLength: 3 }, required: true, default: { kind: "literal", value: "USD" } },
+    { name: "issue_date", type: { kind: "date" }, required: true, indexed: true },
+    {
+      name: "state",
+      type: { kind: "enum", values: ["draft", "confirmed", "void"] },
+      required: true,
+      default: { kind: "literal", value: "draft" },
+      indexed: true,
+    },
+    { name: "confirmed_at", type: { kind: "datetime" } },
+  ],
+  indexes: [{ fields: ["state", "issue_date"] }, { fields: ["invoice_id"] }],
+};
+
 export const ERP_CORE_FINANCE_ENTITIES: readonly Entity[] = [
   LEDGER_ACCOUNT_ENTITY,
   JOURNAL_ENTRY_ENTITY,
@@ -216,4 +247,5 @@ export const ERP_CORE_FINANCE_ENTITIES: readonly Entity[] = [
   EXPENSE_ENTITY,
   BILL_ENTITY,
   BILL_LINE_ENTITY,
+  WHT_CERTIFICATE_ENTITY,
 ];

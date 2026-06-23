@@ -14,6 +14,7 @@ import {
   recognitionGlPostingEffect,
   runWriteEffects,
   unrealizedFxRevaluationEffect,
+  whtCertificateClearingEffect,
   type WriteEffectInput,
 } from "./write-effects.js";
 
@@ -969,5 +970,53 @@ describe("runWriteEffects", () => {
     };
     await expect(runWriteEffects([ok, boom], {} as WriteEffectInput)).rejects.toThrow("boom");
     expect(calls).toEqual(["ok"]);
+  });
+});
+
+describe("whtCertificateClearingEffect", () => {
+  const effect = whtCertificateClearingEffect({
+    resolveAccountCodes: async () => ({ whtReceivable: "1450", taxRecoverable: "1460" }),
+    clock,
+  });
+  const confirm = (store: InMemoryEntityStore, id: string, before: Record<string, unknown>) =>
+    effect({ operation: "transition", entity: "WhtCertificate", tenantId: TENANT, id, before, after: { ...before, state: "confirmed" }, store });
+
+  async function setup() {
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "LedgerAccount", { id: "acc_wht", account_code: "1450" });
+    await store.create(TENANT, "LedgerAccount", { id: "acc_rec", account_code: "1460" });
+    const cert = await store.create(TENANT, "WhtCertificate", { certificate_number: "WHT-1", state: "draft", amount: 50, currency: "USD" });
+    return { store, cert };
+  }
+
+  it("reclasses the withheld tax: debit recoverable, credit WHT receivable", async () => {
+    const { store, cert } = await setup();
+    await confirm(store, String(cert.id), cert);
+    const entry = (await store.list(TENANT, "JournalEntry")).find((e) => e.entry_number === "WHT-1-WHT")!;
+    expect(entry.state).toBe("posted");
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.length).toBe(2);
+    expect(lines.find((l) => l.ledger_account_id === "acc_rec")!.debit).toBe(50);
+    expect(lines.find((l) => l.ledger_account_id === "acc_wht")!.credit).toBe(50);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+  });
+
+  it("fires only on the →confirmed edge, once", async () => {
+    const { store, cert } = await setup();
+    // A non-confirming update does nothing.
+    await effect({ operation: "update", entity: "WhtCertificate", tenantId: TENANT, id: String(cert.id), before: cert, after: { ...cert, certificate_ref: "X" }, store });
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
+    // Confirm posts once; re-confirming (already confirmed) does not double-post.
+    await confirm(store, String(cert.id), cert);
+    const confirmed = { ...cert, state: "confirmed" };
+    await effect({ operation: "update", entity: "WhtCertificate", tenantId: TENANT, id: String(cert.id), before: confirmed, after: { ...confirmed, certificate_ref: "Y" }, store });
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(1);
+  });
+
+  it("skips a zero-amount certificate", async () => {
+    const store = new InMemoryEntityStore();
+    const cert = await store.create(TENANT, "WhtCertificate", { certificate_number: "WHT-0", state: "draft", amount: 0, currency: "USD" });
+    await confirm(store, String(cert.id), cert);
+    expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 });

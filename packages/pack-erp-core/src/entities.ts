@@ -218,6 +218,7 @@ export const ERP_CORE_MODULE_BY_ENTITY: Readonly<Record<string, string>> = {
   Bill: "Finance",
   BillLine: "Finance",
   Expense: "Finance",
+  WhtCertificate: "Finance",
   // Accounting & GL
   LedgerAccount: "Accounting & GL",
   JournalEntry: "Accounting & GL",

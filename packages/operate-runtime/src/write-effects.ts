@@ -1597,3 +1597,87 @@ async function lookupPeriodEndRate(
   }
   return best !== null ? best.rate : null;
 }
+
+export interface WhtCertificateClearingConfig {
+  readonly entity?: string;
+  readonly entryEntity?: string;
+  readonly lineEntity?: string;
+  readonly stateField?: string;
+  readonly confirmedState?: string;
+  readonly numberField?: string;
+  readonly amountField?: string;
+  readonly currencyField?: string;
+  readonly ledgerAccountEntity?: string;
+  readonly accountCodeField?: string;
+  /** Resolves the WHT-receivable (credit) + tax-recoverable (debit) account codes. */
+  readonly resolveAccountCodes?: (tenantId: string) => Promise<{ whtReceivable?: string; taxRecoverable?: string }>;
+  readonly whtReceivableAccountRef?: string;
+  readonly taxRecoverableAccountRef?: string;
+  readonly clock?: { now(): Date };
+}
+
+const WHT_CLEARING_FALLBACKS = {
+  entity: "WhtCertificate",
+  entryEntity: "JournalEntry",
+  lineEntity: "JournalLine",
+  stateField: "state",
+  confirmedState: "confirmed",
+  numberField: "certificate_number",
+  amountField: "amount",
+  currencyField: "currency",
+  ledgerAccountEntity: "LedgerAccount",
+  accountCodeField: "account_code",
+  whtReceivableAccountRef: "wht_receivable",
+  taxRecoverableAccountRef: "income_tax_recoverable",
+} as const;
+
+/**
+ * WHT certificate clearing: when a `WhtCertificate` is confirmed (→confirmed edge), the
+ * tax withheld at recognition (a WHT receivable from the customer) becomes a formal tax
+ * credit claimable from the authority. Posts ONE balanced `JournalEntry` (`<cert>-WHT`,
+ * posted, source `system`) reclassing the withheld amount: debit income-tax-recoverable,
+ * credit WHT-receivable — both assets, no P&L impact. Accounts resolve from the tenant's
+ * configured codes (else placeholder refs). Fires once on the edge, written through the
+ * store inside the confirming transaction (atomic, balanced by construction).
+ */
+export function whtCertificateClearingEffect(config: WhtCertificateClearingConfig = {}): WriteEffect {
+  const c = { ...WHT_CLEARING_FALLBACKS, ...config };
+  return async (input) => {
+    if (input.entity !== c.entity) return;
+    if (input.operation !== "update" && input.operation !== "transition") return;
+    const wasConfirmed = input.before?.[c.stateField] === c.confirmedState;
+    const nowConfirmed = input.after[c.stateField] === c.confirmedState;
+    if (wasConfirmed || !nowConfirmed) return; // fire once, on the →confirmed edge
+
+    const cert = input.after;
+    const certId = input.id;
+    if (certId === null) return;
+    const amount = num(cert[c.amountField]);
+    if (amount <= 0) return;
+
+    const now = c.clock?.now() ?? new Date();
+    const nowIso = now.toISOString();
+    const today = nowIso.slice(0, 10);
+    const certNumber = typeof cert[c.numberField] === "string" ? (cert[c.numberField] as string) : certId;
+    const currency = typeof cert[c.currencyField] === "string" ? (cert[c.currencyField] as string) : "USD";
+
+    const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
+    const recoverableAccount = (await resolveAccountId(input, c, codes.taxRecoverable)) ?? c.taxRecoverableAccountRef;
+    const whtAccount = (await resolveAccountId(input, c, codes.whtReceivable)) ?? c.whtReceivableAccountRef;
+
+    const entry = await input.store.create(input.tenantId, c.entryEntity, {
+      entry_number: `${certNumber}-WHT`,
+      entry_date: today,
+      source: "system",
+      state: "posted",
+      memo: `WHT certificate clearing for ${certNumber}`,
+      posted_at: nowIso,
+      created_at: nowIso,
+      updated_at: nowIso,
+    });
+    const base = { journal_entry_id: String(entry["id"]), currency, fx_rate: 1, created_at: nowIso, updated_at: nowIso };
+    // Reclass the withheld tax: debit income-tax-recoverable, credit WHT-receivable.
+    await input.store.create(input.tenantId, c.lineEntity, glLine(base, recoverableAccount, "WHT — income tax recoverable", "debit", amount));
+    await input.store.create(input.tenantId, c.lineEntity, glLine(base, whtAccount, "WHT — receivable cleared", "credit", amount));
+  };
+}
