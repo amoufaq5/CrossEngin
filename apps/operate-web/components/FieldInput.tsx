@@ -1,6 +1,7 @@
 "use client";
 
-import type { UiFieldSchema } from "@/lib/schema";
+import { ReferencePicker } from "@/components/ReferencePicker";
+import type { UiFieldSchema, UiSchema } from "@/lib/schema";
 
 const INPUT_CLASS =
   "w-full rounded-lg border border-line px-3 py-2 text-sm outline-none transition focus:border-brand disabled:bg-surface-soft disabled:text-ink-faint";
@@ -10,13 +11,28 @@ export function FieldInput({
   value,
   onChange,
   disabled,
+  schema,
 }: {
   field: UiFieldSchema;
   value: string | boolean;
   onChange: (v: string | boolean) => void;
   disabled?: boolean;
+  schema?: UiSchema | null;
 }) {
   const ro = disabled === true || field.readOnly === true;
+
+  if (field.input === "reference" && field.referenceTarget && schema !== undefined) {
+    return (
+      <ReferencePicker
+        target={field.referenceTarget}
+        value={String(value ?? "")}
+        onChange={onChange}
+        disabled={ro}
+        required={field.required}
+        schema={schema}
+      />
+    );
+  }
 
   if (field.input === "boolean") {
     return (

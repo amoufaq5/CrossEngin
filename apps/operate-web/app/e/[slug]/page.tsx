@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
+import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
 import { createRecord, listRecords, type ListResult } from "@/lib/api";
 import { formatCell } from "@/lib/format";
@@ -132,6 +133,7 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
         {showNew && canCreate && (
           <CreateForm
             entity={entity}
+            schema={schema}
             onDone={() => {
               setShowNew(false);
               load();
@@ -224,7 +226,7 @@ function Cell({
     if (slug) {
       return (
         <Link href={`/e/${slug}/${encodeURIComponent(String(value))}`} className="text-brand-600 hover:text-brand-700">
-          {String(value)}
+          <ReferenceLabel schema={schema} target={field.referenceTarget} id={String(value)} />
         </Link>
       );
     }
@@ -268,7 +270,15 @@ function FilterControl({
   );
 }
 
-function CreateForm({ entity, onDone }: { entity: UiEntitySchema; onDone: () => void }) {
+function CreateForm({
+  entity,
+  schema,
+  onDone,
+}: {
+  entity: UiEntitySchema;
+  schema: ReturnType<typeof useSchema>["schema"];
+  onDone: () => void;
+}) {
   const editable = entity.fields.filter((f) => f.readOnly !== true);
   const [values, setValues] = useState<Record<string, string | boolean>>({});
   const [busy, setBusy] = useState(false);
@@ -306,7 +316,7 @@ function CreateForm({ entity, onDone }: { entity: UiEntitySchema; onDone: () => 
                 <span className="rounded bg-amber-50 px-1 text-[10px] font-semibold text-amber-700">{f.classification}</span>
               )}
             </span>
-            <FieldInput field={f} value={values[f.name] ?? (f.input === "boolean" ? false : "")} onChange={(v) => setValues((p) => ({ ...p, [f.name]: v }))} />
+            <FieldInput field={f} value={values[f.name] ?? (f.input === "boolean" ? false : "")} schema={schema} onChange={(v) => setValues((p) => ({ ...p, [f.name]: v }))} />
           </label>
         ))}
       </div>

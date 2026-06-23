@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
+import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
 import { deleteRecord, getRecord, runTransition, updateRecord } from "@/lib/api";
 import { formatCell } from "@/lib/format";
@@ -195,7 +196,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
                   </dt>
                   <dd>
                     {editing && f.readOnly !== true ? (
-                      <FieldInput field={f} value={draft[f.name] ?? ""} onChange={(v) => setDraft((p) => ({ ...p, [f.name]: v }))} />
+                      <FieldInput field={f} value={draft[f.name] ?? ""} schema={schema} onChange={(v) => setDraft((p) => ({ ...p, [f.name]: v }))} />
                     ) : (
                       <ReadValue field={f} value={record[f.name]} schema={schema} />
                     )}
@@ -227,7 +228,7 @@ function ReadValue({
     if (slug) {
       return (
         <Link href={`/e/${slug}/${encodeURIComponent(String(value))}`} className="text-brand-600 hover:text-brand-700">
-          {String(value)}
+          <ReferenceLabel schema={schema} target={field.referenceTarget} id={String(value)} />
         </Link>
       );
     }
