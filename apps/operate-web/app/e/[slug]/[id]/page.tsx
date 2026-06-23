@@ -129,6 +129,17 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
   const available = entity.transitions.filter((t) => t.from.includes(currentState));
   const titleField = record?.["name"] ?? record?.[entity.listColumns[0] ?? "id"] ?? id;
 
+  // One-click WHT certificate from an issued invoice: prefill the certificate's create
+  // form (invoice / customer / currency) from this invoice. Amount is entered from the
+  // physical certificate. Shown only when the manifest models WhtCertificate.
+  const whtSlug = entity.name === "Invoice" ? slugForEntityName(schema, "WhtCertificate") : undefined;
+  const whtHref =
+    whtSlug !== undefined && record !== null
+      ? `/e/${whtSlug}?new=1&invoice_id=${encodeURIComponent(id)}` +
+        `&account_id=${encodeURIComponent(String(record["account_id"] ?? ""))}` +
+        `&currency=${encodeURIComponent(String(record["currency"] ?? ""))}`
+      : undefined;
+
   return (
     <>
       <Topbar title={`${entity.singular}`} subtitle={String(titleField)} />
@@ -139,6 +150,11 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
           </Link>
           {entity.stateField && currentState && <Badge value={currentState} />}
           <div className="ml-auto flex gap-2">
+            {!editing && whtHref !== undefined && (
+              <Link href={whtHref} className="rounded-lg border border-line px-3 py-1.5 text-sm text-ink-muted hover:bg-surface-soft">
+                Raise WHT certificate
+              </Link>
+            )}
             {!editing && (
               <button onClick={startEdit} className="rounded-lg border border-line px-3 py-1.5 text-sm text-ink-muted hover:bg-surface-soft">
                 Edit
