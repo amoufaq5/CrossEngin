@@ -48,6 +48,7 @@ import {
   type WriteEffect,
 } from "./write-effects.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
+import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -508,6 +509,20 @@ export function compileOperateServer(
         viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
         sections: agingSections,
         ...(options.clock !== undefined ? { clock: options.clock } : {}),
+      }),
+    );
+  }
+
+  // WHT reconciliation report: withheld (invoice withholding_total) vs certified
+  // (confirmed WhtCertificate amounts), when the manifest models both.
+  if (agingNames.has("Invoice") && agingNames.has("WhtCertificate")) {
+    routes.register(literalRoute("meta.whtReconciliation.read", "GET", ["v1", "meta", "wht-reconciliation"]));
+    handlers.register(
+      "meta.whtReconciliation.read",
+      buildWhtReconciliationHandler({
+        store: options.store,
+        principalRoles: options.principalRoles,
+        viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
       }),
     );
   }
