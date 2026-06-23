@@ -133,11 +133,13 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
   // form (invoice / customer / currency) from this invoice. Amount is entered from the
   // physical certificate. Shown only when the manifest models WhtCertificate.
   const whtSlug = entity.name === "Invoice" ? slugForEntityName(schema, "WhtCertificate") : undefined;
+  const whtAmount = record !== null ? String(record["withholding_total"] ?? "") : "";
   const whtHref =
     whtSlug !== undefined && record !== null
       ? `/e/${whtSlug}?new=1&invoice_id=${encodeURIComponent(id)}` +
         `&account_id=${encodeURIComponent(String(record["account_id"] ?? ""))}` +
-        `&currency=${encodeURIComponent(String(record["currency"] ?? ""))}`
+        `&currency=${encodeURIComponent(String(record["currency"] ?? ""))}` +
+        (whtAmount !== "" && whtAmount !== "0" ? `&amount=${encodeURIComponent(whtAmount)}` : "")
       : undefined;
 
   return (

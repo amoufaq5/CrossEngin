@@ -597,6 +597,58 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
     expect(lines.find((l) => l.ledger_account_id === "revenue")!.credit).toBe(1000);
     expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
   });
+
+  it("stamps the withholding total onto the invoice when configured", async () => {
+    const stampingRec = recognitionGlPostingEffect({
+      entity: "Invoice",
+      triggerState: "sent",
+      controlSide: "debit",
+      numberField: "invoice_number",
+      controlAccountRef: "ar",
+      netAccountRef: "revenue",
+      taxAccountRef: "tax_payable",
+      controlDescription: "AR",
+      netDescription: "Revenue",
+      taxDescription: "Tax payable",
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      stampWithholdingField: "withholding_total",
+      clock,
+    });
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "TaxCode", { id: "wht", code: "WHT5", rate_pct: 5, kind: "withholding" });
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-WS", state: "draft", document_type: "invoice", subtotal: 1000, tax_total: 0, total: 1000 });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 1000, tax_code_id: "wht" });
+    await stampingRec({ operation: "transition", entity: "Invoice", tenantId: TENANT, id: invId, before: inv, after: { ...inv, state: "sent" }, store });
+    const after = await store.get(TENANT, "Invoice", invId);
+    expect(after?.withholding_total).toBe(50);
+  });
+
+  it("does not stamp withholding when there is none", async () => {
+    const stampingRec = recognitionGlPostingEffect({
+      entity: "Invoice",
+      triggerState: "sent",
+      controlSide: "debit",
+      numberField: "invoice_number",
+      controlAccountRef: "ar",
+      netAccountRef: "revenue",
+      taxAccountRef: "tax_payable",
+      controlDescription: "AR",
+      netDescription: "Revenue",
+      taxDescription: "Tax payable",
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      stampWithholdingField: "withholding_total",
+      clock,
+    });
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "TaxCode", { id: "vat", code: "VAT20", rate_pct: 20, kind: "vat" });
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-NS", state: "draft", document_type: "invoice", subtotal: 100, tax_total: 20, total: 120 });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 100, tax_code_id: "vat" });
+    await stampingRec({ operation: "transition", entity: "Invoice", tenantId: TENANT, id: invId, before: inv, after: { ...inv, state: "sent" }, store });
+    const after = await store.get(TENANT, "Invoice", invId);
+    expect(after?.withholding_total).toBeUndefined();
+  });
 });
 
 describe("recognitionGlPostingEffect — line-level tax codes", () => {
