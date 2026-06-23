@@ -50,6 +50,18 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   const [showNew, setShowNew] = useState(
     () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
   );
+  // Seed the create form from query params matching field names (e.g. a "Raise WHT
+  // certificate" link prefills invoice_id/account_id/currency). Generic across entities.
+  const initialValues = useMemo(() => {
+    if (typeof window === "undefined") return {};
+    const params = new URLSearchParams(window.location.search);
+    const out: Record<string, string> = {};
+    for (const f of entity.fields) {
+      const v = params.get(f.name);
+      if (v !== null && v !== "") out[f.name] = v;
+    }
+    return out;
+  }, [entity]);
 
   const fieldByName = useMemo(() => {
     const m = new Map<string, UiFieldSchema>();
@@ -134,6 +146,7 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
           <CreateForm
             entity={entity}
             schema={schema}
+            initialValues={initialValues}
             onDone={() => {
               setShowNew(false);
               load();
@@ -273,14 +286,16 @@ function FilterControl({
 function CreateForm({
   entity,
   schema,
+  initialValues,
   onDone,
 }: {
   entity: UiEntitySchema;
   schema: ReturnType<typeof useSchema>["schema"];
+  initialValues?: Record<string, string>;
   onDone: () => void;
 }) {
   const editable = entity.fields.filter((f) => f.readOnly !== true);
-  const [values, setValues] = useState<Record<string, string | boolean>>({});
+  const [values, setValues] = useState<Record<string, string | boolean>>(() => ({ ...initialValues }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
