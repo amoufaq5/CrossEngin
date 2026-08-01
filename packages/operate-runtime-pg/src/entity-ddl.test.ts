@@ -50,6 +50,26 @@ describe("emitEntityTableDdl", () => {
   it("does not comment unclassified columns", () => {
     expect(sql).not.toContain(`"sku" IS 'crossengin`);
   });
+
+  it("emits a plain-column trigram GIN index for each plaintext text/varchar column", () => {
+    expect(sql).toContain(
+      'CREATE INDEX IF NOT EXISTS "widget_sku_trgm" ON "tenant_app"."widget" USING gin ("sku" gin_trgm_ops);',
+    );
+  });
+
+  it("uses a plain column trigram index, not a functional unaccent() index", () => {
+    expect(sql).not.toContain("unaccent(");
+  });
+
+  it("does not trigram-index numeric columns", () => {
+    expect(sql).not.toContain('"price_trgm"');
+    expect(sql).not.toContain('"cost_trgm"');
+  });
+
+  it("does not trigram-index an encrypted (BYTEA) column", () => {
+    // ssn is phi → stored BYTEA, so no trigram index despite its text field type.
+    expect(sql).not.toContain('"widget_ssn_trgm"');
+  });
 });
 
 describe("emitForeignKeyDdl", () => {

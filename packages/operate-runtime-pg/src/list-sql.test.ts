@@ -15,7 +15,7 @@ function query(partial: Partial<ListQuery>): ListQuery {
 }
 
 describe("buildListSql — filters", () => {
-  it("builds a case-insensitive ILIKE for a contains filter, binding the value", () => {
+  it("builds an accent- and case-insensitive ILIKE for a contains filter, binding the value", () => {
     const params: unknown[] = ["tenant-1"];
     const parts = buildListSql(
       query({ filters: [{ field: "name", op: "contains", value: "acme" }] }),
@@ -23,7 +23,9 @@ describe("buildListSql — filters", () => {
       ["tenant_id = $1"],
       params,
     );
-    expect(parts.where).toBe("tenant_id = $1 AND document ->> 'name'::text ILIKE ('%' || $2 || '%')");
+    expect(parts.where).toBe(
+      "tenant_id = $1 AND unaccent(document ->> 'name'::text) ILIKE ('%' || unaccent($2) || '%')",
+    );
     expect(params).toEqual(["tenant-1", "acme"]);
   });
 

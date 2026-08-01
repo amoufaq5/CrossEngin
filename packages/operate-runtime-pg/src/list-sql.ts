@@ -45,9 +45,11 @@ function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: un
   }
   const value = Array.isArray(filter.value) ? (filter.value[0] ?? "") : (filter.value as string);
   if (op === "contains") {
-    // case-insensitive substring (typeahead). Compare as text; the bound value is
-    // wrapped with % — LIKE metacharacters in it act as wildcards (fine for search).
-    return `${expr}::text ILIKE ('%' || ${bind(params, value)} || '%')`;
+    // case- and accent-insensitive substring (typeahead). Both sides are folded
+    // with unaccent() so "jose" matches "José"; ILIKE handles case. The value is
+    // bound (never interpolated); its LIKE metacharacters act as wildcards (fine
+    // for search). A plain-column pg_trgm GIN index still accelerates this.
+    return `unaccent(${expr}::text) ILIKE ('%' || unaccent(${bind(params, value)}) || '%')`;
   }
   return `${expr} ${SQL_OP[op]} ${bind(params, value)}${adapter.castSuffix(filter.field)}`;
 }

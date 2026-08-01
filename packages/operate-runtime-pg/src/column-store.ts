@@ -119,6 +119,11 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     if (this.hasEncryptedColumns()) {
       await ensurePgcryptoExtension(this.conn);
     }
+    // Substring search (the `contains` filter) folds accents via unaccent() and
+    // is accelerated by per-text-column pg_trgm GIN indexes (emitted in the
+    // entity-table DDL). Both extensions are provisioned idempotently.
+    await this.conn.query("CREATE EXTENSION IF NOT EXISTS unaccent;");
+    await this.conn.query("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
     const order = topologicalEntityOrder(this.plans);
     for (const name of order) {
       const plan = this.plans.get(name);

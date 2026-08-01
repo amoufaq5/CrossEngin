@@ -5,6 +5,26 @@ import type { EntityTablePlan, JoinTablePlan } from "./column-plan.js";
 
 const TENANT_ISOLATION = "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
 
+const MAX_IDENTIFIER_LEN = 63;
+
+/**
+ * A plaintext (non-encrypted) text/varchar/char column — the kind a `contains`
+ * (substring) filter can search, and which a trigram GIN index accelerates.
+ * BYTEA (encrypted-at-rest) and non-text types (numeric/uuid/date/bool/json/…)
+ * are excluded.
+ */
+function isTrigramIndexable(col: { sqlType: string; encryptAtRest: boolean }): boolean {
+  if (col.encryptAtRest) return false;
+  const t = col.sqlType.toUpperCase();
+  return t === "TEXT" || t.startsWith("VARCHAR") || t.startsWith("CHAR");
+}
+
+/** Deterministic trigram index name, capped at Postgres's 63-char identifier limit. */
+function trigramIndexName(table: string, column: string): string {
+  const name = `${table}_${column}_trgm`;
+  return name.length <= MAX_IDENTIFIER_LEN ? name : name.slice(0, MAX_IDENTIFIER_LEN);
+}
+
 /**
  * Emits idempotent DDL for one entity's per-tenant table: a `CREATE TABLE IF
  * NOT EXISTS` with the system columns (`tenant_id`, TEXT `id`, timestamps) plus
@@ -45,6 +65,19 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     const directives = [`crossengin.data_class=${col.classification}`];
     if (col.encryptAtRest) directives.push("crossengin.encrypt=at_rest");
     stmts.push(`COMMENT ON COLUMN ${qualified}.${quoteIdent(col.column)} IS '${directives.join("; ")}';`);
+  }
+
+  // Trigram GIN index per plaintext text column, accelerating the `contains`
+  // (ILIKE '%…%') substring filter. A *plain* column index (`gin (<col>
+  // gin_trgm_ops)`), NOT a functional `unaccent(<col>)` index — unaccent() is
+  // not IMMUTABLE and can't back an index. Requires the pg_trgm extension
+  // (provisioned by the store's ensureSchema).
+  for (const col of plan.columns) {
+    if (!isTrigramIndexable(col)) continue;
+    const idxName = trigramIndexName(plan.table, col.column);
+    stmts.push(
+      `CREATE INDEX IF NOT EXISTS ${quoteIdent(idxName)} ON ${qualified} USING gin (${quoteIdent(col.column)} gin_trgm_ops);`,
+    );
   }
 
   return stmts;
