@@ -7,7 +7,7 @@ import { Topbar } from "@/components/Topbar";
 import { fetchWhtReconciliation } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { slugForEntityName, useSchema } from "@/lib/schema";
-import type { WhtReconciliation, WhtStatus } from "@/lib/wht";
+import type { WhtCurrencySubtotal, WhtReconciliation, WhtStatus } from "@/lib/wht";
 
 const STATUS_TONE: Record<WhtStatus, string> = {
   certified: "bg-emerald-50 text-emerald-700",
@@ -22,10 +22,16 @@ export default function WhtReportPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
+  // Empty string = unbounded on that end; a YYYY-MM-DD value filters by issue date.
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
 
   useEffect(() => {
     let alive = true;
-    fetchWhtReconciliation()
+    setLoading(true);
+    setError(null);
+    setForbidden(false);
+    fetchWhtReconciliation(from || undefined, to || undefined)
       .then((res) => {
         if (!alive) return;
         setData(res);
@@ -41,12 +47,45 @@ export default function WhtReportPage() {
     return () => {
       alive = false;
     };
-  }, []);
+  }, [from, to]);
 
   return (
     <>
       <Topbar title="Withholding tax" subtitle="Withheld vs certified — uncertified exposure" />
       <div className="px-8 py-6">
+        <div className="mb-6 flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-ink-faint">
+            From
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-normal normal-case text-ink"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-ink-faint">
+            To
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-normal normal-case text-ink"
+            />
+          </label>
+          {(from || to) && (
+            <button
+              type="button"
+              onClick={() => {
+                setFrom("");
+                setTo("");
+              }}
+              className="rounded-lg border border-line bg-surface-soft px-3 py-1.5 text-sm text-ink-muted hover:text-ink"
+            >
+              All time
+            </button>
+          )}
+        </div>
+
         {loading && <p className="text-sm text-ink-muted">Loading reconciliation…</p>}
 
         {forbidden && (
@@ -68,6 +107,29 @@ export default function WhtReportPage() {
               <Stat label="Certified" value={data.totals.certified} />
               <Stat label="Uncertified" value={data.totals.uncertified} accent />
             </div>
+
+            {data.byCurrency.length > 1 && (
+              <div>
+                <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-faint">By currency</h2>
+                <div className="overflow-hidden rounded-xl border border-line bg-white">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-line bg-surface-soft text-left text-[11px] font-semibold uppercase tracking-wider text-ink-faint">
+                        <th className="px-4 py-2.5">Currency</th>
+                        <th className="px-4 py-2.5 text-right">Withheld</th>
+                        <th className="px-4 py-2.5 text-right">Certified</th>
+                        <th className="px-4 py-2.5 text-right">Uncertified</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data.byCurrency.map((c, i) => (
+                        <CurrencyRow key={c.currency || "—"} row={c} first={i === 0} />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
 
             {data.rows.length === 0 ? (
               <div className="rounded-xl border border-line bg-surface-soft px-4 py-10 text-center text-sm text-ink-muted">
@@ -116,6 +178,17 @@ export default function WhtReportPage() {
         )}
       </div>
     </>
+  );
+}
+
+function CurrencyRow({ row, first }: { row: WhtCurrencySubtotal; first: boolean }) {
+  return (
+    <tr className={first ? "" : "border-t border-line"}>
+      <td className="px-4 py-2.5 font-medium text-ink">{row.currency || "—"}</td>
+      <td className="px-4 py-2.5 text-right text-ink">{formatCell(row.withheld, "money")}</td>
+      <td className="px-4 py-2.5 text-right text-ink-muted">{formatCell(row.certified, "money")}</td>
+      <td className="px-4 py-2.5 text-right font-medium text-brand">{formatCell(row.uncertified, "money")}</td>
+    </tr>
   );
 }
 

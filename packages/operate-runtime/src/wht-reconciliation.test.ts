@@ -36,6 +36,59 @@ describe("computeWhtReconciliation", () => {
     expect(r.rows.map((row) => row.invoiceId)).toEqual(["i2", "i3", "i1"]);
   });
 
+  it("groups per-currency subtotals ordered by descending uncertified then currency", () => {
+    // USD: withheld 150, certified 120 → uncertified 30. EUR: withheld 30, certified 0 → 30.
+    // GBP: withheld 200, certified 0 → 200. Order: GBP (200), then EUR/USD tie at 30 → EUR < USD.
+    const r = computeWhtReconciliation({
+      invoices: [
+        { id: "i1", invoice_number: "INV-1", currency: "USD", withholding_total: 100 },
+        { id: "i2", invoice_number: "INV-2", currency: "USD", withholding_total: 50 },
+        { id: "i3", invoice_number: "INV-3", currency: "EUR", withholding_total: 30 },
+        { id: "i6", invoice_number: "INV-6", currency: "GBP", withholding_total: 200 },
+      ],
+      certifiedByInvoice: new Map([
+        ["i1", 100],
+        ["i2", 20],
+      ]),
+    });
+    expect(r.byCurrency).toEqual([
+      { currency: "GBP", withheld: 200, certified: 0, uncertified: 200 },
+      { currency: "EUR", withheld: 30, certified: 0, uncertified: 30 },
+      { currency: "USD", withheld: 150, certified: 120, uncertified: 30 },
+    ]);
+  });
+
+  it("groups a null currency under the empty-string key", () => {
+    const r = computeWhtReconciliation({
+      invoices: [
+        { id: "i1", invoice_number: "INV-1", withholding_total: 40 }, // no currency → null
+        { id: "i2", invoice_number: "INV-2", currency: "USD", withholding_total: 10 },
+      ],
+      certifiedByInvoice: new Map(),
+    });
+    const keys = r.byCurrency.map((c) => c.currency).sort();
+    expect(keys).toEqual(["", "USD"]);
+    expect(r.byCurrency.find((c) => c.currency === "")).toEqual({
+      currency: "",
+      withheld: 40,
+      certified: 0,
+      uncertified: 40,
+    });
+  });
+
+  it("rounds per-currency subtotals to 2 decimals", () => {
+    const r = computeWhtReconciliation({
+      invoices: [
+        { id: "i1", invoice_number: "INV-1", currency: "USD", withholding_total: 10.005 },
+        { id: "i2", invoice_number: "INV-2", currency: "USD", withholding_total: 20.004 },
+      ],
+      certifiedByInvoice: new Map([["i1", 5.006]]),
+    });
+    const usd = r.byCurrency.find((c) => c.currency === "USD");
+    // Row-level round2: withheld 10.01 + 20.00 = 30.01; certified 5.01 → uncertified 25.00.
+    expect(usd).toEqual({ currency: "USD", withheld: 30.01, certified: 5.01, uncertified: 25 });
+  });
+
   it("treats over-certification as fully certified (no negative gap surfaced as open)", () => {
     const r = computeWhtReconciliation({
       invoices: [{ id: "x", invoice_number: "INV-X", currency: "USD", withholding_total: 40 }],

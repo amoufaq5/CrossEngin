@@ -10,7 +10,15 @@ export interface WhtReconRow {
   readonly status: WhtStatus;
 }
 
+export interface WhtCurrencySubtotal {
+  readonly currency: string;
+  readonly withheld: number;
+  readonly certified: number;
+  readonly uncertified: number;
+}
+
 export interface WhtReconciliation {
   readonly totals: { readonly withheld: number; readonly certified: number; readonly uncertified: number };
+  readonly byCurrency: readonly WhtCurrencySubtotal[];
   readonly rows: readonly WhtReconRow[];
 }

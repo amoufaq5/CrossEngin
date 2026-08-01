@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { AccountCodePicker } from "@/components/AccountCodePicker";
 import { getSettings, putSettings } from "@/lib/api";
 
 interface NumberingRow {
@@ -205,17 +206,17 @@ export default function SettingsPage() {
               <Text label="Payment terms (days)" value={finance.defaultPaymentTermsDays ?? ""} onChange={(v) => setD(setFinance, "defaultPaymentTermsDays", v)} />
               <Toggle label="Multi-currency enabled" checked={finance.multiCurrencyEnabled === "true"} onChange={(b) => setD(setFinance, "multiCurrencyEnabled", b ? "true" : "")} />
               <Toggle label="Prices include tax" checked={finance.pricesIncludeTax === "true"} onChange={(b) => setD(setFinance, "pricesIncludeTax", b ? "true" : "")} />
-              <Text label="AR account code" value={finance.arAccountCode ?? ""} onChange={(v) => setD(setFinance, "arAccountCode", v)} />
-              <Text label="Revenue account code" value={finance.revenueAccountCode ?? ""} onChange={(v) => setD(setFinance, "revenueAccountCode", v)} />
-              <Text label="AP account code" value={finance.apAccountCode ?? ""} onChange={(v) => setD(setFinance, "apAccountCode", v)} />
-              <Text label="Expense account code" value={finance.expenseAccountCode ?? ""} onChange={(v) => setD(setFinance, "expenseAccountCode", v)} />
-              <Text label="Cash / bank account code" value={finance.cashAccountCode ?? ""} onChange={(v) => setD(setFinance, "cashAccountCode", v)} />
-              <Text label="Tax payable (output) code" value={finance.taxPayableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxPayableAccountCode", v)} />
-              <Text label="Input tax code" value={finance.taxInputAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxInputAccountCode", v)} />
-              <Text label="FX gain/loss code" value={finance.fxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "fxGainLossAccountCode", v)} />
-              <Text label="Unrealized FX code" value={finance.unrealizedFxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "unrealizedFxGainLossAccountCode", v)} />
-              <Text label="WHT receivable code" value={finance.whtReceivableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtReceivableAccountCode", v)} />
-              <Text label="Tax recoverable code" value={finance.taxRecoverableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxRecoverableAccountCode", v)} />
+              <AccountCodePicker label="AR account code" value={finance.arAccountCode ?? ""} onChange={(v) => setD(setFinance, "arAccountCode", v)} />
+              <AccountCodePicker label="Revenue account code" value={finance.revenueAccountCode ?? ""} onChange={(v) => setD(setFinance, "revenueAccountCode", v)} />
+              <AccountCodePicker label="AP account code" value={finance.apAccountCode ?? ""} onChange={(v) => setD(setFinance, "apAccountCode", v)} />
+              <AccountCodePicker label="Expense account code" value={finance.expenseAccountCode ?? ""} onChange={(v) => setD(setFinance, "expenseAccountCode", v)} />
+              <AccountCodePicker label="Cash / bank account code" value={finance.cashAccountCode ?? ""} onChange={(v) => setD(setFinance, "cashAccountCode", v)} />
+              <AccountCodePicker label="Tax payable (output) code" value={finance.taxPayableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxPayableAccountCode", v)} />
+              <AccountCodePicker label="Input tax code" value={finance.taxInputAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxInputAccountCode", v)} />
+              <AccountCodePicker label="FX gain/loss code" value={finance.fxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "fxGainLossAccountCode", v)} />
+              <AccountCodePicker label="Unrealized FX code" value={finance.unrealizedFxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "unrealizedFxGainLossAccountCode", v)} />
+              <AccountCodePicker label="WHT receivable code" value={finance.whtReceivableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtReceivableAccountCode", v)} />
+              <AccountCodePicker label="Tax recoverable code" value={finance.taxRecoverableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxRecoverableAccountCode", v)} />
             </div>
             <p className="mt-3 text-xs text-ink-faint">
               Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss. Confirming a WHT certificate reclasses the withheld tax from WHT-receivable to tax-recoverable.
@@ -246,12 +247,13 @@ export default function SettingsPage() {
                         onChange={(e) => setJurisdictions((prev) => prev.map((r, j) => (j === i ? { ...r, jurisdiction: e.target.value } : r)))}
                         className="w-1/2 rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand"
                       />
-                      <input
-                        value={row.code}
-                        placeholder="Account code"
-                        onChange={(e) => setJurisdictions((prev) => prev.map((r, j) => (j === i ? { ...r, code: e.target.value } : r)))}
-                        className="w-1/2 rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand"
-                      />
+                      <div className="w-1/2">
+                        <AccountCodePicker
+                          label=""
+                          value={row.code}
+                          onChange={(v) => setJurisdictions((prev) => prev.map((r, j) => (j === i ? { ...r, code: v } : r)))}
+                        />
+                      </div>
                       <button
                         onClick={() => setJurisdictions((prev) => prev.filter((_, j) => j !== i))}
                         className="text-xs font-medium text-brand-600 hover:text-brand-700"
