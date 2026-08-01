@@ -472,15 +472,15 @@ describe("computeLineTaxBreakdown", () => {
     expect(b.netTotal).toBe(400);
     expect(b.taxTotal).toBe(65); // (300×20%) + (100×5%) = 60 + 5
     expect(b.groups).toEqual([
-      { label: "VAT20", tax: 60, accountCode: null, withholding: false },
-      { label: "VAT5", tax: 5, accountCode: null, withholding: false },
+      { label: "VAT20", tax: 60, accountCode: null, jurisdiction: null, withholding: false },
+      { label: "VAT5", tax: 5, accountCode: null, jurisdiction: null, withholding: false },
     ]);
   });
 
   it("carries the per-code GL account code onto its group", () => {
     const codes = new Map([["wht", { rate: 10, label: "WHT10", accountCode: "2155" }]]);
     const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: "wht", flatRatePct: null }], codes);
-    expect(b.groups).toEqual([{ label: "WHT10", tax: 10, accountCode: "2155", withholding: false }]);
+    expect(b.groups).toEqual([{ label: "WHT10", tax: 10, accountCode: "2155", jurisdiction: null, withholding: false }]);
   });
 
   it("separates withholding tax from regular tax in the totals", () => {
@@ -499,8 +499,8 @@ describe("computeLineTaxBreakdown", () => {
     expect(b.taxTotal).toBe(200); // VAT only, part of total
     expect(b.withholdingTotal).toBe(100); // WHT contra, not part of total
     expect(b.groups).toEqual([
-      { label: "VAT20", tax: 200, accountCode: null, withholding: false },
-      { label: "WHT10", tax: 100, accountCode: "2155", withholding: true },
+      { label: "VAT20", tax: 200, accountCode: null, jurisdiction: null, withholding: false },
+      { label: "WHT10", tax: 100, accountCode: "2155", jurisdiction: null, withholding: true },
     ]);
   });
 
@@ -508,7 +508,7 @@ describe("computeLineTaxBreakdown", () => {
     const b = computeLineTaxBreakdown([{ net: 100, taxCodeId: null, flatRatePct: 10 }], new Map());
     expect(b.taxTotal).toBe(10);
     expect(b.withholdingTotal).toBe(0);
-    expect(b.groups).toEqual([{ label: "10%", tax: 10, accountCode: null, withholding: false }]);
+    expect(b.groups).toEqual([{ label: "10%", tax: 10, accountCode: null, jurisdiction: null, withholding: false }]);
   });
 
   it("ignores zero-rate lines", () => {
@@ -565,6 +565,64 @@ describe("recognitionGlPostingEffect — per-TaxCode GL account", () => {
     expect(vat5.ledger_account_id).toBe("tax_payable");
     expect(vat5.credit).toBe(5);
     expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(lines.reduce((s, l) => s + Number(l.credit), 0));
+  });
+
+  it("uses the per-jurisdiction default account when the code has no own account", async () => {
+    const jurisRec = recognitionGlPostingEffect({
+      entity: "Invoice",
+      triggerState: "sent",
+      controlSide: "debit",
+      numberField: "invoice_number",
+      controlAccountRef: "ar",
+      netAccountRef: "revenue",
+      taxAccountRef: "tax_payable",
+      controlDescription: "AR",
+      netDescription: "Revenue",
+      taxDescription: "Tax payable",
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      resolveJurisdictionAccounts: async () => ({ UK: "2201", DE: "2202" }),
+      clock,
+    });
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "LedgerAccount", { id: "acc_uk", account_code: "2201" });
+    // A UK-jurisdiction code with no gl_account_code → posts to the UK default (2201).
+    await store.create(TENANT, "TaxCode", { id: "ukvat", code: "UKVAT", rate_pct: 20, jurisdiction: "UK" });
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-J", state: "draft", document_type: "invoice", subtotal: 100, tax_total: 20, total: 120 });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 100, tax_code_id: "ukvat" });
+    await jurisRec({ operation: "transition", entity: "Invoice", tenantId: TENANT, id: invId, before: inv, after: { ...inv, state: "sent" }, store });
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => l.description === "Tax payable (UKVAT)")!.ledger_account_id).toBe("acc_uk");
+  });
+
+  it("prefers the code's own gl_account_code over the per-jurisdiction default", async () => {
+    const jurisRec = recognitionGlPostingEffect({
+      entity: "Invoice",
+      triggerState: "sent",
+      controlSide: "debit",
+      numberField: "invoice_number",
+      controlAccountRef: "ar",
+      netAccountRef: "revenue",
+      taxAccountRef: "tax_payable",
+      controlDescription: "AR",
+      netDescription: "Revenue",
+      taxDescription: "Tax payable",
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      resolveJurisdictionAccounts: async () => ({ UK: "2201" }),
+      clock,
+    });
+    const store = new InMemoryEntityStore();
+    await store.create(TENANT, "LedgerAccount", { id: "acc_uk", account_code: "2201" });
+    await store.create(TENANT, "LedgerAccount", { id: "acc_own", account_code: "2250" });
+    await store.create(TENANT, "TaxCode", { id: "ukvat", code: "UKVAT", rate_pct: 20, jurisdiction: "UK", gl_account_code: "2250" });
+    const inv = await store.create(TENANT, "Invoice", { invoice_number: "INV-JO", state: "draft", document_type: "invoice", subtotal: 100, tax_total: 20, total: 120 });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", { invoice_id: invId, line_total: 100, tax_code_id: "ukvat" });
+    await jurisRec({ operation: "transition", entity: "Invoice", tenantId: TENANT, id: invId, before: inv, after: { ...inv, state: "sent" }, store });
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => l.description === "Tax payable (UKVAT)")!.ledger_account_id).toBe("acc_own");
   });
 
   it("falls back to the default tax account when the code's gl_account_code doesn't resolve", async () => {

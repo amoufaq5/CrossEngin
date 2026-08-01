@@ -726,6 +726,8 @@ export interface RecognitionGlConfig {
   readonly taxLines?: RecognitionTaxLinesConfig;
   /** When set, the computed withholding total is stamped onto this document field after posting. */
   readonly stampWithholdingField?: string;
+  /** Resolves the tenant's per-jurisdiction default tax accounts (jurisdiction → account_code). */
+  readonly resolveJurisdictionAccounts?: (tenantId: string) => Promise<Record<string, string>>;
   readonly clock?: { now(): Date };
 }
 
@@ -746,6 +748,8 @@ export interface RecognitionTaxLinesConfig {
   readonly codeLabelField?: string;
   /** Optional TaxCode field naming a LedgerAccount account_code for this code's tax line. */
   readonly codeAccountField?: string;
+  /** TaxCode field carrying its jurisdiction (drives the per-jurisdiction default account). */
+  readonly codeJurisdictionField?: string;
   /** TaxCode field carrying its kind + the value that marks a withholding code. */
   readonly codeKindField?: string;
   readonly withholdingKind?: string;
@@ -759,6 +763,7 @@ const TAX_LINES_FALLBACKS = {
   codeRateField: "rate_pct",
   codeLabelField: "code",
   codeAccountField: "gl_account_code",
+  codeJurisdictionField: "jurisdiction",
   codeKindField: "kind",
   withholdingKind: "withholding",
   maxRows: 500,
@@ -781,30 +786,38 @@ export interface TaxBreakdown {
     readonly label: string;
     readonly tax: number;
     readonly accountCode: string | null;
+    readonly jurisdiction: string | null;
     readonly withholding: boolean;
   }[];
 }
 
 /**
  * Pure: given document lines + a resolved `taxCodeId → {rate, label, accountCode?,
- * withholding?}` map, sums the net, computes each line's tax (`net × rate%`, rounded to
- * the cent), and groups the tax by label (the TaxCode's label, or `<rate>%` for an
- * unlabeled flat-rate line). `taxTotal` sums regular tax (added on top of net, part of
+ * jurisdiction?, withholding?}` map, sums the net, computes each line's tax (`net × rate%`,
+ * rounded to the cent), and groups the tax by label (the TaxCode's label, or `<rate>%` for
+ * an unlabeled flat-rate line). `taxTotal` sums regular tax (added on top of net, part of
  * the document total); `withholdingTotal` sums withholding tax (a contra to the control
  * account, deducted from what's paid — not part of the total). Each group carries the
- * first-seen account code + withholding flag for its label.
+ * first-seen account code, jurisdiction, and withholding flag for its label.
  */
 export function computeLineTaxBreakdown(
   lines: readonly TaxBreakdownLine[],
   rateByCode: ReadonlyMap<
     string,
-    { readonly rate: number; readonly label: string; readonly accountCode?: string | null; readonly withholding?: boolean }
+    {
+      readonly rate: number;
+      readonly label: string;
+      readonly accountCode?: string | null;
+      readonly jurisdiction?: string | null;
+      readonly withholding?: boolean;
+    }
   >,
 ): TaxBreakdown {
   let netTotal = 0;
   const order: string[] = [];
   const taxByLabel = new Map<string, number>();
   const accountByLabel = new Map<string, string | null>();
+  const jurisdictionByLabel = new Map<string, string | null>();
   const withholdingByLabel = new Map<string, boolean>();
   for (const line of lines) {
     const net = Math.round(line.net * 100) / 100;
@@ -812,12 +825,14 @@ export function computeLineTaxBreakdown(
     let rate = 0;
     let label: string | null = null;
     let accountCode: string | null = null;
+    let jurisdiction: string | null = null;
     let withholding = false;
     if (line.taxCodeId !== null && rateByCode.has(line.taxCodeId)) {
       const resolved = rateByCode.get(line.taxCodeId)!;
       rate = resolved.rate;
       label = resolved.label;
       accountCode = resolved.accountCode ?? null;
+      jurisdiction = resolved.jurisdiction ?? null;
       withholding = resolved.withholding ?? false;
     } else if (line.flatRatePct !== null) {
       rate = line.flatRatePct;
@@ -829,6 +844,7 @@ export function computeLineTaxBreakdown(
     if (!taxByLabel.has(key)) {
       order.push(key);
       accountByLabel.set(key, accountCode);
+      jurisdictionByLabel.set(key, jurisdiction);
       withholdingByLabel.set(key, withholding);
     }
     taxByLabel.set(key, (taxByLabel.get(key) ?? 0) + tax);
@@ -841,7 +857,13 @@ export function computeLineTaxBreakdown(
     const withholding = withholdingByLabel.get(label) ?? false;
     if (withholding) withholdingTotal += tax;
     else taxTotal += tax;
-    return { label, tax, accountCode: accountByLabel.get(label) ?? null, withholding };
+    return {
+      label,
+      tax,
+      accountCode: accountByLabel.get(label) ?? null,
+      jurisdiction: jurisdictionByLabel.get(label) ?? null,
+      withholding,
+    };
   });
   return {
     netTotal,
@@ -915,7 +937,10 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       const lineRows = page.records.filter((r) => String(r[tc.refField] ?? "") === docId);
       if (lineRows.length > 0) {
         // Resolve each distinct TaxCode once.
-        const rateByCode = new Map<string, { rate: number; label: string; accountCode: string | null; withholding: boolean }>();
+        const rateByCode = new Map<
+          string,
+          { rate: number; label: string; accountCode: string | null; jurisdiction: string | null; withholding: boolean }
+        >();
         const codeIds = new Set<string>();
         for (const r of lineRows) {
           const id = r[tc.taxCodeField];
@@ -926,10 +951,12 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
           if (code !== null) {
             const label = typeof code[tc.codeLabelField] === "string" ? (code[tc.codeLabelField] as string) : id;
             const acct = code[tc.codeAccountField];
+            const juris = code[tc.codeJurisdictionField];
             rateByCode.set(id, {
               rate: num(code[tc.codeRateField]),
               label,
               accountCode: typeof acct === "string" && acct.length > 0 ? acct : null,
+              jurisdiction: typeof juris === "string" && juris.length > 0 ? juris : null,
               withholding: code[tc.codeKindField] === tc.withholdingKind,
             });
           }
@@ -986,24 +1013,27 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     await input.store.create(input.tenantId, c.lineEntity, glLine(base, controlAccount, c.controlDescription, c.controlSide, controlAmount));
     await input.store.create(input.tenantId, c.lineEntity, glLine(base, netAccount, c.netDescription, opposite, subtotal));
     if (taxGroups !== null && taxGroups.length > 0) {
-      // One tax line per TaxCode, each tagged with the code in its description and posted
-      // to the code's own GL account when it carries one (else the default tax account).
-      // Regular tax sits opposite the control (adds to it); withholding sits on the
-      // control side (a contra that reduced the control line above).
+      // Per-code tax account resolution, most specific first: the code's own
+      // `gl_account_code`, else the tenant's per-jurisdiction default (by the code's
+      // jurisdiction), else the document default tax account. Regular tax sits opposite
+      // the control (adds to it); withholding sits on the control side (a contra that
+      // reduced the control line above).
+      const jurisdictionAccounts = config.resolveJurisdictionAccounts
+        ? await config.resolveJurisdictionAccounts(input.tenantId)
+        : {};
       const acctCache = new Map<string, string>();
+      const resolveCode = async (code: string): Promise<string> => {
+        const cached = acctCache.get(code);
+        if (cached !== undefined) return cached;
+        const resolved = (await resolveAccountId(input, c, code)) ?? taxAccount;
+        acctCache.set(code, resolved);
+        return resolved;
+      };
       for (const group of taxGroups) {
         if (group.tax <= EPSILON) continue;
-        let account = taxAccount;
-        if (group.accountCode !== null) {
-          const cached = acctCache.get(group.accountCode);
-          if (cached !== undefined) {
-            account = cached;
-          } else {
-            const resolved = (await resolveAccountId(input, c, group.accountCode)) ?? taxAccount;
-            acctCache.set(group.accountCode, resolved);
-            account = resolved;
-          }
-        }
+        const accountCode =
+          group.accountCode ?? (group.jurisdiction !== null ? jurisdictionAccounts[group.jurisdiction] : undefined);
+        const account = accountCode !== undefined && accountCode.length > 0 ? await resolveCode(accountCode) : taxAccount;
         const side: GlSide = group.withholding ? c.controlSide : opposite;
         const desc = group.withholding ? `Withholding (${group.label})` : `${c.taxDescription} (${group.label})`;
         await input.store.create(input.tenantId, c.lineEntity, glLine(base, account, desc, side, group.tax));

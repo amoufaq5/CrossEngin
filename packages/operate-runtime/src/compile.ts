@@ -216,6 +216,14 @@ function defaultWriteEffects(
   const hasFx = names.has("Currency") && names.has("ExchangeRate");
   // Line-level tax codes drive a per-code recognition split only when TaxCode exists.
   const hasTaxCodes = names.has("TaxCode");
+  // Per-jurisdiction default tax accounts, from finance settings (jurisdiction → code).
+  const jurisdictionResolver =
+    settingsStore === undefined
+      ? {}
+      : {
+          resolveJurisdictionAccounts: async (tenantId: string) =>
+            (await settingsStore.get(tenantId)).finance?.taxAccountsByJurisdiction ?? {},
+        };
 
   if (names.has("JournalEntry") && names.has("JournalLine")) {
     effects.push(journalReversalEffect(clockOpt));
@@ -245,7 +253,7 @@ function defaultWriteEffects(
           netDescription: "Invoice — revenue",
           taxDescription: "Invoice — tax payable",
           ...(hasTaxCodes && names.has("InvoiceLine")
-            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" }, stampWithholdingField: "withholding_total" }
+            ? { taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" }, stampWithholdingField: "withholding_total", ...jurisdictionResolver }
             : {}),
           ...clockOpt,
           ...codeResolver((f) => ({
@@ -296,7 +304,7 @@ function defaultWriteEffects(
         netDescription: "Bill — expense",
         taxDescription: "Bill — input tax",
         ...(hasTaxCodes && names.has("BillLine")
-          ? { taxLines: { entity: "BillLine", refField: "bill_id", netField: "amount" } }
+          ? { taxLines: { entity: "BillLine", refField: "bill_id", netField: "amount" }, ...jurisdictionResolver }
           : {}),
         ...clockOpt,
         ...codeResolver((f) => ({
