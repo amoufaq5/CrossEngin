@@ -53,10 +53,16 @@ interface FeatureRow {
   enabled: boolean;
 }
 
+interface JurisdictionRow {
+  jurisdiction: string;
+  code: string;
+}
+
 export default function SettingsPage() {
   const [company, setCompany] = useState<Company>({});
   const [defaults, setDefaults] = useState<StrMap>({});
   const [finance, setFinance] = useState<StrMap>({});
+  const [jurisdictions, setJurisdictions] = useState<JurisdictionRow[]>([]);
   const [features, setFeatures] = useState<FeatureRow[]>([]);
   const [newFeature, setNewFeature] = useState("");
   const [rows, setRows] = useState<NumberingRow[]>([]);
@@ -76,6 +82,12 @@ export default function SettingsPage() {
         setCompany(s.company ?? {});
         setDefaults(toStrMap(s.defaults));
         setFinance(toStrMap(s.finance));
+        const jmap = (s.finance?.["taxAccountsByJurisdiction"] ?? {}) as Record<string, unknown>;
+        setJurisdictions(
+          Object.entries(jmap)
+            .filter(([, v]) => typeof v === "string")
+            .map(([jurisdiction, v]) => ({ jurisdiction, code: String(v) })),
+        );
         setFeatures(Object.entries(s.features ?? {}).map(([key, enabled]) => ({ key, enabled })));
         const numbering = s.numbering ?? {};
         setRows(
@@ -119,6 +131,8 @@ export default function SettingsPage() {
       if (Object.keys(d).length > 0) payload["defaults"] = d;
 
       const fin = buildFinance(finance);
+      const jmap = jurisdictionRowsToMap(jurisdictions);
+      if (Object.keys(jmap).length > 0) fin["taxAccountsByJurisdiction"] = jmap;
       if (Object.keys(fin).length > 0) payload["finance"] = fin;
 
       if (features.length > 0) {
@@ -200,10 +214,55 @@ export default function SettingsPage() {
               <Text label="Input tax code" value={finance.taxInputAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxInputAccountCode", v)} />
               <Text label="FX gain/loss code" value={finance.fxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "fxGainLossAccountCode", v)} />
               <Text label="Unrealized FX code" value={finance.unrealizedFxGainLossAccountCode ?? ""} onChange={(v) => setD(setFinance, "unrealizedFxGainLossAccountCode", v)} />
+              <Text label="WHT receivable code" value={finance.whtReceivableAccountCode ?? ""} onChange={(v) => setD(setFinance, "whtReceivableAccountCode", v)} />
+              <Text label="Tax recoverable code" value={finance.taxRecoverableAccountCode ?? ""} onChange={(v) => setD(setFinance, "taxRecoverableAccountCode", v)} />
             </div>
             <p className="mt-3 text-xs text-ink-faint">
-              Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss.
+              Account codes map to your chart of accounts (LedgerAccount): invoice issue posts AR / revenue / tax-payable; bill approval posts expense / input-tax / AP; a completed payment settles cash against AR/AP, booking any cash-vs-balance gap to FX gain/loss. Confirming a WHT certificate reclasses the withheld tax from WHT-receivable to tax-recoverable.
             </p>
+
+            <div className="mt-5 border-t border-line pt-4">
+              <div className="mb-1 flex items-center gap-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Tax accounts by jurisdiction</h3>
+                <button
+                  onClick={() => setJurisdictions((prev) => [...prev, { jurisdiction: "", code: "" }])}
+                  className="ml-auto rounded-lg border border-line px-2.5 py-1 text-xs font-medium text-ink-muted hover:bg-surface-soft"
+                >
+                  + Add
+                </button>
+              </div>
+              <p className="mb-3 text-xs text-ink-faint">
+                A tax code&apos;s tax line posts to its own account if set, else the account mapped here for its jurisdiction, else the default tax account above.
+              </p>
+              {jurisdictions.length === 0 ? (
+                <p className="text-xs text-ink-faint">No per-jurisdiction accounts. Add one to override the default for a jurisdiction.</p>
+              ) : (
+                <div className="space-y-2">
+                  {jurisdictions.map((row, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        value={row.jurisdiction}
+                        placeholder="Jurisdiction (e.g. UK)"
+                        onChange={(e) => setJurisdictions((prev) => prev.map((r, j) => (j === i ? { ...r, jurisdiction: e.target.value } : r)))}
+                        className="w-1/2 rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand"
+                      />
+                      <input
+                        value={row.code}
+                        placeholder="Account code"
+                        onChange={(e) => setJurisdictions((prev) => prev.map((r, j) => (j === i ? { ...r, code: e.target.value } : r)))}
+                        className="w-1/2 rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand"
+                      />
+                      <button
+                        onClick={() => setJurisdictions((prev) => prev.filter((_, j) => j !== i))}
+                        className="text-xs font-medium text-brand-600 hover:text-brand-700"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </Section>
 
           <Section title="Feature toggles">
@@ -356,6 +415,19 @@ function buildFinance(f: StrMap): Record<string, unknown> {
   if (f.taxInputAccountCode?.trim()) out.taxInputAccountCode = f.taxInputAccountCode.trim();
   if (f.fxGainLossAccountCode?.trim()) out.fxGainLossAccountCode = f.fxGainLossAccountCode.trim();
   if (f.unrealizedFxGainLossAccountCode?.trim()) out.unrealizedFxGainLossAccountCode = f.unrealizedFxGainLossAccountCode.trim();
+  if (f.whtReceivableAccountCode?.trim()) out.whtReceivableAccountCode = f.whtReceivableAccountCode.trim();
+  if (f.taxRecoverableAccountCode?.trim()) out.taxRecoverableAccountCode = f.taxRecoverableAccountCode.trim();
+  return out;
+}
+
+/** {jurisdiction, code} rows ⇄ the taxAccountsByJurisdiction record. */
+function jurisdictionRowsToMap(rows: readonly JurisdictionRow[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const r of rows) {
+    const j = r.jurisdiction.trim();
+    const c = r.code.trim();
+    if (j !== "" && c !== "") out[j] = c;
+  }
   return out;
 }
 
