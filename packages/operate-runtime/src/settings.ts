@@ -78,6 +78,12 @@ export const FinanceSettingsSchema = z
     whtReceivableAccountCode: z.string().max(32).optional(),
     /** LedgerAccount.account_code for income tax recoverable — debited when a WHT certificate clears. */
     taxRecoverableAccountCode: z.string().max(32).optional(),
+    /**
+     * Per-jurisdiction default tax GL accounts: maps a TaxCode's `jurisdiction` to a
+     * LedgerAccount.account_code. Sits between the per-code `gl_account_code` (most
+     * specific) and the document default tax account (least specific) in recognition.
+     */
+    taxAccountsByJurisdiction: z.record(z.string().max(120), z.string().max(32)).optional(),
   })
   .strict();
 
