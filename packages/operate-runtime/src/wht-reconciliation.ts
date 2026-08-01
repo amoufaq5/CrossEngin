@@ -9,8 +9,17 @@ export interface WhtReconRow {
   readonly status: "certified" | "partial" | "uncertified";
 }
 
+/** A per-currency subtotal across the reconciliation rows. */
+export interface WhtCurrencySubtotal {
+  readonly currency: string;
+  readonly withheld: number;
+  readonly certified: number;
+  readonly uncertified: number;
+}
+
 export interface WhtReconciliation {
   readonly totals: { readonly withheld: number; readonly certified: number; readonly uncertified: number };
+  readonly byCurrency: readonly WhtCurrencySubtotal[];
   readonly rows: readonly WhtReconRow[];
 }
 
@@ -71,8 +80,28 @@ export function computeWhtReconciliation(input: {
   rows.sort((a, b) => b.gap - a.gap || a.number.localeCompare(b.number));
   totalWithheld = round2(totalWithheld);
   totalCertified = round2(totalCertified);
+
+  // Per-currency subtotals: a null currency groups under the "" key. Ordered by
+  // descending uncertified exposure, then currency ascending.
+  const groups = new Map<string, { withheld: number; certified: number }>();
+  for (const row of rows) {
+    const key = row.currency ?? "";
+    const acc = groups.get(key) ?? { withheld: 0, certified: 0 };
+    acc.withheld += row.withheld;
+    acc.certified += row.certified;
+    groups.set(key, acc);
+  }
+  const byCurrency: WhtCurrencySubtotal[] = [...groups.entries()]
+    .map(([currency, acc]) => {
+      const withheld = round2(acc.withheld);
+      const certified = round2(acc.certified);
+      return { currency, withheld, certified, uncertified: round2(withheld - certified) };
+    })
+    .sort((a, b) => b.uncertified - a.uncertified || a.currency.localeCompare(b.currency));
+
   return {
     totals: { withheld: totalWithheld, certified: totalCertified, uncertified: round2(totalWithheld - totalCertified) },
+    byCurrency,
     rows,
   };
 }

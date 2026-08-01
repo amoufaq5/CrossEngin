@@ -101,8 +101,14 @@ export async function fetchAging(asOf?: string): Promise<AgingResponse> {
   return (await res.json()) as AgingResponse;
 }
 
-export async function fetchWhtReconciliation(): Promise<WhtReconciliation> {
-  const res = await fetch("/api/v1/meta/wht-reconciliation", { headers: { accept: "application/json" } });
+export async function fetchWhtReconciliation(from?: string, to?: string): Promise<WhtReconciliation> {
+  const params = new URLSearchParams();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  const query = params.toString();
+  const res = await fetch(`/api/v1/meta/wht-reconciliation${query ? `?${query}` : ""}`, {
+    headers: { accept: "application/json" },
+  });
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   return (await res.json()) as WhtReconciliation;
 }

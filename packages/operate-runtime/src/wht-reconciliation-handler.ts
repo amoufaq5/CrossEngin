@@ -18,6 +18,7 @@ export interface WhtReconciliationHandlerContext {
   readonly certificateConfirmedState?: string;
   readonly certificateInvoiceField?: string;
   readonly certificateAmountField?: string;
+  readonly issueDateField?: string;
   readonly maxRows?: number;
 }
 
@@ -28,6 +29,20 @@ function json(status: number, body: unknown): HandlerOutput {
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** First value of a query param (arrays carry the first), or undefined. */
+function firstQuery(value: string | readonly string[] | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === "string" ? value : value[0];
+}
+
+/** A `YYYY-MM-DD` query value, or undefined when absent/malformed (ignored). */
+function dateParam(value: string | readonly string[] | undefined): string | undefined {
+  const first = firstQuery(value);
+  return first !== undefined && DATE_PATTERN.test(first) ? first : undefined;
 }
 
 /**
@@ -43,9 +58,10 @@ export function buildWhtReconciliationHandler(ctx: WhtReconciliationHandlerConte
   const certConfirmedState = ctx.certificateConfirmedState ?? "confirmed";
   const certInvoiceField = ctx.certificateInvoiceField ?? "invoice_id";
   const certAmountField = ctx.certificateAmountField ?? "amount";
+  const issueDateField = ctx.issueDateField ?? "issue_date";
   const maxRows = ctx.maxRows ?? 5000;
 
-  return async ({ principal }) => {
+  return async ({ principal, request }) => {
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
     const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
@@ -61,7 +77,22 @@ export function buildWhtReconciliationHandler(ctx: WhtReconciliationHandlerConte
       sort: [],
       filters: [{ field: withholdingField, op: "gt", value: "0" }],
     });
-    const invoices = invoicePage.records.filter((inv) => num(inv[withholdingField]) > 0);
+    let invoices = invoicePage.records.filter((inv) => num(inv[withholdingField]) > 0);
+
+    // Optional `?from=YYYY-MM-DD` / `?to=YYYY-MM-DD` period filter over the invoice's
+    // issue date; malformed values are ignored. Certificates clear regardless of period.
+    const from = dateParam(request.query["from"]);
+    const to = dateParam(request.query["to"]);
+    if (from !== undefined || to !== undefined) {
+      invoices = invoices.filter((inv) => {
+        const raw = inv[issueDateField];
+        if (typeof raw !== "string" || raw.length === 0) return false;
+        const issued = raw.slice(0, 10);
+        if (from !== undefined && issued < from) return false;
+        if (to !== undefined && issued > to) return false;
+        return true;
+      });
+    }
 
     // Confirmed certificates, summed by their invoice.
     const certPage = await ctx.store.listPage(tenantId, certificateEntity, {
