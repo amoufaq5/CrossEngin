@@ -52,6 +52,13 @@ describe("matchesFilter — typed operators", () => {
     expect(matchesFilter(r, { field: "status", op: "in", value: ["active", "draft"] })).toBe(true);
     expect(matchesFilter(r, { field: "status", op: "in", value: ["draft"] })).toBe(false);
   });
+  it("contains (case-insensitive substring)", () => {
+    const c = { id: "y", name: "Acme Corporation" };
+    expect(matchesFilter(c, { field: "name", op: "contains", value: "corp" })).toBe(true);
+    expect(matchesFilter(c, { field: "name", op: "contains", value: "ACME" })).toBe(true);
+    expect(matchesFilter(c, { field: "name", op: "contains", value: "xyz" })).toBe(false);
+    expect(matchesFilter(c, { field: "missing", op: "contains", value: "a" })).toBe(false);
+  });
   it("defaults to eq when op is omitted", () => {
     expect(matchesFilter(r, { field: "status", value: "active" })).toBe(true);
   });

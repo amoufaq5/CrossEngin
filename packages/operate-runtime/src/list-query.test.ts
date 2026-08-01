@@ -97,6 +97,15 @@ describe("parseListQuery", () => {
     expect(q.filters).toEqual([{ field: "status", op: "in", value: ["active", "archived", "draft"] }]);
   });
 
+  it("parses a contains filter (typeahead search)", () => {
+    const q = parseListQuery({ "name[contains]": "acme" }, config);
+    expect(q.filters).toEqual([{ field: "name", op: "contains", value: "acme" }]);
+  });
+
+  it("ignores a contains filter on a non-filterable field", () => {
+    expect(parseListQuery({ "secret[contains]": "x" }, config).filters).toEqual([]);
+  });
+
   it("ignores an operator on a non-filterable field", () => {
     const q = parseListQuery({ "secret[gt]": "1" }, config);
     expect(q.filters).toEqual([]);

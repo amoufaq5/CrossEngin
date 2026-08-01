@@ -148,7 +148,7 @@ export function parseListQuery(
   return { limit, cursor, sort, filters };
 }
 
-const FILTER_KEY_RE = /^([a-z][a-z0-9_]*)(?:\[(eq|ne|gt|gte|lt|lte|in)\])?$/;
+const FILTER_KEY_RE = /^([a-z][a-z0-9_]*)(?:\[(eq|ne|gt|gte|lt|lte|in|contains)\])?$/;
 
 /** Parses a filter param key: `field` → eq, `field[op]` → that operator. */
 function parseFilterKey(key: string): { field: string; op: FilterOp } | null {
