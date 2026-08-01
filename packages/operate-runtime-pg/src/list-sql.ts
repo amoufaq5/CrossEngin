@@ -44,6 +44,11 @@ function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: un
     return `${expr}::text = ANY(${bind(params, [...arr])}::text[])`;
   }
   const value = Array.isArray(filter.value) ? (filter.value[0] ?? "") : (filter.value as string);
+  if (op === "contains") {
+    // case-insensitive substring (typeahead). Compare as text; the bound value is
+    // wrapped with % — LIKE metacharacters in it act as wildcards (fine for search).
+    return `${expr}::text ILIKE ('%' || ${bind(params, value)} || '%')`;
+  }
   return `${expr} ${SQL_OP[op]} ${bind(params, value)}${adapter.castSuffix(filter.field)}`;
 }
 

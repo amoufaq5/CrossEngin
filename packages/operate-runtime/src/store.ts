@@ -5,8 +5,11 @@ export interface ListSort {
   readonly direction: "asc" | "desc";
 }
 
-/** Comparison operators a list filter can use. `in` takes an array of values. */
-export const FILTER_OPS = ["eq", "ne", "gt", "gte", "lt", "lte", "in"] as const;
+/**
+ * Comparison operators a list filter can use. `in` takes an array of values;
+ * `contains` is a case-insensitive substring match (typeahead search).
+ */
+export const FILTER_OPS = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "contains"] as const;
 export type FilterOp = (typeof FILTER_OPS)[number];
 
 export interface ListFilter {
@@ -133,6 +136,7 @@ export function matchesFilter(record: EntityRecord, filter: ListFilter): boolean
   const fv = Array.isArray(filter.value) ? (filter.value[0] ?? "") : (filter.value as string);
   if (op === "eq") return String(rv ?? "") === fv;
   if (op === "ne") return String(rv ?? "") !== fv;
+  if (op === "contains") return String(rv ?? "").toLowerCase().includes(fv.toLowerCase());
   const cmp = compareValues(rv, coerceLike(fv, rv));
   if (op === "gt") return cmp > 0;
   if (op === "gte") return cmp >= 0;
