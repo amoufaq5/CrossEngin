@@ -51,16 +51,16 @@ export default function DashboardPage() {
             {inboxItems.length > 0 && (
               <Link
                 href="/inbox"
-                className="mb-6 flex items-center gap-3 rounded-xl border border-brand-200 bg-brand-50 px-5 py-4 transition hover:bg-brand-100"
+                className="mb-6 flex items-center gap-3 rounded-xl border border-line bg-surface-soft px-5 py-4 transition hover:bg-surface-sunken"
               >
-                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-brand text-sm font-black text-white">
+                <span className="flex h-9 w-9 items-center justify-center rounded-full bg-ink text-sm font-semibold text-white">
                   {inboxItems.length}
                 </span>
                 <div className="leading-tight">
-                  <div className="text-sm font-semibold text-brand-700">
+                  <div className="text-sm font-medium text-ink">
                     {inboxItems.length} item{inboxItems.length === 1 ? "" : "s"} awaiting your action
                   </div>
-                  <div className="text-xs text-brand-600">Across all departments — open My Inbox →</div>
+                  <div className="text-xs text-ink-muted">Across all departments — open My Inbox →</div>
                 </div>
               </Link>
             )}

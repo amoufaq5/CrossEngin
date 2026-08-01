@@ -1,10 +1,10 @@
 import type { Config } from "tailwindcss";
 
 /**
- * CrossEngin Operate design system — a crisp white canvas with a single
- * salient red as the brand accent. Red is reserved for identity, primary
- * actions, active navigation, and key figures; everything else stays
- * neutral so the red reads as deliberate, not loud.
+ * CrossEngin Operate design system — minimalist. A near-monochrome canvas with
+ * generous whitespace, hairline borders, and no shadows; a single restrained red
+ * accent is reserved for the brand mark and primary actions only, so the interface
+ * reads as calm and content-first.
  */
 const config: Config = {
   content: [
@@ -17,9 +17,9 @@ const config: Config = {
       colors: {
         brand: {
           DEFAULT: "#E5132B",
-          50: "#fff1f2",
-          100: "#ffe1e3",
-          200: "#ffc8cc",
+          50: "#fff5f5",
+          100: "#ffe8ea",
+          200: "#ffd2d6",
           300: "#ffa1a8",
           400: "#fb6b76",
           500: "#ef3c4a",
@@ -29,16 +29,16 @@ const config: Config = {
           900: "#831421",
         },
         ink: {
-          DEFAULT: "#16181d",
-          muted: "#5b6472",
-          faint: "#8a93a3",
+          DEFAULT: "#1a1c20",
+          muted: "#646c78",
+          faint: "#9aa1ac",
         },
         surface: {
           DEFAULT: "#ffffff",
-          soft: "#f7f8fa",
-          sunken: "#f1f3f6",
+          soft: "#fafbfc",
+          sunken: "#f2f4f6",
         },
-        line: "#e7eaef",
+        line: "#ecedf0",
       },
       fontFamily: {
         sans: [
@@ -51,11 +51,12 @@ const config: Config = {
         ],
       },
       boxShadow: {
-        card: "0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06)",
-        pop: "0 8px 24px rgba(16,24,40,0.12)",
+        // Minimalist: flat by default; `pop` is a soft, low overlay for menus only.
+        card: "none",
+        pop: "0 6px 20px rgba(16,24,40,0.08)",
       },
       borderRadius: {
-        xl: "0.9rem",
+        xl: "0.625rem",
       },
     },
   },
