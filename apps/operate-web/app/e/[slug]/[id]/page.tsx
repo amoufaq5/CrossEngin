@@ -10,6 +10,7 @@ import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
 import { deleteRecord, getRecord, runTransition, updateRecord } from "@/lib/api";
 import { formatCell } from "@/lib/format";
+import { invalidateReferenceCache } from "@/lib/reference-cache";
 import { entityBySlug, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
 
 export default function RecordPage({ params }: { params: { slug: string; id: string } }) {
@@ -89,6 +90,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
       if (Object.keys(patch).length > 0) {
         const updated = await updateRecord(entity.slug, id, patch);
         setRecord(updated);
+        invalidateReferenceCache(entity.slug);
       }
       setEditing(false);
       setNotice("Saved.");
@@ -104,6 +106,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
     setBusy(true);
     try {
       await deleteRecord(entity.slug, id);
+      invalidateReferenceCache(entity.slug);
       router.push(`/e/${entity.slug}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -117,6 +120,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
     try {
       const updated = await runTransition(entity.slug, id, name);
       setRecord(updated);
+      invalidateReferenceCache(entity.slug);
       setNotice(`Transition "${name}" applied.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

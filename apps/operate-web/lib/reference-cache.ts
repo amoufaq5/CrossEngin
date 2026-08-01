@@ -58,6 +58,27 @@ function resolveOne(slug: string, entity: ReturnType<typeof entityByName>, id: s
 }
 
 /**
+ * Drops cached reference labels so subsequent renders refetch fresh data. Call after a
+ * mutation (create/update/delete/transition) to the referenced entity. With a `slug`, only
+ * that entity's caches are cleared (including its per-record `oneInflight` entries); with no
+ * argument, every cache is cleared.
+ */
+export function invalidateReferenceCache(slug?: string): void {
+  if (slug === undefined) {
+    caches.clear();
+    inflight.clear();
+    oneInflight.clear();
+    return;
+  }
+  caches.delete(slug);
+  inflight.delete(slug);
+  const prefix = `${slug}:`;
+  for (const key of oneInflight.keys()) {
+    if (key.startsWith(prefix)) oneInflight.delete(key);
+  }
+}
+
+/**
  * Resolves a reference value to its target record's human label, lazily loading (and
  * caching) the target entity's records — and falling back to a single-record fetch for an
  * id beyond the first page. Returns the raw id while loading or when unresolved, so a

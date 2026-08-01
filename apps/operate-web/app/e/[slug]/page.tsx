@@ -9,6 +9,7 @@ import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
 import { createRecord, listRecords, type ListResult } from "@/lib/api";
 import { formatCell } from "@/lib/format";
+import { invalidateReferenceCache } from "@/lib/reference-cache";
 import { canAccess, entityBySlug, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
 
 function cellKind(field: UiFieldSchema | undefined): string | undefined {
@@ -310,6 +311,7 @@ function CreateForm({
         payload[f.name] = f.input === "number" ? Number(v) : v;
       }
       await createRecord(entity.slug, payload);
+      invalidateReferenceCache(entity.slug);
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
