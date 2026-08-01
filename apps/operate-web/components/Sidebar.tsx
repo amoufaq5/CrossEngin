@@ -37,17 +37,17 @@ export function Sidebar() {
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-line bg-white">
       <div className="flex h-16 items-center gap-2 px-5">
-        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-black text-white">
+        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-bold text-white">
           CE
         </span>
         <div className="leading-tight">
           <div className="text-sm font-bold text-ink">CrossEngin</div>
           {primaryRole ? (
-            <div className="text-[11px] font-medium text-brand-600" title="Your role">
+            <div className="text-[11px] font-medium text-ink-muted" title="Your role">
               {roleLabel(schema, primaryRole)}
             </div>
           ) : (
-            <div className="text-[11px] font-medium uppercase tracking-wider text-brand-600">Operate</div>
+            <div className="text-[11px] font-medium text-ink-faint">Operate</div>
           )}
         </div>
       </div>
@@ -56,7 +56,7 @@ export function Sidebar() {
         <Link
           href="/"
           className={`mb-1 block rounded-lg px-3 py-2 text-sm font-medium transition ${
-            pathname === "/" ? "bg-brand-50 text-brand-700" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+            pathname === "/" ? "bg-surface-sunken text-ink" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
           }`}
         >
           Dashboard
@@ -65,12 +65,12 @@ export function Sidebar() {
           <Link
             href="/inbox"
             className={`mb-2 flex items-center rounded-lg px-3 py-2 text-sm font-medium transition ${
-              pathname === "/inbox" ? "bg-brand-50 text-brand-700" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+              pathname === "/inbox" ? "bg-surface-sunken text-ink" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
             My Inbox
             {inboxCount > 0 && (
-              <span className="ml-auto rounded-full bg-brand px-2 py-0.5 text-[11px] font-bold text-white">
+              <span className="ml-auto rounded-full bg-ink px-2 py-0.5 text-[11px] font-semibold text-white">
                 {inboxCount}
               </span>
             )}
@@ -107,7 +107,7 @@ export function Sidebar() {
                       href={href}
                       className={`block rounded-lg px-3 py-1.5 text-sm transition ${
                         active
-                          ? "bg-brand-50 font-semibold text-brand-700"
+                          ? "bg-surface-sunken font-medium text-ink"
                           : "text-ink-muted hover:bg-surface-soft hover:text-ink"
                       }`}
                     >
@@ -126,7 +126,7 @@ export function Sidebar() {
               href="/reports/aging"
               className={`block rounded-lg px-3 py-1.5 text-sm transition ${
                 pathname === "/reports/aging"
-                  ? "bg-brand-50 font-semibold text-brand-700"
+                  ? "bg-surface-sunken font-medium text-ink"
                   : "text-ink-muted hover:bg-surface-soft hover:text-ink"
               }`}
             >
@@ -136,7 +136,7 @@ export function Sidebar() {
               href="/reports/period-close"
               className={`block rounded-lg px-3 py-1.5 text-sm transition ${
                 pathname === "/reports/period-close"
-                  ? "bg-brand-50 font-semibold text-brand-700"
+                  ? "bg-surface-sunken font-medium text-ink"
                   : "text-ink-muted hover:bg-surface-soft hover:text-ink"
               }`}
             >
@@ -147,7 +147,7 @@ export function Sidebar() {
                 href="/reports/wht"
                 className={`block rounded-lg px-3 py-1.5 text-sm transition ${
                   pathname === "/reports/wht"
-                    ? "bg-brand-50 font-semibold text-brand-700"
+                    ? "bg-surface-sunken font-medium text-ink"
                     : "text-ink-muted hover:bg-surface-soft hover:text-ink"
                 }`}
               >
@@ -163,7 +163,7 @@ export function Sidebar() {
             href="/admin/settings"
             className={`block rounded-lg px-3 py-1.5 text-sm transition ${
               pathname === "/admin/settings"
-                ? "bg-brand-50 font-semibold text-brand-700"
+                ? "bg-surface-sunken font-medium text-ink"
                 : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
