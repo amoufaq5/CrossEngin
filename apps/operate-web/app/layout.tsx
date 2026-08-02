@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 
 import "./globals.css";
 import { Sidebar } from "@/components/Sidebar";
+import { SubscriptionBanner } from "@/components/SubscriptionBanner";
 
 export const metadata: Metadata = {
   title: "CrossEngin Operate",
@@ -14,7 +15,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <div className="flex">
           <Sidebar />
-          <main className="h-screen flex-1 overflow-y-auto">{children}</main>
+          <main className="h-screen flex-1 overflow-y-auto">
+            <SubscriptionBanner />
+            {children}
+          </main>
         </div>
       </body>
     </html>
