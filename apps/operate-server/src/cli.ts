@@ -19,6 +19,8 @@ export interface ServeOptions {
   readonly licenseFile: string | null;
   /** The licensor's Ed25519 public key (base64) used to verify the license. */
   readonly licenseKey: string | null;
+  /** Stripe webhook signing secret — enables POST /v1/webhooks/stripe (needs a pg store). */
+  readonly stripeWebhookSecret: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -60,6 +62,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let jwtAudience: string | null = null;
   let licenseFile: string | null = null;
   let licenseKey: string | null = null;
+  let stripeWebhookSecret: string | null = null;
   let help = false;
   let version = false;
 
@@ -131,6 +134,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--license-key" || arg.startsWith("--license-key=")) {
       licenseKey = takeValue(arg, next, "--license-key");
       i += consumed();
+    } else if (arg === "--stripe-webhook-secret" || arg.startsWith("--stripe-webhook-secret=")) {
+      stripeWebhookSecret = takeValue(arg, next, "--stripe-webhook-secret");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -138,6 +144,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
 
   if (licenseFile !== null && licenseKey === null) {
     throw new CliUsageError("--license requires --license-key (the licensor's base64 Ed25519 public key)");
+  }
+  if (stripeWebhookSecret !== null && store === "memory") {
+    throw new CliUsageError("--stripe-webhook-secret requires a Postgres store (--store pg or pg-columns)");
   }
 
   if (
@@ -171,6 +180,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jwtAudience,
     licenseFile,
     licenseKey,
+    stripeWebhookSecret,
     defaultScheme,
     help,
     version,
@@ -203,6 +213,8 @@ Options:
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
   --license <file>     Offline Ed25519 license token file (on-prem entitlement)
   --license-key <b64>  Licensor Ed25519 public key, base64 (required with --license)
+  --stripe-webhook-secret <s>  Enable POST /v1/webhooks/stripe → billing_subscriptions
+                       (needs --store pg|pg-columns; also enforces the subscription gate)
   --help, -h           Show this help
   --version, -v        Print version
 

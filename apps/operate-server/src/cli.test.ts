@@ -94,6 +94,16 @@ describe("parseServeArgs", () => {
     const opts = parseServeArgs(["--pack", "erp-core"]);
     expect(opts.licenseFile).toBeNull();
     expect(opts.licenseKey).toBeNull();
+    expect(opts.stripeWebhookSecret).toBeNull();
+  });
+
+  it("parses --stripe-webhook-secret with a pg store", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-webhook-secret", "whsec_x"]);
+    expect(opts.stripeWebhookSecret).toBe("whsec_x");
+  });
+
+  it("rejects --stripe-webhook-secret with the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--stripe-webhook-secret", "whsec_x"])).toThrow(/requires a Postgres store/);
   });
 
   it("parses a remote --jwks-url", () => {

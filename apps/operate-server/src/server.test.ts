@@ -198,3 +198,51 @@ describe("OperateHttpServer — offline license entitlement gate", () => {
     expect(parse(res.body).reason).toBe("no_subscription");
   });
 });
+
+describe("OperateHttpServer — webhook route (signature-authenticated, bypasses the gateway)", () => {
+  function serverWithWebhook() {
+    const calls: Array<{ body: string; sig: string | undefined }> = [];
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      webhookRoute: {
+        method: "POST",
+        path: "/v1/webhooks/stripe",
+        handle: async (body, headers) => {
+          calls.push({
+            body: new TextDecoder().decode(body ?? new Uint8Array()),
+            sig: (headers["stripe-signature"] as string | undefined),
+          });
+          const bytes = new TextEncoder().encode(JSON.stringify({ received: true }));
+          return { status: 200, headers: { "content-type": "application/json" }, body: bytes };
+        },
+      },
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+    return { httpServer, calls };
+  }
+
+  it("routes a POST to the webhook path directly, without an API key", async () => {
+    const { httpServer, calls } = serverWithWebhook();
+    const raw: RawHttpRequest = {
+      method: "POST",
+      url: "/v1/webhooks/stripe",
+      headers: { host: "api.example.com", "stripe-signature": "t=1,v1=abc" },
+      remoteAddress: "203.0.113.1",
+    };
+    const res = await httpServer.dispatch(raw, new TextEncoder().encode('{"type":"customer.subscription.updated"}'));
+    expect(res.status).toBe(200);
+    expect(parse(res.body)).toEqual({ received: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.sig).toBe("t=1,v1=abc");
+    expect(calls[0]!.body).toContain("customer.subscription.updated");
+  });
+
+  it("does not intercept a different method on the same path (falls through to the gateway)", async () => {
+    const { httpServer, calls } = serverWithWebhook();
+    const res = await httpServer.dispatch(req("GET", "/v1/webhooks/stripe", "key-manager"), null);
+    expect(calls).toHaveLength(0); // webhook is POST-only
+    expect(res.status).not.toBe(200); // no such gateway route → 4xx
+  });
+});

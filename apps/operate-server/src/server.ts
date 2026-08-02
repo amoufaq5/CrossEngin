@@ -1,4 +1,4 @@
-import type { ForwardedProto } from "@crossengin/api-gateway";
+import type { ForwardedProto, HttpMethod } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   buildOperateGateway,
@@ -9,7 +9,7 @@ import {
   type SettingsStore,
 } from "@crossengin/operate-runtime";
 
-import { parseMethod, rawToIncoming, type RawHttpRequest, type RawHttpResponse } from "./http.js";
+import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
 
 let requestCounter = 0;
@@ -18,8 +18,20 @@ function defaultRequestId(): string {
   return `req_${Date.now().toString(36)}${requestCounter.toString(36).padStart(4, "0")}`;
 }
 
+/**
+ * A pre-dispatch route handled directly (bypassing the gateway auth pipeline) — for
+ * signature-authenticated ingress like Stripe webhooks, where the request is verified by
+ * its signature, not an API key/JWT. Matched by exact method + path before the gateway runs.
+ */
+export interface WebhookRoute {
+  readonly method: HttpMethod;
+  readonly path: string;
+  handle(body: Uint8Array | null, headers: RawHttpRequest["headers"]): Promise<RawHttpResponse>;
+}
+
 export interface OperateHttpServerOptions {
   readonly gateway: OperateServer;
+  readonly webhookRoute?: WebhookRoute;
   readonly defaultScheme?: ForwardedProto;
   readonly idGenerator?: () => string;
   readonly now?: () => Date;
@@ -36,12 +48,14 @@ const METHOD_NOT_ALLOWED_TYPE = "https://crossengin.io/problems/method-not-allow
  */
 export class OperateHttpServer {
   private readonly gateway: OperateServer;
+  private readonly webhookRoute: WebhookRoute | null;
   private readonly scheme: ForwardedProto;
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
 
   constructor(opts: OperateHttpServerOptions) {
     this.gateway = opts.gateway;
+    this.webhookRoute = opts.webhookRoute ?? null;
     this.scheme = opts.defaultScheme ?? "http";
     this.idGenerator = opts.idGenerator ?? defaultRequestId;
     this.now = opts.now ?? (() => new Date());
@@ -51,6 +65,10 @@ export class OperateHttpServer {
     const method = parseMethod(raw.method);
     if (method === null) {
       return problem(405, METHOD_NOT_ALLOWED_TYPE, "Method not allowed", `unsupported method ${raw.method}`);
+    }
+    // Signature-authenticated webhook ingress bypasses the gateway auth pipeline.
+    if (this.webhookRoute !== null && method === this.webhookRoute.method && splitTarget(raw.url).path === this.webhookRoute.path) {
+      return this.webhookRoute.handle(body, raw.headers);
     }
     const forwardedProto = headerScheme(raw) ?? this.scheme;
     const incoming = rawToIncoming(raw, body, {
@@ -96,6 +114,8 @@ export interface BuildOperateHttpServerOptions {
   readonly adminRoles?: readonly string[];
   /** Optional subscription gate: denies a lapsed tenant (past_due → read-only). */
   readonly entitlementResolver?: EntitlementResolver;
+  /** Optional signature-authenticated webhook route handled ahead of the gateway. */
+  readonly webhookRoute?: WebhookRoute;
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -133,6 +153,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   });
   const httpServer = new OperateHttpServer({
     gateway,
+    ...(options.webhookRoute !== undefined ? { webhookRoute: options.webhookRoute } : {}),
     ...(options.defaultScheme !== undefined ? { defaultScheme: options.defaultScheme } : {}),
     ...(options.idGenerator !== undefined ? { idGenerator: options.idGenerator } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
