@@ -31,8 +31,10 @@
     "@crossengin/ai-providers-local": "workspace:*",
     "@crossengin/ai-providers-openai": "workspace:*",
     "@crossengin/ai-router": "workspace:*",
+    "@crossengin/crypto": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
+    "@crossengin/operate-runtime": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
