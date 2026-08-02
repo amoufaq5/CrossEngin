@@ -1696,6 +1696,9 @@ importers:
 
   packages/workflow-runtime-pg:
     dependencies:
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../jobs
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../kernel-pg
