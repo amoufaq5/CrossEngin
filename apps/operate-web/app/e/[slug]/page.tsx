@@ -39,15 +39,43 @@ function Shell({ title, note }: { title: string; note?: string }) {
   );
 }
 
+type ListSortState = { field: string; order: "asc" | "desc" };
+interface ListUrlState {
+  q: string;
+  sort: ListSortState | null;
+  filters: Record<string, string>;
+}
+
+/**
+ * Reads the shareable list state (search / sort / filters) from the URL, validated against the
+ * entity so a stale link can't push a non-sortable/non-filterable field. Filters ride under an
+ * `fl_` prefix so they never collide with the create-form prefill params (raw field names).
+ */
+function readInitialListState(entity: UiEntitySchema): ListUrlState {
+  if (typeof window === "undefined") return { q: "", sort: null, filters: {} };
+  const p = new URLSearchParams(window.location.search);
+  const sortField = p.get("sort");
+  const sort: ListSortState | null =
+    sortField !== null && entity.sortableFields.includes(sortField)
+      ? { field: sortField, order: p.get("order") === "desc" ? "desc" : "asc" }
+      : null;
+  const filters: Record<string, string> = {};
+  for (const [k, v] of p.entries()) {
+    if (k.startsWith("fl_") && entity.filterableFields.includes(k.slice(3)) && v !== "") filters[k.slice(3)] = v;
+  }
+  return { q: p.get("q") ?? "", sort, filters };
+}
+
 function EntityList({ entity }: { entity: UiEntitySchema }) {
   const { schema } = useSchema();
+  const initialState = useMemo(() => readInitialListState(entity), [entity]);
   const [data, setData] = useState<ReadonlyArray<Record<string, unknown>>>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
-  const [q, setQ] = useState("");
-  const [debouncedQ, setDebouncedQ] = useState("");
+  const [q, setQ] = useState(initialState.q);
+  const [debouncedQ, setDebouncedQ] = useState(initialState.q);
   // Server-side search when the entity has searchable (text) fields; else fall back to a
   // client-side filter over the loaded rows.
   const serverSearch = entity.searchableFields.length > 0;
@@ -56,8 +84,25 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
     const t = setTimeout(() => setDebouncedQ(q), 250);
     return () => clearTimeout(t);
   }, [q]);
-  const [sort, setSort] = useState<{ field: string; order: "asc" | "desc" } | null>(null);
-  const [filters, setFilters] = useState<Record<string, string>>({});
+  const [sort, setSort] = useState<ListSortState | null>(initialState.sort);
+  const [filters, setFilters] = useState<Record<string, string>>(initialState.filters);
+
+  // Mirror the list state into the URL (replace, not push — no history spam) so the view is
+  // shareable and survives a refresh. Preserves any unrelated params (e.g. ?new=1 + prefill).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const p = new URLSearchParams(window.location.search);
+    for (const k of ["q", "sort", "order"]) p.delete(k);
+    for (const k of [...p.keys()]) if (k.startsWith("fl_")) p.delete(k);
+    if (debouncedQ.trim() !== "") p.set("q", debouncedQ.trim());
+    if (sort !== null) {
+      p.set("sort", sort.field);
+      p.set("order", sort.order);
+    }
+    for (const [k, v] of Object.entries(filters)) if (v.trim() !== "") p.set(`fl_${k}`, v.trim());
+    const qs = p.toString();
+    window.history.replaceState(null, "", qs === "" ? window.location.pathname : `${window.location.pathname}?${qs}`);
+  }, [debouncedQ, sort, filters]);
   const canCreate = canAccess(schema, entity, "create");
   const [showNew, setShowNew] = useState(
     () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
