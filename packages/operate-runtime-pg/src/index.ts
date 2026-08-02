@@ -7,3 +7,4 @@ export * from "./entity-ddl.js";
 export * from "./column-store.js";
 export * from "./sequence-store.js";
 export * from "./settings-store.js";
+export * from "./entitlement-store.js";
