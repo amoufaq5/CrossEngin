@@ -2,6 +2,8 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { ClaimedTimer } from "@crossengin/workflow-worker";
 import { describe, expect, it } from "vitest";
 
+import type { ClaimRenewer } from "@crossengin/workflow-worker";
+
 import {
   buildTimerClaimer,
   buildTimerProcessor,
@@ -85,6 +87,51 @@ describe("buildTimerProcessor", () => {
     };
     await processor.process(timer);
     expect(fired).toEqual([{ instanceId: "inst-123", nowMs: Date.parse(NOW) }]);
+  });
+});
+
+describe("buildTimerProcessor — lease renewal during a slow fire", () => {
+  it("heartbeats the claim while the fire is in flight", async () => {
+    const renews: string[] = [];
+    const renewer: ClaimRenewer = {
+      renew: async ({ timerId }) => {
+        renews.push(timerId);
+        return true;
+      },
+    };
+    // Sleep gate the test controls, so we can drive exactly one heartbeat mid-fire.
+    let releaseSleep!: () => void;
+    const sleep = (): Promise<void> => new Promise((r) => (releaseSleep = r));
+
+    // A fire that blocks until we let it finish — the "slow" advance.
+    let finishFire!: () => void;
+    const engine: TimerFiringEngine = {
+      fireDueTimersForInstance: () =>
+        new Promise((r) => (finishFire = () => r({ firedTimerIds: [], affectedInstanceIds: [] }))),
+    };
+
+    const processor = buildTimerProcessor(engine, {
+      now: () => new Date(NOW),
+      renewal: { renewer, workerId: "worker-A", intervalMs: 50, sleep },
+    });
+
+    const done = processor.process({
+      timerId: "wft_tim00001",
+      instanceId: "inst-1",
+      tenantId: TENANT,
+      timerName: "deadline",
+      fireAt: "2026-05-17T11:59:00.000Z",
+      transitionToTrigger: null,
+      claimExpiresAt: "2026-05-17T12:00:30.000Z",
+    });
+
+    releaseSleep(); // fire still running → one heartbeat renews the claim
+    await new Promise((r) => setTimeout(r, 0));
+    expect(renews).toEqual(["wft_tim00001"]);
+
+    finishFire();
+    releaseSleep(); // unpark the heartbeat so it observes completion + stops
+    await done;
   });
 });
 
