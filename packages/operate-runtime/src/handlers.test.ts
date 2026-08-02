@@ -123,6 +123,49 @@ describe("operate handlers — CRUD", () => {
   it("404s reading a missing record", async () => {
     expect((await invoke("product.read", { role: "retail_admin", params: { id: "nope" } })).status).toBe(404);
   });
+
+  it("optimistic concurrency: a matching expectedUpdatedAt updates; a stale one 409s", async () => {
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "OC", name: "A" } }));
+    const id = created["id"] as string;
+    const version = created["updated_at"] as string;
+
+    // Stale token → 409 conflict, record untouched.
+    const stale = await invoke("product.update", {
+      role: "retail_admin",
+      params: { id },
+      body: { name: "B", expectedUpdatedAt: "1999-01-01T00:00:00.000Z" },
+    });
+    expect(stale.status).toBe(409);
+    expect(bodyOf(stale)["error"]).toBe("conflict");
+    expect((bodyOf(await invoke("product.read", { role: "retail_admin", params: { id } })))["name"]).toBe("A");
+
+    // Matching token → update succeeds, and the token field is never stored.
+    const ok = await invoke("product.update", {
+      role: "retail_admin",
+      params: { id },
+      body: { name: "B", expectedUpdatedAt: version },
+    });
+    expect(ok.status).toBe(200);
+    expect(bodyOf(ok)["name"]).toBe("B");
+    expect(bodyOf(ok)).not.toHaveProperty("expectedUpdatedAt");
+  });
+
+  it("update without expectedUpdatedAt is unconditional (backward compatible)", async () => {
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "UN", name: "A" } }));
+    const id = created["id"] as string;
+    const out = await invoke("product.update", { role: "retail_admin", params: { id }, body: { name: "B" } });
+    expect(out.status).toBe(200);
+    expect(bodyOf(out)["name"]).toBe("B");
+  });
+
+  it("a conditional update on a missing record 404s", async () => {
+    const out = await invoke("product.update", {
+      role: "retail_admin",
+      params: { id: "nope" },
+      body: { name: "B", expectedUpdatedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    expect(out.status).toBe(404);
+  });
 });
 
 describe("operate handlers — lifecycle transitions", () => {

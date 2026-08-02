@@ -149,11 +149,27 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         });
       }
       case "update": {
-        const patch = { ...(parsedBody ?? {}), updated_at: nowIso(ctx) };
+        // Optimistic concurrency: a client MAY send the `updated_at` it last read as a reserved
+        // `expectedUpdatedAt`; it's stripped from the stored patch and, on mismatch, the write is
+        // rejected 409 (a lost-update guard for the generic editor). Absent → unconditional.
+        const raw = { ...(parsedBody ?? {}) };
+        const expectedUpdatedAt = typeof raw["expectedUpdatedAt"] === "string" ? (raw["expectedUpdatedAt"] as string) : null;
+        delete raw["expectedUpdatedAt"];
+        const patch = { ...raw, updated_at: nowIso(ctx) };
         return writeTxn(ctx, tenantId, async (store) => {
-          const needsBefore = hasGuards(ctx) || hasEffects(ctx);
+          const needsBefore = hasGuards(ctx) || hasEffects(ctx) || expectedUpdatedAt !== null;
           const before = needsBefore ? await store.get(tenantId, spec.entity, id) : null;
           if (needsBefore && before === null) return json(404, { error: "not_found" });
+          if (expectedUpdatedAt !== null && before !== null) {
+            const current = typeof before["updated_at"] === "string" ? (before["updated_at"] as string) : null;
+            if (current !== null && current !== expectedUpdatedAt) {
+              return json(409, {
+                error: "conflict",
+                detail: "the record was modified since you loaded it",
+                currentUpdatedAt: current,
+              });
+            }
+          }
           const block = await guard(ctx, {
             operation: "update",
             entity: spec.entity,
