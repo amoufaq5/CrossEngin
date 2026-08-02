@@ -28,6 +28,9 @@ export interface UiFieldSchema {
   readonly classification?: string;
   readonly unique?: boolean;
   readonly readOnly?: boolean;
+  /** The server fills this field on create when absent (a default) — so a client form need not
+   * demand it even if it is `required`. */
+  readonly defaulted?: boolean;
 }
 
 export interface UiTransitionSchema {
@@ -136,6 +139,11 @@ function uiInput(field: Field): UiInputType {
   }
 }
 
+/** Whether the create path fills this field when the client omits it (default → no client input needed). */
+function isServerDefaulted(field: Field): boolean {
+  return field.default !== undefined || field.name === "currency" || field.type.kind === "currency_amount";
+}
+
 function uiField(field: Field): UiFieldSchema {
   const base: UiFieldSchema = {
     name: field.name,
@@ -146,6 +154,9 @@ function uiField(field: Field): UiFieldSchema {
     ...(field.unique !== undefined && field.unique !== false ? { unique: true } : {}),
     // A sequence-defaulted field is server-generated; surface it read-only.
     ...(field.default?.kind === "sequence" ? { readOnly: true } : {}),
+    // The server auto-fills this on create (a literal/sequence default, or a settings-driven
+    // currency default), so a client form needn't demand it even when required.
+    ...(isServerDefaulted(field) ? { defaulted: true } : {}),
   };
   if (field.type.kind === "enum") {
     return { ...base, enumValues: [...field.type.values] };

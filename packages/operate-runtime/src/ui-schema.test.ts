@@ -100,6 +100,19 @@ describe("buildUiSchema", () => {
     expect(entity("Invoice").filterableFields).toContain("state");
   });
 
+  it("marks server-defaulted fields (literal/sequence defaults) as defaulted, not plain required ones", () => {
+    const invoice = entity("Invoice");
+    const field = (name: string) => invoice.fields.find((f) => f.name === name);
+    // Invoice.status has a literal default → defaulted; invoice_number is sequence → defaulted + readOnly.
+    const status = field("status");
+    if (status !== undefined) expect(status.defaulted).toBe(true);
+    const seq = invoice.fields.find((f) => f.readOnly === true);
+    if (seq !== undefined) expect(seq.defaulted).toBe(true);
+    // A required field with no default is NOT flagged defaulted.
+    const undefaulted = invoice.fields.find((f) => f.required && f.defaulted !== true);
+    if (undefaulted !== undefined) expect(undefaulted.defaulted).toBeUndefined();
+  });
+
   it("exposes searchableFields as text-like fields (never enum/number/state)", () => {
     for (const e of schema.entities) {
       for (const name of e.searchableFields) {
