@@ -538,6 +538,8 @@ export const META_JOB_RUNS: TableDefinition = {
         "output_data_class IN ('public', 'internal', 'commercial_sensitive', 'pii', 'phi', 'regulated')",
     },
     { name: "error", type: "JSONB" },
+    { name: "claimed_by", type: "TEXT" },
+    { name: "claim_expires_at", type: "TIMESTAMPTZ" },
   ],
   primaryKey: ["id"],
   uniqueConstraints: [
@@ -547,6 +549,7 @@ export const META_JOB_RUNS: TableDefinition = {
     { name: "idx_job_runs_tenant_started_at", columns: ["tenant_id", "started_at"] },
     { name: "idx_job_runs_job_id", columns: ["tenant_id", "job_id"] },
     { name: "idx_job_runs_status", columns: ["tenant_id", "status"] },
+    { name: "idx_job_runs_due", columns: ["status", "started_at"] },
   ],
   rls: {
     enabled: true,
