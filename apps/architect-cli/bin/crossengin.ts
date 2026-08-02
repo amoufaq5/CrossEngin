@@ -4,6 +4,7 @@ import { META_TABLES } from "@crossengin/kernel/bootstrap";
 
 import { runApply } from "../src/apply.js";
 import { helpText, parseArgs } from "../src/cli.js";
+import { runLicense } from "../src/license.js";
 import {
   runChat,
   runDiff,
@@ -58,6 +59,8 @@ async function main(): Promise<number> {
       return runApply(command, ctx);
     case "chat":
       return runChat(command, ctx);
+    case "license":
+      return runLicense(command, ctx);
   }
 }
 
