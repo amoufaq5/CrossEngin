@@ -1,4 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
+import { nextRetryAt, type RetryPolicy } from "@crossengin/jobs";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
@@ -32,10 +33,17 @@ export interface JobHandlerContext {
 
 export type JobHandler = (ctx: JobHandlerContext) => Promise<JobHandlerResult>;
 
-/** A registered handler plus its retry ceiling (from the job definition; default 1 = no retry). */
+/**
+ * A registered handler plus its retry configuration (from the job definition). The ceiling is
+ * `retry.maxAttempts` when a `retry` policy is supplied, else `maxAttempts`, else 1 (no retry). A
+ * `retry.backoff` defers each re-attempt via `started_at` (see `executeJobRun`); without one, retries
+ * are immediate. An optional `jitterRng` (`[0,1)` sampler) enables jitter on the backoff.
+ */
 export interface JobHandlerRegistration {
   readonly handler: JobHandler;
   readonly maxAttempts?: number;
+  readonly retry?: RetryPolicy;
+  readonly jitterRng?: () => number;
 }
 
 /**
@@ -193,19 +201,20 @@ export class PostgresJobRunEngine {
       return { runId, executed: true, disposition: "completed", attempts };
     }
 
-    const maxAttempts =
-      registration.maxAttempts !== undefined && registration.maxAttempts >= 1
-        ? Math.floor(registration.maxAttempts)
-        : 1;
+    const ceiling =
+      registration.retry?.maxAttempts ?? (registration.maxAttempts !== undefined ? registration.maxAttempts : 1);
+    const maxAttempts = ceiling >= 1 ? Math.floor(ceiling) : 1;
     const willRetry = result.retryable === true && attempts < maxAttempts;
 
     if (willRetry) {
+      // Defer the re-claim by the policy's backoff: started_at = now + delay (>= now = immediate).
+      const startedAt = nextRetryAt(registration.retry, attempts, this.now().toISOString(), registration.jitterRng);
       const updated = await this.conn.query(
         `UPDATE ${this.schema}.job_runs
-            SET attempts = attempts + 1, error = $3::jsonb,
+            SET attempts = attempts + 1, error = $3::jsonb, started_at = $4::timestamptz,
                 claimed_by = NULL, claim_expires_at = NULL
           WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
-        [runId, tenantId, JSON.stringify(result.error)],
+        [runId, tenantId, JSON.stringify(result.error), startedAt],
       );
       if ((updated.rowCount ?? 0) === 0) return { runId, executed: false, disposition: "not_claimable" };
       return { runId, executed: true, disposition: "retry_scheduled", attempts: attempts + 1 };

@@ -154,6 +154,45 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
     expect(update.sql).toContain("claimed_by = NULL, claim_expires_at = NULL");
   });
 
+  it("defers the re-claim by the RetryPolicy backoff (started_at = now + delay)", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: async () => ({ status: "failed", error: { code: "smtp_down" }, retryable: true }),
+      retry: { maxAttempts: 4, backoff: { kind: "exponential", initialDelay: "PT30S" } },
+    });
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow({ attempts: 2 })], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+
+    const result = await engine.executeJobRun(RUN, TENANT);
+
+    expect(result).toEqual({ runId: RUN, executed: true, disposition: "retry_scheduled", attempts: 3 });
+    const update = calls[1]!;
+    expect(update.sql).toContain("started_at = $4::timestamptz");
+    // attempt 2 failed → exponential 30s * 2^(2-1) = 60s after 12:00:00
+    expect(update.params?.[3]).toBe("2026-05-17T12:01:00.000Z");
+  });
+
+  it("takes the attempt ceiling from retry.maxAttempts and dead-letters when reached", async () => {
+    const calls: Call[] = [];
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: async () => ({ status: "failed", error: { code: "smtp_down" }, retryable: true }),
+      retry: { maxAttempts: 2 },
+    });
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow({ attempts: 2 })], calls }),
+      registry,
+      { now: FIXED_NOW },
+    );
+
+    const result = await engine.executeJobRun(RUN, TENANT);
+
+    expect(result.disposition).toBe("dead-lettered");
+    expect(calls[1]!.params?.[2]).toBe("dead-lettered");
+  });
+
   it("fails a non-retryable failure on attempt 1 regardless of ceiling", async () => {
     const calls: Call[] = [];
     const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
