@@ -113,3 +113,34 @@ export async function releaseTimerClaim(
     [options.timerId, options.workerId],
   );
 }
+
+/**
+ * Extends the lease on a timer this worker still holds — for a slow fire, so another worker doesn't
+ * steal it when the original lease lapses mid-process. Returns `true` only if the row was updated:
+ * the timer must still be `scheduled` AND still `claimed_by` this worker. A `false` means the lease
+ * was lost (stolen after expiry, or the timer already fired) — the caller should stop, since another
+ * worker may now own the fire.
+ */
+export async function renewTimerClaim(
+  conn: PgConnection,
+  options: {
+    readonly timerId: string;
+    readonly workerId: string;
+    readonly now: string;
+    readonly leaseMs?: number;
+    readonly schema?: string;
+  },
+): Promise<boolean> {
+  const schema = options.schema ?? DEFAULT_SCHEMA;
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
+  const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
+  if (!Number.isInteger(leaseMs) || leaseMs < 1) throw new Error(`invalid leaseMs: ${String(leaseMs)}`);
+  const claimExpiresAt = new Date(new Date(options.now).getTime() + leaseMs).toISOString();
+  const result = await conn.query(
+    `UPDATE ${schema}.workflow_timers
+        SET claim_expires_at = $3::timestamptz
+      WHERE timer_id = $1 AND claimed_by = $2 AND status = 'scheduled'`,
+    [options.timerId, options.workerId, claimExpiresAt],
+  );
+  return (result.rowCount ?? 0) > 0;
+}

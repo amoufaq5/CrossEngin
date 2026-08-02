@@ -1,7 +1,7 @@
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
-import { claimDueTimers, releaseTimerClaim } from "./timer-claim.js";
+import { claimDueTimers, releaseTimerClaim, renewTimerClaim } from "./timer-claim.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = "2026-05-17T12:00:00.000Z";
@@ -91,5 +91,37 @@ describe("releaseTimerClaim", () => {
     expect(sql).toContain("SET claimed_by = NULL, claim_expires_at = NULL");
     expect(sql).toContain("claimed_by = $2 AND status = 'scheduled'");
     expect(params).toEqual(["wft_tim00001", "worker-A"]);
+  });
+});
+
+describe("renewTimerClaim", () => {
+  it("extends the lease only while still owned + scheduled, returning true on a row update", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    // one row updated ⇒ rowCount 1 ⇒ renewed
+    const renewed = await renewTimerClaim(mockConnection([{}], capture), {
+      timerId: "wft_tim00001",
+      workerId: "worker-A",
+      now: NOW,
+      leaseMs: 30_000,
+    });
+    expect(renewed).toBe(true);
+    const { sql, params } = capture[0]!;
+    expect(sql).toContain("SET claim_expires_at = $3::timestamptz");
+    expect(sql).toContain("claimed_by = $2 AND status = 'scheduled'");
+    expect(params).toEqual(["wft_tim00001", "worker-A", "2026-05-17T12:00:30.000Z"]);
+  });
+
+  it("returns false when the lease was lost (no row updated)", async () => {
+    const lost = await renewTimerClaim(mockConnection([]), { timerId: "wft_tim00001", workerId: "worker-A", now: NOW });
+    expect(lost).toBe(false);
+  });
+
+  it("rejects an invalid leaseMs / schema", async () => {
+    await expect(
+      renewTimerClaim(mockConnection([]), { timerId: "t", workerId: "w", now: NOW, leaseMs: 0 }),
+    ).rejects.toThrow(/invalid leaseMs/);
+    await expect(
+      renewTimerClaim(mockConnection([]), { timerId: "t", workerId: "w", now: NOW, schema: "x; DROP" }),
+    ).rejects.toThrow(/invalid schema/);
   });
 });

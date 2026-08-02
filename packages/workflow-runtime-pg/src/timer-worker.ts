@@ -2,12 +2,14 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { WorkflowEngine } from "@crossengin/workflow-runtime";
 import {
   WorkflowTimerWorker,
+  renewWhile,
+  type ClaimRenewer,
   type ClaimedTimer,
   type TimerClaimer,
   type TimerProcessor,
 } from "@crossengin/workflow-worker";
 
-import { claimDueTimers, releaseTimerClaim } from "./timer-claim.js";
+import { claimDueTimers, releaseTimerClaim, renewTimerClaim } from "./timer-claim.js";
 
 /** The engine surface a timer processor needs — the log-driven, targeted fire from ADR-0177. */
 export type TimerFiringEngine = Pick<WorkflowEngine, "fireDueTimersForInstance">;
@@ -22,6 +24,30 @@ export function buildTimerClaimer(conn: PgConnection, opts: { readonly schema?: 
 }
 
 /**
+ * Adapts the Postgres `renewTimerClaim` to the worker's `ClaimRenewer`, closing over the lease
+ * duration + clock so `renew({timerId, workerId})` extends the lease to `now + leaseMs`.
+ */
+export function buildClaimRenewer(
+  conn: PgConnection,
+  opts: { readonly leaseMs: number; readonly now?: () => Date; readonly schema?: string },
+): ClaimRenewer {
+  const now = opts.now ?? (() => new Date());
+  const schemaOpt = opts.schema !== undefined ? { schema: opts.schema } : {};
+  return {
+    renew: (o) => renewTimerClaim(conn, { ...o, now: now().toISOString(), leaseMs: opts.leaseMs, ...schemaOpt }),
+  };
+}
+
+/** Lease-renewal config for a processor: heartbeat a claim while a slow fire runs. */
+export interface TimerRenewalConfig {
+  readonly renewer: ClaimRenewer;
+  readonly workerId: string;
+  readonly intervalMs: number;
+  readonly sleep: (ms: number) => Promise<void>;
+  readonly onLeaseLost?: () => void;
+}
+
+/**
  * A `TimerProcessor` that fires a claimed timer by advancing its instance from the durable event
  * log (`engine.fireDueTimersForInstance`). The worker connection is platform-scoped (RLS-bypassing,
  * per ADR-0175), so one engine serves every tenant and the correct `tenant_id` rides on each
@@ -30,12 +56,26 @@ export function buildTimerClaimer(conn: PgConnection, opts: { readonly schema?: 
  */
 export function buildTimerProcessor(
   engine: TimerFiringEngine,
-  opts: { readonly now?: () => Date } = {},
+  opts: { readonly now?: () => Date; readonly renewal?: TimerRenewalConfig } = {},
 ): TimerProcessor {
   const now = opts.now ?? (() => new Date());
+  const renewal = opts.renewal;
   return {
     process: async (timer: ClaimedTimer) => {
-      await engine.fireDueTimersForInstance(timer.instanceId, now().getTime());
+      const fire = engine.fireDueTimersForInstance(timer.instanceId, now().getTime());
+      if (renewal === undefined) {
+        await fire;
+        return;
+      }
+      // Heartbeat the lease while the fire runs, so a slow instance advance isn't stolen.
+      await renewWhile(fire, {
+        renewer: renewal.renewer,
+        timerId: timer.timerId,
+        workerId: renewal.workerId,
+        intervalMs: renewal.intervalMs,
+        sleep: renewal.sleep,
+        ...(renewal.onLeaseLost !== undefined ? { onLeaseLost: renewal.onLeaseLost } : {}),
+      });
     },
   };
 }
@@ -53,6 +93,8 @@ export interface BuildWorkflowTimerWorkerInput {
   readonly sleep?: (ms: number) => Promise<void>;
   readonly onError?: (err: unknown) => void;
   readonly onBatch?: (result: { claimed: number }) => void;
+  /** Enable lease renewal during a fire, heartbeating every N ms (default: off). Needs `leaseMs`. */
+  readonly renewIntervalMs?: number;
 }
 
 /**
@@ -63,7 +105,24 @@ export interface BuildWorkflowTimerWorkerInput {
  */
 export function buildWorkflowTimerWorker(input: BuildWorkflowTimerWorkerInput): WorkflowTimerWorker {
   const claimer = buildTimerClaimer(input.conn, input.schema !== undefined ? { schema: input.schema } : {});
-  const processor = buildTimerProcessor(input.engine, input.now !== undefined ? { now: input.now } : {});
+  // Optional lease renewal: heartbeat the claim while a fire runs so a slow advance isn't stolen.
+  const renewal: TimerRenewalConfig | undefined =
+    input.renewIntervalMs !== undefined
+      ? {
+          renewer: buildClaimRenewer(input.conn, {
+            leaseMs: input.leaseMs ?? 30_000,
+            ...(input.now !== undefined ? { now: input.now } : {}),
+            ...(input.schema !== undefined ? { schema: input.schema } : {}),
+          }),
+          workerId: input.workerId,
+          intervalMs: input.renewIntervalMs,
+          sleep: input.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+        }
+      : undefined;
+  const processor = buildTimerProcessor(input.engine, {
+    ...(input.now !== undefined ? { now: input.now } : {}),
+    ...(renewal !== undefined ? { renewal } : {}),
+  });
   return new WorkflowTimerWorker({
     workerId: input.workerId,
     claimer,
