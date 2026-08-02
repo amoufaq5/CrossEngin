@@ -7,10 +7,21 @@ import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
 import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
-import { createRecord, deleteRecord, listRecords, type ListResult } from "@/lib/api";
+import { createRecord, deleteRecord, listRecords, runTransition, type ListResult } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
-import { canAccess, entityBySlug, fieldErrorMap, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
+import {
+  canAccess,
+  entityBySlug,
+  fieldErrorMap,
+  parseValidationErrors,
+  slugForEntityName,
+  useSchema,
+  viewerRoles,
+  type UiEntitySchema,
+  type UiFieldSchema,
+  type UiTransitionSchema,
+} from "@/lib/schema";
 
 function cellKind(field: UiFieldSchema | undefined): string | undefined {
   if (field === undefined) return undefined;
@@ -138,6 +149,23 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [transitionBusy, setTransitionBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Lifecycle transitions the viewer's role may fire (distinct by name), for bulk application.
+  const bulkTransitions = useMemo(() => {
+    if (entity.stateField === null) return [] as UiTransitionSchema[];
+    const roles = viewerRoles(schema);
+    const seen = new Set<string>();
+    const out: UiTransitionSchema[] = [];
+    for (const t of entity.transitions) {
+      if (roles.length > 0 && !t.roles.some((r) => roles.includes(r))) continue;
+      if (seen.has(t.name)) continue;
+      seen.add(t.name);
+      out.push(t);
+    }
+    return out;
+  }, [entity, schema]);
   const [showNew, setShowNew] = useState(
     () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
   );
@@ -270,6 +298,7 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
     if (!confirm(`Delete ${ids.length} ${ids.length === 1 ? entity.singular : entity.label}? This cannot be undone.`)) return;
     setBulkBusy(true);
     setError(null);
+    setNotice(null);
     try {
       for (const id of ids) await deleteRecord(entity.slug, id);
       invalidateReferenceCache(entity.slug);
@@ -279,6 +308,38 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBulkBusy(false);
+    }
+  }
+
+  // Apply a lifecycle transition to every selected record that is in a valid `from` state for it;
+  // records in a non-matching state are skipped (reported), so a mixed selection is still safe.
+  async function bulkTransition(name: string) {
+    const stateField = entity.stateField;
+    if (stateField === null) return;
+    const ids = [...selected];
+    const byId = new Map(data.map((r) => [String(r["id"] ?? ""), r]));
+    const eligible = ids.filter((id) => {
+      const state = String(byId.get(id)?.[stateField] ?? "");
+      return entity.transitions.some((t) => t.name === name && t.from.includes(state));
+    });
+    if (eligible.length === 0) {
+      setError(`No selected records are in a state where "${name}" applies.`);
+      return;
+    }
+    setTransitionBusy(name);
+    setError(null);
+    setNotice(null);
+    try {
+      for (const id of eligible) await runTransition(entity.slug, id, name);
+      invalidateReferenceCache(entity.slug);
+      setSelected(new Set());
+      load();
+      const skipped = ids.length - eligible.length;
+      setNotice(`Applied “${name}” to ${eligible.length}${skipped > 0 ? ` (skipped ${skipped} not in a valid state)` : ""}.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTransitionBusy(null);
     }
   }
 
@@ -311,6 +372,18 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
           >
             {exporting ? "Exporting…" : selected.size > 0 ? `Export ${selected.size}` : "Export CSV"}
           </button>
+          {selected.size > 0 &&
+            bulkTransitions.map((t) => (
+              <button
+                key={t.name}
+                onClick={() => void bulkTransition(t.name)}
+                disabled={transitionBusy !== null}
+                title={`Apply “${t.label}” to eligible selected records`}
+                className="rounded-lg border border-line bg-brand-50 px-3 py-2 text-sm font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-60"
+              >
+                {transitionBusy === t.name ? "Applying…" : t.label}
+              </button>
+            ))}
           {canDelete && selected.size > 0 && (
             <button
               onClick={() => void bulkDelete()}
@@ -342,6 +415,9 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
           />
         )}
 
+        {notice && (
+          <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-700">{notice}</div>
+        )}
         {error && (
           <div className="mb-4 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">{error}</div>
         )}
