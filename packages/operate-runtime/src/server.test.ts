@@ -10,6 +10,7 @@ import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { describe, expect, it } from "vitest";
 
 import { buildOperateGateway } from "./compile.js";
+import { InMemoryEntitlementResolver, type EntitlementStatus } from "./entitlement.js";
 import { InMemoryEntityStore } from "./store.js";
 
 // This milestone proves the manifest -> routes -> gateway -> handler -> store ->
@@ -273,5 +274,64 @@ describe("operate-server — write path through the gateway (P1.5)", () => {
     expect(again.response.status).toBe(409);
     const dispatch = again.execution.stages.find((s) => s.stage === "dispatch_handler");
     expect(dispatch?.outcome).toBe("deny");
+  });
+});
+
+describe("operate-server — subscription entitlement gate", () => {
+  function makeGatedServer(status: EntitlementStatus) {
+    const store = new InMemoryEntityStore();
+    const principalResolver = new InMemoryPrincipalResolver();
+    for (const role of Object.values(KEYS)) {
+      principalResolver.register(role, {
+        principalId: "00000000-0000-4000-8000-0000000000aa",
+        tenantId: TENANT,
+        principalKind: "user",
+        authScheme: "api_key_header",
+        grantedScopes: [role],
+        mfaProofAgeSeconds: null,
+        resolvedAt: "2026-06-03T12:00:00.000Z",
+      });
+    }
+    const opaqueTokenLookup: OpaqueTokenLookup = {
+      async lookup(_req: IncomingRequest, token: string) {
+        const role = KEYS[token];
+        return role === undefined ? null : { principalRef: role, scopes: [role], tenantId: TENANT };
+      },
+    };
+    const server = buildOperateGateway(resolved, {
+      store,
+      principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" }),
+      principalResolver,
+      opaqueTokenLookup,
+      entitlementResolver: new InMemoryEntitlementResolver([[TENANT, { status, planId: "pro" }]]),
+      clock: { now: () => new Date("2026-06-03T12:00:00.000Z") },
+    });
+    return { server, store };
+  }
+
+  it("an active tenant is served normally", async () => {
+    const { server, store } = makeGatedServer("active");
+    await store.create(TENANT, "Product", PRODUCT);
+    const res = await server.runtime.handleRequest(getReq("/v1/products", "key-manager"));
+    expect(res.response.status).toBe(200);
+  });
+
+  it("a canceled tenant is blocked with 402 on read", async () => {
+    const { server, store } = makeGatedServer("canceled");
+    await store.create(TENANT, "Product", PRODUCT);
+    const res = await server.runtime.handleRequest(getReq("/v1/products", "key-manager"));
+    expect(res.response.status).toBe(402);
+    expect(bodyOf(res.response.bodyBytes).reason).toBe("subscription_canceled");
+  });
+
+  it("a past_due tenant can read but not write", async () => {
+    const { server, store } = makeGatedServer("past_due");
+    await store.create(TENANT, "Product", PRODUCT);
+    const read = await server.runtime.handleRequest(getReq("/v1/products", "key-manager"));
+    expect(read.response.status).toBe(200);
+    const write = await server.runtime.handleRequest(
+      writeReq("POST", "/v1/products", "key-manager", { id: "p2", sku: "S2", name: "Bread", unit_price: 3, status: "active", category: "grocery" }),
+    );
+    expect(write.response.status).toBe(402);
   });
 });
