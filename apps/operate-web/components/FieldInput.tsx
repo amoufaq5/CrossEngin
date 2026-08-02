@@ -3,23 +3,26 @@
 import { ReferencePicker } from "@/components/ReferencePicker";
 import type { UiFieldSchema, UiSchema } from "@/lib/schema";
 
-const INPUT_CLASS =
-  "w-full rounded-lg border border-line px-3 py-2 text-sm outline-none transition focus:border-brand disabled:bg-surface-soft disabled:text-ink-faint";
+const INPUT_BASE =
+  "w-full rounded-lg border px-3 py-2 text-sm outline-none transition disabled:bg-surface-soft disabled:text-ink-faint";
 
 export function FieldInput({
   field,
   value,
   onChange,
   disabled,
+  invalid,
   schema,
 }: {
   field: UiFieldSchema;
   value: string | boolean;
   onChange: (v: string | boolean) => void;
   disabled?: boolean;
+  invalid?: boolean;
   schema?: UiSchema | null;
 }) {
   const ro = disabled === true || field.readOnly === true;
+  const INPUT_CLASS = `${INPUT_BASE} ${invalid === true ? "border-red-400 focus:border-red-500" : "border-line focus:border-brand"}`;
 
   if (field.input === "reference" && field.referenceTarget && schema !== undefined) {
     return (
