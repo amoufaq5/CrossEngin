@@ -258,6 +258,13 @@ export function parseValidationErrors(errMessage: string): readonly FieldValidat
   }
 }
 
+/** Collapses field errors into a field→message map (first error per field wins) for inline display. */
+export function fieldErrorMap(errors: readonly FieldValidationError[]): Record<string, string> {
+  const m: Record<string, string> = {};
+  for (const e of errors) if (m[e.field] === undefined) m[e.field] = e.message;
+  return m;
+}
+
 export function roleLabel(schema: UiSchema | null, name: string): string {
   const r = schema?.roles.find((x) => x.name === name);
   return r?.label ?? name.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());

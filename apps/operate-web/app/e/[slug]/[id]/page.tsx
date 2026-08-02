@@ -11,7 +11,7 @@ import { Topbar } from "@/components/Topbar";
 import { deleteRecord, getRecord, runTransition, updateRecord } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
-import { entityBySlug, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
+import { entityBySlug, fieldErrorMap, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
 
 export default function RecordPage({ params }: { params: { slug: string; id: string } }) {
   const { schema, loading } = useSchema();
@@ -45,6 +45,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Record<string, string | boolean>>({});
   const [notice, setNotice] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   const load = useCallback(() => {
     setBusy(true);
@@ -74,6 +75,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
     if (record === null) return;
     setBusy(true);
     setError(null);
+    setFieldErrors({});
     try {
       const patch: Record<string, unknown> = {};
       for (const f of entity.fields) {
@@ -101,8 +103,9 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
       const msg = e instanceof Error ? e.message : String(e);
       const fields = parseValidationErrors(msg);
       if (fields !== null) {
-        // Stay in edit mode so the user can fix the flagged fields.
-        setError(fields.map((f) => f.message).join("; "));
+        // Stay in edit mode so the user can fix the flagged fields (highlighted inline).
+        setError("Please fix the highlighted fields.");
+        setFieldErrors(fieldErrorMap(fields));
       } else if (msg.startsWith("409")) {
         // Someone else changed this record since we loaded it — reload the latest so the
         // user re-applies their edits against current data rather than clobbering it.
@@ -234,7 +237,24 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
                   </dt>
                   <dd>
                     {editing && f.readOnly !== true ? (
-                      <FieldInput field={f} value={draft[f.name] ?? ""} schema={schema} onChange={(v) => setDraft((p) => ({ ...p, [f.name]: v }))} />
+                      <>
+                        <FieldInput
+                          field={f}
+                          value={draft[f.name] ?? ""}
+                          schema={schema}
+                          invalid={fieldErrors[f.name] !== undefined}
+                          onChange={(v) => {
+                            setDraft((p) => ({ ...p, [f.name]: v }));
+                            setFieldErrors((prev) => {
+                              if (prev[f.name] === undefined) return prev;
+                              const next = { ...prev };
+                              delete next[f.name];
+                              return next;
+                            });
+                          }}
+                        />
+                        {fieldErrors[f.name] && <span className="mt-1 block text-xs text-red-600">{fieldErrors[f.name]}</span>}
+                      </>
                     ) : (
                       <ReadValue field={f} value={record[f.name]} schema={schema} />
                     )}

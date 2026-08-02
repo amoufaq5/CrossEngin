@@ -10,7 +10,7 @@ import { Topbar } from "@/components/Topbar";
 import { createRecord, deleteRecord, listRecords, type ListResult } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
-import { canAccess, entityBySlug, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
+import { canAccess, entityBySlug, fieldErrorMap, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
 
 function cellKind(field: UiFieldSchema | undefined): string | undefined {
   if (field === undefined) return undefined;
@@ -518,6 +518,16 @@ function CreateForm({
   const [values, setValues] = useState<Record<string, string | boolean>>(() => ({ ...initialValues }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  function clearFieldError(name: string) {
+    setFieldErrors((prev) => {
+      if (prev[name] === undefined) return prev;
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+  }
 
   async function submit() {
     // Client-side pre-check: a required field with no server default must be filled. Skips
@@ -527,11 +537,13 @@ function CreateForm({
       (f) => f.required && f.defaulted !== true && f.input !== "boolean" && (values[f.name] === undefined || values[f.name] === ""),
     );
     if (missing.length > 0) {
-      setError(`Please fill in: ${missing.map((f) => f.label).join(", ")}`);
+      setError("Please fix the highlighted fields.");
+      setFieldErrors(Object.fromEntries(missing.map((f) => [f.name, `${f.label} is required`])));
       return;
     }
     setBusy(true);
     setError(null);
+    setFieldErrors({});
     try {
       const payload: Record<string, unknown> = {};
       for (const f of editable) {
@@ -545,7 +557,12 @@ function CreateForm({
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const fields = parseValidationErrors(msg);
-      setError(fields !== null ? fields.map((f) => f.message).join("; ") : msg);
+      if (fields !== null) {
+        setError("Please fix the highlighted fields.");
+        setFieldErrors(fieldErrorMap(fields));
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
@@ -564,7 +581,17 @@ function CreateForm({
                 <span className="rounded bg-amber-50 px-1 text-[10px] font-semibold text-amber-700">{f.classification}</span>
               )}
             </span>
-            <FieldInput field={f} value={values[f.name] ?? (f.input === "boolean" ? false : "")} schema={schema} onChange={(v) => setValues((p) => ({ ...p, [f.name]: v }))} />
+            <FieldInput
+              field={f}
+              value={values[f.name] ?? (f.input === "boolean" ? false : "")}
+              schema={schema}
+              invalid={fieldErrors[f.name] !== undefined}
+              onChange={(v) => {
+                setValues((p) => ({ ...p, [f.name]: v }));
+                clearFieldError(f.name);
+              }}
+            />
+            {fieldErrors[f.name] && <span className="mt-1 block text-xs text-red-600">{fieldErrors[f.name]}</span>}
           </label>
         ))}
       </div>
