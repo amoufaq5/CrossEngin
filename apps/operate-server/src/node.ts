@@ -8,19 +8,24 @@ import {
   InMemorySequenceAllocator,
   InMemorySettingsStore,
   LicenseEntitlementResolver,
+  type EntitlementResolver,
   type EntityStore,
   type SequenceAllocator,
   type SettingsStore,
 } from "@crossengin/operate-runtime";
+import { type PgConnection } from "@crossengin/kernel-pg";
 import {
   ColumnMappedEntityStore,
+  PostgresEntitlementResolver,
   PostgresEntityStore,
   PostgresSequenceAllocator,
   PostgresSettingsStore,
+  PostgresSubscriptionStore,
+  ingestStripeWebhook,
 } from "@crossengin/operate-runtime-pg";
 
 import type { ServeOptions } from "./cli.js";
-import type { RawHttpRequest } from "./http.js";
+import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
@@ -30,7 +35,16 @@ import {
   type JwksKeySpec,
   type JwtVerifyConfig,
 } from "./principals.js";
-import { OperateHttpServer, buildOperateHttpServer } from "./server.js";
+import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
+
+function firstHeader(v: string | readonly string[] | undefined): string | undefined {
+  return v === undefined ? undefined : Array.isArray(v) ? v[0] : (v as string);
+}
+
+function jsonRaw(status: number, body: unknown): RawHttpResponse {
+  const bytes = new TextEncoder().encode(JSON.stringify(body));
+  return { status, headers: { "content-type": "application/json", "content-length": bytes.byteLength.toString() }, body: bytes };
+}
 
 /** The slice of Node's `IncomingMessage` the adapter reads. */
 export interface NodeReqLike extends AsyncIterable<Uint8Array> {
@@ -139,6 +153,8 @@ interface ResolvedStores {
   readonly store: EntityStore;
   readonly allocator: SequenceAllocator;
   readonly settingsStore: SettingsStore;
+  /** The Postgres connection (present only for pg stores), reused for billing wiring. */
+  readonly conn?: PgConnection;
 }
 
 async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<ResolvedStores> {
@@ -156,10 +172,10 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   if (options.store === "pg-columns") {
     const store = new ColumnMappedEntityStore(conn, manifest, options.schema !== null ? { schema: options.schema } : {});
     await store.ensureSchema();
-    return { store, allocator, settingsStore };
+    return { store, allocator, settingsStore, conn };
   }
   const store = new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
-  return { store, allocator, settingsStore };
+  return { store, allocator, settingsStore, conn };
 }
 
 export interface RunningServer {
@@ -178,25 +194,49 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.manifestPath !== null
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
-  const { store, allocator, settingsStore } = await resolveStore(options, manifest);
+  const { store, allocator, settingsStore, conn } = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
+  const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
   // Offline subscription entitlement: verify an Ed25519 license token against the
   // licensor's public key at boot (no cloud billing call). A lapsed/expired license
   // means the gate denies (past_due keeps read access).
-  const entitlementResolver =
+  let entitlementResolver: EntitlementResolver | undefined =
     options.licenseFile !== null && options.licenseKey !== null
       ? new LicenseEntitlementResolver((await readFile(options.licenseFile, "utf8")).trim(), options.licenseKey)
       : undefined;
+  // Cloud billing: a Stripe webhook writes subscription snapshots to billing_subscriptions
+  // and (unless a license already gates) the gate reads them via a Postgres resolver — so a
+  // Stripe subscription change flows straight into enforcement. Signature-authenticated, so
+  // the route runs ahead of the gateway's API-key/JWT pipeline.
+  let webhookRoute: WebhookRoute | undefined;
+  if (options.stripeWebhookSecret !== null && conn !== undefined) {
+    const secret = options.stripeWebhookSecret;
+    const subscriptionStore = new PostgresSubscriptionStore(conn, schemaOpt);
+    if (entitlementResolver === undefined) entitlementResolver = new PostgresEntitlementResolver(conn, schemaOpt);
+    webhookRoute = {
+      method: "POST",
+      path: "/v1/webhooks/stripe",
+      handle: async (body, headers) => {
+        const payload = new TextDecoder().decode(body ?? new Uint8Array());
+        const signatureHeader = firstHeader(headers["stripe-signature"]) ?? "";
+        const result = await ingestStripeWebhook({ payload, signatureHeader, secret, store: subscriptionStore });
+        return result.ok
+          ? jsonRaw(200, { received: true, applied: result.applied })
+          : jsonRaw(400, { error: "invalid_signature", reason: result.reason });
+      },
+    };
+  }
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
     apiKeys,
     allocator,
     settingsStore,
+    ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
+    ...(webhookRoute !== undefined ? { webhookRoute } : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
-    ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
   });
   poller?.start();
   const listener = createNodeRequestListener(httpServer);
