@@ -783,3 +783,120 @@ describe("deferActivities + executeScheduledActivity (distributed activities)", 
     expect((await engine.executeScheduledActivity(state.instanceId, "wfa_nope0001")).executed).toBe(false);
   });
 });
+
+describe("activity retry + dead-letter", () => {
+  function retryDef(maxAttempts: number, withFailTransition = true): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            { kind: "schedule_activity", parameters: { activityKey: "do_thing", kind: "http_call", input: {}, maxAttempts } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        { name: "failed", kind: "terminal_failure", label: "Failed", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+      transitions: [
+        {
+          name: "complete",
+          fromState: "draft",
+          toState: "done",
+          trigger: { kind: "activity_completed", activityKey: "do_thing" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        ...(withFailTransition
+          ? [
+              {
+                name: "fail",
+                fromState: "draft",
+                toState: "failed",
+                trigger: { kind: "activity_failed" as const, activityKey: "do_thing" },
+                guards: [],
+                preTransitionActions: [],
+                postTransitionActions: [],
+              },
+            ]
+          : []),
+      ],
+      initialState: "draft",
+    };
+  }
+
+  const alwaysRetryableFail: ActivityHandler = () => ({
+    status: "failed",
+    errorCode: "FLAKY",
+    errorMessage: "transient",
+    retryable: true,
+  });
+
+  it("retries a retryable failure up to maxAttempts, then dead-letters", async () => {
+    const def = retryDef(3);
+    const registry = createDefaultRegistry().registerForKind("http_call", alwaysRetryableFail);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.filter((e) => e.kind === "activity_started")).toHaveLength(3); // 3 attempts
+    const failures = events.filter((e) => e.kind === "activity_failed");
+    expect(failures).toHaveLength(3);
+    expect(failures.slice(0, 2).every((e) => e.payload["willRetry"] === true && e.payload["deadLettered"] === false)).toBe(true);
+    expect(failures[2]!.payload["deadLettered"]).toBe(true);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("failed"); // dead-letter fired the transition
+  });
+
+  it("stops retrying and completes when a retry succeeds", async () => {
+    const succeedOnSecond: ActivityHandler = (ctx) =>
+      ctx.attemptNumber >= 2
+        ? { status: "succeeded", output: {} }
+        : { status: "failed", errorCode: "FLAKY", errorMessage: "transient", retryable: true };
+    const def = retryDef(3);
+    const registry = createDefaultRegistry().registerForKind("http_call", succeedOnSecond);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.filter((e) => e.kind === "activity_started")).toHaveLength(2);
+    expect(events.some((e) => e.kind === "activity_completed")).toBe(true);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("completed");
+  });
+
+  it("does not retry a non-retryable failure even with maxAttempts>1", async () => {
+    const nonRetryable: ActivityHandler = () => ({ status: "failed", errorCode: "FATAL", errorMessage: "no", retryable: false });
+    const def = retryDef(5);
+    const registry = createDefaultRegistry().registerForKind("http_call", nonRetryable);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.filter((e) => e.kind === "activity_started")).toHaveLength(1); // no retry
+    expect(events.find((e) => e.kind === "activity_failed")?.payload["deadLettered"]).toBe(true);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("failed");
+  });
+
+  it("deferred mode reschedules the retry as a fresh scheduled activity for a worker", async () => {
+    const def = retryDef(3);
+    const log = new InMemoryEventLog();
+    const engine = new WorkflowEngine({
+      eventLog: log,
+      definitions: new Map([[def.id, def]]),
+      activityRegistry: createDefaultRegistry().registerForKind("http_call", alwaysRetryableFail),
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+      deferActivities: true,
+    });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    // Attempt 1 scheduled but not run (deferred). A worker executes it → it fails retryably → the
+    // engine reschedules attempt 2 as a new scheduled activity (still no inline run).
+    const a1 = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "activity_scheduled")!.activityId!;
+    await engine.executeScheduledActivity(state.instanceId, a1);
+    const scheduled = (await engine.listEvents(state.instanceId)).filter((e) => e.kind === "activity_scheduled");
+    expect(scheduled).toHaveLength(2); // attempt 1 + rescheduled attempt 2
+    expect(scheduled[1]!.payload["attemptNumber"]).toBe(2);
+    expect((await engine.listEvents(state.instanceId)).filter((e) => e.kind === "activity_started")).toHaveLength(1); // only attempt 1 ran
+  });
+});
