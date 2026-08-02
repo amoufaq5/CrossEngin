@@ -41,9 +41,11 @@ function Shell({ title, note }: { title: string; note?: string }) {
 
 function EntityList({ entity }: { entity: UiEntitySchema }) {
   const { schema } = useSchema();
-  const [result, setResult] = useState<ListResult | null>(null);
+  const [data, setData] = useState<ReadonlyArray<Record<string, unknown>>>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<{ field: string; order: "asc" | "desc" } | null>(null);
   const [filters, setFilters] = useState<Record<string, string>>({});
@@ -78,15 +80,16 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
       p.set("order", sort.order);
     }
     for (const [k, v] of Object.entries(filters)) if (v.trim() !== "") p.set(k, v.trim());
-    const s = p.toString();
-    return s === "" ? "" : `?${s}`;
+    return `?${p.toString()}`;
   }, [sort, filters]);
 
+  // First page (and reload on query change): replaces the accumulated rows.
   const load = useCallback(() => {
     setBusy(true);
     listRecords(entity.slug, query)
-      .then((r) => {
-        setResult(r);
+      .then((r: ListResult) => {
+        setData(r.data);
+        setNextCursor(r.nextCursor);
         setError(null);
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
@@ -95,14 +98,27 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
 
   useEffect(() => load(), [load]);
 
+  // Next page: keyset cursor from the last response, appended to the loaded rows.
+  const loadMore = useCallback(() => {
+    if (nextCursor === null) return;
+    setLoadingMore(true);
+    listRecords(entity.slug, `${query}&cursor=${encodeURIComponent(nextCursor)}`)
+      .then((r: ListResult) => {
+        setData((prev) => [...prev, ...r.data]);
+        setNextCursor(r.nextCursor);
+        setError(null);
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setLoadingMore(false));
+  }, [entity.slug, query, nextCursor]);
+
   const rows = useMemo(() => {
-    const data = result?.data ?? [];
     const needle = q.trim().toLowerCase();
     if (needle === "") return data;
     return data.filter((row) =>
       entity.listColumns.some((c) => String(row[c] ?? "").toLowerCase().includes(needle)),
     );
-  }, [result, q, entity.listColumns]);
+  }, [data, q, entity.listColumns]);
 
   function toggleSort(field: string) {
     if (!entity.sortableFields.includes(field)) return;
@@ -215,9 +231,22 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
             </tbody>
           </table>
         </div>
-        <p className="mt-3 text-xs text-ink-faint">
-          {rows.length} shown{result?.nextCursor ? " · more available (refine filters)" : ""}
-        </p>
+        <div className="mt-3 flex items-center gap-3">
+          <p className="text-xs text-ink-faint">
+            {rows.length} shown
+            {q.trim() !== "" && data.length !== rows.length ? ` (of ${data.length} loaded)` : ""}
+            {nextCursor !== null ? " · more available" : ""}
+          </p>
+          {nextCursor !== null && (
+            <button
+              onClick={loadMore}
+              disabled={loadingMore}
+              className="rounded-lg border border-line px-3 py-1.5 text-sm font-medium text-ink-muted hover:bg-surface-soft disabled:opacity-60"
+            >
+              {loadingMore ? "Loading…" : "Load more"}
+            </button>
+          )}
+        </div>
       </div>
     </>
   );
