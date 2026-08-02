@@ -3,11 +3,12 @@ import {
   verifyStripeWebhook,
   type StripeWebhookReason,
 } from "@crossengin/billing-stripe";
+import type { PlanLimitsLookup } from "@crossengin/operate-runtime";
 
 import type { PostgresSubscriptionStore, SubscriptionUpsertRow } from "./subscription-store.js";
 
 /** Deployment-supplied plan catalog: maps a plan/price id to its entitlement limits. */
-export type PlanLimitsLookup = (planId: string) => { maxRecordsPerEntity?: number; features?: readonly string[] } | undefined;
+export type { PlanLimitsLookup } from "@crossengin/operate-runtime";
 
 export interface StripeSubscriptionEventOptions {
   readonly planLimits?: PlanLimitsLookup;
