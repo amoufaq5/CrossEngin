@@ -169,6 +169,16 @@ export function Sidebar() {
           >
             Settings
           </Link>
+          <Link
+            href="/admin/billing"
+            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+              pathname === "/admin/billing"
+                ? "bg-surface-sunken font-medium text-ink"
+                : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+            }`}
+          >
+            Billing
+          </Link>
         </div>
       </nav>
     </aside>
