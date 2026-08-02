@@ -347,6 +347,77 @@ describe("tickTimers", () => {
   });
 });
 
+describe("fireDueTimersForInstance (distributed firing)", () => {
+  function timerDef(relativeSeconds: number): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      states: [
+        { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        {
+          name: "awaiting_approval",
+          kind: "waiting",
+          label: "Awaiting",
+          onEntryActions: [{ kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds } }],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        { name: "approved", kind: "terminal_success", label: "A", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        { name: "rejected", kind: "terminal_failure", label: "R", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+    };
+  }
+
+  it("fires a specific instance's due timer + transition", async () => {
+    const def = timerDef(60);
+    const fixed = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({ definition: def, clock: fixed });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    fixed.advance(120_000);
+    const result = await engine.fireDueTimersForInstance(state.instanceId, fixed.now().getTime());
+    expect(result.firedTimerIds).toHaveLength(1);
+    expect(result.affectedInstanceIds).toEqual([state.instanceId]);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("failed");
+  });
+
+  it("fires a timer for an instance a second engine never started (cross-process over one log)", async () => {
+    const def = timerDef(60);
+    const fixed = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine: engineA, log } = makeEngine({ definition: def, clock: fixed });
+    const state = await engineA.startInstance({ definitionId: def.id, tenantId: TENANT });
+    fixed.advance(120_000);
+
+    // Engine B shares only the event log — it never called startInstance (its in-memory map is empty).
+    const engineB = new WorkflowEngine({
+      eventLog: log,
+      definitions: new Map([[def.id, def]]),
+      activityRegistry: createDefaultRegistry(),
+      clock: new FixedClock(fixed.now()),
+      idGenerator: new CountingIdGenerator(),
+    });
+    // tickTimers on B finds nothing (empty in-memory map), but the targeted call fires from the log.
+    expect((await engineB.tickTimers(fixed.now().getTime())).firedTimerIds).toEqual([]);
+    const result = await engineB.fireDueTimersForInstance(state.instanceId, fixed.now().getTime());
+    expect(result.firedTimerIds).toHaveLength(1);
+    expect((await engineB.getInstanceState(state.instanceId))?.status).toBe("failed");
+  });
+
+  it("is idempotent — a re-fire after the timer already fired does nothing", async () => {
+    const def = timerDef(60);
+    const fixed = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeEngine({ definition: def, clock: fixed });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    fixed.advance(120_000);
+    await engine.fireDueTimersForInstance(state.instanceId, fixed.now().getTime());
+    const second = await engine.fireDueTimersForInstance(state.instanceId, fixed.now().getTime());
+    expect(second.firedTimerIds).toEqual([]);
+  });
+
+  it("returns empty for an unknown instance", async () => {
+    const { engine } = makeEngine();
+    expect((await engine.fireDueTimersForInstance("wfi_nope0001", Date.parse("2026-05-16T12:00:00.000Z"))).firedTimerIds).toEqual([]);
+  });
+});
+
 describe("schedule_activity action", () => {
   it("runs the registered handler and emits scheduled+started+completed", async () => {
     const def: WorkflowDefinition = {
