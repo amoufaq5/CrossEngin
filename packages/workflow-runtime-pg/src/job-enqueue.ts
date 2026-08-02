@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 
 import type { PgConnection } from "@crossengin/kernel-pg";
-import { planJobRunsForEvent, type DomainEvent, type JobDeclaration, type PlannedJobRun } from "@crossengin/jobs";
+import {
+  planJobRunsForEvent,
+  scheduledJobsDue,
+  type DomainEvent,
+  type JobDeclaration,
+  type PlannedJobRun,
+} from "@crossengin/jobs";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
@@ -89,6 +95,56 @@ export async function enqueueJobsForEvent(
       ],
     );
     results.push({ jobId: plan.jobId, runId, inserted: (result.rowCount ?? 0) > 0 });
+  }
+
+  return results;
+}
+
+export interface EnqueueScheduledJobsOptions {
+  readonly jobs: readonly JobDeclaration[];
+  readonly tenantId: string;
+  /** The scheduler's current wall-clock; each due job resolves to its current cron tick. */
+  readonly now: string;
+  readonly schema?: string;
+}
+
+/**
+ * The scheduled (cron) producer: for every scheduled job due as of `now` (pure `scheduledJobsDue` →
+ * the current cron tick), inserts a `pending` `job_runs` row a worker will claim + execute. The
+ * `run_id` is derived deterministically from `(tenant, job, fireAt)`, so every scheduler pass within
+ * the same tick window computes the same id — the `ON CONFLICT (tenant_id, run_id) DO NOTHING` insert
+ * fires the tick exactly once with no last-fired state table (the row *is* the state). `started_at`
+ * is the tick instant (≤ now), so the run is immediately due for the claim. Overlapping schedulers /
+ * multiple replicas are safe: they race on the same run id and only one wins.
+ */
+export async function enqueueScheduledJobs(
+  conn: PgConnection,
+  options: EnqueueScheduledJobsOptions,
+): Promise<readonly EnqueuedJobRun[]> {
+  const schema = options.schema ?? DEFAULT_SCHEMA;
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
+
+  const byId = new Map(options.jobs.map((j) => [j.id, j]));
+  const due = scheduledJobsDue(options.jobs, { now: options.now });
+  const results: EnqueuedJobRun[] = [];
+
+  for (const { jobId, fireAt } of due) {
+    const job = byId.get(jobId);
+    if (job === undefined || job.trigger.kind !== "scheduled") continue;
+    const runKey = `scheduled::${options.tenantId}::${jobId}::${fireAt}`;
+    const runId = deterministicRunId(runKey);
+    const trigger = { kind: "scheduled", cron: job.trigger.cron, fireAt };
+    const result = await conn.query<{ run_id: unknown }>(
+      `INSERT INTO ${schema}.job_runs
+         (tenant_id, job_id, job_kind, run_id, trigger, started_at, status,
+          input_redacted, input_data_class, output_data_class, attempts)
+       VALUES ($1::uuid, $2, 'scheduled', $3::uuid, $4::jsonb, $5::timestamptz, 'pending',
+               '{}'::jsonb, $6, $7, 1)
+       ON CONFLICT (tenant_id, run_id) DO NOTHING
+       RETURNING run_id`,
+      [options.tenantId, jobId, runId, JSON.stringify(trigger), fireAt, job.inputDataClass, job.outputDataClass],
+    );
+    results.push({ jobId, runId, inserted: (result.rowCount ?? 0) > 0 });
   }
 
   return results;

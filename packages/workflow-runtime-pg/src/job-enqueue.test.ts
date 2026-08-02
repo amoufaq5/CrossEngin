@@ -2,7 +2,7 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { JobDeclarationSchema, type DomainEvent, type JobDeclaration } from "@crossengin/jobs";
 import { describe, expect, it } from "vitest";
 
-import { deterministicRunId, enqueueJobsForEvent } from "./job-enqueue.js";
+import { deterministicRunId, enqueueJobsForEvent, enqueueScheduledJobs } from "./job-enqueue.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = "2026-05-17T12:00:00.000Z";
@@ -102,6 +102,69 @@ describe("enqueueJobsForEvent", () => {
   it("rejects an invalid schema identifier", async () => {
     await expect(
       enqueueJobsForEvent(mockConn({}), { event: EVENT, jobs: [job("j")], now: NOW, schema: "x;y" }),
+    ).rejects.toThrow(/invalid schema/);
+  });
+});
+
+describe("enqueueScheduledJobs", () => {
+  const reminder = job("overdue-reminder", { trigger: { kind: "scheduled", cron: "0 9 * * *" } });
+
+  it("inserts a pending run at the current cron tick with a deterministic run id", async () => {
+    const calls: Call[] = [];
+    const results = await enqueueScheduledJobs(mockConn({ calls }), {
+      jobs: [reminder, job("on-order")],
+      tenantId: TENANT,
+      now: "2026-05-17T14:23:00Z",
+    });
+
+    const fireAt = "2026-05-17T09:00:00.000Z";
+    expect(results).toEqual([
+      {
+        jobId: "overdue-reminder",
+        runId: deterministicRunId(`scheduled::${TENANT}::overdue-reminder::${fireAt}`),
+        inserted: true,
+      },
+    ]);
+    expect(calls).toHaveLength(1);
+    const { sql, params } = calls[0]!;
+    expect(sql).toContain("'scheduled'");
+    expect(sql).toContain("ON CONFLICT (tenant_id, run_id) DO NOTHING");
+    expect(params?.[1]).toBe("overdue-reminder");
+    expect(params?.[4]).toBe(fireAt); // started_at = the tick instant
+    expect(params?.[3]).toContain('"cron":"0 9 * * *"');
+    expect(params?.[3]).toContain(`"fireAt":"${fireAt}"`);
+  });
+
+  it("derives the same run id across a tick window (idempotent across passes)", async () => {
+    const a = await enqueueScheduledJobs(mockConn({}), {
+      jobs: [reminder],
+      tenantId: TENANT,
+      now: "2026-05-17T09:10:00Z",
+    });
+    const b = await enqueueScheduledJobs(mockConn({ insertRowCount: 0 }), {
+      jobs: [reminder],
+      tenantId: TENANT,
+      now: "2026-05-17T20:00:00Z",
+    });
+    expect(a[0]!.runId).toBe(b[0]!.runId); // same 09:00 tick all day → same id
+    expect(a[0]!.inserted).toBe(true);
+    expect(b[0]!.inserted).toBe(false); // re-enqueue of the same tick is a no-op
+  });
+
+  it("enqueues nothing when no scheduled job is present", async () => {
+    const calls: Call[] = [];
+    const results = await enqueueScheduledJobs(mockConn({ calls }), {
+      jobs: [job("on-order")],
+      tenantId: TENANT,
+      now: NOW,
+    });
+    expect(results).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects an invalid schema identifier", async () => {
+    await expect(
+      enqueueScheduledJobs(mockConn({}), { jobs: [reminder], tenantId: TENANT, now: NOW, schema: "x;y" }),
     ).rejects.toThrow(/invalid schema/);
   });
 });
