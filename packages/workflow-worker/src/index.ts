@@ -5,3 +5,6 @@ export * from "./worker.js";
 export * from "./activity-types.js";
 export * from "./activity-batch.js";
 export * from "./activity-worker.js";
+export * from "./job-types.js";
+export * from "./job-batch.js";
+export * from "./job-worker.js";
