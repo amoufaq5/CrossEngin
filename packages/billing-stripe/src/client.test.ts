@@ -165,3 +165,43 @@ describe("StripeClient error handling", () => {
     await expect(client.getSubscription("sub_x")).rejects.toMatchObject({ name: "StripeError", type: "network_error" });
   });
 });
+
+describe("createBillingPortalSession", () => {
+  it("POSTs customer + return_url and maps the session url", async () => {
+    const capture: CapturedCall[] = [];
+    const client = new StripeClient({
+      apiKey: API_KEY,
+      fetchImpl: buildFetch({
+        capture,
+        responseBody: JSON.stringify({
+          id: "bps_1",
+          object: "billing_portal.session",
+          customer: "cus_abc",
+          return_url: "https://app.example.com/admin/billing",
+          url: "https://billing.stripe.com/session/xyz",
+        }),
+      }),
+    });
+    const session = await client.createBillingPortalSession({
+      customerId: "cus_abc",
+      returnUrl: "https://app.example.com/admin/billing",
+    });
+    expect(session.url).toBe("https://billing.stripe.com/session/xyz");
+    expect(session.customerId).toBe("cus_abc");
+    const call = capture[0]!;
+    expect(call.method).toBe("POST");
+    expect(call.url).toContain("/v1/billing_portal/sessions");
+    expect(call.body).toContain("customer=cus_abc");
+    expect(call.body).toContain("return_url=https%3A%2F%2Fapp.example.com%2Fadmin%2Fbilling");
+  });
+
+  it("throws a StripeError on a non-2xx response", async () => {
+    const client = new StripeClient({
+      apiKey: API_KEY,
+      fetchImpl: buildFetch({ status: 400, responseBody: JSON.stringify({ error: { message: "no such customer" } }) }),
+    });
+    await expect(
+      client.createBillingPortalSession({ customerId: "cus_missing", returnUrl: "https://x/" }),
+    ).rejects.toBeInstanceOf(StripeError);
+  });
+});

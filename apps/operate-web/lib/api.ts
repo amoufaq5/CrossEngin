@@ -152,6 +152,16 @@ export async function fetchUsage(): Promise<TenantUsage> {
   return (await res.json()) as TenantUsage;
 }
 
+export async function createBillingPortalSession(): Promise<{ url: string }> {
+  const res = await fetch("/api/v1/meta/billing-portal", {
+    method: "POST",
+    headers: { accept: "application/json" },
+  });
+  await checkResponse(res);
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  return (await res.json()) as { url: string };
+}
+
 export async function fetchWhtReconciliation(from?: string, to?: string): Promise<WhtReconciliation> {
   const params = new URLSearchParams();
   if (from) params.set("from", from);

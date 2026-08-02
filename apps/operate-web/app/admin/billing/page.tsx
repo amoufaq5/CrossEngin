@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { Topbar } from "@/components/Topbar";
-import { fetchEntitlement, fetchUsage } from "@/lib/api";
+import { createBillingPortalSession, fetchEntitlement, fetchUsage } from "@/lib/api";
 import type { EntityUsage, TenantEntitlement, TenantUsage } from "@/lib/entitlement";
 
 type Badge = { label: string; className: string };
@@ -67,6 +67,27 @@ export default function BillingPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [inactive, setInactive] = useState(false);
+  const [portalBusy, setPortalBusy] = useState(false);
+  const [portalError, setPortalError] = useState<string | null>(null);
+
+  const openBillingPortal = () => {
+    setPortalBusy(true);
+    setPortalError(null);
+    createBillingPortalSession()
+      .then(({ url }) => {
+        window.location.href = url;
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        // 409 = the tenant has no Stripe customer (offline/manual); explain rather than fail loudly.
+        setPortalError(
+          msg.startsWith("409")
+            ? "No billing account is linked to this workspace."
+            : "Could not open the billing portal. Try again shortly.",
+        );
+        setPortalBusy(false);
+      });
+  };
 
   useEffect(() => {
     let alive = true;
@@ -129,12 +150,17 @@ export default function BillingPage() {
                     {badge.label}
                   </span>
                 </div>
-                <button
-                  type="button"
-                  className="rounded-lg border border-line bg-surface-soft px-3 py-1.5 text-sm font-medium text-ink-muted hover:text-ink"
-                >
-                  Manage billing
-                </button>
+                <div className="flex flex-col items-end gap-1">
+                  <button
+                    type="button"
+                    onClick={openBillingPortal}
+                    disabled={portalBusy}
+                    className="rounded-lg border border-line bg-surface-soft px-3 py-1.5 text-sm font-medium text-ink-muted hover:text-ink disabled:opacity-60"
+                  >
+                    {portalBusy ? "Opening…" : "Manage billing"}
+                  </button>
+                  {portalError && <span className="text-xs text-red-600">{portalError}</span>}
+                </div>
               </div>
             </div>
 

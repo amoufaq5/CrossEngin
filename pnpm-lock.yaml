@@ -78,6 +78,9 @@ importers:
       '@crossengin/api-gateway-runtime':
         specifier: workspace:*
         version: link:../../packages/api-gateway-runtime
+      '@crossengin/billing-stripe':
+        specifier: workspace:*
+        version: link:../../packages/billing-stripe
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel

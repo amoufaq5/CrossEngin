@@ -44,6 +44,7 @@ describe("subscriptionRowFromStripeEvent", () => {
       maxRecordsPerEntity: 500,
       features: ["a", "b"],
       stripeSubscriptionId: "sub_123",
+      stripeCustomerId: "cus_123",
     });
     expect(row?.currentPeriodEnd).toBe(new Date((TS + 2_592_000) * 1000).toISOString());
   });

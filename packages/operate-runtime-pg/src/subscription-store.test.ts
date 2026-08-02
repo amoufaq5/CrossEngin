@@ -47,6 +47,7 @@ describe("PostgresSubscriptionStore", () => {
       maxRecordsPerEntity: 500,
       features: ["sso", "exports"],
       stripeSubscriptionId: "sub_123",
+      stripeCustomerId: "cus_123",
     });
     expect(inserts).toHaveLength(1);
     const { params } = inserts[0]!;
@@ -57,6 +58,7 @@ describe("PostgresSubscriptionStore", () => {
     expect(params[5]).toBe(500);
     expect(params[6]).toBe(JSON.stringify(["sso", "exports"]));
     expect(params[7]).toBe("sub_123");
+    expect(params[8]).toBe("cus_123");
     // The raw tenant id is bound, never interpolated into the SQL text.
     expect(inserts[0]!.sql).not.toContain(TENANT);
   });
@@ -72,6 +74,7 @@ describe("PostgresSubscriptionStore", () => {
       maxRecordsPerEntity: 500,
       features: null,
       stripeSubscriptionId: "sub_123",
+      stripeCustomerId: "cus_123",
     });
     const { sql } = inserts[0]!;
     expect(sql).toContain("ON CONFLICT (tenant_id, stripe_subscription_id) DO UPDATE");
@@ -90,6 +93,7 @@ describe("PostgresSubscriptionStore", () => {
       maxRecordsPerEntity: null,
       features: null,
       stripeSubscriptionId: null,
+      stripeCustomerId: null,
     });
     const { params } = inserts[0]!;
     expect(params[6]).toBeNull();
@@ -100,5 +104,41 @@ describe("PostgresSubscriptionStore", () => {
   it("rejects an invalid schema identifier", () => {
     const { conn } = fakePg();
     expect(() => new PostgresSubscriptionStore(conn, { schema: "meta; DROP" })).toThrow(/invalid schema/);
+  });
+
+  it("resolveCustomerId returns the latest non-null customer id under the tenant context", async () => {
+    let tenantCtx: string | null = null;
+    const conn: PgConnection = {
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        const p = params ?? [];
+        if (sql.includes("set_config")) {
+          tenantCtx = String(p[0]);
+          return { rows: [], rowCount: 0 };
+        }
+        if (sql.includes("SELECT stripe_customer_id")) {
+          expect(sql).toContain("stripe_customer_id IS NOT NULL");
+          expect(tenantCtx).toBe(TENANT);
+          return { rows: [{ stripe_customer_id: "cus_live" }], rowCount: 1 };
+        }
+        throw new Error(`unexpected SQL: ${sql}`);
+      }) as PgConnection["query"],
+      transaction: async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn),
+      withAdvisoryLock: async <T,>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    expect(await new PostgresSubscriptionStore(conn).resolveCustomerId(TENANT)).toBe("cus_live");
+  });
+
+  it("resolveCustomerId returns null when the tenant has no Stripe customer", async () => {
+    const conn: PgConnection = {
+      query: (async (sql: string) => {
+        if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
+        return { rows: [], rowCount: 0 };
+      }) as PgConnection["query"],
+      transaction: async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn),
+      withAdvisoryLock: async <T,>(_k: bigint, fn: () => Promise<T>) => fn(),
+      close: async () => undefined,
+    };
+    expect(await new PostgresSubscriptionStore(conn).resolveCustomerId(TENANT)).toBeNull();
   });
 });

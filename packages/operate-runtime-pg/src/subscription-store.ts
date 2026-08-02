@@ -16,6 +16,8 @@ export interface SubscriptionUpsertRow {
   readonly features: readonly string[] | null;
   /** The Stripe subscription id; when present the row upserts in place (else it appends). */
   readonly stripeSubscriptionId: string | null;
+  /** The Stripe customer id — read back to open a Billing Portal session for the tenant. */
+  readonly stripeCustomerId: string | null;
 }
 
 export interface PostgresSubscriptionStoreOptions {
@@ -50,8 +52,8 @@ export class PostgresSubscriptionStore {
     await withTenantContext(this.conn, row.tenantId, async (tx) => {
       await tx.query(
         `INSERT INTO ${this.schema}.billing_subscriptions
-           (tenant_id, plan_id, status, current_period_end, trial_end, max_records_per_entity, features, stripe_subscription_id, created_at, updated_at)
-         VALUES ($1::uuid, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7::jsonb, $8, now(), now())
+           (tenant_id, plan_id, status, current_period_end, trial_end, max_records_per_entity, features, stripe_subscription_id, stripe_customer_id, created_at, updated_at)
+         VALUES ($1::uuid, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7::jsonb, $8, $9, now(), now())
          ON CONFLICT (tenant_id, stripe_subscription_id) DO UPDATE SET
            plan_id = EXCLUDED.plan_id,
            status = EXCLUDED.status,
@@ -59,6 +61,7 @@ export class PostgresSubscriptionStore {
            trial_end = EXCLUDED.trial_end,
            max_records_per_entity = EXCLUDED.max_records_per_entity,
            features = EXCLUDED.features,
+           stripe_customer_id = EXCLUDED.stripe_customer_id,
            updated_at = now()`,
         [
           row.tenantId,
@@ -69,8 +72,29 @@ export class PostgresSubscriptionStore {
           row.maxRecordsPerEntity,
           row.features === null ? null : JSON.stringify(row.features),
           row.stripeSubscriptionId,
+          row.stripeCustomerId,
         ],
       );
+    });
+  }
+
+  /**
+   * The tenant's most-recent non-null Stripe customer id, for opening a Billing Portal
+   * session. Runs under `withTenantContext` (RLS), so it only ever reads the caller tenant's
+   * rows. Returns `null` when the tenant has no Stripe-linked subscription.
+   */
+  async resolveCustomerId(tenantId: string): Promise<string | null> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const res = await tx.query<{ stripe_customer_id: unknown }>(
+        `SELECT stripe_customer_id
+           FROM ${this.schema}.billing_subscriptions
+          WHERE tenant_id = $1::uuid AND stripe_customer_id IS NOT NULL
+          ORDER BY updated_at DESC
+          LIMIT 1`,
+        [tenantId],
+      );
+      const raw = res.rows[0]?.stripe_customer_id;
+      return typeof raw === "string" && raw.length > 0 ? raw : null;
     });
   }
 }

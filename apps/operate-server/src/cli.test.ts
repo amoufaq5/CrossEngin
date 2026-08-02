@@ -96,6 +96,42 @@ describe("parseServeArgs", () => {
     expect(opts.licenseKey).toBeNull();
     expect(opts.stripeWebhookSecret).toBeNull();
     expect(opts.planCatalogFile).toBeNull();
+    expect(opts.stripeApiKey).toBeNull();
+    expect(opts.billingPortalReturnUrl).toBeNull();
+  });
+
+  it("parses --stripe-api-key + --billing-portal-return-url with a pg store", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--store",
+      "pg",
+      "--stripe-api-key",
+      "sk_test_x",
+      "--billing-portal-return-url",
+      "https://app/admin/billing",
+    ]);
+    expect(opts.stripeApiKey).toBe("sk_test_x");
+    expect(opts.billingPortalReturnUrl).toBe("https://app/admin/billing");
+  });
+
+  it("rejects --stripe-api-key without a return url", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-api-key", "sk_x"]),
+    ).toThrow(/requires --billing-portal-return-url/);
+  });
+
+  it("rejects --stripe-api-key with the memory store", () => {
+    expect(() =>
+      parseServeArgs([
+        "--pack",
+        "erp-core",
+        "--stripe-api-key",
+        "sk_x",
+        "--billing-portal-return-url",
+        "https://app/",
+      ]),
+    ).toThrow(/requires a Postgres store/);
   });
 
   it("parses --plan-catalog with a webhook secret + pg store", () => {

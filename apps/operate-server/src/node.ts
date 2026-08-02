@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
+import { StripeClient } from "@crossengin/billing-stripe";
 import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
@@ -9,6 +10,7 @@ import {
   InMemorySettingsStore,
   LicenseEntitlementResolver,
   buildPlanCatalog,
+  type BillingPortalWiring,
   type EntitlementResolver,
   type PlanLimitsLookup,
   type EntityStore,
@@ -211,10 +213,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // and (unless a license already gates) the gate reads them via a Postgres resolver — so a
   // Stripe subscription change flows straight into enforcement. Signature-authenticated, so
   // the route runs ahead of the gateway's API-key/JWT pipeline.
+  // One subscription store backs both the webhook (writes snapshots) and the billing portal
+  // (reads the tenant's Stripe customer id), when either is configured over a pg connection.
+  const subscriptionStore =
+    conn !== undefined && (options.stripeWebhookSecret !== null || options.stripeApiKey !== null)
+      ? new PostgresSubscriptionStore(conn, schemaOpt)
+      : undefined;
   let webhookRoute: WebhookRoute | undefined;
-  if (options.stripeWebhookSecret !== null && conn !== undefined) {
+  if (options.stripeWebhookSecret !== null && conn !== undefined && subscriptionStore !== undefined) {
     const secret = options.stripeWebhookSecret;
-    const subscriptionStore = new PostgresSubscriptionStore(conn, schemaOpt);
     if (entitlementResolver === undefined) entitlementResolver = new PostgresEntitlementResolver(conn, schemaOpt);
     // Optional declarative plan catalog: a webhook event resolves its record cap + features from
     // the catalog (by plan or Stripe price id), falling back to the subscription's own metadata.
@@ -241,6 +248,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       },
     };
   }
+  // Stripe Billing Portal: POST /v1/meta/billing-portal mints a hosted session so a tenant can
+  // manage/fix their subscription. The subscription store resolves the tenant's Stripe customer
+  // id; the Stripe client (with the secret key) creates the session. Both structural.
+  let billingPortal: BillingPortalWiring | undefined;
+  if (options.stripeApiKey !== null && options.billingPortalReturnUrl !== null && subscriptionStore !== undefined) {
+    billingPortal = {
+      customers: subscriptionStore,
+      portal: new StripeClient({ apiKey: options.stripeApiKey }),
+      returnUrl: options.billingPortalReturnUrl,
+    };
+  }
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -249,6 +267,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     settingsStore,
     ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
     ...(webhookRoute !== undefined ? { webhookRoute } : {}),
+    ...(billingPortal !== undefined ? { billingPortal } : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
   });

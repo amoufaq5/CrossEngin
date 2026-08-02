@@ -2,6 +2,7 @@ import type { ForwardedProto, HttpMethod } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   buildOperateGateway,
+  type BillingPortalWiring,
   type EntitlementResolver,
   type EntityStore,
   type OperateServer,
@@ -114,6 +115,8 @@ export interface BuildOperateHttpServerOptions {
   readonly adminRoles?: readonly string[];
   /** Optional subscription gate: denies a lapsed tenant (past_due → read-only). */
   readonly entitlementResolver?: EntitlementResolver;
+  /** Optional Stripe Billing Portal route (POST /v1/meta/billing-portal). */
+  readonly billingPortal?: BillingPortalWiring;
   /** Optional signature-authenticated webhook route handled ahead of the gateway. */
   readonly webhookRoute?: WebhookRoute;
   readonly defaultScheme?: ForwardedProto;
@@ -149,6 +152,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.adminRoles !== undefined ? { adminRoles: options.adminRoles as never } : {}),
     ...(options.entitlementResolver !== undefined ? { entitlementResolver: options.entitlementResolver } : {}),
+    ...(options.billingPortal !== undefined ? { billingPortal: options.billingPortal } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

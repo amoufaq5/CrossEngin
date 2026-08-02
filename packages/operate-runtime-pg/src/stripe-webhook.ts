@@ -76,6 +76,7 @@ export function subscriptionRowFromStripeEvent(
     maxRecordsPerEntity,
     features,
     stripeSubscriptionId: asString(raw["id"]),
+    stripeCustomerId: mapped.customerId.length > 0 ? mapped.customerId : asString(raw["customer"]),
   };
 }
 

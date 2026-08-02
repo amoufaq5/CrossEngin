@@ -23,6 +23,10 @@ export interface ServeOptions {
   readonly stripeWebhookSecret: string | null;
   /** Path to a plan-catalog JSON ({plans:[...]}) — resolves record caps for webhook events. */
   readonly planCatalogFile: string | null;
+  /** Stripe secret API key (sk_…) — enables POST /v1/meta/billing-portal (needs a pg store). */
+  readonly stripeApiKey: string | null;
+  /** Where Stripe returns the customer after the Billing Portal (required with --stripe-api-key). */
+  readonly billingPortalReturnUrl: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -66,6 +70,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let licenseKey: string | null = null;
   let stripeWebhookSecret: string | null = null;
   let planCatalogFile: string | null = null;
+  let stripeApiKey: string | null = null;
+  let billingPortalReturnUrl: string | null = null;
   let help = false;
   let version = false;
 
@@ -143,6 +149,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--plan-catalog" || arg.startsWith("--plan-catalog=")) {
       planCatalogFile = takeValue(arg, next, "--plan-catalog");
       i += consumed();
+    } else if (arg === "--stripe-api-key" || arg.startsWith("--stripe-api-key=")) {
+      stripeApiKey = takeValue(arg, next, "--stripe-api-key");
+      i += consumed();
+    } else if (arg === "--billing-portal-return-url" || arg.startsWith("--billing-portal-return-url=")) {
+      billingPortalReturnUrl = takeValue(arg, next, "--billing-portal-return-url");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -156,6 +168,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (planCatalogFile !== null && stripeWebhookSecret === null) {
     throw new CliUsageError("--plan-catalog requires --stripe-webhook-secret (it feeds webhook record caps)");
+  }
+  if (stripeApiKey !== null && billingPortalReturnUrl === null) {
+    throw new CliUsageError("--stripe-api-key requires --billing-portal-return-url (where Stripe returns the customer)");
+  }
+  if (stripeApiKey !== null && store === "memory") {
+    throw new CliUsageError("--stripe-api-key requires a Postgres store (--store pg or pg-columns)");
   }
 
   if (
@@ -191,6 +209,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     licenseKey,
     stripeWebhookSecret,
     planCatalogFile,
+    stripeApiKey,
+    billingPortalReturnUrl,
     defaultScheme,
     help,
     version,
@@ -227,6 +247,9 @@ Options:
                        (needs --store pg|pg-columns; also enforces the subscription gate)
   --plan-catalog <file>  Plan-catalog JSON {plans:[...]} resolving webhook record caps
                        by plan/price id (requires --stripe-webhook-secret)
+  --stripe-api-key <sk>  Stripe secret key — enables POST /v1/meta/billing-portal
+                       (needs --store pg|pg-columns + --billing-portal-return-url)
+  --billing-portal-return-url <url>  Where Stripe returns the customer after the portal
   --help, -h           Show this help
   --version, -v        Print version
 
