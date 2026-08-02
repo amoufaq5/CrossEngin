@@ -49,7 +49,7 @@ import {
 } from "./write-effects.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
-import { withEntitlement, type EntitlementResolver } from "./entitlement.js";
+import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -476,7 +476,14 @@ export function compileOperateServer(
   const routeSpecs = manifestRouteSpecs(manifest);
   for (const spec of routeSpecs) {
     routes.register(routeFromSpec(spec));
-    handlers.register(spec.operationId, gate(buildSpecHandler(spec, ctx), spec.method === "GET" ? "read" : "write"));
+    const base = buildSpecHandler(spec, ctx);
+    // A create op runs the combined write-status + record-cap gate; every other op runs
+    // the status-only gate (read for GET, write otherwise).
+    const handler =
+      resolver !== undefined && spec.action === "create"
+        ? withRecordLimit(base, { resolver, store: options.store, entity: spec.entity })
+        : gate(base, spec.method === "GET" ? "read" : "write");
+    handlers.register(spec.operationId, handler);
   }
 
   // Manifest-driven UI metadata: any authenticated principal may read the shape.
