@@ -30,6 +30,12 @@ export interface EngineOptions {
   readonly idGenerator?: IdGenerator;
   readonly guardEvaluator?: GuardEvaluator;
   readonly systemActorId?: string;
+  /**
+   * When true, `schedule_activity` records the activity as `scheduled` (persisting its input) but
+   * does NOT run the handler inline — a distributed worker claims + executes it later via
+   * `executeScheduledActivity`. Default false (activities run inline, as before).
+   */
+  readonly deferActivities?: boolean;
 }
 
 export interface StartInstanceInput {
@@ -70,6 +76,7 @@ export class WorkflowEngine {
   private readonly ids: IdGenerator;
   private readonly guardEvaluator: GuardEvaluator;
   private readonly systemActorId: string;
+  private readonly deferActivities: boolean;
   private readonly seenSignalIdempotency: Set<string> = new Set();
   private readonly instanceTenant: Map<string, string> = new Map();
   private readonly instanceCorrelation: Map<string, string> = new Map();
@@ -82,6 +89,7 @@ export class WorkflowEngine {
     this.ids = opts.idGenerator ?? new RandomIdGenerator();
     this.guardEvaluator = opts.guardEvaluator ?? defaultGuardEvaluator;
     this.systemActorId = opts.systemActorId ?? "workflow-engine";
+    this.deferActivities = opts.deferActivities ?? false;
   }
 
   async startInstance(input: StartInstanceInput): Promise<ProjectedInstance> {
@@ -561,12 +569,34 @@ export class WorkflowEngine {
         kind,
         definitionActivityKey: activityKey,
         attemptNumber: 1,
+        input: inputData,
         inputSha256: sha256(JSON.stringify(inputData)),
       },
       correlationId: null,
       causationEventId: null,
     });
 
+    // Deferred mode: leave the activity `scheduled` for a distributed worker to claim + execute.
+    if (this.deferActivities) return;
+    await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, 1, tenantId);
+  }
+
+  /**
+   * Runs a scheduled activity's handler: appends `activity_started`, invokes the resolved handler,
+   * appends the outcome (`activity_completed` / `_failed` / `_timed_out`), and applies the resulting
+   * transition. Shared by the inline path (`applyScheduleActivity`) and the distributed executor
+   * (`executeScheduledActivity`).
+   */
+  private async runActivityHandler(
+    instanceId: string,
+    definition: WorkflowDefinition,
+    activityId: string,
+    activityKey: string,
+    kind: string,
+    inputData: Record<string, unknown>,
+    attemptNumber: number,
+    tenantId: string,
+  ): Promise<void> {
     const handler =
       this.registry.resolve({
         kind: kind as never,
@@ -604,7 +634,7 @@ export class WorkflowEngine {
         definitionId: definition.id,
         definitionActivityKey: activityKey,
         kind: kind as never,
-        attemptNumber: 1,
+        attemptNumber,
         input: inputData,
         variables: state?.variables ?? {},
       });
@@ -707,6 +737,60 @@ export class WorkflowEngine {
         causationEventId: null,
       });
     }
+  }
+
+  /**
+   * Distributed executor: runs a scheduled-but-unstarted activity from the event log, so a worker
+   * that claimed it (in another process) can execute it — the activity analog of
+   * `fireDueTimersForInstance`. Log-driven and idempotent: an activity that already has an
+   * `activity_started` (another worker ran it) is a no-op, so a re-delivered at-least-once claim
+   * runs nothing. The activity's input is read from the persisted `activity_scheduled` payload.
+   */
+  async executeScheduledActivity(
+    instanceId: string,
+    activityId: string,
+  ): Promise<{ readonly executed: boolean }> {
+    const events = await this.eventLog.listByInstance(instanceId);
+    let scheduled: { kind: string; key: string; input: Record<string, unknown>; attempt: number } | null = null;
+    let started = false;
+    for (const e of events) {
+      if (e.activityId !== activityId) continue;
+      if (e.kind === "activity_scheduled") {
+        const p = e.payload;
+        scheduled = {
+          kind: typeof p["kind"] === "string" ? (p["kind"] as string) : "transformation",
+          key: typeof p["definitionActivityKey"] === "string" ? (p["definitionActivityKey"] as string) : "default_activity",
+          input: (p["input"] as Record<string, unknown> | undefined) ?? {},
+          attempt: typeof p["attemptNumber"] === "number" ? (p["attemptNumber"] as number) : 1,
+        };
+      } else if (
+        e.kind === "activity_started" ||
+        e.kind === "activity_completed" ||
+        e.kind === "activity_failed" ||
+        e.kind === "activity_timed_out"
+      ) {
+        started = true;
+      }
+    }
+    if (scheduled === null || started) return { executed: false };
+    const state = await this.getInstanceState(instanceId);
+    if (state === null) return { executed: false };
+    const definition = this.definitions.get(state.definitionId);
+    if (definition === undefined) return { executed: false };
+    await this.runActivityHandler(
+      instanceId,
+      definition,
+      activityId,
+      scheduled.key,
+      scheduled.kind,
+      scheduled.input,
+      scheduled.attempt,
+      state.tenantId,
+    );
+    // The inline path runs inside the step loop; the distributed entry point must drive it itself
+    // so a terminal transition emits instance_completed / runs the next state's on-entry actions.
+    await this.runStepLoop(instanceId, definition);
+    return { executed: true };
   }
 
   private async applyScheduleTimer(

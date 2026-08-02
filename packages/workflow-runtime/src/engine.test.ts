@@ -676,3 +676,110 @@ describe("event sequence numbers", () => {
     }
   });
 });
+
+describe("deferActivities + executeScheduledActivity (distributed activities)", () => {
+  function activityDef(): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            { kind: "schedule_activity", parameters: { activityKey: "process_payment", kind: "transformation", input: { amount: 100 } } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+      transitions: [
+        {
+          name: "complete",
+          fromState: "draft",
+          toState: "done",
+          trigger: { kind: "activity_completed", activityKey: "process_payment" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+      initialState: "draft",
+    };
+  }
+
+  function deferredEngine(def: WorkflowDefinition, log = new InMemoryEventLog()) {
+    return {
+      log,
+      engine: new WorkflowEngine({
+        eventLog: log,
+        definitions: new Map([[def.id, def]]),
+        activityRegistry: createDefaultRegistry(),
+        clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+        idGenerator: new CountingIdGenerator(),
+        deferActivities: true,
+      }),
+    };
+  }
+
+  it("schedules the activity but does NOT run it inline", async () => {
+    const def = activityDef();
+    const { engine } = deferredEngine(def);
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).toContain("activity_scheduled");
+    expect(kinds).not.toContain("activity_started");
+    expect(kinds).not.toContain("instance_completed");
+  });
+
+  it("executeScheduledActivity runs the handler + transitions the instance", async () => {
+    const def = activityDef();
+    const { engine } = deferredEngine(def);
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const scheduled = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "activity_scheduled")!;
+    const result = await engine.executeScheduledActivity(state.instanceId, scheduled.activityId!);
+    expect(result.executed).toBe(true);
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).toContain("activity_started");
+    expect(kinds).toContain("activity_completed");
+    expect(kinds).toContain("instance_completed");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("completed");
+  });
+
+  it("is idempotent — a second execute of an already-started activity is a no-op", async () => {
+    const def = activityDef();
+    const { engine } = deferredEngine(def);
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const activityId = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "activity_scheduled")!.activityId!;
+    await engine.executeScheduledActivity(state.instanceId, activityId);
+    const before = (await engine.listEvents(state.instanceId)).length;
+    const again = await engine.executeScheduledActivity(state.instanceId, activityId);
+    expect(again.executed).toBe(false);
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before); // no duplicate events
+  });
+
+  it("executes for an instance a second engine never started (cross-process over one log)", async () => {
+    const def = activityDef();
+    const { engine: engineA, log } = deferredEngine(def);
+    const state = await engineA.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const activityId = (await engineA.listEvents(state.instanceId)).find((e) => e.kind === "activity_scheduled")!.activityId!;
+    // Engine B shares only the log — never started this instance.
+    const engineB = new WorkflowEngine({
+      eventLog: log,
+      definitions: new Map([[def.id, def]]),
+      activityRegistry: createDefaultRegistry(),
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+    });
+    expect((await engineB.executeScheduledActivity(state.instanceId, activityId)).executed).toBe(true);
+    expect((await engineB.getInstanceState(state.instanceId))?.status).toBe("completed");
+  });
+
+  it("returns executed:false for an unknown activity", async () => {
+    const def = activityDef();
+    const { engine } = deferredEngine(def);
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    expect((await engine.executeScheduledActivity(state.instanceId, "wfa_nope0001")).executed).toBe(false);
+  });
+});
