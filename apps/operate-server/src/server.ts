@@ -2,6 +2,7 @@ import type { ForwardedProto } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   buildOperateGateway,
+  type EntitlementResolver,
   type EntityStore,
   type OperateServer,
   type SequenceAllocator,
@@ -93,6 +94,8 @@ export interface BuildOperateHttpServerOptions {
   readonly settingsStore?: SettingsStore;
   /** Roles permitted to manage tenant settings. */
   readonly adminRoles?: readonly string[];
+  /** Optional subscription gate: denies a lapsed tenant (past_due → read-only). */
+  readonly entitlementResolver?: EntitlementResolver;
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -125,6 +128,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.adminRoles !== undefined ? { adminRoles: options.adminRoles as never } : {}),
+    ...(options.entitlementResolver !== undefined ? { entitlementResolver: options.entitlementResolver } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

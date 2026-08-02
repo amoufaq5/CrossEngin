@@ -7,6 +7,7 @@ import {
   InMemoryEntityStore,
   InMemorySequenceAllocator,
   InMemorySettingsStore,
+  LicenseEntitlementResolver,
   type EntityStore,
   type SequenceAllocator,
   type SettingsStore,
@@ -180,6 +181,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const { store, allocator, settingsStore } = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
+  // Offline subscription entitlement: verify an Ed25519 license token against the
+  // licensor's public key at boot (no cloud billing call). A lapsed/expired license
+  // means the gate denies (past_due keeps read access).
+  const entitlementResolver =
+    options.licenseFile !== null && options.licenseKey !== null
+      ? new LicenseEntitlementResolver((await readFile(options.licenseFile, "utf8")).trim(), options.licenseKey)
+      : undefined;
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -188,6 +196,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     settingsStore,
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
+    ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
   });
   poller?.start();
   const listener = createNodeRequestListener(httpServer);
