@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
@@ -12,6 +12,18 @@ import { deleteRecord, getRecord, runTransition, updateRecord } from "@/lib/api"
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
 import { entityBySlug, fieldErrorMap, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
+
+/** Moves keyboard focus to the first invalid input inside a container, scrolling it into view. */
+function focusFirstInvalid(container: HTMLElement | null): void {
+  if (container === null || typeof window === "undefined") return;
+  requestAnimationFrame(() => {
+    const el = container.querySelector<HTMLElement>('[aria-invalid="true"]');
+    if (el !== null) {
+      el.focus();
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  });
+}
 
 export default function RecordPage({ params }: { params: { slug: string; id: string } }) {
   const { schema, loading } = useSchema();
@@ -46,6 +58,8 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
   const [draft, setDraft] = useState<Record<string, string | boolean>>({});
   const [notice, setNotice] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const fieldsRef = useRef<HTMLDListElement>(null);
+  const errId = (name: string) => `edit-${entity.slug}-err-${name}`;
 
   const load = useCallback(() => {
     setBusy(true);
@@ -106,6 +120,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
         // Stay in edit mode so the user can fix the flagged fields (highlighted inline).
         setError("Please fix the highlighted fields.");
         setFieldErrors(fieldErrorMap(fields));
+        focusFirstInvalid(fieldsRef.current);
       } else if (msg.startsWith("409")) {
         // Someone else changed this record since we loaded it — reload the latest so the
         // user re-applies their edits against current data rather than clobbering it.
@@ -226,7 +241,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
           <p className="text-sm text-ink-muted">Not found.</p>
         ) : (
           <div className="rounded-xl border border-line bg-white p-6">
-            <dl className="grid grid-cols-1 gap-x-8 gap-y-5 md:grid-cols-2">
+            <dl ref={fieldsRef} className="grid grid-cols-1 gap-x-8 gap-y-5 md:grid-cols-2">
               {entity.fields.map((f) => (
                 <div key={f.name}>
                   <dt className="mb-1 flex items-center gap-1 text-xs font-medium uppercase tracking-wide text-ink-faint">
@@ -243,6 +258,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
                           value={draft[f.name] ?? ""}
                           schema={schema}
                           invalid={fieldErrors[f.name] !== undefined}
+                          describedById={errId(f.name)}
                           onChange={(v) => {
                             setDraft((p) => ({ ...p, [f.name]: v }));
                             setFieldErrors((prev) => {
@@ -253,7 +269,11 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
                             });
                           }}
                         />
-                        {fieldErrors[f.name] && <span className="mt-1 block text-xs text-red-600">{fieldErrors[f.name]}</span>}
+                        {fieldErrors[f.name] && (
+                          <span id={errId(f.name)} className="mt-1 block text-xs text-red-600">
+                            {fieldErrors[f.name]}
+                          </span>
+                        )}
                       </>
                     ) : (
                       <ReadValue field={f} value={record[f.name]} schema={schema} />
