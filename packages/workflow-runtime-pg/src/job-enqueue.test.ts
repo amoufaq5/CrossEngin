@@ -2,7 +2,14 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { JobDeclarationSchema, type DomainEvent, type JobDeclaration } from "@crossengin/jobs";
 import { describe, expect, it } from "vitest";
 
-import { deterministicRunId, enqueueJobsForEvent, enqueueScheduledJobs } from "./job-enqueue.js";
+import type { UserInvocation } from "@crossengin/jobs";
+
+import {
+  deterministicRunId,
+  enqueueJobsForEvent,
+  enqueueScheduledJobs,
+  enqueueUserInvokedJob,
+} from "./job-enqueue.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = "2026-05-17T12:00:00.000Z";
@@ -114,6 +121,60 @@ describe("enqueueJobsForEvent", () => {
   it("rejects an invalid schema identifier", async () => {
     await expect(
       enqueueJobsForEvent(mockConn({}), { event: EVENT, jobs: [job("j")], now: NOW, schema: "x;y" }),
+    ).rejects.toThrow(/invalid schema/);
+  });
+});
+
+describe("enqueueUserInvokedJob", () => {
+  const INVOCATION: UserInvocation = {
+    tenantId: TENANT,
+    action: "reindex-catalog",
+    data: { scope: "all" },
+    idempotencyKey: "inv-1",
+  };
+
+  it("inserts a pending userInvoked run for a matching action, deterministic + due now", async () => {
+    const calls: Call[] = [];
+    const results = await enqueueUserInvokedJob(mockConn({ calls }), {
+      invocation: INVOCATION,
+      jobs: [
+        job("reindex", { trigger: { kind: "userInvoked", action: "reindex-catalog" } }),
+        job("other", { trigger: { kind: "userInvoked", action: "export-report" } }),
+      ],
+      now: NOW,
+    });
+
+    expect(results).toEqual([
+      {
+        jobId: "reindex",
+        runId: deterministicRunId("userInvoked::reindex-catalog::inv-1::reindex"),
+        inserted: true,
+      },
+    ]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.params?.[2]).toBe("userInvoked");
+    expect(calls[0]!.params?.[5]).toBe(NOW); // delayMs 0 → due now
+  });
+
+  it("enqueues nothing when no userInvoked job matches the action", async () => {
+    const calls: Call[] = [];
+    const results = await enqueueUserInvokedJob(mockConn({ calls }), {
+      invocation: INVOCATION,
+      jobs: [job("on-order")],
+      now: NOW,
+    });
+    expect(results).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects an invalid schema identifier", async () => {
+    await expect(
+      enqueueUserInvokedJob(mockConn({}), {
+        invocation: INVOCATION,
+        jobs: [job("reindex", { trigger: { kind: "userInvoked", action: "reindex-catalog" } })],
+        now: NOW,
+        schema: "x;y",
+      }),
     ).rejects.toThrow(/invalid schema/);
   });
 });

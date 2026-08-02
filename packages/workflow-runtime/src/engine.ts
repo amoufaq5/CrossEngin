@@ -8,12 +8,19 @@ import {
 } from "@crossengin/workflow-engine";
 
 import {
+  type ActivityInvocation,
+  type ActivityOutcome,
   type ActivityRegistry,
   unsupportedHandler,
 } from "./activity-handlers.js";
 import { type Clock, type IdGenerator, SystemClock, RandomIdGenerator } from "./clock.js";
 import { type EventLog } from "./event-log.js";
 import { type ProjectedInstance, projectInstance } from "./projection.js";
+import {
+  type CompensationStep,
+  compensationKindByActivityId,
+  planCompensation,
+} from "./saga.js";
 import {
   type GuardEvaluator,
   defaultGuardEvaluator,
@@ -108,6 +115,13 @@ export interface SubmitSignalResult {
 export interface TickTimersResult {
   readonly firedTimerIds: readonly string[];
   readonly affectedInstanceIds: readonly string[];
+}
+
+export interface CompensationResult {
+  /** The instance's compensation strategy, or `null` when the instance/definition is unknown. */
+  readonly strategy: WorkflowDefinition["compensationStrategy"] | null;
+  /** The source activityIds compensated by this call (empty when nothing was outstanding). */
+  readonly compensatedActivityIds: readonly string[];
 }
 
 export class WorkflowEngine {
@@ -597,7 +611,13 @@ export class WorkflowEngine {
         ? Math.floor(action.parameters["maxAttempts"] as number)
         : 1;
     const backoff = parseActivityBackoff(action.parameters);
-    await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, 1, maxAttempts, tenantId, backoff, null);
+    // A `compensationActivityKey` is persisted onto the scheduled activity so a later saga rollback
+    // (planCompensation) can find the side-effect's undo handler; absent ⇒ nothing to compensate.
+    const compensationActivityKey =
+      typeof action.parameters["compensationActivityKey"] === "string"
+        ? (action.parameters["compensationActivityKey"] as string)
+        : null;
+    await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, 1, maxAttempts, tenantId, backoff, null, compensationActivityKey);
   }
 
   /**
@@ -616,6 +636,7 @@ export class WorkflowEngine {
     tenantId: string,
     backoff: ActivityRetryBackoff,
     availableAt: string | null,
+    compensationActivityKey: string | null = null,
   ): Promise<void> {
     const activityId = this.ids.generate("wfa");
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
@@ -645,6 +666,7 @@ export class WorkflowEngine {
         // availableAt defers the activity's scheduled_at so the claim (`scheduled_at <= now`) holds it
         // out of the queue until the backoff elapses; absent ⇒ due immediately (occurredAt).
         ...(availableAt !== null ? { availableAt } : {}),
+        ...(compensationActivityKey !== null ? { compensationActivityKey } : {}),
       },
       correlationId: null,
       causationEventId: null,
@@ -652,7 +674,7 @@ export class WorkflowEngine {
 
     // Deferred mode: leave the activity `scheduled` for a distributed worker to claim + execute.
     if (this.deferActivities) return;
-    await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, attemptNumber, maxAttempts, tenantId, backoff);
+    await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, attemptNumber, maxAttempts, tenantId, backoff, compensationActivityKey);
   }
 
   /**
@@ -672,6 +694,7 @@ export class WorkflowEngine {
     maxAttempts: number,
     tenantId: string,
     backoff: ActivityRetryBackoff = null,
+    compensationActivityKey: string | null = null,
   ): Promise<void> {
     const handler =
       this.registry.resolve({
@@ -795,7 +818,7 @@ export class WorkflowEngine {
         const delayMs = activityRetryDelayMs(backoff, attemptNumber);
         const availableAt =
           delayMs > 0 ? new Date(new Date(this.clock.nowIso()).getTime() + delayMs).toISOString() : null;
-        await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, attemptNumber + 1, maxAttempts, tenantId, backoff, availableAt);
+        await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, attemptNumber + 1, maxAttempts, tenantId, backoff, availableAt, compensationActivityKey);
       } else {
         const liveState = await this.getInstanceState(instanceId);
         if (liveState !== null) {
@@ -853,6 +876,7 @@ export class WorkflowEngine {
       attempt: number;
       maxAttempts: number;
       backoff: ActivityRetryBackoff;
+      compensationActivityKey: string | null;
     } | null = null;
     let started = false;
     for (const e of events) {
@@ -866,6 +890,8 @@ export class WorkflowEngine {
           attempt: typeof p["attemptNumber"] === "number" ? (p["attemptNumber"] as number) : 1,
           maxAttempts: typeof p["maxAttempts"] === "number" ? (p["maxAttempts"] as number) : 1,
           backoff: (p["retryBackoff"] as ActivityRetryBackoff) ?? null,
+          compensationActivityKey:
+            typeof p["compensationActivityKey"] === "string" ? (p["compensationActivityKey"] as string) : null,
         };
       } else if (
         e.kind === "activity_started" ||
@@ -892,11 +918,188 @@ export class WorkflowEngine {
       scheduled.maxAttempts,
       state.tenantId,
       scheduled.backoff,
+      scheduled.compensationActivityKey,
     );
     // The inline path runs inside the step loop; the distributed entry point must drive it itself
     // so a terminal transition emits instance_completed / runs the next state's on-entry actions.
     await this.runStepLoop(instanceId, definition);
     return { executed: true };
+  }
+
+  /**
+   * Runs saga compensation for an instance: plans the rollback (`planCompensation` over the
+   * completed side-effect activities, honoring the definition's `compensationStrategy`), then
+   * executes each compensating handler and records `compensation_started` / `activity_compensated`
+   * / `compensation_completed`. Log-driven and idempotent — an activity that already carries an
+   * `activity_compensated` is dropped by the planner, so a re-invocation compensates nothing twice
+   * (mirroring `executeScheduledActivity`). This is the shared code the terminal-failure path and
+   * the public entry point both call.
+   */
+  async compensateInstance(instanceId: string): Promise<CompensationResult> {
+    return this.runCompensation(instanceId);
+  }
+
+  private async runCompensation(instanceId: string): Promise<CompensationResult> {
+    const state = await this.getInstanceState(instanceId);
+    if (state === null) return { strategy: null, compensatedActivityIds: [] };
+    const definition = this.definitions.get(state.definitionId);
+    if (definition === undefined) return { strategy: null, compensatedActivityIds: [] };
+    const strategy = definition.compensationStrategy;
+    // no_compensation / manual_review record nothing beyond what the plan dictates (nothing runs):
+    // no_compensation yields an empty plan; manual_review defers to a human, so it is not executed.
+    if (strategy !== "immediate_reverse_order" && strategy !== "parallel") {
+      return { strategy, compensatedActivityIds: [] };
+    }
+    const events = await this.eventLog.listByInstance(instanceId);
+    const plan = planCompensation({ definition, events });
+    if (plan.steps.length === 0) return { strategy, compensatedActivityIds: [] };
+
+    const kindByActivityId = compensationKindByActivityId(events);
+    const inputByActivityId = new Map<string, Record<string, unknown>>();
+    for (const e of events) {
+      if (e.kind === "activity_scheduled" && e.activityId !== null) {
+        inputByActivityId.set(
+          e.activityId,
+          (e.payload["input"] as Record<string, unknown> | undefined) ?? {},
+        );
+      }
+    }
+
+    const startSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId: state.tenantId,
+      sequenceNumber: startSeq + 1,
+      kind: "compensation_started",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: {
+        strategy,
+        activityIds: plan.steps.map((s) => s.originalActivityId),
+      },
+      correlationId: null,
+      causationEventId: null,
+    });
+
+    const compensatedActivityIds: string[] = [];
+    for (const step of plan.steps) {
+      await this.compensateStep(
+        instanceId,
+        definition,
+        state.tenantId,
+        state.variables,
+        step,
+        kindByActivityId.get(step.originalActivityId) ?? "compensation",
+        inputByActivityId.get(step.originalActivityId) ?? {},
+      );
+      compensatedActivityIds.push(step.originalActivityId);
+    }
+
+    const doneSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId: state.tenantId,
+      sequenceNumber: doneSeq + 1,
+      kind: "compensation_completed",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: { strategy, compensatedActivityIds },
+      correlationId: null,
+      causationEventId: null,
+    });
+
+    return { strategy, compensatedActivityIds };
+  }
+
+  /**
+   * Executes one compensating step: resolves the compensating handler by the source activity's kind
+   * + the plan's `compensationActivityKey` (an unregistered key is a no-op compensation, still
+   * recorded), runs it, then records an `activity_compensated` for the *source* activity so the
+   * projection marks it compensated and the planner excludes it on a re-run.
+   */
+  private async compensateStep(
+    instanceId: string,
+    definition: WorkflowDefinition,
+    tenantId: string,
+    variables: Readonly<Record<string, unknown>>,
+    step: CompensationStep,
+    sourceKind: ActivityInvocation["kind"],
+    input: Record<string, unknown>,
+  ): Promise<void> {
+    const handler = this.registry.resolve({
+      kind: sourceKind,
+      definitionId: definition.id,
+      activityKey: step.compensationActivityKey,
+    });
+    let outcome: ActivityOutcome;
+    if (handler === null) {
+      outcome = { status: "succeeded" };
+    } else {
+      try {
+        outcome = await handler({
+          activityId: this.ids.generate("wfa"),
+          instanceId,
+          tenantId,
+          definitionId: definition.id,
+          definitionActivityKey: step.compensationActivityKey,
+          kind: sourceKind,
+          attemptNumber: 1,
+          input,
+          variables,
+        });
+      } catch (err) {
+        outcome = {
+          status: "failed",
+          errorCode: "COMPENSATION_EXCEPTION",
+          errorMessage: err instanceof Error ? err.message : String(err),
+          retryable: false,
+        };
+      }
+    }
+
+    const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "activity_compensated",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: step.originalActivityId,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: {
+        compensationActivityKey: step.compensationActivityKey,
+        handlerRegistered: handler !== null,
+        compensationStatus: outcome.status,
+        ...(outcome.status === "failed"
+          ? { errorCode: outcome.errorCode, errorMessage: outcome.errorMessage }
+          : {}),
+      },
+      correlationId: null,
+      causationEventId: null,
+    });
   }
 
   private async applyScheduleTimer(
@@ -985,6 +1188,9 @@ export class WorkflowEngine {
         correlationId: null,
         causationEventId: null,
       });
+      // A terminal failure automatically runs saga compensation (once) over the instance's completed
+      // side-effect activities. The same code backs the explicit `compensateInstance` entry point.
+      await this.runCompensation(instanceId);
     } else {
       await this.appendEvent({
         instanceId,

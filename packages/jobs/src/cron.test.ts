@@ -101,6 +101,58 @@ describe("cronNextAfter", () => {
   });
 });
 
+describe("cron timezone handling", () => {
+  it("matches the wall-clock time in an IANA zone, not UTC", () => {
+    const p = parseCron("0 9 * * *"); // 09:00 local
+    // 2026-05-17 is EDT (UTC-4): 09:00 New York == 13:00 UTC.
+    expect(cronMatches(p, at("2026-05-17T13:00:00Z"), "America/New_York")).toBe(true);
+    expect(cronMatches(p, at("2026-05-17T09:00:00Z"), "America/New_York")).toBe(false);
+    // Without a zone the same 09:00Z still matches (UTC-evaluated).
+    expect(cronMatches(p, at("2026-05-17T09:00:00Z"))).toBe(true);
+  });
+
+  it("cronPrevOnOrBefore returns a UTC instant offset by the zone's offset", () => {
+    const zoned = cronPrevOnOrBefore("0 9 * * *", at("2026-05-17T14:23:00Z"), "America/New_York");
+    expect(zoned?.toISOString()).toBe("2026-05-17T13:00:00.000Z");
+    const utc = cronPrevOnOrBefore("0 9 * * *", at("2026-05-17T14:23:00Z"));
+    expect(utc?.toISOString()).toBe("2026-05-17T09:00:00.000Z");
+    expect(zoned?.toISOString()).not.toBe(utc?.toISOString());
+  });
+
+  it("cronNextAfter honors the zone", () => {
+    expect(
+      cronNextAfter("0 9 * * *", at("2026-05-17T13:00:00Z"), "America/New_York")?.toISOString(),
+    ).toBe("2026-05-18T13:00:00.000Z");
+  });
+
+  it("omitting the timezone is byte-identical to UTC evaluation", () => {
+    const withUndefined = cronPrevOnOrBefore("0 9 * * *", at("2026-05-17T14:23:00Z"), undefined);
+    const withoutArg = cronPrevOnOrBefore("0 9 * * *", at("2026-05-17T14:23:00Z"));
+    expect(withUndefined?.toISOString()).toBe(withoutArg?.toISOString());
+  });
+
+  it("falls back to UTC for an invalid IANA zone", () => {
+    const p = parseCron("0 9 * * *");
+    expect(cronMatches(p, at("2026-05-17T09:00:00Z"), "Not/AZone")).toBe(true);
+    expect(cronMatches(p, at("2026-05-17T13:00:00Z"), "Not/AZone")).toBe(false);
+  });
+});
+
+describe("scheduledJobsDue timezone", () => {
+  it("passes each scheduled job's timezone through to the tick", () => {
+    const jobs = [
+      JobDeclarationSchema.parse({
+        id: "ny-morning",
+        name: "ny-morning",
+        trigger: { kind: "scheduled", cron: "0 9 * * *", timezone: "America/New_York" },
+        onFailure: { strategy: "dead-letter" },
+      }),
+    ];
+    const due = scheduledJobsDue(jobs, { now: "2026-05-17T14:23:00Z" });
+    expect(due).toEqual([{ jobId: "ny-morning", fireAt: "2026-05-17T13:00:00.000Z" }]);
+  });
+});
+
 function scheduledJob(id: string, cron: string, extra: Partial<JobDeclaration> = {}): JobDeclaration {
   return JobDeclarationSchema.parse({
     id,

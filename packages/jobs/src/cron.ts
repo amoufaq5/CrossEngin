@@ -70,14 +70,74 @@ export function parseCron(expr: string): ParsedCron {
   };
 }
 
-/** Whether a UTC instant matches a parsed cron, with standard dom/dow OR-when-both-restricted rule. */
-export function cronMatches(parsed: ParsedCron, date: Date): boolean {
-  if (parsed.second !== undefined && !parsed.second.has(date.getUTCSeconds())) return false;
-  if (!parsed.minute.has(date.getUTCMinutes())) return false;
-  if (!parsed.hour.has(date.getUTCHours())) return false;
-  if (!parsed.month.has(date.getUTCMonth() + 1)) return false;
-  const domOk = parsed.dom.has(date.getUTCDate());
-  const dowOk = parsed.dow.has(date.getUTCDay());
+interface CronFields {
+  readonly second: number;
+  readonly minute: number;
+  readonly hour: number;
+  readonly day: number;
+  readonly month: number;
+  readonly weekday: number;
+}
+
+function utcFields(date: Date): CronFields {
+  return {
+    second: date.getUTCSeconds(),
+    minute: date.getUTCMinutes(),
+    hour: date.getUTCHours(),
+    day: date.getUTCDate(),
+    month: date.getUTCMonth() + 1,
+    weekday: date.getUTCDay(),
+  };
+}
+
+// Pinned to `en-US` so the numeric parts are always Latin digits (some default locales emit
+// non-Latin digit glyphs that `Number` cannot parse). Returns null on an invalid IANA zone, which
+// makes `Intl.DateTimeFormat` throw — the caller then falls back to UTC.
+function zonedFields(date: Date, timeZone: string): CronFields | null {
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date);
+  } catch {
+    return null;
+  }
+  const get = (type: Intl.DateTimeFormatPartTypes): number => {
+    const part = parts.find((p) => p.type === type);
+    return part !== undefined ? Number(part.value) : 0;
+  };
+  const year = get("year");
+  const month = get("month");
+  const day = get("day");
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return { second: get("second"), minute: get("minute"), hour: get("hour"), day, month, weekday };
+}
+
+function cronFields(date: Date, timezone?: string): CronFields {
+  if (timezone === undefined) return utcFields(date);
+  return zonedFields(date, timezone) ?? utcFields(date);
+}
+
+/**
+ * Whether an instant matches a parsed cron, with the standard dom/dow OR-when-both-restricted rule.
+ * With no `timezone` the fields are read in UTC; with an IANA `timezone` they are read at the
+ * wall-clock time in that zone (invalid zones fall back to UTC).
+ */
+export function cronMatches(parsed: ParsedCron, date: Date, timezone?: string): boolean {
+  const f = cronFields(date, timezone);
+  if (parsed.second !== undefined && !parsed.second.has(f.second)) return false;
+  if (!parsed.minute.has(f.minute)) return false;
+  if (!parsed.hour.has(f.hour)) return false;
+  if (!parsed.month.has(f.month)) return false;
+  const domOk = parsed.dom.has(f.day);
+  const dowOk = parsed.dow.has(f.weekday);
   return parsed.domRestricted && parsed.dowRestricted ? domOk || dowOk : domOk && dowOk;
 }
 
@@ -99,12 +159,12 @@ function floorToStep(date: Date, hasSeconds: boolean): Date {
  * if none within the bounded search horizon. Deterministic in `now`, so repeated scheduler passes
  * compute the same tick — the basis for idempotent enqueue.
  */
-export function cronPrevOnOrBefore(expr: string, now: Date): Date | null {
+export function cronPrevOnOrBefore(expr: string, now: Date, timezone?: string): Date | null {
   const parsed = parseCron(expr);
   const stepMs = parsed.hasSeconds ? 1_000 : 60_000;
   let cursor = floorToStep(now, parsed.hasSeconds);
   for (let i = 0; i < MAX_STEPS; i += 1) {
-    if (cronMatches(parsed, cursor)) return cursor;
+    if (cronMatches(parsed, cursor, timezone)) return cursor;
     cursor = new Date(cursor.getTime() - stepMs);
   }
   return null;
@@ -114,12 +174,12 @@ export function cronPrevOnOrBefore(expr: string, now: Date): Date | null {
  * The next cron fire instant strictly after `after` (UTC), or `null` if none within the search
  * horizon. Symmetric to `cronPrevOnOrBefore`; useful for "when does this next run" displays.
  */
-export function cronNextAfter(expr: string, after: Date): Date | null {
+export function cronNextAfter(expr: string, after: Date, timezone?: string): Date | null {
   const parsed = parseCron(expr);
   const stepMs = parsed.hasSeconds ? 1_000 : 60_000;
   let cursor = new Date(floorToStep(after, parsed.hasSeconds).getTime() + stepMs);
   for (let i = 0; i < MAX_STEPS; i += 1) {
-    if (cronMatches(parsed, cursor)) return cursor;
+    if (cronMatches(parsed, cursor, timezone)) return cursor;
     cursor = new Date(cursor.getTime() + stepMs);
   }
   return null;
@@ -145,7 +205,7 @@ export function scheduledJobsDue(
   const due: ScheduledDue[] = [];
   for (const job of jobs) {
     if (job.deprecated === true || job.trigger.kind !== "scheduled") continue;
-    const tick = cronPrevOnOrBefore(job.trigger.cron, now);
+    const tick = cronPrevOnOrBefore(job.trigger.cron, now, job.trigger.timezone);
     if (tick !== null) due.push({ jobId: job.id, fireAt: tick.toISOString() });
   }
   return due;

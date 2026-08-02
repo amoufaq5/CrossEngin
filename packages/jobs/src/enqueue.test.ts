@@ -2,10 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   DomainEventSchema,
+  UserInvocationSchema,
   enqueueKeyForEvent,
+  enqueueKeyForUserInvocation,
   matchEventJobs,
+  matchUserInvokedJobs,
   planJobRunsForEvent,
+  planUserInvokedJobRuns,
   type DomainEvent,
+  type UserInvocation,
 } from "./enqueue.js";
 import { JobDeclarationSchema, type JobDeclaration } from "./types.js";
 
@@ -111,5 +116,99 @@ describe("planJobRunsForEvent", () => {
 
   it("returns an empty plan when nothing matches", () => {
     expect(planJobRunsForEvent(EVENT, [job({ id: "j", trigger: { kind: "scheduled", cron: "* * * * *" } })])).toEqual([]);
+  });
+});
+
+const INVOCATION: UserInvocation = {
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  action: "reindex-catalog",
+  data: { scope: "all" },
+  idempotencyKey: "inv-123",
+  occurredAt: "2026-05-17T12:00:00.000Z",
+};
+
+describe("UserInvocationSchema", () => {
+  it("defaults data to {} and accepts an optional idempotencyKey", () => {
+    const i = UserInvocationSchema.parse({ tenantId: "t", action: "run" });
+    expect(i.data).toEqual({});
+    expect(i.idempotencyKey).toBeUndefined();
+  });
+
+  it("rejects an empty action", () => {
+    expect(UserInvocationSchema.safeParse({ tenantId: "t", action: "" }).success).toBe(false);
+  });
+});
+
+describe("matchUserInvokedJobs", () => {
+  it("matches userInvoked-trigger jobs by action, skipping other triggers and deprecated jobs", () => {
+    const jobs = [
+      job({ id: "reindex", trigger: { kind: "userInvoked", action: "reindex-catalog" } }),
+      job({ id: "export", trigger: { kind: "userInvoked", action: "export-report" } }),
+      job({ id: "on-order", trigger: { kind: "event", eventName: "retail.order_placed" } }),
+      job({ id: "legacy", trigger: { kind: "userInvoked", action: "reindex-catalog" }, deprecated: true }),
+    ];
+    expect(matchUserInvokedJobs(INVOCATION, jobs).map((j) => j.id)).toEqual(["reindex"]);
+  });
+});
+
+describe("enqueueKeyForUserInvocation", () => {
+  it("is deterministic, prefixed userInvoked::, and prefers the caller idempotencyKey", () => {
+    expect(enqueueKeyForUserInvocation(INVOCATION, "reindex")).toBe(
+      "userInvoked::reindex-catalog::inv-123::reindex",
+    );
+  });
+
+  it("falls back to a stable payload hash-input when no idempotencyKey is present, key-order invariant", () => {
+    const a: UserInvocation = { tenantId: "t", action: "run", data: { a: 1, b: 2 } };
+    const b: UserInvocation = { tenantId: "t", action: "run", data: { b: 2, a: 1 } };
+    expect(enqueueKeyForUserInvocation(a, "j")).toBe(enqueueKeyForUserInvocation(b, "j"));
+    const c: UserInvocation = { tenantId: "t", action: "run", data: { a: 9 } };
+    expect(enqueueKeyForUserInvocation(a, "j")).not.toBe(enqueueKeyForUserInvocation(c, "j"));
+  });
+
+  it("stays distinct from an event key of the same name", () => {
+    const event: DomainEvent = { name: "reindex.catalog", tenantId: "t", data: {}, idempotencyKey: "k" };
+    const invocation: UserInvocation = { tenantId: "t", action: "reindex.catalog", data: {}, idempotencyKey: "k" };
+    expect(enqueueKeyForUserInvocation(invocation, "j")).not.toBe(enqueueKeyForEvent(event, "j"));
+  });
+});
+
+describe("planUserInvokedJobRuns", () => {
+  it("plans a pending run per matched job, carrying classes + invocation input + runKey", () => {
+    const jobs = [
+      job({
+        id: "reindex",
+        trigger: { kind: "userInvoked", action: "reindex-catalog" },
+        inputDataClass: "commercial_sensitive",
+      }),
+    ];
+    const [plan] = planUserInvokedJobRuns(INVOCATION, jobs);
+    expect(plan).toEqual({
+      jobId: "reindex",
+      jobKind: "userInvoked",
+      trigger: {
+        kind: "userInvoked",
+        action: "reindex-catalog",
+        occurredAt: "2026-05-17T12:00:00.000Z",
+        idempotencyKey: "inv-123",
+      },
+      input: { scope: "all" },
+      inputDataClass: "commercial_sensitive",
+      outputDataClass: "internal",
+      delayMs: 0,
+      runKey: "userInvoked::reindex-catalog::inv-123::reindex",
+    });
+  });
+
+  it("omits occurredAt/idempotencyKey from the trigger when absent", () => {
+    const jobs = [job({ id: "reindex", trigger: { kind: "userInvoked", action: "run" } })];
+    const [plan] = planUserInvokedJobRuns({ tenantId: "t", action: "run", data: {} }, jobs);
+    expect(plan?.trigger).toEqual({ kind: "userInvoked", action: "run" });
+    expect(plan?.delayMs).toBe(0);
+  });
+
+  it("returns an empty plan when nothing matches", () => {
+    const jobs = [job({ id: "other", trigger: { kind: "userInvoked", action: "different" } })];
+    expect(planUserInvokedJobRuns(INVOCATION, jobs)).toEqual([]);
   });
 });

@@ -2,6 +2,7 @@ import type { WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-eng
 import { describe, expect, it } from "vitest";
 
 import {
+  compensationKindByActivityId,
   hasOutstandingCompensation,
   listCompensatableActivities,
   planCompensation,
@@ -248,6 +249,44 @@ describe("planCompensation", () => {
     });
     expect(plan.strategy).toBe("manual_review");
     expect(plan.steps).toHaveLength(1);
+  });
+});
+
+describe("compensationKindByActivityId", () => {
+  it("maps each still-compensatable activity to its source kind", () => {
+    const map = compensationKindByActivityId([
+      event({
+        kind: "activity_scheduled",
+        sequenceNumber: 0,
+        activityId: "wfa_act00001",
+        payload: { kind: "http_call", compensationActivityKey: "refund" },
+      }),
+      event({ kind: "activity_completed", sequenceNumber: 1, activityId: "wfa_act00001" }),
+      event({
+        kind: "activity_scheduled",
+        sequenceNumber: 2,
+        activityId: "wfa_act00002",
+        payload: { kind: "db_write", compensationActivityKey: "undo" },
+      }),
+      event({ kind: "activity_completed", sequenceNumber: 3, activityId: "wfa_act00002" }),
+    ]);
+    expect(map.get("wfa_act00001")).toBe("http_call");
+    expect(map.get("wfa_act00002")).toBe("db_write");
+    expect(map.size).toBe(2);
+  });
+
+  it("excludes already-compensated activities", () => {
+    const map = compensationKindByActivityId([
+      event({
+        kind: "activity_scheduled",
+        sequenceNumber: 0,
+        activityId: "wfa_act00001",
+        payload: { kind: "http_call", compensationActivityKey: "refund" },
+      }),
+      event({ kind: "activity_completed", sequenceNumber: 1, activityId: "wfa_act00001" }),
+      event({ kind: "activity_compensated", sequenceNumber: 2, activityId: "wfa_act00001" }),
+    ]);
+    expect(map.size).toBe(0);
   });
 });
 
