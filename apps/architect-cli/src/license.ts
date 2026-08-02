@@ -1,5 +1,15 @@
+import { readFile } from "node:fs/promises";
+
 import { generateEd25519Keypair } from "@crossengin/crypto";
-import { signLicense, verifyLicense, type EntitlementStatus, type LicenseClaims } from "@crossengin/operate-runtime";
+import {
+  DEFAULT_PLAN_CATALOG,
+  buildPlanCatalog,
+  signLicense,
+  verifyLicense,
+  type EntitlementStatus,
+  type LicenseClaims,
+  type PlanCatalog,
+} from "@crossengin/operate-runtime";
 
 import { getStringFlag, type ParsedCommand } from "./cli.js";
 import { printError, printJson, printSuccess, type IoStreams } from "./format.js";
@@ -56,7 +66,7 @@ function missing(io: IoStreams, flag: string): number {
   return 2;
 }
 
-function runMint(command: ParsedCommand, ctx: RunContext): number {
+async function runMint(command: ParsedCommand, ctx: RunContext): Promise<number> {
   const tenantId = getStringFlag(command, "tenant");
   const privateKey = getStringFlag(command, "private-key");
   const publicKey = getStringFlag(command, "public-key");
@@ -76,16 +86,35 @@ function runMint(command: ParsedCommand, ctx: RunContext): number {
   const featuresRaw = getStringFlag(command, "features");
   const maxRaw = getStringFlag(command, "max-records-per-entity");
 
+  // Plan-derived limits: with --plan, the cap + features come from the plan catalog (default
+  // or a supplied --plan-catalog file) — so an offline license carries the SAME limits the
+  // cloud path resolves for that plan. Explicit --max-records-per-entity / --features still win.
+  let catalog: PlanCatalog = DEFAULT_PLAN_CATALOG;
+  const planCatalogFile = getStringFlag(command, "plan-catalog");
+  if (planCatalogFile !== null) {
+    try {
+      catalog = buildPlanCatalog(JSON.parse(await readFile(planCatalogFile, "utf8")));
+    } catch (err) {
+      printError(ctx.io, `license mint: could not load --plan-catalog: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+  const planLimits = planId !== null ? catalog.limitsFor(planId) : undefined;
+
+  const explicitFeatures =
+    featuresRaw !== null ? featuresRaw.split(",").map((f) => f.trim()).filter((f) => f.length > 0) : undefined;
+  const features = explicitFeatures ?? planLimits?.features;
+  const explicitMax = maxRaw !== null && Number.isFinite(Number(maxRaw)) ? Number(maxRaw) : undefined;
+  const maxRecordsPerEntity = explicitMax ?? planLimits?.maxRecordsPerEntity;
+
   const claims: LicenseClaims = {
     tenantId,
     status: statusRaw,
     issuedAt,
     expiresAt,
     ...(planId !== null ? { planId } : {}),
-    ...(featuresRaw !== null
-      ? { features: featuresRaw.split(",").map((f) => f.trim()).filter((f) => f.length > 0) }
-      : {}),
-    ...(maxRaw !== null && Number.isFinite(Number(maxRaw)) ? { maxRecordsPerEntity: Number(maxRaw) } : {}),
+    ...(features !== undefined ? { features: [...features] } : {}),
+    ...(maxRecordsPerEntity !== undefined ? { maxRecordsPerEntity } : {}),
   };
 
   let token: string;
@@ -124,6 +153,9 @@ function runInspect(command: ParsedCommand, ctx: RunContext): number {
     ctx.io.stdout.write(`  status:  ${result.claims!.status}\n`);
     ctx.io.stdout.write(`  expires: ${result.claims!.expiresAt}\n`);
     if (result.claims!.planId !== undefined) ctx.io.stdout.write(`  plan:    ${result.claims!.planId}\n`);
+    if (result.claims!.maxRecordsPerEntity !== undefined) {
+      ctx.io.stdout.write(`  cap:     ${result.claims!.maxRecordsPerEntity} records/entity\n`);
+    }
   } else {
     printError(ctx.io, `license is invalid: ${result.reason ?? "unknown"}`);
   }

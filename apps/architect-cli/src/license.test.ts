@@ -70,6 +70,49 @@ describe("crossengin license", () => {
     expect(result.claims).toMatchObject({ tenantId: TENANT, status: "active", planId: "pro", maxRecordsPerEntity: 500 });
   });
 
+  it("mint --plan resolves the cap + features from the default plan catalog", async () => {
+    const { pub, priv } = await keypair();
+    const mint = buffers();
+    await runLicense(
+      parsed(
+        "license", "mint",
+        "--tenant", TENANT,
+        "--plan", "free",
+        "--issued", "2026-01-01T00:00:00.000Z",
+        "--expires", "2099-01-01T00:00:00.000Z",
+        "--format", "json",
+        "--private-key", priv,
+        "--public-key", pub,
+      ),
+      mint.ctx,
+    );
+    const { claims } = JSON.parse(mint.out()) as { claims: Record<string, unknown> };
+    // free plan in DEFAULT_PLAN_CATALOG: cap 1000, features ["core"].
+    expect(claims).toMatchObject({ planId: "free", maxRecordsPerEntity: 1000, features: ["core"] });
+  });
+
+  it("mint --max-records-per-entity overrides the plan catalog cap", async () => {
+    const { pub, priv } = await keypair();
+    const mint = buffers();
+    await runLicense(
+      parsed(
+        "license", "mint",
+        "--tenant", TENANT,
+        "--plan", "free",
+        "--max-records-per-entity", "42",
+        "--issued", "2026-01-01T00:00:00.000Z",
+        "--expires", "2099-01-01T00:00:00.000Z",
+        "--format", "json",
+        "--private-key", priv,
+        "--public-key", pub,
+      ),
+      mint.ctx,
+    );
+    const { claims } = JSON.parse(mint.out()) as { claims: Record<string, unknown> };
+    expect(claims.maxRecordsPerEntity).toBe(42); // explicit flag wins
+    expect(claims.features).toEqual(["core"]); // still from the catalog
+  });
+
   it("inspect reports an expired token as invalid (exit 1)", async () => {
     const { pub, priv } = await keypair();
     const mint = buffers();
