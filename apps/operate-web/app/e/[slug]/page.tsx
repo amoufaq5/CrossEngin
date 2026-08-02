@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
@@ -66,6 +66,18 @@ function toCsv(
   const header = columns.map((c) => csvCell(c.label)).join(",");
   const body = rows.map((r) => columns.map((c) => csvCell(r[c.key])).join(",")).join("\r\n");
   return body === "" ? header : `${header}\r\n${body}`;
+}
+
+/** Moves keyboard focus to the first invalid input inside a container, scrolling it into view. */
+function focusFirstInvalid(container: HTMLElement | null): void {
+  if (container === null || typeof window === "undefined") return;
+  requestAnimationFrame(() => {
+    const el = container.querySelector<HTMLElement>('[aria-invalid="true"]');
+    if (el !== null) {
+      el.focus();
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  });
 }
 
 function triggerDownload(filename: string, text: string): void {
@@ -595,6 +607,8 @@ function CreateForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const fieldsRef = useRef<HTMLDivElement>(null);
+  const errId = (name: string) => `create-${entity.slug}-err-${name}`;
 
   function clearFieldError(name: string) {
     setFieldErrors((prev) => {
@@ -615,6 +629,7 @@ function CreateForm({
     if (missing.length > 0) {
       setError("Please fix the highlighted fields.");
       setFieldErrors(Object.fromEntries(missing.map((f) => [f.name, `${f.label} is required`])));
+      focusFirstInvalid(fieldsRef.current);
       return;
     }
     setBusy(true);
@@ -636,6 +651,7 @@ function CreateForm({
       if (fields !== null) {
         setError("Please fix the highlighted fields.");
         setFieldErrors(fieldErrorMap(fields));
+        focusFirstInvalid(fieldsRef.current);
       } else {
         setError(msg);
       }
@@ -647,7 +663,7 @@ function CreateForm({
   return (
     <div className="mb-5 rounded-xl border border-line bg-white p-5">
       <h3 className="mb-4 text-sm font-semibold text-ink">New {entity.singular}</h3>
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
+      <div ref={fieldsRef} className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         {editable.map((f) => (
           <label key={f.name} className="block">
             <span className="mb-1 flex items-center gap-1 text-xs font-medium text-ink-muted">
@@ -662,12 +678,17 @@ function CreateForm({
               value={values[f.name] ?? (f.input === "boolean" ? false : "")}
               schema={schema}
               invalid={fieldErrors[f.name] !== undefined}
+              describedById={errId(f.name)}
               onChange={(v) => {
                 setValues((p) => ({ ...p, [f.name]: v }));
                 clearFieldError(f.name);
               }}
             />
-            {fieldErrors[f.name] && <span className="mt-1 block text-xs text-red-600">{fieldErrors[f.name]}</span>}
+            {fieldErrors[f.name] && (
+              <span id={errId(f.name)} className="mt-1 block text-xs text-red-600">
+                {fieldErrors[f.name]}
+              </span>
+            )}
           </label>
         ))}
       </div>

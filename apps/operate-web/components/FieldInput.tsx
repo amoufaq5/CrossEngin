@@ -12,6 +12,7 @@ export function FieldInput({
   onChange,
   disabled,
   invalid,
+  describedById,
   schema,
 }: {
   field: UiFieldSchema;
@@ -19,10 +20,17 @@ export function FieldInput({
   onChange: (v: string | boolean) => void;
   disabled?: boolean;
   invalid?: boolean;
+  /** id of the element describing this field's error, for aria-describedby when invalid. */
+  describedById?: string;
   schema?: UiSchema | null;
 }) {
   const ro = disabled === true || field.readOnly === true;
   const INPUT_CLASS = `${INPUT_BASE} ${invalid === true ? "border-red-400 focus:border-red-500" : "border-line focus:border-brand"}`;
+  // Screen-reader hooks applied to the standard inputs (text/select/textarea).
+  const a11y = {
+    "aria-invalid": invalid === true ? true : undefined,
+    "aria-describedby": invalid === true ? describedById : undefined,
+  } as const;
 
   if (field.input === "reference" && field.referenceTarget && schema !== undefined) {
     return (
@@ -54,7 +62,7 @@ export function FieldInput({
 
   if (field.input === "select") {
     return (
-      <select className={INPUT_CLASS} value={String(value ?? "")} disabled={ro} onChange={(e) => onChange(e.target.value)}>
+      <select className={INPUT_CLASS} value={String(value ?? "")} disabled={ro} {...a11y} onChange={(e) => onChange(e.target.value)}>
         {!field.required && <option value="">—</option>}
         {(field.enumValues ?? []).map((opt) => (
           <option key={opt} value={opt}>
@@ -71,6 +79,7 @@ export function FieldInput({
         className={`${INPUT_CLASS} min-h-[80px]`}
         value={String(value ?? "")}
         disabled={ro}
+        {...a11y}
         onChange={(e) => onChange(e.target.value)}
       />
     );
@@ -93,6 +102,7 @@ export function FieldInput({
       className={INPUT_CLASS}
       value={String(value ?? "")}
       disabled={ro}
+      {...a11y}
       placeholder={field.input === "reference" ? `${field.referenceTarget ?? ""} id` : undefined}
       onChange={(e) => onChange(e.target.value)}
     />
