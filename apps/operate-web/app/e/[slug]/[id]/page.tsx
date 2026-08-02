@@ -88,6 +88,9 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
         }
       }
       if (Object.keys(patch).length > 0) {
+        // Optimistic concurrency: send the version we loaded; the server 409s if it moved.
+        const expected = record["updated_at"];
+        if (typeof expected === "string") patch["expectedUpdatedAt"] = expected;
         const updated = await updateRecord(entity.slug, id, patch);
         setRecord(updated);
         invalidateReferenceCache(entity.slug);
@@ -95,7 +98,16 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
       setEditing(false);
       setNotice("Saved.");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.startsWith("409")) {
+        // Someone else changed this record since we loaded it — reload the latest so the
+        // user re-applies their edits against current data rather than clobbering it.
+        setError("This record was changed by someone else. Reloaded the latest — please re-apply your edits.");
+        setEditing(false);
+        load();
+      } else {
+        setError(msg);
+      }
     } finally {
       setBusy(false);
     }
