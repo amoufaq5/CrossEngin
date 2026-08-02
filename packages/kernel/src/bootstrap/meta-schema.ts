@@ -6730,6 +6730,8 @@ export const META_WORKFLOW_TIMERS: TableDefinition = {
       check: "fire_count BETWEEN 0 AND 1000000",
     },
     { name: "next_fire_at", type: "TIMESTAMPTZ" },
+    { name: "claimed_by", type: "TEXT" },
+    { name: "claim_expires_at", type: "TIMESTAMPTZ" },
   ],
   primaryKey: ["id"],
   indexes: [
@@ -6740,6 +6742,10 @@ export const META_WORKFLOW_TIMERS: TableDefinition = {
     {
       name: "idx_workflow_timers_fire_at",
       columns: ["fire_at"],
+    },
+    {
+      name: "idx_workflow_timers_due",
+      columns: ["status", "fire_at"],
     },
     {
       name: "idx_workflow_timers_status",
