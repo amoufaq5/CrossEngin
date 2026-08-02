@@ -547,8 +547,32 @@ export class WorkflowEngine {
       typeof action.parameters["kind"] === "string"
         ? (action.parameters["kind"] as ReturnType<typeof String>)
         : "transformation";
-    const activityId = this.ids.generate("wfa");
     const inputData = (action.parameters["input"] as Record<string, unknown>) ?? {};
+    // Retry ceiling from the schedule_activity action (default 1 = no retry). A failed+retryable
+    // attempt below the ceiling reschedules a fresh attempt; at the ceiling it dead-letters.
+    const maxAttempts =
+      typeof action.parameters["maxAttempts"] === "number" && action.parameters["maxAttempts"] >= 1
+        ? Math.floor(action.parameters["maxAttempts"] as number)
+        : 1;
+    await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, 1, maxAttempts, tenantId);
+  }
+
+  /**
+   * Records an activity attempt as `scheduled` (persisting its input + retry ceiling) and, unless
+   * `deferActivities` leaves it for a distributed worker, runs it inline. Used both for the first
+   * attempt (`applyScheduleActivity`) and for each retry (a fresh `activityId` per attempt).
+   */
+  private async scheduleActivity(
+    instanceId: string,
+    definition: WorkflowDefinition,
+    activityKey: string,
+    kind: string,
+    inputData: Record<string, unknown>,
+    attemptNumber: number,
+    maxAttempts: number,
+    tenantId: string,
+  ): Promise<void> {
+    const activityId = this.ids.generate("wfa");
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
@@ -568,7 +592,8 @@ export class WorkflowEngine {
       payload: {
         kind,
         definitionActivityKey: activityKey,
-        attemptNumber: 1,
+        attemptNumber,
+        maxAttempts,
         input: inputData,
         inputSha256: sha256(JSON.stringify(inputData)),
       },
@@ -578,7 +603,7 @@ export class WorkflowEngine {
 
     // Deferred mode: leave the activity `scheduled` for a distributed worker to claim + execute.
     if (this.deferActivities) return;
-    await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, 1, tenantId);
+    await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, attemptNumber, maxAttempts, tenantId);
   }
 
   /**
@@ -595,6 +620,7 @@ export class WorkflowEngine {
     kind: string,
     inputData: Record<string, unknown>,
     attemptNumber: number,
+    maxAttempts: number,
     tenantId: string,
   ): Promise<void> {
     const handler =
@@ -684,6 +710,9 @@ export class WorkflowEngine {
         }
       }
     } else if (outcome.status === "failed") {
+      // Retry when the outcome is retryable and attempts remain; otherwise dead-letter (the
+      // activity_failed is terminal and its trigger transition fires — the workflow handles it).
+      const willRetry = outcome.retryable === true && attemptNumber < maxAttempts;
       await this.appendEvent({
         instanceId,
         tenantId,
@@ -699,21 +728,33 @@ export class WorkflowEngine {
         timerId: null,
         childInstanceId: null,
         variableName: null,
-        payload: { errorCode: outcome.errorCode, errorMessage: outcome.errorMessage },
+        payload: {
+          errorCode: outcome.errorCode,
+          errorMessage: outcome.errorMessage,
+          attemptNumber,
+          maxAttempts,
+          willRetry,
+          deadLettered: !willRetry,
+        },
         correlationId: null,
         causationEventId: null,
       });
-      const liveState = await this.getInstanceState(instanceId);
-      if (liveState !== null) {
-        const transition = evaluateNextTransition({
-          definition,
-          fromState: liveState.currentState,
-          trigger: { kind: "activity_failed", activityKey },
-          variables: liveState.variables,
-          evaluator: this.guardEvaluator,
-        });
-        if (transition !== null) {
-          await this.applyTransition(instanceId, definition, transition, liveState, null, null);
+      if (willRetry) {
+        // Reschedule a fresh attempt (new activityId). No transition — the activity isn't done.
+        await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, attemptNumber + 1, maxAttempts, tenantId);
+      } else {
+        const liveState = await this.getInstanceState(instanceId);
+        if (liveState !== null) {
+          const transition = evaluateNextTransition({
+            definition,
+            fromState: liveState.currentState,
+            trigger: { kind: "activity_failed", activityKey },
+            variables: liveState.variables,
+            evaluator: this.guardEvaluator,
+          });
+          if (transition !== null) {
+            await this.applyTransition(instanceId, definition, transition, liveState, null, null);
+          }
         }
       }
     } else {
@@ -751,7 +792,7 @@ export class WorkflowEngine {
     activityId: string,
   ): Promise<{ readonly executed: boolean }> {
     const events = await this.eventLog.listByInstance(instanceId);
-    let scheduled: { kind: string; key: string; input: Record<string, unknown>; attempt: number } | null = null;
+    let scheduled: { kind: string; key: string; input: Record<string, unknown>; attempt: number; maxAttempts: number } | null = null;
     let started = false;
     for (const e of events) {
       if (e.activityId !== activityId) continue;
@@ -762,6 +803,7 @@ export class WorkflowEngine {
           key: typeof p["definitionActivityKey"] === "string" ? (p["definitionActivityKey"] as string) : "default_activity",
           input: (p["input"] as Record<string, unknown> | undefined) ?? {},
           attempt: typeof p["attemptNumber"] === "number" ? (p["attemptNumber"] as number) : 1,
+          maxAttempts: typeof p["maxAttempts"] === "number" ? (p["maxAttempts"] as number) : 1,
         };
       } else if (
         e.kind === "activity_started" ||
@@ -785,6 +827,7 @@ export class WorkflowEngine {
       scheduled.kind,
       scheduled.input,
       scheduled.attempt,
+      scheduled.maxAttempts,
       state.tenantId,
     );
     // The inline path runs inside the step loop; the distributed entry point must drive it itself
