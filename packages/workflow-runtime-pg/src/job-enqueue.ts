@@ -3,10 +3,12 @@ import { createHash } from "node:crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   planJobRunsForEvent,
+  planUserInvokedJobRuns,
   scheduledJobsDue,
   type DomainEvent,
   type JobDeclaration,
   type PlannedJobRun,
+  type UserInvocation,
 } from "@crossengin/jobs";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -69,15 +71,30 @@ export async function enqueueJobsForEvent(
   const schema = options.schema ?? DEFAULT_SCHEMA;
   if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
 
-  const planned: readonly PlannedJobRun[] = planJobRunsForEvent(options.event, options.jobs);
-  const results: EnqueuedJobRun[] = [];
+  const planned = planJobRunsForEvent(options.event, options.jobs);
+  return insertPlannedRuns(conn, schema, options.event.tenantId, options.now, planned);
+}
 
+/**
+ * Inserts a `pending` `job_runs` row per planned run (shared by the event / delayed / userInvoked
+ * producers). The `run_id` is deterministic from the plan's `runKey`, so the insert is
+ * `ON CONFLICT (tenant_id, run_id) DO NOTHING` — a duplicate producer pass is a no-op
+ * (`inserted: false`). `started_at` is `now + delayMs` (a delayed trigger defers past the enqueue
+ * time; every other kind has `delayMs 0` → `now`, immediately due). All values are bound; the caller
+ * has already validated the schema identifier.
+ */
+async function insertPlannedRuns(
+  conn: PgConnection,
+  schema: string,
+  tenantId: string,
+  now: string,
+  planned: readonly PlannedJobRun[],
+): Promise<readonly EnqueuedJobRun[]> {
+  const results: EnqueuedJobRun[] = [];
   for (const plan of planned) {
     const runId = deterministicRunId(plan.runKey);
-    // A delayed trigger defers the run: started_at = now + delayMs (so the claim's `started_at <= now`
-    // holds it out of the queue until the delay elapses). An event trigger has delayMs 0 → now.
     const startedAt =
-      plan.delayMs > 0 ? new Date(new Date(options.now).getTime() + plan.delayMs).toISOString() : options.now;
+      plan.delayMs > 0 ? new Date(new Date(now).getTime() + plan.delayMs).toISOString() : now;
     const result = await conn.query<{ run_id: unknown }>(
       `INSERT INTO ${schema}.job_runs
          (tenant_id, job_id, job_kind, run_id, trigger, started_at, status,
@@ -87,7 +104,7 @@ export async function enqueueJobsForEvent(
        ON CONFLICT (tenant_id, run_id) DO NOTHING
        RETURNING run_id`,
       [
-        options.event.tenantId,
+        tenantId,
         plan.jobId,
         plan.jobKind,
         runId,
@@ -100,8 +117,30 @@ export async function enqueueJobsForEvent(
     );
     results.push({ jobId: plan.jobId, runId, inserted: (result.rowCount ?? 0) > 0 });
   }
-
   return results;
+}
+
+export interface EnqueueUserInvokedJobOptions {
+  readonly invocation: UserInvocation;
+  readonly jobs: readonly JobDeclaration[];
+  readonly now: string;
+  readonly schema?: string;
+}
+
+/**
+ * The on-demand producer: for every `userInvoked`-trigger job whose `action` matches a user/API
+ * invocation (pure `planUserInvokedJobRuns`), inserts a `pending` `job_runs` row a worker claims +
+ * executes. Idempotent by the same deterministic-`run_id` + `ON CONFLICT DO NOTHING` mechanism as the
+ * event producer, so a re-submitted invocation (same `idempotencyKey` / payload) never double-runs.
+ */
+export async function enqueueUserInvokedJob(
+  conn: PgConnection,
+  options: EnqueueUserInvokedJobOptions,
+): Promise<readonly EnqueuedJobRun[]> {
+  const schema = options.schema ?? DEFAULT_SCHEMA;
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
+  const planned = planUserInvokedJobRuns(options.invocation, options.jobs);
+  return insertPlannedRuns(conn, schema, options.invocation.tenantId, options.now, planned);
 }
 
 export interface EnqueueScheduledJobsOptions {

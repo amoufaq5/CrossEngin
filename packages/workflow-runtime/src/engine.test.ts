@@ -902,6 +902,230 @@ describe("activity retry + dead-letter", () => {
   });
 });
 
+describe("saga compensation", () => {
+  interface CompletedSpec {
+    readonly key: string;
+    readonly comp: string;
+  }
+
+  function sagaDef(
+    strategy: WorkflowDefinition["compensationStrategy"],
+    completed: readonly CompletedSpec[],
+    failingKey: string,
+  ): WorkflowDefinition {
+    const states: WorkflowDefinition["states"] = [];
+    const transitions: WorkflowDefinition["transitions"] = [];
+    const stateNames = completed.map((_, i) => `s${i.toString()}`);
+    const failState = "s_fail";
+    for (let i = 0; i < completed.length; i++) {
+      const c = completed[i]!;
+      const name = stateNames[i]!;
+      const next = i + 1 < completed.length ? stateNames[i + 1]! : failState;
+      states.push({
+        name,
+        kind: i === 0 ? "initial" : "intermediate",
+        label: name,
+        onEntryActions: [
+          {
+            kind: "schedule_activity",
+            parameters: { activityKey: c.key, kind: "http_call", input: {}, compensationActivityKey: c.comp },
+          },
+        ],
+        onExitActions: [],
+        slaSeconds: null,
+      });
+      transitions.push({
+        name: `t_${name}`,
+        fromState: name,
+        toState: next,
+        trigger: { kind: "activity_completed", activityKey: c.key },
+        guards: [],
+        preTransitionActions: [],
+        postTransitionActions: [],
+      });
+    }
+    states.push({
+      name: failState,
+      kind: completed.length === 0 ? "initial" : "intermediate",
+      label: failState,
+      onEntryActions: [
+        { kind: "schedule_activity", parameters: { activityKey: failingKey, kind: "http_call", input: {} } },
+      ],
+      onExitActions: [],
+      slaSeconds: null,
+    });
+    transitions.push({
+      name: "t_fail",
+      fromState: failState,
+      toState: "failed",
+      trigger: { kind: "activity_failed", activityKey: failingKey },
+      guards: [],
+      preTransitionActions: [],
+      postTransitionActions: [],
+    });
+    states.push({
+      name: "failed",
+      kind: "terminal_failure",
+      label: "Failed",
+      onEntryActions: [],
+      onExitActions: [],
+      slaSeconds: null,
+    });
+    const initialState = completed.length > 0 ? stateNames[0]! : failState;
+    return { ...definitionFixture({ compensationStrategy: strategy }), states, transitions, initialState };
+  }
+
+  const succeed: ActivityHandler = () => ({ status: "succeeded", output: {} });
+  const fail: ActivityHandler = () => ({ status: "failed", errorCode: "BOOM", errorMessage: "boom", retryable: false });
+
+  function sagaRegistry(
+    def: WorkflowDefinition,
+    completed: readonly CompletedSpec[],
+    failingKey: string,
+    order: string[],
+    registerCompensators = true,
+  ): ActivityRegistry {
+    const registry = createDefaultRegistry();
+    for (const c of completed) {
+      registry.registerForActivity(def.id, c.key, succeed);
+      if (registerCompensators) {
+        registry.registerForActivity(def.id, c.comp, () => {
+          order.push(c.comp);
+          return { status: "succeeded", output: {} };
+        });
+      }
+    }
+    registry.registerForActivity(def.id, failingKey, fail);
+    return registry;
+  }
+
+  it("auto-compensates a completed activity when the instance reaches terminal_failure", async () => {
+    const completed = [{ key: "charge", comp: "refund" }];
+    const def = sagaDef("immediate_reverse_order", completed, "ship");
+    const order: string[] = [];
+    const registry = sagaRegistry(def, completed, "ship", order);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("compensated");
+    const events = await engine.listEvents(state.instanceId);
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toContain("instance_failed");
+    expect(kinds).toContain("compensation_started");
+    expect(kinds).toContain("activity_compensated");
+    expect(kinds).toContain("compensation_completed");
+    expect(order).toEqual(["refund"]);
+
+    const chargeActivityId = events.find(
+      (e) => e.kind === "activity_scheduled" && e.payload["definitionActivityKey"] === "charge",
+    )!.activityId;
+    const compEvent = events.find((e) => e.kind === "activity_compensated")!;
+    expect(compEvent.activityId).toBe(chargeActivityId);
+    expect(compEvent.payload["handlerRegistered"]).toBe(true);
+  });
+
+  it("compensates immediate_reverse_order in reverse of completion order", async () => {
+    const completed = [
+      { key: "charge", comp: "refund_charge" },
+      { key: "reserve", comp: "undo_reserve" },
+    ];
+    const def = sagaDef("immediate_reverse_order", completed, "ship");
+    const order: string[] = [];
+    const registry = sagaRegistry(def, completed, "ship", order);
+    const { engine } = makeEngine({ definition: def, registry });
+    await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    expect(order).toEqual(["undo_reserve", "refund_charge"]);
+  });
+
+  it("compensates parallel strategy in completion order", async () => {
+    const completed = [
+      { key: "charge", comp: "refund_charge" },
+      { key: "reserve", comp: "undo_reserve" },
+    ];
+    const def = sagaDef("parallel", completed, "ship");
+    const order: string[] = [];
+    const registry = sagaRegistry(def, completed, "ship", order);
+    const { engine } = makeEngine({ definition: def, registry });
+    await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    expect(order).toEqual(["refund_charge", "undo_reserve"]);
+  });
+
+  it("no_compensation compensates nothing and stays failed", async () => {
+    const completed = [{ key: "charge", comp: "refund" }];
+    const def = sagaDef("no_compensation", completed, "ship");
+    const order: string[] = [];
+    const registry = sagaRegistry(def, completed, "ship", order);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("failed");
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("compensation_started");
+    expect(kinds).not.toContain("activity_compensated");
+    expect(order).toEqual([]);
+  });
+
+  it("manual_review defers — no automatic compensation, stays failed", async () => {
+    const completed = [{ key: "charge", comp: "refund" }];
+    const def = sagaDef("manual_review", completed, "ship");
+    const order: string[] = [];
+    const registry = sagaRegistry(def, completed, "ship", order);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("failed");
+    const result = await engine.compensateInstance(state.instanceId);
+    expect(result.strategy).toBe("manual_review");
+    expect(result.compensatedActivityIds).toEqual([]);
+    expect(order).toEqual([]);
+  });
+
+  it("records a no-op activity_compensated when no compensating handler is registered", async () => {
+    const completed = [{ key: "charge", comp: "refund" }];
+    const def = sagaDef("immediate_reverse_order", completed, "ship");
+    const order: string[] = [];
+    const registry = sagaRegistry(def, completed, "ship", order, false);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("compensated");
+    const compEvent = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "activity_compensated")!;
+    expect(compEvent.payload["handlerRegistered"]).toBe(false);
+    expect(compEvent.payload["compensationStatus"]).toBe("succeeded");
+  });
+
+  it("is idempotent — compensateInstance twice compensates each activity only once", async () => {
+    const completed = [{ key: "charge", comp: "refund" }];
+    const def = sagaDef("immediate_reverse_order", completed, "ship");
+    const order: string[] = [];
+    const registry = sagaRegistry(def, completed, "ship", order);
+    const { engine } = makeEngine({ definition: def, registry });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+
+    // Auto compensation already ran once at terminal_failure.
+    expect(order).toEqual(["refund"]);
+    const countAfterAuto = (await engine.listEvents(state.instanceId)).length;
+
+    const first = await engine.compensateInstance(state.instanceId);
+    const second = await engine.compensateInstance(state.instanceId);
+    expect(first.compensatedActivityIds).toEqual([]);
+    expect(second.compensatedActivityIds).toEqual([]);
+    expect(order).toEqual(["refund"]); // handler not invoked again
+    const compEvents = (await engine.listEvents(state.instanceId)).filter((e) => e.kind === "activity_compensated");
+    expect(compEvents).toHaveLength(1);
+    expect((await engine.listEvents(state.instanceId)).length).toBe(countAfterAuto); // no new events
+  });
+
+  it("compensateInstance returns strategy null for an unknown instance", async () => {
+    const { engine } = makeEngine();
+    const result = await engine.compensateInstance("wfi_nope0001");
+    expect(result.strategy).toBeNull();
+    expect(result.compensatedActivityIds).toEqual([]);
+  });
+});
+
 describe("activity retry backoff", () => {
   it("activityRetryDelayMs computes per-kind delays with a cap", () => {
     expect(activityRetryDelayMs(null, 3)).toBe(0);

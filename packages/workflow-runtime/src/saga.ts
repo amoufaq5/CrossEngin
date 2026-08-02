@@ -104,3 +104,19 @@ export function planCompensation(input: {
 export function hasOutstandingCompensation(events: readonly WorkflowEvent[]): boolean {
   return listCompensatableActivities(events).length > 0;
 }
+
+/**
+ * The source `ActivityKind` of every still-compensatable activity, keyed by its activityId. The
+ * engine uses this to resolve a compensating handler (its registry key needs the source kind) and
+ * to carry the kind onto the emitted `activity_compensated` record. Already-compensated activities
+ * are absent (they are excluded by `listCompensatableActivities`).
+ */
+export function compensationKindByActivityId(
+  events: readonly WorkflowEvent[],
+): ReadonlyMap<string, ActivityKind> {
+  const out = new Map<string, ActivityKind>();
+  for (const a of listCompensatableActivities(events)) {
+    out.set(a.activityId, a.kind);
+  }
+  return out;
+}
