@@ -12,6 +12,7 @@ export * from "./handlers.js";
 export * from "./admin-handlers.js";
 export * from "./ui-schema.js";
 export * from "./compile.js";
+export * from "./entitlement.js";
 
 export * from "./aging.js";
 export * from "./aging-handler.js";

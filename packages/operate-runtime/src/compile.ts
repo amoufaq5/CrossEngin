@@ -49,6 +49,7 @@ import {
 } from "./write-effects.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
+import { withEntitlement, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
@@ -71,6 +72,12 @@ export interface OperateRuntimeOptions {
   readonly writeGuards?: readonly WriteGuard[];
   /** Side effects run after a successful write (e.g. auto-generating a reversal entry). */
   readonly writeEffects?: readonly WriteEffect[];
+  /**
+   * Optional subscription gate: when set, every entity + report operation is pre-checked
+   * against the caller tenant's entitlement — a lapsed/suspended tenant gets a 402 (and
+   * `past_due` tenants keep read access but can't write). Omit for an ungated deployment.
+   */
+  readonly entitlementResolver?: EntitlementResolver;
   readonly clock?: { now(): Date };
 }
 
@@ -459,10 +466,17 @@ export function compileOperateServer(
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   };
 
+  // Subscription gate (opt-in): wrap a handler with the entitlement pre-check. Reads pass
+  // for `past_due` tenants; suspended/lapsed tenants get a 402. meta.schema + admin.settings
+  // stay ungated so the UI can still render (and show a payment-required state).
+  const resolver = options.entitlementResolver;
+  const gate = (handler: Parameters<typeof handlers.register>[1], op: "read" | "write") =>
+    resolver !== undefined ? withEntitlement(handler, op, resolver) : handler;
+
   const routeSpecs = manifestRouteSpecs(manifest);
   for (const spec of routeSpecs) {
     routes.register(routeFromSpec(spec));
-    handlers.register(spec.operationId, buildSpecHandler(spec, ctx));
+    handlers.register(spec.operationId, gate(buildSpecHandler(spec, ctx), spec.method === "GET" ? "read" : "write"));
   }
 
   // Manifest-driven UI metadata: any authenticated principal may read the shape.
@@ -511,13 +525,16 @@ export function compileOperateServer(
     routes.register(literalRoute("meta.aging.read", "GET", ["v1", "meta", "aging"]));
     handlers.register(
       "meta.aging.read",
-      buildAgingHandler({
-        store: options.store,
-        principalRoles: options.principalRoles,
-        viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
-        sections: agingSections,
-        ...(options.clock !== undefined ? { clock: options.clock } : {}),
-      }),
+      gate(
+        buildAgingHandler({
+          store: options.store,
+          principalRoles: options.principalRoles,
+          viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
+          sections: agingSections,
+          ...(options.clock !== undefined ? { clock: options.clock } : {}),
+        }),
+        "read",
+      ),
     );
   }
 
@@ -527,11 +544,14 @@ export function compileOperateServer(
     routes.register(literalRoute("meta.whtReconciliation.read", "GET", ["v1", "meta", "wht-reconciliation"]));
     handlers.register(
       "meta.whtReconciliation.read",
-      buildWhtReconciliationHandler({
-        store: options.store,
-        principalRoles: options.principalRoles,
-        viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
-      }),
+      gate(
+        buildWhtReconciliationHandler({
+          store: options.store,
+          principalRoles: options.principalRoles,
+          viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
+        }),
+        "read",
+      ),
     );
   }
 
