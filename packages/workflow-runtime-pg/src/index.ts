@@ -6,4 +6,5 @@ export * from "./persistent-engine.js";
 export * from "./projecting-event-log.js";
 export * from "./replayer.js";
 export * from "./signal-store.js";
+export * from "./timer-claim.js";
 export * from "./timer-store.js";
