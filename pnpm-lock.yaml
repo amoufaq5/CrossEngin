@@ -1705,6 +1705,9 @@ importers:
       '@crossengin/workflow-runtime':
         specifier: workspace:*
         version: link:../workflow-runtime
+      '@crossengin/workflow-worker':
+        specifier: workspace:*
+        version: link:../workflow-worker
       zod:
         specifier: ^3.23.0
         version: 3.25.76

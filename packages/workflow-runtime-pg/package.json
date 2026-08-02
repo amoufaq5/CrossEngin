@@ -24,6 +24,7 @@
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/workflow-engine": "workspace:*",
     "@crossengin/workflow-runtime": "workspace:*",
+    "@crossengin/workflow-worker": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
