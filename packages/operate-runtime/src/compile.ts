@@ -50,6 +50,11 @@ import {
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import { buildEntitlementHandler } from "./entitlement-handler.js";
 import { buildUsageHandler } from "./usage-handler.js";
+import {
+  buildBillingPortalHandler,
+  type BillingCustomerResolver,
+  type BillingPortalCreator,
+} from "./billing-portal-handler.js";
 import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
 import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
@@ -80,7 +85,19 @@ export interface OperateRuntimeOptions {
    * `past_due` tenants keep read access but can't write). Omit for an ungated deployment.
    */
   readonly entitlementResolver?: EntitlementResolver;
+  /**
+   * Optional Stripe Billing Portal: when set, registers `POST /v1/meta/billing-portal`, which
+   * mints a hosted portal session for the caller tenant (own tenant only). Omit for
+   * deployments without cloud billing.
+   */
+  readonly billingPortal?: BillingPortalWiring;
   readonly clock?: { now(): Date };
+}
+
+export interface BillingPortalWiring {
+  readonly customers: BillingCustomerResolver;
+  readonly portal: BillingPortalCreator;
+  readonly returnUrl: string;
 }
 
 const DEFAULT_ADMIN_ROLES: readonly RoleName[] = ["erp_admin" as RoleName];
@@ -523,6 +540,13 @@ export function compileOperateServer(
       "meta.usage.read",
       buildUsageHandler({ resolver, store: options.store, entities: (manifest.entities ?? []).map((e) => e.name) }),
     );
+  }
+
+  // Stripe Billing Portal (opt-in): a lapsed tenant can reach it to fix payment, so it is
+  // registered UNGATED (own tenant only) even when the subscription gate is active.
+  if (options.billingPortal !== undefined) {
+    routes.register(literalRoute("meta.billing-portal.create", "POST", ["v1", "meta", "billing-portal"]));
+    handlers.register("meta.billing-portal.create", buildBillingPortalHandler(options.billingPortal));
   }
 
   // AR/AP aging report, when the manifest models invoices/bills + payments.

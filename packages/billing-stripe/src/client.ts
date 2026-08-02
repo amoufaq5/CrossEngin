@@ -1,3 +1,4 @@
+import { mapBillingPortalSession, type StripeBillingPortalSession } from "./billing-portal.js";
 import { StripeError, stripeErrorFromHttpResponse, stripeErrorFromNetworkError } from "./errors.js";
 import { mapStripeCustomer, type StripeCustomer } from "./customers.js";
 import { mapStripeSubscription, type StripeSubscription } from "./subscriptions.js";
@@ -52,6 +53,11 @@ export interface CancelSubscriptionOptions {
   readonly atPeriodEnd?: boolean;
 }
 
+export interface CreateBillingPortalSessionInput {
+  readonly customerId: string;
+  readonly returnUrl: string;
+}
+
 export class StripeClient {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -101,6 +107,21 @@ export class StripeClient {
         ? await this.request("POST", path, { cancel_at_period_end: true })
         : await this.request("DELETE", path);
     return mapStripeSubscription(json);
+  }
+
+  /**
+   * Creates a Billing Portal session for a customer and returns its hosted `url`. The tenant
+   * is redirected there to update payment methods / cancel / switch plans, then bounced back
+   * to `returnUrl`.
+   */
+  async createBillingPortalSession(
+    input: CreateBillingPortalSessionInput,
+  ): Promise<StripeBillingPortalSession> {
+    const json = await this.request("POST", "/v1/billing_portal/sessions", {
+      customer: input.customerId,
+      return_url: input.returnUrl,
+    });
+    return mapBillingPortalSession(json);
   }
 
   private async request(method: string, path: string, form?: FormLike): Promise<unknown> {

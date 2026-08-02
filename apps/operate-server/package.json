@@ -26,6 +26,7 @@
   "dependencies": {
     "@crossengin/api-gateway": "workspace:*",
     "@crossengin/api-gateway-runtime": "workspace:*",
+    "@crossengin/billing-stripe": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/operate-runtime": "workspace:*",

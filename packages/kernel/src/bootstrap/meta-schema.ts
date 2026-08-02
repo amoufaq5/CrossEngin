@@ -9403,6 +9403,7 @@ export const META_BILLING_SUBSCRIPTIONS: TableDefinition = {
     { name: "max_records_per_entity", type: "INTEGER" },
     { name: "features", type: "JSONB" },
     { name: "stripe_subscription_id", type: "TEXT" },
+    { name: "stripe_customer_id", type: "TEXT" },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],

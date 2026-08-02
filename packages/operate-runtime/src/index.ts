@@ -17,6 +17,7 @@ export * from "./entitlement-handler.js";
 export * from "./license.js";
 export * from "./plan-catalog.js";
 export * from "./usage-handler.js";
+export * from "./billing-portal-handler.js";
 
 export * from "./aging.js";
 export * from "./aging-handler.js";
