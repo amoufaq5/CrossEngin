@@ -1172,6 +1172,9 @@ importers:
 
   packages/operate-runtime-pg:
     dependencies:
+      '@crossengin/billing-stripe':
+        specifier: workspace:*
+        version: link:../billing-stripe
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../kernel

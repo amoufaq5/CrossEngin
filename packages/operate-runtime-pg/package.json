@@ -21,6 +21,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@crossengin/billing-stripe": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/operate-runtime": "workspace:*",
