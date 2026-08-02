@@ -23,6 +23,8 @@ export interface UiFieldSchema {
   readonly classification?: string;
   readonly unique?: boolean;
   readonly readOnly?: boolean;
+  /** The server auto-fills this on create — a required-but-defaulted field needs no client input. */
+  readonly defaulted?: boolean;
 }
 
 export interface UiTransitionSchema {

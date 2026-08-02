@@ -386,6 +386,16 @@ function CreateForm({
   const [error, setError] = useState<string | null>(null);
 
   async function submit() {
+    // Client-side pre-check: a required field with no server default must be filled. Skips
+    // `defaulted` fields (the server fills them) + booleans (false is a valid value), avoiding a
+    // round-trip for the obvious case; the server still validates as the backstop.
+    const missing = editable.filter(
+      (f) => f.required && f.defaulted !== true && f.input !== "boolean" && (values[f.name] === undefined || values[f.name] === ""),
+    );
+    if (missing.length > 0) {
+      setError(`Please fill in: ${missing.map((f) => f.label).join(", ")}`);
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
