@@ -335,3 +335,54 @@ describe("operate-server — subscription entitlement gate", () => {
     expect(write.response.status).toBe(402);
   });
 });
+
+describe("operate-server — plan record-cap enforcement", () => {
+  function cappedServer(cap: number) {
+    const store = new InMemoryEntityStore();
+    const principalResolver = new InMemoryPrincipalResolver();
+    for (const role of Object.values(KEYS)) {
+      principalResolver.register(role, {
+        principalId: "00000000-0000-4000-8000-0000000000aa",
+        tenantId: TENANT,
+        principalKind: "user",
+        authScheme: "api_key_header",
+        grantedScopes: [role],
+        mfaProofAgeSeconds: null,
+        resolvedAt: "2026-06-03T12:00:00.000Z",
+      });
+    }
+    const opaqueTokenLookup: OpaqueTokenLookup = {
+      async lookup(_req: IncomingRequest, token: string) {
+        const role = KEYS[token];
+        return role === undefined ? null : { principalRef: role, scopes: [role], tenantId: TENANT };
+      },
+    };
+    const server = buildOperateGateway(resolved, {
+      store,
+      principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" }),
+      principalResolver,
+      opaqueTokenLookup,
+      entitlementResolver: new InMemoryEntitlementResolver([[TENANT, { status: "active", maxRecordsPerEntity: cap }]]),
+      clock: { now: () => new Date("2026-06-03T12:00:00.000Z") },
+    });
+    return { server, store };
+  }
+
+  it("denies a create once the plan's per-entity cap is reached", async () => {
+    const { server, store } = cappedServer(1);
+    await store.create(TENANT, "Product", { id: "prod-1", sku: "S1", name: "Milk", unit_price: 2, status: "active", category: "grocery" });
+    const res = await server.runtime.handleRequest(
+      writeReq("POST", "/v1/products", "key-manager", { id: "p2", sku: "S2", name: "Bread", unit_price: 3, status: "active", category: "grocery" }),
+    );
+    expect(res.response.status).toBe(402);
+    expect(bodyOf(res.response.bodyBytes).reason).toBe("record_limit_reached");
+  });
+
+  it("allows a create while under the cap", async () => {
+    const { server } = cappedServer(5);
+    const res = await server.runtime.handleRequest(
+      writeReq("POST", "/v1/products", "key-manager", { id: "p1", sku: "S1", name: "Milk", unit_price: 2, status: "active", category: "grocery" }),
+    );
+    expect(res.response.status).toBe(201);
+  });
+});

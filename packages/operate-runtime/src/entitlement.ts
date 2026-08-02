@@ -1,5 +1,7 @@
 import type { Handler, HandlerOutput } from "@crossengin/api-gateway-runtime";
 
+import type { EntityStore } from "./store.js";
+
 /**
  * Subscription status a tenant can be in. Mirrors `@crossengin/billing`'s
  * `SubscriptionStatus` structurally, so a deployment maps its billing record to this
@@ -104,6 +106,57 @@ export function withEntitlement(handler: Handler, op: OperationKind, resolver: E
     const entitlement = await resolver.resolve(tenantId);
     const decision = evaluateEntitlement(entitlement, op);
     if (!decision.allowed) return entitlementProblem(decision);
+    return handler(input);
+  };
+}
+
+const LIMIT_PROBLEM_TYPE = "https://crossengin.dev/problems/plan-limit-reached";
+
+/** Builds the 402 problem output for a plan record-cap breach on create. */
+export function recordLimitProblem(entity: string, limit: number): HandlerOutput {
+  return {
+    kind: "json",
+    status: 402,
+    headers: { "content-type": "application/problem+json" },
+    body: {
+      type: LIMIT_PROBLEM_TYPE,
+      title: "Plan limit reached",
+      status: 402,
+      detail: `Your plan allows at most ${limit} ${entity} record${limit === 1 ? "" : "s"}. Upgrade to add more.`,
+      reason: "record_limit_reached",
+      entity,
+      limit,
+    },
+  };
+}
+
+export interface RecordLimitConfig {
+  readonly resolver: EntitlementResolver;
+  /** Only `listPage` is used — to count existing records under the cap. */
+  readonly store: Pick<EntityStore, "listPage">;
+  readonly entity: string;
+}
+
+/**
+ * Wraps a **create** handler with the full entitlement check: resolves the tenant's
+ * entitlement once, applies the write-status policy (so a lapsed/past-due tenant is denied
+ * before any count), then — when the plan sets `maxRecordsPerEntity` — bounded-counts the
+ * entity's existing records and returns a 402 `record_limit_reached` if the cap is already
+ * met. An unauthenticated request passes through (auth/RBAC own that case).
+ */
+export function withRecordLimit(handler: Handler, config: RecordLimitConfig): Handler {
+  return async (input) => {
+    const tenantId = input.principal?.tenantId ?? null;
+    if (tenantId === null) return handler(input);
+    const entitlement = await config.resolver.resolve(tenantId);
+    const decision = evaluateEntitlement(entitlement, "write");
+    if (!decision.allowed) return entitlementProblem(decision);
+    const cap = entitlement?.maxRecordsPerEntity;
+    if (entitlement !== null && typeof cap === "number" && cap >= 0) {
+      // Read at most cap+1 rows: length >= cap ⟺ the tenant is already at/over the cap.
+      const page = await config.store.listPage(tenantId, config.entity, { limit: cap + 1, cursor: null, sort: [], filters: [] });
+      if (page.records.length >= cap) return recordLimitProblem(config.entity, cap);
+    }
     return handler(input);
   };
 }

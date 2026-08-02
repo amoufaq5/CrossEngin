@@ -6,8 +6,10 @@ import {
   evaluateEntitlement,
   entitlementProblem,
   withEntitlement,
+  withRecordLimit,
   type Entitlement,
 } from "./entitlement.js";
+import { InMemoryEntityStore } from "./store.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 
@@ -95,5 +97,53 @@ describe("withEntitlement", () => {
   it("passes an unauthenticated request through (auth owns that case)", async () => {
     const resolver = new InMemoryEntitlementResolver();
     expect((await withEntitlement(ok, "write", resolver)(inputFor(null))).status).toBe(200);
+  });
+});
+
+describe("withRecordLimit (plan record caps)", () => {
+  async function storeWith(count: number): Promise<InMemoryEntityStore> {
+    const store = new InMemoryEntityStore();
+    for (let i = 0; i < count; i += 1) await store.create(TENANT, "Product", { id: `p${i}`, name: `P${i}` });
+    return store;
+  }
+  const created: Handler = () => ({ kind: "json", status: 201, body: { ok: true } });
+
+  it("allows a create under the cap", async () => {
+    const store = await storeWith(2);
+    const resolver = new InMemoryEntitlementResolver([[TENANT, { status: "active", maxRecordsPerEntity: 5 }]]);
+    const out = await withRecordLimit(created, { resolver, store, entity: "Product" })(inputFor(TENANT));
+    expect(out.status).toBe(201);
+  });
+
+  it("denies a create at the cap with 402 record_limit_reached", async () => {
+    const store = await storeWith(5);
+    const resolver = new InMemoryEntitlementResolver([[TENANT, { status: "active", maxRecordsPerEntity: 5 }]]);
+    const out = await withRecordLimit(created, { resolver, store, entity: "Product" })(inputFor(TENANT));
+    expect(out.status).toBe(402);
+    const body = (out as Extract<HandlerOutput, { kind: "json" }>).body as Record<string, unknown>;
+    expect(body.reason).toBe("record_limit_reached");
+    expect(body.entity).toBe("Product");
+    expect(body.limit).toBe(5);
+  });
+
+  it("ignores the cap when the plan sets none", async () => {
+    const store = await storeWith(100);
+    const resolver = new InMemoryEntitlementResolver([[TENANT, { status: "active" }]]);
+    const out = await withRecordLimit(created, { resolver, store, entity: "Product" })(inputFor(TENANT));
+    expect(out.status).toBe(201);
+  });
+
+  it("applies the write-status policy before the cap (lapsed → status 402)", async () => {
+    const store = await storeWith(0);
+    const resolver = new InMemoryEntitlementResolver([[TENANT, { status: "canceled", maxRecordsPerEntity: 5 }]]);
+    const out = await withRecordLimit(created, { resolver, store, entity: "Product" })(inputFor(TENANT));
+    expect(out.status).toBe(402);
+    expect(((out as Extract<HandlerOutput, { kind: "json" }>).body as Record<string, unknown>).reason).toBe("subscription_canceled");
+  });
+
+  it("passes an unauthenticated request through", async () => {
+    const store = await storeWith(9);
+    const resolver = new InMemoryEntitlementResolver([[TENANT, { status: "active", maxRecordsPerEntity: 5 }]]);
+    expect((await withRecordLimit(created, { resolver, store, entity: "Product" })(inputFor(null))).status).toBe(201);
   });
 });
