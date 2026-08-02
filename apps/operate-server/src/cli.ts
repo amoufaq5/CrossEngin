@@ -15,6 +15,10 @@ export interface ServeOptions {
   readonly jwksRefreshMs: number | null;
   readonly jwtIssuer: string | null;
   readonly jwtAudience: string | null;
+  /** Path to an offline Ed25519 license token file (on-prem subscription entitlement). */
+  readonly licenseFile: string | null;
+  /** The licensor's Ed25519 public key (base64) used to verify the license. */
+  readonly licenseKey: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -54,6 +58,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let jwksRefreshMs: number | null = null;
   let jwtIssuer: string | null = null;
   let jwtAudience: string | null = null;
+  let licenseFile: string | null = null;
+  let licenseKey: string | null = null;
   let help = false;
   let version = false;
 
@@ -119,9 +125,19 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--jwt-audience" || arg.startsWith("--jwt-audience=")) {
       jwtAudience = takeValue(arg, next, "--jwt-audience");
       i += consumed();
+    } else if (arg === "--license" || arg.startsWith("--license=")) {
+      licenseFile = takeValue(arg, next, "--license");
+      i += consumed();
+    } else if (arg === "--license-key" || arg.startsWith("--license-key=")) {
+      licenseKey = takeValue(arg, next, "--license-key");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
+  }
+
+  if (licenseFile !== null && licenseKey === null) {
+    throw new CliUsageError("--license requires --license-key (the licensor's base64 Ed25519 public key)");
   }
 
   if (
@@ -153,6 +169,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jwksRefreshMs,
     jwtIssuer,
     jwtAudience,
+    licenseFile,
+    licenseKey,
     defaultScheme,
     help,
     version,
@@ -183,6 +201,8 @@ Options:
   --jwks-refresh-ms <n> Background JWKS refresh interval (with --jwks-url; >=1000)
   --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
+  --license <file>     Offline Ed25519 license token file (on-prem entitlement)
+  --license-key <b64>  Licensor Ed25519 public key, base64 (required with --license)
   --help, -h           Show this help
   --version, -v        Print version
 

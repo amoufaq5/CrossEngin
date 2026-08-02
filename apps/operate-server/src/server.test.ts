@@ -1,4 +1,5 @@
-import { InMemoryEntityStore } from "@crossengin/operate-runtime";
+import { generateEd25519Keypair } from "@crossengin/crypto";
+import { InMemoryEntityStore, LicenseEntitlementResolver, signLicense } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest } from "./http.js";
@@ -139,5 +140,61 @@ describe("OperateHttpServer — serving a pack over raw HTTP", () => {
     const secondBody = parse(second.body);
     expect((secondBody["data"] as unknown[]).length).toBe(1);
     expect((secondBody["page"] as { nextCursor: string | null }).nextCursor).toBeNull();
+  });
+});
+
+describe("OperateHttpServer — offline license entitlement gate", () => {
+  function licensedServer(status: "active" | "canceled"): OperateHttpServer {
+    const { publicKeyBase64, privateKeyBase64 } = generateEd25519Keypair();
+    const token = signLicense(privateKeyBase64, publicKeyBase64, {
+      tenantId: TENANT,
+      status,
+      planId: "pro",
+      issuedAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: "2027-01-01T00:00:00.000Z",
+    });
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      entitlementResolver: new LicenseEntitlementResolver(token, publicKeyBase64, {
+        now: () => new Date("2026-06-03T12:00:00.000Z"),
+      }),
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+    return httpServer;
+  }
+
+  it("serves a tenant with a valid active license", async () => {
+    const res = await licensedServer("active").dispatch(req("GET", "/v1/products", "key-manager"), null);
+    expect(res.status).toBe(200);
+  });
+
+  it("denies a tenant whose license status is canceled with 402", async () => {
+    const res = await licensedServer("canceled").dispatch(req("GET", "/v1/products", "key-manager"), null);
+    expect(res.status).toBe(402);
+    expect(parse(res.body).reason).toBe("subscription_canceled");
+  });
+
+  it("denies when the license is for a different tenant (public key still valid)", async () => {
+    const { publicKeyBase64, privateKeyBase64 } = generateEd25519Keypair();
+    const token = signLicense(privateKeyBase64, publicKeyBase64, {
+      tenantId: "99999999-9999-4999-8999-999999999999",
+      status: "active",
+      issuedAt: "2026-01-01T00:00:00.000Z",
+      expiresAt: "2027-01-01T00:00:00.000Z",
+    });
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      entitlementResolver: new LicenseEntitlementResolver(token, publicKeyBase64, {
+        now: () => new Date("2026-06-03T12:00:00.000Z"),
+      }),
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+    const res = await httpServer.dispatch(req("GET", "/v1/products", "key-manager"), null);
+    expect(res.status).toBe(402);
+    expect(parse(res.body).reason).toBe("no_subscription");
   });
 });

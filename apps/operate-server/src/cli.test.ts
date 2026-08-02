@@ -80,6 +80,22 @@ describe("parseServeArgs", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-url", "https://idp/jwks"])).toThrow(/issuer.*audience/);
   });
 
+  it("parses --license + --license-key for offline entitlement", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--license", "./tenant.lic", "--license-key", "PUBb64"]);
+    expect(opts.licenseFile).toBe("./tenant.lic");
+    expect(opts.licenseKey).toBe("PUBb64");
+  });
+
+  it("requires --license-key with --license", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--license", "./tenant.lic"])).toThrow(/--license requires --license-key/);
+  });
+
+  it("defaults license options to null", () => {
+    const opts = parseServeArgs(["--pack", "erp-core"]);
+    expect(opts.licenseFile).toBeNull();
+    expect(opts.licenseKey).toBeNull();
+  });
+
   it("parses a remote --jwks-url", () => {
     const opts = parseServeArgs([
       "--pack",
