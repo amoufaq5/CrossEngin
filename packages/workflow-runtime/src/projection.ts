@@ -385,7 +385,9 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
           typeof event.payload["attemptNumber"] === "number"
             ? (event.payload["attemptNumber"] as number)
             : 1,
-        scheduledAt: event.occurredAt,
+        // A retry backoff persists an `availableAt` so the projected scheduled_at defers the claim;
+        // absent ⇒ due at the schedule instant.
+        scheduledAt: asString(event.payload["availableAt"], event.occurredAt) ?? event.occurredAt,
         startedAt: null,
         completedAt: null,
         errorCode: null,

@@ -22,6 +22,48 @@ import {
 
 const MAX_STEP_ITERATIONS = 1000;
 
+/**
+ * A retry backoff for a scheduled activity, in milliseconds (durations stay ms here to avoid an ISO
+ * dependency in the core runtime). `null` ⇒ no backoff ⇒ immediate reschedule (the ADR-0184 behavior).
+ */
+export type ActivityRetryBackoff =
+  | { readonly kind: "exponential" | "linear" | "constant"; readonly initialMs: number; readonly maxMs?: number }
+  | null;
+
+/** The delay (ms) before the next attempt of an activity that just failed on `attemptNumber` (1-based). */
+export function activityRetryDelayMs(backoff: ActivityRetryBackoff, attemptNumber: number): number {
+  if (backoff === null || backoff.initialMs <= 0) return 0;
+  const n = Math.max(1, Math.floor(attemptNumber));
+  let delay: number;
+  switch (backoff.kind) {
+    case "constant":
+      delay = backoff.initialMs;
+      break;
+    case "linear":
+      delay = backoff.initialMs * n;
+      break;
+    case "exponential":
+      delay = backoff.initialMs * 2 ** (n - 1);
+      break;
+  }
+  if (backoff.maxMs !== undefined) delay = Math.min(delay, backoff.maxMs);
+  return Math.round(delay);
+}
+
+/** Reads a `schedule_activity` action's backoff parameters into an `ActivityRetryBackoff` (or `null`). */
+export function parseActivityBackoff(params: Record<string, unknown>): ActivityRetryBackoff {
+  const initial = params["retryBackoffMs"];
+  if (typeof initial !== "number" || !Number.isFinite(initial) || initial <= 0) return null;
+  const kindParam = params["retryBackoffKind"];
+  const kind = kindParam === "linear" || kindParam === "constant" ? kindParam : "exponential";
+  const maxMs = params["retryMaxBackoffMs"];
+  return {
+    kind,
+    initialMs: Math.floor(initial),
+    ...(typeof maxMs === "number" && Number.isFinite(maxMs) ? { maxMs: Math.floor(maxMs) } : {}),
+  };
+}
+
 export interface EngineOptions {
   readonly eventLog: EventLog;
   readonly definitions: ReadonlyMap<string, WorkflowDefinition>;
@@ -554,7 +596,8 @@ export class WorkflowEngine {
       typeof action.parameters["maxAttempts"] === "number" && action.parameters["maxAttempts"] >= 1
         ? Math.floor(action.parameters["maxAttempts"] as number)
         : 1;
-    await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, 1, maxAttempts, tenantId);
+    const backoff = parseActivityBackoff(action.parameters);
+    await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, 1, maxAttempts, tenantId, backoff, null);
   }
 
   /**
@@ -571,6 +614,8 @@ export class WorkflowEngine {
     attemptNumber: number,
     maxAttempts: number,
     tenantId: string,
+    backoff: ActivityRetryBackoff,
+    availableAt: string | null,
   ): Promise<void> {
     const activityId = this.ids.generate("wfa");
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
@@ -596,6 +641,10 @@ export class WorkflowEngine {
         maxAttempts,
         input: inputData,
         inputSha256: sha256(JSON.stringify(inputData)),
+        ...(backoff !== null ? { retryBackoff: backoff } : {}),
+        // availableAt defers the activity's scheduled_at so the claim (`scheduled_at <= now`) holds it
+        // out of the queue until the backoff elapses; absent ⇒ due immediately (occurredAt).
+        ...(availableAt !== null ? { availableAt } : {}),
       },
       correlationId: null,
       causationEventId: null,
@@ -603,7 +652,7 @@ export class WorkflowEngine {
 
     // Deferred mode: leave the activity `scheduled` for a distributed worker to claim + execute.
     if (this.deferActivities) return;
-    await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, attemptNumber, maxAttempts, tenantId);
+    await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, attemptNumber, maxAttempts, tenantId, backoff);
   }
 
   /**
@@ -622,6 +671,7 @@ export class WorkflowEngine {
     attemptNumber: number,
     maxAttempts: number,
     tenantId: string,
+    backoff: ActivityRetryBackoff = null,
   ): Promise<void> {
     const handler =
       this.registry.resolve({
@@ -741,7 +791,11 @@ export class WorkflowEngine {
       });
       if (willRetry) {
         // Reschedule a fresh attempt (new activityId). No transition — the activity isn't done.
-        await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, attemptNumber + 1, maxAttempts, tenantId);
+        // A backoff defers the next attempt's availableAt (deferred mode); absent ⇒ immediate.
+        const delayMs = activityRetryDelayMs(backoff, attemptNumber);
+        const availableAt =
+          delayMs > 0 ? new Date(new Date(this.clock.nowIso()).getTime() + delayMs).toISOString() : null;
+        await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, attemptNumber + 1, maxAttempts, tenantId, backoff, availableAt);
       } else {
         const liveState = await this.getInstanceState(instanceId);
         if (liveState !== null) {
@@ -792,7 +846,14 @@ export class WorkflowEngine {
     activityId: string,
   ): Promise<{ readonly executed: boolean }> {
     const events = await this.eventLog.listByInstance(instanceId);
-    let scheduled: { kind: string; key: string; input: Record<string, unknown>; attempt: number; maxAttempts: number } | null = null;
+    let scheduled: {
+      kind: string;
+      key: string;
+      input: Record<string, unknown>;
+      attempt: number;
+      maxAttempts: number;
+      backoff: ActivityRetryBackoff;
+    } | null = null;
     let started = false;
     for (const e of events) {
       if (e.activityId !== activityId) continue;
@@ -804,6 +865,7 @@ export class WorkflowEngine {
           input: (p["input"] as Record<string, unknown> | undefined) ?? {},
           attempt: typeof p["attemptNumber"] === "number" ? (p["attemptNumber"] as number) : 1,
           maxAttempts: typeof p["maxAttempts"] === "number" ? (p["maxAttempts"] as number) : 1,
+          backoff: (p["retryBackoff"] as ActivityRetryBackoff) ?? null,
         };
       } else if (
         e.kind === "activity_started" ||
@@ -829,6 +891,7 @@ export class WorkflowEngine {
       scheduled.attempt,
       scheduled.maxAttempts,
       state.tenantId,
+      scheduled.backoff,
     );
     // The inline path runs inside the step loop; the distributed entry point must drive it itself
     // so a terminal transition emits instance_completed / runs the next state's on-entry actions.
