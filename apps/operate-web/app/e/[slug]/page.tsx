@@ -7,7 +7,7 @@ import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
 import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
-import { createRecord, listRecords, type ListResult } from "@/lib/api";
+import { createRecord, deleteRecord, listRecords, type ListResult } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
 import { canAccess, entityBySlug, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
@@ -37,6 +37,36 @@ function Shell({ title, note }: { title: string; note?: string }) {
       <div className="px-8 py-6 text-sm text-ink-muted">{note ?? "Loading…"}</div>
     </>
   );
+}
+
+const CSV_EXPORT_MAX = 10000;
+
+function csvCell(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const s = typeof value === "boolean" ? (value ? "true" : "false") : String(value);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+/** Serializes rows to CSV (CRLF line endings, RFC-4180 quoting) over the given columns. */
+function toCsv(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  columns: ReadonlyArray<{ key: string; label: string }>,
+): string {
+  const header = columns.map((c) => csvCell(c.label)).join(",");
+  const body = rows.map((r) => columns.map((c) => csvCell(r[c.key])).join(",")).join("\r\n");
+  return body === "" ? header : `${header}\r\n${body}`;
+}
+
+function triggerDownload(filename: string, text: string): void {
+  if (typeof window === "undefined") return;
+  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8;" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 type ListSortState = { field: string; order: "asc" | "desc" };
@@ -104,6 +134,10 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
     window.history.replaceState(null, "", qs === "" ? window.location.pathname : `${window.location.pathname}?${qs}`);
   }, [debouncedQ, sort, filters]);
   const canCreate = canAccess(schema, entity, "create");
+  const canDelete = canAccess(schema, entity, "delete");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [exporting, setExporting] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [showNew, setShowNew] = useState(
     () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("new") === "1",
   );
@@ -183,6 +217,71 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
     );
   }
 
+  const loadedIds = useMemo(() => rows.map((r) => String(r["id"] ?? "")), [rows]);
+  const allSelected = loadedIds.length > 0 && loadedIds.every((id) => selected.has(id));
+
+  function toggleAll() {
+    setSelected(loadedIds.every((id) => selected.has(id)) ? new Set() : new Set(loadedIds));
+  }
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  // Export CSV: the selected rows, or — when nothing is selected — every row matching the
+  // current filter/sort/search (paged through, bounded). Rows are already redaction-safe (the
+  // API dropped classified fields per-caller), so the CSV can't leak what the table can't show.
+  async function exportCsv() {
+    setExporting(true);
+    setError(null);
+    try {
+      const columns = entity.fields.map((f) => ({ key: f.name, label: f.label }));
+      let exportRows: ReadonlyArray<Record<string, unknown>>;
+      if (selected.size > 0) {
+        exportRows = data.filter((r) => selected.has(String(r["id"] ?? "")));
+      } else {
+        const acc: Record<string, unknown>[] = [];
+        let cursor: string | null = null;
+        do {
+          const page: ListResult = await listRecords(
+            entity.slug,
+            cursor === null ? query : `${query}&cursor=${encodeURIComponent(cursor)}`,
+          );
+          acc.push(...page.data);
+          cursor = page.nextCursor;
+        } while (cursor !== null && acc.length < CSV_EXPORT_MAX);
+        exportRows = acc;
+      }
+      triggerDownload(`${entity.slug}.csv`, toCsv(exportRows, columns));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function bulkDelete() {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    if (!confirm(`Delete ${ids.length} ${ids.length === 1 ? entity.singular : entity.label}? This cannot be undone.`)) return;
+    setBulkBusy(true);
+    setError(null);
+    try {
+      for (const id of ids) await deleteRecord(entity.slug, id);
+      invalidateReferenceCache(entity.slug);
+      setSelected(new Set());
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   return (
     <>
       <Topbar title={entity.label} subtitle={`${entity.module} · ${entity.fields.length} fields`} />
@@ -205,6 +304,22 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
           <button onClick={load} className="rounded-lg border border-line px-3 py-2 text-sm text-ink-muted hover:bg-surface-soft">
             Refresh
           </button>
+          <button
+            onClick={() => void exportCsv()}
+            disabled={exporting}
+            className="rounded-lg border border-line px-3 py-2 text-sm text-ink-muted hover:bg-surface-soft disabled:opacity-60"
+          >
+            {exporting ? "Exporting…" : selected.size > 0 ? `Export ${selected.size}` : "Export CSV"}
+          </button>
+          {canDelete && selected.size > 0 && (
+            <button
+              onClick={() => void bulkDelete()}
+              disabled={bulkBusy}
+              className="rounded-lg border border-brand-200 px-3 py-2 text-sm font-medium text-brand-600 hover:bg-brand-50 disabled:opacity-60"
+            >
+              {bulkBusy ? "Deleting…" : `Delete ${selected.size}`}
+            </button>
+          )}
           {canCreate && (
             <button
               onClick={() => setShowNew((s) => !s)}
@@ -235,6 +350,15 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
           <table className="w-full text-sm">
             <thead className="bg-surface-soft text-left text-xs uppercase tracking-wide text-ink-faint">
               <tr>
+                <th className="w-8 px-4 py-2.5">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleAll}
+                    aria-label="Select all loaded rows"
+                    className="cursor-pointer align-middle"
+                  />
+                </th>
                 {entity.listColumns.map((c) => {
                   const sortable = entity.sortableFields.includes(c);
                   const arrow = sort?.field === c ? (sort.order === "asc" ? " ↑" : " ↓") : "";
@@ -255,22 +379,32 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
             <tbody className="divide-y divide-line">
               {busy && rows.length === 0 && (
                 <tr>
-                  <td colSpan={entity.listColumns.length + 1} className="px-4 py-8 text-center text-ink-faint">
+                  <td colSpan={entity.listColumns.length + 2} className="px-4 py-8 text-center text-ink-faint">
                     Loading…
                   </td>
                 </tr>
               )}
               {!busy && rows.length === 0 && (
                 <tr>
-                  <td colSpan={entity.listColumns.length + 1} className="px-4 py-8 text-center text-ink-faint">
+                  <td colSpan={entity.listColumns.length + 2} className="px-4 py-8 text-center text-ink-faint">
                     No records.
                   </td>
                 </tr>
               )}
               {rows.map((row) => {
                 const id = String(row["id"] ?? "");
+                const isSelected = selected.has(id);
                 return (
-                  <tr key={id} className="transition hover:bg-surface-soft/60">
+                  <tr key={id} className={`transition ${isSelected ? "bg-brand-50/60" : "hover:bg-surface-soft/60"}`}>
+                    <td className="px-4 py-2.5">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleOne(id)}
+                        aria-label={`Select ${id}`}
+                        className="cursor-pointer align-middle"
+                      />
+                    </td>
                     {entity.listColumns.map((c) => (
                       <td key={c} className="px-4 py-2.5 text-ink">
                         <Cell field={fieldByName.get(c)} value={row[c]} schema={schema} />
