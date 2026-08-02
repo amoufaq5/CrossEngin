@@ -9390,6 +9390,33 @@ export const META_OPERATE_TENANT_SETTINGS: TableDefinition = {
   },
 };
 
+export const META_BILLING_SUBSCRIPTIONS: TableDefinition = {
+  schema: "meta",
+  name: "billing_subscriptions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true },
+    { name: "plan_id", type: "TEXT", notNull: true },
+    { name: "status", type: "TEXT", notNull: true },
+    { name: "current_period_end", type: "TIMESTAMPTZ" },
+    { name: "trial_end", type: "TIMESTAMPTZ" },
+    { name: "max_records_per_entity", type: "INTEGER" },
+    { name: "features", type: "JSONB" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_billing_subscriptions_tenant_updated", columns: ["tenant_id", "updated_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "billing_subscriptions_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9516,4 +9543,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_OPERATE_ENTITY_RECORDS,
   META_OPERATE_SEQUENCES,
   META_OPERATE_TENANT_SETTINGS,
+  META_BILLING_SUBSCRIPTIONS,
 ];
