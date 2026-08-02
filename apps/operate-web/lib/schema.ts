@@ -233,6 +233,29 @@ export function featureEnabled(schema: UiSchema | null, key: string, fallback = 
   return v === undefined ? fallback : v;
 }
 
+export interface FieldValidationError {
+  readonly field: string;
+  readonly code: string;
+  readonly message: string;
+}
+
+/**
+ * Extracts per-field validation errors from a thrown API error whose message is
+ * `422: {"error":"validation_failed","fields":[…]}` (as api.ts formats non-ok responses).
+ * Returns null for any other error so the caller falls back to the raw message.
+ */
+export function parseValidationErrors(errMessage: string): readonly FieldValidationError[] | null {
+  if (!errMessage.startsWith("422")) return null;
+  const idx = errMessage.indexOf(":");
+  if (idx === -1) return null;
+  try {
+    const body = JSON.parse(errMessage.slice(idx + 1).trim()) as { error?: string; fields?: FieldValidationError[] };
+    return body.error === "validation_failed" && Array.isArray(body.fields) ? body.fields : null;
+  } catch {
+    return null;
+  }
+}
+
 export function roleLabel(schema: UiSchema | null, name: string): string {
   const r = schema?.roles.find((x) => x.name === name);
   return r?.label ?? name.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());

@@ -11,7 +11,7 @@ import { Topbar } from "@/components/Topbar";
 import { deleteRecord, getRecord, runTransition, updateRecord } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
-import { entityBySlug, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
+import { entityBySlug, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
 
 export default function RecordPage({ params }: { params: { slug: string; id: string } }) {
   const { schema, loading } = useSchema();
@@ -99,7 +99,11 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
       setNotice("Saved.");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (msg.startsWith("409")) {
+      const fields = parseValidationErrors(msg);
+      if (fields !== null) {
+        // Stay in edit mode so the user can fix the flagged fields.
+        setError(fields.map((f) => f.message).join("; "));
+      } else if (msg.startsWith("409")) {
         // Someone else changed this record since we loaded it — reload the latest so the
         // user re-applies their edits against current data rather than clobbering it.
         setError("This record was changed by someone else. Reloaded the latest — please re-apply your edits.");

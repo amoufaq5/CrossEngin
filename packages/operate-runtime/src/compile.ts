@@ -27,6 +27,7 @@ import {
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
 import { literalDefaultPlans, type LiteralDefaultPlan } from "./defaults.js";
+import { buildValidationPlans } from "./validation.js";
 import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { planHasSettingsDefaults, settingsDefaultPlan, type SettingsDefaultPlan } from "./settings-defaults.js";
 import {
@@ -478,6 +479,7 @@ export function compileOperateServer(
     sequencePlans: buildSequencePlans(manifest),
     defaultPlans: buildDefaultPlans(manifest),
     settingsDefaultPlans: buildSettingsDefaultPlans(manifest),
+    validationPlans: buildValidationPlans(manifest),
     writeGuards: options.writeGuards ?? defaultWriteGuards(manifest),
     writeEffects: options.writeEffects ?? defaultWriteEffects(manifest, options.clock, options.settingsStore),
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),

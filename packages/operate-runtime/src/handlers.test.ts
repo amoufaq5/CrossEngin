@@ -95,7 +95,7 @@ describe("operate handlers — RBAC", () => {
 
 describe("operate handlers — CRUD", () => {
   it("creates, reads, lists, updates, deletes a product", async () => {
-    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "S1", name: "A" } }));
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "S1", name: "A", unit_price: 1, unit_cost: 1 } }));
     const id = created["id"] as string;
 
     expect((await invoke("product.read", { role: "retail_admin", params: { id } })).status).toBe(200);
@@ -111,7 +111,7 @@ describe("operate handlers — CRUD", () => {
   });
 
   it("stamps created_at + updated_at on create and bumps updated_at on update", async () => {
-    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "TS", name: "A" } }));
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "TS", name: "A", unit_price: 1, unit_cost: 1 } }));
     expect(typeof created["created_at"]).toBe("string");
     expect(created["updated_at"]).toBe(created["created_at"]);
     const id = created["id"] as string;
@@ -125,7 +125,7 @@ describe("operate handlers — CRUD", () => {
   });
 
   it("optimistic concurrency: a matching expectedUpdatedAt updates; a stale one 409s", async () => {
-    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "OC", name: "A" } }));
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "OC", name: "A", unit_price: 1, unit_cost: 1 } }));
     const id = created["id"] as string;
     const version = created["updated_at"] as string;
 
@@ -151,7 +151,7 @@ describe("operate handlers — CRUD", () => {
   });
 
   it("update without expectedUpdatedAt is unconditional (backward compatible)", async () => {
-    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "UN", name: "A" } }));
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "UN", name: "A", unit_price: 1, unit_cost: 1 } }));
     const id = created["id"] as string;
     const out = await invoke("product.update", { role: "retail_admin", params: { id }, body: { name: "B" } });
     expect(out.status).toBe(200);
@@ -165,6 +165,29 @@ describe("operate handlers — CRUD", () => {
       body: { name: "B", expectedUpdatedAt: "2026-01-01T00:00:00.000Z" },
     });
     expect(out.status).toBe(404);
+  });
+
+  it("422s a create missing a required field (unit_price/unit_cost)", async () => {
+    const out = await invoke("product.create", { role: "retail_admin", body: { sku: "V1", name: "A" } });
+    expect(out.status).toBe(422);
+    const fields = bodyOf(out)["fields"] as Array<{ field: string; code: string }>;
+    expect(fields.map((f) => f.field).sort()).toEqual(["unit_cost", "unit_price"]);
+  });
+
+  it("422s a create with an invalid enum value", async () => {
+    const out = await invoke("product.create", {
+      role: "retail_admin",
+      body: { sku: "V2", name: "A", unit_price: 1, unit_cost: 1, status: "bogus" },
+    });
+    expect(out.status).toBe(422);
+    expect((bodyOf(out)["fields"] as Array<{ code: string }>)[0]?.code).toBe("enum");
+  });
+
+  it("422s an update that empties a required field", async () => {
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "V3", name: "A", unit_price: 1, unit_cost: 1 } }));
+    const id = created["id"] as string;
+    const out = await invoke("product.update", { role: "retail_admin", params: { id }, body: { name: "" } });
+    expect(out.status).toBe(422);
   });
 });
 
@@ -215,7 +238,7 @@ describe("operate handlers — transactional effects", () => {
       route: routeFromSpec(spec),
       principal: principal("retail_admin"),
       params: {},
-      parsedBody: { sku: "ROLL", name: "RolledBack" },
+      parsedBody: { sku: "ROLL", name: "RolledBack", unit_price: 1, unit_cost: 1 },
     });
     expect(out.status).toBe(500);
     // The create was rolled back: nothing persisted for Product.

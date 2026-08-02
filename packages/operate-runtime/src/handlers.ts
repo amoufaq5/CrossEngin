@@ -15,6 +15,7 @@ import { applySettingsDefaults, type SettingsDefaultPlan } from "./settings-defa
 import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from "./settings.js";
 import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { runWriteEffects, type WriteEffect } from "./write-effects.js";
+import { validateBody, type EntityValidationPlan } from "./validation.js";
 import { isTransactional, projectRecord, type EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
@@ -44,6 +45,8 @@ export interface HandlerContext {
   readonly writeGuards?: readonly WriteGuard[];
   /** Side effects run after a successful write (e.g. auto-generating a reversal entry). */
   readonly writeEffects?: readonly WriteEffect[];
+  /** Per-entity field-validation plans (required / type / enum / maxLength), keyed by entity name. */
+  readonly validationPlans?: ReadonlyMap<string, EntityValidationPlan>;
   /** Lets tenant settings override a sequence's format/start/resetPeriod at runtime. */
   readonly settingsStore?: SettingsStore;
   readonly clock?: { now(): Date };
@@ -124,6 +127,10 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         body = await applyEntitySequences(ctx, spec.entity, tenantId, body, settings);
         const createdAt = nowIso(ctx);
         body = { created_at: createdAt, ...body, updated_at: createdAt };
+        // Validate AFTER defaults are applied, so a required field filled by a literal/sequence
+        // default passes. A schema violation is a 422 before anything is written.
+        const createErrors = validateEntity(ctx, spec.entity, body, "create");
+        if (createErrors !== null) return createErrors;
         return writeTxn(ctx, tenantId, async (store) => {
           const block = await guard(ctx, {
             operation: "create",
@@ -155,6 +162,8 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         const raw = { ...(parsedBody ?? {}) };
         const expectedUpdatedAt = typeof raw["expectedUpdatedAt"] === "string" ? (raw["expectedUpdatedAt"] as string) : null;
         delete raw["expectedUpdatedAt"];
+        const updateErrors = validateEntity(ctx, spec.entity, raw, "update");
+        if (updateErrors !== null) return updateErrors;
         const patch = { ...raw, updated_at: nowIso(ctx) };
         return writeTxn(ctx, tenantId, async (store) => {
           const needsBefore = hasGuards(ctx) || hasEffects(ctx) || expectedUpdatedAt !== null;
@@ -301,6 +310,19 @@ async function applyTransition(
 /** Current time as an ISO string, honoring an injected clock for deterministic tests. */
 function nowIso(ctx: HandlerContext): string {
   return (ctx.clock?.now() ?? new Date()).toISOString();
+}
+
+/** Runs the entity's validation plan, returning a 422 output on any error (else null). */
+function validateEntity(
+  ctx: HandlerContext,
+  entity: string,
+  body: Record<string, unknown>,
+  mode: "create" | "update",
+): HandlerOutput | null {
+  const plan = ctx.validationPlans?.get(entity);
+  if (plan === undefined) return null;
+  const errors = validateBody(plan, body, mode);
+  return errors.length > 0 ? json(422, { error: "validation_failed", fields: errors }) : null;
 }
 
 function hasGuards(ctx: HandlerContext): boolean {

@@ -381,7 +381,7 @@ describe("operate-server — plan record-cap enforcement", () => {
   it("allows a create while under the cap", async () => {
     const { server } = cappedServer(5);
     const res = await server.runtime.handleRequest(
-      writeReq("POST", "/v1/products", "key-manager", { id: "p1", sku: "S1", name: "Milk", unit_price: 2, status: "active", category: "grocery" }),
+      writeReq("POST", "/v1/products", "key-manager", { id: "p1", sku: "S1", name: "Milk", unit_price: 2, unit_cost: 1, status: "active", category: "grocery" }),
     );
     expect(res.response.status).toBe(201);
   });
