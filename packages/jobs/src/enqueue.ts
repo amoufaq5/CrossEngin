@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { DATA_CLASSES, EventNameSchema, type JobDeclaration } from "./types.js";
+import { DATA_CLASSES, EventNameSchema, durationToMillis, type JobDeclaration } from "./types.js";
 
 /**
  * A domain event emitted by the platform (e.g. `retail.order_placed`) that may trigger jobs. `data`
@@ -23,16 +23,20 @@ export type DomainEvent = z.infer<typeof DomainEventSchema>;
  */
 export interface PlannedJobRun {
   readonly jobId: string;
-  readonly jobKind: "event";
+  readonly jobKind: "event" | "delayed";
   readonly trigger: {
-    readonly kind: "event";
+    readonly kind: "event" | "delayed";
     readonly eventName: string;
     readonly occurredAt?: string;
     readonly idempotencyKey?: string;
+    /** For a delayed trigger: the ISO 8601 delay after `afterEvent` before the run becomes due. */
+    readonly delay?: string;
   };
   readonly input: Record<string, unknown>;
   readonly inputDataClass: (typeof DATA_CLASSES)[number];
   readonly outputDataClass: (typeof DATA_CLASSES)[number];
+  /** Milliseconds to defer the run past the enqueue time (0 for an event trigger). */
+  readonly delayMs: number;
   readonly runKey: string;
 }
 
@@ -57,39 +61,49 @@ export function enqueueKeyForEvent(event: DomainEvent, jobId: string): string {
 }
 
 /**
- * The event-triggered jobs that fire for an event: `trigger.kind === "event"` with a matching
- * `eventName`, excluding deprecated jobs. Pure — the caller decides what to do with the matches.
+ * The jobs an event triggers: `event`-trigger jobs whose `eventName` matches, plus `delayed`-trigger
+ * jobs whose `afterEvent` matches (fired after their `delay`). Excludes deprecated jobs. Pure — the
+ * caller decides what to do with the matches.
  */
 export function matchEventJobs(
   event: DomainEvent,
   jobs: readonly JobDeclaration[],
 ): readonly JobDeclaration[] {
-  return jobs.filter(
-    (j) => j.deprecated !== true && j.trigger.kind === "event" && j.trigger.eventName === event.name,
-  );
+  return jobs.filter((j) => {
+    if (j.deprecated === true) return false;
+    if (j.trigger.kind === "event") return j.trigger.eventName === event.name;
+    if (j.trigger.kind === "delayed") return j.trigger.afterEvent === event.name;
+    return false;
+  });
 }
 
 /**
  * Plans a `pending` job run for every job an event triggers — the pure producer step. Each planned
- * run carries the job's data classes, the event as its input, and a deterministic `runKey` for
- * idempotent persistence.
+ * run carries the job's data classes, the event as its input, a deterministic `runKey` for idempotent
+ * persistence, and a `delayMs` (0 for an `event` trigger; the `delayed` trigger's `delay` in ms), so
+ * the persistence layer can defer the run's `started_at` past enqueue time.
  */
 export function planJobRunsForEvent(
   event: DomainEvent,
   jobs: readonly JobDeclaration[],
 ): readonly PlannedJobRun[] {
-  return matchEventJobs(event, jobs).map((job) => ({
-    jobId: job.id,
-    jobKind: "event",
-    trigger: {
-      kind: "event",
-      eventName: event.name,
-      ...(event.occurredAt !== undefined ? { occurredAt: event.occurredAt } : {}),
-      ...(event.idempotencyKey !== undefined ? { idempotencyKey: event.idempotencyKey } : {}),
-    },
-    input: event.data,
-    inputDataClass: job.inputDataClass,
-    outputDataClass: job.outputDataClass,
-    runKey: enqueueKeyForEvent(event, job.id),
-  }));
+  return matchEventJobs(event, jobs).map((job) => {
+    const delayed = job.trigger.kind === "delayed" ? job.trigger : undefined;
+    return {
+      jobId: job.id,
+      jobKind: delayed !== undefined ? "delayed" : "event",
+      trigger: {
+        kind: delayed !== undefined ? "delayed" : "event",
+        eventName: event.name,
+        ...(event.occurredAt !== undefined ? { occurredAt: event.occurredAt } : {}),
+        ...(event.idempotencyKey !== undefined ? { idempotencyKey: event.idempotencyKey } : {}),
+        ...(delayed !== undefined ? { delay: delayed.delay } : {}),
+      },
+      input: event.data,
+      inputDataClass: job.inputDataClass,
+      outputDataClass: job.outputDataClass,
+      delayMs: delayed !== undefined ? durationToMillis(delayed.delay) : 0,
+      runKey: enqueueKeyForEvent(event, job.id),
+    };
+  });
 }
