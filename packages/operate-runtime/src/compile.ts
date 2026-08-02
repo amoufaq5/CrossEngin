@@ -49,6 +49,7 @@ import {
 } from "./write-effects.js";
 import { buildAgingHandler, type AgingSpec } from "./aging-handler.js";
 import { buildEntitlementHandler } from "./entitlement-handler.js";
+import { buildUsageHandler } from "./usage-handler.js";
 import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
 import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
@@ -516,6 +517,12 @@ export function compileOperateServer(
   if (resolver !== undefined) {
     routes.register(literalRoute("meta.entitlement.read", "GET", ["v1", "meta", "entitlement"]));
     handlers.register("meta.entitlement.read", buildEntitlementHandler({ resolver }));
+    // Per-entity record usage against the plan cap, for the billing screen's "N of M used" meter.
+    routes.register(literalRoute("meta.usage.read", "GET", ["v1", "meta", "usage"]));
+    handlers.register(
+      "meta.usage.read",
+      buildUsageHandler({ resolver, store: options.store, entities: (manifest.entities ?? []).map((e) => e.name) }),
+    );
   }
 
   // AR/AP aging report, when the manifest models invoices/bills + payments.
