@@ -99,4 +99,17 @@ describe("buildUiSchema", () => {
     // Invoice has a list view AND a lifecycle — still filterable on state.
     expect(entity("Invoice").filterableFields).toContain("state");
   });
+
+  it("exposes searchableFields as text-like fields (never enum/number/state)", () => {
+    for (const e of schema.entities) {
+      for (const name of e.searchableFields) {
+        const field = e.fields.find((f) => f.name === name);
+        expect(field).toBeDefined();
+        expect(["text", "textarea", "email"]).toContain(field!.input);
+      }
+    }
+    // The Account entity carries a text name field → searchable.
+    const account = schema.entities.find((x) => x.name === "Account");
+    if (account !== undefined) expect(account.searchableFields.length).toBeGreaterThan(0);
+  });
 });

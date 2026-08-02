@@ -12,6 +12,17 @@ import {
 
 function manifestWithListView(): Manifest {
   return {
+    entities: [
+      {
+        name: "Product",
+        fields: [
+          { name: "name", type: { kind: "text" } },
+          { name: "status", type: { kind: "enum" } },
+          { name: "secret", type: { kind: "text" } },
+          { name: "notes", type: { kind: "long_text" } },
+        ],
+      },
+    ],
     views: {
       productList: {
         kind: "list",
@@ -44,6 +55,13 @@ describe("listConfigForEntity", () => {
     expect(config.defaultLimit).toBe(DEFAULT_PAGE_SIZE);
     expect(config.defaultSort).toEqual([]);
     expect(config.filterableFields).toEqual([]);
+    expect(config.searchableFields).toEqual([]);
+  });
+
+  it("derives searchableFields as the view's visible text-like columns", () => {
+    const config = listConfigForEntity(manifestWithListView(), "Product");
+    // name is text + visible; status is enum (not text); secret is text but hidden.
+    expect(config.searchableFields).toEqual(["name"]);
   });
 });
 
@@ -54,6 +72,7 @@ describe("parseListQuery", () => {
     defaultSort: [{ field: "name", direction: "asc" }],
     sortableFields: ["name", "status"],
     filterableFields: ["name", "status"],
+    searchableFields: ["name", "description"],
   };
 
   it("uses the default limit + default sort with an empty query", () => {
@@ -109,6 +128,24 @@ describe("parseListQuery", () => {
   it("ignores an operator on a non-filterable field", () => {
     const q = parseListQuery({ "secret[gt]": "1" }, config);
     expect(q.filters).toEqual([]);
+  });
+
+  it("parses ?q into a search over the config's searchable fields", () => {
+    const q = parseListQuery({ q: "milk" }, config);
+    expect(q.search).toEqual({ term: "milk", fields: ["name", "description"] });
+  });
+
+  it("ignores ?q when the entity has no searchable fields", () => {
+    const q = parseListQuery({ q: "milk" }, { ...config, searchableFields: [] });
+    expect(q.search).toBeUndefined();
+  });
+
+  it("ignores a blank ?q", () => {
+    expect(parseListQuery({ q: "   " }, config).search).toBeUndefined();
+  });
+
+  it("does not treat ?q as a filter", () => {
+    expect(parseListQuery({ q: "milk" }, config).filters).toEqual([]);
   });
 
   it("does not treat reserved params (incl. fields) as filters", () => {

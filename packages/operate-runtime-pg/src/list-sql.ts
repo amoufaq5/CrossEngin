@@ -106,6 +106,18 @@ export function buildListSql(
     const pred = filterPredicate(filter, adapter, params);
     if (pred !== null) where.push(pred);
   }
+  // Cross-field free-text search: an OR group of accent-insensitive ILIKE, one bound value
+  // shared across every searchable column (unresolved/encrypted columns are skipped).
+  if (query.search !== undefined && query.search.term.trim() !== "") {
+    const exprs = query.search.fields
+      .map((f) => adapter.columnExpr(f))
+      .filter((e): e is string => e !== null);
+    if (exprs.length > 0) {
+      const p = bind(params, query.search.term);
+      const ors = exprs.map((expr) => `unaccent(${expr}::text) ILIKE ('%' || unaccent(${p}) || '%')`);
+      where.push(`(${ors.join(" OR ")})`);
+    }
+  }
   const cursor = decodeKeyset(query.cursor);
   if (cursor !== null) {
     const seek = seekPredicate(query.sort, cursor, adapter, params);
