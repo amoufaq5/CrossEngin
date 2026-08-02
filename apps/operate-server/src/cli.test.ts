@@ -95,6 +95,27 @@ describe("parseServeArgs", () => {
     expect(opts.licenseFile).toBeNull();
     expect(opts.licenseKey).toBeNull();
     expect(opts.stripeWebhookSecret).toBeNull();
+    expect(opts.planCatalogFile).toBeNull();
+  });
+
+  it("parses --plan-catalog with a webhook secret + pg store", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--store",
+      "pg",
+      "--stripe-webhook-secret",
+      "whsec_x",
+      "--plan-catalog",
+      "./plans.json",
+    ]);
+    expect(opts.planCatalogFile).toBe("./plans.json");
+  });
+
+  it("rejects --plan-catalog without --stripe-webhook-secret", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--plan-catalog", "./plans.json"]),
+    ).toThrow(/--plan-catalog requires --stripe-webhook-secret/);
   });
 
   it("parses --stripe-webhook-secret with a pg store", () => {

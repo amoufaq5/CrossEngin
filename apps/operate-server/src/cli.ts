@@ -21,6 +21,8 @@ export interface ServeOptions {
   readonly licenseKey: string | null;
   /** Stripe webhook signing secret — enables POST /v1/webhooks/stripe (needs a pg store). */
   readonly stripeWebhookSecret: string | null;
+  /** Path to a plan-catalog JSON ({plans:[...]}) — resolves record caps for webhook events. */
+  readonly planCatalogFile: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -63,6 +65,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let licenseFile: string | null = null;
   let licenseKey: string | null = null;
   let stripeWebhookSecret: string | null = null;
+  let planCatalogFile: string | null = null;
   let help = false;
   let version = false;
 
@@ -137,6 +140,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--stripe-webhook-secret" || arg.startsWith("--stripe-webhook-secret=")) {
       stripeWebhookSecret = takeValue(arg, next, "--stripe-webhook-secret");
       i += consumed();
+    } else if (arg === "--plan-catalog" || arg.startsWith("--plan-catalog=")) {
+      planCatalogFile = takeValue(arg, next, "--plan-catalog");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -147,6 +153,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (stripeWebhookSecret !== null && store === "memory") {
     throw new CliUsageError("--stripe-webhook-secret requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (planCatalogFile !== null && stripeWebhookSecret === null) {
+    throw new CliUsageError("--plan-catalog requires --stripe-webhook-secret (it feeds webhook record caps)");
   }
 
   if (
@@ -181,6 +190,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     licenseFile,
     licenseKey,
     stripeWebhookSecret,
+    planCatalogFile,
     defaultScheme,
     help,
     version,
@@ -215,6 +225,8 @@ Options:
   --license-key <b64>  Licensor Ed25519 public key, base64 (required with --license)
   --stripe-webhook-secret <s>  Enable POST /v1/webhooks/stripe → billing_subscriptions
                        (needs --store pg|pg-columns; also enforces the subscription gate)
+  --plan-catalog <file>  Plan-catalog JSON {plans:[...]} resolving webhook record caps
+                       by plan/price id (requires --stripe-webhook-secret)
   --help, -h           Show this help
   --version, -v        Print version
 

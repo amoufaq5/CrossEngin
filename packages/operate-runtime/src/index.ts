@@ -15,6 +15,7 @@ export * from "./compile.js";
 export * from "./entitlement.js";
 export * from "./entitlement-handler.js";
 export * from "./license.js";
+export * from "./plan-catalog.js";
 
 export * from "./aging.js";
 export * from "./aging-handler.js";

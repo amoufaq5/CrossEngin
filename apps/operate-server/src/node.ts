@@ -8,7 +8,9 @@ import {
   InMemorySequenceAllocator,
   InMemorySettingsStore,
   LicenseEntitlementResolver,
+  buildPlanCatalog,
   type EntitlementResolver,
+  type PlanLimitsLookup,
   type EntityStore,
   type SequenceAllocator,
   type SettingsStore,
@@ -214,13 +216,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const secret = options.stripeWebhookSecret;
     const subscriptionStore = new PostgresSubscriptionStore(conn, schemaOpt);
     if (entitlementResolver === undefined) entitlementResolver = new PostgresEntitlementResolver(conn, schemaOpt);
+    // Optional declarative plan catalog: a webhook event resolves its record cap + features from
+    // the catalog (by plan or Stripe price id), falling back to the subscription's own metadata.
+    let planLimits: PlanLimitsLookup | undefined;
+    if (options.planCatalogFile !== null) {
+      planLimits = buildPlanCatalog(JSON.parse(await readFile(options.planCatalogFile, "utf8"))).toLookup();
+    }
     webhookRoute = {
       method: "POST",
       path: "/v1/webhooks/stripe",
       handle: async (body, headers) => {
         const payload = new TextDecoder().decode(body ?? new Uint8Array());
         const signatureHeader = firstHeader(headers["stripe-signature"]) ?? "";
-        const result = await ingestStripeWebhook({ payload, signatureHeader, secret, store: subscriptionStore });
+        const result = await ingestStripeWebhook({
+          payload,
+          signatureHeader,
+          secret,
+          store: subscriptionStore,
+          ...(planLimits !== undefined ? { planLimits } : {}),
+        });
         return result.ok
           ? jsonRaw(200, { received: true, applied: result.applied })
           : jsonRaw(400, { error: "invalid_signature", reason: result.reason });
