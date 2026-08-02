@@ -19,12 +19,24 @@ export interface ListFilter {
   readonly value: string | readonly string[];
 }
 
+/** A free-text search: match a `term` against ANY of `fields` (OR of substring/contains). */
+export interface ListSearch {
+  readonly term: string;
+  readonly fields: readonly string[];
+}
+
 /** A resolved list query: limit + opaque keyset cursor + sort + typed filters. */
 export interface ListQuery {
   readonly limit: number;
   readonly cursor: string | null;
   readonly sort: readonly ListSort[];
   readonly filters: readonly ListFilter[];
+  /**
+   * Optional cross-field free-text search (the `?q` param). Matches when `term` is a
+   * substring of ANY listed field — an OR group, applied in addition to (AND with) the
+   * typed `filters`. Absent when no `?q` was given.
+   */
+  readonly search?: ListSearch;
   /**
    * Optional field-selection hint (the `?fields` projection). A store MAY use it
    * to SELECT fewer columns; the handler still applies the exact projection, so
@@ -185,8 +197,19 @@ function isAfter(row: EntityRecord, cursor: KeysetCursor, sort: readonly ListSor
  * Records are totally ordered by the sort fields + an `id` tiebreaker, so the
  * cursor is a stable position (no offset drift on inserts/deletes).
  */
+/** Whether a record matches a free-text search: `term` is a substring of ANY listed field. */
+export function matchesSearch(record: EntityRecord, search: ListSearch): boolean {
+  const needle = search.term.trim().toLowerCase();
+  if (needle === "") return true;
+  return search.fields.some((f) => String(record[f] ?? "").toLowerCase().includes(needle));
+}
+
 export function applyListQuery(records: readonly EntityRecord[], query: ListQuery): ListPage {
-  const rows = records.filter((r) => query.filters.every((f) => matchesFilter(r, f)));
+  const rows = records.filter(
+    (r) =>
+      query.filters.every((f) => matchesFilter(r, f)) &&
+      (query.search === undefined || matchesSearch(r, query.search)),
+  );
   rows.sort((a, b) => {
     for (const s of query.sort) {
       const cmp = compareValues(a[s.field], b[s.field]);

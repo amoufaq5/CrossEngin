@@ -24,6 +24,7 @@ const FALLBACK_LIST_CONFIG: ListConfig = {
   defaultSort: [],
   sortableFields: [],
   filterableFields: [],
+  searchableFields: [],
 };
 
 export interface HandlerContext {

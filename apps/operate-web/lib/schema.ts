@@ -54,6 +54,7 @@ export interface UiEntitySchema {
   readonly listColumns: readonly string[];
   readonly sortableFields: readonly string[];
   readonly filterableFields: readonly string[];
+  readonly searchableFields: readonly string[];
   readonly stateField: string | null;
   readonly transitions: readonly UiTransitionSchema[];
   readonly operationIds: Record<"list" | "read" | "create" | "update" | "delete", string>;

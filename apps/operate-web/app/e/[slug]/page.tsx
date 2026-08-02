@@ -47,6 +47,15 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   const [busy, setBusy] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
+  // Server-side search when the entity has searchable (text) fields; else fall back to a
+  // client-side filter over the loaded rows.
+  const serverSearch = entity.searchableFields.length > 0;
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQ(q), 250);
+    return () => clearTimeout(t);
+  }, [q]);
   const [sort, setSort] = useState<{ field: string; order: "asc" | "desc" } | null>(null);
   const [filters, setFilters] = useState<Record<string, string>>({});
   const canCreate = canAccess(schema, entity, "create");
@@ -80,8 +89,9 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
       p.set("order", sort.order);
     }
     for (const [k, v] of Object.entries(filters)) if (v.trim() !== "") p.set(k, v.trim());
+    if (serverSearch && debouncedQ.trim() !== "") p.set("q", debouncedQ.trim());
     return `?${p.toString()}`;
-  }, [sort, filters]);
+  }, [sort, filters, serverSearch, debouncedQ]);
 
   // First page (and reload on query change): replaces the accumulated rows.
   const load = useCallback(() => {
@@ -113,12 +123,13 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   }, [entity.slug, query, nextCursor]);
 
   const rows = useMemo(() => {
+    if (serverSearch) return data; // the server already applied ?q across searchable fields
     const needle = q.trim().toLowerCase();
     if (needle === "") return data;
     return data.filter((row) =>
       entity.listColumns.some((c) => String(row[c] ?? "").toLowerCase().includes(needle)),
     );
-  }, [data, q, entity.listColumns]);
+  }, [data, q, entity.listColumns, serverSearch]);
 
   function toggleSort(field: string) {
     if (!entity.sortableFields.includes(field)) return;

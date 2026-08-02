@@ -85,6 +85,33 @@ describe("applyListQuery", () => {
     expect(gt.records.map((r) => r["id"]).sort()).toEqual(["a", "c"]);
   });
 
+  it("free-text search matches ANY searchable field (case-insensitive)", () => {
+    const searchRows = [
+      { id: "a", name: "Almond Milk", notes: "dairy free" },
+      { id: "b", name: "Whole Milk", notes: "keep cold" },
+      { id: "c", name: "Orange Juice", notes: "contains milk solids" },
+      { id: "d", name: "Water", notes: "still" },
+    ];
+    const hits = applyListQuery(
+      searchRows,
+      query({ limit: 10, search: { term: "MILK", fields: ["name", "notes"] } }),
+    );
+    // matches a (name), b (name), c (notes) — not d.
+    expect(hits.records.map((r) => r["id"]).sort()).toEqual(["a", "b", "c"]);
+  });
+
+  it("search ANDs with typed filters", () => {
+    const searchRows = [
+      { id: "a", name: "Milk", status: "active" },
+      { id: "b", name: "Milk", status: "archived" },
+    ];
+    const hits = applyListQuery(
+      searchRows,
+      query({ limit: 10, filters: [{ field: "status", value: "active" }], search: { term: "milk", fields: ["name"] } }),
+    );
+    expect(hits.records.map((r) => r["id"])).toEqual(["a"]);
+  });
+
   it("keyset-paginates with a stable cursor (sorted by name)", () => {
     const sort = [{ field: "name" as const, direction: "asc" as const }];
     const first = applyListQuery(rows, query({ limit: 2, sort }));

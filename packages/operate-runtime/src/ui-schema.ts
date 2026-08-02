@@ -61,6 +61,8 @@ export interface UiEntitySchema {
   readonly listColumns: readonly string[];
   readonly sortableFields: readonly string[];
   readonly filterableFields: readonly string[];
+  /** Text-like fields the `?q` free-text search matches against (server-side). */
+  readonly searchableFields: readonly string[];
   readonly stateField: string | null;
   readonly transitions: readonly UiTransitionSchema[];
   readonly operationIds: {
@@ -225,6 +227,7 @@ export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSch
       listColumns: pickListColumns(entity, []),
       sortableFields: [...config.sortableFields],
       filterableFields: [...config.filterableFields],
+      searchableFields: [...config.searchableFields],
       stateField,
       transitions,
       operationIds: {

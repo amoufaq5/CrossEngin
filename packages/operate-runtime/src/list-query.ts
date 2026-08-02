@@ -1,9 +1,12 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
 
-import type { FilterOp, ListFilter, ListQuery, ListSort } from "./store.js";
+import type { FilterOp, ListFilter, ListQuery, ListSearch, ListSort } from "./store.js";
 
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 500;
+
+/** Manifest field-type kinds whose values are free-text-searchable. */
+const SEARCHABLE_KINDS = new Set(["text", "long_text", "email", "slug", "phone", "url", "string"]);
 
 /** The per-entity list behavior derived from its manifest `ListView`. */
 export interface ListConfig {
@@ -12,9 +15,11 @@ export interface ListConfig {
   readonly defaultSort: readonly ListSort[];
   readonly sortableFields: readonly string[];
   readonly filterableFields: readonly string[];
+  /** Text-like fields the `?q` free-text search matches against (OR of contains). */
+  readonly searchableFields: readonly string[];
 }
 
-const RESERVED_PARAMS = new Set(["limit", "cursor", "sort", "order", "fields"]);
+const RESERVED_PARAMS = new Set(["limit", "cursor", "sort", "order", "fields", "q"]);
 
 /**
  * Parses a `?fields=a,b,c` projection into a field list, or null when absent
@@ -42,6 +47,38 @@ interface LifecycleLike {
   readonly kind: string;
   readonly entity: string;
   readonly stateField: string;
+}
+
+interface FieldLike {
+  readonly name: string;
+  readonly type?: { readonly kind?: string };
+}
+interface EntityLike {
+  readonly name: string;
+  readonly fields?: readonly FieldLike[];
+}
+
+/** The entity's text-like field names (searchable), in declaration order. */
+function textFieldsOf(manifest: Manifest, entity: string): readonly string[] {
+  const ent = ((manifest.entities ?? []) as ReadonlyArray<EntityLike>).find((e) => e.name === entity);
+  if (ent === undefined) return [];
+  return (ent.fields ?? []).filter((f) => SEARCHABLE_KINDS.has(f.type?.kind ?? "")).map((f) => f.name);
+}
+
+/**
+ * The searchable field set for an entity: its text-like fields, narrowed to the view's
+ * visible columns when a list view exists (so search matches what the user sees). With no
+ * view, all text-like fields are searchable.
+ */
+function searchableFieldsFor(
+  manifest: Manifest,
+  entity: string,
+  visibleColumns: readonly string[] | null,
+): readonly string[] {
+  const textFields = textFieldsOf(manifest, entity);
+  if (visibleColumns === null) return textFields;
+  const visible = new Set(visibleColumns);
+  return textFields.filter((f) => visible.has(f));
 }
 
 /** The lifecycle `stateField` for an entity, if a workflow declares one. */
@@ -81,9 +118,11 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
       defaultSort: [],
       sortableFields: [],
       filterableFields: withLifecycleStateFilter(manifest, entity, []),
+      searchableFields: searchableFieldsFor(manifest, entity, null),
     };
   }
   const columns = view.columns ?? [];
+  const visibleColumns = columns.filter((c) => c.hidden !== true).map((c) => c.field);
   const sortableFields = columns.filter((c) => c.hidden !== true && c.sortable !== false).map((c) => c.field);
   const filterableFields = columns.filter((c) => c.hidden !== true && c.filterable !== false).map((c) => c.field);
   const defaultSort: ListSort[] = (view.sort ?? []).map((s) => ({ field: s.field, direction: s.direction ?? "asc" }));
@@ -93,6 +132,7 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
     defaultSort,
     sortableFields,
     filterableFields: withLifecycleStateFilter(manifest, entity, filterableFields),
+    searchableFields: searchableFieldsFor(manifest, entity, visibleColumns),
   };
 }
 
@@ -145,7 +185,15 @@ export function parseListQuery(
     if (v !== undefined) filters.push({ field: parsed.field, op: parsed.op, value: v });
   }
 
-  return { limit, cursor, sort, filters };
+  // Cross-field free-text search: `?q=term` matches ANY searchable field. Ignored when the
+  // entity has no searchable fields, so an arbitrary `?q` can't widen the result set.
+  const q = firstValue(query["q"]);
+  const search: ListSearch | undefined =
+    q !== undefined && q.trim() !== "" && config.searchableFields.length > 0
+      ? { term: q.trim(), fields: config.searchableFields }
+      : undefined;
+
+  return { limit, cursor, sort, filters, ...(search !== undefined ? { search } : {}) };
 }
 
 const FILTER_KEY_RE = /^([a-z][a-z0-9_]*)(?:\[(eq|ne|gt|gte|lt|lte|in|contains)\])?$/;
