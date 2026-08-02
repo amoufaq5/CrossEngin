@@ -3,6 +3,7 @@ export * from "./activity-store.js";
 export * from "./activity-worker.js";
 export * from "./job-claim.js";
 export * from "./job-engine.js";
+export * from "./job-enqueue.js";
 export * from "./job-worker.js";
 export * from "./event-log.js";
 export * from "./id-mapping.js";

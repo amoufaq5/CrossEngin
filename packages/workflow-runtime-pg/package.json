@@ -21,6 +21,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@crossengin/jobs": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/workflow-engine": "workspace:*",
     "@crossengin/workflow-runtime": "workspace:*",
