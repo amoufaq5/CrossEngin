@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 
 import { Topbar } from "@/components/Topbar";
-import { fetchEntitlement } from "@/lib/api";
-import type { TenantEntitlement } from "@/lib/entitlement";
+import { fetchEntitlement, fetchUsage } from "@/lib/api";
+import type { EntityUsage, TenantEntitlement, TenantUsage } from "@/lib/entitlement";
 
 type Badge = { label: string; className: string };
 
@@ -21,8 +21,49 @@ function statusBadge(status: string | null): Badge {
   }
 }
 
+function usageLabel(u: EntityUsage, cap: number | null): string {
+  const used = `${u.overflow ? `${u.used.toLocaleString()}+` : u.used.toLocaleString()}`;
+  return cap === null ? `${used} records` : `${used} of ${cap.toLocaleString()}`;
+}
+
+function UsageMeter({ usage }: { usage: TenantUsage }) {
+  const cap = usage.maxRecordsPerEntity;
+  const rows = [...usage.entities].sort((a, b) => b.used - a.used);
+  return (
+    <div className="rounded-xl border border-line bg-white p-5">
+      <div className="text-xs font-medium uppercase tracking-wide text-ink-faint">Usage</div>
+      {rows.length === 0 ? (
+        <div className="mt-2 text-sm text-ink-muted">No entities to report.</div>
+      ) : (
+        <div className="mt-3 space-y-3">
+          {rows.map((u) => {
+            const pct = cap !== null && cap > 0 ? Math.min(100, Math.round((u.used / cap) * 100)) : null;
+            const barColor = u.atLimit ? "bg-red-500" : pct !== null && pct >= 80 ? "bg-amber-500" : "bg-brand-500";
+            return (
+              <div key={u.entity}>
+                <div className="flex items-center justify-between text-sm">
+                  <span className="font-medium text-ink">{u.entity}</span>
+                  <span className={u.atLimit ? "font-medium text-red-600" : "text-ink-muted"}>
+                    {usageLabel(u, cap)}
+                  </span>
+                </div>
+                {pct !== null && (
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-soft">
+                    <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function BillingPage() {
   const [data, setData] = useState<TenantEntitlement | null>(null);
+  const [usage, setUsage] = useState<TenantUsage | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [inactive, setInactive] = useState(false);
@@ -32,11 +73,16 @@ export default function BillingPage() {
     setLoading(true);
     setError(null);
     setInactive(false);
+    setUsage(null);
     fetchEntitlement()
       .then((res) => {
         if (!alive) return;
         setData(res);
         setLoading(false);
+        // Usage is best-effort — a failure here must not blank the plan card.
+        fetchUsage()
+          .then((u) => alive && setUsage(u))
+          .catch(() => undefined);
       })
       .catch((e: unknown) => {
         if (!alive) return;
@@ -104,6 +150,8 @@ export default function BillingPage() {
                 </div>
               </div>
             </div>
+
+            {usage && <UsageMeter usage={usage} />}
 
             <div className="rounded-xl border border-line bg-white p-5">
               <div className="text-xs font-medium uppercase tracking-wide text-ink-faint">Features</div>
