@@ -9402,12 +9402,18 @@ export const META_BILLING_SUBSCRIPTIONS: TableDefinition = {
     { name: "trial_end", type: "TIMESTAMPTZ" },
     { name: "max_records_per_entity", type: "INTEGER" },
     { name: "features", type: "JSONB" },
+    { name: "stripe_subscription_id", type: "TEXT" },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
   indexes: [
     { name: "idx_billing_subscriptions_tenant_updated", columns: ["tenant_id", "updated_at"] },
+    {
+      name: "uq_billing_subscriptions_tenant_stripe_sub",
+      columns: ["tenant_id", "stripe_subscription_id"],
+      unique: true,
+    },
   ],
   rls: {
     enabled: true,

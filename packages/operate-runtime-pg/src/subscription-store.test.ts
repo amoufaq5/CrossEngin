@@ -46,6 +46,7 @@ describe("PostgresSubscriptionStore", () => {
       trialEnd: null,
       maxRecordsPerEntity: 500,
       features: ["sso", "exports"],
+      stripeSubscriptionId: "sub_123",
     });
     expect(inserts).toHaveLength(1);
     const { params } = inserts[0]!;
@@ -55,11 +56,30 @@ describe("PostgresSubscriptionStore", () => {
     expect(params[3]).toBe("2027-01-01T00:00:00.000Z");
     expect(params[5]).toBe(500);
     expect(params[6]).toBe(JSON.stringify(["sso", "exports"]));
+    expect(params[7]).toBe("sub_123");
     // The raw tenant id is bound, never interpolated into the SQL text.
     expect(inserts[0]!.sql).not.toContain(TENANT);
   });
 
-  it("passes null for absent optionals", async () => {
+  it("upserts on (tenant_id, stripe_subscription_id) so repeat events don't pile up", async () => {
+    const { conn, inserts } = fakePg();
+    await new PostgresSubscriptionStore(conn).insert({
+      tenantId: TENANT,
+      planId: "price_pro",
+      status: "active",
+      currentPeriodEnd: null,
+      trialEnd: null,
+      maxRecordsPerEntity: 500,
+      features: null,
+      stripeSubscriptionId: "sub_123",
+    });
+    const { sql } = inserts[0]!;
+    expect(sql).toContain("ON CONFLICT (tenant_id, stripe_subscription_id) DO UPDATE");
+    expect(sql).toContain("status = EXCLUDED.status");
+    expect(sql).toContain("updated_at = now()");
+  });
+
+  it("passes null for absent optionals (license/manual rows append on NULL sub id)", async () => {
     const { conn, inserts } = fakePg();
     await new PostgresSubscriptionStore(conn).insert({
       tenantId: TENANT,
@@ -69,10 +89,12 @@ describe("PostgresSubscriptionStore", () => {
       trialEnd: null,
       maxRecordsPerEntity: null,
       features: null,
+      stripeSubscriptionId: null,
     });
     const { params } = inserts[0]!;
     expect(params[6]).toBeNull();
     expect(params[5]).toBeNull();
+    expect(params[7]).toBeNull();
   });
 
   it("rejects an invalid schema identifier", () => {

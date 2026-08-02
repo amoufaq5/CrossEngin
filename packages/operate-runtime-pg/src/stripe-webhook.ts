@@ -75,6 +75,7 @@ export function subscriptionRowFromStripeEvent(
     trialEnd: isoFromUnix(mapped.trialEnd),
     maxRecordsPerEntity,
     features,
+    stripeSubscriptionId: asString(raw["id"]),
   };
 }
 

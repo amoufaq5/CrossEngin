@@ -14,6 +14,8 @@ export interface SubscriptionUpsertRow {
   readonly trialEnd: string | null;
   readonly maxRecordsPerEntity: number | null;
   readonly features: readonly string[] | null;
+  /** The Stripe subscription id; when present the row upserts in place (else it appends). */
+  readonly stripeSubscriptionId: string | null;
 }
 
 export interface PostgresSubscriptionStoreOptions {
@@ -22,11 +24,14 @@ export interface PostgresSubscriptionStoreOptions {
 }
 
 /**
- * Writes subscription snapshots to `meta.billing_subscriptions`. Each `insert` appends a
- * new row (the table's `id` is an auto-generated UUID); `PostgresEntitlementResolver` reads
- * the most-recently-updated row per tenant, so the newest snapshot wins. Append-only keeps
- * a subscription-state audit trail; compaction is a follow-up. Runs under RLS via
- * `withTenantContext`, so a row can only be written for the context tenant.
+ * Writes subscription snapshots to `meta.billing_subscriptions` under RLS (via
+ * `withTenantContext`, so a row can only be written for the context tenant). When a row
+ * carries a `stripeSubscriptionId`, `insert` **upserts in place** on
+ * `(tenant_id, stripe_subscription_id)` — repeated events for the same Stripe subscription
+ * update the one row rather than piling up snapshots. A row with a `null`
+ * `stripeSubscriptionId` (offline license / manual) appends, since NULLs are distinct in the
+ * unique index — preserving an audit trail for the non-Stripe path.
+ * `PostgresEntitlementResolver` still reads the most-recently-updated row per tenant.
  */
 export class PostgresSubscriptionStore {
   private readonly schema: string;
@@ -45,8 +50,16 @@ export class PostgresSubscriptionStore {
     await withTenantContext(this.conn, row.tenantId, async (tx) => {
       await tx.query(
         `INSERT INTO ${this.schema}.billing_subscriptions
-           (tenant_id, plan_id, status, current_period_end, trial_end, max_records_per_entity, features, created_at, updated_at)
-         VALUES ($1::uuid, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7::jsonb, now(), now())`,
+           (tenant_id, plan_id, status, current_period_end, trial_end, max_records_per_entity, features, stripe_subscription_id, created_at, updated_at)
+         VALUES ($1::uuid, $2, $3, $4::timestamptz, $5::timestamptz, $6, $7::jsonb, $8, now(), now())
+         ON CONFLICT (tenant_id, stripe_subscription_id) DO UPDATE SET
+           plan_id = EXCLUDED.plan_id,
+           status = EXCLUDED.status,
+           current_period_end = EXCLUDED.current_period_end,
+           trial_end = EXCLUDED.trial_end,
+           max_records_per_entity = EXCLUDED.max_records_per_entity,
+           features = EXCLUDED.features,
+           updated_at = now()`,
         [
           row.tenantId,
           row.planId,
@@ -55,6 +68,7 @@ export class PostgresSubscriptionStore {
           row.trialEnd,
           row.maxRecordsPerEntity,
           row.features === null ? null : JSON.stringify(row.features),
+          row.stripeSubscriptionId,
         ],
       );
     });
