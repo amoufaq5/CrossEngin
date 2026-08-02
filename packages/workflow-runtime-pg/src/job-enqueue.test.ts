@@ -79,6 +79,18 @@ describe("enqueueJobsForEvent", () => {
     expect(params?.[6]).toBe(JSON.stringify({ order_id: "o-1" }));
   });
 
+  it("defers a delayed-trigger run: started_at = now + delay", async () => {
+    const calls: Call[] = [];
+    await enqueueJobsForEvent(mockConn({ calls }), {
+      event: EVENT,
+      jobs: [job("review-request", { trigger: { kind: "delayed", afterEvent: "retail.order_placed", delay: "PT2H" } })],
+      now: NOW,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.params?.[2]).toBe("delayed");
+    expect(calls[0]!.params?.[5]).toBe("2026-05-17T14:00:00.000Z"); // 12:00 + 2h
+  });
+
   it("reports inserted:false when the run already exists (re-delivered event)", async () => {
     const results = await enqueueJobsForEvent(mockConn({ insertRowCount: 0 }), {
       event: EVENT,

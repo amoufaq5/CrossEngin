@@ -74,6 +74,10 @@ export async function enqueueJobsForEvent(
 
   for (const plan of planned) {
     const runId = deterministicRunId(plan.runKey);
+    // A delayed trigger defers the run: started_at = now + delayMs (so the claim's `started_at <= now`
+    // holds it out of the queue until the delay elapses). An event trigger has delayMs 0 → now.
+    const startedAt =
+      plan.delayMs > 0 ? new Date(new Date(options.now).getTime() + plan.delayMs).toISOString() : options.now;
     const result = await conn.query<{ run_id: unknown }>(
       `INSERT INTO ${schema}.job_runs
          (tenant_id, job_id, job_kind, run_id, trigger, started_at, status,
@@ -88,7 +92,7 @@ export async function enqueueJobsForEvent(
         plan.jobKind,
         runId,
         JSON.stringify(plan.trigger),
-        options.now,
+        startedAt,
         JSON.stringify(plan.input),
         plan.inputDataClass,
         plan.outputDataClass,

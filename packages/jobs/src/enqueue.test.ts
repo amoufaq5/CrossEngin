@@ -49,6 +49,14 @@ describe("matchEventJobs", () => {
     ];
     expect(matchEventJobs(EVENT, jobs).map((j) => j.id)).toEqual(["decrement-inventory"]);
   });
+
+  it("also matches delayed-trigger jobs by their afterEvent", () => {
+    const jobs = [
+      job({ id: "review-request", trigger: { kind: "delayed", afterEvent: "retail.order_placed", delay: "P1D" } }),
+      job({ id: "other", trigger: { kind: "delayed", afterEvent: "retail.order_shipped", delay: "PT1H" } }),
+    ];
+    expect(matchEventJobs(EVENT, jobs).map((j) => j.id)).toEqual(["review-request"]);
+  });
 });
 
 describe("enqueueKeyForEvent", () => {
@@ -86,8 +94,19 @@ describe("planJobRunsForEvent", () => {
       input: { order_id: "o-1", total: 42 },
       inputDataClass: "commercial_sensitive",
       outputDataClass: "internal",
+      delayMs: 0,
       runKey: "retail.order_placed::evt-123::decrement-inventory",
     });
+  });
+
+  it("plans a delayed run with delayMs from the trigger's ISO duration", () => {
+    const jobs = [
+      job({ id: "send-review-request", trigger: { kind: "delayed", afterEvent: "retail.order_placed", delay: "PT1H" } }),
+    ];
+    const [plan] = planJobRunsForEvent(EVENT, jobs);
+    expect(plan?.jobKind).toBe("delayed");
+    expect(plan?.delayMs).toBe(3_600_000);
+    expect(plan?.trigger).toMatchObject({ kind: "delayed", eventName: "retail.order_placed", delay: "PT1H" });
   });
 
   it("returns an empty plan when nothing matches", () => {
