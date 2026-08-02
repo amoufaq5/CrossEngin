@@ -8,7 +8,8 @@ import {
 } from "./activity-handlers.js";
 import { CountingIdGenerator, FixedClock } from "./clock.js";
 import { InMemoryEventLog } from "./event-log.js";
-import { WorkflowEngine } from "./engine.js";
+import { WorkflowEngine, activityRetryDelayMs, parseActivityBackoff } from "./engine.js";
+import { projectActivities } from "./projection.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000099";
@@ -898,5 +899,112 @@ describe("activity retry + dead-letter", () => {
     expect(scheduled).toHaveLength(2); // attempt 1 + rescheduled attempt 2
     expect(scheduled[1]!.payload["attemptNumber"]).toBe(2);
     expect((await engine.listEvents(state.instanceId)).filter((e) => e.kind === "activity_started")).toHaveLength(1); // only attempt 1 ran
+  });
+});
+
+describe("activity retry backoff", () => {
+  it("activityRetryDelayMs computes per-kind delays with a cap", () => {
+    expect(activityRetryDelayMs(null, 3)).toBe(0);
+    expect(activityRetryDelayMs({ kind: "constant", initialMs: 5000 }, 4)).toBe(5000);
+    expect(activityRetryDelayMs({ kind: "linear", initialMs: 5000 }, 3)).toBe(15000);
+    expect(activityRetryDelayMs({ kind: "exponential", initialMs: 5000 }, 3)).toBe(20000);
+    expect(activityRetryDelayMs({ kind: "exponential", initialMs: 5000, maxMs: 12000 }, 3)).toBe(12000);
+  });
+
+  it("parseActivityBackoff reads the schedule_activity parameters (default kind exponential)", () => {
+    expect(parseActivityBackoff({})).toBeNull();
+    expect(parseActivityBackoff({ retryBackoffMs: 0 })).toBeNull();
+    expect(parseActivityBackoff({ retryBackoffMs: 5000 })).toEqual({ kind: "exponential", initialMs: 5000 });
+    expect(parseActivityBackoff({ retryBackoffMs: 5000, retryBackoffKind: "linear", retryMaxBackoffMs: 60000 })).toEqual({
+      kind: "linear",
+      initialMs: 5000,
+      maxMs: 60000,
+    });
+  });
+
+  function backoffDef(): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_activity",
+              parameters: {
+                activityKey: "do_thing",
+                kind: "http_call",
+                input: {},
+                maxAttempts: 3,
+                retryBackoffMs: 30000,
+                retryBackoffKind: "constant",
+              },
+            },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+        { name: "failed", kind: "terminal_failure", label: "Failed", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+      transitions: [
+        {
+          name: "fail",
+          fromState: "draft",
+          toState: "failed",
+          trigger: { kind: "activity_failed", activityKey: "do_thing" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+      initialState: "draft",
+    };
+  }
+
+  const alwaysRetryableFail: ActivityHandler = () => ({
+    status: "failed",
+    errorCode: "FLAKY",
+    errorMessage: "transient",
+    retryable: true,
+  });
+
+  it("defers the rescheduled attempt's availableAt (and projected scheduledAt) by the backoff", async () => {
+    const def = backoffDef();
+    const log = new InMemoryEventLog();
+    const engine = new WorkflowEngine({
+      eventLog: log,
+      definitions: new Map([[def.id, def]]),
+      activityRegistry: createDefaultRegistry().registerForKind("http_call", alwaysRetryableFail),
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+      deferActivities: true,
+    });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const a1 = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "activity_scheduled")!.activityId!;
+    await engine.executeScheduledActivity(state.instanceId, a1);
+
+    const events = await engine.listEvents(state.instanceId);
+    const scheduled = events.filter((e) => e.kind === "activity_scheduled");
+    expect(scheduled).toHaveLength(2);
+    // attempt 1 persisted the backoff; attempt 2 was deferred 30s past the fixed clock.
+    expect(scheduled[0]!.payload["retryBackoff"]).toEqual({ kind: "constant", initialMs: 30000 });
+    expect(scheduled[1]!.payload["availableAt"]).toBe("2026-05-16T12:00:30.000Z");
+
+    const attempt2 = projectActivities(events).find((a) => a.attemptNumber === 2)!;
+    expect(attempt2.scheduledAt).toBe("2026-05-16T12:00:30.000Z"); // claim defers until backoff elapses
+  });
+
+  it("keeps the first attempt due immediately (no availableAt)", async () => {
+    const def = backoffDef();
+    const { engine } = makeEngine({
+      definition: def,
+      registry: createDefaultRegistry().registerForKind("http_call", alwaysRetryableFail),
+    });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const first = (await engine.listEvents(state.instanceId)).filter((e) => e.kind === "activity_scheduled")[0]!;
+    expect(first.payload["availableAt"]).toBeUndefined();
   });
 });
