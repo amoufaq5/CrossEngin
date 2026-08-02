@@ -66,7 +66,7 @@ describe("createNodeRequestListener", () => {
   it("collects a POST body and creates a record", async () => {
     const listener = createNodeRequestListener(httpServer());
     const res = mockRes();
-    const body = new TextEncoder().encode(JSON.stringify({ sku: "S1", name: "A", status: "active", category: "g" }));
+    const body = new TextEncoder().encode(JSON.stringify({ sku: "S1", name: "A", unit_price: 2, unit_cost: 1, status: "active", category: "grocery" }));
     await listener(
       mockReq({
         method: "POST",

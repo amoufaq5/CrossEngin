@@ -10,7 +10,7 @@ import { Topbar } from "@/components/Topbar";
 import { createRecord, listRecords, type ListResult } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
-import { canAccess, entityBySlug, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
+import { canAccess, entityBySlug, parseValidationErrors, slugForEntityName, useSchema, type UiEntitySchema, type UiFieldSchema } from "@/lib/schema";
 
 function cellKind(field: UiFieldSchema | undefined): string | undefined {
   if (field === undefined) return undefined;
@@ -399,7 +399,9 @@ function CreateForm({
       invalidateReferenceCache(entity.slug);
       onDone();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      const fields = parseValidationErrors(msg);
+      setError(fields !== null ? fields.map((f) => f.message).join("; ") : msg);
     } finally {
       setBusy(false);
     }

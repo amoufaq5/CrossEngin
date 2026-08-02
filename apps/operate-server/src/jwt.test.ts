@@ -117,7 +117,7 @@ describe("operate-server — Bearer JWT auth (EdDSA via JWKS)", () => {
 
   it("authorizes a write by the JWT's scope (store_manager creates a product)", async () => {
     const server = makeServer();
-    const body = new TextEncoder().encode(JSON.stringify({ sku: "S1", name: "Milk", unit_price: 2, status: "active", category: "g" }));
+    const body = new TextEncoder().encode(JSON.stringify({ sku: "S1", name: "Milk", unit_price: 2, unit_cost: 1, status: "active", category: "grocery" }));
     const raw = jwtReq("POST", "/v1/products", buildJwt(validClaims()), { "content-type": "application/json" });
     const res = await server.dispatch(raw, body);
     expect(res.status).toBe(201);

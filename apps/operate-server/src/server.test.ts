@@ -120,8 +120,9 @@ describe("OperateHttpServer — serving a pack over raw HTTP", () => {
       const { raw, bytes } = jsonBody("POST", "/v1/products", "key-manager", {
         ...p,
         unit_price: 1,
+        unit_cost: 0.5,
         status: "active",
-        category: "g",
+        category: "grocery",
       });
       await server.dispatch(raw, bytes);
     }

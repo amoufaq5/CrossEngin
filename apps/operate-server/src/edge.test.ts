@@ -82,7 +82,7 @@ describe("createFetchHandler — serving over the Fetch API", () => {
   it("paginates with ?limit and an opaque cursor", async () => {
     const fetch = handler();
     for (const p of [{ sku: "A", name: "Apple" }, { sku: "B", name: "Banana" }, { sku: "C", name: "Cherry" }]) {
-      await fetch(postReq("/v1/products", "key-manager", { ...p, unit_price: 1, status: "active", category: "g" }));
+      await fetch(postReq("/v1/products", "key-manager", { ...p, unit_price: 1, unit_cost: 0.5, status: "active", category: "grocery" }));
     }
     const first = await fetch(getReq("/v1/products?limit=2", "key-manager"));
     const body = (await first.json()) as { data: unknown[]; page: { nextCursor: string | null } };
