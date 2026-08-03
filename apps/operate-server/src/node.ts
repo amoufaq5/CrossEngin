@@ -44,6 +44,7 @@ import {
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
 import { JobScheduler, StaticTenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
+import { PostgresJobInvoker } from "./job-invoke.js";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
   return v === undefined ? undefined : Array.isArray(v) ? v[0] : (v as string);
@@ -273,6 +274,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       entityEventEffect({ sink, ...(options.eventPrefix !== null ? { eventPrefix: options.eventPrefix } : {}) }),
     );
   }
+  // On-demand job invocation: POST /v1/meta/jobs/invoke enqueues the caller tenant's userInvoked
+  // jobs. Enabled by --enable-job-invoke over a pg store (needs the conn + the manifest's jobs).
+  const jobInvoker =
+    options.enableJobInvoke && conn !== undefined
+      ? new PostgresJobInvoker(conn, Object.values(manifest.jobs ?? {}), schemaOpt)
+      : undefined;
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -283,6 +290,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(webhookRoute !== undefined ? { webhookRoute } : {}),
     ...(billingPortal !== undefined ? { billingPortal } : {}),
     ...(additionalWriteEffects.length > 0 ? { additionalWriteEffects } : {}),
+    ...(jobInvoker !== undefined ? { jobInvoker } : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
   });

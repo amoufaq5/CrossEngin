@@ -5,6 +5,7 @@ import {
   type BillingPortalWiring,
   type EntitlementResolver,
   type EntityStore,
+  type JobInvoker,
   type OperateServer,
   type SequenceAllocator,
   type SettingsStore,
@@ -122,6 +123,8 @@ export interface BuildOperateHttpServerOptions {
   readonly webhookRoute?: WebhookRoute;
   /** Extra after-write effects appended to the defaults (e.g. entity-event → job emission). */
   readonly additionalWriteEffects?: readonly WriteEffect[];
+  /** Optional on-demand job invocation route (POST /v1/meta/jobs/invoke). */
+  readonly jobInvoker?: JobInvoker;
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -157,6 +160,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.entitlementResolver !== undefined ? { entitlementResolver: options.entitlementResolver } : {}),
     ...(options.billingPortal !== undefined ? { billingPortal: options.billingPortal } : {}),
     ...(options.additionalWriteEffects !== undefined ? { additionalWriteEffects: options.additionalWriteEffects } : {}),
+    ...(options.jobInvoker !== undefined ? { jobInvoker: options.jobInvoker } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

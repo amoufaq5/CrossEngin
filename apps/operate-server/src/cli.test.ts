@@ -197,6 +197,15 @@ describe("parseServeArgs", () => {
     ).toThrow(/requires --emit-entity-events/);
   });
 
+  it("parses --enable-job-invoke with a pg store, defaults off", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--store", "pg", "--enable-job-invoke"]).enableJobInvoke).toBe(true);
+    expect(parseServeArgs(["--pack", "erp-core"]).enableJobInvoke).toBe(false);
+  });
+
+  it("rejects --enable-job-invoke with the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--enable-job-invoke"])).toThrow(/requires a Postgres store/);
+  });
+
   it("rejects --stripe-api-key without a return url", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-api-key", "sk_x"]),

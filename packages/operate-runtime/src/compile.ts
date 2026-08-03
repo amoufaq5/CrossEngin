@@ -57,6 +57,7 @@ import {
   type BillingPortalCreator,
 } from "./billing-portal-handler.js";
 import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
+import { buildJobInvokeHandler, type JobInvoker } from "./job-invoke-handler.js";
 import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
@@ -94,6 +95,11 @@ export interface OperateRuntimeOptions {
    * deployments without cloud billing.
    */
   readonly billingPortal?: BillingPortalWiring;
+  /**
+   * Optional on-demand job invocation: when set, registers `POST /v1/meta/jobs/invoke`, which
+   * enqueues the caller tenant's `userInvoked` jobs for a named action. Omit to not expose it.
+   */
+  readonly jobInvoker?: JobInvoker;
   readonly clock?: { now(): Date };
 }
 
@@ -554,6 +560,13 @@ export function compileOperateServer(
   if (options.billingPortal !== undefined) {
     routes.register(literalRoute("meta.billing-portal.create", "POST", ["v1", "meta", "billing-portal"]));
     handlers.register("meta.billing-portal.create", buildBillingPortalHandler(options.billingPortal));
+  }
+
+  // On-demand job invocation (opt-in): an authenticated caller runs a userInvoked job for their own
+  // tenant, enqueuing it into job_runs for the worker fleet.
+  if (options.jobInvoker !== undefined) {
+    routes.register(literalRoute("meta.jobs.invoke", "POST", ["v1", "meta", "jobs", "invoke"]));
+    handlers.register("meta.jobs.invoke", buildJobInvokeHandler(options.jobInvoker));
   }
 
   // AR/AP aging report, when the manifest models invoices/bills + payments.
