@@ -53,6 +53,20 @@ export async function listRecords(slug: string, query = ""): Promise<ListResult>
   return { data: obj.data ?? [], nextCursor: obj.page?.nextCursor ?? null };
 }
 
+/** Lists the m2m-associated records of a record: `GET /v1/<ownerSlug>/<id>/<relatedSlug>`. */
+export async function listAssociations(
+  ownerSlug: string,
+  id: string,
+  relatedSlug: string,
+): Promise<ReadonlyArray<Record<string, unknown>>> {
+  const suffix = `/${encodeURIComponent(id)}/${relatedSlug}`;
+  const res = await fetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
+  await checkResponse(res);
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  const json = (await res.json()) as { data?: Array<Record<string, unknown>> };
+  return json.data ?? [];
+}
+
 export async function createRecord(
   slug: string,
   payload: Record<string, unknown>,

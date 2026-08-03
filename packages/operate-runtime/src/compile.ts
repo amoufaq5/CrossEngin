@@ -26,6 +26,7 @@ import {
 } from "./admin-handlers.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
+import { associationRouteFromSpec, buildAssociationListHandler, manifestAssociationRoutes } from "./association.js";
 import { literalDefaultPlans, type LiteralDefaultPlan } from "./defaults.js";
 import { buildValidationPlans } from "./validation.js";
 import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
@@ -526,6 +527,12 @@ export function compileOperateServer(
         ? withRecordLimit(base, { resolver, store: options.store, entity: spec.entity })
         : gate(base, spec.method === "GET" ? "read" : "write");
     handlers.register(spec.operationId, handler);
+  }
+
+  // Association read routes: GET /v1/<owner>/{id}/<related> lists the m2m-linked related records.
+  for (const spec of manifestAssociationRoutes(manifest)) {
+    routes.register(associationRouteFromSpec(spec));
+    handlers.register(spec.operationId, gate(buildAssociationListHandler(spec, ctx), "read"));
   }
 
   // Manifest-driven UI metadata: any authenticated principal may read the shape.
