@@ -116,5 +116,30 @@ describe("buildJobInvokeHandler", () => {
       const out = await handler(input({ principal: principalWithRole("cashier"), parsedBody: { action: "run" } }));
       expect(out.status).toBe(202);
     });
+
+    it("a per-action rule overrides the default allow-list for that action", async () => {
+      const handler = buildJobInvokeHandler(runsInvoker, {
+        allowedRoles: new Set(["ops_admin"]),
+        rolesByAction: new Map([["reindex-catalog", new Set(["catalog_admin"])]]),
+        principalRoles: principalRoles as never,
+      });
+      // catalog_admin is allowed for reindex-catalog (per-action) but NOT the default ops_admin list
+      expect((await handler(input({ principal: principalWithRole("catalog_admin"), parsedBody: { action: "reindex-catalog" } }))).status).toBe(202);
+      // ops_admin (default) is NOT in the reindex-catalog override → 403
+      expect((await handler(input({ principal: principalWithRole("ops_admin"), parsedBody: { action: "reindex-catalog" } }))).status).toBe(403);
+      // an action with no per-action rule falls back to the default list → ops_admin allowed
+      expect((await handler(input({ principal: principalWithRole("ops_admin"), parsedBody: { action: "other-action" } }))).status).toBe(202);
+    });
+
+    it("a per-action rule with no default gates only that action, leaving others open", async () => {
+      const handler = buildJobInvokeHandler(runsInvoker, {
+        rolesByAction: new Map([["reindex-catalog", new Set(["catalog_admin"])]]),
+        principalRoles: principalRoles as never,
+      });
+      // gated action denies a non-matching role
+      expect((await handler(input({ principal: principalWithRole("cashier"), parsedBody: { action: "reindex-catalog" } }))).status).toBe(403);
+      // un-listed action is open
+      expect((await handler(input({ principal: principalWithRole("cashier"), parsedBody: { action: "free-action" } }))).status).toBe(202);
+    });
   });
 });

@@ -261,6 +261,33 @@ describe("parseServeArgs", () => {
     ).toThrow(/requires --enable-job-invoke/);
   });
 
+  it("parses repeatable --job-invoke-action-role specs", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--store",
+      "pg",
+      "--enable-job-invoke",
+      "--job-invoke-action-role",
+      "reindex-catalog:catalog_admin",
+      "--job-invoke-action-role",
+      "export-report:analyst",
+    ]);
+    expect(opts.jobInvokeActionRoles).toEqual(["reindex-catalog:catalog_admin", "export-report:analyst"]);
+  });
+
+  it("rejects a malformed --job-invoke-action-role spec", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--enable-job-invoke", "--job-invoke-action-role", "noColon"]),
+    ).toThrow(/expected action:role/);
+  });
+
+  it("rejects --job-invoke-action-role without --enable-job-invoke", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--job-invoke-action-role", "a:r"]),
+    ).toThrow(/requires --enable-job-invoke/);
+  });
+
   it("rejects --stripe-api-key without a return url", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-api-key", "sk_x"]),

@@ -3,6 +3,26 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { InvokedJobRun, JobInvocationRequest, JobInvoker } from "@crossengin/operate-runtime";
 import { enqueueUserInvokedJob } from "@crossengin/workflow-runtime-pg";
 
+/**
+ * Parses repeatable `action:role` specs into a per-action role map (`{action → {role, …}}`). An
+ * action may repeat to accumulate roles. A spec without a non-empty action and role throws.
+ */
+export function buildActionRoleMap(specs: readonly string[]): ReadonlyMap<string, ReadonlySet<string>> {
+  const map = new Map<string, Set<string>>();
+  for (const spec of specs) {
+    const idx = spec.indexOf(":");
+    if (idx <= 0 || idx === spec.length - 1) {
+      throw new Error(`invalid job-invoke action role spec: ${JSON.stringify(spec)} (expected action:role)`);
+    }
+    const action = spec.slice(0, idx);
+    const role = spec.slice(idx + 1);
+    const set = map.get(action) ?? new Set<string>();
+    set.add(role);
+    map.set(action, set);
+  }
+  return map;
+}
+
 export interface PostgresJobInvokerOptions {
   readonly schema?: string;
   readonly now?: () => Date;
