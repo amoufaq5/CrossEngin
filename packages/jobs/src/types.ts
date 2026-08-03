@@ -173,6 +173,11 @@ export const JobDeclarationSchema = z
     idempotent: z.boolean().default(true),
     inputDataClass: z.enum(DATA_CLASSES).default("internal"),
     outputDataClass: z.enum(DATA_CLASSES).default("internal"),
+    /**
+     * Roles permitted to invoke this job on demand (for a `userInvoked` trigger). When present, only
+     * these roles may fire it via the invoke endpoint; absent leaves the deployment's default gate.
+     */
+    invokeRoles: z.array(z.string().min(1)).nonempty().optional(),
     deprecated: z.boolean().optional(),
   })
   .refine(

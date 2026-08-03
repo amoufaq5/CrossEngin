@@ -23,6 +23,20 @@ export function buildActionRoleMap(specs: readonly string[]): ReadonlyMap<string
   return map;
 }
 
+/**
+ * Merges per-action role maps, with `override` winning per action — a deployment's operator overrides
+ * (CLI) replace a manifest-declared action's roles entirely, while un-overridden manifest actions
+ * carry through. Returns a fresh map.
+ */
+export function mergeActionRoleMaps(
+  base: ReadonlyMap<string, ReadonlySet<string>>,
+  override: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const merged = new Map<string, ReadonlySet<string>>(base);
+  for (const [action, roles] of override) merged.set(action, roles);
+  return merged;
+}
+
 export interface PostgresJobInvokerOptions {
   readonly schema?: string;
   readonly now?: () => Date;

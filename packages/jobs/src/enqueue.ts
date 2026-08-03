@@ -155,6 +155,25 @@ export function enqueueKeyForUserInvocation(invocation: UserInvocation, jobId: s
  * mirroring `planJobRunsForEvent`. Each planned run carries the job's data classes, the invocation
  * payload as its input, a deterministic `runKey` for idempotent persistence, and `delayMs` 0.
  */
+/**
+ * The manifest-declared invoke-role requirements per action: for every non-deprecated
+ * `userInvoked`-trigger job that declares `invokeRoles`, maps its `trigger.action` to the set of roles
+ * permitted to invoke it. Actions where multiple jobs declare roles union them. Pure — the deployment
+ * merges this with any operator-supplied overrides.
+ */
+export function invokeRolesByAction(
+  jobs: readonly JobDeclaration[],
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const map = new Map<string, Set<string>>();
+  for (const job of jobs) {
+    if (job.deprecated === true || job.trigger.kind !== "userInvoked" || job.invokeRoles === undefined) continue;
+    const set = map.get(job.trigger.action) ?? new Set<string>();
+    for (const role of job.invokeRoles) set.add(role);
+    map.set(job.trigger.action, set);
+  }
+  return map;
+}
+
 export function planUserInvokedJobRuns(
   invocation: UserInvocation,
   jobs: readonly JobDeclaration[],

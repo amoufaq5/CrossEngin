@@ -44,7 +44,8 @@ import {
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
-import { PostgresJobInvoker, buildActionRoleMap } from "./job-invoke.js";
+import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
+import { invokeRolesByAction } from "@crossengin/jobs";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
   return v === undefined ? undefined : Array.isArray(v) ? v[0] : (v as string);
@@ -280,6 +281,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.enableJobInvoke && conn !== undefined
       ? new PostgresJobInvoker(conn, Object.values(manifest.jobs ?? {}), schemaOpt)
       : undefined;
+  // Per-action invoke roles: the manifest's declared invokeRoles are the baseline; the operator's
+  // --job-invoke-action-role overrides win per action.
+  const invokeActionRoles =
+    jobInvoker !== undefined
+      ? mergeActionRoleMaps(
+          invokeRolesByAction(Object.values(manifest.jobs ?? {})),
+          buildActionRoleMap(options.jobInvokeActionRoles),
+        )
+      : new Map<string, ReadonlySet<string>>();
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -294,8 +304,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(jobInvoker !== undefined && options.jobInvokeRoles.length > 0
       ? { jobInvokeRoles: options.jobInvokeRoles }
       : {}),
-    ...(jobInvoker !== undefined && options.jobInvokeActionRoles.length > 0
-      ? { jobInvokeActionRoles: buildActionRoleMap(options.jobInvokeActionRoles) }
+    ...(jobInvoker !== undefined && invokeActionRoles.size > 0
+      ? { jobInvokeActionRoles: invokeActionRoles }
       : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
