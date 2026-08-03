@@ -3,7 +3,7 @@ import { JobDeclarationSchema, type JobDeclaration } from "@crossengin/jobs";
 import { describe, expect, it } from "vitest";
 
 import type { IntervalScheduler } from "./jwks.js";
-import { JobScheduler, StaticTenantSource } from "./scheduler.js";
+import { JobScheduler, PostgresTenantSource, StaticTenantSource } from "./scheduler.js";
 
 const T1 = "00000000-0000-4000-8000-000000000001";
 const T2 = "00000000-0000-4000-8000-000000000002";
@@ -146,6 +146,41 @@ describe("JobScheduler", () => {
     expect(calls.length).toBeGreaterThan(afterStart);
     s.stop();
     expect(cleared()).toBe(true);
+  });
+
+  it("PostgresTenantSource selects active tenants from meta.tenants", async () => {
+    const calls: Call[] = [];
+    const conn = {
+      query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+        calls.push({ sql, params });
+        return { rows: [{ id: T1 }, { id: T2 }], rowCount: 2 };
+      }) as PgConnection["query"],
+      transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+      withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+    const source = new PostgresTenantSource(conn);
+    const ids = await source.activeTenantIds();
+    expect(ids).toEqual([T1, T2]);
+    expect(calls[0]!.sql).toContain("FROM meta.tenants");
+    expect(calls[0]!.sql).toContain("status = ANY($1::text[])");
+    expect(calls[0]!.params).toEqual([["active"]]);
+  });
+
+  it("PostgresTenantSource honors custom active statuses and rejects a bad schema", async () => {
+    const calls: Call[] = [];
+    const conn = {
+      query: (async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+        calls.push({ sql, params });
+        return { rows: [], rowCount: 0 };
+      }) as PgConnection["query"],
+      transaction: (async () => undefined) as unknown as PgConnection["transaction"],
+      withAdvisoryLock: (async () => undefined) as unknown as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+    await new PostgresTenantSource(conn, { statuses: ["active", "suspended"] }).activeTenantIds();
+    expect(calls[0]!.params).toEqual([["active", "suspended"]]);
+    expect(() => new PostgresTenantSource(conn, { schema: "x;y" })).toThrow(/invalid schema/);
   });
 
   it("start() is idempotent", () => {

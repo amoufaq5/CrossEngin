@@ -42,7 +42,7 @@ import {
   type JwtVerifyConfig,
 } from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
-import { JobScheduler, StaticTenantSource } from "./scheduler.js";
+import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
 import { PostgresJobInvoker } from "./job-invoke.js";
 
@@ -299,10 +299,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // idempotent enqueue makes running it on every replica safe.
   let jobScheduler: JobScheduler | null = null;
   if (options.scheduleMs !== null && conn !== undefined) {
+    // The tenant registry (meta.tenants) is always in `meta` — independent of the entity `--schema`.
+    const tenants: TenantSource = options.scheduleAllTenants
+      ? new PostgresTenantSource(conn)
+      : new StaticTenantSource(options.scheduleTenants);
     jobScheduler = new JobScheduler({
       conn,
       jobs: Object.values(manifest.jobs ?? {}),
-      tenants: new StaticTenantSource(options.scheduleTenants),
+      tenants,
       intervalMs: options.scheduleMs,
       ...schemaOpt,
     });

@@ -32,6 +32,46 @@ export class StaticTenantSource implements TenantSource {
   }
 }
 
+const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
+const DEFAULT_TENANT_STATUSES = ["active"] as const;
+
+export interface PostgresTenantSourceOptions {
+  readonly schema?: string;
+  /** Tenant statuses treated as active (default `['active']`); a suspended/deleted tenant is skipped. */
+  readonly statuses?: readonly string[];
+}
+
+/**
+ * A `TenantSource` that enumerates the live tenants from `meta.tenants` — so the scheduler fires cron
+ * jobs for every active tenant without a hand-maintained list. Reads `id` where `status` is one of the
+ * configured active statuses (default `active`), bound as a parameter; the schema identifier is
+ * validated. Platform-scoped (the tenant registry is not RLS-guarded). Re-queried each tick, so a
+ * newly-provisioned or newly-suspended tenant is picked up on the next pass.
+ */
+export class PostgresTenantSource implements TenantSource {
+  private readonly schema: string;
+  private readonly statuses: readonly string[];
+
+  constructor(
+    private readonly conn: PgConnection,
+    options: PostgresTenantSourceOptions = {},
+  ) {
+    this.schema = options.schema ?? "meta";
+    if (!SCHEMA_RE.test(this.schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(this.schema)}`);
+    this.statuses = options.statuses ?? DEFAULT_TENANT_STATUSES;
+  }
+
+  async activeTenantIds(): Promise<readonly string[]> {
+    const result = await this.conn.query<{ id: unknown }>(
+      `SELECT id FROM ${this.schema}.tenants WHERE status = ANY($1::text[]) ORDER BY id`,
+      [this.statuses],
+    );
+    return result.rows
+      .map((r) => (typeof r.id === "string" ? r.id : r.id instanceof Object ? String(r.id) : String(r.id ?? "")))
+      .filter((id) => id.length > 0);
+  }
+}
+
 /** What one tenant's tick enqueued (for metrics / logging). */
 export interface SchedulerTickResult {
   readonly tenantId: string;
