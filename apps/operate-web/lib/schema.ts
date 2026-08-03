@@ -60,6 +60,14 @@ export interface UiEntitySchema {
   readonly stateField: string | null;
   readonly transitions: readonly UiTransitionSchema[];
   readonly operationIds: Record<"list" | "read" | "create" | "update" | "delete", string>;
+  readonly associations?: readonly UiAssociationSchema[];
+}
+
+/** A many-to-many association owned by an entity — the related entity + its resource slug. */
+export interface UiAssociationSchema {
+  readonly relatedEntity: string;
+  readonly relatedSlug: string;
+  readonly relatedLabel: string;
 }
 
 export interface UiRoleSchema {

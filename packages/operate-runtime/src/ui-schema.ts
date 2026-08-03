@@ -4,6 +4,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Field } from "@crossengin/types/meta-schema";
 
 import { listConfigForEntity } from "./list-query.js";
+import { manifestAssociationRoutes } from "./association.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityCamel, resourceSlug } from "./slugs.js";
 
@@ -75,6 +76,15 @@ export interface UiEntitySchema {
     readonly update: string;
     readonly delete: string;
   };
+  /** Many-to-many associations owned by this entity — the related entity + its resource slug. */
+  readonly associations: readonly UiAssociationSchema[];
+}
+
+/** A `many_to_many` association surfaced on the entity's detail view (`/v1/<slug>/{id}/<relatedSlug>`). */
+export interface UiAssociationSchema {
+  readonly relatedEntity: string;
+  readonly relatedSlug: string;
+  readonly relatedLabel: string;
 }
 
 export interface UiRoleSchema {
@@ -222,6 +232,16 @@ function transitionsFor(
 
 /** Derives the manifest-driven UI metadata a front end needs to render every entity. */
 export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSchema {
+  const associationsByOwner = new Map<string, UiAssociationSchema[]>();
+  for (const route of manifestAssociationRoutes(manifest)) {
+    const list = associationsByOwner.get(route.ownerEntity) ?? [];
+    list.push({
+      relatedEntity: route.relatedEntity,
+      relatedSlug: resourceSlug(route.relatedEntity),
+      relatedLabel: pluralLabel(route.relatedEntity),
+    });
+    associationsByOwner.set(route.ownerEntity, list);
+  }
   const entities: UiEntitySchema[] = [];
   for (const entity of manifest.entities ?? []) {
     const config = listConfigForEntity(manifest, entity.name);
@@ -248,6 +268,7 @@ export function buildUiSchema(manifest: Manifest, now: Date = new Date()): UiSch
         update: `${camel}.update`,
         delete: `${camel}.delete`,
       },
+      associations: associationsByOwner.get(entity.name) ?? [],
     });
   }
   entities.sort((a, b) => a.label.localeCompare(b.label));

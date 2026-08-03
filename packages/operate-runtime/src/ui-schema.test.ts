@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { Manifest } from "@crossengin/kernel/manifest";
 import { buildErpCorePack } from "@crossengin/pack-erp-core";
 
 import { buildUiSchema } from "./ui-schema.js";
@@ -14,6 +15,25 @@ function entity(name: string) {
 describe("buildUiSchema", () => {
   it("covers every manifest entity", () => {
     expect(schema.entities.length).toBe(buildErpCorePack().entities.length);
+  });
+
+  it("surfaces m2m associations on the owning entity (both directions)", () => {
+    const m = {
+      entities: [
+        { name: "Tag", fields: [{ name: "label", type: { kind: "text" } }] },
+        { name: "Product", fields: [{ name: "name", type: { kind: "text" } }] },
+      ],
+      relations: [{ kind: "many_to_many", left: "Tag", right: "Product" }],
+    } as unknown as Manifest;
+    const s = buildUiSchema(m, new Date("2026-06-20T00:00:00Z"));
+    const tag = s.entities.find((e) => e.name === "Tag")!;
+    const product = s.entities.find((e) => e.name === "Product")!;
+    expect(tag.associations).toEqual([{ relatedEntity: "Product", relatedSlug: "products", relatedLabel: "Products" }]);
+    expect(product.associations.map((a) => a.relatedEntity)).toEqual(["Tag"]);
+  });
+
+  it("has an empty associations list for an entity with no m2m relations", () => {
+    expect(entity("Invoice").associations).toEqual([]);
   });
 
   it("derives kebab-plural slugs", () => {

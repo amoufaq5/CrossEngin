@@ -8,10 +8,11 @@ import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
 import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
-import { deleteRecord, getRecord, listRecords, runTransition, updateRecord } from "@/lib/api";
+import { deleteRecord, getRecord, listAssociations, listRecords, runTransition, updateRecord } from "@/lib/api";
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
 import {
+  entityByName,
   entityBySlug,
   fieldErrorMap,
   parseValidationErrors,
@@ -19,6 +20,7 @@ import {
   slugForEntityName,
   useSchema,
   type ReverseReference,
+  type UiAssociationSchema,
   type UiEntitySchema,
   type UiFieldSchema,
 } from "@/lib/schema";
@@ -298,6 +300,10 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
         {record !== null && !editing && reverseReferences(schema, entity.name).map((rel) => (
           <RelatedRecords key={`${rel.entity.name}.${rel.field.name}`} rel={rel} parentId={id} schema={schema} />
         ))}
+
+        {record !== null && !editing && (entity.associations ?? []).map((assoc) => (
+          <AssociatedRecords key={assoc.relatedEntity} owner={entity} assoc={assoc} parentId={id} schema={schema} />
+        ))}
       </div>
     </>
   );
@@ -386,6 +392,100 @@ function RelatedRecords({
                         {idx === 0 ? (
                           <Link
                             href={`/e/${child.slug}/${encodeURIComponent(rowId)}`}
+                            className="text-brand-600 hover:text-brand-700"
+                          >
+                            {formatCell(row[c]) || rowId}
+                          </Link>
+                        ) : (
+                          <span className="text-ink">{formatCell(row[c])}</span>
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * A many-to-many associations panel: the records linked to this one across a `many_to_many` relation.
+ * Fetches `GET /v1/<owner>/<id>/<related>` (the manifest-derived association route) and renders a
+ * compact table over the related entity's list columns, each deep-linked. Empty / unsupported (501)
+ * associations render nothing.
+ */
+function AssociatedRecords({
+  owner,
+  assoc,
+  parentId,
+  schema,
+}: {
+  owner: UiEntitySchema;
+  assoc: UiAssociationSchema;
+  parentId: string;
+  schema: ReturnType<typeof useSchema>["schema"];
+}) {
+  const related = entityByName(schema, assoc.relatedEntity);
+  const [rows, setRows] = useState<ReadonlyArray<Record<string, unknown>>>([]);
+  const [busy, setBusy] = useState(true);
+
+  const columns = (related?.listColumns ?? ["id"]).slice(0, 4);
+  const columnLabel = (name: string): string => related?.fields.find((f) => f.name === name)?.label ?? name;
+
+  useEffect(() => {
+    let cancelled = false;
+    setBusy(true);
+    listAssociations(owner.slug, parentId, assoc.relatedSlug)
+      .then((data) => {
+        if (!cancelled) setRows(data);
+      })
+      .catch(() => {
+        // Best-effort: a store without association support (501) or any error → no panel.
+        if (!cancelled) setRows([]);
+      })
+      .finally(() => {
+        if (!cancelled) setBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [owner.slug, parentId, assoc.relatedSlug]);
+
+  if (!busy && rows.length === 0) return null;
+
+  return (
+    <section className="mt-6 rounded-xl border border-line bg-white p-6">
+      <h2 className="mb-3 text-sm font-semibold text-ink">
+        {assoc.relatedLabel} <span className="font-normal text-ink-faint">linked</span>
+      </h2>
+      {busy ? (
+        <p className="text-sm text-ink-muted">Loading…</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-line text-left text-xs uppercase tracking-wide text-ink-faint">
+                {columns.map((c) => (
+                  <th key={c} className="py-2 pr-4 font-medium">
+                    {columnLabel(c)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => {
+                const rowId = String(row["id"] ?? "");
+                return (
+                  <tr key={rowId} className="border-b border-line/60 last:border-0 hover:bg-surface">
+                    {columns.map((c, idx) => (
+                      <td key={c} className="py-2 pr-4">
+                        {idx === 0 && related !== undefined ? (
+                          <Link
+                            href={`/e/${related.slug}/${encodeURIComponent(rowId)}`}
                             className="text-brand-600 hover:text-brand-700"
                           >
                             {formatCell(row[c]) || rowId}
