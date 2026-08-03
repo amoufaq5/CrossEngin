@@ -38,7 +38,7 @@ export function validateManifest(manifest: Manifest): void {
   const entityTransitions = validateWorkflows(manifest, entityNames);
   validatePermissions(manifest, entityNames, rolesMap, entityTransitions);
   validateIntegrations(manifest);
-  validateJobs(manifest);
+  validateJobs(manifest, rolesMap);
   validateFiles(manifest);
   const reportIds = validateReports(manifest, entityNames);
   const dashboardIds = validateDashboards(manifest, reportIds);
@@ -358,7 +358,7 @@ function validateIntegrations(manifest: Manifest): void {
   }
 }
 
-function validateJobs(manifest: Manifest): void {
+function validateJobs(manifest: Manifest, rolesMap: ReadonlyMap<string, RoleDefinition>): void {
   const jobs: Record<string, JobDeclaration> = manifest.jobs ?? {};
   const seenJobIds = new Set<string>();
   const workflowNames = new Set<string>(Object.keys(manifest.workflows ?? {}));
@@ -380,6 +380,23 @@ function validateJobs(manifest: Manifest): void {
         `jobs.${key}.trigger.workflow`,
         `workflow trigger references unknown workflow '${job.trigger.workflow}'`,
       );
+    }
+
+    if (job.invokeRoles !== undefined) {
+      if (job.trigger.kind !== "userInvoked") {
+        throw new ManifestValidationError(
+          `jobs.${key}.invokeRoles`,
+          `invokeRoles is only meaningful on a 'userInvoked'-trigger job (job '${job.id}' has a '${job.trigger.kind}' trigger)`,
+        );
+      }
+      for (const roleName of job.invokeRoles) {
+        if (!rolesMap.has(roleName)) {
+          throw new ManifestValidationError(
+            `jobs.${key}.invokeRoles`,
+            `invokeRoles references role '${roleName}' which is not declared in manifest.roles`,
+          );
+        }
+      }
     }
   }
 }
