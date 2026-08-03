@@ -743,6 +743,69 @@ describe("validateManifest — jobs", () => {
     };
     expect(() => validateManifest(m)).not.toThrow();
   });
+
+  it("accepts a userInvoked job whose invokeRoles are all declared", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: { ops_admin: { name: "ops_admin" }, catalog_admin: { name: "catalog_admin" } },
+      jobs: {
+        "reindex-catalog": {
+          id: "reindex-catalog",
+          name: "Reindex Catalog",
+          trigger: { kind: "userInvoked", action: "reindex-catalog" },
+          onFailure: { strategy: "dead-letter" },
+          idempotent: true,
+          inputDataClass: "internal",
+          outputDataClass: "internal",
+          invokeRoles: ["ops_admin", "catalog_admin"],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("rejects invokeRoles that reference an undeclared role", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: { ops_admin: { name: "ops_admin" } },
+      jobs: {
+        "reindex-catalog": {
+          id: "reindex-catalog",
+          name: "Reindex Catalog",
+          trigger: { kind: "userInvoked", action: "reindex-catalog" },
+          onFailure: { strategy: "dead-letter" },
+          idempotent: true,
+          inputDataClass: "internal",
+          outputDataClass: "internal",
+          invokeRoles: ["ghost_role"],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/invokeRoles references role 'ghost_role'/);
+  });
+
+  it("rejects invokeRoles on a non-userInvoked job", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: { ops_admin: { name: "ops_admin" } },
+      jobs: {
+        "nightly-report": {
+          id: "nightly-report",
+          name: "Nightly Report",
+          trigger: { kind: "scheduled", cron: "0 0 * * *" },
+          onFailure: { strategy: "dead-letter" },
+          idempotent: true,
+          inputDataClass: "internal",
+          outputDataClass: "internal",
+          invokeRoles: ["ops_admin"],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/only meaningful on a 'userInvoked'-trigger job/);
+  });
 });
 
 describe("validateManifest — reports + dashboards", () => {
