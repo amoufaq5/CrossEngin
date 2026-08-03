@@ -81,6 +81,9 @@ importers:
       '@crossengin/billing-stripe':
         specifier: workspace:*
         version: link:../../packages/billing-stripe
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../../packages/jobs
       '@crossengin/kernel':
         specifier: workspace:*
         version: link:../../packages/kernel
@@ -105,6 +108,9 @@ importers:
       '@crossengin/pack-erp-retail':
         specifier: workspace:*
         version: link:../../packages/pack-erp-retail
+      '@crossengin/workflow-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/workflow-runtime-pg
       zod:
         specifier: ^3.23.0
         version: 3.25.76

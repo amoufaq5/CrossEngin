@@ -27,6 +27,10 @@ export interface ServeOptions {
   readonly stripeApiKey: string | null;
   /** Where Stripe returns the customer after the Billing Portal (required with --stripe-api-key). */
   readonly billingPortalReturnUrl: string | null;
+  /** Cron scheduler tick interval (ms) — enables in-process scheduled-job enqueue (needs a pg store). */
+  readonly scheduleMs: number | null;
+  /** Tenant ids the cron scheduler fires jobs for (repeatable; required with --schedule-ms). */
+  readonly scheduleTenants: readonly string[];
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -72,6 +76,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let planCatalogFile: string | null = null;
   let stripeApiKey: string | null = null;
   let billingPortalReturnUrl: string | null = null;
+  let scheduleMs: number | null = null;
+  const scheduleTenants: string[] = [];
   let help = false;
   let version = false;
 
@@ -155,6 +161,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--billing-portal-return-url" || arg.startsWith("--billing-portal-return-url=")) {
       billingPortalReturnUrl = takeValue(arg, next, "--billing-portal-return-url");
       i += consumed();
+    } else if (arg === "--schedule-ms" || arg.startsWith("--schedule-ms=")) {
+      const raw = takeValue(arg, next, "--schedule-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --schedule-ms: ${raw} (>= 1000)`);
+      scheduleMs = n;
+      i += consumed();
+    } else if (arg === "--schedule-tenant" || arg.startsWith("--schedule-tenant=")) {
+      scheduleTenants.push(takeValue(arg, next, "--schedule-tenant"));
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -174,6 +189,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (stripeApiKey !== null && store === "memory") {
     throw new CliUsageError("--stripe-api-key requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (scheduleMs !== null && store === "memory") {
+    throw new CliUsageError("--schedule-ms requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (scheduleMs !== null && scheduleTenants.length === 0) {
+    throw new CliUsageError("--schedule-ms requires at least one --schedule-tenant");
+  }
+  if (scheduleTenants.length > 0 && scheduleMs === null) {
+    throw new CliUsageError("--schedule-tenant requires --schedule-ms (the scheduler tick interval)");
   }
 
   if (
@@ -211,6 +235,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     planCatalogFile,
     stripeApiKey,
     billingPortalReturnUrl,
+    scheduleMs,
+    scheduleTenants,
     defaultScheme,
     help,
     version,
@@ -250,6 +276,10 @@ Options:
   --stripe-api-key <sk>  Stripe secret key — enables POST /v1/meta/billing-portal
                        (needs --store pg|pg-columns + --billing-portal-return-url)
   --billing-portal-return-url <url>  Where Stripe returns the customer after the portal
+  --schedule-ms <n>    Cron scheduler tick interval (ms, >=1000) — enqueues the
+                       manifest's scheduled jobs into job_runs (needs --store pg|pg-columns)
+  --schedule-tenant <uuid>  Tenant the scheduler fires jobs for (repeatable; required
+                       with --schedule-ms)
   --help, -h           Show this help
   --version, -v        Print version
 

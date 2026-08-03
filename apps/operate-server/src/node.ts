@@ -40,6 +40,7 @@ import {
   type JwtVerifyConfig,
 } from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
+import { JobScheduler, StaticTenantSource } from "./scheduler.js";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
   return v === undefined ? undefined : Array.isArray(v) ? v[0] : (v as string);
@@ -271,7 +272,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
   });
+  // In-process cron scheduler: enqueue the manifest's scheduled jobs into job_runs per tenant, so the
+  // distributed worker fleet runs them. Enabled by --schedule-ms + --schedule-tenant over a pg store;
+  // idempotent enqueue makes running it on every replica safe.
+  let jobScheduler: JobScheduler | null = null;
+  if (options.scheduleMs !== null && conn !== undefined) {
+    jobScheduler = new JobScheduler({
+      conn,
+      jobs: Object.values(manifest.jobs ?? {}),
+      tenants: new StaticTenantSource(options.scheduleTenants),
+      intervalMs: options.scheduleMs,
+      ...schemaOpt,
+    });
+  }
   poller?.start();
+  jobScheduler?.start();
   const listener = createNodeRequestListener(httpServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -285,6 +300,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     close: () =>
       new Promise<void>((resolve, reject) => {
         poller?.stop();
+        jobScheduler?.stop();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
