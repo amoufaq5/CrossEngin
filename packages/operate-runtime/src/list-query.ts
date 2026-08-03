@@ -100,6 +100,30 @@ function withLifecycleStateFilter(
   return [...filterableFields, sf];
 }
 
+/** The entity's reference (foreign-key) field names, in declaration order. */
+function referenceFieldsOf(manifest: Manifest, entity: string): readonly string[] {
+  const ent = ((manifest.entities ?? []) as ReadonlyArray<EntityLike>).find((e) => e.name === entity);
+  if (ent === undefined) return [];
+  return (ent.fields ?? []).filter((f) => f.type?.kind === "reference").map((f) => f.name);
+}
+
+/**
+ * Ensures reference (FK) fields are filterable so a related-records query can push `?<ref>=<id>` into
+ * SQL — the natural join keys for "the children pointing at this record", the same principle as the
+ * lifecycle-state filter. Additive: a reference already filterable is unchanged.
+ */
+function withReferenceFilters(
+  manifest: Manifest,
+  entity: string,
+  filterableFields: readonly string[],
+): readonly string[] {
+  const refs = referenceFieldsOf(manifest, entity);
+  if (refs.length === 0) return filterableFields;
+  const set = new Set(filterableFields);
+  for (const r of refs) set.add(r);
+  return [...set];
+}
+
 /**
  * Derives the `ListConfig` for an entity from the first `ListView` in the
  * manifest that targets it: default page size + default sort + the set of
@@ -117,7 +141,7 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
       maxLimit: MAX_PAGE_SIZE,
       defaultSort: [],
       sortableFields: [],
-      filterableFields: withLifecycleStateFilter(manifest, entity, []),
+      filterableFields: withReferenceFilters(manifest, entity, withLifecycleStateFilter(manifest, entity, [])),
       searchableFields: searchableFieldsFor(manifest, entity, null),
     };
   }
@@ -131,7 +155,7 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
     maxLimit: MAX_PAGE_SIZE,
     defaultSort,
     sortableFields,
-    filterableFields: withLifecycleStateFilter(manifest, entity, filterableFields),
+    filterableFields: withReferenceFilters(manifest, entity, withLifecycleStateFilter(manifest, entity, filterableFields)),
     searchableFields: searchableFieldsFor(manifest, entity, visibleColumns),
   };
 }

@@ -170,6 +170,33 @@ export function slugForEntityName(schema: UiSchema | null, name: string): string
   return entityByName(schema, name)?.slug;
 }
 
+/** A child entity that references `targetName` through one of its reference fields. */
+export interface ReverseReference {
+  readonly entity: UiEntitySchema;
+  readonly field: UiFieldSchema;
+}
+
+/**
+ * The reverse relations of an entity: every other entity that carries a reference field pointing at
+ * `targetName` (its children). Derived purely from the UI schema's reference fields, so the detail
+ * view can render "related records" — the rows whose `<field>` equals this record's id — without any
+ * extra schema. Restricted to entities the viewer may list, and to fields the server exposes as
+ * filterable (so the `?<field>=<id>` query actually narrows).
+ */
+export function reverseReferences(schema: UiSchema | null, targetName: string): readonly ReverseReference[] {
+  if (schema === null) return [];
+  const out: ReverseReference[] = [];
+  for (const entity of schema.entities) {
+    if (!canAccess(schema, entity, "list")) continue;
+    for (const field of entity.fields) {
+      if (field.input === "reference" && field.referenceTarget === targetName && entity.filterableFields.includes(field.name)) {
+        out.push({ entity, field });
+      }
+    }
+  }
+  return out;
+}
+
 /** Preferred department display order; anything else sorts after, alphabetically. */
 export const DEPARTMENT_ORDER: readonly string[] = [
   "Sales & CRM",
