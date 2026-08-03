@@ -39,6 +39,8 @@ export interface ServeOptions {
   readonly eventPrefix: string | null;
   /** Expose POST /v1/meta/jobs/invoke to run userInvoked jobs on demand (needs a pg store). */
   readonly enableJobInvoke: boolean;
+  /** Roles permitted to call the job-invoke route (repeatable); empty ⇒ open to any tenant principal. */
+  readonly jobInvokeRoles: readonly string[];
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -90,6 +92,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let emitEntityEvents = false;
   let eventPrefix: string | null = null;
   let enableJobInvoke = false;
+  const jobInvokeRoles: string[] = [];
   let help = false;
   let version = false;
 
@@ -191,6 +194,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--enable-job-invoke") {
       enableJobInvoke = true;
+    } else if (arg === "--job-invoke-role" || arg.startsWith("--job-invoke-role=")) {
+      jobInvokeRoles.push(takeValue(arg, next, "--job-invoke-role"));
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -231,6 +237,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (enableJobInvoke && store === "memory") {
     throw new CliUsageError("--enable-job-invoke requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (jobInvokeRoles.length > 0 && !enableJobInvoke) {
+    throw new CliUsageError("--job-invoke-role requires --enable-job-invoke");
   }
 
   if (
@@ -274,6 +283,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     emitEntityEvents,
     eventPrefix,
     enableJobInvoke,
+    jobInvokeRoles,
     defaultScheme,
     help,
     version,
@@ -324,6 +334,8 @@ Options:
   --event-prefix <p>   Namespace prefix for emitted event names (with --emit-entity-events)
   --enable-job-invoke  Expose POST /v1/meta/jobs/invoke to run userInvoked jobs on demand
                        (needs --store pg|pg-columns)
+  --job-invoke-role <role>  Restrict job invocation to this role (repeatable; with
+                       --enable-job-invoke). Omit to allow any authenticated tenant principal
   --help, -h           Show this help
   --version, -v        Print version
 

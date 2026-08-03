@@ -236,6 +236,31 @@ describe("parseServeArgs", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--enable-job-invoke"])).toThrow(/requires a Postgres store/);
   });
 
+  it("parses repeatable --job-invoke-role with --enable-job-invoke", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--store",
+      "pg",
+      "--enable-job-invoke",
+      "--job-invoke-role",
+      "ops_admin",
+      "--job-invoke-role",
+      "erp_admin",
+    ]);
+    expect(opts.jobInvokeRoles).toEqual(["ops_admin", "erp_admin"]);
+  });
+
+  it("defaults job-invoke roles to empty (open)", () => {
+    expect(parseServeArgs(["--pack", "erp-core"]).jobInvokeRoles).toEqual([]);
+  });
+
+  it("rejects --job-invoke-role without --enable-job-invoke", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--job-invoke-role", "ops_admin"]),
+    ).toThrow(/requires --enable-job-invoke/);
+  });
+
   it("rejects --stripe-api-key without a return url", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-api-key", "sk_x"]),
