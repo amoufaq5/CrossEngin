@@ -8,6 +8,7 @@ import {
   type OperateServer,
   type SequenceAllocator,
   type SettingsStore,
+  type WriteEffect,
 } from "@crossengin/operate-runtime";
 
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
@@ -119,6 +120,8 @@ export interface BuildOperateHttpServerOptions {
   readonly billingPortal?: BillingPortalWiring;
   /** Optional signature-authenticated webhook route handled ahead of the gateway. */
   readonly webhookRoute?: WebhookRoute;
+  /** Extra after-write effects appended to the defaults (e.g. entity-event → job emission). */
+  readonly additionalWriteEffects?: readonly WriteEffect[];
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -153,6 +156,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.adminRoles !== undefined ? { adminRoles: options.adminRoles as never } : {}),
     ...(options.entitlementResolver !== undefined ? { entitlementResolver: options.entitlementResolver } : {}),
     ...(options.billingPortal !== undefined ? { billingPortal: options.billingPortal } : {}),
+    ...(options.additionalWriteEffects !== undefined ? { additionalWriteEffects: options.additionalWriteEffects } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

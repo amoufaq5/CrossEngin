@@ -80,6 +80,8 @@ export interface OperateRuntimeOptions {
   readonly writeGuards?: readonly WriteGuard[];
   /** Side effects run after a successful write (e.g. auto-generating a reversal entry). */
   readonly writeEffects?: readonly WriteEffect[];
+  /** Extra effects appended after the resolved base effects (e.g. entity-event emission) — additive. */
+  readonly additionalWriteEffects?: readonly WriteEffect[];
   /**
    * Optional subscription gate: when set, every entity + report operation is pre-checked
    * against the caller tenant's entitlement — a lapsed/suspended tenant gets a 402 (and
@@ -481,7 +483,10 @@ export function compileOperateServer(
     settingsDefaultPlans: buildSettingsDefaultPlans(manifest),
     validationPlans: buildValidationPlans(manifest),
     writeGuards: options.writeGuards ?? defaultWriteGuards(manifest),
-    writeEffects: options.writeEffects ?? defaultWriteEffects(manifest, options.clock, options.settingsStore),
+    writeEffects: [
+      ...(options.writeEffects ?? defaultWriteEffects(manifest, options.clock, options.settingsStore)),
+      ...(options.additionalWriteEffects ?? []),
+    ],
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),

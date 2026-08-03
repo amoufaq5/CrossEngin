@@ -302,6 +302,7 @@ async function applyTransition(
       before: record,
       after,
       store,
+      transitionTo: t.toState,
     });
     return json(200, after);
   });
