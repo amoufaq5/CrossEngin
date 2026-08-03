@@ -5,6 +5,7 @@ export * from "./manifest-source.js";
 export * from "./server.js";
 export * from "./scheduler.js";
 export * from "./entity-events.js";
+export * from "./job-invoke.js";
 export * from "./edge.js";
 export * from "./cli.js";
 export * from "./node.js";

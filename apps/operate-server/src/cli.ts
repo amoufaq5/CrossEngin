@@ -35,6 +35,8 @@ export interface ServeOptions {
   readonly emitEntityEvents: boolean;
   /** Optional namespace prefix for emitted entity-event names (e.g. `retail`). */
   readonly eventPrefix: string | null;
+  /** Expose POST /v1/meta/jobs/invoke to run userInvoked jobs on demand (needs a pg store). */
+  readonly enableJobInvoke: boolean;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -84,6 +86,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const scheduleTenants: string[] = [];
   let emitEntityEvents = false;
   let eventPrefix: string | null = null;
+  let enableJobInvoke = false;
   let help = false;
   let version = false;
 
@@ -181,6 +184,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--event-prefix" || arg.startsWith("--event-prefix=")) {
       eventPrefix = takeValue(arg, next, "--event-prefix");
       i += consumed();
+    } else if (arg === "--enable-job-invoke") {
+      enableJobInvoke = true;
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -215,6 +220,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (eventPrefix !== null && !emitEntityEvents) {
     throw new CliUsageError("--event-prefix requires --emit-entity-events");
+  }
+  if (enableJobInvoke && store === "memory") {
+    throw new CliUsageError("--enable-job-invoke requires a Postgres store (--store pg or pg-columns)");
   }
 
   if (
@@ -256,6 +264,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     scheduleTenants,
     emitEntityEvents,
     eventPrefix,
+    enableJobInvoke,
     defaultScheme,
     help,
     version,
@@ -302,6 +311,8 @@ Options:
   --emit-entity-events  Emit a domain event per entity create/update/delete/transition,
                        firing event-triggered jobs into job_runs (needs --store pg|pg-columns)
   --event-prefix <p>   Namespace prefix for emitted event names (with --emit-entity-events)
+  --enable-job-invoke  Expose POST /v1/meta/jobs/invoke to run userInvoked jobs on demand
+                       (needs --store pg|pg-columns)
   --help, -h           Show this help
   --version, -v        Print version
 

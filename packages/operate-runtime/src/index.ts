@@ -9,6 +9,7 @@ export * from "./settings-defaults.js";
 export * from "./write-guards.js";
 export * from "./write-effects.js";
 export * from "./entity-events.js";
+export * from "./job-invoke-handler.js";
 export * from "./handlers.js";
 export * from "./admin-handlers.js";
 export * from "./ui-schema.js";
