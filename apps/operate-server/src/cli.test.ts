@@ -115,6 +115,56 @@ describe("parseServeArgs", () => {
     expect(opts.billingPortalReturnUrl).toBe("https://app/admin/billing");
   });
 
+  it("parses --schedule-ms + repeatable --schedule-tenant with a pg store", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--store",
+      "pg",
+      "--schedule-ms",
+      "60000",
+      "--schedule-tenant",
+      "00000000-0000-4000-8000-000000000001",
+      "--schedule-tenant",
+      "00000000-0000-4000-8000-000000000002",
+    ]);
+    expect(opts.scheduleMs).toBe(60000);
+    expect(opts.scheduleTenants).toEqual([
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+    ]);
+  });
+
+  it("defaults the scheduler options to disabled", () => {
+    const opts = parseServeArgs(["--pack", "erp-core"]);
+    expect(opts.scheduleMs).toBeNull();
+    expect(opts.scheduleTenants).toEqual([]);
+  });
+
+  it("rejects --schedule-ms with the memory store", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--schedule-ms", "60000", "--schedule-tenant", "t"]),
+    ).toThrow(/requires a Postgres store/);
+  });
+
+  it("rejects --schedule-ms without a tenant", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--store", "pg", "--schedule-ms", "60000"])).toThrow(
+      /requires at least one --schedule-tenant/,
+    );
+  });
+
+  it("rejects --schedule-tenant without --schedule-ms", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--schedule-tenant", "t"]),
+    ).toThrow(/requires --schedule-ms/);
+  });
+
+  it("rejects too-small --schedule-ms", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--schedule-ms", "500", "--schedule-tenant", "t"]),
+    ).toThrow(/invalid --schedule-ms/);
+  });
+
   it("rejects --stripe-api-key without a return url", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-api-key", "sk_x"]),

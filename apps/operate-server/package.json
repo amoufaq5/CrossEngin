@@ -27,6 +27,7 @@
     "@crossengin/api-gateway": "workspace:*",
     "@crossengin/api-gateway-runtime": "workspace:*",
     "@crossengin/billing-stripe": "workspace:*",
+    "@crossengin/jobs": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/operate-runtime": "workspace:*",
@@ -35,6 +36,7 @@
     "@crossengin/pack-erp-grocery": "workspace:*",
     "@crossengin/pack-erp-healthcare": "workspace:*",
     "@crossengin/pack-erp-retail": "workspace:*",
+    "@crossengin/workflow-runtime-pg": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {
