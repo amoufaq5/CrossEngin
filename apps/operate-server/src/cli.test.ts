@@ -135,10 +135,18 @@ describe("parseServeArgs", () => {
     ]);
   });
 
+  it("parses --schedule-all-tenants (DB-backed source) with a pg store", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--schedule-ms", "60000", "--schedule-all-tenants"]);
+    expect(opts.scheduleMs).toBe(60000);
+    expect(opts.scheduleAllTenants).toBe(true);
+    expect(opts.scheduleTenants).toEqual([]);
+  });
+
   it("defaults the scheduler options to disabled", () => {
     const opts = parseServeArgs(["--pack", "erp-core"]);
     expect(opts.scheduleMs).toBeNull();
     expect(opts.scheduleTenants).toEqual([]);
+    expect(opts.scheduleAllTenants).toBe(false);
   });
 
   it("rejects --schedule-ms with the memory store", () => {
@@ -147,16 +155,38 @@ describe("parseServeArgs", () => {
     ).toThrow(/requires a Postgres store/);
   });
 
-  it("rejects --schedule-ms without a tenant", () => {
+  it("rejects --schedule-ms without a tenant source", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--store", "pg", "--schedule-ms", "60000"])).toThrow(
-      /requires at least one --schedule-tenant/,
+      /--schedule-tenant or --schedule-all-tenants/,
     );
+  });
+
+  it("rejects --schedule-tenant + --schedule-all-tenants together", () => {
+    expect(() =>
+      parseServeArgs([
+        "--pack",
+        "erp-core",
+        "--store",
+        "pg",
+        "--schedule-ms",
+        "60000",
+        "--schedule-tenant",
+        "t",
+        "--schedule-all-tenants",
+      ]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("rejects --schedule-all-tenants without --schedule-ms", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--schedule-all-tenants"]),
+    ).toThrow(/require --schedule-ms/);
   });
 
   it("rejects --schedule-tenant without --schedule-ms", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--store", "pg", "--schedule-tenant", "t"]),
-    ).toThrow(/requires --schedule-ms/);
+    ).toThrow(/require --schedule-ms/);
   });
 
   it("rejects too-small --schedule-ms", () => {

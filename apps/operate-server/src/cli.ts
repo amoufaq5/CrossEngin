@@ -29,8 +29,10 @@ export interface ServeOptions {
   readonly billingPortalReturnUrl: string | null;
   /** Cron scheduler tick interval (ms) — enables in-process scheduled-job enqueue (needs a pg store). */
   readonly scheduleMs: number | null;
-  /** Tenant ids the cron scheduler fires jobs for (repeatable; required with --schedule-ms). */
+  /** Tenant ids the cron scheduler fires jobs for (repeatable; one of this or --schedule-all-tenants). */
   readonly scheduleTenants: readonly string[];
+  /** Fire the cron scheduler for every active tenant in meta.tenants (DB-backed source). */
+  readonly scheduleAllTenants: boolean;
   /** Emit an entity-write event per create/update/delete/transition → event-triggered jobs (needs pg). */
   readonly emitEntityEvents: boolean;
   /** Optional namespace prefix for emitted entity-event names (e.g. `retail`). */
@@ -84,6 +86,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let billingPortalReturnUrl: string | null = null;
   let scheduleMs: number | null = null;
   const scheduleTenants: string[] = [];
+  let scheduleAllTenants = false;
   let emitEntityEvents = false;
   let eventPrefix: string | null = null;
   let enableJobInvoke = false;
@@ -179,6 +182,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--schedule-tenant" || arg.startsWith("--schedule-tenant=")) {
       scheduleTenants.push(takeValue(arg, next, "--schedule-tenant"));
       i += consumed();
+    } else if (arg === "--schedule-all-tenants") {
+      scheduleAllTenants = true;
     } else if (arg === "--emit-entity-events") {
       emitEntityEvents = true;
     } else if (arg === "--event-prefix" || arg.startsWith("--event-prefix=")) {
@@ -209,11 +214,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (scheduleMs !== null && store === "memory") {
     throw new CliUsageError("--schedule-ms requires a Postgres store (--store pg or pg-columns)");
   }
-  if (scheduleMs !== null && scheduleTenants.length === 0) {
-    throw new CliUsageError("--schedule-ms requires at least one --schedule-tenant");
+  if (scheduleMs !== null && scheduleTenants.length === 0 && !scheduleAllTenants) {
+    throw new CliUsageError("--schedule-ms requires --schedule-tenant or --schedule-all-tenants");
   }
-  if (scheduleTenants.length > 0 && scheduleMs === null) {
-    throw new CliUsageError("--schedule-tenant requires --schedule-ms (the scheduler tick interval)");
+  if (scheduleTenants.length > 0 && scheduleAllTenants) {
+    throw new CliUsageError("--schedule-tenant and --schedule-all-tenants are mutually exclusive");
+  }
+  if ((scheduleTenants.length > 0 || scheduleAllTenants) && scheduleMs === null) {
+    throw new CliUsageError("--schedule-tenant / --schedule-all-tenants require --schedule-ms (the tick interval)");
   }
   if (emitEntityEvents && store === "memory") {
     throw new CliUsageError("--emit-entity-events requires a Postgres store (--store pg or pg-columns)");
@@ -262,6 +270,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     billingPortalReturnUrl,
     scheduleMs,
     scheduleTenants,
+    scheduleAllTenants,
     emitEntityEvents,
     eventPrefix,
     enableJobInvoke,
@@ -306,8 +315,10 @@ Options:
   --billing-portal-return-url <url>  Where Stripe returns the customer after the portal
   --schedule-ms <n>    Cron scheduler tick interval (ms, >=1000) — enqueues the
                        manifest's scheduled jobs into job_runs (needs --store pg|pg-columns)
-  --schedule-tenant <uuid>  Tenant the scheduler fires jobs for (repeatable; required
-                       with --schedule-ms)
+  --schedule-tenant <uuid>  Tenant the scheduler fires jobs for (repeatable; one of this
+                       or --schedule-all-tenants is required with --schedule-ms)
+  --schedule-all-tenants  Fire the scheduler for every active tenant in meta.tenants
+                       (DB-backed; mutually exclusive with --schedule-tenant)
   --emit-entity-events  Emit a domain event per entity create/update/delete/transition,
                        firing event-triggered jobs into job_runs (needs --store pg|pg-columns)
   --event-prefix <p>   Namespace prefix for emitted event names (with --emit-entity-events)
