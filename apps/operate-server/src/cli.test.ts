@@ -165,6 +165,38 @@ describe("parseServeArgs", () => {
     ).toThrow(/invalid --schedule-ms/);
   });
 
+  it("parses --emit-entity-events + --event-prefix with a pg store", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--store",
+      "pg",
+      "--emit-entity-events",
+      "--event-prefix",
+      "retail",
+    ]);
+    expect(opts.emitEntityEvents).toBe(true);
+    expect(opts.eventPrefix).toBe("retail");
+  });
+
+  it("defaults entity-event emission to off", () => {
+    const opts = parseServeArgs(["--pack", "erp-core"]);
+    expect(opts.emitEntityEvents).toBe(false);
+    expect(opts.eventPrefix).toBeNull();
+  });
+
+  it("rejects --emit-entity-events with the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--emit-entity-events"])).toThrow(
+      /requires a Postgres store/,
+    );
+  });
+
+  it("rejects --event-prefix without --emit-entity-events", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--event-prefix", "retail"]),
+    ).toThrow(/requires --emit-entity-events/);
+  });
+
   it("rejects --stripe-api-key without a return url", () => {
     expect(() =>
       parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-api-key", "sk_x"]),

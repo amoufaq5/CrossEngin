@@ -1,8 +1,12 @@
 import type { EntityRecord, ListFilter } from "./store.js";
 import type { WriteGuardInput } from "./write-guards.js";
 
-/** A side effect run after a write has been persisted (the after-commit sibling of WriteGuard). */
-export type WriteEffectInput = WriteGuardInput;
+/**
+ * A side effect run after a write has been persisted (the after-commit sibling of WriteGuard).
+ * `transitionTo` carries the lifecycle target state on a `transition` op (absent otherwise), so an
+ * effect can name the event by the new state (e.g. `salesorder.placed`).
+ */
+export type WriteEffectInput = WriteGuardInput & { readonly transitionTo?: string };
 export type WriteEffect = (input: WriteEffectInput) => Promise<void>;
 
 /** Runs effects in order; an effect that throws aborts the chain (caller maps it to 500). */

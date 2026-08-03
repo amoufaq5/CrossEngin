@@ -10,6 +10,8 @@ import {
   InMemorySettingsStore,
   LicenseEntitlementResolver,
   buildPlanCatalog,
+  entityEventEffect,
+  type WriteEffect,
   type BillingPortalWiring,
   type EntitlementResolver,
   type PlanLimitsLookup,
@@ -41,6 +43,7 @@ import {
 } from "./principals.js";
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
 import { JobScheduler, StaticTenantSource } from "./scheduler.js";
+import { PostgresEntityEventSink } from "./entity-events.js";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
   return v === undefined ? undefined : Array.isArray(v) ? v[0] : (v as string);
@@ -260,6 +263,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       returnUrl: options.billingPortalReturnUrl,
     };
   }
+  // Entity-event emission: turn each served write into a domain event that fires event-triggered
+  // (and delayed) jobs into job_runs. Best-effort (a failed enqueue never fails the write), appended
+  // after the manifest's default financial effects. Enabled by --emit-entity-events over a pg store.
+  const additionalWriteEffects: WriteEffect[] = [];
+  if (options.emitEntityEvents && conn !== undefined) {
+    const sink = new PostgresEntityEventSink(conn, Object.values(manifest.jobs ?? {}), schemaOpt);
+    additionalWriteEffects.push(
+      entityEventEffect({ sink, ...(options.eventPrefix !== null ? { eventPrefix: options.eventPrefix } : {}) }),
+    );
+  }
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -269,6 +282,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
     ...(webhookRoute !== undefined ? { webhookRoute } : {}),
     ...(billingPortal !== undefined ? { billingPortal } : {}),
+    ...(additionalWriteEffects.length > 0 ? { additionalWriteEffects } : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
   });

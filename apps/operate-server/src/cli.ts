@@ -31,6 +31,10 @@ export interface ServeOptions {
   readonly scheduleMs: number | null;
   /** Tenant ids the cron scheduler fires jobs for (repeatable; required with --schedule-ms). */
   readonly scheduleTenants: readonly string[];
+  /** Emit an entity-write event per create/update/delete/transition → event-triggered jobs (needs pg). */
+  readonly emitEntityEvents: boolean;
+  /** Optional namespace prefix for emitted entity-event names (e.g. `retail`). */
+  readonly eventPrefix: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -78,6 +82,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let billingPortalReturnUrl: string | null = null;
   let scheduleMs: number | null = null;
   const scheduleTenants: string[] = [];
+  let emitEntityEvents = false;
+  let eventPrefix: string | null = null;
   let help = false;
   let version = false;
 
@@ -170,6 +176,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--schedule-tenant" || arg.startsWith("--schedule-tenant=")) {
       scheduleTenants.push(takeValue(arg, next, "--schedule-tenant"));
       i += consumed();
+    } else if (arg === "--emit-entity-events") {
+      emitEntityEvents = true;
+    } else if (arg === "--event-prefix" || arg.startsWith("--event-prefix=")) {
+      eventPrefix = takeValue(arg, next, "--event-prefix");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -198,6 +209,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (scheduleTenants.length > 0 && scheduleMs === null) {
     throw new CliUsageError("--schedule-tenant requires --schedule-ms (the scheduler tick interval)");
+  }
+  if (emitEntityEvents && store === "memory") {
+    throw new CliUsageError("--emit-entity-events requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (eventPrefix !== null && !emitEntityEvents) {
+    throw new CliUsageError("--event-prefix requires --emit-entity-events");
   }
 
   if (
@@ -237,6 +254,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     billingPortalReturnUrl,
     scheduleMs,
     scheduleTenants,
+    emitEntityEvents,
+    eventPrefix,
     defaultScheme,
     help,
     version,
@@ -280,6 +299,9 @@ Options:
                        manifest's scheduled jobs into job_runs (needs --store pg|pg-columns)
   --schedule-tenant <uuid>  Tenant the scheduler fires jobs for (repeatable; required
                        with --schedule-ms)
+  --emit-entity-events  Emit a domain event per entity create/update/delete/transition,
+                       firing event-triggered jobs into job_runs (needs --store pg|pg-columns)
+  --event-prefix <p>   Namespace prefix for emitted event names (with --emit-entity-events)
   --help, -h           Show this help
   --version, -v        Print version
 
