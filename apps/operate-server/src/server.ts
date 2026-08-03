@@ -127,6 +127,8 @@ export interface BuildOperateHttpServerOptions {
   readonly jobInvoker?: JobInvoker;
   /** Roles permitted to call the job-invoke route; omit to leave it open to any tenant principal. */
   readonly jobInvokeRoles?: readonly string[];
+  /** Per-action role overrides for the job-invoke route ({action → roles}). */
+  readonly jobInvokeActionRoles?: ReadonlyMap<string, ReadonlySet<string>>;
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -164,6 +166,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.additionalWriteEffects !== undefined ? { additionalWriteEffects: options.additionalWriteEffects } : {}),
     ...(options.jobInvoker !== undefined ? { jobInvoker: options.jobInvoker } : {}),
     ...(options.jobInvokeRoles !== undefined ? { jobInvokeRoles: options.jobInvokeRoles as never } : {}),
+    ...(options.jobInvokeActionRoles !== undefined ? { jobInvokeActionRoles: options.jobInvokeActionRoles } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

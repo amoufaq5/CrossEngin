@@ -44,7 +44,7 @@ import {
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
-import { PostgresJobInvoker } from "./job-invoke.js";
+import { PostgresJobInvoker, buildActionRoleMap } from "./job-invoke.js";
 
 function firstHeader(v: string | readonly string[] | undefined): string | undefined {
   return v === undefined ? undefined : Array.isArray(v) ? v[0] : (v as string);
@@ -293,6 +293,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(jobInvoker !== undefined ? { jobInvoker } : {}),
     ...(jobInvoker !== undefined && options.jobInvokeRoles.length > 0
       ? { jobInvokeRoles: options.jobInvokeRoles }
+      : {}),
+    ...(jobInvoker !== undefined && options.jobInvokeActionRoles.length > 0
+      ? { jobInvokeActionRoles: buildActionRoleMap(options.jobInvokeActionRoles) }
       : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),

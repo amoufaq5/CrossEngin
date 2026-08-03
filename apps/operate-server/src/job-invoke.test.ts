@@ -2,7 +2,7 @@ import { JobDeclarationSchema, type JobDeclaration } from "@crossengin/jobs";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
-import { PostgresJobInvoker } from "./job-invoke.js";
+import { PostgresJobInvoker, buildActionRoleMap } from "./job-invoke.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = () => new Date("2026-05-17T12:00:00.000Z");
@@ -51,5 +51,24 @@ describe("PostgresJobInvoker", () => {
     const runs = await invoker.invoke({ tenantId: TENANT, action: "unknown", data: {} });
     expect(runs).toEqual([]);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("buildActionRoleMap", () => {
+  it("parses action:role specs, accumulating roles per action", () => {
+    const map = buildActionRoleMap([
+      "reindex-catalog:catalog_admin",
+      "reindex-catalog:ops_admin",
+      "export-report:analyst",
+    ]);
+    expect([...map.get("reindex-catalog")!].sort()).toEqual(["catalog_admin", "ops_admin"]);
+    expect([...map.get("export-report")!]).toEqual(["analyst"]);
+    expect(map.has("other")).toBe(false);
+  });
+
+  it("throws on a malformed spec (no colon / empty side)", () => {
+    expect(() => buildActionRoleMap(["noColon"])).toThrow(/expected action:role/);
+    expect(() => buildActionRoleMap([":role"])).toThrow(/expected action:role/);
+    expect(() => buildActionRoleMap(["action:"])).toThrow(/expected action:role/);
   });
 });

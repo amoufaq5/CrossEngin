@@ -105,6 +105,11 @@ export interface OperateRuntimeOptions {
    * (fail-closed); omit to leave it open to any authenticated tenant principal.
    */
   readonly jobInvokeRoles?: readonly RoleName[];
+  /**
+   * Per-action role overrides for `POST /v1/meta/jobs/invoke`, keyed by action. An action present here
+   * uses its own role set instead of `jobInvokeRoles`; actions absent fall back to `jobInvokeRoles`.
+   */
+  readonly jobInvokeActionRoles?: ReadonlyMap<string, ReadonlySet<string>>;
   readonly clock?: { now(): Date };
 }
 
@@ -578,6 +583,7 @@ export function compileOperateServer(
         ...(options.jobInvokeRoles !== undefined
           ? { allowedRoles: new Set<string>(options.jobInvokeRoles as readonly string[]) }
           : {}),
+        ...(options.jobInvokeActionRoles !== undefined ? { rolesByAction: options.jobInvokeActionRoles } : {}),
       }),
     );
   }

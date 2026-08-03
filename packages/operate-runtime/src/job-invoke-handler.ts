@@ -30,21 +30,34 @@ function json(status: number, body: unknown): HandlerOutput {
 
 export interface JobInvokeGateOptions {
   /**
-   * If set, only principals with one of these roles may invoke a job (`403` otherwise). Fail-closed:
-   * an empty set, or a set with no `principalRoles` bridge to resolve the caller's roles, denies
-   * everyone. Omit entirely to leave the endpoint open to any authenticated tenant principal.
+   * The default allow-list: if set, only principals with one of these roles may invoke an action that
+   * has no per-action rule (`403` otherwise). Omit to leave un-listed actions open.
    */
   readonly allowedRoles?: ReadonlySet<string>;
-  /** Bridges a principal to its role names — required for `allowedRoles` to authorize anyone. */
+  /**
+   * Per-action allow-lists, keyed by action. When an action is present here, its role set **overrides**
+   * `allowedRoles` for that action (so a specific action can require a different — stricter or
+   * different — role than the default). Actions absent here fall back to `allowedRoles`.
+   */
+  readonly rolesByAction?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Bridges a principal to its role names — required for any allow-list to authorize anyone. */
   readonly principalRoles?: (principal: ResolvedPrincipal | null) => PrincipalRoles;
 }
 
-/** Whether the caller may invoke, given the gate. No gate (`allowedRoles` unset) ⇒ always true. */
-function isRoleAllowed(principal: ResolvedPrincipal | null, gate: JobInvokeGateOptions): boolean {
-  if (gate.allowedRoles === undefined) return true;
-  if (gate.principalRoles === undefined) return false; // gated but no bridge → fail-closed
-  const { primaryRole, secondaryRoles } = gate.principalRoles(principal);
-  return [primaryRole, ...(secondaryRoles ?? [])].some((r) => gate.allowedRoles!.has(r));
+/** The role set governing an action: its per-action override, else the default (or undefined ⇒ open). */
+function effectiveAllowedRoles(action: string, gate: JobInvokeGateOptions): ReadonlySet<string> | undefined {
+  return gate.rolesByAction?.get(action) ?? gate.allowedRoles;
+}
+
+/** Whether the caller holds one of `allowed`. Fail-closed: no `principalRoles` bridge ⇒ nobody. */
+function callerHasRole(
+  principal: ResolvedPrincipal | null,
+  allowed: ReadonlySet<string>,
+  bridge: JobInvokeGateOptions["principalRoles"],
+): boolean {
+  if (bridge === undefined) return false;
+  const { primaryRole, secondaryRoles } = bridge(principal);
+  return [primaryRole, ...(secondaryRoles ?? [])].some((r) => allowed.has(r));
 }
 
 /**
@@ -60,13 +73,15 @@ export function buildJobInvokeHandler(invoker: JobInvoker, gate: JobInvokeGateOp
   return async ({ principal, parsedBody }) => {
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
-    if (!isRoleAllowed(principal, gate)) {
-      return json(403, { error: "forbidden", detail: "role not permitted to invoke jobs" });
-    }
 
     const body = parsedBody ?? {};
     const action = typeof body["action"] === "string" ? body["action"].trim() : "";
     if (action.length === 0) return json(400, { error: "invalid_request", detail: "action is required" });
+
+    const allowed = effectiveAllowedRoles(action, gate);
+    if (allowed !== undefined && !callerHasRole(principal, allowed, gate.principalRoles)) {
+      return json(403, { error: "forbidden", detail: "role not permitted to invoke this action" });
+    }
 
     const rawData = body["data"];
     const data =

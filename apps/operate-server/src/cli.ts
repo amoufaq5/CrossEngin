@@ -41,6 +41,8 @@ export interface ServeOptions {
   readonly enableJobInvoke: boolean;
   /** Roles permitted to call the job-invoke route (repeatable); empty ⇒ open to any tenant principal. */
   readonly jobInvokeRoles: readonly string[];
+  /** Per-action role overrides for job-invoke as `action:role` specs (repeatable). */
+  readonly jobInvokeActionRoles: readonly string[];
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -93,6 +95,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let eventPrefix: string | null = null;
   let enableJobInvoke = false;
   const jobInvokeRoles: string[] = [];
+  const jobInvokeActionRoles: string[] = [];
   let help = false;
   let version = false;
 
@@ -197,6 +200,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--job-invoke-role" || arg.startsWith("--job-invoke-role=")) {
       jobInvokeRoles.push(takeValue(arg, next, "--job-invoke-role"));
       i += consumed();
+    } else if (arg === "--job-invoke-action-role" || arg.startsWith("--job-invoke-action-role=")) {
+      jobInvokeActionRoles.push(takeValue(arg, next, "--job-invoke-action-role"));
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -241,6 +247,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (jobInvokeRoles.length > 0 && !enableJobInvoke) {
     throw new CliUsageError("--job-invoke-role requires --enable-job-invoke");
   }
+  if (jobInvokeActionRoles.length > 0 && !enableJobInvoke) {
+    throw new CliUsageError("--job-invoke-action-role requires --enable-job-invoke");
+  }
+  for (const spec of jobInvokeActionRoles) {
+    const idx = spec.indexOf(":");
+    if (idx <= 0 || idx === spec.length - 1) {
+      throw new CliUsageError(`invalid --job-invoke-action-role: ${spec} (expected action:role)`);
+    }
+  }
 
   if (
     (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
@@ -284,6 +299,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     eventPrefix,
     enableJobInvoke,
     jobInvokeRoles,
+    jobInvokeActionRoles,
     defaultScheme,
     help,
     version,
@@ -336,6 +352,8 @@ Options:
                        (needs --store pg|pg-columns)
   --job-invoke-role <role>  Restrict job invocation to this role (repeatable; with
                        --enable-job-invoke). Omit to allow any authenticated tenant principal
+  --job-invoke-action-role <action:role>  Per-action role override (repeatable); an action
+                       listed here uses its own roles instead of --job-invoke-role
   --help, -h           Show this help
   --version, -v        Print version
 
