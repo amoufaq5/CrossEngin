@@ -74,4 +74,47 @@ describe("buildJobInvokeHandler", () => {
     const out = await handler(input({ principal: null, parsedBody: { action: "run", tenantId: "spoofed" } }));
     expect(out.status).toBe(401);
   });
+
+  describe("role gating", () => {
+    const runsInvoker = invokerOf([{ jobId: "j", runId: "r", inserted: true }]);
+    const principalRoles = (p: { primaryRole?: string } | null) => ({
+      primaryRole: (p?.primaryRole ?? "viewer") as string,
+      secondaryRoles: [] as readonly string[],
+    });
+
+    function principalWithRole(role: string): HandlerInput["principal"] {
+      return { tenantId: TENANT, primaryRole: role } as unknown as HandlerInput["principal"];
+    }
+
+    it("202s when the caller's role is in the allow-list", async () => {
+      const handler = buildJobInvokeHandler(runsInvoker, {
+        allowedRoles: new Set(["ops_admin"]),
+        principalRoles: principalRoles as never,
+      });
+      const out = await handler(input({ principal: principalWithRole("ops_admin"), parsedBody: { action: "run" } }));
+      expect(out.status).toBe(202);
+    });
+
+    it("403s when the caller's role is not in the allow-list", async () => {
+      const handler = buildJobInvokeHandler(runsInvoker, {
+        allowedRoles: new Set(["ops_admin"]),
+        principalRoles: principalRoles as never,
+      });
+      const out = await handler(input({ principal: principalWithRole("cashier"), parsedBody: { action: "run" } }));
+      expect(out.status).toBe(403);
+      expect(body(out)).toMatchObject({ error: "forbidden" });
+    });
+
+    it("is fail-closed: an allow-list with no principalRoles bridge denies everyone", async () => {
+      const handler = buildJobInvokeHandler(runsInvoker, { allowedRoles: new Set(["ops_admin"]) });
+      const out = await handler(input({ principal: principalWithRole("ops_admin"), parsedBody: { action: "run" } }));
+      expect(out.status).toBe(403);
+    });
+
+    it("is open when no allow-list is set (any authenticated tenant principal)", async () => {
+      const handler = buildJobInvokeHandler(runsInvoker, { principalRoles: principalRoles as never });
+      const out = await handler(input({ principal: principalWithRole("cashier"), parsedBody: { action: "run" } }));
+      expect(out.status).toBe(202);
+    });
+  });
 });

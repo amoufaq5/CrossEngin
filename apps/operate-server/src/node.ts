@@ -291,6 +291,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(billingPortal !== undefined ? { billingPortal } : {}),
     ...(additionalWriteEffects.length > 0 ? { additionalWriteEffects } : {}),
     ...(jobInvoker !== undefined ? { jobInvoker } : {}),
+    ...(jobInvoker !== undefined && options.jobInvokeRoles.length > 0
+      ? { jobInvokeRoles: options.jobInvokeRoles }
+      : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
   });

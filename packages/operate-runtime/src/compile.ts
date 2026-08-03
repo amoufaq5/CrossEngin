@@ -100,6 +100,11 @@ export interface OperateRuntimeOptions {
    * enqueues the caller tenant's `userInvoked` jobs for a named action. Omit to not expose it.
    */
   readonly jobInvoker?: JobInvoker;
+  /**
+   * Roles permitted to call `POST /v1/meta/jobs/invoke`. When set, the endpoint is role-gated
+   * (fail-closed); omit to leave it open to any authenticated tenant principal.
+   */
+  readonly jobInvokeRoles?: readonly RoleName[];
   readonly clock?: { now(): Date };
 }
 
@@ -566,7 +571,15 @@ export function compileOperateServer(
   // tenant, enqueuing it into job_runs for the worker fleet.
   if (options.jobInvoker !== undefined) {
     routes.register(literalRoute("meta.jobs.invoke", "POST", ["v1", "meta", "jobs", "invoke"]));
-    handlers.register("meta.jobs.invoke", buildJobInvokeHandler(options.jobInvoker));
+    handlers.register(
+      "meta.jobs.invoke",
+      buildJobInvokeHandler(options.jobInvoker, {
+        principalRoles: options.principalRoles,
+        ...(options.jobInvokeRoles !== undefined
+          ? { allowedRoles: new Set<string>(options.jobInvokeRoles as readonly string[]) }
+          : {}),
+      }),
+    );
   }
 
   // AR/AP aging report, when the manifest models invoices/bills + payments.

@@ -125,6 +125,8 @@ export interface BuildOperateHttpServerOptions {
   readonly additionalWriteEffects?: readonly WriteEffect[];
   /** Optional on-demand job invocation route (POST /v1/meta/jobs/invoke). */
   readonly jobInvoker?: JobInvoker;
+  /** Roles permitted to call the job-invoke route; omit to leave it open to any tenant principal. */
+  readonly jobInvokeRoles?: readonly string[];
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -161,6 +163,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.billingPortal !== undefined ? { billingPortal: options.billingPortal } : {}),
     ...(options.additionalWriteEffects !== undefined ? { additionalWriteEffects: options.additionalWriteEffects } : {}),
     ...(options.jobInvoker !== undefined ? { jobInvoker: options.jobInvoker } : {}),
+    ...(options.jobInvokeRoles !== undefined ? { jobInvokeRoles: options.jobInvokeRoles as never } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({
