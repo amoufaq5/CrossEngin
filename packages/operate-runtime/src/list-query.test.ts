@@ -63,6 +63,25 @@ describe("listConfigForEntity", () => {
     // name is text + visible; status is enum (not text); secret is text but hidden.
     expect(config.searchableFields).toEqual(["name"]);
   });
+
+  it("always makes reference (FK) fields filterable, even when no view lists them", () => {
+    const m = {
+      entities: [
+        {
+          name: "OrderLine",
+          fields: [
+            { name: "quantity", type: { kind: "integer" } },
+            { name: "order", type: { kind: "reference", target: "SalesOrder" } },
+            { name: "product", type: { kind: "reference", target: "Product" } },
+          ],
+        },
+      ],
+    } as unknown as Manifest;
+    const config = listConfigForEntity(m, "OrderLine");
+    // reference fields are join keys for related-records queries → always filterable
+    expect(config.filterableFields).toEqual(expect.arrayContaining(["order", "product"]));
+    expect(config.filterableFields).not.toContain("quantity");
+  });
 });
 
 describe("parseListQuery", () => {
