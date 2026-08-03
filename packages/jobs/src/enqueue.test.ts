@@ -6,6 +6,7 @@ import {
   enqueueKeyForEvent,
   enqueueKeyForUserInvocation,
   matchEventJobs,
+  invokeRolesByAction,
   matchUserInvokedJobs,
   planJobRunsForEvent,
   planUserInvokedJobRuns,
@@ -148,6 +149,31 @@ describe("matchUserInvokedJobs", () => {
       job({ id: "legacy", trigger: { kind: "userInvoked", action: "reindex-catalog" }, deprecated: true }),
     ];
     expect(matchUserInvokedJobs(INVOCATION, jobs).map((j) => j.id)).toEqual(["reindex"]);
+  });
+});
+
+describe("invokeRolesByAction", () => {
+  it("maps each userInvoked job's action to its declared invokeRoles", () => {
+    const jobs = [
+      job({ id: "reindex", trigger: { kind: "userInvoked", action: "reindex-catalog" }, invokeRoles: ["catalog_admin"] }),
+      job({ id: "export", trigger: { kind: "userInvoked", action: "export-report" }, invokeRoles: ["analyst", "ops_admin"] }),
+      job({ id: "no-roles", trigger: { kind: "userInvoked", action: "free-action" } }),
+      job({ id: "on-order", trigger: { kind: "event", eventName: "retail.order_placed" }, invokeRoles: ["x"] }),
+      job({ id: "legacy", trigger: { kind: "userInvoked", action: "reindex-catalog" }, invokeRoles: ["y"], deprecated: true }),
+    ];
+    const map = invokeRolesByAction(jobs);
+    expect([...map.get("reindex-catalog")!]).toEqual(["catalog_admin"]);
+    expect([...map.get("export-report")!].sort()).toEqual(["analyst", "ops_admin"]);
+    expect(map.has("free-action")).toBe(false); // no invokeRoles → not gated
+    expect(map.has("retail.order_placed")).toBe(false); // not a userInvoked trigger
+  });
+
+  it("unions roles when multiple userInvoked jobs share an action", () => {
+    const jobs = [
+      job({ id: "a", trigger: { kind: "userInvoked", action: "shared" }, invokeRoles: ["role_a"] }),
+      job({ id: "b", trigger: { kind: "userInvoked", action: "shared" }, invokeRoles: ["role_b"] }),
+    ];
+    expect([...invokeRolesByAction(jobs).get("shared")!].sort()).toEqual(["role_a", "role_b"]);
   });
 });
 

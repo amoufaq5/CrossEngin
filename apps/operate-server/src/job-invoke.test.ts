@@ -2,7 +2,7 @@ import { JobDeclarationSchema, type JobDeclaration } from "@crossengin/jobs";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
-import { PostgresJobInvoker, buildActionRoleMap } from "./job-invoke.js";
+import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const NOW = () => new Date("2026-05-17T12:00:00.000Z");
@@ -70,5 +70,24 @@ describe("buildActionRoleMap", () => {
     expect(() => buildActionRoleMap(["noColon"])).toThrow(/expected action:role/);
     expect(() => buildActionRoleMap([":role"])).toThrow(/expected action:role/);
     expect(() => buildActionRoleMap(["action:"])).toThrow(/expected action:role/);
+  });
+});
+
+describe("mergeActionRoleMaps", () => {
+  it("overrides base per action, carrying through un-overridden actions", () => {
+    const base = new Map<string, ReadonlySet<string>>([
+      ["reindex-catalog", new Set(["catalog_admin"])],
+      ["export-report", new Set(["analyst"])],
+    ]);
+    const override = new Map<string, ReadonlySet<string>>([["reindex-catalog", new Set(["ops_admin"])]]);
+    const merged = mergeActionRoleMaps(base, override);
+    expect([...merged.get("reindex-catalog")!]).toEqual(["ops_admin"]); // override wins entirely
+    expect([...merged.get("export-report")!]).toEqual(["analyst"]); // base carries through
+  });
+
+  it("returns a fresh map (does not mutate base)", () => {
+    const base = new Map<string, ReadonlySet<string>>([["a", new Set(["r"])]]);
+    mergeActionRoleMaps(base, new Map([["b", new Set(["s"])]]));
+    expect(base.has("b")).toBe(false);
   });
 });
