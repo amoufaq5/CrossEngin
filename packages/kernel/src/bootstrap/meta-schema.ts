@@ -9364,6 +9364,37 @@ export const META_OPERATE_ENTITY_RECORDS: TableDefinition = {
   },
 };
 
+export const META_OPERATE_ENTITY_LINKS: TableDefinition = {
+  schema: "meta",
+  name: "operate_entity_links",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "left_entity", type: "TEXT", notNull: true, check: "left_entity ~ '^[A-Za-z][A-Za-z0-9_]{0,62}$'" },
+    { name: "right_entity", type: "TEXT", notNull: true, check: "right_entity ~ '^[A-Za-z][A-Za-z0-9_]{0,62}$'" },
+    { name: "left_id", type: "TEXT", notNull: true, check: "char_length(left_id) BETWEEN 1 AND 200" },
+    { name: "right_id", type: "TEXT", notNull: true, check: "char_length(right_id) BETWEEN 1 AND 200" },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "operate_entity_links_unique",
+      columns: ["tenant_id", "left_entity", "right_entity", "left_id", "right_id"],
+    },
+  ],
+  indexes: [
+    { name: "idx_operate_entity_links_left", columns: ["tenant_id", "left_entity", "right_entity", "left_id"] },
+    { name: "idx_operate_entity_links_right", columns: ["tenant_id", "left_entity", "right_entity", "right_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "operate_entity_links_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_OPERATE_SEQUENCES: TableDefinition = {
   schema: "meta",
   name: "operate_sequences",
@@ -9563,6 +9594,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_LATENCY_EVALUATIONS,
   META_OPERATE_ENTITY_RECORDS,
+  META_OPERATE_ENTITY_LINKS,
   META_OPERATE_SEQUENCES,
   META_OPERATE_TENANT_SETTINGS,
   META_BILLING_SUBSCRIPTIONS,
