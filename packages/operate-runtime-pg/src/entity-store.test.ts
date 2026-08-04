@@ -445,3 +445,110 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
     expect(last.params).toEqual([TENANT, "Product", 11]);
   });
 });
+
+/**
+ * A fake `PgConnection` backing BOTH the links table and the records table,
+ * seeded directly. Interprets the `pruneDanglingLinks` reads/deletes: the links
+ * SELECT (`SELECT left_id, right_id`), the surviving-id SELECT (`SELECT
+ * record_id`), and the link DELETE (5 params). Honors the tenant RLS context.
+ */
+function fakePrunePg(seed: {
+  links: ReadonlyArray<LinkRow>;
+  records: ReadonlyArray<{ tenant_id: string; entity: string; record_id: string }>;
+}): { conn: PgConnection; remainingLinks: () => ReadonlyArray<LinkRow> } {
+  const links: LinkRow[] = seed.links.map((l) => ({ ...l }));
+  const records = seed.records.map((r) => ({ ...r }));
+  let tenantCtx: string | null = null;
+
+  const run = async (sql: string, params?: readonly unknown[]) => {
+    const p = params ?? [];
+    if (sql.includes("set_config")) {
+      tenantCtx = String(p[0]);
+      return { rows: [], rowCount: 0 };
+    }
+    if (sql.includes("SELECT left_id") && sql.includes("operate_entity_links")) {
+      const matched = links.filter(
+        (r) => tenantCtx !== null && r.tenant_id === tenantCtx && r.left_entity === p[1] && r.right_entity === p[2],
+      );
+      return { rows: matched.map((r) => ({ left_id: r.left_id, right_id: r.right_id })), rowCount: matched.length };
+    }
+    if (sql.includes("SELECT record_id")) {
+      const matched = records.filter((r) => tenantCtx !== null && r.tenant_id === tenantCtx && r.entity === p[1]);
+      return { rows: matched.map((r) => ({ record_id: r.record_id })), rowCount: matched.length };
+    }
+    if (sql.includes("DELETE") && sql.includes("operate_entity_links")) {
+      const idx = links.findIndex(
+        (r) =>
+          r.tenant_id === p[0] &&
+          r.left_entity === p[1] &&
+          r.right_entity === p[2] &&
+          r.left_id === p[3] &&
+          r.right_id === p[4],
+      );
+      if (idx >= 0) {
+        links.splice(idx, 1);
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  };
+
+  const conn: PgConnection = {
+    query: run as PgConnection["query"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => {
+      const before = tenantCtx;
+      try {
+        return await fn(conn);
+      } finally {
+        tenantCtx = before;
+      }
+    }) as PgConnection["transaction"],
+    withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+    close: (async () => undefined) as PgConnection["close"],
+  };
+  return { conn, remainingLinks: () => links };
+}
+
+function link(leftId: string, rightId: string): LinkRow {
+  return { tenant_id: TENANT, left_entity: "Product", right_entity: "Tag", left_id: leftId, right_id: rightId };
+}
+function rec(entity: string, record_id: string): { tenant_id: string; entity: string; record_id: string } {
+  return { tenant_id: TENANT, entity, record_id };
+}
+
+describe("PostgresEntityStore.pruneDanglingLinks", () => {
+  it("drops links whose left or right endpoint no longer exists, keeps the rest", async () => {
+    const { conn, remainingLinks } = fakePrunePg({
+      links: [link("p1", "t1"), link("p1", "t2"), link("pX", "t1"), link("p1", "tX")],
+      records: [rec("Product", "p1"), rec("Tag", "t1"), rec("Tag", "t2")],
+    });
+    const store = new PostgresEntityStore(conn);
+    const result = await store.pruneDanglingLinks(TENANT, "Product", "Tag");
+    // pX (missing Product) and tX (missing Tag) dangle; p1/t1 and p1/t2 survive.
+    expect(result).toEqual({ pruned: 2, kept: 2 });
+    expect(remainingLinks().map((l) => `${l.left_id}/${l.right_id}`).sort()).toEqual(["p1/t1", "p1/t2"]);
+  });
+
+  it("is a no-op when every link's endpoints exist", async () => {
+    const { conn, remainingLinks } = fakePrunePg({
+      links: [link("p1", "t1"), link("p2", "t2")],
+      records: [rec("Product", "p1"), rec("Product", "p2"), rec("Tag", "t1"), rec("Tag", "t2")],
+    });
+    const store = new PostgresEntityStore(conn);
+    expect(await store.pruneDanglingLinks(TENANT, "Product", "Tag")).toEqual({ pruned: 0, kept: 2 });
+    expect(remainingLinks()).toHaveLength(2);
+  });
+
+  it("prunes only within the caller's tenant (RLS context)", async () => {
+    const { conn, remainingLinks } = fakePrunePg({
+      links: [link("p1", "t1")],
+      records: [rec("Product", "p1"), rec("Tag", "t1")],
+    });
+    const store = new PostgresEntityStore(conn);
+    // Under a different tenant, the RLS context sees no links/records → nothing to prune, nothing dropped.
+    const result = await store.pruneDanglingLinks(OTHER_TENANT, "Product", "Tag");
+    expect(result).toEqual({ pruned: 0, kept: 0 });
+    expect(remainingLinks()).toHaveLength(1);
+  });
+});
