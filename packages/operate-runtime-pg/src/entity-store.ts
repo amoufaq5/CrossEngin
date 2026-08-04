@@ -11,7 +11,14 @@ import {
 } from "@crossengin/operate-runtime";
 
 import { createOp, getOp, listOp, listPageOp, removeOp, updateOp } from "./entity-ops.js";
+import { planLinkPrune } from "./link-integrity.js";
 import { withTenantContext } from "./tenant-context.js";
+
+/** Outcome of a dangling-link prune sweep over one relation. */
+export interface LinkPruneResult {
+  readonly pruned: number;
+  readonly kept: number;
+}
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 
@@ -246,6 +253,50 @@ export class PostgresEntityStore
         params,
       );
       return Number(res.rows[0]?.n ?? "0");
+    });
+  }
+
+  /**
+   * Prunes dangling association links for one `many_to_many` relation — links
+   * whose `left_id` no longer names a `leftEntity` record or whose `right_id`
+   * no longer names a `rightEntity` record. Unlike the column store (whose join
+   * tables carry `ON DELETE CASCADE` FKs), the generic `operate_entity_links`
+   * table has no FK to the document rows, so a deleted record leaves its links
+   * behind; this is the sweep that removes them. Loads the relation's links +
+   * both sides' surviving record ids, decides via the pure `planLinkPrune`, and
+   * deletes the dropped set — all in one tenant-scoped transaction (RLS-confined,
+   * so it only ever touches the caller's tenant). Intended for a scheduled
+   * maintenance job iterating the manifest's m2m relations.
+   */
+  async pruneDanglingLinks(tenantId: string, leftEntity: string, rightEntity: string): Promise<LinkPruneResult> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const linkRows = await tx.query<{ left_id: string; right_id: string }>(
+        `SELECT left_id, right_id FROM ${this.linksTable}
+          WHERE tenant_id = $1 AND left_entity = $2 AND right_entity = $3`,
+        [tenantId, leftEntity, rightEntity],
+      );
+      const idsFor = async (entity: string): Promise<Set<string>> => {
+        const res = await tx.query<{ record_id: string }>(
+          `SELECT record_id FROM ${this.table} WHERE tenant_id = $1 AND entity = $2`,
+          [tenantId, entity],
+        );
+        return new Set(res.rows.map((r) => String(r.record_id)));
+      };
+      const existingLeftIds = await idsFor(leftEntity);
+      const existingRightIds = leftEntity === rightEntity ? existingLeftIds : await idsFor(rightEntity);
+      const plan = planLinkPrune({
+        links: linkRows.rows.map((r) => ({ leftId: String(r.left_id), rightId: String(r.right_id) })),
+        existingLeftIds,
+        existingRightIds,
+      });
+      for (const link of plan.drop) {
+        await tx.query(
+          `DELETE FROM ${this.linksTable}
+            WHERE tenant_id = $1 AND left_entity = $2 AND right_entity = $3 AND left_id = $4 AND right_id = $5`,
+          [tenantId, leftEntity, rightEntity, link.leftId, link.rightId],
+        );
+      }
+      return { pruned: plan.drop.length, kept: plan.keep.length };
     });
   }
 
