@@ -171,3 +171,138 @@ export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: Ass
     return json(200, { data });
   };
 }
+
+/** The write side of the association API — link / unlink two rows across a `many_to_many` relation. */
+export interface AssociationWriter {
+  link(tenantId: string, leftEntity: string, rightEntity: string, leftId: string, rightId: string): Promise<void>;
+  unlink(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    leftId: string,
+    rightId: string,
+  ): Promise<boolean>;
+}
+
+/** Structural check: does the entity store also write associations? */
+export function isAssociationWriter(store: unknown): store is AssociationWriter {
+  const s = store as { link?: unknown; unlink?: unknown } | null;
+  return typeof s?.link === "function" && typeof s?.unlink === "function";
+}
+
+/**
+ * A derived association write route: `PUT` (link) / `DELETE` (unlink)
+ * `/v1/<owner>/{id}/<related>/{relatedId}`. Authorized by `update` on the *owner* (modifying a
+ * record's associations is part of updating it).
+ */
+export interface AssociationWriteRouteSpec {
+  readonly operationId: string;
+  readonly action: "link" | "unlink";
+  readonly method: "PUT" | "DELETE";
+  readonly pathSegments: readonly PathSegment[];
+  readonly ownerEntity: string;
+  readonly relatedEntity: string;
+  readonly left: string;
+  readonly right: string;
+  readonly ownerIsLeft: boolean;
+}
+
+const RELATED_ID_PARAM: PathSegment = { kind: "parameter", name: "relatedId", pattern: null };
+
+function writeSpec(
+  owner: string,
+  related: string,
+  left: string,
+  right: string,
+  ownerIsLeft: boolean,
+  action: "link" | "unlink",
+): AssociationWriteRouteSpec {
+  return {
+    operationId: `${entityCamel(owner)}.${entityCamel(related)}.${action}`,
+    action,
+    method: action === "link" ? "PUT" : "DELETE",
+    pathSegments: [lit("v1"), lit(resourceSlug(owner)), ID_PARAM, lit(resourceSlug(related)), RELATED_ID_PARAM],
+    ownerEntity: owner,
+    relatedEntity: related,
+    left,
+    right,
+    ownerIsLeft,
+  };
+}
+
+/** The link + unlink routes derived from a manifest's `many_to_many` relations (both directions). */
+export function manifestAssociationWriteRoutes(manifest: Manifest): readonly AssociationWriteRouteSpec[] {
+  const relations = (manifest.relations ?? []) as ReadonlyArray<RelationLike>;
+  const out: AssociationWriteRouteSpec[] = [];
+  const seen = new Set<string>();
+  const add = (spec: AssociationWriteRouteSpec): void => {
+    if (seen.has(spec.operationId)) return;
+    seen.add(spec.operationId);
+    out.push(spec);
+  };
+  for (const rel of relations) {
+    if (rel.kind !== "many_to_many" || rel.left === undefined || rel.right === undefined) continue;
+    for (const action of ["link", "unlink"] as const) {
+      add(writeSpec(rel.left, rel.right, rel.left, rel.right, true, action));
+      if (rel.left !== rel.right) add(writeSpec(rel.right, rel.left, rel.left, rel.right, false, action));
+    }
+  }
+  return out;
+}
+
+export function associationWriteRouteFromSpec(spec: AssociationWriteRouteSpec): RouteDefinition {
+  return {
+    id: routeId(spec.operationId),
+    operationId: spec.operationId,
+    method: spec.method,
+    pathSegments: [...spec.pathSegments],
+    apiVersion: "v1",
+    isDeprecated: false,
+    deprecatedSince: null,
+    sunsetAt: null,
+    successorOperationId: null,
+    requiredScopes: [],
+    rateLimitPolicyId: null,
+    idempotencyRequired: false,
+    requestSchemaSha256: null,
+    responseSchemaSha256: null,
+  };
+}
+
+/**
+ * `PUT` / `DELETE /v1/<owner>/{id}/<related>/{relatedId}` — links or unlinks the two rows across the
+ * relation. RBAC-checks `update` on the *owner* entity (associations are part of the owner's state).
+ * Idempotent: `link` is a no-op if already linked, `unlink` returns `204` whether or not a link
+ * existed. Maps the `{id}` (owner) + `{relatedId}` to the relation's (left, right) via `ownerIsLeft`.
+ * `501 associations_unsupported` when the store can't write associations.
+ */
+export function buildAssociationWriteHandler(spec: AssociationWriteRouteSpec, ctx: AssociationHandlerContext): Handler {
+  return async ({ principal, params }) => {
+    const tenantId = principal?.tenantId ?? null;
+    if (tenantId === null) return json(401, { error: "tenant_required" });
+
+    const decision = rbacCheck({
+      principal: authPrincipal(principal, ctx.principalRoles),
+      permissions: ctx.permissions,
+      roles: ctx.roles,
+      entity: spec.ownerEntity,
+      operation: "update",
+    });
+    if (!decision.allowed) return json(403, { error: "forbidden", detail: decision.reason });
+
+    if (!isAssociationWriter(ctx.store)) {
+      return json(501, { error: "associations_unsupported", detail: "the entity store does not support associations" });
+    }
+
+    const ownerId = params["id"] ?? "";
+    const relatedId = params["relatedId"] ?? "";
+    const leftId = spec.ownerIsLeft ? ownerId : relatedId;
+    const rightId = spec.ownerIsLeft ? relatedId : ownerId;
+    if (spec.action === "link") {
+      await ctx.store.link(tenantId, spec.left, spec.right, leftId, rightId);
+    } else {
+      await ctx.store.unlink(tenantId, spec.left, spec.right, leftId, rightId);
+    }
+    return { kind: "empty", status: 204 };
+  };
+}

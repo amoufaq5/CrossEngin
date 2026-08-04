@@ -8,10 +8,21 @@ import { Badge } from "@/components/Badge";
 import { FieldInput } from "@/components/FieldInput";
 import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
-import { deleteRecord, getRecord, listAssociations, listRecords, runTransition, updateRecord } from "@/lib/api";
+import {
+  deleteRecord,
+  getRecord,
+  linkAssociation,
+  listAssociations,
+  listRecords,
+  runTransition,
+  unlinkAssociation,
+  updateRecord,
+} from "@/lib/api";
+import { ReferencePicker } from "@/components/ReferencePicker";
 import { formatCell } from "@/lib/format";
 import { invalidateReferenceCache } from "@/lib/reference-cache";
 import {
+  canAccess,
   entityByName,
   entityBySlug,
   fieldErrorMap,
@@ -432,30 +443,64 @@ function AssociatedRecords({
   const related = entityByName(schema, assoc.relatedEntity);
   const [rows, setRows] = useState<ReadonlyArray<Record<string, unknown>>>([]);
   const [busy, setBusy] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [picked, setPicked] = useState("");
+  const [writing, setWriting] = useState(false);
+  // Managing a record's associations is part of updating it → gate on owner-update access.
+  const canWrite = canAccess(schema, owner, "update");
 
   const columns = (related?.listColumns ?? ["id"]).slice(0, 4);
   const columnLabel = (name: string): string => related?.fields.find((f) => f.name === name)?.label ?? name;
 
+  const reload = useCallback(async () => {
+    try {
+      const data = await listAssociations(owner.slug, parentId, assoc.relatedSlug);
+      setRows(data);
+      setFailed(false);
+    } catch {
+      // A store without association support (501) or any error → hide the panel entirely.
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  }, [owner.slug, parentId, assoc.relatedSlug]);
+
   useEffect(() => {
     let cancelled = false;
     setBusy(true);
-    listAssociations(owner.slug, parentId, assoc.relatedSlug)
-      .then((data) => {
-        if (!cancelled) setRows(data);
-      })
-      .catch(() => {
-        // Best-effort: a store without association support (501) or any error → no panel.
-        if (!cancelled) setRows([]);
-      })
-      .finally(() => {
-        if (!cancelled) setBusy(false);
-      });
+    void (async () => {
+      if (!cancelled) await reload();
+    })();
     return () => {
       cancelled = true;
     };
-  }, [owner.slug, parentId, assoc.relatedSlug]);
+  }, [reload]);
 
-  if (!busy && rows.length === 0) return null;
+  async function link(): Promise<void> {
+    if (picked === "" || writing) return;
+    setWriting(true);
+    try {
+      await linkAssociation(owner.slug, parentId, assoc.relatedSlug, picked);
+      setPicked("");
+      await reload();
+    } finally {
+      setWriting(false);
+    }
+  }
+
+  async function unlink(relatedId: string): Promise<void> {
+    if (writing) return;
+    setWriting(true);
+    try {
+      await unlinkAssociation(owner.slug, parentId, assoc.relatedSlug, relatedId);
+      await reload();
+    } finally {
+      setWriting(false);
+    }
+  }
+
+  if (failed) return null;
+  if (!busy && rows.length === 0 && !canWrite) return null;
 
   return (
     <section className="mt-6 rounded-xl border border-line bg-white p-6">
@@ -474,9 +519,17 @@ function AssociatedRecords({
                     {columnLabel(c)}
                   </th>
                 ))}
+                {canWrite && <th className="py-2" />}
               </tr>
             </thead>
             <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={columns.length + (canWrite ? 1 : 0)} className="py-2 text-ink-faint">
+                    No links yet.
+                  </td>
+                </tr>
+              )}
               {rows.map((row) => {
                 const rowId = String(row["id"] ?? "");
                 return (
@@ -495,11 +548,36 @@ function AssociatedRecords({
                         )}
                       </td>
                     ))}
+                    {canWrite && (
+                      <td className="py-2 text-right">
+                        <button
+                          onClick={() => void unlink(rowId)}
+                          disabled={writing}
+                          className="text-xs text-ink-muted hover:text-red-600 disabled:opacity-50"
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 );
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {canWrite && !busy && (
+        <div className="mt-4 flex items-end gap-2">
+          <div className="w-72">
+            <ReferencePicker target={assoc.relatedEntity} value={picked} onChange={setPicked} schema={schema} />
+          </div>
+          <button
+            onClick={() => void link()}
+            disabled={picked === "" || writing}
+            className="rounded-lg bg-brand-600 px-3 py-1.5 text-sm text-white hover:bg-brand-700 disabled:opacity-50"
+          >
+            Link
+          </button>
         </div>
       )}
     </section>
