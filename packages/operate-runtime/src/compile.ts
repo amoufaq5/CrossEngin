@@ -26,7 +26,14 @@ import {
 } from "./admin-handlers.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
-import { associationRouteFromSpec, buildAssociationListHandler, manifestAssociationRoutes } from "./association.js";
+import {
+  associationRouteFromSpec,
+  associationWriteRouteFromSpec,
+  buildAssociationListHandler,
+  buildAssociationWriteHandler,
+  manifestAssociationRoutes,
+  manifestAssociationWriteRoutes,
+} from "./association.js";
 import { literalDefaultPlans, type LiteralDefaultPlan } from "./defaults.js";
 import { buildValidationPlans } from "./validation.js";
 import { sequenceFieldPlans, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
@@ -533,6 +540,11 @@ export function compileOperateServer(
   for (const spec of manifestAssociationRoutes(manifest)) {
     routes.register(associationRouteFromSpec(spec));
     handlers.register(spec.operationId, gate(buildAssociationListHandler(spec, ctx), "read"));
+  }
+  // Association write routes: PUT/DELETE /v1/<owner>/{id}/<related>/{relatedId} link/unlink.
+  for (const spec of manifestAssociationWriteRoutes(manifest)) {
+    routes.register(associationWriteRouteFromSpec(spec));
+    handlers.register(spec.operationId, gate(buildAssociationWriteHandler(spec, ctx), "write"));
   }
 
   // Manifest-driven UI metadata: any authenticated principal may read the shape.

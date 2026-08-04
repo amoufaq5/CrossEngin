@@ -6,9 +6,13 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildAssociationListHandler,
+  buildAssociationWriteHandler,
   isAssociationReader,
+  isAssociationWriter,
   manifestAssociationRoutes,
+  manifestAssociationWriteRoutes,
   type AssociationHandlerContext,
+  type AssociationWriteRouteSpec,
 } from "./association.js";
 import type { EntityRecord, EntityStore, ListPage, ListQuery } from "./store.js";
 
@@ -85,12 +89,25 @@ class FakeStore implements EntityStore {
     this.lastListLinks = { left, right, opts };
     return this.links;
   }
+  linked: Array<{ left: string; right: string; leftId: string; rightId: string }> = [];
+  unlinked: Array<{ left: string; right: string; leftId: string; rightId: string }> = [];
+  async link(_t: string, left: string, right: string, leftId: string, rightId: string): Promise<void> {
+    this.linked.push({ left, right, leftId, rightId });
+  }
+  async unlink(_t: string, left: string, right: string, leftId: string, rightId: string): Promise<boolean> {
+    this.unlinked.push({ left, right, leftId, rightId });
+    return true;
+  }
 }
 
-const permissions: PermissionMap = { Product: { list: { roles: ["viewer"] } } } as unknown as PermissionMap;
+const permissions: PermissionMap = {
+  Product: { list: { roles: ["viewer"] } },
+  Tag: { update: { roles: ["editor"] } },
+} as unknown as PermissionMap;
 const roles = new Map<RoleName, RoleDefinition>([
   ["viewer" as RoleName, { name: "viewer" } as RoleDefinition],
   ["cashier" as RoleName, { name: "cashier" } as RoleDefinition],
+  ["editor" as RoleName, { name: "editor" } as RoleDefinition],
 ]);
 const principalRoles = (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anon" });
 
@@ -171,5 +188,87 @@ describe("buildAssociationListHandler", () => {
     const out = await invoke(bare, "viewer");
     expect(out.status).toBe(501);
     expect(out.kind === "json" ? (out.body as { error: string }).error : "").toBe("associations_unsupported");
+  });
+});
+
+describe("manifestAssociationWriteRoutes", () => {
+  it("derives link + unlink routes both directions with a {relatedId} param", () => {
+    const routes = manifestAssociationWriteRoutes(m2mManifest([{ left: "Tag", right: "Product" }]));
+    expect(routes.map((r) => r.operationId).sort()).toEqual([
+      "product.tag.link",
+      "product.tag.unlink",
+      "tag.product.link",
+      "tag.product.unlink",
+    ]);
+    const link = routes.find((r) => r.operationId === "tag.product.link")!;
+    expect(link.method).toBe("PUT");
+    expect(link.pathSegments.map((s) => (s.kind === "literal" ? s.value : `{${s.name}}`))).toEqual([
+      "v1",
+      "tags",
+      "{id}",
+      "products",
+      "{relatedId}",
+    ]);
+    expect(routes.find((r) => r.operationId === "tag.product.unlink")!.method).toBe("DELETE");
+  });
+});
+
+describe("isAssociationWriter", () => {
+  it("detects a store with link + unlink", () => {
+    expect(isAssociationWriter({ link: () => undefined, unlink: () => undefined })).toBe(true);
+    expect(isAssociationWriter({ link: () => undefined })).toBe(false);
+    expect(isAssociationWriter(null)).toBe(false);
+  });
+});
+
+const linkSpec = manifestAssociationWriteRoutes(m2mManifest([{ left: "Tag", right: "Product" }])).find(
+  (r) => r.operationId === "tag.product.link",
+)! as AssociationWriteRouteSpec;
+
+function invokeWrite(
+  store: EntityStore,
+  spec: AssociationWriteRouteSpec,
+  role: string | null,
+  params: Record<string, string>,
+): Promise<HandlerOutput> {
+  const ctx: AssociationHandlerContext = { store, permissions, roles, principalRoles };
+  const handler = buildAssociationWriteHandler(spec, ctx);
+  return Promise.resolve(
+    handler({ request: {} as never, route: {} as never, principal: principal(role), params, parsedBody: null }),
+  );
+}
+
+describe("buildAssociationWriteHandler", () => {
+  it("401s without a tenant; 403s when the caller can't update the owner", async () => {
+    expect((await invokeWrite(new FakeStore(), linkSpec, null, { id: "t", relatedId: "p" })).status).toBe(401);
+    expect((await invokeWrite(new FakeStore(), linkSpec, "viewer", { id: "t", relatedId: "p" })).status).toBe(403);
+  });
+
+  it("links, mapping owner {id} → left and {relatedId} → right, returning 204", async () => {
+    const store = new FakeStore();
+    const out = await invokeWrite(store, linkSpec, "editor", { id: "tag-1", relatedId: "prod-a" });
+    expect(out.status).toBe(204);
+    expect(store.linked).toEqual([{ left: "Tag", right: "Product", leftId: "tag-1", rightId: "prod-a" }]);
+  });
+
+  it("unlinks via the DELETE spec, returning 204", async () => {
+    const unlinkSpec = manifestAssociationWriteRoutes(m2mManifest([{ left: "Tag", right: "Product" }])).find(
+      (r) => r.operationId === "tag.product.unlink",
+    )! as AssociationWriteRouteSpec;
+    const store = new FakeStore();
+    const out = await invokeWrite(store, unlinkSpec, "editor", { id: "tag-1", relatedId: "prod-a" });
+    expect(out.status).toBe(204);
+    expect(store.unlinked).toEqual([{ left: "Tag", right: "Product", leftId: "tag-1", rightId: "prod-a" }]);
+  });
+
+  it("501s when the store can't write associations", async () => {
+    const bare: EntityStore = {
+      listPage: async () => ({ data: [], page: { limit: 50, nextCursor: null } }),
+      get: async () => null,
+      create: async (_t, _e, r) => r,
+      update: async () => null,
+      remove: async () => true,
+    };
+    expect((await invokeWrite(bare, linkSpec, "editor", { id: "t", relatedId: "p" })).status).toBe(501);
   });
 });

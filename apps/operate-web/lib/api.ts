@@ -67,6 +67,22 @@ export async function listAssociations(
   return json.data ?? [];
 }
 
+/** Links a related record via a m2m relation: `PUT /v1/<ownerSlug>/<id>/<relatedSlug>/<relatedId>`. */
+export async function linkAssociation(ownerSlug: string, id: string, relatedSlug: string, relatedId: string): Promise<void> {
+  const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/${encodeURIComponent(relatedId)}`;
+  const res = await fetch(apiPath(ownerSlug, suffix), { method: "PUT", headers: { accept: "application/json" } });
+  await checkResponse(res);
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+}
+
+/** Unlinks a related record via a m2m relation: `DELETE /v1/<ownerSlug>/<id>/<relatedSlug>/<relatedId>`. */
+export async function unlinkAssociation(ownerSlug: string, id: string, relatedSlug: string, relatedId: string): Promise<void> {
+  const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/${encodeURIComponent(relatedId)}`;
+  const res = await fetch(apiPath(ownerSlug, suffix), { method: "DELETE", headers: { accept: "application/json" } });
+  await checkResponse(res);
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+}
+
 export async function createRecord(
   slug: string,
   payload: Record<string, unknown>,
