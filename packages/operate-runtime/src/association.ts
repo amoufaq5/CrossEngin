@@ -27,6 +27,26 @@ export function isAssociationReader(store: unknown): store is AssociationReader 
 }
 
 /**
+ * The count side of the `many_to_many` association API — counts the join-table link pairs for a
+ * relation, optionally narrowed to one side. A store gains count support by implementing this (the
+ * column-mapped store does); the route reports it unsupported rather than lying. Kept structural so
+ * `operate-runtime` needs no `-pg` dependency.
+ */
+export interface AssociationCounter {
+  countLinks(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    opts: { readonly leftId?: string; readonly rightId?: string },
+  ): Promise<number>;
+}
+
+/** Structural check: does the entity store also count associations? */
+export function isAssociationCounter(store: unknown): store is AssociationCounter {
+  return typeof (store as { countLinks?: unknown } | null)?.countLinks === "function";
+}
+
+/**
  * A derived association-list route: `GET /v1/<owner>/{id}/<related>` — the `related` records linked to
  * the `owner` record via a `many_to_many` relation. `ownerIsLeft` records which side of the relation
  * the path id belongs to, so the handler narrows `listLinks` correctly.
@@ -169,6 +189,110 @@ export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: Ass
     const records = await Promise.all(relatedIds.map((id) => ctx.store.get(tenantId, spec.relatedEntity, id)));
     const data = records.filter((r): r is EntityRecord => r !== null);
     return json(200, { data });
+  };
+}
+
+/**
+ * A derived association-count route: `GET /v1/<owner>/{id}/<related>/count` — the number of `related`
+ * records linked to the `owner` record via a `many_to_many` relation. `ownerIsLeft` records which side
+ * of the relation the path id belongs to, so the handler narrows `countLinks` correctly.
+ */
+export interface AssociationCountRouteSpec {
+  readonly operationId: string;
+  readonly method: "GET";
+  readonly pathSegments: readonly PathSegment[];
+  readonly ownerEntity: string;
+  readonly relatedEntity: string;
+  readonly left: string;
+  readonly right: string;
+  readonly ownerIsLeft: boolean;
+}
+
+function countSpec(owner: string, related: string, left: string, right: string, ownerIsLeft: boolean): AssociationCountRouteSpec {
+  return {
+    operationId: `${entityCamel(owner)}.${entityCamel(related)}.count`,
+    method: "GET",
+    pathSegments: [lit("v1"), lit(resourceSlug(owner)), ID_PARAM, lit(resourceSlug(related)), lit("count")],
+    ownerEntity: owner,
+    relatedEntity: related,
+    left,
+    right,
+    ownerIsLeft,
+  };
+}
+
+/**
+ * The association-count routes derived from a manifest's `many_to_many` relations: two per relation
+ * (each side counts the other), or one for a self-relation. Duplicate owner→related pairs are de-duped
+ * by operationId, mirroring `manifestAssociationRoutes`.
+ */
+export function manifestAssociationCountRoutes(manifest: Manifest): readonly AssociationCountRouteSpec[] {
+  const relations = (manifest.relations ?? []) as ReadonlyArray<RelationLike>;
+  const out: AssociationCountRouteSpec[] = [];
+  const seen = new Set<string>();
+  const add = (spec: AssociationCountRouteSpec): void => {
+    if (seen.has(spec.operationId)) return;
+    seen.add(spec.operationId);
+    out.push(spec);
+  };
+  for (const rel of relations) {
+    if (rel.kind !== "many_to_many" || rel.left === undefined || rel.right === undefined) continue;
+    add(countSpec(rel.left, rel.right, rel.left, rel.right, true));
+    if (rel.left !== rel.right) add(countSpec(rel.right, rel.left, rel.left, rel.right, false));
+  }
+  return out;
+}
+
+export function associationCountRouteFromSpec(spec: AssociationCountRouteSpec): RouteDefinition {
+  return {
+    id: routeId(spec.operationId),
+    operationId: spec.operationId,
+    method: spec.method,
+    pathSegments: [...spec.pathSegments],
+    apiVersion: "v1",
+    isDeprecated: false,
+    deprecatedSince: null,
+    sunsetAt: null,
+    successorOperationId: null,
+    requiredScopes: [],
+    rateLimitPolicyId: null,
+    idempotencyRequired: false,
+    requestSchemaSha256: null,
+    responseSchemaSha256: null,
+  };
+}
+
+/**
+ * `GET /v1/<owner>/{id}/<related>/count` — RBAC-checks `list` on the *related* entity, then returns
+ * `{count}`: the number of the owner's association links (`countLinks` narrowed to the owner side). A
+ * store without count support returns `501 associations_unsupported` rather than a fabricated zero.
+ */
+export function buildAssociationCountHandler(spec: AssociationCountRouteSpec, ctx: AssociationHandlerContext): Handler {
+  return async ({ principal, params }) => {
+    const tenantId = principal?.tenantId ?? null;
+    if (tenantId === null) return json(401, { error: "tenant_required" });
+
+    const decision = rbacCheck({
+      principal: authPrincipal(principal, ctx.principalRoles),
+      permissions: ctx.permissions,
+      roles: ctx.roles,
+      entity: spec.relatedEntity,
+      operation: "list",
+    });
+    if (!decision.allowed) return json(403, { error: "forbidden", detail: decision.reason });
+
+    if (!isAssociationCounter(ctx.store)) {
+      return json(501, { error: "associations_unsupported", detail: "the entity store does not support associations" });
+    }
+
+    const ownerId = params["id"] ?? "";
+    const count = await ctx.store.countLinks(
+      tenantId,
+      spec.left,
+      spec.right,
+      spec.ownerIsLeft ? { leftId: ownerId } : { rightId: ownerId },
+    );
+    return json(200, { count });
   };
 }
 

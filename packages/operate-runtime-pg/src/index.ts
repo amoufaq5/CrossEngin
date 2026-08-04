@@ -5,6 +5,7 @@ export * from "./entity-store.js";
 export * from "./column-plan.js";
 export * from "./entity-ddl.js";
 export * from "./column-store.js";
+export * from "./link-integrity.js";
 export * from "./sequence-store.js";
 export * from "./settings-store.js";
 export * from "./entitlement-store.js";

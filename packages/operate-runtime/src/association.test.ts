@@ -5,10 +5,13 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import { describe, expect, it } from "vitest";
 
 import {
+  buildAssociationCountHandler,
   buildAssociationListHandler,
   buildAssociationWriteHandler,
+  isAssociationCounter,
   isAssociationReader,
   isAssociationWriter,
+  manifestAssociationCountRoutes,
   manifestAssociationRoutes,
   manifestAssociationWriteRoutes,
   type AssociationHandlerContext,
@@ -88,6 +91,17 @@ class FakeStore implements EntityStore {
   ): Promise<ReadonlyArray<{ leftId: string; rightId: string }>> {
     this.lastListLinks = { left, right, opts };
     return this.links;
+  }
+  linkCount = 0;
+  lastCountLinks: { left: string; right: string; opts: { leftId?: string; rightId?: string } } | null = null;
+  async countLinks(
+    _t: string,
+    left: string,
+    right: string,
+    opts: { leftId?: string; rightId?: string },
+  ): Promise<number> {
+    this.lastCountLinks = { left, right, opts };
+    return this.linkCount;
   }
   linked: Array<{ left: string; right: string; leftId: string; rightId: string }> = [];
   unlinked: Array<{ left: string; right: string; leftId: string; rightId: string }> = [];
@@ -270,5 +284,100 @@ describe("buildAssociationWriteHandler", () => {
       remove: async () => true,
     };
     expect((await invokeWrite(bare, linkSpec, "editor", { id: "t", relatedId: "p" })).status).toBe(501);
+  });
+});
+
+describe("manifestAssociationCountRoutes", () => {
+  it("derives two count routes per m2m relation (each side counts the other)", () => {
+    const routes = manifestAssociationCountRoutes(m2mManifest([{ left: "Tag", right: "Product" }]));
+    expect(routes.map((r) => r.operationId).sort()).toEqual(["product.tag.count", "tag.product.count"]);
+    const tagProduct = routes.find((r) => r.operationId === "tag.product.count")!;
+    expect(tagProduct.pathSegments.map((s) => (s.kind === "literal" ? s.value : `{${s.name}}`))).toEqual([
+      "v1",
+      "tags",
+      "{id}",
+      "products",
+      "count",
+    ]);
+    expect(tagProduct.ownerIsLeft).toBe(true);
+    expect(routes.find((r) => r.operationId === "product.tag.count")!.ownerIsLeft).toBe(false);
+  });
+
+  it("emits a single count route for a self-relation and ignores non-m2m relations", () => {
+    const routes = manifestAssociationCountRoutes({
+      relations: [
+        { kind: "many_to_many", left: "Person", right: "Person" },
+        { kind: "many_to_one", from: "A", field: "b", to: "B" },
+      ],
+    } as unknown as Manifest);
+    expect(routes.map((r) => r.operationId)).toEqual(["person.person.count"]);
+  });
+
+  it("de-dupes duplicate owner→related pairs by operationId", () => {
+    const routes = manifestAssociationCountRoutes(
+      m2mManifest([
+        { left: "Tag", right: "Product" },
+        { left: "Tag", right: "Product" },
+      ]),
+    );
+    expect(routes.map((r) => r.operationId).sort()).toEqual(["product.tag.count", "tag.product.count"]);
+  });
+});
+
+describe("isAssociationCounter", () => {
+  it("detects a store that implements countLinks", () => {
+    expect(isAssociationCounter({ countLinks: () => undefined })).toBe(true);
+    expect(isAssociationCounter({ listLinks: () => undefined })).toBe(false);
+    expect(isAssociationCounter(null)).toBe(false);
+  });
+});
+
+const countSpecFixture = manifestAssociationCountRoutes(m2mManifest([{ left: "Tag", right: "Product" }])).find(
+  (r) => r.operationId === "tag.product.count",
+)!;
+
+function invokeCount(store: EntityStore, role: string | null, id = "tag-1"): Promise<HandlerOutput> {
+  const ctx: AssociationHandlerContext = { store, permissions, roles, principalRoles };
+  const handler = buildAssociationCountHandler(countSpecFixture, ctx);
+  return Promise.resolve(
+    handler({
+      request: {} as never,
+      route: {} as never,
+      principal: principal(role),
+      params: { id },
+      parsedBody: null,
+    }),
+  );
+}
+
+describe("buildAssociationCountHandler", () => {
+  it("401s when the principal has no tenant", async () => {
+    expect((await invokeCount(new FakeStore(), null)).status).toBe(401);
+  });
+
+  it("403s when the caller's role can't list the related entity", async () => {
+    expect((await invokeCount(new FakeStore(), "cashier")).status).toBe(403);
+  });
+
+  it("501s when the store has no association count support", async () => {
+    const bare: EntityStore = {
+      listPage: async () => ({ data: [], page: { limit: 50, nextCursor: null } }),
+      get: async () => null,
+      create: async (_t, _e, r) => r,
+      update: async () => null,
+      remove: async () => true,
+    };
+    const out = await invokeCount(bare, "viewer");
+    expect(out.status).toBe(501);
+    expect(out.kind === "json" ? (out.body as { error: string }).error : "").toBe("associations_unsupported");
+  });
+
+  it("200s with the link count, narrowing countLinks to the owner (left) id", async () => {
+    const store = new FakeStore();
+    store.linkCount = 3;
+    const out = await invokeCount(store, "viewer", "tag-1");
+    expect(out.status).toBe(200);
+    expect(out.kind === "json" ? (out.body as { count: number }).count : -1).toBe(3);
+    expect(store.lastCountLinks).toEqual({ left: "Tag", right: "Product", opts: { leftId: "tag-1" } });
   });
 });

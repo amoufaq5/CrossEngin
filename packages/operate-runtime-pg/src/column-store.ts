@@ -453,6 +453,39 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   /**
+   * Counts the association links for a relation, optionally narrowed to one side
+   * (`{ leftId }` → number of rights for a left, `{ rightId }` → number of lefts
+   * for a right). Mirrors `listLinks`' predicate build over the join table.
+   */
+  async countLinks(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    opts: { readonly leftId?: string; readonly rightId?: string } = {},
+  ): Promise<number> {
+    const plan = this.joinPlanFor(leftEntity, rightEntity);
+    const qualified = qualifyTable(plan.schema, plan.table);
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const params: unknown[] = [tenantId];
+      const where = [`${quoteIdent("tenant_id")} = $1`];
+      if (opts.leftId !== undefined) {
+        params.push(opts.leftId);
+        where.push(`${quoteIdent(plan.leftColumn)} = $${params.length.toString()}`);
+      }
+      if (opts.rightId !== undefined) {
+        params.push(opts.rightId);
+        where.push(`${quoteIdent(plan.rightColumn)} = $${params.length.toString()}`);
+      }
+      const res = await tx.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM ${qualified}
+          WHERE ${where.join(" AND ")}`,
+        params,
+      );
+      return Number(res.rows[0]?.n ?? "0");
+    });
+  }
+
+  /**
    * Resolves a `query.fields` projection to the column-name set to SELECT —
    * the requested fields' columns plus the sort fields' columns (needed for the
    * keyset cursor). Returns undefined when there's no projection (select all).

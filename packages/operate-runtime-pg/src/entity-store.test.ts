@@ -271,6 +271,23 @@ function fakeLinksPg(): { conn: PgConnection; calls: string[] } {
       }
       return { rows: [], rowCount: 0 };
     }
+    if (sql.includes("SELECT 1") && sql.includes("operate_entity_links")) {
+      const found = visible.some((r) => same(r, p));
+      return { rows: found ? [{ "?column?": 1 }] : [], rowCount: found ? 1 : 0 };
+    }
+    if (sql.includes("count(*)") && sql.includes("operate_entity_links")) {
+      let matched = visible.filter((r) => r.left_entity === p[1] && r.right_entity === p[2]);
+      let idxc = 3;
+      if (sql.includes("left_id = $")) {
+        const want = p[idxc++];
+        matched = matched.filter((r) => r.left_id === want);
+      }
+      if (sql.includes("right_id = $")) {
+        const want = p[idxc++];
+        matched = matched.filter((r) => r.right_id === want);
+      }
+      return { rows: [{ n: String(matched.length) }], rowCount: 1 };
+    }
     if (sql.includes("SELECT left_id")) {
       let matched = visible.filter((r) => r.left_entity === p[1] && r.right_entity === p[2]);
       let idx = 3;
@@ -351,6 +368,26 @@ describe("PostgresEntityStore — associations (join table)", () => {
     const store = new PostgresEntityStore(conn, { schema: "tenant_app" });
     await store.link(TENANT, "Product", "Tag", "p1", "t1");
     expect(calls.some((c) => c.includes("tenant_app.operate_entity_links"))).toBe(true);
+  });
+
+  it("isLinked is true when linked and false otherwise", async () => {
+    const { conn } = fakeLinksPg();
+    const store = new PostgresEntityStore(conn);
+    await store.link(TENANT, "Product", "Tag", "p1", "t1");
+    expect(await store.isLinked(TENANT, "Product", "Tag", "p1", "t1")).toBe(true);
+    expect(await store.isLinked(TENANT, "Product", "Tag", "p1", "t2")).toBe(false);
+  });
+
+  it("countLinks totals, narrows by leftId, narrows by rightId, and is tenant-isolated", async () => {
+    const { conn } = fakeLinksPg();
+    const store = new PostgresEntityStore(conn);
+    await store.link(TENANT, "Product", "Tag", "p1", "t1");
+    await store.link(TENANT, "Product", "Tag", "p1", "t2");
+    await store.link(TENANT, "Product", "Tag", "p2", "t1");
+    expect(await store.countLinks(TENANT, "Product", "Tag", {})).toBe(3);
+    expect(await store.countLinks(TENANT, "Product", "Tag", { leftId: "p1" })).toBe(2);
+    expect(await store.countLinks(TENANT, "Product", "Tag", { rightId: "t1" })).toBe(2);
+    expect(await store.countLinks(OTHER_TENANT, "Product", "Tag", {})).toBe(0);
   });
 });
 

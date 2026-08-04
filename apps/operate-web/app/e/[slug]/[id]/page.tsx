@@ -320,6 +320,15 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
   );
 }
 
+/** A small pill showing a relation's row count next to a panel heading. */
+function CountBadge({ label }: { label: string }) {
+  return (
+    <span className="rounded-full bg-surface-soft px-2 py-0.5 text-xs font-medium tabular-nums text-ink-muted">
+      {label}
+    </span>
+  );
+}
+
 /**
  * A related-records panel: the child rows whose reference `<field>` points at this record. Fetches
  * `?<field>=<id>` (server-side filtered — reference fields are always filterable), shows a compact
@@ -336,9 +345,11 @@ function RelatedRecords({
 }) {
   const { entity: child, field } = rel;
   const [rows, setRows] = useState<ReadonlyArray<Record<string, unknown>>>([]);
+  const [hasMore, setHasMore] = useState(false);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const PAGE = 6;
   const columns = child.listColumns.filter((c) => c !== field.name).slice(0, 4);
   const columnLabel = (name: string): string => child.fields.find((f) => f.name === name)?.label ?? name;
 
@@ -346,10 +357,14 @@ function RelatedRecords({
     let cancelled = false;
     setBusy(true);
     setError(null);
-    const query = `?${encodeURIComponent(field.name)}=${encodeURIComponent(parentId)}&limit=6`;
+    const query = `?${encodeURIComponent(field.name)}=${encodeURIComponent(parentId)}&limit=${PAGE}`;
     listRecords(child.slug, query)
       .then((res) => {
-        if (!cancelled) setRows(res.data);
+        if (!cancelled) {
+          setRows(res.data);
+          // A next cursor means more rows exist than the page shows → render "N+".
+          setHasMore(res.nextCursor !== null);
+        }
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -364,11 +379,16 @@ function RelatedRecords({
 
   if (!busy && error === null && rows.length === 0) return null;
 
+  const countLabel = rows.length === 0 ? "" : hasMore ? `${rows.length}+` : String(rows.length);
+
   return (
     <section className="mt-6 rounded-xl border border-line bg-white p-6">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-ink">
-          {child.label} <span className="font-normal text-ink-faint">via {field.label}</span>
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-ink">
+          <span>
+            {child.label} <span className="font-normal text-ink-faint">via {field.label}</span>
+          </span>
+          {countLabel !== "" && <CountBadge label={countLabel} />}
         </h2>
         <Link
           href={`/e/${child.slug}?fl_${encodeURIComponent(field.name)}=${encodeURIComponent(parentId)}`}
@@ -446,6 +466,7 @@ function AssociatedRecords({
   const [failed, setFailed] = useState(false);
   const [picked, setPicked] = useState("");
   const [writing, setWriting] = useState(false);
+  const [writeError, setWriteError] = useState<string | null>(null);
   // Managing a record's associations is part of updating it → gate on owner-update access.
   const canWrite = canAccess(schema, owner, "update");
 
@@ -479,10 +500,13 @@ function AssociatedRecords({
   async function link(): Promise<void> {
     if (picked === "" || writing) return;
     setWriting(true);
+    setWriteError(null);
     try {
       await linkAssociation(owner.slug, parentId, assoc.relatedSlug, picked);
       setPicked("");
       await reload();
+    } catch (e) {
+      setWriteError(e instanceof Error ? e.message : String(e));
     } finally {
       setWriting(false);
     }
@@ -491,9 +515,16 @@ function AssociatedRecords({
   async function unlink(relatedId: string): Promise<void> {
     if (writing) return;
     setWriting(true);
+    setWriteError(null);
+    // Optimistic: drop the row immediately, restore it if the server rejects the unlink.
+    const prev = rows;
+    setRows((rs) => rs.filter((r) => String(r["id"] ?? "") !== relatedId));
     try {
       await unlinkAssociation(owner.slug, parentId, assoc.relatedSlug, relatedId);
       await reload();
+    } catch (e) {
+      setRows(prev);
+      setWriteError(e instanceof Error ? e.message : String(e));
     } finally {
       setWriting(false);
     }
@@ -504,8 +535,11 @@ function AssociatedRecords({
 
   return (
     <section className="mt-6 rounded-xl border border-line bg-white p-6">
-      <h2 className="mb-3 text-sm font-semibold text-ink">
-        {assoc.relatedLabel} <span className="font-normal text-ink-faint">linked</span>
+      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink">
+        <span>
+          {assoc.relatedLabel} <span className="font-normal text-ink-faint">linked</span>
+        </span>
+        {!busy && rows.length > 0 && <CountBadge label={String(rows.length)} />}
       </h2>
       {busy ? (
         <p className="text-sm text-ink-muted">Loading…</p>
@@ -580,6 +614,7 @@ function AssociatedRecords({
           </button>
         </div>
       )}
+      {writeError !== null && <p className="mt-2 text-xs text-red-600">{writeError}</p>}
     </section>
   );
 }
