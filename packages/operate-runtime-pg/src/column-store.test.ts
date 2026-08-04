@@ -353,6 +353,16 @@ describe("ColumnMappedEntityStore — many_to_many association links", () => {
     expect(sel.params).toEqual([TENANT, "c1"]);
   });
 
+  it("countLinks counts join rows, narrowing by one side", async () => {
+    const cap = capturePg([{ n: "2" }]);
+    const n = await m2mStore(cap).countLinks(TENANT, "Course", "Student", { leftId: "c1" });
+    expect(n).toBe(2);
+    const sel = cap.calls.find((c) => c.sql.includes("count(*)"))!;
+    expect(sel.sql).toContain('"tenant_app"."course_student"');
+    expect(sel.sql).toContain('"course_id" = $2');
+    expect(sel.params).toEqual([TENANT, "c1"]);
+  });
+
   it("throws for a relation with no join table", async () => {
     await expect(m2mStore(capturePg()).link(TENANT, "Course", "Teacher", "c1", "t1")).rejects.toThrow(/no many_to_many join table/);
   });

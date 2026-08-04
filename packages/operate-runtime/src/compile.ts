@@ -27,10 +27,13 @@ import {
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
 import {
+  associationCountRouteFromSpec,
   associationRouteFromSpec,
   associationWriteRouteFromSpec,
+  buildAssociationCountHandler,
   buildAssociationListHandler,
   buildAssociationWriteHandler,
+  manifestAssociationCountRoutes,
   manifestAssociationRoutes,
   manifestAssociationWriteRoutes,
 } from "./association.js";
@@ -545,6 +548,11 @@ export function compileOperateServer(
   for (const spec of manifestAssociationWriteRoutes(manifest)) {
     routes.register(associationWriteRouteFromSpec(spec));
     handlers.register(spec.operationId, gate(buildAssociationWriteHandler(spec, ctx), "write"));
+  }
+  // Association count routes: GET /v1/<owner>/{id}/<related>/count counts the m2m-linked related records.
+  for (const spec of manifestAssociationCountRoutes(manifest)) {
+    routes.register(associationCountRouteFromSpec(spec));
+    handlers.register(spec.operationId, gate(buildAssociationCountHandler(spec, ctx), "read"));
   }
 
   // Manifest-driven UI metadata: any authenticated principal may read the shape.

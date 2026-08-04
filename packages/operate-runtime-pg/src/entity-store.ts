@@ -1,5 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  type AssociationCounter,
   type AssociationReader,
   type AssociationWriter,
   type EntityRecord,
@@ -79,7 +80,9 @@ class TxEntityStore implements EntityStore {
  * Implements `TransactionalEntityStore`, so the serving runtime can run a write
  * + its guards + its effects (e.g. an auto-reversal) atomically.
  */
-export class PostgresEntityStore implements TransactionalEntityStore, AssociationReader, AssociationWriter {
+export class PostgresEntityStore
+  implements TransactionalEntityStore, AssociationReader, AssociationWriter, AssociationCounter
+{
   private readonly conn: PgConnection;
   private readonly table: string;
   private readonly linksTable: string;
@@ -193,6 +196,56 @@ export class PostgresEntityStore implements TransactionalEntityStore, Associatio
         params,
       );
       return res.rows.map((r) => ({ leftId: String(r.left_id), rightId: String(r.right_id) }));
+    });
+  }
+
+  /** Reports whether two rows are linked across the relation. */
+  async isLinked(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    leftId: string,
+    rightId: string,
+  ): Promise<boolean> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const res = await tx.query(
+        `SELECT 1 FROM ${this.linksTable}
+          WHERE tenant_id = $1 AND left_entity = $2 AND right_entity = $3 AND left_id = $4 AND right_id = $5
+          LIMIT 1`,
+        [tenantId, leftEntity, rightEntity, leftId, rightId],
+      );
+      return res.rowCount > 0;
+    });
+  }
+
+  /**
+   * Counts the association links for a relation, optionally narrowed to one side
+   * (`{ leftId }` → number of rights for a left, `{ rightId }` → number of lefts
+   * for a right). Mirrors `listLinks`' predicate build; RLS confines the count.
+   */
+  async countLinks(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    opts: { readonly leftId?: string; readonly rightId?: string } = {},
+  ): Promise<number> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const params: unknown[] = [tenantId, leftEntity, rightEntity];
+      const where = ["tenant_id = $1", "left_entity = $2", "right_entity = $3"];
+      if (opts.leftId !== undefined) {
+        params.push(opts.leftId);
+        where.push(`left_id = $${params.length.toString()}`);
+      }
+      if (opts.rightId !== undefined) {
+        params.push(opts.rightId);
+        where.push(`right_id = $${params.length.toString()}`);
+      }
+      const res = await tx.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM ${this.linksTable}
+          WHERE ${where.join(" AND ")}`,
+        params,
+      );
+      return Number(res.rows[0]?.n ?? "0");
     });
   }
 
