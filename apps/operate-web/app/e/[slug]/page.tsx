@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/Badge";
+import { ColumnChooser } from "@/components/ColumnChooser";
 import { FieldInput } from "@/components/FieldInput";
 import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
@@ -119,6 +120,35 @@ function readInitialListState(entity: UiEntitySchema): ListUrlState {
   return { q: p.get("q") ?? "", sort, filters };
 }
 
+const COLUMNS_STORAGE_PREFIX = "operate-web:columns:";
+
+/**
+ * Restores the per-slug column choice from localStorage, dropping any stored name that no longer
+ * exists on the entity (schema drift). Falls back to the entity's default `listColumns`.
+ */
+function loadStoredColumns(slug: string, validNames: readonly string[], fallback: readonly string[]): string[] {
+  if (typeof window === "undefined") return [...fallback];
+  try {
+    const raw = window.localStorage.getItem(COLUMNS_STORAGE_PREFIX + slug);
+    if (raw === null) return [...fallback];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [...fallback];
+    const valid = parsed.filter((c): c is string => typeof c === "string" && validNames.includes(c));
+    return valid.length > 0 ? valid : [...fallback];
+  } catch {
+    return [...fallback];
+  }
+}
+
+function storeColumns(slug: string, columns: readonly string[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(COLUMNS_STORAGE_PREFIX + slug, JSON.stringify(columns));
+  } catch {
+    // localStorage may be full or disabled (private mode) — the choice just won't persist.
+  }
+}
+
 function EntityList({ entity }: { entity: UiEntitySchema }) {
   const { schema } = useSchema();
   const initialState = useMemo(() => readInitialListState(entity), [entity]);
@@ -139,6 +169,19 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
   }, [q]);
   const [sort, setSort] = useState<ListSortState | null>(initialState.sort);
   const [filters, setFilters] = useState<Record<string, string>>(initialState.filters);
+
+  // Which columns the table renders. Seeded from the per-slug localStorage choice (or the entity's
+  // default `listColumns`), then unioned with any field arriving pre-filtered via a deep link so its
+  // filter input surfaces. Ordered by the entity's field order for stable headers.
+  const [visibleColumns, setVisibleColumns] = useState<readonly string[]>(() => {
+    const validNames = entity.fields.map((f) => f.name);
+    const stored = loadStoredColumns(entity.slug, validNames, entity.listColumns);
+    const wanted = new Set([...stored, ...Object.keys(initialState.filters)]);
+    return entity.fields.filter((f) => wanted.has(f.name)).map((f) => f.name);
+  });
+  useEffect(() => {
+    storeColumns(entity.slug, visibleColumns);
+  }, [entity.slug, visibleColumns]);
 
   // Mirror the list state into the URL (replace, not push — no history spam) so the view is
   // shareable and survives a refresh. Preserves any unrelated params (e.g. ?new=1 + prefill).
@@ -200,7 +243,9 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
     return m;
   }, [entity]);
 
-  const query = useMemo(() => {
+  // The filter/sort/search query, without column projection — CSV export rides this to fetch every
+  // field regardless of which columns the table shows.
+  const baseQuery = useMemo(() => {
     const p = new URLSearchParams();
     p.set("limit", "50");
     if (sort) {
@@ -211,6 +256,16 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
     if (serverSearch && debouncedQ.trim() !== "") p.set("q", debouncedQ.trim());
     return `?${p.toString()}`;
   }, [sort, filters, serverSearch, debouncedQ]);
+
+  // Server-side projection to just the columns the table needs. `id` keeps rows navigable and the
+  // state field keeps bulk-transition eligibility computable even when neither is a visible column.
+  const projection = useMemo(() => {
+    const cols = new Set<string>(["id", ...visibleColumns]);
+    if (entity.stateField !== null) cols.add(entity.stateField);
+    return [...cols].join(",");
+  }, [visibleColumns, entity.stateField]);
+
+  const query = useMemo(() => `${baseQuery}&fields=${encodeURIComponent(projection)}`, [baseQuery, projection]);
 
   // First page (and reload on query change): replaces the accumulated rows.
   const load = useCallback(() => {
@@ -246,9 +301,9 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
     const needle = q.trim().toLowerCase();
     if (needle === "") return data;
     return data.filter((row) =>
-      entity.listColumns.some((c) => String(row[c] ?? "").toLowerCase().includes(needle)),
+      visibleColumns.some((c) => String(row[c] ?? "").toLowerCase().includes(needle)),
     );
-  }, [data, q, entity.listColumns, serverSearch]);
+  }, [data, q, visibleColumns, serverSearch]);
 
   function toggleSort(field: string) {
     if (!entity.sortableFields.includes(field)) return;
@@ -289,7 +344,7 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
         do {
           const page: ListResult = await listRecords(
             entity.slug,
-            cursor === null ? query : `${query}&cursor=${encodeURIComponent(cursor)}`,
+            cursor === null ? baseQuery : `${baseQuery}&cursor=${encodeURIComponent(cursor)}`,
           );
           acc.push(...page.data);
           cursor = page.nextCursor;
@@ -366,14 +421,12 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
             placeholder={`Search ${entity.label.toLowerCase()}…`}
             className="w-64 rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand"
           />
-          {entity.filterableFields.slice(0, 3).map((f) => (
-            <FilterControl
-              key={f}
-              field={fieldByName.get(f)}
-              value={filters[f] ?? ""}
-              onChange={(v) => setFilters((prev) => ({ ...prev, [f]: v }))}
-            />
-          ))}
+          <ColumnChooser
+            fields={entity.fields}
+            visible={visibleColumns}
+            onChange={setVisibleColumns}
+            onReset={() => setVisibleColumns([...entity.listColumns])}
+          />
           <button onClick={load} className="rounded-lg border border-line px-3 py-2 text-sm text-ink-muted hover:bg-surface-soft">
             Refresh
           </button>
@@ -447,7 +500,7 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
                     className="cursor-pointer align-middle"
                   />
                 </th>
-                {entity.listColumns.map((c) => {
+                {visibleColumns.map((c) => {
                   const sortable = entity.sortableFields.includes(c);
                   const arrow = sort?.field === c ? (sort.order === "asc" ? " ↑" : " ↓") : "";
                   return (
@@ -463,18 +516,36 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
                 })}
                 <th className="px-4 py-2.5" />
               </tr>
+              {visibleColumns.some((c) => entity.filterableFields.includes(c)) && (
+                <tr className="border-t border-line normal-case tracking-normal">
+                  <th className="px-4 py-1.5" />
+                  {visibleColumns.map((c) => (
+                    <th key={c} className="px-2 py-1.5 font-normal">
+                      {entity.filterableFields.includes(c) ? (
+                        <FilterControl
+                          variant="cell"
+                          field={fieldByName.get(c)}
+                          value={filters[c] ?? ""}
+                          onChange={(v) => setFilters((prev) => ({ ...prev, [c]: v }))}
+                        />
+                      ) : null}
+                    </th>
+                  ))}
+                  <th className="px-2 py-1.5" />
+                </tr>
+              )}
             </thead>
             <tbody className="divide-y divide-line">
               {busy && rows.length === 0 && (
                 <tr>
-                  <td colSpan={entity.listColumns.length + 2} className="px-4 py-8 text-center text-ink-faint">
+                  <td colSpan={visibleColumns.length + 2} className="px-4 py-8 text-center text-ink-faint">
                     Loading…
                   </td>
                 </tr>
               )}
               {!busy && rows.length === 0 && (
                 <tr>
-                  <td colSpan={entity.listColumns.length + 2} className="px-4 py-8 text-center text-ink-faint">
+                  <td colSpan={visibleColumns.length + 2} className="px-4 py-8 text-center text-ink-faint">
                     No records.
                   </td>
                 </tr>
@@ -493,7 +564,7 @@ function EntityList({ entity }: { entity: UiEntitySchema }) {
                         className="cursor-pointer align-middle"
                       />
                     </td>
-                    {entity.listColumns.map((c) => (
+                    {visibleColumns.map((c) => (
                       <td key={c} className="px-4 py-2.5 text-ink">
                         <Cell field={fieldByName.get(c)} value={row[c]} schema={schema} />
                       </td>
@@ -559,20 +630,23 @@ function FilterControl({
   field,
   value,
   onChange,
+  variant = "bar",
 }: {
   field: UiFieldSchema | undefined;
   value: string;
   onChange: (v: string) => void;
+  /** `bar` is a standalone control; `cell` fills a table header cell as a compact filter row. */
+  variant?: "bar" | "cell";
 }) {
   if (field === undefined) return null;
+  const cell = variant === "cell";
+  const base = `rounded-lg border border-line text-sm outline-none focus:border-brand ${
+    cell ? "w-full px-2 py-1" : "px-3 py-2"
+  }`;
   if (field.input === "select") {
     return (
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand"
-      >
-        <option value="">{field.label}: all</option>
+      <select value={value} onChange={(e) => onChange(e.target.value)} className={base}>
+        <option value="">{cell ? "All" : `${field.label}: all`}</option>
         {(field.enumValues ?? []).map((o) => (
           <option key={o} value={o}>
             {o.replace(/_/g, " ")}
@@ -585,8 +659,8 @@ function FilterControl({
     <input
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      placeholder={`${field.label}…`}
-      className="w-40 rounded-lg border border-line px-3 py-2 text-sm outline-none focus:border-brand"
+      placeholder={cell ? "Filter…" : `${field.label}…`}
+      className={cell ? base : `w-40 ${base}`}
     />
   );
 }

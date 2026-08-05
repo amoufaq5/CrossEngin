@@ -464,6 +464,8 @@ function AssociatedRecords({
   const related = entityByName(schema, assoc.relatedEntity);
   const [rows, setRows] = useState<ReadonlyArray<Record<string, unknown>>>([]);
   const [total, setTotal] = useState(0);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [busy, setBusy] = useState(true);
   const [failed, setFailed] = useState(false);
   const [picked, setPicked] = useState("");
@@ -472,18 +474,19 @@ function AssociatedRecords({
   // Managing a record's associations is part of updating it → gate on owner-update access.
   const canWrite = canAccess(schema, owner, "update");
 
-  const PREVIEW = 8;
+  const PAGE = 8;
   const columns = (related?.listColumns ?? ["id"]).slice(0, 4);
   const columnLabel = (name: string): string => related?.fields.find((f) => f.name === name)?.label ?? name;
 
   const reload = useCallback(async () => {
     try {
-      // Preview the first page of records; the count route gives the true total (server caps the list).
-      const [data, count] = await Promise.all([
-        listAssociations(owner.slug, parentId, assoc.relatedSlug, PREVIEW),
+      // Load the first page of records; the count route gives the true total (server pages the list).
+      const [page, count] = await Promise.all([
+        listAssociations(owner.slug, parentId, assoc.relatedSlug, { limit: PAGE }),
         countAssociation(owner.slug, parentId, assoc.relatedSlug),
       ]);
-      setRows(data);
+      setRows(page.data);
+      setCursor(page.nextCursor);
       setTotal(count);
       setFailed(false);
     } catch {
@@ -493,6 +496,20 @@ function AssociatedRecords({
       setBusy(false);
     }
   }, [owner.slug, parentId, assoc.relatedSlug]);
+
+  async function loadMore(): Promise<void> {
+    if (cursor === null || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const page = await listAssociations(owner.slug, parentId, assoc.relatedSlug, { limit: PAGE, cursor });
+      setRows((rs) => [...rs, ...page.data]);
+      setCursor(page.nextCursor);
+    } catch (e) {
+      setWriteError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -611,10 +628,19 @@ function AssociatedRecords({
           </table>
         </div>
       )}
-      {!busy && total > rows.length && (
-        <p className="mt-2 text-xs text-ink-faint">
-          Showing {rows.length} of {total}.
-        </p>
+      {!busy && cursor !== null && (
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            onClick={() => void loadMore()}
+            disabled={loadingMore}
+            className="rounded-lg border border-line px-3 py-1.5 text-xs text-ink-muted hover:bg-surface-soft disabled:opacity-50"
+          >
+            {loadingMore ? "Loading…" : "Load more"}
+          </button>
+          <span className="text-xs text-ink-faint">
+            Showing {rows.length} of {total}.
+          </span>
+        </div>
       )}
       {canWrite && !busy && (
         <div className="mt-4 flex items-end gap-2">

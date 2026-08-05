@@ -54,24 +54,30 @@ export async function listRecords(slug: string, query = ""): Promise<ListResult>
 }
 
 /**
- * Lists the m2m-associated records of a record:
- * `GET /v1/<ownerSlug>/<id>/<relatedSlug>[?limit=N]`. The server caps the fetch;
- * pass `limit` to preview just the first page and read the true size via
- * `countAssociation`.
+ * Lists a page of the m2m-associated records of a record:
+ * `GET /v1/<ownerSlug>/<id>/<relatedSlug>[?limit=N&cursor=C]`. The server caps
+ * the fetch and returns an opaque `nextCursor` (null on the last page) for
+ * "load more"; read the exact size via `countAssociation`.
  */
 export async function listAssociations(
   ownerSlug: string,
   id: string,
   relatedSlug: string,
-  limit?: number,
-): Promise<ReadonlyArray<Record<string, unknown>>> {
-  const query = limit !== undefined ? `?limit=${limit.toString()}` : "";
-  const suffix = `/${encodeURIComponent(id)}/${relatedSlug}${query}`;
+  opts: { limit?: number; cursor?: string } = {},
+): Promise<{ data: ReadonlyArray<Record<string, unknown>>; nextCursor: string | null }> {
+  const params = new URLSearchParams();
+  if (opts.limit !== undefined) params.set("limit", opts.limit.toString());
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  const qs = params.toString();
+  const suffix = `/${encodeURIComponent(id)}/${relatedSlug}${qs ? `?${qs}` : ""}`;
   const res = await fetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
-  const json = (await res.json()) as { data?: Array<Record<string, unknown>> };
-  return json.data ?? [];
+  const json = (await res.json()) as {
+    data?: Array<Record<string, unknown>>;
+    page?: { nextCursor?: string | null };
+  };
+  return { data: json.data ?? [], nextCursor: json.page?.nextCursor ?? null };
 }
 
 /** The exact number of m2m-linked records: `GET /v1/<ownerSlug>/<id>/<relatedSlug>/count`. */

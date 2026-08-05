@@ -34,10 +34,12 @@ import type { PruneOptions, ServeOptions } from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import {
+  isDanglingLinkPruner,
   relationPairsFromManifest,
   sweepDanglingLinksForTenants,
   type MultiTenantSweepReport,
 } from "./link-sweep.js";
+import { PruneScheduler } from "./prune-scheduler.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
@@ -332,8 +334,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ...schemaOpt,
     });
   }
+  // In-process dangling-link prune sweep: periodically prune every active tenant's orphaned m2m
+  // association links from the JSONB store. Enabled by --prune-links-ms over the JSONB pg store
+  // (the column store's join-table FKs cascade, so it never dangles — hence the pruner guard).
+  let pruneScheduler: PruneScheduler | null = null;
+  if (options.pruneLinksMs !== null && conn !== undefined && isDanglingLinkPruner(store)) {
+    pruneScheduler = new PruneScheduler({
+      pruner: store,
+      pairs: relationPairsFromManifest(manifest),
+      tenantSource: new PostgresTenantSource(conn, schemaOpt),
+      intervalMs: options.pruneLinksMs,
+    });
+  }
   poller?.start();
   jobScheduler?.start();
+  pruneScheduler?.start();
   const listener = createNodeRequestListener(httpServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -348,6 +363,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       new Promise<void>((resolve, reject) => {
         poller?.stop();
         jobScheduler?.stop();
+        pruneScheduler?.stop();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };

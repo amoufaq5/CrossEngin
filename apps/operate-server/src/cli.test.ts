@@ -195,6 +195,33 @@ describe("parseServeArgs", () => {
     ).toThrow(/invalid --schedule-ms/);
   });
 
+  it("parses --prune-links-ms with the JSONB pg store", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--prune-links-ms", "60000"]);
+    expect(opts.pruneLinksMs).toBe(60000);
+  });
+
+  it("defaults --prune-links-ms to null", () => {
+    expect(parseServeArgs(["--pack", "erp-core"]).pruneLinksMs).toBeNull();
+  });
+
+  it("rejects --prune-links-ms with the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--prune-links-ms", "60000"])).toThrow(
+      /requires the JSONB Postgres store/,
+    );
+  });
+
+  it("rejects --prune-links-ms with the pg-columns store", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg-columns", "--prune-links-ms", "60000"]),
+    ).toThrow(/requires the JSONB Postgres store/);
+  });
+
+  it("rejects too-small --prune-links-ms", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--prune-links-ms", "500"]),
+    ).toThrow(/invalid --prune-links-ms/);
+  });
+
   it("parses --emit-entity-events + --event-prefix with a pg store", () => {
     const opts = parseServeArgs([
       "--pack",
