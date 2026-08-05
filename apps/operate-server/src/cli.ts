@@ -306,11 +306,103 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   };
 }
 
+/**
+ * Options for the `prune-links` maintenance subcommand — sweep a tenant's
+ * dangling m2m association links from the JSONB store's `operate_entity_links`
+ * table. Always runs against the JSONB store (the column store's join-table FKs
+ * cascade, so it never dangles), so there is no `--store` flag.
+ */
+export interface PruneOptions {
+  readonly pack: string | null;
+  readonly manifestPath: string | null;
+  readonly schema: string | null;
+  readonly tenantId: string | null;
+  readonly help: boolean;
+}
+
+const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
+
+/**
+ * Parses the argv *after* the `prune-links` subcommand token into
+ * `PruneOptions`. Shares the manifest-source + `--schema` flags with `serve`
+ * and adds a required `--tenant`.
+ */
+export function parsePruneArgs(argv: readonly string[]): PruneOptions {
+  let pack: string | null = null;
+  let manifestPath: string | null = null;
+  let schema: string | null = null;
+  let tenantId: string | null = null;
+  let help = false;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const next = argv[i + 1];
+    const consumed = (): number => (isInline(arg) ? 0 : 1);
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+    } else if (arg === "--pack" || arg.startsWith("--pack=")) {
+      pack = takeValue(arg, next, "--pack");
+      i += consumed();
+    } else if (arg === "--manifest" || arg.startsWith("--manifest=")) {
+      manifestPath = takeValue(arg, next, "--manifest");
+      i += consumed();
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
+      i += consumed();
+    } else if (arg === "--tenant" || arg.startsWith("--tenant=")) {
+      tenantId = takeValue(arg, next, "--tenant");
+      i += consumed();
+    } else {
+      throw new CliUsageError(`unknown argument: ${arg}`);
+    }
+  }
+
+  if (!help) {
+    if (pack === null && manifestPath === null) {
+      throw new CliUsageError("one of --pack or --manifest is required");
+    }
+    if (pack !== null && manifestPath !== null) {
+      throw new CliUsageError("--pack and --manifest are mutually exclusive");
+    }
+    if (tenantId === null) {
+      throw new CliUsageError("prune-links requires --tenant <uuid>");
+    }
+    if (!TENANT_ID_RE.test(tenantId)) {
+      throw new CliUsageError(`invalid --tenant: ${tenantId}`);
+    }
+  }
+
+  return { pack, manifestPath, schema, tenantId, help };
+}
+
+export const pruneHelpText = `operate-server prune-links — remove a tenant's dangling m2m association links
+
+Usage:
+  operate-server prune-links --pack <name> --tenant <uuid> [--schema <name>]
+  operate-server prune-links --manifest <file.json> --tenant <uuid> [--schema <name>]
+
+Sweeps the JSONB store's operate_entity_links table for the tenant, deleting
+links whose left or right record no longer exists (the column store's join-table
+FKs cascade, so this is JSONB-store-only). Reports pruned/kept per relation.
+Uses standard PG* env vars for the connection.
+
+Options:
+  --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
+  --manifest <file>    Path to a resolved manifest JSON document
+  --tenant <uuid>      Tenant to sweep (required)
+  --schema <name>      Postgres schema for the entity store (default meta)
+  --help, -h           Show this help
+`;
+
 export const helpText = `operate-server — serve a resolved CrossEngin manifest as a live multi-tenant API
 
 Usage:
   operate-server --pack <name> [options]
   operate-server --manifest <file.json> [options]
+
+Subcommands:
+  prune-links          Remove a tenant's dangling m2m links (see prune-links --help)
 
 Manifest source (exactly one):
   --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}

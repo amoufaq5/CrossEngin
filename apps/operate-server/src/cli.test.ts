@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CliUsageError, parseServeArgs } from "./cli.js";
+import { CliUsageError, parsePruneArgs, parseServeArgs } from "./cli.js";
 
 describe("parseServeArgs", () => {
   it("parses a pack + port + repeated api-keys", () => {
@@ -348,5 +348,44 @@ describe("parseServeArgs", () => {
       "https://api/",
     ]);
     expect(opts.jwksUrl).toBe("https://idp/.well-known/jwks.json");
+  });
+});
+
+describe("parsePruneArgs", () => {
+  const TENANT = "00000000-0000-4000-8000-000000000001";
+
+  it("parses a pack + tenant + schema", () => {
+    const opts = parsePruneArgs(["--pack", "erp-retail", "--tenant", TENANT, "--schema", "tenant_app"]);
+    expect(opts).toEqual({ pack: "erp-retail", manifestPath: null, schema: "tenant_app", tenantId: TENANT, help: false });
+  });
+
+  it("parses inline --flag=value form and a manifest source", () => {
+    const opts = parsePruneArgs([`--manifest=./m.json`, `--tenant=${TENANT}`]);
+    expect(opts.manifestPath).toBe("./m.json");
+    expect(opts.tenantId).toBe(TENANT);
+    expect(opts.pack).toBeNull();
+  });
+
+  it("requires a tenant", () => {
+    expect(() => parsePruneArgs(["--pack", "erp-retail"])).toThrow(/requires --tenant/);
+  });
+
+  it("requires exactly one manifest source", () => {
+    expect(() => parsePruneArgs(["--tenant", TENANT])).toThrow(/--pack or --manifest is required/);
+    expect(() => parsePruneArgs(["--pack", "x", "--manifest", "m.json", "--tenant", TENANT])).toThrow(
+      /mutually exclusive/,
+    );
+  });
+
+  it("rejects a malformed tenant id", () => {
+    expect(() => parsePruneArgs(["--pack", "erp-retail", "--tenant", "not a uuid!"])).toThrow(/invalid --tenant/);
+  });
+
+  it("rejects an unknown argument", () => {
+    expect(() => parsePruneArgs(["--pack", "x", "--tenant", TENANT, "--bogus"])).toThrow(CliUsageError);
+  });
+
+  it("--help skips required-flag validation", () => {
+    expect(parsePruneArgs(["--help"]).help).toBe(true);
   });
 });

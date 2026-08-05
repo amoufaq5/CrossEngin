@@ -1,14 +1,40 @@
 #!/usr/bin/env node
 
-import { CliUsageError, helpText, parseServeArgs } from "../src/cli.js";
-import { serve } from "../src/node.js";
+import { CliUsageError, helpText, parsePruneArgs, pruneHelpText, parseServeArgs } from "../src/cli.js";
+import { formatSweepReport } from "../src/link-sweep.js";
+import { runPruneLinks, serve } from "../src/node.js";
 
 const CLI_VERSION = "0.0.0";
 
-async function main(): Promise<number> {
+async function runPrune(argv: readonly string[]): Promise<number> {
   let options;
   try {
-    options = parseServeArgs(process.argv.slice(2));
+    options = parsePruneArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${pruneHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(pruneHelpText);
+    return 0;
+  }
+  const report = await runPruneLinks(options);
+  process.stdout.write(formatSweepReport(report));
+  return 0;
+}
+
+async function main(): Promise<number> {
+  const argv = process.argv.slice(2);
+  if (argv[0] === "prune-links") {
+    return runPrune(argv.slice(1));
+  }
+
+  let options;
+  try {
+    options = parseServeArgs(argv);
   } catch (err) {
     if (err instanceof CliUsageError) {
       process.stderr.write(`error: ${err.message}\n\n${helpText}`);
