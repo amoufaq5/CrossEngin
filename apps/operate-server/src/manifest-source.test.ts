@@ -29,9 +29,37 @@ describe("loadBuiltinPack", () => {
     expect((manifest.entities ?? []).map((e) => e.name)).toContain("Invoice");
   });
 
+  it("resolves the government pack against core (Citizen + core Account)", async () => {
+    const manifest = await loadBuiltinPack("erp-government");
+    const entityNames = (manifest.entities ?? []).map((e) => e.name);
+    expect(entityNames).toContain("Citizen");
+    expect(entityNames).toContain("Account");
+    expect(manifest.meta.compliancePacks).toContain("nist-800-53");
+  });
+
+  it("resolves the education pack against core (Student + core Account)", async () => {
+    const manifest = await loadBuiltinPack("erp-education");
+    const entityNames = (manifest.entities ?? []).map((e) => e.name);
+    expect(entityNames).toContain("Student");
+    expect(entityNames).toContain("Enrollment");
+    expect(entityNames).toContain("Account");
+    expect(manifest.meta.compliancePacks).toContain("ferpa");
+  });
+
+  it("resolves the construction pack against core (Subcontractor + core Account)", async () => {
+    const manifest = await loadBuiltinPack("erp-construction");
+    const entityNames = (manifest.entities ?? []).map((e) => e.name);
+    expect(entityNames).toContain("Subcontractor");
+    expect(entityNames).toContain("Account");
+    expect(manifest.meta.compliancePacks).toContain("osha");
+  });
+
   it("lists the built-in pack names", () => {
     expect(BUILTIN_PACK_NAMES).toContain("erp-retail");
     expect(BUILTIN_PACK_NAMES).toContain("erp-grocery");
+    expect(BUILTIN_PACK_NAMES).toContain("erp-government");
+    expect(BUILTIN_PACK_NAMES).toContain("erp-education");
+    expect(BUILTIN_PACK_NAMES).toContain("erp-construction");
   });
 
   it("throws on an unknown pack", async () => {
