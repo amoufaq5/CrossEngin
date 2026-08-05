@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { CliUsageError, helpText, parsePruneArgs, pruneHelpText, parseServeArgs } from "../src/cli.js";
-import { formatSweepReport } from "../src/link-sweep.js";
+import { formatMultiTenantReport } from "../src/link-sweep.js";
 import { runPruneLinks, serve } from "../src/node.js";
 
 const CLI_VERSION = "0.0.0";
@@ -22,7 +22,7 @@ async function runPrune(argv: readonly string[]): Promise<number> {
     return 0;
   }
   const report = await runPruneLinks(options);
-  process.stdout.write(formatSweepReport(report));
+  process.stdout.write(formatMultiTenantReport(report));
   return 0;
 }
 

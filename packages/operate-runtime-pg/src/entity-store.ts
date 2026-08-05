@@ -20,6 +20,12 @@ export interface LinkPruneResult {
   readonly kept: number;
 }
 
+/** Options for `pruneDanglingLinks`. */
+export interface PruneDanglingLinksOptions {
+  /** Report what would be pruned without deleting anything (`pruned` is the would-be count). */
+  readonly dryRun?: boolean;
+}
+
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 
 export interface PostgresEntityStoreOptions {
@@ -266,9 +272,16 @@ export class PostgresEntityStore
    * both sides' surviving record ids, decides via the pure `planLinkPrune`, and
    * deletes the dropped set — all in one tenant-scoped transaction (RLS-confined,
    * so it only ever touches the caller's tenant). Intended for a scheduled
-   * maintenance job iterating the manifest's m2m relations.
+   * maintenance job iterating the manifest's m2m relations. With
+   * `{dryRun: true}` it computes the same plan but deletes nothing (the
+   * transaction is read-only), so `pruned` is the would-be count.
    */
-  async pruneDanglingLinks(tenantId: string, leftEntity: string, rightEntity: string): Promise<LinkPruneResult> {
+  async pruneDanglingLinks(
+    tenantId: string,
+    leftEntity: string,
+    rightEntity: string,
+    opts: PruneDanglingLinksOptions = {},
+  ): Promise<LinkPruneResult> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const linkRows = await tx.query<{ left_id: string; right_id: string }>(
         `SELECT left_id, right_id FROM ${this.linksTable}
@@ -289,12 +302,14 @@ export class PostgresEntityStore
         existingLeftIds,
         existingRightIds,
       });
-      for (const link of plan.drop) {
-        await tx.query(
-          `DELETE FROM ${this.linksTable}
-            WHERE tenant_id = $1 AND left_entity = $2 AND right_entity = $3 AND left_id = $4 AND right_id = $5`,
-          [tenantId, leftEntity, rightEntity, link.leftId, link.rightId],
-        );
+      if (opts.dryRun !== true) {
+        for (const link of plan.drop) {
+          await tx.query(
+            `DELETE FROM ${this.linksTable}
+              WHERE tenant_id = $1 AND left_entity = $2 AND right_entity = $3 AND left_id = $4 AND right_id = $5`,
+            [tenantId, leftEntity, rightEntity, link.leftId, link.rightId],
+          );
+        }
       }
       return { pruned: plan.drop.length, kept: plan.keep.length };
     });

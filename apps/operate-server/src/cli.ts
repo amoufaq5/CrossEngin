@@ -317,6 +317,10 @@ export interface PruneOptions {
   readonly manifestPath: string | null;
   readonly schema: string | null;
   readonly tenantId: string | null;
+  /** Sweep every active tenant from meta.tenants (mutually exclusive with --tenant). */
+  readonly allTenants: boolean;
+  /** Report what would be pruned without deleting anything. */
+  readonly dryRun: boolean;
   readonly help: boolean;
 }
 
@@ -332,6 +336,8 @@ export function parsePruneArgs(argv: readonly string[]): PruneOptions {
   let manifestPath: string | null = null;
   let schema: string | null = null;
   let tenantId: string | null = null;
+  let allTenants = false;
+  let dryRun = false;
   let help = false;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -353,6 +359,10 @@ export function parsePruneArgs(argv: readonly string[]): PruneOptions {
     } else if (arg === "--tenant" || arg.startsWith("--tenant=")) {
       tenantId = takeValue(arg, next, "--tenant");
       i += consumed();
+    } else if (arg === "--all-tenants") {
+      allTenants = true;
+    } else if (arg === "--dry-run") {
+      dryRun = true;
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -365,33 +375,39 @@ export function parsePruneArgs(argv: readonly string[]): PruneOptions {
     if (pack !== null && manifestPath !== null) {
       throw new CliUsageError("--pack and --manifest are mutually exclusive");
     }
-    if (tenantId === null) {
-      throw new CliUsageError("prune-links requires --tenant <uuid>");
+    if (tenantId === null && !allTenants) {
+      throw new CliUsageError("prune-links requires --tenant <uuid> or --all-tenants");
     }
-    if (!TENANT_ID_RE.test(tenantId)) {
+    if (tenantId !== null && allTenants) {
+      throw new CliUsageError("--tenant and --all-tenants are mutually exclusive");
+    }
+    if (tenantId !== null && !TENANT_ID_RE.test(tenantId)) {
       throw new CliUsageError(`invalid --tenant: ${tenantId}`);
     }
   }
 
-  return { pack, manifestPath, schema, tenantId, help };
+  return { pack, manifestPath, schema, tenantId, allTenants, dryRun, help };
 }
 
 export const pruneHelpText = `operate-server prune-links — remove a tenant's dangling m2m association links
 
 Usage:
   operate-server prune-links --pack <name> --tenant <uuid> [--schema <name>]
-  operate-server prune-links --manifest <file.json> --tenant <uuid> [--schema <name>]
+  operate-server prune-links --manifest <file.json> --all-tenants [--dry-run]
 
-Sweeps the JSONB store's operate_entity_links table for the tenant, deleting
-links whose left or right record no longer exists (the column store's join-table
-FKs cascade, so this is JSONB-store-only). Reports pruned/kept per relation.
-Uses standard PG* env vars for the connection.
+Sweeps the JSONB store's operate_entity_links table, deleting links whose left
+or right record no longer exists (the column store's join-table FKs cascade, so
+this is JSONB-store-only). Reports pruned/kept per relation. Uses standard PG*
+env vars for the connection.
 
 Options:
   --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
   --manifest <file>    Path to a resolved manifest JSON document
-  --tenant <uuid>      Tenant to sweep (required)
+  --tenant <uuid>      Tenant to sweep (one of this or --all-tenants)
+  --all-tenants        Sweep every active tenant in meta.tenants
+                       (mutually exclusive with --tenant)
   --schema <name>      Postgres schema for the entity store (default meta)
+  --dry-run            Report what would be pruned without deleting anything
   --help, -h           Show this help
 `;
 
