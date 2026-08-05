@@ -45,6 +45,8 @@ export interface ServeOptions {
   readonly jobInvokeRoles: readonly string[];
   /** Per-action role overrides for job-invoke as `action:role` specs (repeatable). */
   readonly jobInvokeActionRoles: readonly string[];
+  /** Path to a marketplace pack-catalog JSON ({packs:[...]}) — enables the /v1/admin/packs routes (needs pg). */
+  readonly packCatalogFile: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -99,6 +101,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let enableJobInvoke = false;
   const jobInvokeRoles: string[] = [];
   const jobInvokeActionRoles: string[] = [];
+  let packCatalogFile: string | null = null;
   let help = false;
   let version = false;
 
@@ -212,6 +215,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--job-invoke-action-role" || arg.startsWith("--job-invoke-action-role=")) {
       jobInvokeActionRoles.push(takeValue(arg, next, "--job-invoke-action-role"));
       i += consumed();
+    } else if (arg === "--pack-catalog" || arg.startsWith("--pack-catalog=")) {
+      packCatalogFile = takeValue(arg, next, "--pack-catalog");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -270,6 +276,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       throw new CliUsageError(`invalid --job-invoke-action-role: ${spec} (expected action:role)`);
     }
   }
+  if (packCatalogFile !== null && store === "memory") {
+    throw new CliUsageError("--pack-catalog requires a Postgres store (--store pg or pg-columns)");
+  }
 
   if (
     (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
@@ -315,6 +324,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     enableJobInvoke,
     jobInvokeRoles,
     jobInvokeActionRoles,
+    packCatalogFile,
     defaultScheme,
     help,
     version,
@@ -479,6 +489,9 @@ Options:
                        --enable-job-invoke). Omit to allow any authenticated tenant principal
   --job-invoke-action-role <action:role>  Per-action role override (repeatable); an action
                        listed here uses its own roles instead of --job-invoke-role
+  --pack-catalog <file>  Marketplace pack-catalog JSON ({packs:[...]}) — enables the admin pack
+                       routes GET /v1/admin/packs, POST /v1/admin/packs/install,
+                       POST /v1/admin/packs/{id}/uninstall (needs --store pg|pg-columns)
   --help, -h           Show this help
   --version, -v        Print version
 

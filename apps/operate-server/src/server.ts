@@ -5,6 +5,7 @@ import {
   type BillingPortalWiring,
   type EntitlementResolver,
   type EntityStore,
+  type ExtraGatewayRoute,
   type JobInvoker,
   type OperateServer,
   type SequenceAllocator,
@@ -129,6 +130,8 @@ export interface BuildOperateHttpServerOptions {
   readonly jobInvokeRoles?: readonly string[];
   /** Per-action role overrides for the job-invoke route ({action → roles}). */
   readonly jobInvokeActionRoles?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Deployment-injected admin routes (e.g. marketplace pack install), registered ungated. */
+  readonly extraRoutes?: readonly ExtraGatewayRoute[];
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
@@ -167,6 +170,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.jobInvoker !== undefined ? { jobInvoker: options.jobInvoker } : {}),
     ...(options.jobInvokeRoles !== undefined ? { jobInvokeRoles: options.jobInvokeRoles as never } : {}),
     ...(options.jobInvokeActionRoles !== undefined ? { jobInvokeActionRoles: options.jobInvokeActionRoles } : {}),
+    ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

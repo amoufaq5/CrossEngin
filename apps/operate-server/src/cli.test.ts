@@ -204,6 +204,19 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core"]).pruneLinksMs).toBeNull();
   });
 
+  it("parses --pack-catalog with a pg store and defaults it to null", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--store", "pg", "--pack-catalog", "./catalog.json"]).packCatalogFile).toBe(
+      "./catalog.json",
+    );
+    expect(parseServeArgs(["--pack", "erp-core"]).packCatalogFile).toBeNull();
+  });
+
+  it("rejects --pack-catalog with the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--pack-catalog", "./catalog.json"])).toThrow(
+      /requires a Postgres store/,
+    );
+  });
+
   it("rejects --prune-links-ms with the memory store", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--prune-links-ms", "60000"])).toThrow(
       /requires the JSONB Postgres store/,

@@ -8,6 +8,7 @@ export * from "./prune-scheduler.js";
 export * from "./entity-events.js";
 export * from "./job-invoke.js";
 export * from "./link-sweep.js";
+export * from "./marketplace-admin.js";
 export * from "./edge.js";
 export * from "./cli.js";
 export * from "./node.js";

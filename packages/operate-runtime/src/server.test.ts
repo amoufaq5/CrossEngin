@@ -32,7 +32,7 @@ const resolved = await resolveManifest(buildErpRetailPack(), { registry });
 
 const KEYS: Record<string, string> = { "key-cashier": "cashier", "key-manager": "store_manager" };
 
-function makeServer() {
+function makeServer(extra: Partial<Parameters<typeof buildOperateGateway>[1]> = {}) {
   const store = new InMemoryEntityStore();
   const principalResolver = new InMemoryPrincipalResolver();
   for (const role of Object.values(KEYS)) {
@@ -58,6 +58,7 @@ function makeServer() {
     principalResolver,
     opaqueTokenLookup,
     clock: { now: () => new Date("2026-06-03T12:00:00.000Z") },
+    ...extra,
   });
   return { server, store };
 }
@@ -384,5 +385,53 @@ describe("operate-server — plan record-cap enforcement", () => {
       writeReq("POST", "/v1/products", "key-manager", { id: "p1", sku: "S1", name: "Milk", unit_price: 2, unit_cost: 1, status: "active", category: "grocery" }),
     );
     expect(res.response.status).toBe(201);
+  });
+});
+
+describe("operate-server — extraRoutes injection hook", () => {
+  const pingRoute = {
+    id: "rt_custom_ping",
+    operationId: "custom.ping",
+    method: "GET" as const,
+    pathSegments: [
+      { kind: "literal" as const, value: "v1" },
+      { kind: "literal" as const, value: "custom" },
+      { kind: "literal" as const, value: "ping" },
+    ],
+    apiVersion: "v1" as const,
+    isDeprecated: false,
+    deprecatedSince: null,
+    sunsetAt: null,
+    successorOperationId: null,
+    requiredScopes: [],
+    rateLimitPolicyId: null,
+    idempotencyRequired: false,
+    requestSchemaSha256: null,
+    responseSchemaSha256: null,
+  };
+
+  it("registers a deployment-supplied route + handler that the gateway serves", async () => {
+    const { server } = makeServer({
+      extraRoutes: [
+        {
+          route: pingRoute,
+          handler: ({ principal }) => ({
+            kind: "json",
+            status: 200,
+            body: { pong: true, role: principal?.grantedScopes[0] ?? null },
+          }),
+        },
+      ],
+    });
+    const res = await server.runtime.handleRequest(getReq("/v1/custom/ping", "key-manager"));
+    expect(res.response.status).toBe(200);
+    expect(res.execution.routeOperationId).toBe("custom.ping");
+    expect(bodyOf(res.response.bodyBytes)).toEqual({ pong: true, role: "store_manager" });
+  });
+
+  it("does not register the route when no extraRoutes are supplied", async () => {
+    const { server } = makeServer();
+    const res = await server.runtime.handleRequest(getReq("/v1/custom/ping", "key-manager"));
+    expect(res.response.status).toBe(404);
   });
 });
