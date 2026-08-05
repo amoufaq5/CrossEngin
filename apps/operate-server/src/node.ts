@@ -43,11 +43,14 @@ import { PruneScheduler } from "./prune-scheduler.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
+  buildPrincipalWiring,
   parseApiKeySpec,
   parseJwksKeySpec,
   type JwksKeySpec,
   type JwtVerifyConfig,
 } from "./principals.js";
+import { PersistentMarketplaceInstallEngine, PostgresInstallationStore } from "@crossengin/marketplace-runtime-pg";
+import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
@@ -297,12 +300,33 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           buildActionRoleMap(options.jobInvokeActionRoles),
         )
       : new Map<string, ReadonlySet<string>>();
+  // Marketplace admin: the /v1/admin/packs routes install/list/uninstall catalog packs per tenant via
+  // the persistent install engine. Enabled by --pack-catalog over a pg store (needs the conn for the
+  // installation store). The tenant context is a deployment default; per-tenant plan/region is a follow-up.
+  const extraRoutes =
+    options.packCatalogFile !== null && conn !== undefined
+      ? buildMarketplaceAdminRoutes({
+          engine: new PersistentMarketplaceInstallEngine(new PostgresInstallationStore(conn, schemaOpt)),
+          store: new PostgresInstallationStore(conn, schemaOpt),
+          catalog: loadPackCatalog(await readFile(options.packCatalogFile, "utf8")),
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          adminRoles: new Set(["erp_admin"]),
+          tenantContext: {
+            platformVersion: "1.0.0",
+            region: "us-east",
+            planTier: "professional",
+            compliancePacks: [],
+            isDedicatedTenant: false,
+          },
+        })
+      : undefined;
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
     apiKeys,
     allocator,
     settingsStore,
+    ...(extraRoutes !== undefined ? { extraRoutes } : {}),
     ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
     ...(webhookRoute !== undefined ? { webhookRoute } : {}),
     ...(billingPortal !== undefined ? { billingPortal } : {}),

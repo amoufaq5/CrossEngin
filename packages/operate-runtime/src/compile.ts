@@ -11,6 +11,7 @@ import {
   InMemoryRouteRegistry,
   MapRedactionRegistry,
   redactionRegistryFromManifest,
+  type Handler,
   type IdempotencyStore,
   type JwksProvider,
   type OpaqueTokenLookup,
@@ -121,7 +122,19 @@ export interface OperateRuntimeOptions {
    * uses its own role set instead of `jobInvokeRoles`; actions absent fall back to `jobInvokeRoles`.
    */
   readonly jobInvokeActionRoles?: ReadonlyMap<string, ReadonlySet<string>>;
+  /**
+   * Extra gateway routes registered as-is, ungated (the handler self-authorizes) — the seam a
+   * deployment uses to inject an admin surface this package has no domain knowledge of (e.g.
+   * marketplace pack install). Registered after the built-in routes.
+   */
+  readonly extraRoutes?: readonly ExtraGatewayRoute[];
   readonly clock?: { now(): Date };
+}
+
+/** A deployment-supplied gateway route + handler injected via `extraRoutes`. */
+export interface ExtraGatewayRoute {
+  readonly route: RouteDefinition;
+  readonly handler: Handler;
 }
 
 export interface BillingPortalWiring {
@@ -576,6 +589,13 @@ export function compileOperateServer(
     routes.register(literalRoute("admin.settings.update", "PUT", ["v1", "admin", "settings"]));
     handlers.register("admin.settings.read", buildAdminSettingsReadHandler(adminCtx));
     handlers.register("admin.settings.update", buildAdminSettingsUpdateHandler(adminCtx));
+  }
+
+  // Deployment-injected admin routes (e.g. marketplace pack install) — registered ungated; each
+  // handler self-authorizes. The runtime treats them as opaque, so it needs no domain knowledge.
+  for (const extra of options.extraRoutes ?? []) {
+    routes.register(extra.route);
+    handlers.register(extra.route.operationId, extra.handler);
   }
 
   // The caller tenant's own subscription/plan state, when a resolver is wired. Registered

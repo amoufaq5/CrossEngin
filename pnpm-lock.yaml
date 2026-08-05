@@ -90,6 +90,15 @@ importers:
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../../packages/kernel-pg
+      '@crossengin/marketplace':
+        specifier: workspace:*
+        version: link:../../packages/marketplace
+      '@crossengin/marketplace-runtime':
+        specifier: workspace:*
+        version: link:../../packages/marketplace-runtime
+      '@crossengin/marketplace-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/marketplace-runtime-pg
       '@crossengin/operate-runtime':
         specifier: workspace:*
         version: link:../../packages/operate-runtime
