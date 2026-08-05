@@ -53,18 +53,35 @@ export async function listRecords(slug: string, query = ""): Promise<ListResult>
   return { data: obj.data ?? [], nextCursor: obj.page?.nextCursor ?? null };
 }
 
-/** Lists the m2m-associated records of a record: `GET /v1/<ownerSlug>/<id>/<relatedSlug>`. */
+/**
+ * Lists the m2m-associated records of a record:
+ * `GET /v1/<ownerSlug>/<id>/<relatedSlug>[?limit=N]`. The server caps the fetch;
+ * pass `limit` to preview just the first page and read the true size via
+ * `countAssociation`.
+ */
 export async function listAssociations(
   ownerSlug: string,
   id: string,
   relatedSlug: string,
+  limit?: number,
 ): Promise<ReadonlyArray<Record<string, unknown>>> {
-  const suffix = `/${encodeURIComponent(id)}/${relatedSlug}`;
+  const query = limit !== undefined ? `?limit=${limit.toString()}` : "";
+  const suffix = `/${encodeURIComponent(id)}/${relatedSlug}${query}`;
   const res = await fetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   const json = (await res.json()) as { data?: Array<Record<string, unknown>> };
   return json.data ?? [];
+}
+
+/** The exact number of m2m-linked records: `GET /v1/<ownerSlug>/<id>/<relatedSlug>/count`. */
+export async function countAssociation(ownerSlug: string, id: string, relatedSlug: string): Promise<number> {
+  const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/count`;
+  const res = await fetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
+  await checkResponse(res);
+  if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
+  const json = (await res.json()) as { count?: number };
+  return json.count ?? 0;
 }
 
 /** Links a related record via a m2m relation: `PUT /v1/<ownerSlug>/<id>/<relatedSlug>/<relatedId>`. */
