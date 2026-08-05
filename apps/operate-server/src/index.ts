@@ -4,6 +4,7 @@ export * from "./jwks.js";
 export * from "./manifest-source.js";
 export * from "./server.js";
 export * from "./scheduler.js";
+export * from "./prune-scheduler.js";
 export * from "./entity-events.js";
 export * from "./job-invoke.js";
 export * from "./link-sweep.js";

@@ -21,6 +21,20 @@ function parseAssocLimit(query: Readonly<Record<string, string | readonly string
 }
 
 /**
+ * Parses an association list's `?cursor` — a zero-based offset into the owner's
+ * link list, produced by the previous page's `nextCursor`. Non-numeric or
+ * negative values reset to 0, so a stale/forged cursor is safe (it just starts
+ * over rather than erroring).
+ */
+function parseAssocCursor(query: Readonly<Record<string, string | readonly string[]>> | undefined): number {
+  const raw = query?.["cursor"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) return 0;
+  return n;
+}
+
+/**
  * The read side of the `many_to_many` association API — lists the join-table link pairs for a
  * relation, optionally narrowed to one side. A store gains association support by implementing this
  * (the column-mapped store does); other stores don't, and the route reports it unsupported rather than
@@ -199,13 +213,18 @@ export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: Ass
       spec.right,
       spec.ownerIsLeft ? { leftId: ownerId } : { rightId: ownerId },
     );
-    // Cap how many linked records we fetch — the panel previews the first page; the exact
-    // total comes from the sibling `…/count` route. Prevents an unbounded fan-out of `get`s.
-    const limit = parseAssocLimit(request.query as Readonly<Record<string, string | readonly string[]>> | undefined);
-    const relatedIds = links.map((l) => (spec.ownerIsLeft ? l.rightId : l.leftId)).slice(0, limit);
-    const records = await Promise.all(relatedIds.map((id) => ctx.store.get(tenantId, spec.relatedEntity, id)));
+    // Page the linked records: `?limit` caps the fetch, `?cursor` is a zero-based offset into
+    // the owner's links. The exact total comes from the sibling `…/count` route. Prevents an
+    // unbounded fan-out of `get`s and lets the panel "load more" without refetching the page.
+    const query = request.query as Readonly<Record<string, string | readonly string[]>> | undefined;
+    const limit = parseAssocLimit(query);
+    const offset = parseAssocCursor(query);
+    const allIds = links.map((l) => (spec.ownerIsLeft ? l.rightId : l.leftId));
+    const pageIds = allIds.slice(offset, offset + limit);
+    const records = await Promise.all(pageIds.map((id) => ctx.store.get(tenantId, spec.relatedEntity, id)));
     const data = records.filter((r): r is EntityRecord => r !== null);
-    return json(200, { data });
+    const nextCursor = offset + limit < allIds.length ? String(offset + limit) : null;
+    return json(200, { data, page: { limit, nextCursor } });
   };
 }
 

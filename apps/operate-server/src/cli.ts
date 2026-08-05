@@ -33,6 +33,8 @@ export interface ServeOptions {
   readonly scheduleTenants: readonly string[];
   /** Fire the cron scheduler for every active tenant in meta.tenants (DB-backed source). */
   readonly scheduleAllTenants: boolean;
+  /** Dangling-link prune sweep interval (ms) — periodically prunes every active tenant's dangling m2m links (needs --store pg). */
+  readonly pruneLinksMs: number | null;
   /** Emit an entity-write event per create/update/delete/transition → event-triggered jobs (needs pg). */
   readonly emitEntityEvents: boolean;
   /** Optional namespace prefix for emitted entity-event names (e.g. `retail`). */
@@ -91,6 +93,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let scheduleMs: number | null = null;
   const scheduleTenants: string[] = [];
   let scheduleAllTenants = false;
+  let pruneLinksMs: number | null = null;
   let emitEntityEvents = false;
   let eventPrefix: string | null = null;
   let enableJobInvoke = false;
@@ -190,6 +193,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--schedule-all-tenants") {
       scheduleAllTenants = true;
+    } else if (arg === "--prune-links-ms" || arg.startsWith("--prune-links-ms=")) {
+      const raw = takeValue(arg, next, "--prune-links-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --prune-links-ms: ${raw} (>= 1000)`);
+      pruneLinksMs = n;
+      i += consumed();
     } else if (arg === "--emit-entity-events") {
       emitEntityEvents = true;
     } else if (arg === "--event-prefix" || arg.startsWith("--event-prefix=")) {
@@ -234,6 +243,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if ((scheduleTenants.length > 0 || scheduleAllTenants) && scheduleMs === null) {
     throw new CliUsageError("--schedule-tenant / --schedule-all-tenants require --schedule-ms (the tick interval)");
+  }
+  if (pruneLinksMs !== null && store !== "pg") {
+    throw new CliUsageError(
+      "--prune-links-ms requires the JSONB Postgres store (--store pg); the column store cascades and can't dangle",
+    );
   }
   if (emitEntityEvents && store === "memory") {
     throw new CliUsageError("--emit-entity-events requires a Postgres store (--store pg or pg-columns)");
@@ -295,6 +309,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     scheduleMs,
     scheduleTenants,
     scheduleAllTenants,
+    pruneLinksMs,
     emitEntityEvents,
     eventPrefix,
     enableJobInvoke,
@@ -453,6 +468,8 @@ Options:
                        or --schedule-all-tenants is required with --schedule-ms)
   --schedule-all-tenants  Fire the scheduler for every active tenant in meta.tenants
                        (DB-backed; mutually exclusive with --schedule-tenant)
+  --prune-links-ms <n>  Dangling-link prune sweep interval (ms, >=1000) — periodically
+                       prunes every active tenant's dangling m2m links (needs --store pg)
   --emit-entity-events  Emit a domain event per entity create/update/delete/transition,
                        firing event-triggered jobs into job_runs (needs --store pg|pg-columns)
   --event-prefix <p>   Namespace prefix for emitted event names (with --emit-entity-events)

@@ -205,8 +205,34 @@ describe("buildAssociationListHandler", () => {
         parsedBody: null,
       }),
     );
-    const data = out.kind === "json" ? (out.body as { data: unknown[] }).data : [];
-    expect(data).toEqual([{ id: "prod-a" }, { id: "prod-b" }]);
+    const body = out.kind === "json" ? (out.body as { data: unknown[]; page: { nextCursor: string | null } }) : null;
+    expect(body?.data).toEqual([{ id: "prod-a" }, { id: "prod-b" }]);
+    // A third link remains, so the page advertises a next cursor at offset 2.
+    expect(body?.page.nextCursor).toBe("2");
+  });
+
+  it("advances past a ?cursor and clears nextCursor on the last page", async () => {
+    const store = new FakeStore();
+    store.links = [
+      { leftId: "tag-1", rightId: "prod-a" },
+      { leftId: "tag-1", rightId: "prod-b" },
+      { leftId: "tag-1", rightId: "prod-c" },
+    ];
+    store.seed("Product", "prod-c", { id: "prod-c" });
+    const ctx: AssociationHandlerContext = { store, permissions, roles, principalRoles };
+    const handler = buildAssociationListHandler(spec, ctx);
+    const out = await Promise.resolve(
+      handler({
+        request: { query: { limit: "2", cursor: "2" } } as never,
+        route: {} as never,
+        principal: principal("viewer"),
+        params: { id: "tag-1" },
+        parsedBody: null,
+      }),
+    );
+    const body = out.kind === "json" ? (out.body as { data: unknown[]; page: { nextCursor: string | null } }) : null;
+    expect(body?.data).toEqual([{ id: "prod-c" }]);
+    expect(body?.page.nextCursor).toBeNull();
   });
 
   it("skips a link whose related record was deleted (get returns null)", async () => {
