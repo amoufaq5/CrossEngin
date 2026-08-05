@@ -356,7 +356,30 @@ describe("parsePruneArgs", () => {
 
   it("parses a pack + tenant + schema", () => {
     const opts = parsePruneArgs(["--pack", "erp-retail", "--tenant", TENANT, "--schema", "tenant_app"]);
-    expect(opts).toEqual({ pack: "erp-retail", manifestPath: null, schema: "tenant_app", tenantId: TENANT, help: false });
+    expect(opts).toEqual({
+      pack: "erp-retail",
+      manifestPath: null,
+      schema: "tenant_app",
+      tenantId: TENANT,
+      allTenants: false,
+      dryRun: false,
+      help: false,
+    });
+  });
+
+  it("parses --all-tenants + --dry-run", () => {
+    const opts = parsePruneArgs(["--pack", "erp-retail", "--all-tenants", "--dry-run"]);
+    expect(opts.allTenants).toBe(true);
+    expect(opts.dryRun).toBe(true);
+    expect(opts.tenantId).toBeNull();
+  });
+
+  it("requires --tenant or --all-tenants", () => {
+    expect(() => parsePruneArgs(["--pack", "erp-retail"])).toThrow(/--tenant <uuid> or --all-tenants/);
+  });
+
+  it("rejects --tenant + --all-tenants together", () => {
+    expect(() => parsePruneArgs(["--pack", "x", "--tenant", TENANT, "--all-tenants"])).toThrow(/mutually exclusive/);
   });
 
   it("parses inline --flag=value form and a manifest source", () => {

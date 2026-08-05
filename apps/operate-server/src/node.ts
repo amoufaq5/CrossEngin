@@ -33,7 +33,11 @@ import {
 import type { PruneOptions, ServeOptions } from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
-import { relationPairsFromManifest, sweepDanglingLinks, type SweepReport } from "./link-sweep.js";
+import {
+  relationPairsFromManifest,
+  sweepDanglingLinksForTenants,
+  type MultiTenantSweepReport,
+} from "./link-sweep.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
@@ -356,9 +360,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
  * JSONB store — the column store never dangles. Closes the connection before
  * returning the aggregated `SweepReport`.
  */
-export async function runPruneLinks(options: PruneOptions): Promise<SweepReport> {
-  if (options.tenantId === null) {
-    throw new Error("prune-links requires a tenant id");
+export async function runPruneLinks(options: PruneOptions): Promise<MultiTenantSweepReport> {
+  if (options.tenantId === null && !options.allTenants) {
+    throw new Error("prune-links requires a tenant id or --all-tenants");
   }
   const manifest =
     options.manifestPath !== null
@@ -368,7 +372,13 @@ export async function runPruneLinks(options: PruneOptions): Promise<SweepReport>
   try {
     const store = new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
     const pairs = relationPairsFromManifest(manifest);
-    return await sweepDanglingLinks(store, pairs, options.tenantId);
+    const tenantIds = options.allTenants
+      ? await new PostgresTenantSource(
+          conn,
+          options.schema !== null ? { schema: options.schema } : {},
+        ).activeTenantIds()
+      : [options.tenantId ?? ""];
+    return await sweepDanglingLinksForTenants(store, pairs, tenantIds, { dryRun: options.dryRun });
   } finally {
     await conn.close();
   }

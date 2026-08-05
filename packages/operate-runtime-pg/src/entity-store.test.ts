@@ -530,6 +530,18 @@ describe("PostgresEntityStore.pruneDanglingLinks", () => {
     expect(remainingLinks().map((l) => `${l.left_id}/${l.right_id}`).sort()).toEqual(["p1/t1", "p1/t2"]);
   });
 
+  it("dry-run reports the would-be prune count without deleting", async () => {
+    const { conn, remainingLinks } = fakePrunePg({
+      links: [link("p1", "t1"), link("pX", "t1"), link("p1", "tX")],
+      records: [rec("Product", "p1"), rec("Tag", "t1")],
+    });
+    const store = new PostgresEntityStore(conn);
+    const result = await store.pruneDanglingLinks(TENANT, "Product", "Tag", { dryRun: true });
+    expect(result).toEqual({ pruned: 2, kept: 1 });
+    // Nothing was actually deleted.
+    expect(remainingLinks()).toHaveLength(3);
+  });
+
   it("is a no-op when every link's endpoints exist", async () => {
     const { conn, remainingLinks } = fakePrunePg({
       links: [link("p1", "t1"), link("p2", "t2")],
