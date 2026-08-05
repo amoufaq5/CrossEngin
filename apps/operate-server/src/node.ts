@@ -30,9 +30,10 @@ import {
   ingestStripeWebhook,
 } from "@crossengin/operate-runtime-pg";
 
-import type { ServeOptions } from "./cli.js";
+import type { PruneOptions, ServeOptions } from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
+import { relationPairsFromManifest, sweepDanglingLinks, type SweepReport } from "./link-sweep.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
@@ -346,4 +347,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
+}
+
+/**
+ * Runs the `prune-links` maintenance sweep: loads the manifest, opens a Postgres
+ * connection (standard PG* env vars), builds a JSONB `PostgresEntityStore`, and
+ * prunes every m2m relation's dangling links for the given tenant. Always the
+ * JSONB store — the column store never dangles. Closes the connection before
+ * returning the aggregated `SweepReport`.
+ */
+export async function runPruneLinks(options: PruneOptions): Promise<SweepReport> {
+  if (options.tenantId === null) {
+    throw new Error("prune-links requires a tenant id");
+  }
+  const manifest =
+    options.manifestPath !== null
+      ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
+      : await loadBuiltinPack(options.pack ?? "");
+  const conn = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const store = new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
+    const pairs = relationPairsFromManifest(manifest);
+    return await sweepDanglingLinks(store, pairs, options.tenantId);
+  } finally {
+    await conn.close();
+  }
 }
