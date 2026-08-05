@@ -3,8 +3,22 @@ import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengi
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
+import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from "./list-query.js";
 import { entityCamel, resourceSlug, routeId } from "./slugs.js";
 import type { EntityRecord, EntityStore } from "./store.js";
+
+/**
+ * Parses an association list's `?limit` — the cap on how many linked records to
+ * fetch. Clamped to `MAX_PAGE_SIZE`, defaulting to `DEFAULT_PAGE_SIZE`. A caller
+ * that wants the exact total uses the sibling `…/count` route (unbounded).
+ */
+function parseAssocLimit(query: Readonly<Record<string, string | readonly string[]>> | undefined): number {
+  const raw = query?.["limit"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return DEFAULT_PAGE_SIZE;
+  return Math.min(n, MAX_PAGE_SIZE);
+}
 
 /**
  * The read side of the `many_to_many` association API — lists the join-table link pairs for a
@@ -161,7 +175,7 @@ function authPrincipal(resolved: ResolvedPrincipal | null, principalRoles: Assoc
  * empty list, so the caller can tell "no support" from "no links".
  */
 export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: AssociationHandlerContext): Handler {
-  return async ({ principal, params }) => {
+  return async ({ request, principal, params }) => {
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
 
@@ -185,7 +199,10 @@ export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: Ass
       spec.right,
       spec.ownerIsLeft ? { leftId: ownerId } : { rightId: ownerId },
     );
-    const relatedIds = links.map((l) => (spec.ownerIsLeft ? l.rightId : l.leftId));
+    // Cap how many linked records we fetch — the panel previews the first page; the exact
+    // total comes from the sibling `…/count` route. Prevents an unbounded fan-out of `get`s.
+    const limit = parseAssocLimit(request.query as Readonly<Record<string, string | readonly string[]>> | undefined);
+    const relatedIds = links.map((l) => (spec.ownerIsLeft ? l.rightId : l.leftId)).slice(0, limit);
     const records = await Promise.all(relatedIds.map((id) => ctx.store.get(tenantId, spec.relatedEntity, id)));
     const data = records.filter((r): r is EntityRecord => r !== null);
     return json(200, { data });

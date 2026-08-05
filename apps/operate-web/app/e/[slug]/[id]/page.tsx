@@ -9,6 +9,7 @@ import { FieldInput } from "@/components/FieldInput";
 import { ReferenceLabel } from "@/components/ReferenceLabel";
 import { Topbar } from "@/components/Topbar";
 import {
+  countAssociation,
   deleteRecord,
   getRecord,
   linkAssociation,
@@ -462,6 +463,7 @@ function AssociatedRecords({
 }) {
   const related = entityByName(schema, assoc.relatedEntity);
   const [rows, setRows] = useState<ReadonlyArray<Record<string, unknown>>>([]);
+  const [total, setTotal] = useState(0);
   const [busy, setBusy] = useState(true);
   const [failed, setFailed] = useState(false);
   const [picked, setPicked] = useState("");
@@ -470,13 +472,19 @@ function AssociatedRecords({
   // Managing a record's associations is part of updating it → gate on owner-update access.
   const canWrite = canAccess(schema, owner, "update");
 
+  const PREVIEW = 8;
   const columns = (related?.listColumns ?? ["id"]).slice(0, 4);
   const columnLabel = (name: string): string => related?.fields.find((f) => f.name === name)?.label ?? name;
 
   const reload = useCallback(async () => {
     try {
-      const data = await listAssociations(owner.slug, parentId, assoc.relatedSlug);
+      // Preview the first page of records; the count route gives the true total (server caps the list).
+      const [data, count] = await Promise.all([
+        listAssociations(owner.slug, parentId, assoc.relatedSlug, PREVIEW),
+        countAssociation(owner.slug, parentId, assoc.relatedSlug),
+      ]);
       setRows(data);
+      setTotal(count);
       setFailed(false);
     } catch {
       // A store without association support (501) or any error → hide the panel entirely.
@@ -516,14 +524,17 @@ function AssociatedRecords({
     if (writing) return;
     setWriting(true);
     setWriteError(null);
-    // Optimistic: drop the row immediately, restore it if the server rejects the unlink.
-    const prev = rows;
+    // Optimistic: drop the row + decrement the total immediately, restore both if the server rejects.
+    const prevRows = rows;
+    const prevTotal = total;
     setRows((rs) => rs.filter((r) => String(r["id"] ?? "") !== relatedId));
+    setTotal((t) => Math.max(0, t - 1));
     try {
       await unlinkAssociation(owner.slug, parentId, assoc.relatedSlug, relatedId);
       await reload();
     } catch (e) {
-      setRows(prev);
+      setRows(prevRows);
+      setTotal(prevTotal);
       setWriteError(e instanceof Error ? e.message : String(e));
     } finally {
       setWriting(false);
@@ -531,7 +542,7 @@ function AssociatedRecords({
   }
 
   if (failed) return null;
-  if (!busy && rows.length === 0 && !canWrite) return null;
+  if (!busy && total === 0 && !canWrite) return null;
 
   return (
     <section className="mt-6 rounded-xl border border-line bg-white p-6">
@@ -539,7 +550,7 @@ function AssociatedRecords({
         <span>
           {assoc.relatedLabel} <span className="font-normal text-ink-faint">linked</span>
         </span>
-        {!busy && rows.length > 0 && <CountBadge label={String(rows.length)} />}
+        {!busy && total > 0 && <CountBadge label={String(total)} />}
       </h2>
       {busy ? (
         <p className="text-sm text-ink-muted">Loading…</p>
@@ -599,6 +610,11 @@ function AssociatedRecords({
             </tbody>
           </table>
         </div>
+      )}
+      {!busy && total > rows.length && (
+        <p className="mt-2 text-xs text-ink-faint">
+          Showing {rows.length} of {total}.
+        </p>
       )}
       {canWrite && !busy && (
         <div className="mt-4 flex items-end gap-2">

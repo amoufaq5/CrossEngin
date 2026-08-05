@@ -184,6 +184,31 @@ describe("buildAssociationListHandler", () => {
     expect(store.lastListLinks).toEqual({ left: "Tag", right: "Product", opts: { leftId: "tag-1" } });
   });
 
+  it("caps the fetched related records at ?limit", async () => {
+    const store = new FakeStore();
+    store.links = [
+      { leftId: "tag-1", rightId: "prod-a" },
+      { leftId: "tag-1", rightId: "prod-b" },
+      { leftId: "tag-1", rightId: "prod-c" },
+    ];
+    store.seed("Product", "prod-a", { id: "prod-a" });
+    store.seed("Product", "prod-b", { id: "prod-b" });
+    store.seed("Product", "prod-c", { id: "prod-c" });
+    const ctx: AssociationHandlerContext = { store, permissions, roles, principalRoles };
+    const handler = buildAssociationListHandler(spec, ctx);
+    const out = await Promise.resolve(
+      handler({
+        request: { query: { limit: "2" } } as never,
+        route: {} as never,
+        principal: principal("viewer"),
+        params: { id: "tag-1" },
+        parsedBody: null,
+      }),
+    );
+    const data = out.kind === "json" ? (out.body as { data: unknown[] }).data : [];
+    expect(data).toEqual([{ id: "prod-a" }, { id: "prod-b" }]);
+  });
+
   it("skips a link whose related record was deleted (get returns null)", async () => {
     const store = new FakeStore();
     store.links = [{ leftId: "tag-1", rightId: "gone" }];
