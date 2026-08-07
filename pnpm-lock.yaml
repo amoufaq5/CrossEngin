@@ -126,6 +126,12 @@ importers:
       '@crossengin/pack-erp-retail':
         specifier: workspace:*
         version: link:../../packages/pack-erp-retail
+      '@crossengin/residency':
+        specifier: workspace:*
+        version: link:../../packages/residency
+      '@crossengin/residency-runtime':
+        specifier: workspace:*
+        version: link:../../packages/residency-runtime
       '@crossengin/workflow-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/workflow-runtime-pg

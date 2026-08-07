@@ -1,5 +1,7 @@
 import type { ForwardedProto, HttpMethod } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
+import type { Region } from "@crossengin/residency";
+import { decideRegionRouting, type TenantResidencyDirectory } from "@crossengin/residency-runtime";
 import {
   buildOperateGateway,
   type BillingPortalWiring,
@@ -33,15 +35,31 @@ export interface WebhookRoute {
   handle(body: Uint8Array | null, headers: RawHttpRequest["headers"]): Promise<RawHttpResponse>;
 }
 
+/**
+ * Data-residency edge routing: this instance's `region` + a tenant→profile
+ * directory. Before dispatch, a request carrying a tenant hint whose profile
+ * forbids `region` is redirected to the tenant's home region (or denied), so a
+ * tenant's data is only ever served from a residency-compatible region.
+ */
+export interface RegionGuardConfig {
+  readonly region: Region;
+  readonly directory: TenantResidencyDirectory;
+  /** Header carrying the tenant hint used for pre-auth routing (default `x-tenant-id`). */
+  readonly tenantHeader?: string;
+}
+
 export interface OperateHttpServerOptions {
   readonly gateway: OperateServer;
   readonly webhookRoute?: WebhookRoute;
+  readonly regionGuard?: RegionGuardConfig;
   readonly defaultScheme?: ForwardedProto;
   readonly idGenerator?: () => string;
   readonly now?: () => Date;
 }
 
 const METHOD_NOT_ALLOWED_TYPE = "https://crossengin.io/problems/method-not-allowed";
+const MISDIRECTED_REGION_TYPE = "https://crossengin.io/problems/misdirected-region";
+const RESIDENCY_VIOLATION_TYPE = "https://crossengin.io/problems/residency-violation";
 
 /**
  * The framework-agnostic serving core: turns a `RawHttpRequest` + body into a
@@ -53,6 +71,7 @@ const METHOD_NOT_ALLOWED_TYPE = "https://crossengin.io/problems/method-not-allow
 export class OperateHttpServer {
   private readonly gateway: OperateServer;
   private readonly webhookRoute: WebhookRoute | null;
+  private readonly regionGuard: RegionGuardConfig | null;
   private readonly scheme: ForwardedProto;
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
@@ -60,6 +79,7 @@ export class OperateHttpServer {
   constructor(opts: OperateHttpServerOptions) {
     this.gateway = opts.gateway;
     this.webhookRoute = opts.webhookRoute ?? null;
+    this.regionGuard = opts.regionGuard ?? null;
     this.scheme = opts.defaultScheme ?? "http";
     this.idGenerator = opts.idGenerator ?? defaultRequestId;
     this.now = opts.now ?? (() => new Date());
@@ -74,6 +94,9 @@ export class OperateHttpServer {
     if (this.webhookRoute !== null && method === this.webhookRoute.method && splitTarget(raw.url).path === this.webhookRoute.path) {
       return this.webhookRoute.handle(body, raw.headers);
     }
+    // Data-residency edge routing (pre-auth): route/deny by the request's tenant hint before dispatch.
+    const residency = await this.checkResidency(raw);
+    if (residency !== null) return residency;
     const forwardedProto = headerScheme(raw) ?? this.scheme;
     const incoming = rawToIncoming(raw, body, {
       method,
@@ -84,6 +107,42 @@ export class OperateHttpServer {
     const { response } = await this.gateway.runtime.handleRequest(incoming);
     return { status: response.status, headers: { ...response.headers }, body: response.bodyBytes };
   }
+
+  /**
+   * Residency edge decision for a request. Uses the (unverified) tenant hint header only to *route*
+   * (redirect to the tenant's home region) or *deny* a forbidden region — never to grant access, so a
+   * spoofed hint can at worst misdirect the attacker's own request. A tenant with no residency profile
+   * is unconstrained (returns null → dispatch proceeds); the gateway still authenticates authoritatively.
+   */
+  private async checkResidency(raw: RawHttpRequest): Promise<RawHttpResponse | null> {
+    if (this.regionGuard === null) return null;
+    const header = this.regionGuard.tenantHeader ?? "x-tenant-id";
+    const raw0 = raw.headers[header];
+    const hint = Array.isArray(raw0) ? raw0[0] : raw0;
+    if (hint === undefined || hint === "") return null;
+    const profile = await this.regionGuard.directory.resolve(hint);
+    if (profile === null) return null;
+    const decision = decideRegionRouting(profile, this.regionGuard.region);
+    if (decision.action === "redirect") {
+      return regionProblem(421, MISDIRECTED_REGION_TYPE, "Misdirected region", decision.reason, decision.region);
+    }
+    if (decision.action === "deny") {
+      return regionProblem(403, RESIDENCY_VIOLATION_TYPE, "Residency violation", decision.reason, null);
+    }
+    return null;
+  }
+}
+
+/** A residency problem doc carrying the correct region (as a header + an extension). */
+function regionProblem(status: number, type: string, title: string, detail: string, correctRegion: Region | null): RawHttpResponse {
+  const extensions = correctRegion !== null ? { correctRegion } : {};
+  const bodyBytes = new TextEncoder().encode(JSON.stringify({ type, title, status, detail, extensions }));
+  const headers: Record<string, string> = {
+    "content-type": "application/problem+json",
+    "content-length": bodyBytes.byteLength.toString(),
+  };
+  if (correctRegion !== null) headers["x-crossengin-region"] = correctRegion;
+  return { status, headers, body: bodyBytes };
 }
 
 function headerScheme(raw: RawHttpRequest): ForwardedProto | null {
@@ -122,6 +181,8 @@ export interface BuildOperateHttpServerOptions {
   readonly billingPortal?: BillingPortalWiring;
   /** Optional signature-authenticated webhook route handled ahead of the gateway. */
   readonly webhookRoute?: WebhookRoute;
+  /** Optional data-residency edge guard: routes/denies by tenant home region before dispatch. */
+  readonly regionGuard?: RegionGuardConfig;
   /** Extra after-write effects appended to the defaults (e.g. entity-event → job emission). */
   readonly additionalWriteEffects?: readonly WriteEffect[];
   /** Optional on-demand job invocation route (POST /v1/meta/jobs/invoke). */
@@ -176,6 +237,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   const httpServer = new OperateHttpServer({
     gateway,
     ...(options.webhookRoute !== undefined ? { webhookRoute: options.webhookRoute } : {}),
+    ...(options.regionGuard !== undefined ? { regionGuard: options.regionGuard } : {}),
     ...(options.defaultScheme !== undefined ? { defaultScheme: options.defaultScheme } : {}),
     ...(options.idGenerator !== undefined ? { idGenerator: options.idGenerator } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),

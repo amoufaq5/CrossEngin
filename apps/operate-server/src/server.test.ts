@@ -1,5 +1,7 @@
 import { generateEd25519Keypair } from "@crossengin/crypto";
 import { InMemoryEntityStore, LicenseEntitlementResolver, signLicense } from "@crossengin/operate-runtime";
+import { buildProfileFromTemplate } from "@crossengin/residency";
+import { InMemoryTenantResidencyDirectory } from "@crossengin/residency-runtime";
 import { describe, expect, it } from "vitest";
 
 import type { RawHttpRequest } from "./http.js";
@@ -245,5 +247,58 @@ describe("OperateHttpServer — webhook route (signature-authenticated, bypasses
     const res = await httpServer.dispatch(req("GET", "/v1/webhooks/stripe", "key-manager"), null);
     expect(calls).toHaveLength(0); // webhook is POST-only
     expect(res.status).not.toBe(200); // no such gateway route → 4xx
+  });
+});
+
+describe("OperateHttpServer — data-residency edge routing", () => {
+  const euOnly = buildProfileFromTemplate("eu-only", { establishedAt: "2026-01-01T00:00:00.000Z" });
+
+  function regionServer(region: string): OperateHttpServer {
+    const directory = new InMemoryTenantResidencyDirectory([[TENANT, euOnly]]);
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      regionGuard: { region: region as never, directory },
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+    return httpServer;
+  }
+
+  function reqWithTenant(url: string, key: string, tenantHint?: string): RawHttpRequest {
+    const headers: Record<string, string> = { "x-api-key": key, host: "api.example.com" };
+    if (tenantHint !== undefined) headers["x-tenant-id"] = tenantHint;
+    return { method: "GET", url, headers, remoteAddress: "203.0.113.1" };
+  }
+
+  it("redirects (421) an eu-only tenant hitting a forbidden region, naming the home region", async () => {
+    const res = await regionServer("us-east").dispatch(reqWithTenant("/v1/products", "key-manager", TENANT), null);
+    expect(res.status).toBe(421);
+    expect(res.headers["x-crossengin-region"]).toBe("eu-central");
+    expect(parse(res.body).extensions).toMatchObject({ correctRegion: "eu-central" });
+  });
+
+  it("serves the tenant in an allowed region (guard proceeds to the gateway)", async () => {
+    const res = await regionServer("eu-central").dispatch(reqWithTenant("/v1/products", "key-manager", TENANT), null);
+    expect(res.status).toBe(200);
+  });
+
+  it("proceeds when no tenant hint is present (routing needs a hint)", async () => {
+    const res = await regionServer("us-east").dispatch(reqWithTenant("/v1/products", "key-manager"), null);
+    expect(res.status).toBe(200);
+  });
+
+  it("proceeds for a tenant with no residency profile (unconstrained)", async () => {
+    // Empty directory → the tenant has no profile → the guard doesn't constrain it, even in a
+    // region that would be forbidden for an eu-only tenant. The hint matches the key's tenant.
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      regionGuard: { region: "us-east" as never, directory: new InMemoryTenantResidencyDirectory() },
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+    const res = await httpServer.dispatch(reqWithTenant("/v1/products", "key-manager", TENANT), null);
+    expect(res.status).toBe(200);
   });
 });
