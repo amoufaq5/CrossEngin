@@ -234,6 +234,34 @@ describe("parseServeArgs", () => {
     );
   });
 
+  it("parses --residency-store with --region + a pg store", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--region", "eu-central", "--residency-store"]);
+    expect(opts.residencyStore).toBe(true);
+    expect(parseServeArgs(["--pack", "erp-core"]).residencyStore).toBe(false);
+  });
+
+  it("rejects --residency-store without --region, with the memory store, or alongside --residency-file", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--store", "pg", "--residency-store"])).toThrow(
+      /--residency-store requires --region/,
+    );
+    expect(() => parseServeArgs(["--pack", "erp-core", "--region", "eu-central", "--residency-store"])).toThrow(
+      /requires a Postgres store/,
+    );
+    expect(() =>
+      parseServeArgs([
+        "--pack",
+        "erp-core",
+        "--store",
+        "pg",
+        "--region",
+        "eu-central",
+        "--residency-store",
+        "--residency-file",
+        "./r.json",
+      ]),
+    ).toThrow(/mutually exclusive/);
+  });
+
   it("rejects --prune-links-ms with the memory store", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--prune-links-ms", "60000"])).toThrow(
       /requires the JSONB Postgres store/,

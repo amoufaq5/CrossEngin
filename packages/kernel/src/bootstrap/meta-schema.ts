@@ -9436,6 +9436,22 @@ export const META_OPERATE_TENANT_SETTINGS: TableDefinition = {
   },
 };
 
+export const META_TENANT_RESIDENCY_PROFILES: TableDefinition = {
+  schema: "meta",
+  name: "tenant_residency_profiles",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "profile", type: "JSONB", notNull: true },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_by", type: "TEXT" },
+  ],
+  primaryKey: ["tenant_id"],
+  rls: {
+    enabled: true,
+    policies: [{ name: "tenant_residency_profiles_tenant_isolation", using: TENANT_ISOLATION_USING }],
+  },
+};
+
 export const META_BILLING_SUBSCRIPTIONS: TableDefinition = {
   schema: "meta",
   name: "billing_subscriptions",
@@ -9597,5 +9613,6 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_OPERATE_ENTITY_LINKS,
   META_OPERATE_SEQUENCES,
   META_OPERATE_TENANT_SETTINGS,
+  META_TENANT_RESIDENCY_PROFILES,
   META_BILLING_SUBSCRIPTIONS,
 ];
