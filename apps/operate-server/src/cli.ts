@@ -1,3 +1,5 @@
+import { REGIONS } from "@crossengin/residency";
+
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 
 export type StoreKind = "memory" | "pg" | "pg-columns";
@@ -47,6 +49,10 @@ export interface ServeOptions {
   readonly jobInvokeActionRoles: readonly string[];
   /** Path to a marketplace pack-catalog JSON ({packs:[...]}) — enables the /v1/admin/packs routes (needs pg). */
   readonly packCatalogFile: string | null;
+  /** This instance's serving region id (from @crossengin/residency) — enables residency edge routing with --residency-file. */
+  readonly region: string | null;
+  /** Path to a residency file ({tenants:[{tenantId, profile}]}) — the tenant→region directory (requires --region). */
+  readonly residencyFile: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -102,6 +108,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const jobInvokeRoles: string[] = [];
   const jobInvokeActionRoles: string[] = [];
   let packCatalogFile: string | null = null;
+  let region: string | null = null;
+  let residencyFile: string | null = null;
   let help = false;
   let version = false;
 
@@ -218,6 +226,16 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--pack-catalog" || arg.startsWith("--pack-catalog=")) {
       packCatalogFile = takeValue(arg, next, "--pack-catalog");
       i += consumed();
+    } else if (arg === "--region" || arg.startsWith("--region=")) {
+      const raw = takeValue(arg, next, "--region");
+      if (!(REGIONS as readonly string[]).includes(raw)) {
+        throw new CliUsageError(`invalid --region: ${raw} (one of ${REGIONS.join(", ")})`);
+      }
+      region = raw;
+      i += consumed();
+    } else if (arg === "--residency-file" || arg.startsWith("--residency-file=")) {
+      residencyFile = takeValue(arg, next, "--residency-file");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -279,6 +297,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (packCatalogFile !== null && store === "memory") {
     throw new CliUsageError("--pack-catalog requires a Postgres store (--store pg or pg-columns)");
   }
+  if (residencyFile !== null && region === null) {
+    throw new CliUsageError("--residency-file requires --region (this instance's serving region)");
+  }
 
   if (
     (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
@@ -325,6 +346,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jobInvokeRoles,
     jobInvokeActionRoles,
     packCatalogFile,
+    region,
+    residencyFile,
     defaultScheme,
     help,
     version,
@@ -492,6 +515,10 @@ Options:
   --pack-catalog <file>  Marketplace pack-catalog JSON ({packs:[...]}) — enables the admin pack
                        routes GET /v1/admin/packs, POST /v1/admin/packs/install,
                        POST /v1/admin/packs/{id}/uninstall (needs --store pg|pg-columns)
+  --region <id>        This instance's serving region (e.g. eu-central) — with --residency-file,
+                       enables data-residency edge routing (redirect/deny by tenant home region)
+  --residency-file <file>  Residency directory JSON ({tenants:[{tenantId, profile}]}) mapping each
+                       tenant to its residency profile (requires --region)
   --help, -h           Show this help
   --version, -v        Print version
 

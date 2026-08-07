@@ -217,6 +217,23 @@ describe("parseServeArgs", () => {
     );
   });
 
+  it("parses --region + --residency-file and defaults them to null", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--region", "eu-central", "--residency-file", "./r.json"]);
+    expect(opts.region).toBe("eu-central");
+    expect(opts.residencyFile).toBe("./r.json");
+    expect(parseServeArgs(["--pack", "erp-core"]).region).toBeNull();
+  });
+
+  it("rejects an invalid --region", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--region", "mars-1"])).toThrow(/invalid --region/);
+  });
+
+  it("rejects --residency-file without --region", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--residency-file", "./r.json"])).toThrow(
+      /--residency-file requires --region/,
+    );
+  });
+
   it("rejects --prune-links-ms with the memory store", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--prune-links-ms", "60000"])).toThrow(
       /requires the JSONB Postgres store/,
