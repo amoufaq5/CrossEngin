@@ -44,6 +44,7 @@
     "@crossengin/pack-erp-retail": "workspace:*",
     "@crossengin/residency": "workspace:*",
     "@crossengin/residency-runtime": "workspace:*",
+    "@crossengin/residency-runtime-pg": "workspace:*",
     "@crossengin/workflow-runtime-pg": "workspace:*",
     "zod": "^3.23.0"
   },

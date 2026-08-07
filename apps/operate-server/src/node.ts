@@ -53,6 +53,8 @@ import { PersistentMarketplaceInstallEngine, PostgresInstallationStore } from "@
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { loadResidencyDirectory } from "./residency-source.js";
 import type { Region } from "@crossengin/residency";
+import type { TenantResidencyDirectory } from "@crossengin/residency-runtime";
+import { PostgresTenantResidencyDirectory } from "@crossengin/residency-runtime-pg";
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
@@ -322,14 +324,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           },
         })
       : undefined;
-  // Data-residency edge routing: this instance's region + a tenant→profile directory. A tenant hint
-  // whose profile forbids this region is redirected to its home region (or denied) before dispatch.
+  // Data-residency edge routing: this instance's region + a tenant→profile directory (a static file
+  // via --residency-file, or the Postgres tenant_residency_profiles table via --residency-store). A
+  // tenant hint whose profile forbids this region is redirected to its home region before dispatch.
+  let residencyDirectory: TenantResidencyDirectory | undefined;
+  if (options.residencyFile !== null) {
+    residencyDirectory = loadResidencyDirectory(await readFile(options.residencyFile, "utf8"));
+  } else if (options.residencyStore && conn !== undefined) {
+    residencyDirectory = new PostgresTenantResidencyDirectory(conn, schemaOpt);
+  }
   const regionGuard =
-    options.region !== null && options.residencyFile !== null
-      ? {
-          region: options.region as Region,
-          directory: loadResidencyDirectory(await readFile(options.residencyFile, "utf8")),
-        }
+    options.region !== null && residencyDirectory !== undefined
+      ? { region: options.region as Region, directory: residencyDirectory }
       : undefined;
   const { httpServer } = buildOperateHttpServer({
     manifest,

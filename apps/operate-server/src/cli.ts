@@ -53,6 +53,8 @@ export interface ServeOptions {
   readonly region: string | null;
   /** Path to a residency file ({tenants:[{tenantId, profile}]}) — the tenant→region directory (requires --region). */
   readonly residencyFile: string | null;
+  /** Use the Postgres tenant_residency_profiles table as the directory (requires --region + pg store). */
+  readonly residencyStore: boolean;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -110,6 +112,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let packCatalogFile: string | null = null;
   let region: string | null = null;
   let residencyFile: string | null = null;
+  let residencyStore = false;
   let help = false;
   let version = false;
 
@@ -236,6 +239,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--residency-file" || arg.startsWith("--residency-file=")) {
       residencyFile = takeValue(arg, next, "--residency-file");
       i += consumed();
+    } else if (arg === "--residency-store") {
+      residencyStore = true;
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -300,6 +305,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (residencyFile !== null && region === null) {
     throw new CliUsageError("--residency-file requires --region (this instance's serving region)");
   }
+  if (residencyStore && region === null) {
+    throw new CliUsageError("--residency-store requires --region (this instance's serving region)");
+  }
+  if (residencyStore && store === "memory") {
+    throw new CliUsageError("--residency-store requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (residencyStore && residencyFile !== null) {
+    throw new CliUsageError("--residency-store and --residency-file are mutually exclusive");
+  }
 
   if (
     (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
@@ -348,6 +362,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     packCatalogFile,
     region,
     residencyFile,
+    residencyStore,
     defaultScheme,
     help,
     version,
@@ -519,6 +534,8 @@ Options:
                        enables data-residency edge routing (redirect/deny by tenant home region)
   --residency-file <file>  Residency directory JSON ({tenants:[{tenantId, profile}]}) mapping each
                        tenant to its residency profile (requires --region)
+  --residency-store    Use the Postgres tenant_residency_profiles table as the residency directory
+                       (requires --region + --store pg|pg-columns; alternative to --residency-file)
   --help, -h           Show this help
   --version, -v        Print version
 
