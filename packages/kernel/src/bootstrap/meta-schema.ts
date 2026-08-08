@@ -9147,6 +9147,24 @@ export const META_ARCHITECT_PROPOSALS: TableDefinition = {
   },
 };
 
+export const META_ARCHITECT_TENANT_COST: TableDefinition = {
+  schema: "meta",
+  name: "architect_tenant_cost",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "period_key", type: "TEXT", notNull: true, check: "period_key ~ '^[0-9]{4}-[0-9]{2}$'" },
+    { name: "dollars_used", type: "NUMERIC(14,6)", notNull: true, default: "0", check: "dollars_used >= 0" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tenant_id", "period_key"],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "architect_tenant_cost_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_SLO_EVALUATIONS: TableDefinition = {
   schema: "meta",
   name: "slo_evaluations",
@@ -9606,6 +9624,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ARCHITECT_MESSAGES,
   META_ARCHITECT_TOOL_INVOCATIONS,
   META_ARCHITECT_PROPOSALS,
+  META_ARCHITECT_TENANT_COST,
   META_SLO_EVALUATIONS,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_LATENCY_EVALUATIONS,
