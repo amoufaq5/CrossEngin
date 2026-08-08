@@ -27,6 +27,7 @@ import {
 
 import { PostgresTranscript, type Transcript } from "@crossengin/ai-architect-pg";
 import { ArchitectGuardRuntime } from "@crossengin/ai-architect-runtime";
+import { PostgresTenantCostStore, monthlyPeriodKey, seedTenantMonthlyCost } from "@crossengin/ai-architect-runtime-pg";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 
 import {
@@ -494,6 +495,25 @@ export async function runChat(
     }
   }
 
+  // Production cost governance: seed the guard from the tenant's durable monthly spend and persist each
+  // turn's cost back, when a Postgres connection is available (--persist). Session token/tool caps stay
+  // in-memory; the per-tenant monthly dollar ceiling is enforced against the shared, durable total.
+  const guard = new ArchitectGuardRuntime();
+  let onTurnCost: ((dollars: number) => Promise<void>) | undefined;
+  if (pgConnection !== null) {
+    const costStore = new PostgresTenantCostStore(pgConnection);
+    const periodKey = monthlyPeriodKey(new Date());
+    try {
+      await seedTenantMonthlyCost(costStore, guard.tracker, tenantId, new Date());
+      onTurnCost = async (dollars: number): Promise<void> => {
+        await costStore.addMonthly(tenantId, periodKey, dollars);
+      };
+    } catch (err) {
+      printError(ctx.io, `chat: failed to load durable cost state: ${err instanceof Error ? err.message : String(err)}`);
+      return 1;
+    }
+  }
+
   try {
     const result = await runChatRepl({
       provider,
@@ -512,7 +532,8 @@ export async function runChat(
       transcript,
       autoApprove,
       providerLabel: built.describeLastTurn,
-      guard: new ArchitectGuardRuntime(),
+      guard,
+      ...(onTurnCost !== undefined ? { onTurnCost } : {}),
     });
     if (command.format === "json") {
       printJson(ctx.io, {

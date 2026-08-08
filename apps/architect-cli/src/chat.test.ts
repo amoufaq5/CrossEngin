@@ -1209,3 +1209,66 @@ describe("runChatExchange — cost guard", () => {
     expect(result.toolInvocations[0]?.output).toMatch(/blocked by the cost guard/);
   });
 });
+
+describe("runChatExchange — durable cost sink", () => {
+  it("calls onTurnCost with each turn's dollar cost", async () => {
+    const validJson = JSON.stringify(emptyManifest({ name: "T", slug: "t" }));
+    const provider = new FakeProvider({
+      responses: [
+        [
+          { kind: "text", text: "validating" },
+          { kind: "tool_call_start", id: "tu_1", name: "validate_manifest" },
+          { kind: "tool_call_arg_delta", id: "tu_1", delta: JSON.stringify({ manifest_json: validJson }) },
+          { kind: "tool_call_end", id: "tu_1" },
+          { kind: "usage_final", usage: { inputTokens: 10, outputTokens: 5, cost: 0.02 } },
+        ],
+        [
+          { kind: "text", text: "done" },
+          { kind: "usage_final", usage: { inputTokens: 5, outputTokens: 2, cost: 0.01 } },
+        ],
+      ],
+    });
+    const persisted: number[] = [];
+    const { io } = buffers();
+    await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "validate",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      toolCatalog: buildToolCatalog(),
+      onTurnCost: (d) => {
+        persisted.push(d);
+      },
+    });
+    // Two turns billed: the initial (0.02) + the continuation (0.01).
+    expect(persisted).toEqual([0.02, 0.01]);
+  });
+
+  it("skips zero-cost turns", async () => {
+    const provider = new FakeProvider({
+      responses: [[{ kind: "text", text: "hi" }, { kind: "usage_final", usage: { inputTokens: 1, outputTokens: 1, cost: 0 } }]],
+    });
+    const persisted: number[] = [];
+    const { io } = buffers();
+    await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "hi",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      onTurnCost: (d) => {
+        persisted.push(d);
+      },
+    });
+    expect(persisted).toEqual([]);
+  });
+});

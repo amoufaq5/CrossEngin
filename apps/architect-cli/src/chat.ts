@@ -406,6 +406,8 @@ export interface ChatReplOptions {
   readonly providerLabel?: () => string | null;
   /** Optional production safety guard, threaded to each exchange. */
   readonly guard?: ArchitectGuardRuntime;
+  /** Optional durable cost sink, threaded to each exchange. */
+  readonly onTurnCost?: (dollars: number) => void | Promise<void>;
 }
 
 export function interactiveApprover(opts: {
@@ -467,6 +469,8 @@ export interface ChatExchangeOptions {
   readonly providerLabel?: () => string | null;
   /** Optional production safety guard: gates the turn + each tool on cost ceilings, records usage. */
   readonly guard?: ArchitectGuardRuntime;
+  /** Optional durable cost sink: called with each turn's dollar cost to persist it (e.g. Postgres). */
+  readonly onTurnCost?: (dollars: number) => void | Promise<void>;
 }
 
 /** Records a turn's usage into the guard's session/tenant cost state (tokens + dollars). */
@@ -474,6 +478,15 @@ function recordTurnCost(guard: ArchitectGuardRuntime, tenantId: string, sessionI
   if (usage === null) return;
   guard.recordTokens(sessionId, usage.inputTokens + usage.outputTokens);
   guard.recordDollars(tenantId, usage.cost);
+}
+
+/** Persists a turn's dollar cost via the durable sink (skips zero-cost turns). */
+async function persistTurnCost(
+  sink: ((dollars: number) => void | Promise<void>) | undefined,
+  usage: Usage | null,
+): Promise<void> {
+  if (sink === undefined || usage === null || usage.cost <= 0) return;
+  await sink(usage.cost);
 }
 
 export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatExchangeResult> {
@@ -549,6 +562,7 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
   let lastCalls = initial.record.toolCalls;
   if (initial.record.usage !== null) accumulateUsage(accumulated, initial.record.usage);
   if (opts.guard !== undefined) recordTurnCost(opts.guard, opts.tenantId, opts.sessionId, initial.record.usage);
+  await persistTurnCost(opts.onTurnCost, initial.record.usage);
   if (opts.format === "human" && initial.record.usage !== null) {
     opts.io.stdout.write(`\n[${formatUsageLine(initial.record.usage, opts.providerLabel?.())}]`);
   }
@@ -652,6 +666,7 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
     lastCalls = continuation.toolCalls;
     if (continuation.usage !== null) accumulateUsage(accumulated, continuation.usage);
     if (opts.guard !== undefined) recordTurnCost(opts.guard, opts.tenantId, opts.sessionId, continuation.usage);
+    await persistTurnCost(opts.onTurnCost, continuation.usage);
     if (opts.format === "human" && continuation.usage !== null) {
       opts.io.stdout.write(`\n[${formatUsageLine(continuation.usage)}]`);
     }
@@ -870,6 +885,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       autoApprove: opts.autoApprove,
       providerLabel: opts.providerLabel,
       guard: opts.guard,
+      onTurnCost: opts.onTurnCost,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);
@@ -912,6 +928,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       autoApprove: opts.autoApprove,
       providerLabel: opts.providerLabel,
       guard: opts.guard,
+      onTurnCost: opts.onTurnCost,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);
