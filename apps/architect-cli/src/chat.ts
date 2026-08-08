@@ -373,6 +373,15 @@ export function formatUsageLine(usage: Usage, providerLabel?: string | null): st
   return parts.join(" ");
 }
 
+/**
+ * The end-of-session summary line: turn count + aggregate usage, plus the tenant's month-to-date
+ * Architect spend when durable cost tracking is active (`monthToDate` non-null).
+ */
+export function formatSessionSummary(turns: number, aggregateUsage: Usage, monthToDate: number | null): string {
+  const spend = monthToDate !== null ? ` Tenant month-to-date spend: $${monthToDate.toFixed(6)}.` : "";
+  return `\nSession ended after ${turns.toString()} turn(s). Aggregate ${formatUsageLine(aggregateUsage)}.${spend}\n`;
+}
+
 export interface LineReader {
   next(): Promise<string | null>;
 }
