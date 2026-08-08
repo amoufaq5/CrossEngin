@@ -454,4 +454,51 @@ describe("executeToolCall — propose_manifest_edit", () => {
     const parsed = JSON.parse(result.output) as { error: string };
     expect(parsed.error).toContain("valid JSON");
   });
+
+  it("REFUSES a hard-refusal edit (disable audit on pack-bound entity) without writing", async () => {
+    const dir = await tempDir();
+    const path = join(dir, "m.json");
+    const packBoundAuditable = {
+      manifestVersion: "1.0",
+      meta: { name: "Care", slug: "care", version: "1.0.0", compliancePacks: ["hipaa"] },
+      entities: [
+        {
+          name: "Patient",
+          traits: ["auditable"],
+          fields: [{ name: "label", type: { kind: "text", maxLength: 32 } }],
+        },
+      ],
+    };
+    await writeFile(path, JSON.stringify(packBoundAuditable, null, 2), "utf8");
+    const auditRemoved = {
+      ...packBoundAuditable,
+      entities: [
+        {
+          name: "Patient",
+          fields: [{ name: "label", type: { kind: "text", maxLength: 32 } }],
+        },
+      ],
+    };
+    const approver = new RecordingApprover(true);
+    const tools = buildToolCatalog({ allowFileWrite: true, approver, fileRootDir: dir });
+    const result = await executeToolCall(tools, {
+      id: "pe1",
+      name: "propose_manifest_edit",
+      input: { path: "m.json", new_manifest_json: JSON.stringify(auditRemoved) },
+    });
+    expect(result.isError).toBe(false);
+    const parsed = JSON.parse(result.output) as {
+      applied: boolean;
+      reason: string;
+      refusal: string;
+      auditSeverity: string;
+    };
+    expect(parsed.applied).toBe(false);
+    expect(parsed.reason).toBe("refused");
+    expect(parsed.refusal).toBe("disable_audit_on_pack_bound_entity");
+    expect(parsed.auditSeverity).toBe("P0");
+    expect(approver.requests).toHaveLength(0);
+    const onDisk = JSON.parse(await readFile(path, "utf8")) as Manifest;
+    expect(onDisk.entities?.[0]?.traits).toContain("auditable");
+  });
 });
