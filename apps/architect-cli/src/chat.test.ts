@@ -8,6 +8,7 @@ import type {
   ProviderPricing,
   Region,
 } from "@crossengin/ai-providers";
+import { ArchitectGuardRuntime } from "@crossengin/ai-architect-runtime";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -1116,5 +1117,95 @@ describe("runChatRepl — transcript wiring", () => {
     expect(end.inputTokens).toBe(30);
     expect(end.outputTokens).toBe(8);
     expect(end.costUsd).toBeCloseTo(0.003, 6);
+  });
+});
+
+describe("runChatExchange — cost guard", () => {
+  it("blocks a turn before calling the provider when the session token ceiling is reached", async () => {
+    const captured: CompletionRequest[] = [];
+    const provider = new FakeProvider({ responses: [[...ONE_TURN_CHUNKS]], captured });
+    const guard = new ArchitectGuardRuntime();
+    guard.recordTokens(SESSION, 50_000); // at the 50k session ceiling
+    const { io, out } = buffers();
+    const result = await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "hello",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      guard,
+    });
+    expect(captured).toHaveLength(0); // provider never called
+    expect(result.usage).toBeNull();
+    expect(result.iterations).toBe(0);
+    expect(result.assistantText).toMatch(/blocked by the AI Architect cost guard/);
+    expect(out()).toMatch(/session token ceiling/);
+  });
+
+  it("records a turn's tokens + cost into the guard's cost state", async () => {
+    const provider = new FakeProvider({ responses: [[...ONE_TURN_CHUNKS]] });
+    const guard = new ArchitectGuardRuntime();
+    const { io } = buffers();
+    await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "hello",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      guard,
+    });
+    // ONE_TURN_CHUNKS usage: in 12 + out 6 = 18 tokens, cost 0.0000045.
+    expect(guard.tracker.session(SESSION).tokensUsed).toBe(18);
+    expect(guard.tracker.tenant(TENANT).monthlyDollarsUsed).toBeCloseTo(0.0000045, 10);
+  });
+
+  it("blocks a tool at its per-tool session cap without executing it", async () => {
+    const validJson = JSON.stringify(emptyManifest({ name: "T", slug: "t" }));
+    const provider = new FakeProvider({
+      responses: [
+        [
+          { kind: "text", text: "validating" },
+          { kind: "tool_call_start", id: "tu_1", name: "validate_manifest" },
+          { kind: "tool_call_arg_delta", id: "tu_1", delta: JSON.stringify({ manifest_json: validJson }) },
+          { kind: "tool_call_end", id: "tu_1" },
+          { kind: "usage_final", usage: { inputTokens: 10, outputTokens: 5, cost: 0.00002 } },
+        ],
+        [
+          { kind: "text", text: "done" },
+          { kind: "usage_final", usage: { inputTokens: 5, outputTokens: 2, cost: 0.00001 } },
+        ],
+      ],
+    });
+    const guard = new ArchitectGuardRuntime();
+    // Fill the per-tool session cap (8) for validate_manifest, spread across turns.
+    for (let i = 0; i < 8; i += 1) {
+      guard.beginTurn(SESSION);
+      guard.recordToolCall(SESSION, "validate_manifest");
+    }
+    const { io } = buffers();
+    const result = await runChatExchange({
+      provider,
+      renderer: plainTextRenderer(io),
+      io,
+      format: "human",
+      history: [],
+      userInput: "validate",
+      systemPrompt: "sys",
+      tenantId: TENANT,
+      sessionId: SESSION,
+      toolCatalog: buildToolCatalog(),
+      guard,
+    });
+    expect(result.toolInvocations).toHaveLength(1);
+    expect(result.toolInvocations[0]?.isError).toBe(true);
+    expect(result.toolInvocations[0]?.output).toMatch(/blocked by the cost guard/);
   });
 });

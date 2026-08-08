@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { Transcript } from "@crossengin/ai-architect-pg";
+import type { ArchitectGuardRuntime } from "@crossengin/ai-architect-runtime";
 import type {
   CompletionChunk,
   CompletionRequest,
@@ -403,6 +404,8 @@ export interface ChatReplOptions {
   readonly transcript?: Transcript;
   readonly autoApprove?: boolean;
   readonly providerLabel?: () => string | null;
+  /** Optional production safety guard, threaded to each exchange. */
+  readonly guard?: ArchitectGuardRuntime;
 }
 
 export function interactiveApprover(opts: {
@@ -462,6 +465,15 @@ export interface ChatExchangeOptions {
   readonly autoApprove?: boolean;
   /** Returns a label for the provider that served the turn (e.g. `openai/gpt-4o`), or null. */
   readonly providerLabel?: () => string | null;
+  /** Optional production safety guard: gates the turn + each tool on cost ceilings, records usage. */
+  readonly guard?: ArchitectGuardRuntime;
+}
+
+/** Records a turn's usage into the guard's session/tenant cost state (tokens + dollars). */
+function recordTurnCost(guard: ArchitectGuardRuntime, tenantId: string, sessionId: string, usage: Usage | null): void {
+  if (usage === null) return;
+  guard.recordTokens(sessionId, usage.inputTokens + usage.outputTokens);
+  guard.recordDollars(tenantId, usage.cost);
 }
 
 export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatExchangeResult> {
@@ -484,6 +496,29 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
     output: string;
     isError: boolean;
   }> = [];
+
+  // Pre-turn safety gate: block the turn before calling the provider when a cost ceiling is reached.
+  if (opts.guard !== undefined) {
+    opts.guard.beginTurn(opts.sessionId);
+    const gate = opts.guard.evaluate({ tenantId: opts.tenantId, sessionId: opts.sessionId });
+    if (gate.outcome === "block") {
+      const notice = `Request blocked by the AI Architect cost guard: ${gate.reason}.`;
+      opts.io.stdout.write(`\n[${notice}]`);
+      return {
+        history: [...opts.history],
+        assistantText: notice,
+        toolInvocations: [],
+        usage: null,
+        iterations: 0,
+        truncated: false,
+      };
+    }
+    if (gate.outcome === "warn") {
+      opts.io.stdout.write(
+        `\n[cost warning: session ${gate.cost.percentSessionTokens.toFixed(0)}% of token budget, tenant ${gate.cost.percentMonthlyDollars.toFixed(0)}% of monthly budget]`,
+      );
+    }
+  }
 
   if (transcript !== undefined) {
     await transcript.onMessage({
@@ -513,6 +548,7 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
   let lastText = initial.record.assistantText;
   let lastCalls = initial.record.toolCalls;
   if (initial.record.usage !== null) accumulateUsage(accumulated, initial.record.usage);
+  if (opts.guard !== undefined) recordTurnCost(opts.guard, opts.tenantId, opts.sessionId, initial.record.usage);
   if (opts.format === "human" && initial.record.usage !== null) {
     opts.io.stdout.write(`\n[${formatUsageLine(initial.record.usage, opts.providerLabel?.())}]`);
   }
@@ -542,8 +578,16 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
     }
     const toolMessages: LlmMessage[] = [];
     for (const call of lastCalls) {
+      // Per-tool cost gate: a blocked tool isn't executed — the model gets an error result to react to.
+      const toolGate = opts.guard?.evaluate({ tenantId: opts.tenantId, sessionId: opts.sessionId, proposedTool: call.name });
       const startTime = Date.now();
-      const result = await executeToolCall(opts.toolCatalog, call);
+      const result =
+        toolGate !== undefined && toolGate.outcome === "block"
+          ? { output: `tool '${call.name}' blocked by the cost guard: ${toolGate.reason}`, isError: true }
+          : await executeToolCall(opts.toolCatalog, call);
+      if (opts.guard !== undefined && !(toolGate !== undefined && toolGate.outcome === "block")) {
+        opts.guard.recordToolCall(opts.sessionId, call.name);
+      }
       const durationMs = Date.now() - startTime;
       invocations.push({
         id: call.id,
@@ -607,6 +651,7 @@ export async function runChatExchange(opts: ChatExchangeOptions): Promise<ChatEx
     lastText = continuation.assistantText;
     lastCalls = continuation.toolCalls;
     if (continuation.usage !== null) accumulateUsage(accumulated, continuation.usage);
+    if (opts.guard !== undefined) recordTurnCost(opts.guard, opts.tenantId, opts.sessionId, continuation.usage);
     if (opts.format === "human" && continuation.usage !== null) {
       opts.io.stdout.write(`\n[${formatUsageLine(continuation.usage)}]`);
     }
@@ -824,6 +869,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       turnIndex: turns,
       autoApprove: opts.autoApprove,
       providerLabel: opts.providerLabel,
+      guard: opts.guard,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);
@@ -865,6 +911,7 @@ export async function runChatRepl(opts: ChatReplOptions): Promise<ChatReplResult
       turnIndex: turns,
       autoApprove: opts.autoApprove,
       providerLabel: opts.providerLabel,
+      guard: opts.guard,
     });
     history = result.history;
     if (result.usage !== null) accumulateUsage(aggregate, result.usage);

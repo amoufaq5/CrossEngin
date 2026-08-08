@@ -26,6 +26,7 @@ import {
 } from "@crossengin/kernel/manifest";
 
 import { PostgresTranscript, type Transcript } from "@crossengin/ai-architect-pg";
+import { ArchitectGuardRuntime } from "@crossengin/ai-architect-runtime";
 import { createNodePgConnection, parsePgEnvConfig, type PgConnection } from "@crossengin/kernel-pg";
 
 import {
@@ -511,6 +512,7 @@ export async function runChat(
       transcript,
       autoApprove,
       providerLabel: built.describeLastTurn,
+      guard: new ArchitectGuardRuntime(),
     });
     if (command.format === "json") {
       printJson(ctx.io, {
