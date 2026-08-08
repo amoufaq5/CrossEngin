@@ -3,6 +3,7 @@ export * from "./connection.js";
 export * from "./diff.js";
 export * from "./encryption.js";
 export * from "./encryption-migration.js";
+export * from "./encryption-writepath.js";
 export * from "./introspection.js";
 export * from "./migration-log.js";
 export * from "./node-pg.js";
