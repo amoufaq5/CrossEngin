@@ -36,7 +36,7 @@ import {
   DEFAULT_CHAT_MODEL,
   DEFAULT_MAX_TOOL_ITERATIONS,
   DEFAULT_TENANT_ID,
-  formatUsageLine,
+  formatSessionSummary,
   interactiveApprover,
   lineReaderFromIterable,
   linesFromReadable,
@@ -479,27 +479,31 @@ export async function runChat(
   const provider: CompletionProvider = built.provider;
 
   const persistFlag = getBooleanFlag(command, "persist");
+  const costStoreFlag = getBooleanFlag(command, "cost-store");
   let transcript: Transcript | undefined = ctx.transcriptOverride;
   let pgConnection: PgConnection | null = null;
-  if (transcript === undefined && persistFlag) {
+  // One Postgres connection backs both the transcript (--persist) and the durable cost store
+  // (--cost-store); either flag opens it.
+  if ((persistFlag && transcript === undefined) || costStoreFlag) {
     try {
-      const config = parsePgEnvConfig(ctx.env);
-      pgConnection = createNodePgConnection(config);
-      transcript = new PostgresTranscript(pgConnection);
+      pgConnection = createNodePgConnection(parsePgEnvConfig(ctx.env));
     } catch (err) {
       printError(
         ctx.io,
-        `chat: --persist requires PG env vars (PGHOST/PGDATABASE/...): ${err instanceof Error ? err.message : String(err)}`,
+        `chat: --persist / --cost-store require PG env vars (PGHOST/PGDATABASE/...): ${err instanceof Error ? err.message : String(err)}`,
       );
       return 1;
     }
+    if (persistFlag && transcript === undefined) transcript = new PostgresTranscript(pgConnection);
   }
 
   // Production cost governance: seed the guard from the tenant's durable monthly spend and persist each
-  // turn's cost back, when a Postgres connection is available (--persist). Session token/tool caps stay
-  // in-memory; the per-tenant monthly dollar ceiling is enforced against the shared, durable total.
+  // turn's cost back, when a Postgres connection is available (--persist or --cost-store). Session
+  // token/tool caps stay in-memory; the per-tenant monthly dollar ceiling is enforced against the shared,
+  // durable total.
   const guard = new ArchitectGuardRuntime();
   let onTurnCost: ((dollars: number) => Promise<void>) | undefined;
+  let durableCost = false;
   if (pgConnection !== null) {
     const costStore = new PostgresTenantCostStore(pgConnection);
     const periodKey = monthlyPeriodKey(new Date());
@@ -508,6 +512,7 @@ export async function runChat(
       onTurnCost = async (dollars: number): Promise<void> => {
         await costStore.addMonthly(tenantId, periodKey, dollars);
       };
+      durableCost = true;
     } catch (err) {
       printError(ctx.io, `chat: failed to load durable cost state: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
@@ -535,16 +540,17 @@ export async function runChat(
       guard,
       ...(onTurnCost !== undefined ? { onTurnCost } : {}),
     });
+    // With durable cost, the guard's tenant total is the seeded month-to-date plus this session's spend.
+    const monthToDate = durableCost ? guard.tracker.tenant(tenantId).monthlyDollarsUsed : null;
     if (command.format === "json") {
       printJson(ctx.io, {
         ok: true,
         turns: result.turns,
         aggregateUsage: result.aggregateUsage,
+        ...(monthToDate !== null ? { tenantMonthlyDollars: monthToDate } : {}),
       });
     } else {
-      ctx.io.stdout.write(
-        `\nSession ended after ${result.turns.toString()} turn(s). Aggregate ${formatUsageLine(result.aggregateUsage)}.\n`,
-      );
+      ctx.io.stdout.write(formatSessionSummary(result.turns, result.aggregateUsage, monthToDate));
     }
     return 0;
   } catch (err) {

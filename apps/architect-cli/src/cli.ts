@@ -148,6 +148,7 @@ export function helpText(): string {
     "  --auto-approve-writes   With chat, skip the y/N prompt for write tools",
     "  --max-tool-iterations N With chat, cap tool-dispatch loops per turn (default: 5)",
     "  --persist               With chat, log session/messages/tools/proposals to Postgres",
+    "  --cost-store            With chat, persist per-tenant monthly Architect spend to Postgres",
     "",
     "Environment (for apply / chat --persist):",
     "  PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE, PGAPPNAME",

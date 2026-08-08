@@ -15,6 +15,7 @@ import {
   DEFAULT_ARCHITECT_SYSTEM_PROMPT,
   NullTranscript,
   buildCompletionRequest,
+  formatSessionSummary,
   formatUsageLine,
   interactiveApprover,
   jsonChunkRenderer,
@@ -1270,5 +1271,22 @@ describe("runChatExchange — durable cost sink", () => {
       },
     });
     expect(persisted).toEqual([]);
+  });
+});
+
+describe("formatSessionSummary", () => {
+  const usage = { inputTokens: 100, outputTokens: 40, cost: 0.0123 };
+
+  it("omits the spend line when durable cost is not tracked (monthToDate null)", () => {
+    const s = formatSessionSummary(3, usage, null);
+    expect(s).toContain("Session ended after 3 turn(s)");
+    expect(s).toContain("cost=$0.012300");
+    expect(s).not.toContain("month-to-date");
+  });
+
+  it("appends the tenant month-to-date spend when tracked", () => {
+    const s = formatSessionSummary(2, usage, 4.5);
+    expect(s).toContain("Session ended after 2 turn(s)");
+    expect(s).toContain("Tenant month-to-date spend: $4.500000.");
   });
 });
