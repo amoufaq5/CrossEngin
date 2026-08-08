@@ -11,6 +11,7 @@ import {
 } from "@crossengin/kernel/manifest";
 
 import { buildManifestSummary } from "./manifest-io.js";
+import { classifyManifestEditRefusal, manifestEditRefusalResult } from "./refusal.js";
 
 export type ToolInput = Record<string, unknown>;
 
@@ -282,6 +283,10 @@ async function proposeManifestEditTool(
   }
   const absolute = resolve(rootDir, pathRaw);
   const existing = await loadExistingManifest(absolute);
+  const refusal = classifyManifestEditRefusal(existing, proposed);
+  if (refusal !== null) {
+    return manifestEditRefusalResult(refusal);
+  }
   const isNew = existing === null;
   const oldHash = existing !== null ? manifestHash(existing) : null;
   const newHash = manifestHash(proposed);
