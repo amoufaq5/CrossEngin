@@ -6,6 +6,7 @@ export * from "./server.js";
 export * from "./scheduler.js";
 export * from "./prune-scheduler.js";
 export * from "./slo.js";
+export * from "./slo-config.js";
 export * from "./entity-events.js";
 export * from "./job-invoke.js";
 export * from "./link-sweep.js";

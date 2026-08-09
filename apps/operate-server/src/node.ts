@@ -58,6 +58,7 @@ import { PostgresTenantResidencyDirectory } from "@crossengin/residency-runtime-
 import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./server.js";
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
+import { buildSloEnforcement, loadSloConfig } from "./slo-config.js";
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
 import { invokeRolesByAction } from "@crossengin/jobs";
 
@@ -337,6 +338,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.region !== null && residencyDirectory !== undefined
       ? { region: options.region as Region, directory: residencyDirectory }
       : undefined;
+  // Live SLO enforcement: a config file registers availability/latency SLOs; the observer feeds every
+  // dispatched request's outcome into the engines, and the scheduler evaluates burn/latency on an interval,
+  // declaring incidents + paging + optional flag rollback on a breach. Enabled by --slo-config.
+  const sloEnforcement =
+    options.sloConfig !== null
+      ? buildSloEnforcement(await loadSloConfig(options.sloConfig), {
+          onDecision: (d) =>
+            console.info(
+              `[slo] ${d.signal} ${d.kind} surface=${d.surface} slo=${d.sloId}` +
+                (d.incidentId !== null ? ` incident=${d.incidentId}` : ""),
+            ),
+          onError: (err) => console.error("[slo] evaluation error", err),
+        })
+      : null;
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -358,6 +373,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
+    ...(sloEnforcement !== null ? { onExecution: sloEnforcement.observer.asExecutionSink() } : {}),
   });
   // In-process cron scheduler: enqueue the manifest's scheduled jobs into job_runs per tenant, so the
   // distributed worker fleet runs them. Enabled by --schedule-ms + --schedule-tenant over a pg store;
@@ -391,6 +407,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   poller?.start();
   jobScheduler?.start();
   pruneScheduler?.start();
+  sloEnforcement?.scheduler.start();
   const listener = createNodeRequestListener(httpServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -406,6 +423,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         poller?.stop();
         jobScheduler?.stop();
         pruneScheduler?.stop();
+        sloEnforcement?.scheduler.stop();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };

@@ -421,6 +421,12 @@ describe("parseServeArgs", () => {
     expect(() => parseServeArgs(["--pack", "erp-core", "--stripe-webhook-secret", "whsec_x"])).toThrow(/requires a Postgres store/);
   });
 
+  it("parses --slo-config and defaults it to null", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--slo-config", "./slo.json"]).sloConfig).toBe("./slo.json");
+    expect(parseServeArgs(["--pack=erp-core", "--slo-config=./slo.json"]).sloConfig).toBe("./slo.json");
+    expect(parseServeArgs(["--pack", "erp-core"]).sloConfig).toBeNull();
+  });
+
   it("parses a remote --jwks-url", () => {
     const opts = parseServeArgs([
       "--pack",
