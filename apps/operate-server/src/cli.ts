@@ -55,6 +55,8 @@ export interface ServeOptions {
   readonly residencyFile: string | null;
   /** Use the Postgres tenant_residency_profiles table as the directory (requires --region + pg store). */
   readonly residencyStore: boolean;
+  /** Path to a JSON SLO config ({alertPolicy, systemActorUserId, availability?, latency?}) — auto-enforces SLOs over the live request stream. */
+  readonly sloConfig: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -113,6 +115,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let region: string | null = null;
   let residencyFile: string | null = null;
   let residencyStore = false;
+  let sloConfig: string | null = null;
   let help = false;
   let version = false;
 
@@ -241,6 +244,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--residency-store") {
       residencyStore = true;
+    } else if (arg === "--slo-config" || arg.startsWith("--slo-config=")) {
+      sloConfig = takeValue(arg, next, "--slo-config");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -363,6 +369,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     region,
     residencyFile,
     residencyStore,
+    sloConfig,
     defaultScheme,
     help,
     version,
@@ -536,6 +543,9 @@ Options:
                        tenant to its residency profile (requires --region)
   --residency-store    Use the Postgres tenant_residency_profiles table as the residency directory
                        (requires --region + --store pg|pg-columns; alternative to --residency-file)
+  --slo-config <file>  JSON SLO config ({alertPolicy, systemActorUserId, availability?, latency?}) —
+                       auto-enforces availability/latency SLOs over the live request stream, declaring
+                       incidents + paging + optional flag rollback on a burn/latency breach
   --help, -h           Show this help
   --version, -v        Print version
 
