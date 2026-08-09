@@ -105,6 +105,12 @@ importers:
       '@crossengin/marketplace-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/marketplace-runtime-pg
+      '@crossengin/observability':
+        specifier: workspace:*
+        version: link:../../packages/observability
+      '@crossengin/observability-runtime':
+        specifier: workspace:*
+        version: link:../../packages/observability-runtime
       '@crossengin/operate-runtime':
         specifier: workspace:*
         version: link:../../packages/operate-runtime

@@ -1,4 +1,4 @@
-import type { ForwardedProto, HttpMethod } from "@crossengin/api-gateway";
+import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
 import { decideRegionRouting, type TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -55,6 +55,14 @@ export interface OperateHttpServerOptions {
   readonly defaultScheme?: ForwardedProto;
   readonly idGenerator?: () => string;
   readonly now?: () => Date;
+  /**
+   * Invoked with the `PipelineExecution` of every gateway-dispatched request
+   * (after the response is produced). The SLO request observer subscribes here
+   * to feed the live request stream into the enforcement engines. Never throws
+   * out of dispatch — an observer error is swallowed so observation can't break
+   * serving.
+   */
+  readonly onExecution?: (execution: PipelineExecution) => void;
 }
 
 const METHOD_NOT_ALLOWED_TYPE = "https://crossengin.io/problems/method-not-allowed";
@@ -75,6 +83,7 @@ export class OperateHttpServer {
   private readonly scheme: ForwardedProto;
   private readonly idGenerator: () => string;
   private readonly now: () => Date;
+  private readonly onExecution: ((execution: PipelineExecution) => void) | null;
 
   constructor(opts: OperateHttpServerOptions) {
     this.gateway = opts.gateway;
@@ -83,6 +92,7 @@ export class OperateHttpServer {
     this.scheme = opts.defaultScheme ?? "http";
     this.idGenerator = opts.idGenerator ?? defaultRequestId;
     this.now = opts.now ?? (() => new Date());
+    this.onExecution = opts.onExecution ?? null;
   }
 
   async dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse> {
@@ -104,7 +114,14 @@ export class OperateHttpServer {
       id: this.idGenerator(),
       receivedAt: this.now().toISOString(),
     });
-    const { response } = await this.gateway.runtime.handleRequest(incoming);
+    const { response, execution } = await this.gateway.runtime.handleRequest(incoming);
+    if (this.onExecution !== null) {
+      try {
+        this.onExecution(execution);
+      } catch {
+        // Observation must never break serving.
+      }
+    }
     return { status: response.status, headers: { ...response.headers }, body: response.bodyBytes };
   }
 
@@ -196,6 +213,8 @@ export interface BuildOperateHttpServerOptions {
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
+  /** Optional live-request observer sink (e.g. the SLO request observer). */
+  readonly onExecution?: (execution: PipelineExecution) => void;
 }
 
 export interface BuiltOperateHttpServer {
@@ -241,6 +260,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.defaultScheme !== undefined ? { defaultScheme: options.defaultScheme } : {}),
     ...(options.idGenerator !== undefined ? { idGenerator: options.idGenerator } : {}),
     ...(options.now !== undefined ? { now: options.now } : {}),
+    ...(options.onExecution !== undefined ? { onExecution: options.onExecution } : {}),
   });
   return { httpServer, gateway };
 }
