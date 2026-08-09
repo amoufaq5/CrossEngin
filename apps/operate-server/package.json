@@ -39,6 +39,8 @@
     "@crossengin/marketplace": "workspace:*",
     "@crossengin/marketplace-runtime": "workspace:*",
     "@crossengin/marketplace-runtime-pg": "workspace:*",
+    "@crossengin/observability": "workspace:*",
+    "@crossengin/observability-runtime": "workspace:*",
     "@crossengin/pack-erp-grocery": "workspace:*",
     "@crossengin/pack-erp-healthcare": "workspace:*",
     "@crossengin/pack-erp-retail": "workspace:*",
