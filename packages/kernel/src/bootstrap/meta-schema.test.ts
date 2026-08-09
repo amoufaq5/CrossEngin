@@ -121,8 +121,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 129 tables", () => {
-    expect(META_TABLES).toHaveLength(129);
+  it("contains 132 tables", () => {
+    expect(META_TABLES).toHaveLength(132);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -172,7 +172,10 @@ describe("META_TABLES", () => {
       "data_subjects",
       "dead_letter_jobs",
       "deployments",
+      "dr_drill_executions",
       "dr_drills",
+      "dr_failover_executions",
+      "dr_readiness_snapshots",
       "ediscovery_requests",
       "events",
       "extension_packs",
