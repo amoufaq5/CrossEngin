@@ -9504,6 +9504,136 @@ export const META_BILLING_SUBSCRIPTIONS: TableDefinition = {
   },
 };
 
+export const META_DR_FAILOVER_EXECUTIONS: TableDefinition = {
+  schema: "meta",
+  name: "dr_failover_executions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "execution_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "dr_failover_executions_execution_id_key" },
+      check: "execution_id ~ '^fov_[a-z0-9]{4,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "tier", type: "TEXT", notNull: true },
+    { name: "trigger", type: "TEXT", notNull: true },
+    { name: "status", type: "TEXT", notNull: true },
+    { name: "from_region", type: "TEXT", notNull: true },
+    { name: "to_region", type: "TEXT", notNull: true },
+    { name: "triggered_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "completed_at", type: "TIMESTAMPTZ" },
+    { name: "actual_rpo_seconds", type: "INTEGER", check: "actual_rpo_seconds IS NULL OR actual_rpo_seconds >= 0" },
+    { name: "actual_rto_seconds", type: "INTEGER", check: "actual_rto_seconds IS NULL OR actual_rto_seconds >= 0" },
+    { name: "rpo_breached", type: "BOOLEAN" },
+    { name: "rto_breached", type: "BOOLEAN" },
+    { name: "incident_ticket_id", type: "TEXT" },
+    { name: "record", type: "JSONB", notNull: true },
+    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_dr_failover_executions_tenant_at", columns: ["tenant_id", "recorded_at"] },
+    { name: "idx_dr_failover_executions_status", columns: ["status"] },
+    { name: "idx_dr_failover_executions_tier", columns: ["tier"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "dr_failover_executions_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_DR_DRILL_EXECUTIONS: TableDefinition = {
+  schema: "meta",
+  name: "dr_drill_executions",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "execution_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "dr_drill_executions_execution_id_key" },
+      check: "execution_id ~ '^drl_[a-z0-9]{4,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "kind", type: "TEXT", notNull: true },
+    { name: "tier", type: "TEXT", notNull: true },
+    { name: "outcome", type: "TEXT" },
+    { name: "passing", type: "BOOLEAN" },
+    { name: "rpo_breached", type: "BOOLEAN" },
+    { name: "rto_breached", type: "BOOLEAN" },
+    { name: "scheduled_for", type: "TIMESTAMPTZ", notNull: true },
+    { name: "executed_at", type: "TIMESTAMPTZ" },
+    { name: "record", type: "JSONB", notNull: true },
+    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_dr_drill_executions_tenant_at", columns: ["tenant_id", "recorded_at"] },
+    { name: "idx_dr_drill_executions_outcome", columns: ["outcome"] },
+    { name: "idx_dr_drill_executions_tier", columns: ["tier"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "dr_drill_executions_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
+export const META_DR_READINESS_SNAPSHOTS: TableDefinition = {
+  schema: "meta",
+  name: "dr_readiness_snapshots",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "snapshot_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "dr_readiness_snapshots_snapshot_id_key" },
+      check: "snapshot_id ~ '^drr_[a-z0-9]{4,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "ready", type: "BOOLEAN", notNull: true },
+    { name: "total_issues", type: "INTEGER", notNull: true, check: "total_issues >= 0" },
+    { name: "overdue_drills", type: "INTEGER", notNull: true, default: "0", check: "overdue_drills >= 0" },
+    { name: "stale_runbooks", type: "INTEGER", notNull: true, default: "0", check: "stale_runbooks >= 0" },
+    { name: "expired_backups", type: "INTEGER", notNull: true, default: "0", check: "expired_backups >= 0" },
+    { name: "unverified_backups", type: "INTEGER", notNull: true, default: "0", check: "unverified_backups >= 0" },
+    { name: "replication_violations", type: "INTEGER", notNull: true, default: "0", check: "replication_violations >= 0" },
+    { name: "failover_breaches", type: "INTEGER", notNull: true, default: "0", check: "failover_breaches >= 0" },
+    { name: "drill_breaches", type: "INTEGER", notNull: true, default: "0", check: "drill_breaches >= 0" },
+    { name: "report", type: "JSONB", notNull: true },
+    { name: "generated_at", type: "TIMESTAMPTZ", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_dr_readiness_snapshots_tenant_at", columns: ["tenant_id", "generated_at"] },
+    { name: "idx_dr_readiness_snapshots_ready", columns: ["ready"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "dr_readiness_snapshots_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9634,4 +9764,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_OPERATE_TENANT_SETTINGS,
   META_TENANT_RESIDENCY_PROFILES,
   META_BILLING_SUBSCRIPTIONS,
+  META_DR_FAILOVER_EXECUTIONS,
+  META_DR_DRILL_EXECUTIONS,
+  META_DR_READINESS_SNAPSHOTS,
 ];
