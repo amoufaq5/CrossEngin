@@ -59,7 +59,11 @@ import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
 import { buildSloEnforcement, loadSloConfig } from "./slo-config.js";
-import { deriveSloConfig } from "./slo-defaults.js";
+import {
+  deriveSloConfig,
+  loadSloDefaultsOverride,
+  sloDefaultsOptionsFromOverride,
+} from "./slo-defaults.js";
 import {
   buildDrReadinessLifecycle,
   loadDrReadinessConfig,
@@ -357,7 +361,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.sloConfig !== null
       ? await loadSloConfig(options.sloConfig)
       : options.sloDefaults
-        ? deriveSloConfig(manifest)
+        ? deriveSloConfig(
+            manifest,
+            options.sloDefaultsOverride !== null
+              ? sloDefaultsOptionsFromOverride(await loadSloDefaultsOverride(options.sloDefaultsOverride))
+              : {},
+          )
         : null;
   const sloEnforcement =
     sloConfig !== null

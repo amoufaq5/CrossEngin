@@ -59,6 +59,8 @@ export interface ServeOptions {
   readonly sloConfig: string | null;
   /** Derive default availability + latency SLOs from the manifest (one per entity operation) — enforce without a hand-written config. Mutually exclusive with --slo-config. */
   readonly sloDefaults: boolean;
+  /** Path to a partial SLO-defaults override ({alertPolicy?, systemActorUserId?, target tweaks, extra*?}) layered onto the derived defaults. Requires --slo-defaults. */
+  readonly sloDefaultsOverride: string | null;
   /** Path to a JSON DR-readiness config ({tenantId?, intervalMs?, input:{runbooks,backups,replication}}) — periodically assesses + persists DR readiness (needs --store pg). */
   readonly drReadinessConfig: string | null;
   /** Path to a JSON access-reviews config ({systemActorUserId, campaigns, grants, principals}) — runs attestation campaigns on a schedule (needs --store pg). */
@@ -123,6 +125,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let residencyStore = false;
   let sloConfig: string | null = null;
   let sloDefaults = false;
+  let sloDefaultsOverride: string | null = null;
   let drReadinessConfig: string | null = null;
   let accessReviewsConfig: string | null = null;
   let help = false;
@@ -258,6 +261,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--slo-defaults") {
       sloDefaults = true;
+    } else if (arg === "--slo-defaults-override" || arg.startsWith("--slo-defaults-override=")) {
+      sloDefaultsOverride = takeValue(arg, next, "--slo-defaults-override");
+      i += consumed();
     } else if (arg === "--dr-readiness-config" || arg.startsWith("--dr-readiness-config=")) {
       drReadinessConfig = takeValue(arg, next, "--dr-readiness-config");
       i += consumed();
@@ -340,6 +346,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (sloDefaults && sloConfig !== null) {
     throw new CliUsageError("--slo-defaults and --slo-config are mutually exclusive");
   }
+  if (sloDefaultsOverride !== null && !sloDefaults) {
+    throw new CliUsageError("--slo-defaults-override requires --slo-defaults");
+  }
 
   if (
     (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
@@ -391,6 +400,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     residencyStore,
     sloConfig,
     sloDefaults,
+    sloDefaultsOverride,
     drReadinessConfig,
     accessReviewsConfig,
     defaultScheme,
@@ -572,6 +582,9 @@ Options:
   --slo-defaults       Derive default availability + latency SLOs from the manifest (one per entity
                        operation, read vs. write targets) and enforce them — no config file needed.
                        Mutually exclusive with --slo-config
+  --slo-defaults-override <file>  Partial override layered onto --slo-defaults ({alertPolicy?,
+                       systemActorUserId?, target/interval tweaks, extraAvailability?, extraLatency?}) —
+                       real paging + tuning without re-declaring every SLO. Requires --slo-defaults
   --dr-readiness-config <file>  JSON DR-readiness config ({tenantId?, intervalMs?, input:{runbooks,
                        backups, replication}}) — periodically folds live failover/drill executions into
                        the declared infra, assesses readiness, and persists a snapshot (needs --store pg)
