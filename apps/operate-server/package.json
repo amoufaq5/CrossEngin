@@ -24,8 +24,14 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@crossengin/access-reviews": "workspace:*",
+    "@crossengin/access-reviews-runtime": "workspace:*",
+    "@crossengin/access-reviews-runtime-pg": "workspace:*",
     "@crossengin/api-gateway": "workspace:*",
     "@crossengin/api-gateway-runtime": "workspace:*",
+    "@crossengin/dr": "workspace:*",
+    "@crossengin/dr-runtime": "workspace:*",
+    "@crossengin/dr-runtime-pg": "workspace:*",
     "@crossengin/billing-stripe": "workspace:*",
     "@crossengin/jobs": "workspace:*",
     "@crossengin/kernel": "workspace:*",

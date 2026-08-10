@@ -427,6 +427,18 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core"]).sloConfig).toBeNull();
   });
 
+  it("parses --dr-readiness-config and defaults it to null", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--dr-readiness-config", "./dr.json"]).drReadinessConfig).toBe("./dr.json");
+    expect(parseServeArgs(["--pack=erp-core", "--dr-readiness-config=./dr.json"]).drReadinessConfig).toBe("./dr.json");
+    expect(parseServeArgs(["--pack", "erp-core"]).drReadinessConfig).toBeNull();
+  });
+
+  it("parses --access-reviews-config and defaults it to null", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--access-reviews-config", "./ar.json"]).accessReviewsConfig).toBe("./ar.json");
+    expect(parseServeArgs(["--pack=erp-core", "--access-reviews-config=./ar.json"]).accessReviewsConfig).toBe("./ar.json");
+    expect(parseServeArgs(["--pack", "erp-core"]).accessReviewsConfig).toBeNull();
+  });
+
   it("parses a remote --jwks-url", () => {
     const opts = parseServeArgs([
       "--pack",
