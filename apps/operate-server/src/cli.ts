@@ -65,6 +65,8 @@ export interface ServeOptions {
   readonly drReadinessConfig: string | null;
   /** Path to a JSON access-reviews config ({systemActorUserId, campaigns, grants, principals}) — runs attestation campaigns on a schedule (needs --store pg). */
   readonly accessReviewsConfig: string | null;
+  /** Source the review grants from this instance's configured API-key principals (their live role assignments) instead of the config's static grants. Requires --access-reviews-config. */
+  readonly accessReviewsLiveGrants: boolean;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -128,6 +130,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let sloDefaultsOverride: string | null = null;
   let drReadinessConfig: string | null = null;
   let accessReviewsConfig: string | null = null;
+  let accessReviewsLiveGrants = false;
   let help = false;
   let version = false;
 
@@ -270,6 +273,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--access-reviews-config" || arg.startsWith("--access-reviews-config=")) {
       accessReviewsConfig = takeValue(arg, next, "--access-reviews-config");
       i += consumed();
+    } else if (arg === "--access-reviews-live-grants") {
+      accessReviewsLiveGrants = true;
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -349,6 +354,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (sloDefaultsOverride !== null && !sloDefaults) {
     throw new CliUsageError("--slo-defaults-override requires --slo-defaults");
   }
+  if (accessReviewsLiveGrants && accessReviewsConfig === null) {
+    throw new CliUsageError("--access-reviews-live-grants requires --access-reviews-config");
+  }
 
   if (
     (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
@@ -402,6 +410,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     sloDefaults,
     sloDefaultsOverride,
     drReadinessConfig,
+    accessReviewsLiveGrants,
     accessReviewsConfig,
     defaultScheme,
     help,
@@ -591,6 +600,9 @@ Options:
   --access-reviews-config <file>  JSON access-reviews config ({systemActorUserId, campaigns, grants,
                        principals}) — runs attestation campaigns on a schedule: starts due campaigns,
                        generates items from the live grants, auto-revokes lapsed access (needs --store pg)
+  --access-reviews-live-grants  Source the review grants from this instance's configured API-key
+                       principals (their live role assignments) instead of the config's static grants.
+                       Requires --access-reviews-config
   --help, -h           Show this help
   --version, -v        Print version
 

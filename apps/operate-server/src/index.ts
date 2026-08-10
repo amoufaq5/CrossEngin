@@ -10,6 +10,7 @@ export * from "./slo-config.js";
 export * from "./slo-defaults.js";
 export * from "./dr-readiness.js";
 export * from "./access-reviews-lifecycle.js";
+export * from "./live-grants.js";
 export * from "./entity-events.js";
 export * from "./job-invoke.js";
 export * from "./link-sweep.js";

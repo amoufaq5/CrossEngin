@@ -177,6 +177,38 @@ describe("AccessReviewCampaignScheduler tick", () => {
     expect(calls.listedFor).toEqual([]);
   });
 
+  it("sources grants from an injected grantSource instead of the config", async () => {
+    const calls: StubCalls = { started: [], generatedFor: [], listedFor: [], revocationsFor: [] };
+    let grantsSeen = -1;
+    const runtime = {
+      campaignStore: { getByCampaignId: async () => null },
+      startCampaign: async (c: AccessReviewCampaign) => {
+        calls.started.push(c.id);
+        return { ...c, status: "in_progress" as const };
+      },
+      generateItems: async (
+        _c: AccessReviewCampaign,
+        grants: readonly unknown[],
+      ) => {
+        grantsSeen = grants.length;
+        return [] as readonly AccessReviewItem[];
+      },
+    } as unknown as import("@crossengin/access-reviews-runtime-pg").PersistentAccessReviewRuntime;
+    const lifecycle = buildAccessReviewsLifecycle(dummyConn, config, {
+      runtime,
+      clock: () => NOW,
+      grantSource: {
+        grantsForCampaign: async () => ({
+          grants: [{} as never, {} as never, {} as never],
+          principals: [],
+        }),
+      },
+    });
+    await lifecycle.scheduler.tickOnce();
+    // Config declares zero grants; the source supplied three.
+    expect(grantsSeen).toBe(3);
+  });
+
   it("routes a tick error to onError instead of throwing", async () => {
     let captured: unknown = null;
     const throwingRuntime = {

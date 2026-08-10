@@ -13,6 +13,7 @@ import {
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
+import { StaticLiveGrantSource, type LiveGrantSource } from "./live-grants.js";
 
 export const AccessReviewsConfigSchema = z
   .object({
@@ -70,6 +71,8 @@ export interface AccessReviewsLifecycleOptions {
   readonly onTick?: (report: AccessReviewTickReport) => void;
   readonly onError?: (err: unknown) => void;
   readonly runtime?: PersistentAccessReviewRuntime;
+  /** Where a started campaign's grants come from. Defaults to the config's static grants/principals. */
+  readonly grantSource?: LiveGrantSource;
 }
 
 /**
@@ -82,12 +85,17 @@ export interface AccessReviewsLifecycleOptions {
  */
 export class AccessReviewCampaignScheduler {
   private handle: IntervalHandle | null = null;
+  private readonly grantSource: LiveGrantSource;
 
   constructor(
     private readonly runtime: PersistentAccessReviewRuntime,
     private readonly config: AccessReviewsConfig,
     private readonly opts: AccessReviewsLifecycleOptions = {},
-  ) {}
+  ) {
+    this.grantSource =
+      opts.grantSource ??
+      new StaticLiveGrantSource({ grants: config.grants, principals: config.principals });
+  }
 
   start(): void {
     if (this.handle !== null) return;
@@ -127,10 +135,11 @@ export class AccessReviewCampaignScheduler {
 
       if (isDueToStart(current, now)) {
         const started = await this.runtime.startCampaign(current, now);
+        const snapshot = await this.grantSource.grantsForCampaign(started);
         const items = await this.runtime.generateItems(
           started,
-          this.config.grants,
-          this.config.principals,
+          snapshot.grants,
+          snapshot.principals,
           { assignReviewers: this.config.assignReviewers },
         );
         startedCampaigns.push(started.id);
