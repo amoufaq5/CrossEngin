@@ -29,6 +29,7 @@
     "@crossengin/access-reviews-runtime-pg": "workspace:*",
     "@crossengin/api-gateway": "workspace:*",
     "@crossengin/api-gateway-runtime": "workspace:*",
+    "@crossengin/auth": "workspace:*",
     "@crossengin/dr": "workspace:*",
     "@crossengin/dr-runtime": "workspace:*",
     "@crossengin/dr-runtime-pg": "workspace:*",

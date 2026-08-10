@@ -74,6 +74,7 @@ import {
   loadAccessReviewsConfig,
   type AccessReviewsLifecycle,
 } from "./access-reviews-lifecycle.js";
+import { AuthLiveGrantSource, apiKeyPrincipalProvider } from "./live-grants.js";
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
 import { invokeRolesByAction } from "@crossengin/jobs";
 
@@ -403,6 +404,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       console.warn("[access-reviews] --access-reviews-config requires a Postgres store (--store pg); skipping");
     } else {
       accessReviews = buildAccessReviewsLifecycle(conn, await loadAccessReviewsConfig(options.accessReviewsConfig), {
+        ...(options.accessReviewsLiveGrants
+          ? { grantSource: new AuthLiveGrantSource(apiKeyPrincipalProvider(apiKeys)) }
+          : {}),
         onTick: (r) =>
           console.info(
             `[access-reviews] started=${r.startedCampaigns.length.toString()} items=${r.generatedItems.toString()} revoked=${r.autoRevocations.length.toString()}`,

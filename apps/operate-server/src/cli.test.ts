@@ -457,6 +457,20 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core"]).drReadinessConfig).toBeNull();
   });
 
+  it("parses --access-reviews-live-grants only with --access-reviews-config", () => {
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--access-reviews-config", "./ar.json", "--access-reviews-live-grants"])
+        .accessReviewsLiveGrants,
+    ).toBe(true);
+    expect(parseServeArgs(["--pack", "erp-core"]).accessReviewsLiveGrants).toBe(false);
+  });
+
+  it("rejects --access-reviews-live-grants without --access-reviews-config", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--access-reviews-live-grants"])).toThrow(
+      /requires --access-reviews-config/,
+    );
+  });
+
   it("parses --access-reviews-config and defaults it to null", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--access-reviews-config", "./ar.json"]).accessReviewsConfig).toBe("./ar.json");
     expect(parseServeArgs(["--pack=erp-core", "--access-reviews-config=./ar.json"]).accessReviewsConfig).toBe("./ar.json");
