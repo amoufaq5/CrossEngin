@@ -57,6 +57,8 @@ export interface ServeOptions {
   readonly residencyStore: boolean;
   /** Path to a JSON SLO config ({alertPolicy, systemActorUserId, availability?, latency?}) — auto-enforces SLOs over the live request stream. */
   readonly sloConfig: string | null;
+  /** Derive default availability + latency SLOs from the manifest (one per entity operation) — enforce without a hand-written config. Mutually exclusive with --slo-config. */
+  readonly sloDefaults: boolean;
   /** Path to a JSON DR-readiness config ({tenantId?, intervalMs?, input:{runbooks,backups,replication}}) — periodically assesses + persists DR readiness (needs --store pg). */
   readonly drReadinessConfig: string | null;
   /** Path to a JSON access-reviews config ({systemActorUserId, campaigns, grants, principals}) — runs attestation campaigns on a schedule (needs --store pg). */
@@ -120,6 +122,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let residencyFile: string | null = null;
   let residencyStore = false;
   let sloConfig: string | null = null;
+  let sloDefaults = false;
   let drReadinessConfig: string | null = null;
   let accessReviewsConfig: string | null = null;
   let help = false;
@@ -253,6 +256,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--slo-config" || arg.startsWith("--slo-config=")) {
       sloConfig = takeValue(arg, next, "--slo-config");
       i += consumed();
+    } else if (arg === "--slo-defaults") {
+      sloDefaults = true;
     } else if (arg === "--dr-readiness-config" || arg.startsWith("--dr-readiness-config=")) {
       drReadinessConfig = takeValue(arg, next, "--dr-readiness-config");
       i += consumed();
@@ -332,6 +337,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (residencyStore && residencyFile !== null) {
     throw new CliUsageError("--residency-store and --residency-file are mutually exclusive");
   }
+  if (sloDefaults && sloConfig !== null) {
+    throw new CliUsageError("--slo-defaults and --slo-config are mutually exclusive");
+  }
 
   if (
     (jwksKeys.length > 0 || jwksFile !== null || jwksUrl !== null) &&
@@ -382,6 +390,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     residencyFile,
     residencyStore,
     sloConfig,
+    sloDefaults,
     drReadinessConfig,
     accessReviewsConfig,
     defaultScheme,
@@ -560,6 +569,9 @@ Options:
   --slo-config <file>  JSON SLO config ({alertPolicy, systemActorUserId, availability?, latency?}) —
                        auto-enforces availability/latency SLOs over the live request stream, declaring
                        incidents + paging + optional flag rollback on a burn/latency breach
+  --slo-defaults       Derive default availability + latency SLOs from the manifest (one per entity
+                       operation, read vs. write targets) and enforce them — no config file needed.
+                       Mutually exclusive with --slo-config
   --dr-readiness-config <file>  JSON DR-readiness config ({tenantId?, intervalMs?, input:{runbooks,
                        backups, replication}}) — periodically folds live failover/drill executions into
                        the declared infra, assesses readiness, and persists a snapshot (needs --store pg)

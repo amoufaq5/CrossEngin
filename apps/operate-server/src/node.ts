@@ -59,6 +59,7 @@ import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
 import { buildSloEnforcement, loadSloConfig } from "./slo-config.js";
+import { deriveSloConfig } from "./slo-defaults.js";
 import {
   buildDrReadinessLifecycle,
   loadDrReadinessConfig,
@@ -348,12 +349,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.region !== null && residencyDirectory !== undefined
       ? { region: options.region as Region, directory: residencyDirectory }
       : undefined;
-  // Live SLO enforcement: a config file registers availability/latency SLOs; the observer feeds every
-  // dispatched request's outcome into the engines, and the scheduler evaluates burn/latency on an interval,
-  // declaring incidents + paging + optional flag rollback on a breach. Enabled by --slo-config.
-  const sloEnforcement =
+  // Live SLO enforcement: availability/latency SLOs registered from a config file (--slo-config) or
+  // derived from the manifest (--slo-defaults, one SLO per entity operation). The observer feeds every
+  // dispatched request's outcome into the engines, and the scheduler evaluates burn/latency on an
+  // interval, declaring incidents + paging + optional flag rollback on a breach.
+  const sloConfig =
     options.sloConfig !== null
-      ? buildSloEnforcement(await loadSloConfig(options.sloConfig), {
+      ? await loadSloConfig(options.sloConfig)
+      : options.sloDefaults
+        ? deriveSloConfig(manifest)
+        : null;
+  const sloEnforcement =
+    sloConfig !== null
+      ? buildSloEnforcement(sloConfig, {
           onDecision: (d) =>
             console.info(
               `[slo] ${d.signal} ${d.kind} surface=${d.surface} slo=${d.sloId}` +
