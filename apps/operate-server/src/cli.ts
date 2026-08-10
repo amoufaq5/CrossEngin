@@ -57,6 +57,10 @@ export interface ServeOptions {
   readonly residencyStore: boolean;
   /** Path to a JSON SLO config ({alertPolicy, systemActorUserId, availability?, latency?}) — auto-enforces SLOs over the live request stream. */
   readonly sloConfig: string | null;
+  /** Path to a JSON DR-readiness config ({tenantId?, intervalMs?, input:{runbooks,backups,replication}}) — periodically assesses + persists DR readiness (needs --store pg). */
+  readonly drReadinessConfig: string | null;
+  /** Path to a JSON access-reviews config ({systemActorUserId, campaigns, grants, principals}) — runs attestation campaigns on a schedule (needs --store pg). */
+  readonly accessReviewsConfig: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -116,6 +120,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let residencyFile: string | null = null;
   let residencyStore = false;
   let sloConfig: string | null = null;
+  let drReadinessConfig: string | null = null;
+  let accessReviewsConfig: string | null = null;
   let help = false;
   let version = false;
 
@@ -247,6 +253,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--slo-config" || arg.startsWith("--slo-config=")) {
       sloConfig = takeValue(arg, next, "--slo-config");
       i += consumed();
+    } else if (arg === "--dr-readiness-config" || arg.startsWith("--dr-readiness-config=")) {
+      drReadinessConfig = takeValue(arg, next, "--dr-readiness-config");
+      i += consumed();
+    } else if (arg === "--access-reviews-config" || arg.startsWith("--access-reviews-config=")) {
+      accessReviewsConfig = takeValue(arg, next, "--access-reviews-config");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -370,6 +382,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     residencyFile,
     residencyStore,
     sloConfig,
+    drReadinessConfig,
+    accessReviewsConfig,
     defaultScheme,
     help,
     version,
@@ -546,6 +560,12 @@ Options:
   --slo-config <file>  JSON SLO config ({alertPolicy, systemActorUserId, availability?, latency?}) —
                        auto-enforces availability/latency SLOs over the live request stream, declaring
                        incidents + paging + optional flag rollback on a burn/latency breach
+  --dr-readiness-config <file>  JSON DR-readiness config ({tenantId?, intervalMs?, input:{runbooks,
+                       backups, replication}}) — periodically folds live failover/drill executions into
+                       the declared infra, assesses readiness, and persists a snapshot (needs --store pg)
+  --access-reviews-config <file>  JSON access-reviews config ({systemActorUserId, campaigns, grants,
+                       principals}) — runs attestation campaigns on a schedule: starts due campaigns,
+                       generates items from the live grants, auto-revokes lapsed access (needs --store pg)
   --help, -h           Show this help
   --version, -v        Print version
 

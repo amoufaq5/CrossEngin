@@ -78,6 +78,15 @@ importers:
 
   apps/operate-server:
     dependencies:
+      '@crossengin/access-reviews':
+        specifier: workspace:*
+        version: link:../../packages/access-reviews
+      '@crossengin/access-reviews-runtime':
+        specifier: workspace:*
+        version: link:../../packages/access-reviews-runtime
+      '@crossengin/access-reviews-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/access-reviews-runtime-pg
       '@crossengin/api-gateway':
         specifier: workspace:*
         version: link:../../packages/api-gateway
@@ -87,6 +96,15 @@ importers:
       '@crossengin/billing-stripe':
         specifier: workspace:*
         version: link:../../packages/billing-stripe
+      '@crossengin/dr':
+        specifier: workspace:*
+        version: link:../../packages/dr
+      '@crossengin/dr-runtime':
+        specifier: workspace:*
+        version: link:../../packages/dr-runtime
+      '@crossengin/dr-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/dr-runtime-pg
       '@crossengin/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs

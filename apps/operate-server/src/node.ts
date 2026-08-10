@@ -59,6 +59,16 @@ import { OperateHttpServer, buildOperateHttpServer, type WebhookRoute } from "./
 import { JobScheduler, PostgresTenantSource, StaticTenantSource, type TenantSource } from "./scheduler.js";
 import { PostgresEntityEventSink } from "./entity-events.js";
 import { buildSloEnforcement, loadSloConfig } from "./slo-config.js";
+import {
+  buildDrReadinessLifecycle,
+  loadDrReadinessConfig,
+  type DrReadinessLifecycle,
+} from "./dr-readiness.js";
+import {
+  buildAccessReviewsLifecycle,
+  loadAccessReviewsConfig,
+  type AccessReviewsLifecycle,
+} from "./access-reviews-lifecycle.js";
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
 import { invokeRolesByAction } from "@crossengin/jobs";
 
@@ -352,6 +362,38 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           onError: (err) => console.error("[slo] evaluation error", err),
         })
       : null;
+  // Periodic DR-readiness assessment: fold the failover/drill executions recorded through the API into
+  // the config's declared infra, assess readiness, and persist a snapshot. Enabled by
+  // --dr-readiness-config over a pg store (needs the conn for the execution stores).
+  let drReadiness: DrReadinessLifecycle | null = null;
+  if (options.drReadinessConfig !== null) {
+    if (conn === undefined) {
+      console.warn("[dr] --dr-readiness-config requires a Postgres store (--store pg); skipping");
+    } else {
+      drReadiness = buildDrReadinessLifecycle(conn, await loadDrReadinessConfig(options.drReadinessConfig), {
+        onReport: (r) =>
+          console.info(`[dr] readiness ready=${r.ready.toString()} issues=${r.counts.totalIssues.toString()}`),
+        onError: (err) => console.error("[dr] readiness error", err),
+      });
+    }
+  }
+  // Scheduled access-review campaigns: start due campaigns, generate items from the config's live grants,
+  // and auto-revoke lapsed access — persisting through the access-reviews runtime. Enabled by
+  // --access-reviews-config over a pg store.
+  let accessReviews: AccessReviewsLifecycle | null = null;
+  if (options.accessReviewsConfig !== null) {
+    if (conn === undefined) {
+      console.warn("[access-reviews] --access-reviews-config requires a Postgres store (--store pg); skipping");
+    } else {
+      accessReviews = buildAccessReviewsLifecycle(conn, await loadAccessReviewsConfig(options.accessReviewsConfig), {
+        onTick: (r) =>
+          console.info(
+            `[access-reviews] started=${r.startedCampaigns.length.toString()} items=${r.generatedItems.toString()} revoked=${r.autoRevocations.length.toString()}`,
+          ),
+        onError: (err) => console.error("[access-reviews] tick error", err),
+      });
+    }
+  }
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -408,6 +450,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   jobScheduler?.start();
   pruneScheduler?.start();
   sloEnforcement?.scheduler.start();
+  drReadiness?.scheduler.start();
+  accessReviews?.scheduler.start();
   const listener = createNodeRequestListener(httpServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -424,6 +468,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         jobScheduler?.stop();
         pruneScheduler?.stop();
         sloEnforcement?.scheduler.stop();
+        drReadiness?.scheduler.stop();
+        accessReviews?.scheduler.stop();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
