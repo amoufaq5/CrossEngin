@@ -438,6 +438,19 @@ describe("parseServeArgs", () => {
     );
   });
 
+  it("parses --slo-defaults-override only with --slo-defaults", () => {
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--slo-defaults", "--slo-defaults-override", "./ov.json"]).sloDefaultsOverride,
+    ).toBe("./ov.json");
+    expect(parseServeArgs(["--pack", "erp-core"]).sloDefaultsOverride).toBeNull();
+  });
+
+  it("rejects --slo-defaults-override without --slo-defaults", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--slo-defaults-override", "./ov.json"])).toThrow(
+      /requires --slo-defaults/,
+    );
+  });
+
   it("parses --dr-readiness-config and defaults it to null", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--dr-readiness-config", "./dr.json"]).drReadinessConfig).toBe("./dr.json");
     expect(parseServeArgs(["--pack=erp-core", "--dr-readiness-config=./dr.json"]).drReadinessConfig).toBe("./dr.json");

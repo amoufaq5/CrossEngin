@@ -24,7 +24,7 @@ import {
 
 const DEFAULT_EVALUATE_INTERVAL_MS = 60_000;
 
-const SloRegistrationConfigSchema = z
+export const SloRegistrationConfigSchema = z
   .object({
     slo: SloSchema,
     category: z.string().min(1).optional(),
@@ -61,7 +61,7 @@ export const SloConfigSchema = z
 
 export type SloConfig = z.infer<typeof SloConfigSchema>;
 
-type SloRegistrationConfig = z.infer<typeof SloRegistrationConfigSchema>;
+export type SloRegistrationConfig = z.infer<typeof SloRegistrationConfigSchema>;
 
 /** Pure parse — validates an already-decoded JSON value into a `SloConfig`. */
 export function parseSloConfig(json: unknown): SloConfig {

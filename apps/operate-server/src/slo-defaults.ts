@@ -1,8 +1,16 @@
+import { readFile } from "node:fs/promises";
+
+import { z } from "zod";
 import type { Manifest } from "@crossengin/kernel";
-import type { AlertPolicy } from "@crossengin/observability";
+import { AlertPolicySchema, type AlertPolicy } from "@crossengin/observability";
 import { manifestRouteSpecs } from "@crossengin/operate-runtime";
 
-import { SloConfigSchema, type SloConfig } from "./slo-config.js";
+import {
+  SloConfigSchema,
+  SloRegistrationConfigSchema,
+  type SloConfig,
+  type SloRegistrationConfig,
+} from "./slo-config.js";
 
 /** Actions whose surface is a read (availability + latency tuned looser/tighter accordingly). */
 const READ_ACTIONS: ReadonlySet<string> = new Set(["list", "read", "get"]);
@@ -34,6 +42,10 @@ export interface SloDefaultsOptions {
   readonly writeP95?: string;
   readonly includeLatency?: boolean;
   readonly tenantId?: string | null;
+  /** Extra availability registrations appended after the derived ones (from an override file). */
+  readonly extraAvailability?: readonly SloRegistrationConfig[];
+  /** Extra latency registrations appended after the derived ones. */
+  readonly extraLatency?: readonly SloRegistrationConfig[];
 }
 
 /**
@@ -87,7 +99,10 @@ export function deriveSloConfig(manifest: Manifest, opts: SloDefaultsOptions = {
     }
   }
 
-  if (availability.length === 0) {
+  for (const reg of opts.extraAvailability ?? []) availability.push(reg);
+  for (const reg of opts.extraLatency ?? []) latency.push(reg);
+
+  if (availability.length === 0 && latency.length === 0) {
     throw new Error("deriveSloConfig: manifest declares no entity operations to enforce");
   }
 
@@ -106,4 +121,71 @@ export function sloSlug(operationId: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * A partial override layered onto the manifest-derived defaults: a real alert
+ * policy + acting user (so `--slo-defaults` can actually page), target/interval
+ * tweaks, and any extra SLO registrations — all optional. Everything the file
+ * omits keeps its derived default. The final config is re-validated by
+ * `SloConfigSchema`, so a malformed alert policy / SLO is rejected.
+ */
+export const SloDefaultsOverrideSchema = z
+  .object({
+    systemActorUserId: z.string().uuid().optional(),
+    alertPolicy: AlertPolicySchema.optional(),
+    evaluateIntervalMs: z.number().int().positive().optional(),
+    window: z.string().min(2).optional(),
+    readAvailability: z.number().min(0.5).max(1).optional(),
+    writeAvailability: z.number().min(0.5).max(1).optional(),
+    readP95: z.string().min(2).optional(),
+    writeP95: z.string().min(2).optional(),
+    includeLatency: z.boolean().optional(),
+    tenantId: z.string().uuid().nullable().optional(),
+    extraAvailability: z.array(SloRegistrationConfigSchema).optional(),
+    extraLatency: z.array(SloRegistrationConfigSchema).optional(),
+  })
+  .strict();
+export type SloDefaultsOverride = z.infer<typeof SloDefaultsOverrideSchema>;
+
+export function parseSloDefaultsOverride(json: unknown): SloDefaultsOverride {
+  return SloDefaultsOverrideSchema.parse(json);
+}
+
+export async function loadSloDefaultsOverride(path: string): Promise<SloDefaultsOverride> {
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (err) {
+    throw new Error(`--slo-defaults-override: cannot read ${path}: ${errMessage(err)}`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`--slo-defaults-override: invalid JSON in ${path}: ${errMessage(err)}`);
+  }
+  return parseSloDefaultsOverride(parsed);
+}
+
+/** Maps an override file into `deriveSloConfig` options (drops the undefined keys). */
+export function sloDefaultsOptionsFromOverride(override: SloDefaultsOverride): SloDefaultsOptions {
+  return {
+    ...(override.systemActorUserId !== undefined ? { systemActorUserId: override.systemActorUserId } : {}),
+    ...(override.alertPolicy !== undefined ? { alertPolicy: override.alertPolicy } : {}),
+    ...(override.evaluateIntervalMs !== undefined ? { evaluateIntervalMs: override.evaluateIntervalMs } : {}),
+    ...(override.window !== undefined ? { window: override.window } : {}),
+    ...(override.readAvailability !== undefined ? { readAvailability: override.readAvailability } : {}),
+    ...(override.writeAvailability !== undefined ? { writeAvailability: override.writeAvailability } : {}),
+    ...(override.readP95 !== undefined ? { readP95: override.readP95 } : {}),
+    ...(override.writeP95 !== undefined ? { writeP95: override.writeP95 } : {}),
+    ...(override.includeLatency !== undefined ? { includeLatency: override.includeLatency } : {}),
+    ...(override.tenantId !== undefined ? { tenantId: override.tenantId } : {}),
+    ...(override.extraAvailability !== undefined ? { extraAvailability: override.extraAvailability } : {}),
+    ...(override.extraLatency !== undefined ? { extraLatency: override.extraLatency } : {}),
+  };
+}
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
