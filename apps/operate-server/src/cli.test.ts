@@ -427,6 +427,17 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core"]).sloConfig).toBeNull();
   });
 
+  it("parses --slo-defaults and defaults it to false", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--slo-defaults"]).sloDefaults).toBe(true);
+    expect(parseServeArgs(["--pack", "erp-core"]).sloDefaults).toBe(false);
+  });
+
+  it("rejects --slo-defaults together with --slo-config", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--slo-defaults", "--slo-config", "./slo.json"])).toThrow(
+      /mutually exclusive/,
+    );
+  });
+
   it("parses --dr-readiness-config and defaults it to null", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--dr-readiness-config", "./dr.json"]).drReadinessConfig).toBe("./dr.json");
     expect(parseServeArgs(["--pack=erp-core", "--dr-readiness-config=./dr.json"]).drReadinessConfig).toBe("./dr.json");
