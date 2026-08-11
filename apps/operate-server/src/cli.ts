@@ -67,6 +67,8 @@ export interface ServeOptions {
   readonly accessReviewsConfig: string | null;
   /** Source the review grants from this instance's configured API-key principals (their live role assignments) instead of the config's static grants. Requires --access-reviews-config. */
   readonly accessReviewsLiveGrants: boolean;
+  /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
+  readonly meteringConfig: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -131,6 +133,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let drReadinessConfig: string | null = null;
   let accessReviewsConfig: string | null = null;
   let accessReviewsLiveGrants = false;
+  let meteringConfig: string | null = null;
   let help = false;
   let version = false;
 
@@ -275,6 +278,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--access-reviews-live-grants") {
       accessReviewsLiveGrants = true;
+    } else if (arg === "--metering-config" || arg.startsWith("--metering-config=")) {
+      meteringConfig = takeValue(arg, next, "--metering-config");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -412,6 +418,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     drReadinessConfig,
     accessReviewsLiveGrants,
     accessReviewsConfig,
+    meteringConfig,
     defaultScheme,
     help,
     version,
@@ -603,6 +610,9 @@ Options:
   --access-reviews-live-grants  Source the review grants from this instance's configured API-key
                        principals (their live role assignments) instead of the config's static grants.
                        Requires --access-reviews-config
+  --metering-config <file>  JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?,
+                       flushIntervalMs?}) — meters each billable request into billing usage keyed by the
+                       tenant's subscription, flushed to Postgres periodically (needs --store pg)
   --help, -h           Show this help
   --version, -v        Print version
 

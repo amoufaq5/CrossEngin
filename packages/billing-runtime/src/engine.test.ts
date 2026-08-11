@@ -65,6 +65,14 @@ describe("BillingMeteringEngine — exit criterion", () => {
     expect(result.invoice?.lineItems.every((l) => l.kind !== "usage_overage")).toBe(true);
   });
 
+  it("clearSubscription drops a subscription's buckets without invoicing", () => {
+    const e = engine();
+    e.recordUsage(aiCall({ idempotencyKey: "a", quantity: 5 }));
+    expect(e.usage(SUBSCRIPTION)).toHaveLength(1);
+    e.clearSubscription(SUBSCRIPTION);
+    expect(e.usage(SUBSCRIPTION)).toEqual([]);
+  });
+
   it("fires onAnomaly when a bucket spikes past the meter threshold", () => {
     const anomalies: number[] = [];
     const e = new BillingMeteringEngine({

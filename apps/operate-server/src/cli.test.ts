@@ -471,6 +471,12 @@ describe("parseServeArgs", () => {
     );
   });
 
+  it("parses --metering-config and defaults it to null", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--metering-config", "./m.json"]).meteringConfig).toBe("./m.json");
+    expect(parseServeArgs(["--pack=erp-core", "--metering-config=./m.json"]).meteringConfig).toBe("./m.json");
+    expect(parseServeArgs(["--pack", "erp-core"]).meteringConfig).toBeNull();
+  });
+
   it("parses --access-reviews-config and defaults it to null", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--access-reviews-config", "./ar.json"]).accessReviewsConfig).toBe("./ar.json");
     expect(parseServeArgs(["--pack=erp-core", "--access-reviews-config=./ar.json"]).accessReviewsConfig).toBe("./ar.json");
