@@ -121,8 +121,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 132 tables", () => {
-    expect(META_TABLES).toHaveLength(132);
+  it("contains 133 tables", () => {
+    expect(META_TABLES).toHaveLength(133);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -160,6 +160,7 @@ describe("META_TABLES", () => {
       "backup_records",
       "billing_events",
       "billing_subscriptions",
+      "billing_usage_records",
       "budget_breaches",
       "cdc_checkpoints",
       "chain_of_custody",

@@ -9634,6 +9634,52 @@ export const META_DR_READINESS_SNAPSHOTS: TableDefinition = {
   },
 };
 
+export const META_BILLING_USAGE_RECORDS: TableDefinition = {
+  schema: "meta",
+  name: "billing_usage_records",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "subscription_id", type: "UUID", notNull: true },
+    {
+      name: "meter",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "meter IN ('ai_call', 'ai_token', 'storage_gb_month', 'integration_call', 'job_run')",
+    },
+    { name: "period_start", type: "TIMESTAMPTZ", notNull: true },
+    { name: "period_end", type: "TIMESTAMPTZ", notNull: true },
+    { name: "quantity", type: "NUMERIC(20, 4)", notNull: true, check: "quantity >= 0" },
+    {
+      name: "source",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "source IN ('ai_provider_calls', 'job_costs', 'integration_calls', 'tenant_storage_usage', 'manual')",
+    },
+    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "idempotency_key",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "billing_usage_records_idempotency_key_key" },
+    },
+    { name: "record", type: "JSONB", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_billing_usage_records_tenant_period", columns: ["tenant_id", "period_start"] },
+    { name: "idx_billing_usage_records_subscription", columns: ["subscription_id", "meter"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "billing_usage_records_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9767,4 +9813,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_DR_FAILOVER_EXECUTIONS,
   META_DR_DRILL_EXECUTIONS,
   META_DR_READINESS_SNAPSHOTS,
+  META_BILLING_USAGE_RECORDS,
 ];
