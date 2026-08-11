@@ -77,6 +77,35 @@ export class PostgresUsageRecordStore {
     });
   }
 
+  /** Usage records not yet reported to Stripe, oldest first. */
+  async listUnsynced(tenantId: string, limit = 500): Promise<readonly UsageRecord[]> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const result = await tx.query<UsageRow>(
+        `SELECT record FROM ${SCHEMA}.${TABLE}
+         WHERE synced_to_stripe_at IS NULL ORDER BY recorded_at ASC LIMIT $1`,
+        [limit],
+      );
+      return result.rows.map(rowToRecord);
+    });
+  }
+
+  /** Marks a usage record as reported to Stripe (idempotent — a re-mark is a no-op UPDATE). */
+  async markSynced(
+    tenantId: string,
+    recordId: string,
+    stripeUsageRecordId: string,
+    syncedAt: string,
+  ): Promise<void> {
+    await withTenantContext(this.conn, tenantId, async (tx) => {
+      await tx.query(
+        `UPDATE ${SCHEMA}.${TABLE}
+         SET synced_to_stripe_at = $2, stripe_usage_record_id = $3
+         WHERE id = $1 AND synced_to_stripe_at IS NULL`,
+        [recordId, syncedAt, stripeUsageRecordId],
+      );
+    });
+  }
+
   async sumForMeter(
     tenantId: string,
     subscriptionId: string,

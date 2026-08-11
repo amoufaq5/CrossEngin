@@ -2,6 +2,7 @@ import { mapBillingPortalSession, type StripeBillingPortalSession } from "./bill
 import { StripeError, stripeErrorFromHttpResponse, stripeErrorFromNetworkError } from "./errors.js";
 import { mapStripeCustomer, type StripeCustomer } from "./customers.js";
 import { mapStripeSubscription, type StripeSubscription } from "./subscriptions.js";
+import { mapStripeUsageRecord, type CreateUsageRecordInput, type StripeUsageRecord } from "./usage-records.js";
 
 export const STRIPE_API_BASE_URL = "https://api.stripe.com";
 
@@ -124,10 +125,38 @@ export class StripeClient {
     return mapBillingPortalSession(json);
   }
 
-  private async request(method: string, path: string, form?: FormLike): Promise<unknown> {
+  /**
+   * Reports metered usage to a Stripe subscription item (legacy usage-records
+   * API). The `idempotencyKey` rides as Stripe's `Idempotency-Key` header, so a
+   * retried report is de-duplicated by Stripe.
+   */
+  async createUsageRecord(input: CreateUsageRecordInput): Promise<StripeUsageRecord> {
+    const form: FormLike = {
+      quantity: input.quantity,
+      action: input.action ?? "increment",
+      ...(input.timestamp !== undefined ? { timestamp: input.timestamp } : {}),
+    };
+    const json = await this.request(
+      "POST",
+      `/v1/subscription_items/${encodeURIComponent(input.subscriptionItemId)}/usage_records`,
+      form,
+      input.idempotencyKey,
+    );
+    return mapStripeUsageRecord(json);
+  }
+
+  private async request(
+    method: string,
+    path: string,
+    form?: FormLike,
+    idempotencyKey?: string,
+  ): Promise<unknown> {
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.apiKey}`,
     };
+    if (idempotencyKey !== undefined) {
+      headers["idempotency-key"] = idempotencyKey;
+    }
     let body: string | undefined;
     if (form !== undefined) {
       headers["content-type"] = "application/x-www-form-urlencoded";
