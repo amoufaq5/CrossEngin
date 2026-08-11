@@ -96,6 +96,15 @@ importers:
       '@crossengin/auth':
         specifier: workspace:*
         version: link:../../packages/auth
+      '@crossengin/billing':
+        specifier: workspace:*
+        version: link:../../packages/billing
+      '@crossengin/billing-runtime':
+        specifier: workspace:*
+        version: link:../../packages/billing-runtime
+      '@crossengin/billing-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/billing-runtime-pg
       '@crossengin/billing-stripe':
         specifier: workspace:*
         version: link:../../packages/billing-stripe

@@ -78,6 +78,11 @@ export class BillingMeteringEngine {
     return this.meter.bucketsFor(subscriptionId);
   }
 
+  /** Drops a subscription's accumulated buckets (e.g. after a usage flush persists them). */
+  clearSubscription(subscriptionId: string): void {
+    this.meter.clearSubscription(subscriptionId);
+  }
+
   closePeriod(input: ClosePeriodInput): ClosePeriodResult {
     const buckets = this.meter.bucketsFor(input.subscription.id);
     const source = input.source ?? "manual";

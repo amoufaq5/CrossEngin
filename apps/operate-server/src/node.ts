@@ -1,6 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
+import type { PipelineExecution } from "@crossengin/api-gateway";
 import { StripeClient } from "@crossengin/billing-stripe";
 import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
@@ -75,6 +76,7 @@ import {
   type AccessReviewsLifecycle,
 } from "./access-reviews-lifecycle.js";
 import { AuthLiveGrantSource, apiKeyPrincipalProvider } from "./live-grants.js";
+import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
 import { invokeRolesByAction } from "@crossengin/jobs";
 
@@ -415,6 +417,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       });
     }
   }
+  // Usage metering: each billable request (authenticated tenant, mapped subscription, counted status)
+  // accumulates into a billing engine keyed by the tenant's subscription, flushed to Postgres on an
+  // interval. Enabled by --metering-config over a pg store.
+  let metering: RequestMetering | null = null;
+  if (options.meteringConfig !== null) {
+    if (conn === undefined) {
+      console.warn("[metering] --metering-config requires a Postgres store (--store pg); skipping");
+    } else {
+      metering = buildRequestMetering(conn, await loadMeteringConfig(options.meteringConfig), {
+        onFlush: (written) => console.info(`[metering] flushed ${written.toString()} usage record(s)`),
+        onError: (err) => console.error("[metering] flush error", err),
+      });
+    }
+  }
+  // Compose the per-request observers (SLO + metering) into one execution sink.
+  const executionSinks: ((execution: PipelineExecution) => void)[] = [];
+  if (sloEnforcement !== null) executionSinks.push(sloEnforcement.observer.asExecutionSink());
+  if (metering !== null) executionSinks.push(metering.observer.asExecutionSink());
+  const onExecution =
+    executionSinks.length > 0
+      ? (execution: PipelineExecution): void => {
+          for (const sink of executionSinks) sink(execution);
+        }
+      : undefined;
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -436,7 +462,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : {}),
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
-    ...(sloEnforcement !== null ? { onExecution: sloEnforcement.observer.asExecutionSink() } : {}),
+    ...(onExecution !== undefined ? { onExecution } : {}),
   });
   // In-process cron scheduler: enqueue the manifest's scheduled jobs into job_runs per tenant, so the
   // distributed worker fleet runs them. Enabled by --schedule-ms + --schedule-tenant over a pg store;
@@ -473,6 +499,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   sloEnforcement?.scheduler.start();
   drReadiness?.scheduler.start();
   accessReviews?.scheduler.start();
+  metering?.flushScheduler?.start();
   const listener = createNodeRequestListener(httpServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -491,6 +518,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         sloEnforcement?.scheduler.stop();
         drReadiness?.scheduler.stop();
         accessReviews?.scheduler.stop();
+        metering?.flushScheduler?.stop();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
