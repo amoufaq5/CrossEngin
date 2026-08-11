@@ -9666,11 +9666,14 @@ export const META_BILLING_USAGE_RECORDS: TableDefinition = {
       unique: { constraintName: "billing_usage_records_idempotency_key_key" },
     },
     { name: "record", type: "JSONB", notNull: true },
+    { name: "synced_to_stripe_at", type: "TIMESTAMPTZ" },
+    { name: "stripe_usage_record_id", type: "TEXT" },
   ],
   primaryKey: ["id"],
   indexes: [
     { name: "idx_billing_usage_records_tenant_period", columns: ["tenant_id", "period_start"] },
     { name: "idx_billing_usage_records_subscription", columns: ["subscription_id", "meter"] },
+    { name: "idx_billing_usage_records_unsynced", columns: ["tenant_id", "synced_to_stripe_at"] },
   ],
   rls: {
     enabled: true,
