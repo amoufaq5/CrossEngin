@@ -123,6 +123,9 @@ importers:
       '@crossengin/dr-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/dr-runtime-pg
+      '@crossengin/forensics':
+        specifier: workspace:*
+        version: link:../../packages/forensics
       '@crossengin/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs

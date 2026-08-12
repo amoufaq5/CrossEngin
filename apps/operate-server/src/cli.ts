@@ -69,7 +69,7 @@ export interface ServeOptions {
   readonly accessReviewsConfig: string | null;
   /** Source the review grants from this instance's configured API-key principals (their live role assignments) instead of the config's static grants. Requires --access-reviews-config. */
   readonly accessReviewsLiveGrants: boolean;
-  /** Path to a JSON certification config ({tenantId?, intervalMs?, schema?, frameworks?, drReadiness?, accessReviews?}) — periodically certifies each framework from live control-evidence and persists sealed reports (needs --store pg). */
+  /** Path to a JSON certification config ({tenantId?, intervalMs?, schema?, frameworks?, drReadiness?, accessReviews?, forensicChain?}) — periodically certifies each framework from live control-evidence and persists sealed reports (needs --store pg). */
   readonly certificationConfig: string | null;
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
@@ -641,9 +641,10 @@ Options:
                        principals (their live role assignments) instead of the config's static grants.
                        Requires --access-reviews-config
   --certification-config <file>  JSON certification config ({tenantId?, intervalMs?, schema?, frameworks?,
-                       drReadiness?, accessReviews?}) — periodically certifies each framework (SOC 2 /
-                       HIPAA / …) from live control-evidence (encryption coverage, DR readiness, sealed
-                       access reviews) and persists a sealed report per framework (needs --store pg)
+                       drReadiness?, accessReviews?, forensicChain?}) — periodically certifies each
+                       framework (SOC 2 / HIPAA / …) from live control-evidence (encryption coverage, DR
+                       readiness, sealed access reviews, tamper-evident audit chain) and persists a sealed
+                       report per framework (needs --store pg)
   --metering-config <file>  JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?,
                        flushIntervalMs?}) — meters each billable request into billing usage keyed by the
                        tenant's subscription, flushed to Postgres periodically (needs --store pg)
