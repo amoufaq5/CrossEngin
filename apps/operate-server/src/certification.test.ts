@@ -20,10 +20,27 @@ import {
   buildCertificationLifecycle,
   drReadinessSource,
   encryptionCoverageSource,
+  forensicChainSource,
   loadCertificationConfig,
   parseCertificationConfig,
   type EvidenceSource,
 } from "./certification.js";
+
+const G = "0".repeat(64);
+function chainEntry(seq: number, prior: string, hash: string) {
+  return {
+    sequenceNumber: seq,
+    kind: "audit_event" as const,
+    recordedAt: AT,
+    actorReference: "svc",
+    payloadSha256: "d".repeat(64),
+    payloadSizeBytes: 10,
+    priorEntryHash: prior,
+    entryHash: hash,
+    signingKeyFingerprint: "e".repeat(64),
+    signature: "sig",
+  };
+}
 
 const AT = "2026-06-01T00:00:00.000Z";
 const TENANT = "11111111-1111-1111-1111-111111111111";
@@ -67,6 +84,7 @@ describe("parseCertificationConfig", () => {
     expect(c.frameworks).toEqual(["soc2_type2", "hipaa_security_rule"]);
     expect(c.drReadiness).toBe(true);
     expect(c.accessReviews).toBe(true);
+    expect(c.forensicChain).toBe(true);
   });
 
   it("accepts explicit frameworks + toggles", () => {
@@ -125,6 +143,34 @@ describe("evidence sources", () => {
     const [ev] = await src.collect("soc2_type2", AT);
     expect(ev?.sourceKind).toBe("dr_readiness");
     expect(ev?.satisfied).toBe(true);
+  });
+
+  it("forensicChainSource yields nothing for an empty chain (not a vacuous pass)", async () => {
+    const src = forensicChainSource({ loadChain: async () => [] });
+    expect(await src.collect("soc2_type2", AT)).toEqual([]);
+  });
+
+  it("forensicChainSource verifies an intact chain from genesis", async () => {
+    const h1 = "1".repeat(64);
+    const h2 = "2".repeat(64);
+    const src = forensicChainSource({
+      loadChain: async () => [chainEntry(0, G, h1), chainEntry(1, h1, h2)],
+    });
+    const [ev] = await src.collect("soc2_type2", AT);
+    expect(ev?.sourceKind).toBe("forensic_chain");
+    expect(ev?.satisfied).toBe(true);
+  });
+
+  it("forensicChainSource flags a broken chain", async () => {
+    const h1 = "1".repeat(64);
+    const h2 = "2".repeat(64);
+    const src = forensicChainSource({
+      // entry 1 claims a wrong priorEntryHash → chain broken at 1
+      loadChain: async () => [chainEntry(0, G, h1), chainEntry(1, "9".repeat(64), h2)],
+    });
+    const [ev] = await src.collect("soc2_type2", AT);
+    expect(ev?.satisfied).toBe(false);
+    expect(ev?.findings[0]).toContain("1");
   });
 
   it("accessReviewSource is framework-aware and skips a missing pack", async () => {

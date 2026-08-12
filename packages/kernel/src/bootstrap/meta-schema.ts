@@ -9735,6 +9735,58 @@ export const META_CERTIFICATION_REPORTS: TableDefinition = {
   },
 };
 
+export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
+  schema: "meta",
+  name: "forensic_chain_entries",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "sequence_number", type: "BIGINT", notNull: true, check: "sequence_number >= 0" },
+    {
+      name: "kind",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "kind IN ('audit_event', 'access_event', 'data_change', 'config_change', 'security_event', 'deletion_event', 'approval_decision')",
+    },
+    { name: "recorded_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "actor_reference", type: "TEXT", notNull: true },
+    { name: "payload_sha256", type: "CHAR(64)", notNull: true, check: "payload_sha256 ~ '^[0-9a-f]{64}$'" },
+    { name: "payload_size_bytes", type: "BIGINT", notNull: true, check: "payload_size_bytes >= 0" },
+    { name: "prior_entry_hash", type: "CHAR(64)", notNull: true, check: "prior_entry_hash ~ '^[0-9a-f]{64}$'" },
+    {
+      name: "entry_hash",
+      type: "CHAR(64)",
+      notNull: true,
+      unique: { constraintName: "forensic_chain_entries_entry_hash_key" },
+      check: "entry_hash ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "signing_key_fingerprint", type: "CHAR(64)", notNull: true, check: "signing_key_fingerprint ~ '^[0-9a-f]{64}$'" },
+    { name: "signature", type: "TEXT", notNull: true },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "forensic_chain_entries_tenant_seq_key",
+      columns: ["tenant_id", "sequence_number"],
+    },
+  ],
+  indexes: [
+    { name: "idx_forensic_chain_entries_tenant_seq", columns: ["tenant_id", "sequence_number"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "forensic_chain_entries_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9870,4 +9922,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_DR_READINESS_SNAPSHOTS,
   META_BILLING_USAGE_RECORDS,
   META_CERTIFICATION_REPORTS,
+  META_FORENSIC_CHAIN_ENTRIES,
 ];

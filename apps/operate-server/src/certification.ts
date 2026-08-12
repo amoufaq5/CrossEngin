@@ -6,6 +6,7 @@ import {
   evidenceFromAccessReviewEvidence,
   evidenceFromDrReadiness,
   evidenceFromEncryptionCoverage,
+  evidenceFromForensicChain,
   type AccessReviewEvidenceLike,
   type CertificationReport,
   type Clock,
@@ -18,6 +19,11 @@ import { buildPersistentCertificationEngine } from "@crossengin/certification-ru
 import { EncryptionApplier, type PgConnection } from "@crossengin/kernel-pg";
 import { PostgresDrReadinessStore } from "@crossengin/dr-runtime-pg";
 import { withTenantContext } from "@crossengin/access-reviews-runtime-pg";
+import {
+  ChainedLogEntrySchema,
+  verifyChainIntegrity,
+  type ChainedLogEntry,
+} from "@crossengin/forensics";
 
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
@@ -34,6 +40,7 @@ export const CertificationConfigSchema = z
       .default(["soc2_type2", "hipaa_security_rule"]),
     drReadiness: z.boolean().default(true),
     accessReviews: z.boolean().default(true),
+    forensicChain: z.boolean().default(true),
   })
   .strict();
 export type CertificationConfig = z.infer<typeof CertificationConfigSchema>;
@@ -182,6 +189,76 @@ export class PostgresAccessReviewEvidenceReader
   }
 }
 
+export interface ForensicChainReader {
+  loadChain(): Promise<readonly ChainedLogEntry[]>;
+}
+
+/**
+ * Verifies a persisted tamper-evident hash-chain. An **empty** chain yields no evidence (the audit
+ * control stays `not_assessed` — a valid-by-vacuity empty log must not read as a satisfied control);
+ * a non-empty chain is folded from genesis by `verifyChainIntegrity`.
+ */
+export function forensicChainSource(
+  reader: ForensicChainReader,
+  controlId = "audit.tamper_evident_log",
+): EvidenceSource {
+  return {
+    async collect(_framework, at) {
+      const entries = await reader.loadChain();
+      if (entries.length === 0) return [];
+      return [evidenceFromForensicChain(controlId, verifyChainIntegrity(entries), at)];
+    },
+  };
+}
+
+/**
+ * Loads the ordered `forensic_chain_entries` for a scope so the chain can be verified from genesis.
+ * A tenant chain is read within the tenant's RLS context; a null tenant reads the platform chain
+ * (rows with `tenant_id IS NULL`). Entries are ordered by `sequence_number` ascending — the whole
+ * chain, since integrity verification starts at the genesis hash.
+ */
+export class PostgresForensicChainReader implements ForensicChainReader {
+  private readonly schema: string;
+
+  constructor(
+    private readonly conn: PgConnection,
+    private readonly tenantId: string | null,
+    schema = "meta",
+  ) {
+    if (!SCHEMA_RE.test(schema)) {
+      throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
+    }
+    this.schema = schema;
+  }
+
+  async loadChain(): Promise<readonly ChainedLogEntry[]> {
+    const sql = `SELECT sequence_number, kind, recorded_at, actor_reference, payload_sha256,
+        payload_size_bytes, prior_entry_hash, entry_hash, signing_key_fingerprint, signature
+      FROM ${this.schema}.forensic_chain_entries
+      ORDER BY sequence_number ASC`;
+    const rows =
+      this.tenantId === null
+        ? (await this.conn.query<Record<string, unknown>>(sql)).rows
+        : await withTenantContext(this.conn, this.tenantId, async (tx) =>
+            (await tx.query<Record<string, unknown>>(sql)).rows,
+          );
+    return rows.map((row) =>
+      ChainedLogEntrySchema.parse({
+        sequenceNumber: Number(row["sequence_number"]),
+        kind: String(row["kind"]),
+        recordedAt: toIso(row["recorded_at"]),
+        actorReference: String(row["actor_reference"]),
+        payloadSha256: String(row["payload_sha256"]),
+        payloadSizeBytes: Number(row["payload_size_bytes"]),
+        priorEntryHash: String(row["prior_entry_hash"]),
+        entryHash: String(row["entry_hash"]),
+        signingKeyFingerprint: String(row["signing_key_fingerprint"]),
+        signature: String(row["signature"]),
+      }),
+    );
+  }
+}
+
 export interface CertificationSchedulerOptions {
   readonly certify: () => Promise<readonly CertificationReport[]>;
   readonly intervalMs: number;
@@ -320,6 +397,13 @@ export function defaultLiveSources(
       ),
     );
   }
+  if (config.forensicChain) {
+    sources.push(
+      forensicChainSource(
+        new PostgresForensicChainReader(conn, config.tenantId, config.schema),
+      ),
+    );
+  }
   return sources;
 }
 
@@ -327,6 +411,10 @@ function toStringArray(value: unknown): string[] {
   const raw = typeof value === "string" ? safeParse(value) : value;
   if (!Array.isArray(raw)) return [];
   return raw.filter((v): v is string => typeof v === "string");
+}
+
+function toIso(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : String(value);
 }
 
 function safeParse(text: string): unknown {
