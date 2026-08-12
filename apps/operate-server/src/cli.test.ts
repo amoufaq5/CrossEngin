@@ -471,6 +471,15 @@ describe("parseServeArgs", () => {
     );
   });
 
+  it("parses --marketplace-authoring (needs pg) and defaults it to false", () => {
+    expect(parseServeArgs(["--pack", "erp-core", "--store", "pg", "--marketplace-authoring"]).marketplaceAuthoring).toBe(true);
+    expect(parseServeArgs(["--pack", "erp-core"]).marketplaceAuthoring).toBe(false);
+  });
+
+  it("rejects --marketplace-authoring on a memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--marketplace-authoring"])).toThrow(/requires a Postgres store/);
+  });
+
   it("parses --metering-config and defaults it to null", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--metering-config", "./m.json"]).meteringConfig).toBe("./m.json");
     expect(parseServeArgs(["--pack=erp-core", "--metering-config=./m.json"]).meteringConfig).toBe("./m.json");

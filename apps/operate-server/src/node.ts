@@ -50,8 +50,15 @@ import {
   type JwksKeySpec,
   type JwtVerifyConfig,
 } from "./principals.js";
-import { PersistentMarketplaceInstallEngine, PostgresInstallationStore } from "@crossengin/marketplace-runtime-pg";
+import {
+  PersistentMarketplaceInstallEngine,
+  PostgresInstallationStore,
+  PostgresPackVersionStore,
+  buildPersistentPackSubmissionEngine,
+} from "@crossengin/marketplace-runtime-pg";
+import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
+import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
 import { loadResidencyDirectory } from "./residency-source.js";
 import type { Region } from "@crossengin/residency";
 import type { TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -331,23 +338,40 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Marketplace admin: the /v1/admin/packs routes install/list/uninstall catalog packs per tenant via
   // the persistent install engine. Enabled by --pack-catalog over a pg store (needs the conn for the
   // installation store). The tenant context is a deployment default; per-tenant plan/region is a follow-up.
-  const extraRoutes =
-    options.packCatalogFile !== null && conn !== undefined
-      ? buildMarketplaceAdminRoutes({
-          engine: new PersistentMarketplaceInstallEngine(new PostgresInstallationStore(conn, schemaOpt)),
-          store: new PostgresInstallationStore(conn, schemaOpt),
-          catalog: loadPackCatalog(await readFile(options.packCatalogFile, "utf8")),
-          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
-          adminRoles: new Set(["erp_admin"]),
-          tenantContext: {
-            platformVersion: "1.0.0",
-            region: "us-east",
-            planTier: "professional",
-            compliancePacks: [],
-            isDedicatedTenant: false,
-          },
-        })
-      : undefined;
+  const extraRouteList: ExtraGatewayRoute[] = [];
+  if (options.packCatalogFile !== null && conn !== undefined) {
+    extraRouteList.push(
+      ...buildMarketplaceAdminRoutes({
+        engine: new PersistentMarketplaceInstallEngine(new PostgresInstallationStore(conn, schemaOpt)),
+        store: new PostgresInstallationStore(conn, schemaOpt),
+        catalog: loadPackCatalog(await readFile(options.packCatalogFile, "utf8")),
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        adminRoles: new Set(["erp_admin"]),
+        tenantContext: {
+          platformVersion: "1.0.0",
+          region: "us-east",
+          planTier: "professional",
+          compliancePacks: [],
+          isDedicatedTenant: false,
+        },
+      }),
+    );
+  }
+  // Third-party authoring: the /v1/authoring/packs routes let an author submit a signed pack version and
+  // a reviewer take it through security review → publish, persisting to meta.pack_versions. Enabled by
+  // --marketplace-authoring over a pg store.
+  if (options.marketplaceAuthoring && conn !== undefined) {
+    extraRouteList.push(
+      ...buildMarketplaceAuthoringRoutes({
+        engine: buildPersistentPackSubmissionEngine(conn),
+        store: new PostgresPackVersionStore(conn),
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        authorRoles: new Set(["pack_author"]),
+        reviewerRoles: new Set(["marketplace_reviewer"]),
+      }),
+    );
+  }
+  const extraRoutes = extraRouteList.length > 0 ? extraRouteList : undefined;
   // Data-residency edge routing: this instance's region + a tenant→profile directory (a static file
   // via --residency-file, or the Postgres tenant_residency_profiles table via --residency-store). A
   // tenant hint whose profile forbids this region is redirected to its home region before dispatch.
