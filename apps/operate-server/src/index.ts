@@ -12,6 +12,7 @@ export * from "./dr-readiness.js";
 export * from "./access-reviews-lifecycle.js";
 export * from "./live-grants.js";
 export * from "./metering.js";
+export * from "./stripe-usage-sync.js";
 export * from "./entity-events.js";
 export * from "./job-invoke.js";
 export * from "./link-sweep.js";

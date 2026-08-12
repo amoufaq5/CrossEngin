@@ -477,6 +477,26 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core"]).meteringConfig).toBeNull();
   });
 
+  it("parses --stripe-usage-sync-config (needs --stripe-api-key + pg)", () => {
+    const ok = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg", "--stripe-api-key", "sk_test", "--stripe-usage-sync-config", "./s.json",
+    ]);
+    expect(ok.stripeUsageSyncConfig).toBe("./s.json");
+    expect(parseServeArgs(["--pack", "erp-core"]).stripeUsageSyncConfig).toBeNull();
+  });
+
+  it("rejects --stripe-usage-sync-config without --stripe-api-key", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-usage-sync-config", "./s.json"]),
+    ).toThrow(/requires --stripe-api-key/);
+  });
+
+  it("allows --stripe-api-key with --stripe-usage-sync-config (no billing-portal url needed)", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--stripe-api-key", "sk_test", "--stripe-usage-sync-config", "./s.json"]),
+    ).not.toThrow();
+  });
+
   it("parses --access-reviews-config and defaults it to null", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--access-reviews-config", "./ar.json"]).accessReviewsConfig).toBe("./ar.json");
     expect(parseServeArgs(["--pack=erp-core", "--access-reviews-config=./ar.json"]).accessReviewsConfig).toBe("./ar.json");

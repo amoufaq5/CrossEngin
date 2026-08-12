@@ -77,6 +77,11 @@ import {
 } from "./access-reviews-lifecycle.js";
 import { AuthLiveGrantSource, apiKeyPrincipalProvider } from "./live-grants.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
+import {
+  buildStripeUsageSync,
+  loadStripeUsageSyncConfig,
+  type StripeUsageSync,
+} from "./stripe-usage-sync.js";
 import { PostgresJobInvoker, buildActionRoleMap, mergeActionRoleMaps } from "./job-invoke.js";
 import { invokeRolesByAction } from "@crossengin/jobs";
 
@@ -431,6 +436,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       });
     }
   }
+  // Stripe usage sync: periodically report each configured tenant's un-synced usage records to Stripe
+  // and mark them synced. Enabled by --stripe-usage-sync-config over a pg store + --stripe-api-key.
+  let stripeUsageSync: StripeUsageSync | null = null;
+  if (options.stripeUsageSyncConfig !== null && conn !== undefined && options.stripeApiKey !== null) {
+    stripeUsageSync = buildStripeUsageSync(
+      conn,
+      new StripeClient({ apiKey: options.stripeApiKey }),
+      await loadStripeUsageSyncConfig(options.stripeUsageSyncConfig),
+      {
+        onSync: (o) =>
+          console.info(`[stripe-usage] tenant=${o.tenant} synced=${o.synced.toString()} skipped=${o.skipped.toString()}`),
+        onError: (err) => console.error("[stripe-usage] sync error", err),
+      },
+    );
+  }
   // Compose the per-request observers (SLO + metering) into one execution sink.
   const executionSinks: ((execution: PipelineExecution) => void)[] = [];
   if (sloEnforcement !== null) executionSinks.push(sloEnforcement.observer.asExecutionSink());
@@ -500,6 +520,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   drReadiness?.scheduler.start();
   accessReviews?.scheduler.start();
   metering?.flushScheduler?.start();
+  stripeUsageSync?.scheduler.start();
   const listener = createNodeRequestListener(httpServer);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
@@ -519,6 +540,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         drReadiness?.scheduler.stop();
         accessReviews?.scheduler.stop();
         metering?.flushScheduler?.stop();
+        stripeUsageSync?.scheduler.stop();
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   };
