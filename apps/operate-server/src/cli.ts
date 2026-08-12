@@ -49,6 +49,8 @@ export interface ServeOptions {
   readonly jobInvokeActionRoles: readonly string[];
   /** Path to a marketplace pack-catalog JSON ({packs:[...]}) — enables the /v1/admin/packs routes (needs pg). */
   readonly packCatalogFile: string | null;
+  /** Enable the third-party authoring routes (/v1/authoring/packs — submit/review/publish pack versions). Needs pg. */
+  readonly marketplaceAuthoring: boolean;
   /** This instance's serving region id (from @crossengin/residency) — enables residency edge routing with --residency-file. */
   readonly region: string | null;
   /** Path to a residency file ({tenants:[{tenantId, profile}]}) — the tenant→region directory (requires --region). */
@@ -126,6 +128,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const jobInvokeRoles: string[] = [];
   const jobInvokeActionRoles: string[] = [];
   let packCatalogFile: string | null = null;
+  let marketplaceAuthoring = false;
   let region: string | null = null;
   let residencyFile: string | null = null;
   let residencyStore = false;
@@ -253,6 +256,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--pack-catalog" || arg.startsWith("--pack-catalog=")) {
       packCatalogFile = takeValue(arg, next, "--pack-catalog");
       i += consumed();
+    } else if (arg === "--marketplace-authoring") {
+      marketplaceAuthoring = true;
     } else if (arg === "--region" || arg.startsWith("--region=")) {
       const raw = takeValue(arg, next, "--region");
       if (!(REGIONS as readonly string[]).includes(raw)) {
@@ -350,6 +355,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       throw new CliUsageError(`invalid --job-invoke-action-role: ${spec} (expected action:role)`);
     }
   }
+  if (marketplaceAuthoring && store === "memory") {
+    throw new CliUsageError("--marketplace-authoring requires a Postgres store (--store pg or pg-columns)");
+  }
   if (packCatalogFile !== null && store === "memory") {
     throw new CliUsageError("--pack-catalog requires a Postgres store (--store pg or pg-columns)");
   }
@@ -420,6 +428,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jobInvokeRoles,
     jobInvokeActionRoles,
     packCatalogFile,
+    marketplaceAuthoring,
     region,
     residencyFile,
     residencyStore,
@@ -598,6 +607,8 @@ Options:
   --pack-catalog <file>  Marketplace pack-catalog JSON ({packs:[...]}) — enables the admin pack
                        routes GET /v1/admin/packs, POST /v1/admin/packs/install,
                        POST /v1/admin/packs/{id}/uninstall (needs --store pg|pg-columns)
+  --marketplace-authoring  Enable the third-party authoring routes under /v1/authoring/packs —
+                       submit a signed pack version, review it, publish/withdraw (needs --store pg)
   --region <id>        This instance's serving region (e.g. eu-central) — with --residency-file,
                        enables data-residency edge routing (redirect/deny by tenant home region)
   --residency-file <file>  Residency directory JSON ({tenants:[{tenantId, profile}]}) mapping each

@@ -17,6 +17,7 @@ export * from "./entity-events.js";
 export * from "./job-invoke.js";
 export * from "./link-sweep.js";
 export * from "./marketplace-admin.js";
+export * from "./marketplace-authoring.js";
 export * from "./residency-source.js";
 export * from "./edge.js";
 export * from "./cli.js";
