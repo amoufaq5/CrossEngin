@@ -9683,6 +9683,58 @@ export const META_BILLING_USAGE_RECORDS: TableDefinition = {
   },
 };
 
+export const META_CERTIFICATION_REPORTS: TableDefinition = {
+  schema: "meta",
+  name: "certification_reports",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "report_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "certification_reports_report_id_key" },
+      check: "report_id ~ '^cert_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "framework",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "framework IN ('soc2_type2', 'iso27001', 'hipaa_security_rule', 'pci_dss_v4', 'gdpr_article_32', 'cfr_21_part_11', 'custom')",
+    },
+    { name: "certifiable", type: "BOOLEAN", notNull: true },
+    { name: "controls_total", type: "INTEGER", notNull: true, check: "controls_total >= 0" },
+    { name: "controls_satisfied", type: "INTEGER", notNull: true, default: "0", check: "controls_satisfied >= 0" },
+    { name: "controls_deficient", type: "INTEGER", notNull: true, default: "0", check: "controls_deficient >= 0" },
+    { name: "controls_not_assessed", type: "INTEGER", notNull: true, default: "0", check: "controls_not_assessed >= 0" },
+    {
+      name: "sealed_sha256",
+      type: "TEXT",
+      notNull: true,
+      check: "sealed_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "report", type: "JSONB", notNull: true },
+    { name: "generated_at", type: "TIMESTAMPTZ", notNull: true },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_certification_reports_tenant_at", columns: ["tenant_id", "generated_at"] },
+    { name: "idx_certification_reports_framework", columns: ["framework", "generated_at"] },
+    { name: "idx_certification_reports_certifiable", columns: ["certifiable"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "certification_reports_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9817,4 +9869,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_DR_DRILL_EXECUTIONS,
   META_DR_READINESS_SNAPSHOTS,
   META_BILLING_USAGE_RECORDS,
+  META_CERTIFICATION_REPORTS,
 ];
