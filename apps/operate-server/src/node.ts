@@ -83,6 +83,11 @@ import {
   type AccessReviewsLifecycle,
 } from "./access-reviews-lifecycle.js";
 import { AuthLiveGrantSource, apiKeyPrincipalProvider } from "./live-grants.js";
+import {
+  buildCertificationLifecycle,
+  loadCertificationConfig,
+  type CertificationLifecycle,
+} from "./certification.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -446,6 +451,32 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       });
     }
   }
+  // Periodic compliance certification: each pass collects live control-evidence (encryption coverage,
+  // latest DR-readiness snapshot, latest sealed access-review evidence) per framework, certifies each
+  // configured framework, and persists a sealed report. Enabled by --certification-config over a pg store.
+  let certification: CertificationLifecycle | null = null;
+  if (options.certificationConfig !== null) {
+    if (conn === undefined) {
+      console.warn("[certification] --certification-config requires a Postgres store (--store pg); skipping");
+    } else {
+      certification = buildCertificationLifecycle(
+        conn,
+        await loadCertificationConfig(options.certificationConfig),
+        {
+          onReports: (reports) => {
+            for (const r of reports) {
+              console.info(
+                `[certification] ${r.framework} certifiable=${r.certifiable.toString()} ` +
+                  `satisfied=${r.assessment.counts.satisfied.toString()}/${r.assessment.counts.total.toString()} report=${r.reportId}`,
+              );
+            }
+          },
+          onError: (err) => console.error("[certification] pass error", err),
+          onSourceError: (err) => console.error("[certification] evidence source error", err),
+        },
+      );
+    }
+  }
   // Usage metering: each billable request (authenticated tenant, mapped subscription, counted status)
   // accumulates into a billing engine keyed by the tenant's subscription, flushed to Postgres on an
   // interval. Enabled by --metering-config over a pg store.
@@ -543,6 +574,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   sloEnforcement?.scheduler.start();
   drReadiness?.scheduler.start();
   accessReviews?.scheduler.start();
+  certification?.scheduler.start();
   metering?.flushScheduler?.start();
   stripeUsageSync?.scheduler.start();
   const listener = createNodeRequestListener(httpServer);
@@ -563,6 +595,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         sloEnforcement?.scheduler.stop();
         drReadiness?.scheduler.stop();
         accessReviews?.scheduler.stop();
+        certification?.scheduler.stop();
         metering?.flushScheduler?.stop();
         stripeUsageSync?.scheduler.stop();
         server.close((err) => (err ? reject(err) : resolve()));
