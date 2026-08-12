@@ -108,6 +108,12 @@ importers:
       '@crossengin/billing-stripe':
         specifier: workspace:*
         version: link:../../packages/billing-stripe
+      '@crossengin/certification-runtime':
+        specifier: workspace:*
+        version: link:../../packages/certification-runtime
+      '@crossengin/certification-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/certification-runtime-pg
       '@crossengin/dr':
         specifier: workspace:*
         version: link:../../packages/dr
