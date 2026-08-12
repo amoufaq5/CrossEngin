@@ -69,6 +69,8 @@ export interface ServeOptions {
   readonly accessReviewsLiveGrants: boolean;
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
+  /** Path to a JSON Stripe usage-sync config ({intervalMs?, tenants, subscriptionItems}) — periodically reports persisted usage records to Stripe (needs --store pg + --stripe-api-key). */
+  readonly stripeUsageSyncConfig: string | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -134,6 +136,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let accessReviewsConfig: string | null = null;
   let accessReviewsLiveGrants = false;
   let meteringConfig: string | null = null;
+  let stripeUsageSyncConfig: string | null = null;
   let help = false;
   let version = false;
 
@@ -281,6 +284,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--metering-config" || arg.startsWith("--metering-config=")) {
       meteringConfig = takeValue(arg, next, "--metering-config");
       i += consumed();
+    } else if (arg === "--stripe-usage-sync-config" || arg.startsWith("--stripe-usage-sync-config=")) {
+      stripeUsageSyncConfig = takeValue(arg, next, "--stripe-usage-sync-config");
+      i += consumed();
     } else {
       throw new CliUsageError(`unknown argument: ${arg}`);
     }
@@ -295,11 +301,16 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (planCatalogFile !== null && stripeWebhookSecret === null) {
     throw new CliUsageError("--plan-catalog requires --stripe-webhook-secret (it feeds webhook record caps)");
   }
-  if (stripeApiKey !== null && billingPortalReturnUrl === null) {
-    throw new CliUsageError("--stripe-api-key requires --billing-portal-return-url (where Stripe returns the customer)");
+  if (stripeApiKey !== null && billingPortalReturnUrl === null && stripeUsageSyncConfig === null) {
+    throw new CliUsageError(
+      "--stripe-api-key requires --billing-portal-return-url or --stripe-usage-sync-config (nothing would use the key)",
+    );
   }
   if (stripeApiKey !== null && store === "memory") {
     throw new CliUsageError("--stripe-api-key requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (stripeUsageSyncConfig !== null && stripeApiKey === null) {
+    throw new CliUsageError("--stripe-usage-sync-config requires --stripe-api-key");
   }
   if (scheduleMs !== null && store === "memory") {
     throw new CliUsageError("--schedule-ms requires a Postgres store (--store pg or pg-columns)");
@@ -419,6 +430,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     accessReviewsLiveGrants,
     accessReviewsConfig,
     meteringConfig,
+    stripeUsageSyncConfig,
     defaultScheme,
     help,
     version,
@@ -613,6 +625,9 @@ Options:
   --metering-config <file>  JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?,
                        flushIntervalMs?}) — meters each billable request into billing usage keyed by the
                        tenant's subscription, flushed to Postgres periodically (needs --store pg)
+  --stripe-usage-sync-config <file>  JSON usage-sync config ({intervalMs?, tenants, subscriptionItems}) —
+                       periodically reports persisted usage records to Stripe + marks them synced
+                       (needs --store pg + --stripe-api-key)
   --help, -h           Show this help
   --version, -v        Print version
 
