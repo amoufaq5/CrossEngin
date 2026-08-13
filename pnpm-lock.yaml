@@ -114,6 +114,9 @@ importers:
       '@crossengin/certification-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/certification-runtime-pg
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../../packages/crypto
       '@crossengin/dr':
         specifier: workspace:*
         version: link:../../packages/dr
@@ -126,6 +129,9 @@ importers:
       '@crossengin/forensics':
         specifier: workspace:*
         version: link:../../packages/forensics
+      '@crossengin/forensics-pg':
+        specifier: workspace:*
+        version: link:../../packages/forensics-pg
       '@crossengin/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs
@@ -196,9 +202,6 @@ importers:
       '@crossengin/config':
         specifier: workspace:*
         version: link:../../packages/config
-      '@crossengin/crypto':
-        specifier: workspace:*
-        version: link:../../packages/crypto
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../../packages/testing

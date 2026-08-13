@@ -88,6 +88,7 @@ import {
   loadCertificationConfig,
   type CertificationLifecycle,
 } from "./certification.js";
+import { buildAuditChain, loadAuditChainConfig, type AuditChain } from "./audit-chain.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -506,10 +507,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       },
     );
   }
-  // Compose the per-request observers (SLO + metering) into one execution sink.
+  // Audit chain: append a signed, hash-linked audit-log entry per request into the tamper-evident chain,
+  // so certification's forensic-chain source has a live chain to verify. Enabled by --audit-chain-config
+  // over a pg store.
+  let auditChain: AuditChain | null = null;
+  if (options.auditChainConfig !== null) {
+    if (conn === undefined) {
+      console.warn("[audit-chain] --audit-chain-config requires a Postgres store (--store pg); skipping");
+    } else {
+      auditChain = buildAuditChain(conn, await loadAuditChainConfig(options.auditChainConfig), {
+        onError: (err) => console.error("[audit-chain] append error", err),
+      });
+    }
+  }
+  // Compose the per-request observers (SLO + metering + audit chain) into one execution sink.
   const executionSinks: ((execution: PipelineExecution) => void)[] = [];
   if (sloEnforcement !== null) executionSinks.push(sloEnforcement.observer.asExecutionSink());
   if (metering !== null) executionSinks.push(metering.observer.asExecutionSink());
+  if (auditChain !== null) executionSinks.push(auditChain.observer.asExecutionSink());
   const onExecution =
     executionSinks.length > 0
       ? (execution: PipelineExecution): void => {
@@ -598,7 +613,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         certification?.scheduler.stop();
         metering?.flushScheduler?.stop();
         stripeUsageSync?.scheduler.stop();
-        server.close((err) => (err ? reject(err) : resolve()));
+        // Drain any queued audit-chain appends before closing, so no request's entry is lost on shutdown.
+        void (auditChain?.observer.drain() ?? Promise.resolve()).finally(() => {
+          server.close((err) => (err ? reject(err) : resolve()));
+        });
       }),
   };
 }
