@@ -71,6 +71,8 @@ export interface ServeOptions {
   readonly accessReviewsLiveGrants: boolean;
   /** Path to a JSON certification config ({tenantId?, intervalMs?, schema?, frameworks?, drReadiness?, accessReviews?, forensicChain?}) — periodically certifies each framework from live control-evidence and persists sealed reports (needs --store pg). */
   readonly certificationConfig: string | null;
+  /** Path to a JSON audit-chain config ({schema?, actorReference?, privateKeyBase64, publicKeyBase64}) — appends a signed, hash-linked audit-log entry per request into the tamper-evident chain (needs --store pg). */
+  readonly auditChainConfig: string | null;
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
   /** Path to a JSON Stripe usage-sync config ({intervalMs?, tenants, subscriptionItems}) — periodically reports persisted usage records to Stripe (needs --store pg + --stripe-api-key). */
@@ -141,6 +143,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let accessReviewsConfig: string | null = null;
   let accessReviewsLiveGrants = false;
   let certificationConfig: string | null = null;
+  let auditChainConfig: string | null = null;
   let meteringConfig: string | null = null;
   let stripeUsageSyncConfig: string | null = null;
   let help = false;
@@ -291,6 +294,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       accessReviewsLiveGrants = true;
     } else if (arg === "--certification-config" || arg.startsWith("--certification-config=")) {
       certificationConfig = takeValue(arg, next, "--certification-config");
+      i += consumed();
+    } else if (arg === "--audit-chain-config" || arg.startsWith("--audit-chain-config=")) {
+      auditChainConfig = takeValue(arg, next, "--audit-chain-config");
       i += consumed();
     } else if (arg === "--metering-config" || arg.startsWith("--metering-config=")) {
       meteringConfig = takeValue(arg, next, "--metering-config");
@@ -445,6 +451,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     accessReviewsLiveGrants,
     accessReviewsConfig,
     certificationConfig,
+    auditChainConfig,
     meteringConfig,
     stripeUsageSyncConfig,
     defaultScheme,
@@ -645,6 +652,10 @@ Options:
                        framework (SOC 2 / HIPAA / …) from live control-evidence (encryption coverage, DR
                        readiness, sealed access reviews, tamper-evident audit chain) and persists a sealed
                        report per framework (needs --store pg)
+  --audit-chain-config <file>  JSON audit-chain config ({schema?, actorReference?, privateKeyBase64,
+                       publicKeyBase64}) — appends a signed, hash-linked audit-log entry per request into
+                       the tamper-evident chain, so certification's forensic-chain source has a live chain
+                       to verify (needs --store pg)
   --metering-config <file>  JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?,
                        flushIntervalMs?}) — meters each billable request into billing usage keyed by the
                        tenant's subscription, flushed to Postgres periodically (needs --store pg)
