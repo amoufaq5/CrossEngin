@@ -14,12 +14,13 @@ ai-providers-local, workflow-worker, pack-erp-construction/-education/-governmen
 
 ## 2. Baseline
 
-- `pnpm install` — clean.
-- `pnpm -r build` — exit 0.
-- `pnpm -r typecheck`, `pnpm -r test` — first run failed on unbuilt workspace deps
-  (`@crossengin/testing/dist/vitest-preset.js`, `@crossengin/ai-providers` dist missing), i.e. typecheck/test
-  scripts require a prior `pnpm -r build`; turbo.json dependency ordering does not cover `tsc --noEmit`/vitest
-  inputs. Re-run after build: results below.
+- `pnpm install` — clean. `pnpm -r build` — exit 0. `pnpm -r typecheck` — exit 0, no type errors.
+- `pnpm -r test` — exit 0, **7,830 tests passing across 81 package suites**, zero failures.
+- One tooling observation: CLAUDE.md documents `pnpm -r test` / `pnpm -r typecheck` as the workspace
+  commands, but `pnpm -r` bypasses turbo's task graph, so on a clean checkout both fail with
+  `ERR_MODULE_NOT_FOUND` on unbuilt workspace deps (`@crossengin/testing/dist/vitest-preset.js`,
+  `@crossengin/ai-providers` dist). `turbo.json` correctly declares `test`/`typecheck → ^build`;
+  the root scripts (`pnpm test`, `pnpm typecheck`) work from clean. Docs/workflow mismatch, not a code bug.
 
 ## 3. Findings
 
