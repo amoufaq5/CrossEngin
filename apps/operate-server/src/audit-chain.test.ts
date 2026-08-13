@@ -59,6 +59,7 @@ import {
 } from "./audit-chain.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
+const TENANT_B = "33333333-3333-3333-3333-333333333333";
 const PRINCIPAL = "22222222-2222-2222-2222-2222222222aa";
 const keypair = generateEd25519Keypair();
 
@@ -184,5 +185,59 @@ describe("AuditChainObserver", () => {
     chain.observer.asExecutionSink()(execution());
     await chain.observer.drain();
     expect(await chain.store.loadChain(TENANT)).toHaveLength(1);
+  });
+
+  it("appends for different tenants proceed in parallel; drain clears the scopes", async () => {
+    const order: string[] = [];
+    let releaseA = (): void => {};
+    const gateA = new Promise<void>((r) => {
+      releaseA = r;
+    });
+    const store = {
+      append: async (input: { tenantId: string | null }) => {
+        if (input.tenantId === TENANT) {
+          await gateA;
+          order.push("A");
+        } else {
+          order.push("B");
+        }
+        return { sequenceNumber: 0 } as never;
+      },
+    } as unknown as PostgresChainLogStore;
+    const observer = new AuditChainObserver(store, config());
+
+    observer.record(execution({ tenantId: TENANT, requestId: "req_aaaaaaaa11111111" }));
+    observer.record(execution({ tenantId: TENANT_B, requestId: "req_bbbbbbbb22222222" }));
+    expect(observer.activeScopes()).toBe(2);
+
+    // B is not blocked behind A's gated append.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(order).toEqual(["B"]);
+
+    releaseA();
+    await observer.drain();
+    expect(order).toEqual(["B", "A"]);
+    expect(observer.activeScopes()).toBe(0);
+    expect(observer.pending()).toBe(0);
+  });
+
+  it("keeps a single tenant's appends strictly ordered on its own queue", async () => {
+    const seen: number[] = [];
+    let n = 0;
+    const store = {
+      append: async () => {
+        const mine = n++;
+        // later-scheduled appends resolve their microtask first if not serialized
+        await Promise.resolve();
+        seen.push(mine);
+        return { sequenceNumber: mine } as never;
+      },
+    } as unknown as PostgresChainLogStore;
+    const observer = new AuditChainObserver(store, config());
+    observer.record(execution({ requestId: "req_aaaaaaaa11111111" }));
+    observer.record(execution({ requestId: "req_bbbbbbbb22222222" }));
+    observer.record(execution({ requestId: "req_cccccccc33333333" }));
+    await observer.drain();
+    expect(seen).toEqual([0, 1, 2]);
   });
 });
