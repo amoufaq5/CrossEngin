@@ -1,16 +1,28 @@
 # CrossEngin Code Review (correctness / robustness / efficiency / integration / test quality)
 
-Status: IN PROGRESS — interim save. Findings are being verified and merged; do not act on this draft yet.
+Status: COMPLETE. Read-only review; no source files were modified.
 
 Date: 2026-08-13. Scope: full workspace at commit dc2f794 (branch claude/crossengin-audit-mgh3c1).
-Note: CLAUDE.md describes 59 packages + 2 apps; the tree actually contains 80 packages + 3 apps
-(Phase 4 additions: certification-runtime[-pg], billing-runtime[-pg], billing-stripe, dr-runtime[-pg],
-residency-runtime[-pg], marketplace-runtime[-pg], access-reviews-runtime[-pg], ai-architect-runtime[-pg],
-ai-providers-local, workflow-worker, pack-erp-construction/-education/-government, apps/operate-web, web-ui).
+Note: CLAUDE.md describes 59 packages + 2 apps / 123 tables / 6,383 tests; the tree actually contains
+80 packages + 3 apps, 135 meta-schema tables, 7,830 tests (Phase 4 additions: certification-runtime[-pg],
+billing-runtime[-pg], billing-stripe, dr-runtime[-pg], residency-runtime[-pg], marketplace-runtime[-pg],
+access-reviews-runtime[-pg], ai-architect-runtime[-pg], ai-providers-local, workflow-worker,
+pack-erp-construction/-education/-government, apps/operate-web, web-ui). CLAUDE.md is stale.
 
 ## 1. Executive summary
 
-(to be completed at end of review)
+~155 CONFIRMED defects (exact breaking input identified) and ~25 PLAUSIBLE, plus batched minor items.
+2 CRITICAL: billing usage records are silently overwritten per same-day flush (under-billing + Stripe
+double-billing follow-ons), and the distributed timer/activity workers pass UUID ids into text-id
+engine APIs — the whole worker path is a silent no-op against a real database. The persistence tier
+has never run end-to-end against real Postgres: projection INSERTs violate NOT NULLs, drivers return
+Dates where ISO strings are contracted, and `drift`/`verify` tooling cries wolf on its own output.
+Top 3 systemic concerns: (1) every `-pg` package is tested only against SQL-substring fakes — the
+single root cause behind most CONFIRMED high-severity bugs; (2) fail-open at unwired seams — declared
+invariants (JWT claims, ABAC, timeouts, onExit actions, classifications on traits, search tags,
+suppressions) that no runtime enforces when input is absent; (3) N parallel implementations of one
+contract diverge (3 entity stores, 2 event logs, 2 compensation planners, 3 semver comparators,
+3 percentile helpers, triplicated webhook canonicalization) with no parity suites.
 
 ## 2. Baseline
 
@@ -24,7 +36,71 @@ ai-providers-local, workflow-worker, pack-erp-construction/-education/-governmen
 
 ## 3. Findings
 
-(interim: grouped by package while agent reports land; final version will be re-ranked globally by severity)
+### Global ranking — top findings by severity (details in the per-package sections below)
+
+Production-crashing / data-destroying:
+1. **[CRITICAL]** Billing: day-granular idempotency key + REPLACE-upsert silently discards all but the
+   last flush window each day; partial flush failure loses usage; un-updated `id` causes perpetual
+   Stripe re-reporting → daily double-billing (billing #1, #2, #5; operate-server #2).
+2. **[CRITICAL]** Distributed workers pass UUID `instance_id` into text-id engine APIs: no timer ever
+   fires, no activity ever executes, claims re-loop forever (observability/worker #1).
+3. **[HIGH]** workflow-runtime-pg projection INSERTs omit NOT-NULL columns — the auto-projection path
+   throws on the first real event; the M3.5/M3.6 persistence story has never worked on a live schema
+   (workflow-runtime-pg #1).
+4. **[HIGH]** kernel-pg: first-ever `apply` on a fresh database throws before any DDL; `drift` reports
+   mass false drift against its own output; crash between DDL commit and bookkeeping wedges migration
+   permanently (kernel-pg #1, #2, #4).
+5. **[HIGH]** kernel emit ordering + duplicate index derivation: `emitManifestCreate(erpCorePack)` and
+   add-entity-with-reference migrations cannot apply (kernel #1, #2).
+
+Silently-wrong (data integrity / money / compliance):
+6. **[HIGH]** Webhook signals are lost invisibly: HMAC verified over re-serialized JSON (401s for
+   genuine senders), restart empties the in-memory match registry (202 + `ok:true` for a dropped
+   signal), idempotency keys burned before matching (retries answered "deduplicated") (bridge #2, #3;
+   workflow #2, #3).
+7. **[HIGH]** Saga compensation refunds charges that never happened — failed/never-run side-effect
+   activities are compensated; failed+retried attempts are compensated twice (workflow #1).
+8. **[HIGH]** Forensic chain verification checks linkage only — content tampering passes; sealed
+   HIPAA/SOC 2 reports certify tampered logs; chain reader mixes tenant + platform chains into false
+   tamper verdicts (certification #1, #2; independently confirmed by three reviewers).
+9. **[HIGH]** Gateway idempotency has no in-flight reservation (two concurrent first POSTs both
+   execute), and replay returns an empty body (gateway #1, #5).
+10. **[HIGH]** JWT claim checks fail open when the claim is absent — a signed `{sub}` token never
+    expires and passes any issuer/audience config (gateway #2; operate-server seam).
+11. **[HIGH]** operate-runtime: redaction registered only for list/read — transitions/updates return
+    PII unredacted to a cashier with the shipped retail pack; the lifecycle state field is an ordinary
+    writable field, bypassing transition RBAC (operate-runtime #1, #2).
+12. **[HIGH]** Column store drops trait fields (`updated_at` never stored): optimistic concurrency is a
+    silent no-op and event idempotency keys collapse (operate-runtime #3); keyset pagination silently
+    loses rows on NULL sort values (#4).
+13. **[HIGH]** Marketplace pack signature binds only the manifest — one valid signature authorizes
+    arbitrary version/bundle/packId submissions (marketplace #1).
+14. **[HIGH]** Access reviews: `all_tenant_admins` scope inverted (admins never reviewed);
+    auto-revocations re-emitted every tick forever and never applied; attestation `attestedAt`/phrase
+    not persisted (signatures unverifiable after roundtrip) (access-reviews #2, #3, #5).
+15. **[HIGH]** ml-training eval gate: a run that skips required safety cases entirely passes at
+    `requiredPassRate=1` (bizops #1).
+16. **[HIGH]** jobs enqueue keys omit tenantId — cross-tenant idempotency collisions dedupe one
+    tenant's job away as another's replay (jobs #1).
+17. **[HIGH]** sdk cursor codec corrupts non-Latin-1 payloads — silent skipped/repeated pages (sdk #1).
+18. **[HIGH]** search permission filtering fail-open twice: empty session tags → match-everything
+    filter; non-role resource tags advisory by default → cross-tenant hits (substrate #1, #2).
+19. **[HIGH]** Packs: `WhtCertificate` has no permissions (dead entity); retail/construction entity
+    overrides orphan core relations/workflows (ghost lifecycles, wrong cascades); ~19 one_to_many
+    cascades silently RESTRICT (packs #1–#4).
+20. **[HIGH]** pwa `advanceWatermark` mixes entities — offline sync silently skips rows forever
+    (substrate #3).
+
+Slow / leaks: O(E²) workflow re-projection ×4 stores per append; router buffers whole completions;
+unbounded in-memory stores (idempotency, rate-limit buckets, dedup sets, resolver caches,
+TraceCollector, meter `seen`); N+1 applier skip-checks and association fetches; un-prunable
+RollingWindow; dead trigram indexes under `unaccent()` predicates.
+
+Brittle: stream readers never released on early exit; mid-stream errors escape un-normalized (kills
+fallback); JWKS refetch storms with invisible failures; PG pool never closed; schedulers with no
+error sinks; `verify-ca` TLS mapped to no-verification.
+
+### Per-package findings
 
 ### kernel-pg
 
@@ -1105,10 +1181,131 @@ ai-providers-local, workflow-worker, pack-erp-construction/-education/-governmen
    webhook-signing) — agree today, single-sided drift breaks verification silently. auth RBAC
    precedence/inheritance/classification redaction verified correct; types/config/testing clean.
 
+### substrate: reporting / search / views / pwa / edge / active-active / deploy / dr + operate-web + web-ui
+
+1. **[HIGH][A][CONFIRMED]** `packages/search/src/permissions.ts:104-108` — empty session tag set yields
+   `permission_tags:=*` — a match-everything Typesense filter: the *least* entitled caller (broken SSO
+   mapping, service account) sees the *most*. Test-enshrined. Fix: match-nothing filter or throw.
+
+2. **[HIGH][A][CONFIRMED]** `permissions.ts:55-102` — `isAuthorizedForResource` enforces only the
+   `role` tag by default; `tenant:`/`store:`/clearance tags on the resource are advisory unless the
+   call site opts in via `requireAll` — cross-tenant hit authorized with matching role. Fix: enforce
+   every key present on the resource.
+
+3. **[HIGH][A][CONFIRMED]** `packages/pwa/src/sync.ts:132-148` — `advanceWatermark` never filters
+   `op.entity === current.entity`: a mixed-entity batch overwrites the Patient watermark with an
+   Invoice cursor a month ahead — Patient rows in between are skipped forever (silent offline-sync
+   data loss). Also drops `rowIdCursor`; can't seed from null. Fix: filter by entity.
+
+4. **[MED]** batched (CONFIRMED unless noted): `mvRegisterMerge` is a plain union — never prunes
+   same-region dominated entries (register grows forever, reports self-overwritten siblings; zero
+   tests) · pwa `classifyResponse` emits `in_flight → abandoned`, which `OUTBOX_ENTRY_TRANSITIONS`
+   forbids (validating consumers reject the classifier's own verdict); 3xx → infinite pending ·
+   deploy `semverComparator` discards prerelease (`1.0.0-rc.1` == `1.0.0`; `latestRelease` is
+   input-order-dependent) · `rollbackTarget` returns `successful[1]` even when the current deploy
+   *failed* (rolls back two versions; PLAUSIBLE) · LWW register/map non-commutative on full tie
+   (replicas converge to different values; PLAUSIBLE) · dr tier_3 default: snapshot cadence 24h vs
+   declared 1h RPO — cannot meet its own target (PLAUSIBLE) · web-ui/server.mjs: no stream error
+   handlers (client abort → uncaught ECONNRESET → process dies) + binds 0.0.0.0 while injecting
+   `x-api-key` into every proxied request (PLAUSIBLE) · operate-web proxy re-joins percent-decoded
+   path segments without re-encoding (`rec%2Fx` becomes an extra path segment; PLAUSIBLE).
+
+5. **[LOW]** batched: edge `shouldCache` assumes lowercase header keys (`Authorization` unnormalized →
+   authenticated response cached) · deploy forbidden-latest is exact-match `"latest"` (any other
+   mutable tag admitted) · operate-web period-close trusts a possibly-dropped `fiscal_period_id`
+   filter · entity list pages lack a stale-response guard (older slow response overwrites newer rows;
+   sibling components do guard). Clean: active-active vector clocks (concurrent case handled
+   correctly), G/PN-counter + OR-set merges, edge budget/autoscaling math, reporting `compareLsn`,
+   views override helpers (union-redaction, fail-closed). operate-web ↔ operate-server seam is
+   consistent by construction (UI schema is server-fed; hardcoded slugs match `resourceSlug()`).
+
 ## 4. Package-by-package coverage log
 
-(being merged)
+All 80 packages + 3 apps were reviewed by 21 assignments. "Read fully" = every non-test src module
+read line-by-line and compared against its tests. Per group:
+
+- **kernel** — read fully (manifest/*, ddl/*, tenancy, workflow, bootstrap emit/types); the 9,926-line
+  `bootstrap/meta-schema.ts` read structurally + two programmatic sweeps (FK `schema:` presence, RLS
+  expressions) rather than row-by-row — its invariants are enforced by real tests. 135 tables (docs
+  say 123).
+- **kernel-pg** — read fully incl. bin. `node-pg.ts` has zero tests (noted).
+- **workflow-engine / workflow-runtime** — read fully; engine/projection/saga/transitions/event-log
+  tests read, trivial modules' tests skipped.
+- **workflow-runtime-pg / workflow-signal-bridge** — read fully; job/timer claim + worker modules
+  skimmed at grep level after the claim-SQL pattern was verified (the timer/activity claim seam was
+  separately read in full by the worker group).
+- **api-gateway-runtime / api-gateway-pg** — read fully (all 9 + 5 modules, all tests); redaction
+  tree-walk exercised against nested/edge shapes; contracts seam (`@crossengin/api-gateway`) verified.
+- **operate-runtime / operate-runtime-pg** — core serving path read fully (store, list-query,
+  operations, slugs, handlers, compile, association, defaults, validation, write-guards,
+  entity-events, tenant-context, records, entity-store, entity-ops, list-sql, column-plan, entity-ddl,
+  column-store, link-integrity, sequence-store). **Not reviewed** (peripheral): settings*, ui-schema,
+  admin-handlers, license, plan-catalog, billing-portal/job-invoke handlers, auto-number/*,
+  settings/entitlement/subscription stores, stripe-webhook (billing group read stripe-webhook's seam).
+- **apps/operate-server** — all 27 modules read fully, 10 test files fully + rest skimmed; Phase 4
+  lifecycles (certification, metering, marketplace, access-reviews, DR, SLO) read fully.
+- **apps/architect-cli** — read fully (all modules + 7 test suites); license tooling test skipped.
+- **ai-providers / -anthropic / -openai / -local / ai-router** — all read fully including SSE parsers
+  byte-level.
+- **ai-architect / -pg / -runtime / -runtime-pg** — read fully; META_ARCHITECT_* column alignment
+  verified against kernel meta-schema.
+- **crypto / auth / types / config / testing** — read fully; Ed25519 edge behavior verified at
+  runtime; RBAC/redaction semantics verified against gateway + operate-runtime consumers.
+- **observability-runtime / -pg / workflow-worker** — read fully; burn-rate/percentile math traced;
+  worker seam audited in workflow-runtime-pg (where the critical id-domain bug lives).
+- **billing / billing-runtime / -pg / billing-stripe** — read fully; consumers (operate-server
+  metering + stripe sync, operate-runtime-pg stripe-webhook) read.
+- **marketplace / -runtime / -pg, access-reviews / -runtime / -pg** — read fully; meta-schema tables
+  cross-checked.
+- **certification-runtime / -pg, dr-runtime / -pg, residency-runtime / -pg** — read fully;
+  residency-runtime(-pg) verdict: clean.
+- **packs (7)** — all src read line-by-line (core's 29 files included); every relation field, lifecycle
+  state set, transition grant, and view column cross-checked; operate-server registry seam verified.
+- **contracts: api-gateway, rate-limiting, sdk, sdk-clients, feature-flags, jobs, observability,
+  notifications, integrations, files, i18n, finops, tenant-lifecycle, migration, ml-training,
+  incident-response, forensics, data-lineage, compliance, security, sso, residency, reporting, search,
+  views, pwa, edge, active-active, deploy, dr** — helpers/superRefines/transition maps read fully;
+  giant schema literals sampled; i18n plural map verified empirically against Node ICU; deploy/
+  active-active helpers verified by execution.
+- **apps/operate-web + web-ui** — read fully (both are small); zero tests exist in either.
 
 ## 5. Test-suite observations
 
-(being merged)
+Recurring patterns that make green tests weaker than they look:
+
+1. **Every `-pg` package tests against hand-rolled fakes that dispatch on SQL substrings and never
+   execute SQL.** Column lists vs meta-schema NOT NULLs, driver type coercions (TIMESTAMPTZ → `Date`,
+   NUMERIC → string, UUID vs TEXT ids), `ON CONFLICT` replace-vs-accumulate semantics, RLS, and
+   concurrency are structurally untestable in this style. This one pattern hides the worst confirmed
+   bugs in the audit (workflow projection NOT NULL failures, worker UUID/text id mismatch, billing
+   usage overwrite, replayer Date comparisons). A single suite cross-checking each store's INSERT
+   column list against the importable `META_TABLES` would catch a whole class without a database;
+   one docker-Postgres integration job would catch the rest.
+2. **Tests enshrine bugs as expected behavior** (verbatim assertions of wrong output): kernel diff
+   emit ordering ("drops before modifies before adds"), billing dunning's illegal `notified→retry_2`,
+   timer-worker's UUID argument, search's wildcard-for-empty-session and role-only authorization,
+   residency's contradictory `minimumProfileForPacks` outputs, stripe-sync's period-end timestamp,
+   pwa's `in_flight→abandoned`, architect-cli's N−1 tool iterations.
+3. **Negative cases are missing exactly where the invariants live**: no JWT with *absent* exp/iss/aud;
+   no odd-length hex compare; no saga fixture with a failed/never-run activity; no signal with no
+   matching transition; no fractional billing quantity; no re-close/second-flush of the same period;
+   no repeated scheduler tick past a deadline; no `all_tenant_admins` scope test; no
+   `mvRegisterMerge` test at all; no CRLF SSE through the incremental splitter; no cross-entity
+   `advanceWatermark` batch.
+4. **Self-referential fixtures**: chains verified by the same helpers that built them (forensics —
+   no content-tamper negative), risk scores asserted against their own formula, plural maps asserted
+   against themselves rather than `Intl.PluralRules`, workflow test fixtures that violate the
+   contract schema they claim to consume (`publishedBy === createdBy`).
+5. **No concurrency, crash-resume, or restart tests anywhere in the workspace** — no two-writer event
+   log, no append-succeeded/projection-failed, no engine rebuilt over a persisted log receiving a
+   signal, no concurrent idempotent POSTs, no concurrent installs.
+6. **Contract-package testing is genuinely good** (systematic accept+reject pairs, transition-map
+   negatives, boundary values) — the weakness is concentrated at IO seams and in cross-package
+   integration, not in schema hygiene. Standouts: signal-bridge core (real HMAC + tamper negatives),
+   tombstone canonicalization, residency-runtime, workflow-worker's renew harness, CLI arg-parse
+   suites, edge tests against real undici Request/Response.
+7. **Tests are excluded from typechecking** (`tsconfig` excludes `**/*.test.ts`), and it shows:
+   fixtures with invalid `TaskKind`s, stub embeds missing required fields, `as never` casts hiding
+   enum mismatches in production code (`sox_quarterly`, `marketing_only_channel`,
+   `automated_collection`).
+8. **operate-web and web-ui ship zero tests** (~5,000 lines, including money-adjacent logic).
