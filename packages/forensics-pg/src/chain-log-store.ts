@@ -4,6 +4,7 @@ import {
   GENESIS_HASH,
   buildChainEntry,
   verifyChainIntegrity,
+  type ChainCheckpoint,
   type ChainedLogEntry,
 } from "@crossengin/forensics";
 
@@ -13,6 +14,12 @@ import {
   rowToChainEntry,
   type ChainAppendInput,
 } from "./records.js";
+import {
+  checkpointFromChain,
+  verifyChainSuffix,
+  type ChainSuffixVerdict,
+  type CheckpointMeta,
+} from "./checkpoint.js";
 import type { ChainSigner } from "./signer.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -93,6 +100,51 @@ export class PostgresChainLogStore {
 
   async tail(tenantId: string | null): Promise<ChainTail | null> {
     return this.scoped(tenantId, (tx) => this.tailWithin(tx));
+  }
+
+  /** The chain suffix at or after `fromSequence`, ordered — the input to a checkpoint-anchored verify. */
+  async loadFrom(
+    tenantId: string | null,
+    fromSequence: number,
+  ): Promise<readonly ChainedLogEntry[]> {
+    return this.scoped(tenantId, async (tx) => {
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE}
+         WHERE sequence_number >= $1 ORDER BY sequence_number ASC`,
+        [fromSequence],
+      );
+      return result.rows.map((row) => rowToChainEntry(row));
+    });
+  }
+
+  /**
+   * O(suffix) integrity check: loads only the entries strictly after the checkpoint (the checkpoint's own
+   * entry is the anchor, at `checkpoint.rootHash`) and folds them forward via `verifyChainSuffix`.
+   */
+  async verifyFromCheckpoint(
+    tenantId: string | null,
+    checkpoint: ChainCheckpoint,
+  ): Promise<ChainSuffixVerdict> {
+    const fromSequence = checkpoint.sequenceNumber + 1;
+    const entries = await this.loadFrom(tenantId, fromSequence);
+    return verifyChainSuffix(entries, { fromSequence, priorRootHash: checkpoint.rootHash });
+  }
+
+  /**
+   * Builds a `ChainCheckpoint` at the current chain tail. It does NOT persist — hand the result to a
+   * `PostgresChainCheckpointStore.record` to durably anchor it. Throws on an empty chain (nothing to anchor).
+   */
+  async createCheckpoint(
+    tenantId: string | null,
+    meta: { checkpointedBy: string } & Partial<CheckpointMeta>,
+  ): Promise<ChainCheckpoint> {
+    const entries = await this.loadChain(tenantId);
+    return checkpointFromChain(entries, {
+      checkpointedBy: meta.checkpointedBy,
+      checkpointedAt: meta.checkpointedAt ?? new Date().toISOString(),
+      externalAnchorReference: meta.externalAnchorReference,
+      algorithm: meta.algorithm,
+    });
   }
 
   private async tailWithin(tx: PgConnection): Promise<ChainTail | null> {

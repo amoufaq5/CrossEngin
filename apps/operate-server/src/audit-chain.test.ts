@@ -56,6 +56,8 @@ import {
   ed25519ChainSigner,
   loadAuditChainConfig,
   parseAuditChainConfig,
+  sampleValue,
+  shouldRecordAudit,
 } from "./audit-chain.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
@@ -142,6 +144,65 @@ describe("ed25519ChainSigner + auditAppendInputFrom", () => {
   });
 });
 
+describe("shouldRecordAudit", () => {
+  it("records every outcome + operation by default", () => {
+    expect(shouldRecordAudit(execution(), config())).toBe(true);
+    expect(shouldRecordAudit(execution({ finalOutcome: "deny" }), config())).toBe(true);
+  });
+
+  it("outcomes allowlist skips a passing request but records a failure", () => {
+    const c = config({ outcomes: ["deny", "error"] });
+    expect(shouldRecordAudit(execution({ finalOutcome: "pass", finalResponseStatus: 200 }), c)).toBe(false);
+    expect(shouldRecordAudit(execution({ finalOutcome: "deny", finalResponseStatus: 403 }), c)).toBe(true);
+    expect(shouldRecordAudit(execution({ finalOutcome: "error", finalResponseStatus: 500 }), c)).toBe(true);
+  });
+
+  it("operations allowlist skips a non-listed operation and excludes a null operation", () => {
+    const c = config({ operations: ["product.list"] });
+    expect(shouldRecordAudit(execution({ routeOperationId: "product.list" }), c)).toBe(true);
+    expect(shouldRecordAudit(execution({ routeOperationId: "product.get" }), c)).toBe(false);
+    expect(shouldRecordAudit(execution({ routeOperationId: null }), c)).toBe(false);
+  });
+
+  it("sampleRate 0 records nothing and sampleRate 1 records everything", () => {
+    const none = config({ sampleRate: 0 });
+    const all = config({ sampleRate: 1 });
+    for (const id of ["req_abcdefgh12345678", "req_aaaaaaaa11111111", "req_cccccccc33333333"]) {
+      expect(shouldRecordAudit(execution({ requestId: id }), none)).toBe(false);
+      expect(shouldRecordAudit(execution({ requestId: id }), all)).toBe(true);
+    }
+  });
+
+  it("an intermediate rate is deterministic per requestId and partitions a spread", () => {
+    const half = config({ sampleRate: 0.5 });
+    // sampleValue is stable, so the decision is stable across calls for the same id.
+    expect(sampleValue("req_abcdefgh12345678")).toBe(sampleValue("req_abcdefgh12345678"));
+    const under = execution({ requestId: "req_abcdefgh12345678" }); // sampleValue ~0.199 < 0.5
+    const over = execution({ requestId: "req_aaaaaaaa11111111" }); // sampleValue ~0.970 >= 0.5
+    expect(shouldRecordAudit(under, half)).toBe(true);
+    expect(shouldRecordAudit(under, half)).toBe(true);
+    expect(shouldRecordAudit(over, half)).toBe(false);
+
+    const ids = [
+      "req_abcdefgh12345678", "req_aaaaaaaa11111111", "req_bbbbbbbb22222222",
+      "req_cccccccc33333333", "req_lowsample0001", "req_highsample999",
+      "req_sample00000001", "req_sample00000002", "req_sample00000003", "req_sample00000004",
+    ];
+    const recorded = ids.filter((id) => shouldRecordAudit(execution({ requestId: id }), half)).length;
+    expect(recorded).toBeGreaterThan(0);
+    expect(recorded).toBeLessThan(ids.length);
+  });
+});
+
+describe("sampleValue", () => {
+  it("is in [0, 1) and deterministic", () => {
+    const v = sampleValue("req_abcdefgh12345678");
+    expect(v).toBeGreaterThanOrEqual(0);
+    expect(v).toBeLessThan(1);
+    expect(sampleValue("req_abcdefgh12345678")).toBe(v);
+  });
+});
+
 describe("AuditChainObserver", () => {
   it("appends one signed, hash-linked entry per request, in order", async () => {
     const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
@@ -160,6 +221,22 @@ describe("AuditChainObserver", () => {
     for (const entry of chain) {
       expect(verifyChainEntrySignature(entry, keypair.publicKeyBase64)).toBe(true);
     }
+  });
+
+  it("a filtered-out request appends nothing and never touches the queues", async () => {
+    const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
+    const observer = new AuditChainObserver(store, config({ outcomes: ["deny", "error"] }));
+
+    observer.record(execution({ finalOutcome: "pass", requestId: "req_aaaaaaaa11111111" }));
+    expect(observer.pending()).toBe(0);
+    expect(observer.activeScopes()).toBe(0);
+    await observer.drain();
+    expect(await store.loadChain(TENANT)).toHaveLength(0);
+
+    // A passing (matching) request still appends as before.
+    observer.record(execution({ finalOutcome: "deny", finalResponseStatus: 403, requestId: "req_bbbbbbbb22222222" }));
+    await observer.drain();
+    expect(await store.loadChain(TENANT)).toHaveLength(1);
   });
 
   it("routes an append failure to onError without stalling the queue", async () => {

@@ -9787,6 +9787,48 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
   },
 };
 
+export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
+  schema: "meta",
+  name: "forensic_chain_checkpoints",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    { name: "sequence_number", type: "BIGINT", notNull: true, check: "sequence_number >= 0" },
+    { name: "root_hash", type: "CHAR(64)", notNull: true, check: "root_hash ~ '^[0-9a-f]{64}$'" },
+    { name: "checkpointed_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "checkpointed_by", type: "TEXT", notNull: true },
+    { name: "external_anchor_reference", type: "TEXT" },
+    {
+      name: "algorithm",
+      type: "TEXT",
+      notNull: true,
+      default: "'sha256'",
+      check: "algorithm IN ('sha256', 'sha512', 'blake3')",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "forensic_chain_checkpoints_tenant_seq_key",
+      columns: ["tenant_id", "sequence_number"],
+    },
+  ],
+  indexes: [
+    { name: "idx_forensic_chain_checkpoints_tenant_seq", columns: ["tenant_id", "sequence_number"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "forensic_chain_checkpoints_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9923,4 +9965,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_BILLING_USAGE_RECORDS,
   META_CERTIFICATION_REPORTS,
   META_FORENSIC_CHAIN_ENTRIES,
+  META_FORENSIC_CHAIN_CHECKPOINTS,
 ];
