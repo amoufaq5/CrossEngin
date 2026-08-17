@@ -7,7 +7,7 @@ import {
   verifyChainIntegrity,
 } from "@crossengin/forensics";
 
-import { PostgresChainLogStore, advisoryKeyFor } from "./chain-log-store.js";
+import { PostgresChainLogReader, PostgresChainLogStore, advisoryKeyFor } from "./chain-log-store.js";
 import { keyStoreChainSigner } from "./signer.js";
 import { fakeChainPg } from "./test-fakes.js";
 
@@ -178,6 +178,47 @@ describe("PostgresChainLogStore checkpoint anchoring", () => {
     const verdict = await store.verifyFromCheckpoint(TENANT_A, cp);
     expect(verdict.valid).toBe(false);
     expect(verdict.brokenAt).toBe(3);
+  });
+});
+
+async function newSignerAndKey() {
+  const keyStore = new InMemoryKeyStore();
+  const record = await keyStore.createKey({ tenantId: null, algorithm: "ed25519", purpose: "evidence_sealing" });
+  const publicKeyBase64 = await keyStore.getPublicMaterial(record.handle);
+  return { signer: keyStoreChainSigner(keyStore, record, null), publicKeyBase64 };
+}
+
+describe("PostgresChainLogReader (signer-free)", () => {
+  it("reads + integrity-verifies a chain a store wrote, without a signing key", async () => {
+    const { signer, publicKeyBase64 } = await newSignerAndKey();
+    const conn = fakeChainPg();
+    const store = new PostgresChainLogStore(conn, signer);
+    await append(store, TENANT_A, 0);
+    await append(store, TENANT_A, 1);
+
+    // A reader over the SAME connection — constructed with NO signer.
+    const reader = new PostgresChainLogReader(conn);
+    const chain = await reader.loadChain(TENANT_A);
+    expect(chain).toHaveLength(2);
+    expect(verifyChainIntegrity(chain).valid).toBe(true);
+    for (const entry of chain) {
+      expect(verifyChainEntrySignature(entry, publicKeyBase64)).toBe(true);
+    }
+    expect(await reader.verify(TENANT_A)).toEqual({ valid: true, brokenAt: null });
+  });
+
+  it("the store is a reader (checkpoint + suffix verify work through the base type)", async () => {
+    const { store } = await newStore();
+    await append(store, TENANT_A, 0);
+    await append(store, TENANT_A, 1);
+    const reader: PostgresChainLogReader = store;
+    const cp = await reader.createCheckpoint(TENANT_A, { checkpointedBy: "auditor", checkpointedAt: AT });
+    expect(cp.sequenceNumber).toBe(1);
+    expect(await reader.verifyFromCheckpoint(TENANT_A, cp)).toEqual({ valid: true, brokenAt: null });
+  });
+
+  it("rejects a bad schema on the reader too", () => {
+    expect(() => new PostgresChainLogReader(fakeChainPg(), { schema: "Bad-Schema" })).toThrow(/schema/);
   });
 });
 

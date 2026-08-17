@@ -3,7 +3,7 @@ import {
   type ChainedLogEntry,
 } from "@crossengin/forensics";
 
-import type { PostgresChainLogStore } from "./chain-log-store.js";
+import type { PostgresChainLogReader } from "./chain-log-store.js";
 
 /**
  * Resolves a signing-key fingerprint to its base64 Ed25519 public key, or null when the fingerprint
@@ -77,10 +77,10 @@ export async function verifyChainSignatures(
 }
 
 export async function verifyStoredChainSignatures(
-  store: PostgresChainLogStore,
+  reader: PostgresChainLogReader,
   tenantId: string | null,
   resolver: PublicKeyResolver,
 ): Promise<ChainSignatureVerdict> {
-  const entries = await store.loadChain(tenantId);
+  const entries = await reader.loadChain(tenantId);
   return verifyChainSignatures(entries, resolver);
 }

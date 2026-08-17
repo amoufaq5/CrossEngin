@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import { InMemoryKeyStore } from "@crossengin/crypto";
 import type { PostgresKeyRegistry } from "@crossengin/crypto-pg";
+import { PostgresChainLogStore, keyStoreChainSigner } from "@crossengin/forensics-pg";
+import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
-import { keyRegistryResolver } from "./chain-verify.js";
+import {
+  formatChainVerification,
+  keyRegistryResolver,
+  verifyChainFull,
+} from "./chain-verify.js";
 
 const FP = "a".repeat(64);
 const PUB = "cHVibGljLWtleS1iYXNlNjQ=";
@@ -40,5 +47,88 @@ describe("keyRegistryResolver", () => {
     const resolver = keyRegistryResolver(fakeRegistry({ [FP]: { publicKeyBase64: PUB } }, spy));
     await resolver.resolveByFingerprint(FP);
     expect(spy).toHaveBeenCalledWith(FP);
+  });
+});
+
+const TENANT = "11111111-1111-1111-1111-111111111111";
+
+/** Minimal in-memory fake of meta.forensic_chain_entries (append + ordered read), tenant-scoped. */
+function fakeChainPg(): PgConnection {
+  const rows: Record<string, unknown>[] = [];
+  function client(): PgConnection {
+    let tenant: string | null = null;
+    const query = async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
+      const p = params ?? [];
+      if (sql.includes("set_config")) { tenant = (p[0] as string | null) ?? null; return { rows: [], rowCount: 0 }; }
+      if (sql.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 0 };
+      if (sql.includes("INSERT INTO")) {
+        rows.push({
+          tenant_id: p[0] ?? null, sequence_number: p[1], kind: p[2], recorded_at: p[3], actor_reference: p[4],
+          payload_sha256: p[5], payload_size_bytes: p[6], prior_entry_hash: p[7], entry_hash: p[8],
+          signing_key_fingerprint: p[9], signature: p[10],
+        });
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("SELECT")) {
+        let visible = rows.filter((r) => (r["tenant_id"] ?? null) === tenant)
+          .sort((a, b) => Number(a["sequence_number"]) - Number(b["sequence_number"]));
+        if (sql.includes("ORDER BY sequence_number DESC")) visible = visible.slice(-1);
+        return { rows: visible, rowCount: visible.length };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const c: PgConnection = {
+      query: query as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(client())) as PgConnection["transaction"],
+      withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+    return c;
+  }
+  return client();
+}
+
+async function seededChain() {
+  const keyStore = new InMemoryKeyStore();
+  const record = await keyStore.createKey({ tenantId: null, algorithm: "ed25519", purpose: "evidence_sealing" });
+  const publicKeyBase64 = await keyStore.getPublicMaterial(record.handle);
+  const signer = keyStoreChainSigner(keyStore, record, null);
+  const store = new PostgresChainLogStore(fakeChainPg(), signer);
+  for (let n = 0; n < 3; n += 1) {
+    await store.append({ tenantId: TENANT, kind: "audit_event", actorReference: "gw", recordedAt: "2026-06-01T00:00:00.000Z", payload: `e${n.toString()}` });
+  }
+  return { store, fingerprint: signer.fingerprint, publicKeyBase64 };
+}
+
+describe("verifyChainFull", () => {
+  it("reports OK when integrity + registry-resolved signatures verify", async () => {
+    const { store, fingerprint, publicKeyBase64 } = await seededChain();
+    const registry = fakeRegistry({ [fingerprint]: { publicKeyBase64 } });
+    const report = await verifyChainFull(store, registry, TENANT);
+    expect(report.ok).toBe(true);
+    expect(report.integrity.valid).toBe(true);
+    expect(report.signatures.valid).toBe(true);
+    expect(report.signatures.checked).toBe(3);
+    expect(formatChainVerification(report)).toContain("OK");
+  });
+
+  it("reports FAILED when the signing key is not registered", async () => {
+    const { store } = await seededChain();
+    const report = await verifyChainFull(store, fakeRegistry({}), TENANT);
+    expect(report.ok).toBe(false);
+    expect(report.signatures.valid).toBe(false);
+    expect(report.signatures.unresolvedFingerprints.length).toBe(1);
+    const text = formatChainVerification(report);
+    expect(text).toContain("FAILED");
+    expect(text).toContain("unresolved keys");
+  });
+
+  it("an empty chain is vacuously OK", async () => {
+    const keyStore = new InMemoryKeyStore();
+    const record = await keyStore.createKey({ tenantId: null, algorithm: "ed25519", purpose: "evidence_sealing" });
+    const store = new PostgresChainLogStore(fakeChainPg(), keyStoreChainSigner(keyStore, record, null));
+    const report = await verifyChainFull(store, fakeRegistry({}), TENANT);
+    expect(report.ok).toBe(true);
+    expect(report.signatures.checked).toBe(0);
   });
 });

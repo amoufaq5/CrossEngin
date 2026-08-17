@@ -31,7 +31,7 @@ import {
   ingestStripeWebhook,
 } from "@crossengin/operate-runtime-pg";
 
-import type { PruneOptions, ServeOptions } from "./cli.js";
+import type { PruneOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import {
@@ -103,10 +103,12 @@ import {
   type CheckpointLifecycle,
 } from "./checkpoint-scheduler.js";
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
+import { PostgresChainLogReader } from "@crossengin/forensics-pg";
 import {
   buildTenantAuditPolicyCache,
   type TenantAuditPolicyLifecycle,
 } from "./audit-sampling-policy-source.js";
+import { verifyChainFull, type ChainVerificationReport } from "./chain-verify.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -731,6 +733,26 @@ export async function runPruneLinks(options: PruneOptions): Promise<MultiTenantS
         ).activeTenantIds()
       : [options.tenantId ?? ""];
     return await sweepDanglingLinksForTenants(store, pairs, tenantIds, { dryRun: options.dryRun });
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * Runs the `verify-chain` subcommand: opens a Postgres connection (standard PG* env vars), reads the
+ * scope's forensic audit chain with a signer-free `PostgresChainLogReader`, and verifies hash-chain
+ * integrity + per-entry signatures against the crypto-pg key registry. Closes the connection before
+ * returning the report.
+ */
+export async function runVerifyChain(options: VerifyChainOptions): Promise<ChainVerificationReport> {
+  const conn = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const reader = new PostgresChainLogReader(
+      conn,
+      options.schema !== null ? { schema: options.schema } : {},
+    );
+    const registry = new PostgresKeyRegistry(conn);
+    return await verifyChainFull(reader, registry, options.platform ? null : options.tenantId);
   } finally {
     await conn.close();
   }

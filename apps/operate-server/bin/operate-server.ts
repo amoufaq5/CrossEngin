@@ -1,8 +1,17 @@
 #!/usr/bin/env node
 
-import { CliUsageError, helpText, parsePruneArgs, pruneHelpText, parseServeArgs } from "../src/cli.js";
+import {
+  CliUsageError,
+  helpText,
+  parsePruneArgs,
+  parseServeArgs,
+  parseVerifyChainArgs,
+  pruneHelpText,
+  verifyChainHelpText,
+} from "../src/cli.js";
 import { formatMultiTenantReport } from "../src/link-sweep.js";
-import { runPruneLinks, serve } from "../src/node.js";
+import { formatChainVerification } from "../src/chain-verify.js";
+import { runPruneLinks, runVerifyChain, serve } from "../src/node.js";
 
 const CLI_VERSION = "0.0.0";
 
@@ -26,10 +35,37 @@ async function runPrune(argv: readonly string[]): Promise<number> {
   return 0;
 }
 
+async function runVerify(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseVerifyChainArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${verifyChainHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(verifyChainHelpText);
+    return 0;
+  }
+  const report = await runVerifyChain(options);
+  process.stdout.write(
+    options.format === "json"
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : `${formatChainVerification(report)}\n`,
+  );
+  return report.ok ? 0 : 1;
+}
+
 async function main(): Promise<number> {
   const argv = process.argv.slice(2);
   if (argv[0] === "prune-links") {
     return runPrune(argv.slice(1));
+  }
+  if (argv[0] === "verify-chain") {
+    return runVerify(argv.slice(1));
   }
 
   let options;
