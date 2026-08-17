@@ -99,6 +99,7 @@ import { registerAuditChainKey } from "./audit-chain-key-registration.js";
 import {
   buildCheckpointLifecycle,
   loadCheckpointConfig,
+  tenantSourceScopes,
   type CheckpointLifecycle,
 } from "./checkpoint-scheduler.js";
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
@@ -555,8 +556,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         "[checkpoint] --checkpoint-config requires --audit-chain-config (for the chain signing key); skipping",
       );
     } else {
-      checkpoints = buildCheckpointLifecycle(conn, await loadCheckpointConfig(options.checkpointConfig), {
+      const checkpointConfig = await loadCheckpointConfig(options.checkpointConfig);
+      // The tenant registry (meta.tenants) is always in `meta`, independent of the chain `schema`.
+      const liveScopes = checkpointConfig.allTenants
+        ? {
+            tenants: tenantSourceScopes(new PostgresTenantSource(conn), {
+              includePlatform: checkpointConfig.includePlatform,
+            }),
+          }
+        : {};
+      checkpoints = buildCheckpointLifecycle(conn, checkpointConfig, {
         signer: ed25519ChainSigner(auditConfig),
+        ...liveScopes,
         onCheckpoint: (scope, cp) =>
           console.info(
             `[checkpoint] scope=${scope ?? "platform"} seq=${cp.sequenceNumber.toString()} root=${cp.rootHash.slice(0, 12)}`,

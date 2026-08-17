@@ -18,6 +18,7 @@ import {
   configScopes,
   loadCheckpointConfig,
   parseCheckpointConfig,
+  tenantSourceScopes,
   CheckpointScheduler,
 } from "./checkpoint-scheduler.js";
 
@@ -198,6 +199,7 @@ const BASE_CONFIG = {
   checkpointedBy: "operate-server",
   tenants: [] as string[],
   includePlatform: false,
+  allTenants: false,
 };
 
 describe("parseCheckpointConfig", () => {
@@ -248,6 +250,47 @@ describe("configScopes", () => {
       TENANT_A,
       null,
     ]);
+  });
+});
+
+describe("allTenants config + tenantSourceScopes", () => {
+  it("allTenants defaults false and accepts true", () => {
+    expect(parseCheckpointConfig({}).allTenants).toBe(false);
+    expect(parseCheckpointConfig({ allTenants: true }).allTenants).toBe(true);
+  });
+
+  it("resolves scopes from a live tenant source, re-queried each call", async () => {
+    let ids: string[] = [TENANT_A, TENANT_B];
+    const source = { activeTenantIds: async () => ids };
+    const scopes = tenantSourceScopes(source);
+    expect(await scopes()).toEqual([TENANT_A, TENANT_B]);
+    // a newly-provisioned tenant is picked up on the next call
+    ids = [TENANT_A, TENANT_B, TENANT_POISON];
+    expect(await scopes()).toEqual([TENANT_A, TENANT_B, TENANT_POISON]);
+  });
+
+  it("appends the platform scope only when includePlatform is set", async () => {
+    const source = { activeTenantIds: () => [TENANT_A] };
+    expect(await tenantSourceScopes(source)()).toEqual([TENANT_A]);
+    expect(await tenantSourceScopes(source, { includePlatform: true })()).toEqual([TENANT_A, null]);
+  });
+
+  it("drives checkpointing over every live tenant", async () => {
+    const conn = fakeChainPg();
+    const signer = await newSigner();
+    await seed(conn, signer, TENANT_A, 2);
+    await seed(conn, signer, TENANT_B, 4);
+    const checkpointStore = new PostgresChainCheckpointStore(conn, {});
+
+    const { runOnce } = buildCheckpointLifecycle(conn, { ...BASE_CONFIG, allTenants: true }, {
+      signer,
+      tenants: tenantSourceScopes({ activeTenantIds: () => [TENANT_A, TENANT_B] }),
+    });
+    const results = await runOnce();
+
+    expect(results.map((r) => r.outcome)).toEqual(["recorded", "recorded"]);
+    expect((await checkpointStore.latest(TENANT_A))?.sequenceNumber).toBe(1);
+    expect((await checkpointStore.latest(TENANT_B))?.sequenceNumber).toBe(3);
   });
 });
 

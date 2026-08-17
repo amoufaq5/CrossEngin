@@ -73,7 +73,7 @@ export interface ServeOptions {
   readonly certificationConfig: string | null;
   /** Path to a JSON audit-chain config ({schema?, actorReference?, privateKeyBase64, publicKeyBase64, outcomes?, operations?, sampleRate?, tenantOverrides?}) — appends a signed, hash-linked audit-log entry per request into the tamper-evident chain + registers its sealing key (needs --store pg). */
   readonly auditChainConfig: string | null;
-  /** Path to a JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?, includePlatform?}) — periodically anchors a chain checkpoint per tenant so verification stays bounded (needs --store pg + --audit-chain-config). */
+  /** Path to a JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?, includePlatform?, allTenants?}) — periodically anchors a chain checkpoint per tenant (or every active tenant when allTenants) so verification stays bounded (needs --store pg + --audit-chain-config). */
   readonly checkpointConfig: string | null;
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
@@ -665,8 +665,9 @@ Options:
                        tamper-evident chain and registers its sealing key in the key registry (needs
                        --store pg)
   --checkpoint-config <file>  JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?,
-                       includePlatform?}) — periodically anchors a chain checkpoint per tenant so
-                       verifying a long chain stays bounded (needs --store pg + --audit-chain-config)
+                       includePlatform?, allTenants?}) — periodically anchors a chain checkpoint per tenant
+                       (allTenants: every active tenant from the live registry) so verifying a long chain
+                       stays bounded (needs --store pg + --audit-chain-config)
   --metering-config <file>  JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?,
                        flushIntervalMs?}) — meters each billable request into billing usage keyed by the
                        tenant's subscription, flushed to Postgres periodically (needs --store pg)

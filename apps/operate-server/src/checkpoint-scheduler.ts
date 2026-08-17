@@ -20,9 +20,33 @@ export const CheckpointConfigSchema = z
     checkpointedBy: z.string().min(1).default("operate-server"),
     tenants: z.array(z.string().uuid()).default([]),
     includePlatform: z.boolean().default(false),
+    /** Checkpoint every active tenant from the live tenant registry instead of the static `tenants` list. */
+    allTenants: z.boolean().default(false),
   })
   .strict();
 export type CheckpointConfig = z.infer<typeof CheckpointConfigSchema>;
+
+/** The live-tenant-registry seam the scheduler reads when `allTenants` is on (satisfied by `PostgresTenantSource`). */
+export interface ActiveTenantSource {
+  activeTenantIds(): Promise<readonly string[]> | readonly string[];
+}
+
+/**
+ * Adapts a live `ActiveTenantSource` into a `CheckpointScopeSource`: every active tenant becomes a scope,
+ * plus the platform (`null`) chain when `includePlatform`. Re-queried each pass, so a newly-provisioned or
+ * newly-suspended tenant is picked up on the next tick.
+ */
+export function tenantSourceScopes(
+  source: ActiveTenantSource,
+  opts: { readonly includePlatform?: boolean } = {},
+): CheckpointScopeSource {
+  return async () => {
+    const ids = await source.activeTenantIds();
+    const scopes: (string | null)[] = [...ids];
+    if (opts.includePlatform === true) scopes.push(null);
+    return scopes;
+  };
+}
 
 export function parseCheckpointConfig(json: unknown): CheckpointConfig {
   return CheckpointConfigSchema.parse(json);
