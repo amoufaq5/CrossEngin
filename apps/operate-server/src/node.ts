@@ -88,7 +88,20 @@ import {
   loadCertificationConfig,
   type CertificationLifecycle,
 } from "./certification.js";
-import { buildAuditChain, loadAuditChainConfig, type AuditChain } from "./audit-chain.js";
+import {
+  buildAuditChain,
+  ed25519ChainSigner,
+  loadAuditChainConfig,
+  type AuditChain,
+  type AuditChainConfig,
+} from "./audit-chain.js";
+import { registerAuditChainKey } from "./audit-chain-key-registration.js";
+import {
+  buildCheckpointLifecycle,
+  loadCheckpointConfig,
+  type CheckpointLifecycle,
+} from "./checkpoint-scheduler.js";
+import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -511,12 +524,44 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // so certification's forensic-chain source has a live chain to verify. Enabled by --audit-chain-config
   // over a pg store.
   let auditChain: AuditChain | null = null;
+  let auditConfig: AuditChainConfig | null = null;
   if (options.auditChainConfig !== null) {
     if (conn === undefined) {
       console.warn("[audit-chain] --audit-chain-config requires a Postgres store (--store pg); skipping");
     } else {
-      auditChain = buildAuditChain(conn, await loadAuditChainConfig(options.auditChainConfig), {
+      auditConfig = await loadAuditChainConfig(options.auditChainConfig);
+      auditChain = buildAuditChain(conn, auditConfig, {
         onError: (err) => console.error("[audit-chain] append error", err),
+      });
+      // Register the sealing key's public half into the platform key registry (best-effort — a registry
+      // failure must not stop serving) so a chain entry's signingKeyFingerprint resolves to a known key.
+      try {
+        const registered = await registerAuditChainKey(new PostgresKeyRegistry(conn), auditConfig);
+        console.info(`[audit-chain] registered sealing key ${registered.keyId}`);
+      } catch (err) {
+        console.error("[audit-chain] key registration failed", err);
+      }
+    }
+  }
+  // Periodic per-tenant chain checkpointing: anchor a ChainCheckpoint at each configured scope's tail so
+  // verification stays bounded (verify only the suffix after the latest checkpoint). Enabled by
+  // --checkpoint-config over a pg store; reuses the audit chain's signing key, so it needs --audit-chain-config.
+  let checkpoints: CheckpointLifecycle | null = null;
+  if (options.checkpointConfig !== null) {
+    if (conn === undefined) {
+      console.warn("[checkpoint] --checkpoint-config requires a Postgres store (--store pg); skipping");
+    } else if (auditConfig === null) {
+      console.warn(
+        "[checkpoint] --checkpoint-config requires --audit-chain-config (for the chain signing key); skipping",
+      );
+    } else {
+      checkpoints = buildCheckpointLifecycle(conn, await loadCheckpointConfig(options.checkpointConfig), {
+        signer: ed25519ChainSigner(auditConfig),
+        onCheckpoint: (scope, cp) =>
+          console.info(
+            `[checkpoint] scope=${scope ?? "platform"} seq=${cp.sequenceNumber.toString()} root=${cp.rootHash.slice(0, 12)}`,
+          ),
+        onError: (err) => console.error("[checkpoint] pass error", err),
       });
     }
   }
@@ -590,6 +635,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   drReadiness?.scheduler.start();
   accessReviews?.scheduler.start();
   certification?.scheduler.start();
+  checkpoints?.scheduler.start();
   metering?.flushScheduler?.start();
   stripeUsageSync?.scheduler.start();
   const listener = createNodeRequestListener(httpServer);
@@ -611,6 +657,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         drReadiness?.scheduler.stop();
         accessReviews?.scheduler.stop();
         certification?.scheduler.stop();
+        checkpoints?.scheduler.stop();
         metering?.flushScheduler?.stop();
         stripeUsageSync?.scheduler.stop();
         // Drain any queued audit-chain appends before closing, so no request's entry is lost on shutdown.

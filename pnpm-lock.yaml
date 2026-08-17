@@ -117,6 +117,9 @@ importers:
       '@crossengin/crypto':
         specifier: workspace:*
         version: link:../../packages/crypto
+      '@crossengin/crypto-pg':
+        specifier: workspace:*
+        version: link:../../packages/crypto-pg
       '@crossengin/dr':
         specifier: workspace:*
         version: link:../../packages/dr

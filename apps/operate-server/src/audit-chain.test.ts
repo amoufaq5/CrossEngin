@@ -56,6 +56,7 @@ import {
   ed25519ChainSigner,
   loadAuditChainConfig,
   parseAuditChainConfig,
+  resolveAuditPolicy,
   sampleValue,
   shouldRecordAudit,
 } from "./audit-chain.js";
@@ -194,6 +195,58 @@ describe("shouldRecordAudit", () => {
   });
 });
 
+describe("resolveAuditPolicy", () => {
+  it("returns a tenant's full override in place of the base", () => {
+    const c = config({
+      outcomes: ["pass"],
+      operations: ["product.list"],
+      sampleRate: 1,
+      tenantOverrides: { [TENANT]: { outcomes: ["deny", "error"], operations: ["product.get"], sampleRate: 0.1 } },
+    });
+    expect(resolveAuditPolicy(TENANT, c)).toEqual({ outcomes: ["deny", "error"], operations: ["product.get"], sampleRate: 0.1 });
+  });
+
+  it("inherits unset override fields from the base (partial override)", () => {
+    const c = config({
+      outcomes: ["pass"],
+      operations: ["product.list"],
+      sampleRate: 1,
+      tenantOverrides: { [TENANT]: { sampleRate: 0.01 } },
+    });
+    expect(resolveAuditPolicy(TENANT, c)).toEqual({ outcomes: ["pass"], operations: ["product.list"], sampleRate: 0.01 });
+  });
+
+  it("uses the base for a tenant with no override and for a null (platform) tenant", () => {
+    const c = config({
+      outcomes: ["pass"],
+      sampleRate: 0.5,
+      tenantOverrides: { [TENANT]: { sampleRate: 0 } },
+    });
+    expect(resolveAuditPolicy(TENANT_B, c)).toEqual({ outcomes: ["pass"], operations: undefined, sampleRate: 0.5 });
+    expect(resolveAuditPolicy(null, c)).toEqual({ outcomes: ["pass"], operations: undefined, sampleRate: 0.5 });
+  });
+});
+
+describe("shouldRecordAudit with tenantOverrides", () => {
+  it("a per-tenant sampleRate 0 silences that tenant while others still record", () => {
+    const c = config({ tenantOverrides: { [TENANT]: { sampleRate: 0 } } });
+    expect(shouldRecordAudit(execution({ tenantId: TENANT }), c)).toBe(false);
+    expect(shouldRecordAudit(execution({ tenantId: TENANT_B }), c)).toBe(true);
+  });
+
+  it("a per-tenant outcomes allowlist skips that tenant's pass while the base tenant still records", () => {
+    const c = config({ tenantOverrides: { [TENANT]: { outcomes: ["deny", "error"] } } });
+    expect(shouldRecordAudit(execution({ tenantId: TENANT, finalOutcome: "pass", finalResponseStatus: 200 }), c)).toBe(false);
+    expect(shouldRecordAudit(execution({ tenantId: TENANT, finalOutcome: "deny", finalResponseStatus: 403 }), c)).toBe(true);
+    expect(shouldRecordAudit(execution({ tenantId: TENANT_B, finalOutcome: "pass", finalResponseStatus: 200 }), c)).toBe(true);
+  });
+
+  it("a null (platform) tenant is unaffected by a tenant override map", () => {
+    const c = config({ tenantOverrides: { [TENANT]: { sampleRate: 0 } } });
+    expect(shouldRecordAudit(execution({ tenantId: null }), c)).toBe(true);
+  });
+});
+
 describe("sampleValue", () => {
   it("is in [0, 1) and deterministic", () => {
     const v = sampleValue("req_abcdefgh12345678");
@@ -237,6 +290,20 @@ describe("AuditChainObserver", () => {
     observer.record(execution({ finalOutcome: "deny", finalResponseStatus: 403, requestId: "req_bbbbbbbb22222222" }));
     await observer.drain();
     expect(await store.loadChain(TENANT)).toHaveLength(1);
+  });
+
+  it("a per-tenant override that filters out a tenant appends nothing while another tenant still appends", async () => {
+    const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
+    const observer = new AuditChainObserver(store, config({ tenantOverrides: { [TENANT]: { sampleRate: 0 } } }));
+
+    observer.record(execution({ tenantId: TENANT, requestId: "req_aaaaaaaa11111111" }));
+    expect(observer.pending()).toBe(0);
+    expect(observer.activeScopes()).toBe(0);
+
+    observer.record(execution({ tenantId: TENANT_B, requestId: "req_bbbbbbbb22222222" }));
+    await observer.drain();
+    expect(await store.loadChain(TENANT)).toHaveLength(0);
+    expect(await store.loadChain(TENANT_B)).toHaveLength(1);
   });
 
   it("routes an append failure to onError without stalling the queue", async () => {

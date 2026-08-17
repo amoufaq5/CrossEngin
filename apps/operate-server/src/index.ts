@@ -13,6 +13,8 @@ export * from "./access-reviews-lifecycle.js";
 export * from "./live-grants.js";
 export * from "./certification.js";
 export * from "./audit-chain.js";
+export * from "./audit-chain-key-registration.js";
+export * from "./checkpoint-scheduler.js";
 export * from "./metering.js";
 export * from "./stripe-usage-sync.js";
 export * from "./entity-events.js";
