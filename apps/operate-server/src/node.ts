@@ -103,6 +103,10 @@ import {
   type CheckpointLifecycle,
 } from "./checkpoint-scheduler.js";
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
+import {
+  buildTenantAuditPolicyCache,
+  type TenantAuditPolicyLifecycle,
+} from "./audit-sampling-policy-source.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -526,13 +530,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // over a pg store.
   let auditChain: AuditChain | null = null;
   let auditConfig: AuditChainConfig | null = null;
+  let auditPolicy: TenantAuditPolicyLifecycle | null = null;
   if (options.auditChainConfig !== null) {
     if (conn === undefined) {
       console.warn("[audit-chain] --audit-chain-config requires a Postgres store (--store pg); skipping");
     } else {
       auditConfig = await loadAuditChainConfig(options.auditChainConfig);
+      // Live per-tenant sampling from meta.operate_tenant_settings (overrides the config map, no redeploy).
+      // Enabled by --audit-sampling-refresh-ms; refreshed into an in-memory snapshot the observer reads.
+      if (options.auditSamplingRefreshMs !== null) {
+        auditPolicy = buildTenantAuditPolicyCache({
+          settingsStore,
+          tenants: new PostgresTenantSource(conn),
+          intervalMs: options.auditSamplingRefreshMs,
+          onError: (err, tenantId) =>
+            console.error(`[audit-sampling] tenant=${tenantId} settings load error`, err),
+          refreshOnError: (err) => console.error("[audit-sampling] refresh error", err),
+        });
+      }
       auditChain = buildAuditChain(conn, auditConfig, {
         onError: (err) => console.error("[audit-chain] append error", err),
+        ...(auditPolicy !== null ? { policyCache: auditPolicy.cache } : {}),
       });
       // Register the sealing key's public half into the platform key registry (best-effort — a registry
       // failure must not stop serving) so a chain entry's signingKeyFingerprint resolves to a known key.
@@ -560,9 +578,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // The tenant registry (meta.tenants) is always in `meta`, independent of the chain `schema`.
       const liveScopes = checkpointConfig.allTenants
         ? {
-            tenants: tenantSourceScopes(new PostgresTenantSource(conn), {
-              includePlatform: checkpointConfig.includePlatform,
-            }),
+            tenants: tenantSourceScopes(
+              new PostgresTenantSource(
+                conn,
+                checkpointConfig.tenantStatuses !== undefined
+                  ? { statuses: checkpointConfig.tenantStatuses }
+                  : {},
+              ),
+              { includePlatform: checkpointConfig.includePlatform },
+            ),
           }
         : {};
       checkpoints = buildCheckpointLifecycle(conn, checkpointConfig, {
@@ -647,6 +671,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   accessReviews?.scheduler.start();
   certification?.scheduler.start();
   checkpoints?.scheduler.start();
+  auditPolicy?.refresher.start();
   metering?.flushScheduler?.start();
   stripeUsageSync?.scheduler.start();
   const listener = createNodeRequestListener(httpServer);
@@ -669,6 +694,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         accessReviews?.scheduler.stop();
         certification?.scheduler.stop();
         checkpoints?.scheduler.stop();
+        auditPolicy?.refresher.stop();
         metering?.flushScheduler?.stop();
         stripeUsageSync?.scheduler.stop();
         // Drain any queued audit-chain appends before closing, so no request's entry is lost on shutdown.

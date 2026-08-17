@@ -259,6 +259,15 @@ describe("allTenants config + tenantSourceScopes", () => {
     expect(parseCheckpointConfig({ allTenants: true }).allTenants).toBe(true);
   });
 
+  it("tenantStatuses is optional and, when set, must be non-empty", () => {
+    expect(parseCheckpointConfig({}).tenantStatuses).toBeUndefined();
+    expect(parseCheckpointConfig({ tenantStatuses: ["active", "trial"] }).tenantStatuses).toEqual([
+      "active",
+      "trial",
+    ]);
+    expect(() => parseCheckpointConfig({ tenantStatuses: [] })).toThrow();
+  });
+
   it("resolves scopes from a live tenant source, re-queried each call", async () => {
     let ids: string[] = [TENANT_A, TENANT_B];
     const source = { activeTenantIds: async () => ids };

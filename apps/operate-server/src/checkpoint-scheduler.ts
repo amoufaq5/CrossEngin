@@ -22,6 +22,8 @@ export const CheckpointConfigSchema = z
     includePlatform: z.boolean().default(false),
     /** Checkpoint every active tenant from the live tenant registry instead of the static `tenants` list. */
     allTenants: z.boolean().default(false),
+    /** With `allTenants`, which tenant statuses to include (passed to the live source; default `['active']`). */
+    tenantStatuses: z.array(z.string().min(1)).nonempty().optional(),
   })
   .strict();
 export type CheckpointConfig = z.infer<typeof CheckpointConfigSchema>;
