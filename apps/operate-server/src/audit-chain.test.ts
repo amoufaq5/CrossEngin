@@ -365,6 +365,64 @@ describe("AuditChainObserver", () => {
     expect(observer.pending()).toBe(0);
   });
 
+  it("a live policyCache sampleRate 0 silences a tenant the config would otherwise record", async () => {
+    const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
+    const policyCache = { get: (t: string) => (t === TENANT ? { sampleRate: 0 } : undefined) };
+    // config records everything; only the live policy filters TENANT out.
+    const observer = new AuditChainObserver(store, config(), { policyCache });
+
+    observer.record(execution({ tenantId: TENANT, requestId: "req_aaaaaaaa11111111" }));
+    expect(observer.pending()).toBe(0);
+    expect(observer.activeScopes()).toBe(0);
+
+    observer.record(execution({ tenantId: TENANT_B, requestId: "req_bbbbbbbb22222222" }));
+    await observer.drain();
+    expect(await store.loadChain(TENANT)).toHaveLength(0);
+    expect(await store.loadChain(TENANT_B)).toHaveLength(1);
+  });
+
+  it("a tenant with no live policy falls back to the config path", async () => {
+    const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
+    const policyCache = { get: (_t: string) => undefined };
+    const observer = new AuditChainObserver(store, config({ outcomes: ["deny", "error"] }), { policyCache });
+
+    // config's outcomes allowlist still applies when the cache has nothing for this tenant.
+    observer.record(execution({ finalOutcome: "pass", requestId: "req_aaaaaaaa11111111" }));
+    await observer.drain();
+    expect(await store.loadChain(TENANT)).toHaveLength(0);
+
+    observer.record(execution({ finalOutcome: "deny", finalResponseStatus: 403, requestId: "req_bbbbbbbb22222222" }));
+    await observer.drain();
+    expect(await store.loadChain(TENANT)).toHaveLength(1);
+  });
+
+  it("a live policy overrides a config tenantOverride (live wins per-field)", async () => {
+    const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
+    // config would SILENCE the tenant (sampleRate 0), but the live policy re-enables full recording.
+    const policyCache = { get: (t: string) => (t === TENANT ? { sampleRate: 1 } : undefined) };
+    const observer = new AuditChainObserver(
+      store,
+      config({ tenantOverrides: { [TENANT]: { sampleRate: 0 } } }),
+      { policyCache },
+    );
+
+    observer.record(execution({ tenantId: TENANT, requestId: "req_aaaaaaaa11111111" }));
+    await observer.drain();
+    expect(await store.loadChain(TENANT)).toHaveLength(1);
+  });
+
+  it("a live outcomes allowlist filters a tenant while another still appends", async () => {
+    const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
+    const policyCache = { get: (t: string) => (t === TENANT ? { outcomes: ["deny", "error"] as const } : undefined) };
+    const observer = new AuditChainObserver(store, config(), { policyCache });
+
+    observer.record(execution({ tenantId: TENANT, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_aaaaaaaa11111111" }));
+    observer.record(execution({ tenantId: TENANT_B, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_bbbbbbbb22222222" }));
+    await observer.drain();
+    expect(await store.loadChain(TENANT)).toHaveLength(0);
+    expect(await store.loadChain(TENANT_B)).toHaveLength(1);
+  });
+
   it("keeps a single tenant's appends strictly ordered on its own queue", async () => {
     const seen: number[] = [];
     let n = 0;

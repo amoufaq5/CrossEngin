@@ -73,8 +73,10 @@ export interface ServeOptions {
   readonly certificationConfig: string | null;
   /** Path to a JSON audit-chain config ({schema?, actorReference?, privateKeyBase64, publicKeyBase64, outcomes?, operations?, sampleRate?, tenantOverrides?}) — appends a signed, hash-linked audit-log entry per request into the tamper-evident chain + registers its sealing key (needs --store pg). */
   readonly auditChainConfig: string | null;
-  /** Path to a JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?, includePlatform?, allTenants?}) — periodically anchors a chain checkpoint per tenant (or every active tenant when allTenants) so verification stays bounded (needs --store pg + --audit-chain-config). */
+  /** Path to a JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?, includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain checkpoint per tenant (or every active tenant when allTenants) so verification stays bounded (needs --store pg + --audit-chain-config). */
   readonly checkpointConfig: string | null;
+  /** Refresh interval (ms) for live per-tenant audit sampling read from meta.operate_tenant_settings; enables the live policy cache (needs --store pg + --audit-chain-config). Null disables it. */
+  readonly auditSamplingRefreshMs: number | null;
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
   /** Path to a JSON Stripe usage-sync config ({intervalMs?, tenants, subscriptionItems}) — periodically reports persisted usage records to Stripe (needs --store pg + --stripe-api-key). */
@@ -147,6 +149,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let certificationConfig: string | null = null;
   let auditChainConfig: string | null = null;
   let checkpointConfig: string | null = null;
+  let auditSamplingRefreshMs: number | null = null;
   let meteringConfig: string | null = null;
   let stripeUsageSyncConfig: string | null = null;
   let help = false;
@@ -304,6 +307,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--checkpoint-config" || arg.startsWith("--checkpoint-config=")) {
       checkpointConfig = takeValue(arg, next, "--checkpoint-config");
       i += consumed();
+    } else if (arg === "--audit-sampling-refresh-ms" || arg.startsWith("--audit-sampling-refresh-ms=")) {
+      const raw = takeValue(arg, next, "--audit-sampling-refresh-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000) {
+        throw new CliUsageError(`invalid --audit-sampling-refresh-ms: ${raw} (>= 1000)`);
+      }
+      auditSamplingRefreshMs = n;
+      i += consumed();
     } else if (arg === "--metering-config" || arg.startsWith("--metering-config=")) {
       meteringConfig = takeValue(arg, next, "--metering-config");
       i += consumed();
@@ -459,6 +470,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     certificationConfig,
     auditChainConfig,
     checkpointConfig,
+    auditSamplingRefreshMs,
     meteringConfig,
     stripeUsageSyncConfig,
     defaultScheme,
@@ -665,9 +677,13 @@ Options:
                        tamper-evident chain and registers its sealing key in the key registry (needs
                        --store pg)
   --checkpoint-config <file>  JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?,
-                       includePlatform?, allTenants?}) — periodically anchors a chain checkpoint per tenant
-                       (allTenants: every active tenant from the live registry) so verifying a long chain
-                       stays bounded (needs --store pg + --audit-chain-config)
+                       includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain
+                       checkpoint per tenant (allTenants: every active tenant from the live registry,
+                       tenantStatuses: which statuses to include) so verifying a long chain stays bounded
+                       (needs --store pg + --audit-chain-config)
+  --audit-sampling-refresh-ms <n>  Refresh interval (ms, >=1000) for live per-tenant audit sampling read
+                       from meta.operate_tenant_settings (overrides the config map without a redeploy);
+                       enables the live policy cache (needs --store pg + --audit-chain-config)
   --metering-config <file>  JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?,
                        flushIntervalMs?}) — meters each billable request into billing usage keyed by the
                        tenant's subscription, flushed to Postgres periodically (needs --store pg)

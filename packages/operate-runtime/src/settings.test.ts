@@ -56,6 +56,22 @@ describe("TenantSettingsSchema", () => {
     expect(TenantSettingsSchema.safeParse({ defaults: { dateFormat: "bogus" } }).success).toBe(false);
     expect(TenantSettingsSchema.safeParse({ features: { f1: "yes" } }).success).toBe(false);
   });
+
+  it("accepts an optional auditSampling policy and stays valid without one", () => {
+    const withSampling = TenantSettingsSchema.parse({
+      auditSampling: { outcomes: ["deny", "error"], operations: ["product.list"], sampleRate: 0.25 },
+    });
+    expect(withSampling.auditSampling?.sampleRate).toBe(0.25);
+    expect(withSampling.auditSampling?.outcomes).toEqual(["deny", "error"]);
+
+    const withoutSampling = TenantSettingsSchema.parse({ company: { name: "Acme" } });
+    expect(withoutSampling.auditSampling).toBeUndefined();
+  });
+
+  it("rejects an invalid auditSampling policy", () => {
+    expect(TenantSettingsSchema.safeParse({ auditSampling: { sampleRate: 2 } }).success).toBe(false);
+    expect(TenantSettingsSchema.safeParse({ auditSampling: { bogus: true } }).success).toBe(false);
+  });
 });
 
 describe("InMemorySettingsStore", () => {

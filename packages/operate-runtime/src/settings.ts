@@ -89,6 +89,23 @@ export const FinanceSettingsSchema = z
 
 export type FinanceSettings = z.infer<typeof FinanceSettingsSchema>;
 
+/**
+ * Per-tenant audit-chain sampling/filter policy an admin can set without a redeploy — read live and
+ * overlaid over the static serving-edge `--audit-chain-config`. Structurally the serving layer's
+ * `TenantAuditPolicy`, but defined here so `operate-runtime` stays independent of the `operate-server`
+ * app. `outcomes` is left as free `string[]` (operate-runtime doesn't own the gateway's stage-outcome
+ * enum); the serving layer validates/maps it against its `STAGE_OUTCOMES`.
+ */
+export const AuditSamplingSettingsSchema = z
+  .object({
+    outcomes: z.array(z.string().min(1)).optional(),
+    operations: z.array(z.string().min(1)).optional(),
+    sampleRate: z.number().min(0).max(1).optional(),
+  })
+  .strict();
+
+export type AuditSamplingSettings = z.infer<typeof AuditSamplingSettingsSchema>;
+
 export const TenantSettingsSchema = z
   .object({
     company: CompanyProfileSchema.optional(),
@@ -98,6 +115,8 @@ export const TenantSettingsSchema = z
     numbering: z.record(z.string().min(1), NumberingOverrideSchema).optional(),
     /** Per-tenant feature toggles, keyed by a stable feature id. */
     features: z.record(z.string().min(1).max(80), z.boolean()).optional(),
+    /** Live audit-chain sampling/filter policy, overlaid over the serving-edge config. */
+    auditSampling: AuditSamplingSettingsSchema.optional(),
   })
   .strict();
 
