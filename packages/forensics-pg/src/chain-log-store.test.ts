@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { InMemoryKeyStore } from "@crossengin/crypto";
+import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   GENESIS_HASH,
   verifyChainEntrySignature,
@@ -104,6 +105,79 @@ describe("PostgresChainLogStore.append", () => {
     expect(
       () => new PostgresChainLogStore(fakeChainPg(), keyStoreChainSigner(keyStore, rec, null), { schema: "Bad-Schema" }),
     ).toThrow(/schema/);
+  });
+});
+
+/** Wraps a connection so every `loadFrom` (`WHERE sequence_number >=`) read corrupts the tail row's link. */
+function tamperingConn(inner: PgConnection): PgConnection {
+  const wrap = (c: PgConnection): PgConnection => ({
+    query: (async (sql: string, params?: readonly unknown[]) => {
+      const res = await c.query(sql, params);
+      if (sql.includes("sequence_number >=") && res.rows.length > 0) {
+        const rows = res.rows.map((r) => ({ ...r }) as Record<string, unknown>);
+        rows[rows.length - 1]!["prior_entry_hash"] = "f".repeat(64);
+        return { rows, rowCount: rows.length };
+      }
+      return res;
+    }) as PgConnection["query"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      inner.transaction((tx) => fn(wrap(tx)))) as PgConnection["transaction"],
+    withAdvisoryLock: c.withAdvisoryLock,
+    close: c.close,
+  });
+  return wrap(inner);
+}
+
+describe("PostgresChainLogStore checkpoint anchoring", () => {
+  it("createCheckpoint anchors at the tail and verifyFromCheckpoint clears the suffix", async () => {
+    const { store } = await newStore();
+    await append(store, TENANT_A, 0);
+    await append(store, TENANT_A, 1);
+    const e2 = await append(store, TENANT_A, 2);
+
+    const cp = await store.createCheckpoint(TENANT_A, { checkpointedBy: "auditor", checkpointedAt: AT });
+    expect(cp.sequenceNumber).toBe(2);
+    expect(cp.rootHash).toBe(e2.entryHash);
+
+    await append(store, TENANT_A, 3);
+    await append(store, TENANT_A, 4);
+
+    expect(await store.verifyFromCheckpoint(TENANT_A, cp)).toEqual({ valid: true, brokenAt: null });
+  });
+
+  it("loadFrom returns only the entries at or after the given sequence", async () => {
+    const { store } = await newStore();
+    for (let i = 0; i < 4; i++) await append(store, TENANT_A, i);
+    const from2 = await store.loadFrom(TENANT_A, 2);
+    expect(from2.map((e) => e.sequenceNumber)).toEqual([2, 3]);
+  });
+
+  it("createCheckpoint throws on an empty chain", async () => {
+    const { store } = await newStore();
+    await expect(store.createCheckpoint(TENANT_A, { checkpointedBy: "auditor" })).rejects.toThrow(
+      /empty chain/,
+    );
+  });
+
+  it("verifyFromCheckpoint reports a break when an after-checkpoint entry is tampered", async () => {
+    const keyStore = new InMemoryKeyStore();
+    const record = await keyStore.createKey({
+      tenantId: null,
+      algorithm: "ed25519",
+      purpose: "evidence_sealing",
+    });
+    const signer = keyStoreChainSigner(keyStore, record, null);
+    const store = new PostgresChainLogStore(tamperingConn(fakeChainPg()), signer);
+
+    await append(store, TENANT_A, 0);
+    await append(store, TENANT_A, 1);
+    const cp = await store.createCheckpoint(TENANT_A, { checkpointedBy: "auditor", checkpointedAt: AT });
+    await append(store, TENANT_A, 2);
+    await append(store, TENANT_A, 3);
+
+    const verdict = await store.verifyFromCheckpoint(TENANT_A, cp);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.brokenAt).toBe(3);
   });
 });
 

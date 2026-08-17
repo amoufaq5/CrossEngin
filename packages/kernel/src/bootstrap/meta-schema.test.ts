@@ -121,8 +121,8 @@ import {
 } from "./meta-schema.js";
 
 describe("META_TABLES", () => {
-  it("contains 135 tables", () => {
-    expect(META_TABLES).toHaveLength(135);
+  it("contains 136 tables", () => {
+    expect(META_TABLES).toHaveLength(136);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -188,6 +188,7 @@ describe("META_TABLES", () => {
       "feature_flag_targeting_rules",
       "feature_flags",
       "files",
+      "forensic_chain_checkpoints",
       "forensic_chain_entries",
       "forensic_evidence",
       "gateway_idempotency_records",
