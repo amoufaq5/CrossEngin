@@ -37,6 +37,7 @@
     "@crossengin/certification-runtime": "workspace:*",
     "@crossengin/certification-runtime-pg": "workspace:*",
     "@crossengin/crypto": "workspace:*",
+    "@crossengin/crypto-pg": "workspace:*",
     "@crossengin/dr": "workspace:*",
     "@crossengin/dr-runtime": "workspace:*",
     "@crossengin/forensics": "workspace:*",
