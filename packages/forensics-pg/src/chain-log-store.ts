@@ -38,49 +38,22 @@ export interface PostgresChainLogStoreOptions {
 }
 
 /**
- * The chain producer: appends signed, hash-linked `ChainedLogEntry` rows to `meta.forensic_chain_entries`.
- *
- * Every append runs in ONE transaction that first takes a per-tenant `pg_advisory_xact_lock` (auto-released
- * at commit, bound to the transaction's own connection — so concurrent appends for a tenant serialize and
- * the `priorEntryHash` chain never races), then sets the tenant's RLS context, reads the current tail,
- * builds + signs the next entry from the genesis-anchored `priorEntryHash`, and inserts it. A platform
- * chain (`tenantId = null`) skips the RLS context (RLS then exposes only `tenant_id IS NULL` rows).
+ * Read-only view over `meta.forensic_chain_entries` — load, integrity-verify, and checkpoint a scope's
+ * chain WITHOUT a signing key. Verification only needs public keys (resolved elsewhere), so a `verify-chain`
+ * tool / auditor can read a chain it has no authority to write; the signing key stays with the producer
+ * (`PostgresChainLogStore`, which extends this reader with the append path).
  */
-export class PostgresChainLogStore {
-  private readonly schema: string;
+export class PostgresChainLogReader {
+  protected readonly schema: string;
 
   constructor(
-    private readonly conn: PgConnection,
-    private readonly signer: ChainSigner,
+    protected readonly conn: PgConnection,
     options: PostgresChainLogStoreOptions = {},
   ) {
     this.schema = options.schema ?? "meta";
     if (!SCHEMA_RE.test(this.schema)) {
       throw new Error(`invalid schema identifier: ${JSON.stringify(this.schema)}`);
     }
-  }
-
-  async append(input: ChainAppendInput): Promise<ChainedLogEntry> {
-    const valid = ChainAppendInputSchema.parse(input);
-    return this.serialized(valid.tenantId, async (tx) => {
-      const tail = await this.tailWithin(tx);
-      const sequenceNumber = tail === null ? 0 : tail.sequenceNumber + 1;
-      const priorEntryHash = tail === null ? GENESIS_HASH : tail.entryHash;
-      const sealed = await buildChainEntry({
-        sequenceNumber,
-        priorEntryHash,
-        entry: {
-          kind: valid.kind,
-          recordedAt: valid.recordedAt,
-          actorReference: valid.actorReference,
-          payloadBytes: valid.payload,
-        },
-        signingKeyFingerprint: this.signer.fingerprint,
-        sign: (bytes) => this.signer.sign(bytes),
-      });
-      await this.insertWithin(tx, valid.tenantId, sealed.entry);
-      return sealed.entry;
-    });
   }
 
   async loadChain(tenantId: string | null): Promise<readonly ChainedLogEntry[]> {
@@ -147,7 +120,7 @@ export class PostgresChainLogStore {
     });
   }
 
-  private async tailWithin(tx: PgConnection): Promise<ChainTail | null> {
+  protected async tailWithin(tx: PgConnection): Promise<ChainTail | null> {
     const result = await tx.query<Record<string, unknown>>(
       `SELECT sequence_number, entry_hash FROM ${this.schema}.${TABLE}
        ORDER BY sequence_number DESC LIMIT 1`,
@@ -158,6 +131,61 @@ export class PostgresChainLogStore {
       sequenceNumber: Number(row["sequence_number"]),
       entryHash: String(row["entry_hash"]).trim(),
     };
+  }
+
+  /** A read-only transaction with the tenant's RLS context set (platform reads skip it). */
+  protected scoped<T>(
+    tenantId: string | null,
+    fn: (tx: PgConnection) => Promise<T>,
+  ): Promise<T> {
+    if (tenantId !== null) assertTenantId(tenantId);
+    return this.conn.transaction(async (tx) => {
+      if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      return fn(tx);
+    });
+  }
+}
+
+/**
+ * The chain producer: appends signed, hash-linked `ChainedLogEntry` rows to `meta.forensic_chain_entries`,
+ * on top of the read-only {@link PostgresChainLogReader}.
+ *
+ * Every append runs in ONE transaction that first takes a per-tenant `pg_advisory_xact_lock` (auto-released
+ * at commit, bound to the transaction's own connection — so concurrent appends for a tenant serialize and
+ * the `priorEntryHash` chain never races), then sets the tenant's RLS context, reads the current tail,
+ * builds + signs the next entry from the genesis-anchored `priorEntryHash`, and inserts it. A platform
+ * chain (`tenantId = null`) skips the RLS context (RLS then exposes only `tenant_id IS NULL` rows).
+ */
+export class PostgresChainLogStore extends PostgresChainLogReader {
+  constructor(
+    conn: PgConnection,
+    private readonly signer: ChainSigner,
+    options: PostgresChainLogStoreOptions = {},
+  ) {
+    super(conn, options);
+  }
+
+  async append(input: ChainAppendInput): Promise<ChainedLogEntry> {
+    const valid = ChainAppendInputSchema.parse(input);
+    return this.serialized(valid.tenantId, async (tx) => {
+      const tail = await this.tailWithin(tx);
+      const sequenceNumber = tail === null ? 0 : tail.sequenceNumber + 1;
+      const priorEntryHash = tail === null ? GENESIS_HASH : tail.entryHash;
+      const sealed = await buildChainEntry({
+        sequenceNumber,
+        priorEntryHash,
+        entry: {
+          kind: valid.kind,
+          recordedAt: valid.recordedAt,
+          actorReference: valid.actorReference,
+          payloadBytes: valid.payload,
+        },
+        signingKeyFingerprint: this.signer.fingerprint,
+        sign: (bytes) => this.signer.sign(bytes),
+      });
+      await this.insertWithin(tx, valid.tenantId, sealed.entry);
+      return sealed.entry;
+    });
   }
 
   private async insertWithin(
@@ -194,18 +222,6 @@ export class PostgresChainLogStore {
     if (tenantId !== null) assertTenantId(tenantId);
     return this.conn.transaction(async (tx) => {
       await tx.query("SELECT pg_advisory_xact_lock($1)", [advisoryKeyFor(tenantId)]);
-      if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
-      return fn(tx);
-    });
-  }
-
-  /** A read-only transaction with the tenant's RLS context set (platform reads skip it). */
-  private scoped<T>(
-    tenantId: string | null,
-    fn: (tx: PgConnection) => Promise<T>,
-  ): Promise<T> {
-    if (tenantId !== null) assertTenantId(tenantId);
-    return this.conn.transaction(async (tx) => {
       if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
       return fn(tx);
     });

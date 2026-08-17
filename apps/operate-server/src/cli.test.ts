@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CliUsageError, parsePruneArgs, parseServeArgs } from "./cli.js";
+import { CliUsageError, parsePruneArgs, parseServeArgs, parseVerifyChainArgs } from "./cli.js";
 
 describe("parseServeArgs", () => {
   it("parses a pack + port + repeated api-keys", () => {
@@ -586,5 +586,39 @@ describe("parsePruneArgs", () => {
 
   it("--help skips required-flag validation", () => {
     expect(parsePruneArgs(["--help"]).help).toBe(true);
+  });
+});
+
+describe("parseVerifyChainArgs", () => {
+  const TENANT = "00000000-0000-4000-8000-000000000001";
+
+  it("parses a tenant scope with schema + format", () => {
+    const opts = parseVerifyChainArgs(["--tenant", TENANT, "--schema", "tenant_app", "--format", "json"]);
+    expect(opts.tenantId).toBe(TENANT);
+    expect(opts.platform).toBe(false);
+    expect(opts.schema).toBe("tenant_app");
+    expect(opts.format).toBe("json");
+  });
+
+  it("parses the platform scope and defaults format to human", () => {
+    const opts = parseVerifyChainArgs(["--platform"]);
+    expect(opts.platform).toBe(true);
+    expect(opts.tenantId).toBeNull();
+    expect(opts.format).toBe("human");
+  });
+
+  it("requires exactly one of --tenant / --platform", () => {
+    expect(() => parseVerifyChainArgs([])).toThrow(/--tenant <uuid> or --platform/);
+    expect(() => parseVerifyChainArgs(["--tenant", TENANT, "--platform"])).toThrow(/mutually exclusive/);
+  });
+
+  it("rejects a malformed tenant, a bad format, and unknown args", () => {
+    expect(() => parseVerifyChainArgs(["--tenant", "nope!"])).toThrow(/invalid --tenant/);
+    expect(() => parseVerifyChainArgs(["--platform", "--format", "yaml"])).toThrow(/invalid --format/);
+    expect(() => parseVerifyChainArgs(["--platform", "--bogus"])).toThrow(CliUsageError);
+  });
+
+  it("--help skips required-flag validation", () => {
+    expect(parseVerifyChainArgs(["--help"]).help).toBe(true);
   });
 });

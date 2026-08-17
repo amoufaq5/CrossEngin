@@ -584,6 +584,87 @@ Options:
   --help, -h           Show this help
 `;
 
+/**
+ * Options for the `verify-chain` maintenance subcommand — read a scope's forensic audit chain (with a
+ * signer-free reader) and verify hash-chain integrity + per-entry signatures against the crypto-pg key
+ * registry. Read-only; uses standard PG* env vars.
+ */
+export interface VerifyChainOptions {
+  readonly tenantId: string | null;
+  /** Verify the platform (null-tenant) chain (mutually exclusive with --tenant). */
+  readonly platform: boolean;
+  readonly schema: string | null;
+  readonly format: "human" | "json";
+  readonly help: boolean;
+}
+
+/** Parses the argv *after* the `verify-chain` token. Requires exactly one of --tenant / --platform. */
+export function parseVerifyChainArgs(argv: readonly string[]): VerifyChainOptions {
+  let tenantId: string | null = null;
+  let platform = false;
+  let schema: string | null = null;
+  let format: "human" | "json" = "human";
+  let help = false;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const next = argv[i + 1];
+    const consumed = (): number => (isInline(arg) ? 0 : 1);
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+    } else if (arg === "--tenant" || arg.startsWith("--tenant=")) {
+      tenantId = takeValue(arg, next, "--tenant");
+      i += consumed();
+    } else if (arg === "--platform") {
+      platform = true;
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
+      i += consumed();
+    } else if (arg === "--format" || arg.startsWith("--format=")) {
+      const raw = takeValue(arg, next, "--format");
+      if (raw !== "human" && raw !== "json") throw new CliUsageError(`invalid --format: ${raw} (human|json)`);
+      format = raw;
+      i += consumed();
+    } else {
+      throw new CliUsageError(`unknown argument: ${arg}`);
+    }
+  }
+
+  if (!help) {
+    if (tenantId === null && !platform) {
+      throw new CliUsageError("verify-chain requires --tenant <uuid> or --platform");
+    }
+    if (tenantId !== null && platform) {
+      throw new CliUsageError("--tenant and --platform are mutually exclusive");
+    }
+    if (tenantId !== null && !TENANT_ID_RE.test(tenantId)) {
+      throw new CliUsageError(`invalid --tenant: ${tenantId}`);
+    }
+  }
+
+  return { tenantId, platform, schema, format, help };
+}
+
+export const verifyChainHelpText = `operate-server verify-chain — verify a forensic audit chain's integrity + signatures
+
+Usage:
+  operate-server verify-chain --tenant <uuid> [--schema <name>] [--format human|json]
+  operate-server verify-chain --platform [--format json]
+
+Reads the scope's meta.forensic_chain_entries with a signer-free reader, folds the
+hash chain from genesis, and verifies each entry's Ed25519 signature against the
+public key resolved from the crypto-pg key registry (meta.crypto_keys). Read-only;
+exits 0 when valid, 1 when integrity or a signature fails. Uses standard PG* env vars.
+
+Options:
+  --tenant <uuid>      Tenant chain to verify (one of this or --platform)
+  --platform           Verify the platform (null-tenant) chain
+  --schema <name>      Postgres schema for the chain (default meta)
+  --format <fmt>       Output format: human (default) or json
+  --help, -h           Show this help
+`;
+
 export const helpText = `operate-server — serve a resolved CrossEngin manifest as a live multi-tenant API
 
 Usage:
