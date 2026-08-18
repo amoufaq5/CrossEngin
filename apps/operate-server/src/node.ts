@@ -59,6 +59,7 @@ import {
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
+import { PostgresTenantStore, buildPlatformAdminRoutes } from "./platform-admin.js";
 import { loadResidencyDirectory } from "./residency-source.js";
 import type { Region } from "@crossengin/residency";
 import type { TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -398,6 +399,18 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         authorRoles: new Set(["pack_author"]),
         reviewerRoles: new Set(["marketplace_reviewer"]),
+      }),
+    );
+  }
+  // Platform super-admin: the /v1/platform routes manage the meta.tenants registry (list/create/suspend/
+  // archive/reactivate + stats) across all tenants, gated to the configured platform-admin role(s). Enabled
+  // by --platform-admin over a pg store.
+  if (options.platformAdmin && conn !== undefined) {
+    extraRouteList.push(
+      ...buildPlatformAdminRoutes({
+        store: new PostgresTenantStore(conn),
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        adminRoles: new Set(options.platformAdminRoles),
       }),
     );
   }

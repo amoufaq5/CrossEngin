@@ -77,6 +77,10 @@ export interface ServeOptions {
   readonly checkpointConfig: string | null;
   /** Refresh interval (ms) for live per-tenant audit sampling read from meta.operate_tenant_settings; enables the live policy cache (needs --store pg + --audit-chain-config). Null disables it. */
   readonly auditSamplingRefreshMs: number | null;
+  /** Expose the platform super-admin tenant-management routes under /v1/platform (list/create/suspend/archive/reactivate tenants + stats over meta.tenants; needs --store pg|pg-columns). */
+  readonly platformAdmin: boolean;
+  /** Roles allowed to call the platform-admin routes (repeatable; default platform_admin). */
+  readonly platformAdminRoles: readonly string[];
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
   /** Path to a JSON Stripe usage-sync config ({intervalMs?, tenants, subscriptionItems}) — periodically reports persisted usage records to Stripe (needs --store pg + --stripe-api-key). */
@@ -150,6 +154,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let auditChainConfig: string | null = null;
   let checkpointConfig: string | null = null;
   let auditSamplingRefreshMs: number | null = null;
+  let platformAdmin = false;
+  const platformAdminRoles: string[] = [];
   let meteringConfig: string | null = null;
   let stripeUsageSyncConfig: string | null = null;
   let help = false;
@@ -315,6 +321,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       }
       auditSamplingRefreshMs = n;
       i += consumed();
+    } else if (arg === "--platform-admin") {
+      platformAdmin = true;
+    } else if (arg === "--platform-admin-role" || arg.startsWith("--platform-admin-role=")) {
+      platformAdminRoles.push(takeValue(arg, next, "--platform-admin-role"));
+      i += consumed();
     } else if (arg === "--metering-config" || arg.startsWith("--metering-config=")) {
       meteringConfig = takeValue(arg, next, "--metering-config");
       i += consumed();
@@ -328,6 +339,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
 
   if (licenseFile !== null && licenseKey === null) {
     throw new CliUsageError("--license requires --license-key (the licensor's base64 Ed25519 public key)");
+  }
+  if (platformAdmin && store === "memory") {
+    throw new CliUsageError("--platform-admin requires a Postgres store (--store pg or pg-columns)");
   }
   if (stripeWebhookSecret !== null && store === "memory") {
     throw new CliUsageError("--stripe-webhook-secret requires a Postgres store (--store pg or pg-columns)");
@@ -471,6 +485,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     auditChainConfig,
     checkpointConfig,
     auditSamplingRefreshMs,
+    platformAdmin,
+    platformAdminRoles: platformAdminRoles.length > 0 ? platformAdminRoles : ["platform_admin"],
     meteringConfig,
     stripeUsageSyncConfig,
     defaultScheme,
@@ -734,6 +750,10 @@ Options:
                        POST /v1/admin/packs/{id}/uninstall (needs --store pg|pg-columns)
   --marketplace-authoring  Enable the third-party authoring routes under /v1/authoring/packs —
                        submit a signed pack version, review it, publish/withdraw (needs --store pg)
+  --platform-admin     Expose the platform super-admin routes under /v1/platform — list/create/suspend/
+                       archive/reactivate tenants + stats over meta.tenants (needs --store pg|pg-columns)
+  --platform-admin-role <role>  Role allowed to call the /v1/platform routes (repeatable; default
+                       platform_admin). Fail-closed: only these roles reach tenant management
   --region <id>        This instance's serving region (e.g. eu-central) — with --residency-file,
                        enables data-residency edge routing (redirect/deny by tenant home region)
   --residency-file <file>  Residency directory JSON ({tenants:[{tenantId, profile}]}) mapping each

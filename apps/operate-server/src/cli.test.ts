@@ -55,6 +55,23 @@ describe("parseServeArgs", () => {
     expect(() => parseServeArgs(["--bogus"])).toThrow(/unknown argument/);
   });
 
+  it("--platform-admin defaults its role, accepts overrides, and requires a pg store", () => {
+    const dflt = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--platform-admin"]);
+    expect(dflt.platformAdmin).toBe(true);
+    expect(dflt.platformAdminRoles).toEqual(["platform_admin"]);
+
+    const custom = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg-columns", "--platform-admin",
+      "--platform-admin-role", "super", "--platform-admin-role", "ops",
+    ]);
+    expect(custom.platformAdminRoles).toEqual(["super", "ops"]);
+
+    expect(parseServeArgs(["--pack", "erp-core"]).platformAdmin).toBe(false);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--platform-admin"])).toThrow(
+      /--platform-admin requires a Postgres store/,
+    );
+  });
+
   it("requires a value for a value-flag", () => {
     expect(() => parseServeArgs(["--pack"])).toThrow(/requires a value/);
   });
