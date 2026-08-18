@@ -180,6 +180,20 @@ export function Sidebar() {
             Billing
           </Link>
         </div>
+
+        <div className="mt-5 border-t border-line pt-3">
+          <div className="px-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-faint">Platform</div>
+          <Link
+            href="/platform"
+            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+              pathname === "/platform" || pathname.startsWith("/platform/")
+                ? "bg-surface-sunken font-medium text-ink"
+                : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+            }`}
+          >
+            Tenants
+          </Link>
+        </div>
       </nav>
     </aside>
   );
