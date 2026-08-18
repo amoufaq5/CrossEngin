@@ -1,7 +1,10 @@
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import {
+  verifyChainSignatures,
+  verifyChainSuffix,
   verifyStoredChainSignatures,
   type ChainSignatureVerdict,
+  type PostgresChainCheckpointStore,
   type PostgresChainLogReader,
   type PublicKeyResolver,
 } from "@crossengin/forensics-pg";
@@ -35,6 +38,10 @@ export function verifyChainSignaturesAgainstRegistry(
 export interface ChainVerificationReport {
   readonly tenantId: string | null;
   readonly ok: boolean;
+  /** `full` folds from genesis; `from_checkpoint` verifies only the suffix after the latest checkpoint. */
+  readonly mode: "full" | "from_checkpoint";
+  /** The anchoring checkpoint's sequence when `mode === "from_checkpoint"`, else null. */
+  readonly checkpointSequence: number | null;
   readonly integrity: { readonly valid: boolean; readonly brokenAt: number | null; readonly reason?: string };
   readonly signatures: ChainSignatureVerdict;
 }
@@ -51,13 +58,55 @@ export async function verifyChainFull(
 ): Promise<ChainVerificationReport> {
   const integrity = await reader.verify(tenantId);
   const signatures = await verifyChainSignaturesAgainstRegistry(reader, registry, tenantId);
-  return { tenantId, ok: integrity.valid && signatures.valid, integrity, signatures };
+  return {
+    tenantId,
+    ok: integrity.valid && signatures.valid,
+    mode: "full",
+    checkpointSequence: null,
+    integrity,
+    signatures,
+  };
+}
+
+/**
+ * Bounded re-verification: verifies ONLY the suffix after the scope's latest persisted checkpoint —
+ * integrity from the checkpoint's `rootHash` anchor (not genesis) plus signatures over just those
+ * entries — so re-verifying a long chain costs O(entries since the last checkpoint). Falls back to a
+ * full verify when no checkpoint exists yet. Trust in the anchor comes from the earlier verification
+ * that produced it (ADR-0252/0255); this does not re-fold the prefix.
+ */
+export async function verifyChainFromCheckpoint(
+  reader: PostgresChainLogReader,
+  registry: PostgresKeyRegistry,
+  checkpoints: PostgresChainCheckpointStore,
+  tenantId: string | null,
+): Promise<ChainVerificationReport> {
+  const checkpoint = await checkpoints.latest(tenantId);
+  if (checkpoint === null) {
+    return verifyChainFull(reader, registry, tenantId);
+  }
+  const fromSequence = checkpoint.sequenceNumber + 1;
+  const suffix = await reader.loadFrom(tenantId, fromSequence);
+  const integrity = verifyChainSuffix(suffix, { fromSequence, priorRootHash: checkpoint.rootHash });
+  const signatures = await verifyChainSignatures(suffix, keyRegistryResolver(registry));
+  return {
+    tenantId,
+    ok: integrity.valid && signatures.valid,
+    mode: "from_checkpoint",
+    checkpointSequence: checkpoint.sequenceNumber,
+    integrity,
+    signatures,
+  };
 }
 
 export function formatChainVerification(report: ChainVerificationReport): string {
   const scope = report.tenantId ?? "platform";
   const lines: string[] = [];
-  lines.push(`chain verification: ${scope} — ${report.ok ? "OK" : "FAILED"}`);
+  const anchor =
+    report.mode === "from_checkpoint"
+      ? ` [from checkpoint seq ${String(report.checkpointSequence)}]`
+      : " [full]";
+  lines.push(`chain verification: ${scope}${anchor} — ${report.ok ? "OK" : "FAILED"}`);
   lines.push(
     `  integrity: ${report.integrity.valid ? "valid" : `BROKEN at ${String(report.integrity.brokenAt)}` +
       (report.integrity.reason ? ` (${report.integrity.reason})` : "")}`,
