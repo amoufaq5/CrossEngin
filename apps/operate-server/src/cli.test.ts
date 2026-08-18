@@ -605,6 +605,12 @@ describe("parseVerifyChainArgs", () => {
     expect(opts.platform).toBe(true);
     expect(opts.tenantId).toBeNull();
     expect(opts.format).toBe("human");
+    expect(opts.fromCheckpoint).toBe(false);
+  });
+
+  it("parses --from-checkpoint", () => {
+    expect(parseVerifyChainArgs(["--platform", "--from-checkpoint"]).fromCheckpoint).toBe(true);
+    expect(parseVerifyChainArgs(["--tenant", TENANT]).fromCheckpoint).toBe(false);
   });
 
   it("requires exactly one of --tenant / --platform", () => {

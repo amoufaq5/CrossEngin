@@ -103,12 +103,16 @@ import {
   type CheckpointLifecycle,
 } from "./checkpoint-scheduler.js";
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
-import { PostgresChainLogReader } from "@crossengin/forensics-pg";
+import { PostgresChainCheckpointStore, PostgresChainLogReader } from "@crossengin/forensics-pg";
 import {
   buildTenantAuditPolicyCache,
   type TenantAuditPolicyLifecycle,
 } from "./audit-sampling-policy-source.js";
-import { verifyChainFull, type ChainVerificationReport } from "./chain-verify.js";
+import {
+  verifyChainFromCheckpoint,
+  verifyChainFull,
+  type ChainVerificationReport,
+} from "./chain-verify.js";
 import { buildRequestMetering, loadMeteringConfig, type RequestMetering } from "./metering.js";
 import {
   buildStripeUsageSync,
@@ -747,12 +751,15 @@ export async function runPruneLinks(options: PruneOptions): Promise<MultiTenantS
 export async function runVerifyChain(options: VerifyChainOptions): Promise<ChainVerificationReport> {
   const conn = createNodePgConnection(parsePgEnvConfig());
   try {
-    const reader = new PostgresChainLogReader(
-      conn,
-      options.schema !== null ? { schema: options.schema } : {},
-    );
+    const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
+    const reader = new PostgresChainLogReader(conn, schemaOpt);
     const registry = new PostgresKeyRegistry(conn);
-    return await verifyChainFull(reader, registry, options.platform ? null : options.tenantId);
+    const tenantId = options.platform ? null : options.tenantId;
+    if (options.fromCheckpoint) {
+      const checkpoints = new PostgresChainCheckpointStore(conn, schemaOpt);
+      return await verifyChainFromCheckpoint(reader, registry, checkpoints, tenantId);
+    }
+    return await verifyChainFull(reader, registry, tenantId);
   } finally {
     await conn.close();
   }

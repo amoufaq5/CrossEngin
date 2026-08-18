@@ -595,6 +595,8 @@ export interface VerifyChainOptions {
   readonly platform: boolean;
   readonly schema: string | null;
   readonly format: "human" | "json";
+  /** Verify only the suffix after the latest persisted checkpoint (bounded), instead of from genesis. */
+  readonly fromCheckpoint: boolean;
   readonly help: boolean;
 }
 
@@ -604,6 +606,7 @@ export function parseVerifyChainArgs(argv: readonly string[]): VerifyChainOption
   let platform = false;
   let schema: string | null = null;
   let format: "human" | "json" = "human";
+  let fromCheckpoint = false;
   let help = false;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -618,6 +621,8 @@ export function parseVerifyChainArgs(argv: readonly string[]): VerifyChainOption
       i += consumed();
     } else if (arg === "--platform") {
       platform = true;
+    } else if (arg === "--from-checkpoint") {
+      fromCheckpoint = true;
     } else if (arg === "--schema" || arg.startsWith("--schema=")) {
       schema = takeValue(arg, next, "--schema");
       i += consumed();
@@ -643,7 +648,7 @@ export function parseVerifyChainArgs(argv: readonly string[]): VerifyChainOption
     }
   }
 
-  return { tenantId, platform, schema, format, help };
+  return { tenantId, platform, schema, format, fromCheckpoint, help };
 }
 
 export const verifyChainHelpText = `operate-server verify-chain — verify a forensic audit chain's integrity + signatures
@@ -657,9 +662,15 @@ hash chain from genesis, and verifies each entry's Ed25519 signature against the
 public key resolved from the crypto-pg key registry (meta.crypto_keys). Read-only;
 exits 0 when valid, 1 when integrity or a signature fails. Uses standard PG* env vars.
 
+With --from-checkpoint, verifies only the suffix after the scope's latest persisted
+checkpoint (bounded cost for long chains) — integrity anchored at the checkpoint's
+root hash, signatures over just the suffix; falls back to a full verify when no
+checkpoint exists yet.
+
 Options:
   --tenant <uuid>      Tenant chain to verify (one of this or --platform)
   --platform           Verify the platform (null-tenant) chain
+  --from-checkpoint    Verify only the suffix after the latest checkpoint (bounded)
   --schema <name>      Postgres schema for the chain (default meta)
   --format <fmt>       Output format: human (default) or json
   --help, -h           Show this help

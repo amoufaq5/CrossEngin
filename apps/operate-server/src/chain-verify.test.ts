@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryKeyStore } from "@crossengin/crypto";
 import type { PostgresKeyRegistry } from "@crossengin/crypto-pg";
-import { PostgresChainLogStore, keyStoreChainSigner } from "@crossengin/forensics-pg";
+import {
+  PostgresChainCheckpointStore,
+  PostgresChainLogStore,
+  keyStoreChainSigner,
+} from "@crossengin/forensics-pg";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
 import {
   formatChainVerification,
   keyRegistryResolver,
+  verifyChainFromCheckpoint,
   verifyChainFull,
 } from "./chain-verify.js";
 
@@ -52,9 +57,11 @@ describe("keyRegistryResolver", () => {
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 
-/** Minimal in-memory fake of meta.forensic_chain_entries (append + ordered read), tenant-scoped. */
+/** In-memory fake of meta.forensic_chain_entries + meta.forensic_chain_checkpoints, routed by table name. */
 function fakeChainPg(): PgConnection {
-  const rows: Record<string, unknown>[] = [];
+  const entryRows: Record<string, unknown>[] = [];
+  const checkpointRows: Record<string, unknown>[] = [];
+  const CHECKPOINTS = "forensic_chain_checkpoints";
   function client(): PgConnection {
     let tenant: string | null = null;
     const query = async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
@@ -62,7 +69,14 @@ function fakeChainPg(): PgConnection {
       if (sql.includes("set_config")) { tenant = (p[0] as string | null) ?? null; return { rows: [], rowCount: 0 }; }
       if (sql.includes("pg_advisory_xact_lock")) return { rows: [], rowCount: 0 };
       if (sql.includes("INSERT INTO")) {
-        rows.push({
+        if (sql.includes(CHECKPOINTS)) {
+          checkpointRows.push({
+            tenant_id: p[0] ?? null, sequence_number: p[1], root_hash: p[2], checkpointed_at: p[3],
+            checkpointed_by: p[4], external_anchor_reference: p[5] ?? null, algorithm: p[6],
+          });
+          return { rows: [], rowCount: 1 };
+        }
+        entryRows.push({
           tenant_id: p[0] ?? null, sequence_number: p[1], kind: p[2], recorded_at: p[3], actor_reference: p[4],
           payload_sha256: p[5], payload_size_bytes: p[6], prior_entry_hash: p[7], entry_hash: p[8],
           signing_key_fingerprint: p[9], signature: p[10],
@@ -70,8 +84,11 @@ function fakeChainPg(): PgConnection {
         return { rows: [], rowCount: 1 };
       }
       if (sql.includes("SELECT")) {
-        let visible = rows.filter((r) => (r["tenant_id"] ?? null) === tenant)
+        const table = sql.includes(CHECKPOINTS) ? checkpointRows : entryRows;
+        let visible = table.filter((r) => (r["tenant_id"] ?? null) === tenant)
           .sort((a, b) => Number(a["sequence_number"]) - Number(b["sequence_number"]));
+        const geMatch = /sequence_number >= \$(\d+)/.exec(sql);
+        if (geMatch) visible = visible.filter((r) => Number(r["sequence_number"]) >= Number(p[Number(geMatch[1]) - 1]));
         if (sql.includes("ORDER BY sequence_number DESC")) visible = visible.slice(-1);
         return { rows: visible, rowCount: visible.length };
       }
@@ -88,16 +105,19 @@ function fakeChainPg(): PgConnection {
   return client();
 }
 
-async function seededChain() {
+const AT = "2026-06-01T00:00:00.000Z";
+
+async function seededChain(count = 3) {
   const keyStore = new InMemoryKeyStore();
   const record = await keyStore.createKey({ tenantId: null, algorithm: "ed25519", purpose: "evidence_sealing" });
   const publicKeyBase64 = await keyStore.getPublicMaterial(record.handle);
   const signer = keyStoreChainSigner(keyStore, record, null);
-  const store = new PostgresChainLogStore(fakeChainPg(), signer);
-  for (let n = 0; n < 3; n += 1) {
-    await store.append({ tenantId: TENANT, kind: "audit_event", actorReference: "gw", recordedAt: "2026-06-01T00:00:00.000Z", payload: `e${n.toString()}` });
-  }
-  return { store, fingerprint: signer.fingerprint, publicKeyBase64 };
+  const conn = fakeChainPg();
+  const store = new PostgresChainLogStore(conn, signer);
+  const append = (n: number) =>
+    store.append({ tenantId: TENANT, kind: "audit_event", actorReference: "gw", recordedAt: AT, payload: `e${n.toString()}` });
+  for (let n = 0; n < count; n += 1) await append(n);
+  return { conn, store, append, fingerprint: signer.fingerprint, publicKeyBase64 };
 }
 
 describe("verifyChainFull", () => {
@@ -129,6 +149,60 @@ describe("verifyChainFull", () => {
     const store = new PostgresChainLogStore(fakeChainPg(), keyStoreChainSigner(keyStore, record, null));
     const report = await verifyChainFull(store, fakeRegistry({}), TENANT);
     expect(report.ok).toBe(true);
+    expect(report.mode).toBe("full");
+    expect(report.checkpointSequence).toBeNull();
     expect(report.signatures.checked).toBe(0);
+  });
+});
+
+describe("verifyChainFromCheckpoint", () => {
+  it("verifies only the suffix after the latest checkpoint", async () => {
+    const { conn, store, append, fingerprint, publicKeyBase64 } = await seededChain(3);
+    const checkpoints = new PostgresChainCheckpointStore(conn, {});
+    // Anchor a checkpoint at the current tail (seq 2), then append two more entries.
+    const cp = await store.createCheckpoint(TENANT, { checkpointedBy: "auditor", checkpointedAt: AT });
+    await checkpoints.record(TENANT, cp);
+    await append(3);
+    await append(4);
+
+    const report = await verifyChainFromCheckpoint(
+      store,
+      fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+      checkpoints,
+      TENANT,
+    );
+    expect(report.mode).toBe("from_checkpoint");
+    expect(report.checkpointSequence).toBe(2);
+    expect(report.ok).toBe(true);
+    // only the two entries AFTER the checkpoint are re-checked
+    expect(report.signatures.checked).toBe(2);
+    expect(formatChainVerification(report)).toContain("from checkpoint seq 2");
+  });
+
+  it("falls back to a full verify when no checkpoint exists", async () => {
+    const { conn, store, fingerprint, publicKeyBase64 } = await seededChain(3);
+    const report = await verifyChainFromCheckpoint(
+      store,
+      fakeRegistry({ [fingerprint]: { publicKeyBase64 } }),
+      new PostgresChainCheckpointStore(conn, {}),
+      TENANT,
+    );
+    expect(report.mode).toBe("full");
+    expect(report.signatures.checked).toBe(3);
+    expect(report.ok).toBe(true);
+  });
+
+  it("reports FAILED when a suffix signature does not resolve", async () => {
+    const { conn, store, append } = await seededChain(2);
+    const checkpoints = new PostgresChainCheckpointStore(conn, {});
+    const cp = await store.createCheckpoint(TENANT, { checkpointedBy: "auditor", checkpointedAt: AT });
+    await checkpoints.record(TENANT, cp);
+    await append(2);
+
+    // registry knows no keys → the one suffix entry is unresolved
+    const report = await verifyChainFromCheckpoint(store, fakeRegistry({}), checkpoints, TENANT);
+    expect(report.mode).toBe("from_checkpoint");
+    expect(report.signatures.checked).toBe(1);
+    expect(report.ok).toBe(false);
   });
 });
