@@ -1,0 +1,112 @@
+name: crossengin
+
+# CrossEngin on a single VM: Postgres (+pg_uuidv7), a one-shot schema migrate,
+# the operate-server API, the operate-web UI, and Caddy for automatic HTTPS.
+# Everything reads deploy/.env — copy deploy/.env.example to deploy/.env first.
+
+x-app-build: &app-build
+  context: ..
+  dockerfile: deploy/Dockerfile
+
+x-pg-env: &pg-env
+  PGHOST: db
+  PGPORT: "5432"
+  PGUSER: ${POSTGRES_USER}
+  PGPASSWORD: ${POSTGRES_PASSWORD}
+  PGDATABASE: ${POSTGRES_DB}
+
+services:
+  db:
+    build:
+      context: ./postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # One-shot: applies the meta-schema (idempotent — safe to re-run on every `up`).
+  migrate:
+    build: *app-build
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      <<: *pg-env
+    command: ["node", "apps/architect-cli/dist/bin/crossengin.js", "apply", "--confirm"]
+    restart: "no"
+
+  api:
+    build: *app-build
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *pg-env
+      NODE_ENV: production
+    # Args in list form so the api-key (token:role:tenant) is never shell-split.
+    command:
+      - node
+      - apps/operate-server/dist/bin/operate-server.js
+      - --pack
+      - ${OPERATE_PACK:-erp-core}
+      - --store
+      - pg
+      - --port
+      - "8787"
+      - --scheme
+      - https
+      - --platform-admin
+      - --api-key
+      - ${OPERATE_ADMIN_API_KEY}
+    expose:
+      - "8787"
+    restart: unless-stopped
+
+  web:
+    build: *app-build
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      # The web app's server-side proxy calls the API over the internal network.
+      OPERATE_API_URL: http://api:8787
+      OPERATE_API_KEY: ${OPERATE_WEB_API_KEY}
+    # next start binds 0.0.0.0:3000 by default; Caddy reaches it as web:3000.
+    command: ["pnpm", "--filter", "@crossengin/operate-web", "start"]
+    expose:
+      - "3000"
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    depends_on:
+      - web
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:
