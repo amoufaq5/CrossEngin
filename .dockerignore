@@ -1,0 +1,11 @@
+# The image runs `pnpm install` + `pnpm -r build` itself, so local build output and
+# dependencies are regenerated inside — keep them out of the build context.
+**/node_modules
+**/dist
+**/.next
+**/*.tsbuildinfo
+.git
+.github
+**/*.log
+**/coverage
+deploy/.env
