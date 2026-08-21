@@ -68,4 +68,19 @@ operate-web) against dictated structural contracts, integrated by the orchestrat
 - 3 integration defects found by the live run and fixed with tests: kernel array-shaped
   entities in `manifestSummary` (entityCount 0 → correct), missing extraRoutes on tenant
   gateways, and the operator-role graft. +8 tests across the two modules; architect-cli table
-  count 136 → 137. An adversarial multi-agent review ran over the new surface before merge.
+  count 136 → 137.
+- A four-lens adversarial review (tenant isolation / authorization / injection /
+  correctness) ran before merge. Isolation, authorization, and injection returned no
+  confirmed findings (the P1.18 tenant cross-check provably defuses `x-tenant-id` spoofing;
+  the role graft cannot reach field-level grants, so classification redaction stays
+  fail-closed; SQL fully parameterized; React escapes AI strings). Six review findings were
+  fixed with tests: (1) the residency region guard now rides tenant gateways; (2) a
+  `--store pg-columns` deployment serves custom-manifest tenants from a JSONB store over the
+  same connection (the column store only plans the boot pack's entities); (3) `activate`
+  takes a per-tenant `pg_advisory_xact_lock` so concurrent activates cannot commit two
+  active rows (a partial unique index needs kernel emitter support — follow-up); (4) tenant
+  resolution is credential-first — the `x-tenant-id` header only routes requests carrying an
+  unknown Bearer credential (JWT mode) and only as a canonical UUID, so unauthenticated
+  header floods never reach the manifest source; (5) the gateway cache is capped
+  (default 1000 entries, expired-then-oldest eviction); (6) the Node intake caps request
+  bodies at 10 MiB → 413 problem doc (a pre-existing platform-wide gap since P1.7).

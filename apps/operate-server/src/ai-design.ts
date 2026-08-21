@@ -268,14 +268,25 @@ export function ensureRolesInManifest(
     const entityPerms: Record<string, unknown> = isRecord(permissions[entityName])
       ? { ...(permissions[entityName] as Record<string, unknown>) }
       : Object.fromEntries(["list", "read", "create", "update", "delete"].map((op) => [op, { roles: [] }]));
-    for (const [op, grant] of Object.entries(entityPerms)) {
-      if (!isRecord(grant) || !Array.isArray(grant["roles"])) continue;
-      const grantRoles = grant["roles"] as unknown[];
-      const merged = [...grantRoles];
+    const graftGrant = (grant: unknown): unknown => {
+      if (!isRecord(grant) || !Array.isArray(grant["roles"])) return grant;
+      const merged = [...(grant["roles"] as unknown[])];
       for (const role of ensureRoles) {
         if (!merged.includes(role)) merged.push(role);
       }
-      entityPerms[op] = { ...grant, roles: merged };
+      return { ...grant, roles: merged };
+    };
+    for (const [op, grant] of Object.entries(entityPerms)) {
+      // `transitions` is a record of named grants (lifecycle endpoints); `fields` is
+      // deliberately untouched so grafted roles never gain field-level reads and
+      // classification redaction stays fail-closed for them.
+      if (op === "transitions" && isRecord(grant)) {
+        entityPerms[op] = Object.fromEntries(
+          Object.entries(grant).map(([name, t]) => [name, graftGrant(t)]),
+        );
+        continue;
+      }
+      entityPerms[op] = graftGrant(grant);
     }
     permissions[entityName] = entityPerms;
   }

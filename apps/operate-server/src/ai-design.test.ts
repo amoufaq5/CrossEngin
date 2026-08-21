@@ -425,3 +425,30 @@ describe("ensureRolesInManifest", () => {
     expect(perms["WorkOrder"]?.["update"]?.roles).toContain("erp_admin");
   });
 });
+
+describe("ensureRolesInManifest — transition + field grants", () => {
+  it("grafts into transition grants but never into field-level grants", () => {
+    const manifest = {
+      ...(DESIGN_EXAMPLE_MANIFEST as Record<string, unknown>),
+      permissions: {
+        Customer: {
+          list: { roles: ["app_admin"] },
+          read: { roles: ["app_admin"] },
+          create: { roles: ["app_admin"] },
+          update: { roles: ["app_admin"] },
+          delete: { roles: ["app_admin"] },
+          transitions: { archive: { roles: ["app_admin"] } },
+          fields: { contact_email: { read: { roles: ["app_admin"] } } },
+        },
+        WorkOrder: (DESIGN_EXAMPLE_MANIFEST as { permissions: Record<string, unknown> }).permissions["WorkOrder"],
+      },
+    };
+    const grafted = ensureRolesInManifest(manifest, ["erp_admin"]);
+    const perms = grafted["permissions"] as Record<string, Record<string, unknown>>;
+    const customer = perms["Customer"] ?? {};
+    expect((customer["transitions"] as Record<string, { roles: string[] }>)["archive"]?.roles).toContain("erp_admin");
+    const fields = customer["fields"] as Record<string, { read: { roles: string[] } }>;
+    expect(fields["contact_email"]?.read.roles).toEqual(["app_admin"]);
+    expect((customer["list"] as { roles: string[] }).roles).toContain("erp_admin");
+  });
+});

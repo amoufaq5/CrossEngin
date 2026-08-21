@@ -488,15 +488,17 @@ describe("tenant-manifests — store activate", () => {
     const activateCalls = captured.slice();
     expect(promoted?.status).toBe("active");
     expect(promoted?.activatedAt).not.toBeNull();
-    expect(activateCalls).toHaveLength(3);
-    expect(activateCalls.map((c) => c.inTx)).toEqual([true, true, true]);
+    expect(activateCalls).toHaveLength(4);
+    expect(activateCalls.map((c) => c.inTx)).toEqual([true, true, true, true]);
     expect(activateCalls.filter((c) => c.sql.includes("set_config"))).toHaveLength(1);
     expect(activateCalls[0]?.sql).toContain("set_config");
     expect(activateCalls[0]?.params).toEqual([TENANT_A]);
-    expect(activateCalls[1]?.sql).toContain("SET status = 'archived'");
-    expect(activateCalls[1]?.sql).toContain("AND id <> $2");
-    expect(activateCalls[2]?.sql).toContain("SET status = 'active'");
-    expect(activateCalls[2]?.sql).toContain("activated_at = now()");
+    expect(activateCalls[1]?.sql).toContain("pg_advisory_xact_lock");
+    expect(activateCalls[1]?.params).toEqual([TENANT_A]);
+    expect(activateCalls[2]?.sql).toContain("SET status = 'archived'");
+    expect(activateCalls[2]?.sql).toContain("AND id <> $2");
+    expect(activateCalls[3]?.sql).toContain("SET status = 'active'");
+    expect(activateCalls[3]?.sql).toContain("activated_at = now()");
     expect((await store.getById(TENANT_A, first.id))?.status).toBe("archived");
   });
 

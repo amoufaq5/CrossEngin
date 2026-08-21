@@ -766,20 +766,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // observers (SLO, audit chain, metering, billing) stay on the default server for now.
   let dispatchTarget: DispatchTarget = httpServer;
   if (options.perTenantManifests && manifestStore !== null) {
+    // The column-mapped store only knows the boot pack's entities (its column plans are derived
+    // at boot), so custom-manifest tenants are served from the manifest-agnostic JSONB store
+    // over the same connection instead of 500ing on every unplanned entity.
+    const tenantStore: EntityStore =
+      store instanceof ColumnMappedEntityStore && conn !== undefined
+        ? new PostgresEntityStore(conn, schemaOpt)
+        : store;
     gatewayCache = new TenantGatewayCache({
       source: manifestStore,
-      // Tenant gateways keep the deployment's extra routes (AI design, platform admin) and the
-      // subscription gate, so activating a custom manifest never severs a tenant from /v1/ai.
+      // Tenant gateways keep the deployment's extra routes (AI design, platform admin), the
+      // subscription gate, and the residency region guard, so activating a custom manifest
+      // never severs a tenant from /v1/ai and never exempts it from residency enforcement.
       build: (tenantManifest): OperateHttpServer =>
         buildOperateHttpServer({
           manifest: tenantManifest,
-          store,
+          store: tenantStore,
           apiKeys,
           allocator,
           settingsStore,
           ...(jwt !== null ? { jwt } : {}),
           ...(extraRoutes !== undefined ? { extraRoutes } : {}),
           ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
+          ...(regionGuard !== undefined ? { regionGuard } : {}),
           defaultScheme: options.defaultScheme,
         }).httpServer,
       onInvalidManifest: (tenantId, issues) =>

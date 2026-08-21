@@ -93,9 +93,21 @@ function makeCache(
 }
 
 describe("resolveRequestTenant", () => {
-  it("prefers the x-tenant-id header over the api key's tenant", () => {
+  it("the api key's bound tenant is authoritative over a spoofable x-tenant-id header", () => {
     const raw = req("/v1/widgets", { "x-tenant-id": TENANT_2, "x-api-key": "key-a" });
-    expect(resolveRequestTenant(raw, API_KEYS)).toBe(TENANT_2);
+    expect(resolveRequestTenant(raw, API_KEYS)).toBe(TENANT_1);
+  });
+
+  it("honors the x-tenant-id header only for an unknown Bearer credential (JWT mode) with a canonical UUID", () => {
+    const jwtish = { authorization: "Bearer eyJ.some.jwt", "x-tenant-id": TENANT_2 };
+    expect(resolveRequestTenant(req("/x", jwtish), API_KEYS)).toBe(TENANT_2);
+    expect(resolveRequestTenant(req("/x", { "x-tenant-id": TENANT_2 }), API_KEYS)).toBeNull();
+    expect(
+      resolveRequestTenant(req("/x", { authorization: "Bearer eyJ.some.jwt", "x-tenant-id": "not-a-uuid" }), API_KEYS),
+    ).toBeNull();
+    expect(
+      resolveRequestTenant(req("/x", { authorization: "Bearer eyJ.some.jwt", "x-tenant-id": "deadbeef" }), API_KEYS),
+    ).toBeNull();
   });
 
   it("resolves the tenant from a matching x-api-key token", () => {
@@ -109,7 +121,9 @@ describe("resolveRequestTenant", () => {
   });
 
   it("looks up header names case-insensitively", () => {
-    expect(resolveRequestTenant(req("/x", { "X-Tenant-Id": TENANT_1 }), API_KEYS)).toBe(TENANT_1);
+    expect(
+      resolveRequestTenant(req("/x", { Authorization: "Bearer eyJ.jwt", "X-Tenant-Id": TENANT_1 }), API_KEYS),
+    ).toBe(TENANT_1);
     expect(resolveRequestTenant(req("/x", { "X-API-KEY": "key-a" }), API_KEYS)).toBe(TENANT_1);
     expect(resolveRequestTenant(req("/x", { Authorization: "bearer key-b" }), API_KEYS)).toBe(TENANT_2);
   });
@@ -125,7 +139,7 @@ describe("resolveRequestTenant", () => {
   });
 
   it("takes the first value of an array-valued header", () => {
-    const raw = req("/x", { "x-tenant-id": [TENANT_2, TENANT_1] });
+    const raw = req("/x", { authorization: "Bearer eyJ.jwt", "x-tenant-id": [TENANT_2, TENANT_1] });
     expect(resolveRequestTenant(raw, API_KEYS)).toBe(TENANT_2);
   });
 });
@@ -367,5 +381,34 @@ describe("buildPerTenantDispatch — two tenants, two manifests, one edge", () =
     };
     expect(parsed.data).toHaveLength(1);
     expect(parsed.data[0]).toMatchObject({ name: "w-1" });
+  });
+});
+
+describe("TenantGatewayCache — capacity", () => {
+  it("evicts the oldest entry at maxEntries instead of growing without bound", async () => {
+    let calls = 0;
+    const source = {
+      activeManifestFor: async (): Promise<Record<string, unknown> | null> => {
+        calls += 1;
+        return null;
+      },
+    };
+    const cache = new TenantGatewayCache({
+      source,
+      build: () => {
+        throw new Error("never built");
+      },
+      maxEntries: 3,
+      ttlMs: 60_000,
+    });
+    for (let i = 0; i < 10; i++) {
+      await cache.serverFor(`00000000-0000-4000-8000-00000000000${i.toString()}`);
+    }
+    expect(calls).toBe(10);
+    calls = 0;
+    await cache.serverFor("00000000-0000-4000-8000-000000000009");
+    expect(calls).toBe(0);
+    await cache.serverFor("00000000-0000-4000-8000-000000000000");
+    expect(calls).toBe(1);
   });
 });

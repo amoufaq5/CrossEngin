@@ -291,6 +291,11 @@ export class PostgresTenantManifestStore implements TenantManifestSource {
   /** Demote-then-promote in ONE tenant transaction, so exactly one row is `active` per tenant. */
   async activate(tenantId: string, id: string): Promise<TenantManifestRecord | null> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
+      // Serialize activations per tenant: under READ COMMITTED, two concurrent activates of
+      // different drafts would each see zero rows to demote and commit two 'active' rows.
+      await tx.query("SELECT pg_advisory_xact_lock(hashtext('operate_tenant_manifests'), hashtext($1))", [
+        tenantId,
+      ]);
       await tx.query(
         `UPDATE ${this.table} SET status = 'archived', updated_at = now()` +
           ` WHERE tenant_id = $1 AND status = 'active' AND id <> $2`,
