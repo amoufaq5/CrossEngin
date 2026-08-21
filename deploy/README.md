@@ -80,10 +80,14 @@ checkpoints, billing, marketplace, etc.) — add the flags you want to the `api`
 
 ## Notes
 
-- **`pg_uuidv7`:** the DB image (`deploy/postgres/Dockerfile`) compiles the extension in
-  because the migration applier requires the *extension*, not just a function. If you use
-  a **managed** Postgres instead, ensure `CREATE EXTENSION pg_uuidv7;` succeeds there and
-  point `PGHOST`/… at it (drop the `db` service).
+- **`pg_uuidv7`:** the DB image (`deploy/postgres/Dockerfile`) compiles the extension in.
+  The migration applier accepts *either* the `pg_uuidv7` extension *or* a pure-SQL
+  `uuid_generate_v7()` function. If you use a **managed** Postgres, install whichever your
+  provider allows and point `PGHOST`/… at it (drop the `db` service). For **Supabase**
+  specifically (no C extensions), see [`VERCEL-SUPABASE.md`](./VERCEL-SUPABASE.md) — run
+  `deploy/supabase/00-uuidv7.sql` once to define the pure-SQL function.
+- **Supabase + Vercel:** for the managed-cloud path (Supabase DB + Vercel UI + a container
+  host for the API) see [`VERCEL-SUPABASE.md`](./VERCEL-SUPABASE.md).
 - **AI features are not required to serve.** `operate-server` never calls an LLM at
   runtime — the AI Architect (natural-language manifest authoring) is a separate,
   dev-time tool (`crossengin chat` in `architect-cli`). See the main README for

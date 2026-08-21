@@ -36,10 +36,11 @@ function freshState(overrides: Partial<FakeDbState> = {}): FakeDbState {
 function fakeConnection(state: FakeDbState): PgConnection {
   function runQuery<T>(sql: string, params?: readonly unknown[]): PgQueryResult<T> {
     if (sql.includes("pg_extension WHERE extname = 'pg_uuidv7'")) {
-      if (state.extensions.has("pg_uuidv7")) {
-        return { rows: [{ extname: "pg_uuidv7" }] as unknown as readonly T[], rowCount: 1 };
-      }
-      return { rows: [] as readonly T[], rowCount: 0 };
+      const present = state.extensions.has("pg_uuidv7");
+      return {
+        rows: [{ has_extension: present, has_function: present }] as unknown as readonly T[],
+        rowCount: 1,
+      };
     }
     if (sql.includes("server_version_num")) {
       return {
