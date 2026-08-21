@@ -1,4 +1,4 @@
-# ADR-0262: Platform super-admin tenant-management console (Phase 4)
+# ADR-0265: Platform super-admin tenant-management console (Phase 4)
 
 | Field | Value |
 |---|---|
