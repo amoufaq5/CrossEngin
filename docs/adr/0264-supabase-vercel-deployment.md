@@ -6,7 +6,7 @@
 | **Date** | 2026-08-21 |
 | **Authors** | amoufaq5 (with AI assistance) |
 | **Reviewers** | _pending_ |
-| **Related** | ADR-0047 (kernel-pg applier), ADR-0087/0089 (operate-server + edge adapter), ADR-0262 (platform admin console), ADR-0077 (Phase 4), PR #153 (Docker-Compose VM) |
+| **Related** | ADR-0047 (kernel-pg applier), ADR-0087/0089 (operate-server + edge adapter), ADR-0265 (platform admin console), ADR-0077 (Phase 4), PR #153 (Docker-Compose VM) |
 
 ## Context
 
