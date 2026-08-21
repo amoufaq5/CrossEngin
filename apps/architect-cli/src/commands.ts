@@ -323,6 +323,7 @@ export function buildChatProvider(
     choice: string;
     localModel?: string;
     localBaseUrl?: string;
+    openaiBaseUrl?: string;
   },
 ): ProviderBuild {
   if (ctx.providerOverride !== undefined) {
@@ -348,8 +349,13 @@ export function buildChatProvider(
   const hasOpenai = openaiKey !== undefined && openaiKey.length > 0;
   const makeAnthropic = (): AnthropicProvider =>
     new AnthropicProvider({ apiKey: anthropicKey as string, defaultModel: opts.model });
+  const openaiBaseUrl = opts.openaiBaseUrl ?? ctx.env["OPENAI_BASE_URL"];
   const makeOpenai = (): OpenAiProvider =>
-    new OpenAiProvider({ apiKey: openaiKey as string, defaultModel: opts.openaiModel });
+    new OpenAiProvider({
+      apiKey: openaiKey as string,
+      defaultModel: opts.openaiModel,
+      ...(openaiBaseUrl !== undefined && openaiBaseUrl.length > 0 ? { baseUrl: openaiBaseUrl } : {}),
+    });
 
   if (opts.choice === "anthropic") {
     if (!hasAnthropic) return { error: "chat: --provider anthropic requires ANTHROPIC_API_KEY.", code: 1 };
@@ -464,6 +470,7 @@ export async function runChat(
   }
   const localModelFlag = getStringFlag(command, "local-model") ?? undefined;
   const localBaseUrlFlag = getStringFlag(command, "local-url") ?? undefined;
+  const openaiBaseUrlFlag = getStringFlag(command, "openai-base-url") ?? undefined;
 
   const built = buildChatProvider(ctx, {
     model,
@@ -471,6 +478,7 @@ export async function runChat(
     choice: providerChoice,
     localModel: localModelFlag,
     localBaseUrl: localBaseUrlFlag,
+    openaiBaseUrl: openaiBaseUrlFlag,
   });
   if ("error" in built) {
     printError(ctx.io, built.error);

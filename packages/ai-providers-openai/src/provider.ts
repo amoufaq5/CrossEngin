@@ -106,6 +106,13 @@ export class OpenAiProvider implements LlmProvider {
     };
   }
 
+  /** The effective API host (no path). Defaults to the public OpenAI API; an
+   * OpenAI-compatible endpoint (Azure OpenAI, a gateway, or a self-hosted OSS
+   * server) can be substituted via `baseUrl`. The `/v1/...` path is appended. */
+  get endpoint(): string {
+    return this.baseUrl;
+  }
+
   async *complete(req: CompletionRequest): AsyncIterable<CompletionChunk> {
     const model = this.resolveModel(req.model);
     const built = buildOpenAiRequest(req, {
