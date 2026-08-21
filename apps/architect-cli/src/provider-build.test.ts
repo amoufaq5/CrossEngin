@@ -99,4 +99,48 @@ describe("buildChatProvider", () => {
     });
     expect("describeLastTurn" in built && built.describeLastTurn()).toBe("local/qwen2.5");
   });
+
+  it("defaults the OpenAI provider to the public API host", () => {
+    const built = buildChatProvider(ctx({ OPENAI_API_KEY: "sk-oai" }), { ...opts, choice: "openai" });
+    const provider = "provider" in built ? (built.provider as OpenAiProvider) : undefined;
+    expect(provider?.endpoint).toBe("https://api.openai.com");
+  });
+
+  it("points the OpenAI provider at --openai-base-url", () => {
+    const built = buildChatProvider(ctx({ OPENAI_API_KEY: "sk-oai" }), {
+      ...opts,
+      choice: "openai",
+      openaiBaseUrl: "http://localhost:11434",
+    });
+    const provider = "provider" in built ? (built.provider as OpenAiProvider) : undefined;
+    expect(provider?.endpoint).toBe("http://localhost:11434");
+  });
+
+  it("reads OPENAI_BASE_URL from the environment", () => {
+    const built = buildChatProvider(
+      ctx({ OPENAI_API_KEY: "sk-oai", OPENAI_BASE_URL: "http://vllm:8000" }),
+      { ...opts, choice: "openai" },
+    );
+    const provider = "provider" in built ? (built.provider as OpenAiProvider) : undefined;
+    expect(provider?.endpoint).toBe("http://vllm:8000");
+  });
+
+  it("prefers the --openai-base-url flag over OPENAI_BASE_URL", () => {
+    const built = buildChatProvider(
+      ctx({ OPENAI_API_KEY: "sk-oai", OPENAI_BASE_URL: "http://env:8000" }),
+      { ...opts, choice: "openai", openaiBaseUrl: "http://flag:9000" },
+    );
+    const provider = "provider" in built ? (built.provider as OpenAiProvider) : undefined;
+    expect(provider?.endpoint).toBe("http://flag:9000");
+  });
+
+  it("ignores an empty --openai-base-url and keeps the default host", () => {
+    const built = buildChatProvider(ctx({ OPENAI_API_KEY: "sk-oai" }), {
+      ...opts,
+      choice: "openai",
+      openaiBaseUrl: "",
+    });
+    const provider = "provider" in built ? (built.provider as OpenAiProvider) : undefined;
+    expect(provider?.endpoint).toBe("https://api.openai.com");
+  });
 });

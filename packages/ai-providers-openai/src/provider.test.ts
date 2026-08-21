@@ -99,6 +99,19 @@ describe("OpenAiProvider construction", () => {
   it("requires an api key", () => {
     expect(() => new OpenAiProvider({ apiKey: "", defaultModel: "gpt-4o" })).toThrow();
   });
+
+  it("defaults endpoint to the public API host", () => {
+    expect(provider(buildFetch()).endpoint).toBe("https://api.openai.com");
+  });
+
+  it("exposes a custom baseUrl on endpoint", () => {
+    const p = new OpenAiProvider({
+      apiKey: API_KEY,
+      defaultModel: "gpt-4o",
+      baseUrl: "http://localhost:11434",
+    });
+    expect(p.endpoint).toBe("http://localhost:11434");
+  });
 });
 
 describe("OpenAiProvider.complete", () => {

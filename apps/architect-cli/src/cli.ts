@@ -135,6 +135,7 @@ export function helpText(): string {
     "  --model <id>            With chat, pick a Claude model (default: claude-sonnet-4-6)",
     "  --provider <name>       With chat: auto (default) | anthropic | openai | local. auto routes Anthropic->OpenAI when both keys are set",
     "  --openai-model <id>     With chat, the OpenAI fallback/primary model (default: gpt-4o)",
+    "  --openai-base-url <url> With chat, point the OpenAI provider at a compatible host, no /v1 (also OPENAI_BASE_URL; default: https://api.openai.com)",
     "  --local-model <id>      With --provider local, the model name (default: llama3.1)",
     "  --local-url <url>       With --provider local, the OpenAI-compatible base URL (default: http://localhost:11434/v1)",
     "  --max-tokens <n>        With chat, cap response tokens (default: 4096)",
