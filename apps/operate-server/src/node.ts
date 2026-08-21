@@ -444,6 +444,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             provider: providerBuild.provider,
             model: providerBuild.model,
             providerLabel: providerBuild.providerLabel,
+            ensureRoles: options.aiDesignRoles,
           })
         : null;
     if (providerBuild === null) {
@@ -740,6 +741,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   if (options.perTenantManifests && manifestStore !== null) {
     gatewayCache = new TenantGatewayCache({
       source: manifestStore,
+      // Tenant gateways keep the deployment's extra routes (AI design, platform admin) and the
+      // subscription gate, so activating a custom manifest never severs a tenant from /v1/ai.
       build: (tenantManifest): OperateHttpServer =>
         buildOperateHttpServer({
           manifest: tenantManifest,
@@ -748,6 +751,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           allocator,
           settingsStore,
           ...(jwt !== null ? { jwt } : {}),
+          ...(extraRoutes !== undefined ? { extraRoutes } : {}),
+          ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
           defaultScheme: options.defaultScheme,
         }).httpServer,
       onInvalidManifest: (tenantId, issues) =>

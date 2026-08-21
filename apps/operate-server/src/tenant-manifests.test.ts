@@ -276,6 +276,34 @@ describe("tenant-manifests — manifestSummary", () => {
     ]);
   });
 
+  it("summarizes a kernel-shaped manifest (array entities, array fields, i18n labels)", () => {
+    const summary = manifestSummary({
+      entities: [
+        { name: "Customer", label: { en: "Customers" }, fields: [{ name: "email" }, { name: "phone" }], traits: ["auditable"] },
+        { name: "WorkOrder", fields: [{ name: "status" }] },
+      ],
+      roles: { app_admin: {}, app_user: {} },
+      relations: [{ name: "customer_orders" }],
+      workflows: [{ name: "order_lifecycle" }],
+    });
+    expect(summary.entityCount).toBe(2);
+    expect(summary.roleCount).toBe(2);
+    expect(summary.relationCount).toBe(1);
+    expect(summary.workflowCount).toBe(1);
+    expect(summary.entities).toEqual([
+      { name: "Customer", label: "Customers", fieldCount: 2 },
+      { name: "WorkOrder", label: "WorkOrder", fieldCount: 1 },
+    ]);
+  });
+
+  it("names an array entity without a name defensively", () => {
+    const summary = manifestSummary({ entities: [{ fields: [] }, 42] });
+    expect(summary.entities).toEqual([
+      { name: "entity_0", label: "entity_0", fieldCount: 0 },
+      { name: "entity_1", label: "entity_1", fieldCount: 0 },
+    ]);
+  });
+
   it("returns zeros for an empty manifest", () => {
     expect(manifestSummary({})).toEqual({
       entityCount: 0,

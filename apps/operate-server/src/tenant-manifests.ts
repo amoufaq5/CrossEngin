@@ -76,13 +76,27 @@ function countOf(value: unknown): number {
   return rec === null ? 0 : Object.keys(rec).length;
 }
 
+function labelOf(value: unknown, fallback: string): string {
+  if (typeof value === "string" && value.length > 0) return value;
+  const rec = recordOf(value);
+  const en = rec?.["en"];
+  if (typeof en === "string" && en.length > 0) return en;
+  return fallback;
+}
+
 export function manifestSummary(manifest: Record<string, unknown>): ManifestSummary {
-  const entityRecord = recordOf(manifest["entities"]) ?? {};
-  const entities = Object.entries(entityRecord).map(([name, value]) => {
+  // The kernel manifest carries entities as an array of {name, fields, ...}; a generated or
+  // hand-written doc may instead key them by name. Summarize either shape.
+  const rawEntities = manifest["entities"];
+  const entries: readonly [string, unknown][] = Array.isArray(rawEntities)
+    ? rawEntities.map((value, index): [string, unknown] => {
+        const name = recordOf(value)?.["name"];
+        return [typeof name === "string" && name.length > 0 ? name : `entity_${index.toString()}`, value];
+      })
+    : Object.entries(recordOf(rawEntities) ?? {});
+  const entities = entries.map(([name, value]) => {
     const entity = recordOf(value) ?? {};
-    const rawLabel = entity["label"];
-    const label = typeof rawLabel === "string" && rawLabel.length > 0 ? rawLabel : name;
-    return { name, label, fieldCount: countOf(entity["fields"]) };
+    return { name, label: labelOf(entity["label"], name), fieldCount: countOf(entity["fields"]) };
   });
   return {
     entityCount: entities.length,
