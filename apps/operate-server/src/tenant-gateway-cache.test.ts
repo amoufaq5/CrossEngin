@@ -412,3 +412,35 @@ describe("TenantGatewayCache — capacity", () => {
     expect(calls).toBe(1);
   });
 });
+
+describe("per-tenant gateways — observability parity", () => {
+  it("emits a PipelineExecution per request when the build passes onExecution", async () => {
+    const executions: { operationId: string | null; outcome: string }[] = [];
+    const source = fakeSource({ [TENANT_1]: tinyManifest("t-one", "Widget") as Record<string, unknown> });
+    const cache = new TenantGatewayCache({
+      source,
+      build: (manifest) =>
+        buildOperateHttpServer({
+          manifest,
+          store: new InMemoryEntityStore(),
+          apiKeys: API_KEYS,
+          now: () => new Date("2026-08-21T12:00:00.000Z"),
+          onExecution: (execution) => {
+            executions.push({
+              operationId: execution.routeOperationId,
+              outcome: execution.finalOutcome,
+            });
+          },
+        }).httpServer,
+    });
+    const dispatch = buildPerTenantDispatch({
+      defaultDispatch: async () => ({ status: 500, headers: {}, body: null }),
+      cache,
+      apiKeys: API_KEYS,
+    });
+    const res = await dispatch(req("/v1/widgets", { "x-api-key": "key-a" }), null);
+    expect(res.status).toBe(200);
+    expect(executions).toHaveLength(1);
+    expect(executions[0]?.operationId).toBe("widget.list");
+  });
+});

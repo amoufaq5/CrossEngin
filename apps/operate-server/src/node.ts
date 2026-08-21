@@ -775,9 +775,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         : store;
     gatewayCache = new TenantGatewayCache({
       source: manifestStore,
-      // Tenant gateways keep the deployment's extra routes (AI design, platform admin), the
-      // subscription gate, and the residency region guard, so activating a custom manifest
-      // never severs a tenant from /v1/ai and never exempts it from residency enforcement.
+      // Tenant gateways mirror the default server's cross-cutting wiring — extra routes (AI
+      // design, platform admin), the subscription gate, the residency guard, the per-request
+      // observer chain (SLO burn/latency, usage metering, audit chain), write effects and job
+      // invocation — so activating a custom manifest never drops a tenant out of enforcement,
+      // billing, or the tamper-evident audit trail. Only the deployment-wide singletons that
+      // are not per-request (the Stripe webhook + billing-portal routes) stay on the default
+      // server, which still handles them for every tenant.
       build: (tenantManifest): OperateHttpServer =>
         buildOperateHttpServer({
           manifest: tenantManifest,
@@ -789,6 +793,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ...(extraRoutes !== undefined ? { extraRoutes } : {}),
           ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
           ...(regionGuard !== undefined ? { regionGuard } : {}),
+          ...(additionalWriteEffects.length > 0 ? { additionalWriteEffects } : {}),
+          ...(jobInvoker !== undefined ? { jobInvoker } : {}),
+          ...(jobInvoker !== undefined && options.jobInvokeRoles.length > 0
+            ? { jobInvokeRoles: options.jobInvokeRoles }
+            : {}),
+          ...(jobInvoker !== undefined && invokeActionRoles.size > 0
+            ? { jobInvokeActionRoles: invokeActionRoles }
+            : {}),
+          ...(onExecution !== undefined ? { onExecution } : {}),
           defaultScheme: options.defaultScheme,
         }).httpServer,
       onInvalidManifest: (tenantId, issues) =>

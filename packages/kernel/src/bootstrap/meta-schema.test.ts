@@ -89,6 +89,7 @@ import {
   META_SDK_CLIENT_INSTALLATIONS,
   META_SDK_CLIENT_RELEASES,
   META_OPERATE_ENTITY_RECORDS,
+  META_OPERATE_TENANT_MANIFESTS,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_EVALUATIONS,
   META_SLO_LATENCY_EVALUATIONS,
@@ -1061,6 +1062,32 @@ describe("table column shapes", () => {
     ]);
     expect(META_OPERATE_ENTITY_RECORDS.rls?.policies?.[0]?.using).toBe(
       "tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+    );
+  });
+
+  it("META_OPERATE_TENANT_MANIFESTS keeps the tenant+status lookup index", () => {
+    const idx = META_OPERATE_TENANT_MANIFESTS.indexes?.find(
+      (i) => i.name === "idx_operate_tenant_manifests_tenant_status",
+    );
+    expect(idx?.columns).toEqual(["tenant_id", "status"]);
+    expect(idx?.unique).toBeUndefined();
+    expect(idx?.where).toBeUndefined();
+  });
+
+  it("META_OPERATE_TENANT_MANIFESTS enforces at most one active manifest per tenant", () => {
+    const idx = META_OPERATE_TENANT_MANIFESTS.indexes?.find(
+      (i) => i.name === "uq_operate_tenant_manifests_active",
+    );
+    expect(idx).toBeDefined();
+    expect(idx?.columns).toEqual(["tenant_id"]);
+    expect(idx?.unique).toBe(true);
+    expect(idx?.where).toBe("status = 'active'");
+  });
+
+  it("META_OPERATE_TENANT_MANIFESTS emits the partial unique index in the bootstrap SQL", () => {
+    const sql = emitMetaBootstrapSql();
+    expect(sql).toContain(
+      `CREATE UNIQUE INDEX "uq_operate_tenant_manifests_active" ON "meta"."operate_tenant_manifests" ("tenant_id") WHERE status = 'active';`,
     );
   });
 

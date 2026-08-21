@@ -21,6 +21,7 @@ export interface IndexSpec {
   readonly columns: readonly string[];
   readonly unique?: boolean;
   readonly kind?: "btree" | "gin" | "gist" | "hash";
+  readonly where?: string;
 }
 
 export interface UniqueConstraint {

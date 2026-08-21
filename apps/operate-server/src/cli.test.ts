@@ -676,3 +676,27 @@ describe("parseVerifyChainArgs", () => {
     expect(parseVerifyChainArgs(["--help"]).help).toBe(true);
   });
 });
+
+describe("parseServeArgs — manifest refresh + AI budget flags", () => {
+  const BASE = ["--pack", "erp-core"];
+  it("defaults both to null", () => {
+    const opts = parseServeArgs(BASE);
+    expect(opts.manifestRefreshMs).toBeNull();
+    expect(opts.aiMaxUsdPerMonth).toBeNull();
+  });
+
+  it("parses --manifest-refresh-ms in both forms and rejects sub-second / non-integer", () => {
+    expect(parseServeArgs([...BASE, "--manifest-refresh-ms", "5000"]).manifestRefreshMs).toBe(5000);
+    expect(parseServeArgs([...BASE, "--manifest-refresh-ms=2500"]).manifestRefreshMs).toBe(2500);
+    expect(() => parseServeArgs([...BASE, "--manifest-refresh-ms", "999"])).toThrow();
+    expect(() => parseServeArgs([...BASE, "--manifest-refresh-ms", "abc"])).toThrow();
+  });
+
+  it("parses --ai-max-usd-per-month and rejects zero / negative / non-numeric", () => {
+    expect(parseServeArgs([...BASE, "--ai-max-usd-per-month", "50"]).aiMaxUsdPerMonth).toBe(50);
+    expect(parseServeArgs([...BASE, "--ai-max-usd-per-month=12.5"]).aiMaxUsdPerMonth).toBe(12.5);
+    expect(() => parseServeArgs([...BASE, "--ai-max-usd-per-month", "0"])).toThrow();
+    expect(() => parseServeArgs([...BASE, "--ai-max-usd-per-month", "-3"])).toThrow();
+    expect(() => parseServeArgs([...BASE, "--ai-max-usd-per-month", "nope"])).toThrow();
+  });
+});
