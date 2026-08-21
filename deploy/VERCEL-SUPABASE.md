@@ -159,10 +159,18 @@ Keep one `platform_admin` API key for the console only. See
 
 ## 6. The AI Architect (open-source model)
 
-**None of the deployed tiers call an LLM.** The API and UI serve tenants with no
-AI at runtime. The AI Architect — natural-language manifest authoring — is a
-separate **developer CLI** (`crossengin chat`) you run **locally**, not on
-Vercel or Supabase. To run it against a self-hosted open-source model:
+**By default no deployed tier calls an LLM.** The API and UI serve tenants with
+no AI at runtime. Two opt-in ways to add AI:
+
+**In-product (deployed):** add `--ai-design` to the `operate-server` command and
+set `ANTHROPIC_API_KEY` *or* `OPENAI_API_KEY` (with `OPENAI_BASE_URL` pointing at
+a self-hosted OSS server to stay off commercial APIs) in the API host's
+environment. Tenant admins then get **/setup** in the UI — describe the business,
+review the AI-generated system, activate it as that tenant's live schema
+(per-tenant manifests, served immediately).
+
+**Dev-time (local):** the `crossengin chat` CLI, run **locally**, not on Vercel
+or Supabase. To run it against a self-hosted open-source model:
 
 1. Run an OpenAI-compatible server on your machine (or a GPU box), e.g.
    [Ollama](https://ollama.com): `ollama serve` then `ollama pull qwen2.5-coder`

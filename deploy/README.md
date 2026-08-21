@@ -88,7 +88,10 @@ checkpoints, billing, marketplace, etc.) — add the flags you want to the `api`
   `deploy/supabase/00-uuidv7.sql` once to define the pure-SQL function.
 - **Supabase + Vercel:** for the managed-cloud path (Supabase DB + Vercel UI + a container
   host for the API) see [`VERCEL-SUPABASE.md`](./VERCEL-SUPABASE.md).
-- **AI features are not required to serve.** `operate-server` never calls an LLM at
-  runtime — the AI Architect (natural-language manifest authoring) is a separate,
-  dev-time tool (`crossengin chat` in `architect-cli`). See the main README for
-  self-hosting an open-source model behind it.
+- **AI features are optional.** By default `operate-server` never calls an LLM at
+  runtime. Adding `--ai-design` to the `api` command (plus `ANTHROPIC_API_KEY` or
+  `OPENAI_API_KEY` — with `OPENAI_BASE_URL` for a self-hosted OSS model such as
+  Ollama/vLLM — in its environment) enables the in-product AI Architect: tenants
+  describe their business at `/setup` in the UI, review the generated system, and
+  activate it as their live, per-tenant schema. Without the flag, nothing calls a
+  model; the dev-time `crossengin chat` CLI remains available either way.

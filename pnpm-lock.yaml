@@ -87,6 +87,15 @@ importers:
       '@crossengin/access-reviews-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/access-reviews-runtime-pg
+      '@crossengin/ai-providers':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers
+      '@crossengin/ai-providers-anthropic':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers-anthropic
+      '@crossengin/ai-providers-openai':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers-openai
       '@crossengin/api-gateway':
         specifier: workspace:*
         version: link:../../packages/api-gateway

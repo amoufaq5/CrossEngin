@@ -176,6 +176,16 @@ export function Sidebar() {
           >
             Billing
           </Link>
+          <Link
+            href="/setup"
+            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+              pathname === "/setup"
+                ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
+                : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+            }`}
+          >
+            AI Studio
+          </Link>
         </div>
 
         <div className="mt-5 border-t border-line pt-3">

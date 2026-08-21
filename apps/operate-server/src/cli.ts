@@ -81,6 +81,14 @@ export interface ServeOptions {
   readonly platformAdmin: boolean;
   /** Roles allowed to call the platform-admin routes (repeatable; default platform_admin). */
   readonly platformAdminRoles: readonly string[];
+  /** Expose the in-product AI Architect routes under /v1/ai — describe a business, get a validated manifest proposal, activate it (over meta.operate_tenant_manifests; needs --store pg|pg-columns; the designer needs ANTHROPIC_API_KEY or OPENAI_API_KEY [+ optional OPENAI_BASE_URL]). Implies per-tenant manifest serving. */
+  readonly aiDesign: boolean;
+  /** Roles allowed to call the AI-design routes (repeatable; default erp_admin + platform_admin). */
+  readonly aiDesignRoles: readonly string[];
+  /** Serve each tenant's activated custom manifest from meta.operate_tenant_manifests, falling back to the boot pack (needs --store pg|pg-columns). */
+  readonly perTenantManifests: boolean;
+  /** Model override for the AI designer (defaults per provider). */
+  readonly aiModel: string | null;
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
   /** Path to a JSON Stripe usage-sync config ({intervalMs?, tenants, subscriptionItems}) — periodically reports persisted usage records to Stripe (needs --store pg + --stripe-api-key). */
@@ -156,6 +164,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let auditSamplingRefreshMs: number | null = null;
   let platformAdmin = false;
   const platformAdminRoles: string[] = [];
+  let aiDesign = false;
+  const aiDesignRoles: string[] = [];
+  let perTenantManifests = false;
+  let aiModel: string | null = null;
   let meteringConfig: string | null = null;
   let stripeUsageSyncConfig: string | null = null;
   let help = false;
@@ -326,6 +338,16 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--platform-admin-role" || arg.startsWith("--platform-admin-role=")) {
       platformAdminRoles.push(takeValue(arg, next, "--platform-admin-role"));
       i += consumed();
+    } else if (arg === "--ai-design") {
+      aiDesign = true;
+    } else if (arg === "--ai-design-role" || arg.startsWith("--ai-design-role=")) {
+      aiDesignRoles.push(takeValue(arg, next, "--ai-design-role"));
+      i += consumed();
+    } else if (arg === "--per-tenant-manifests") {
+      perTenantManifests = true;
+    } else if (arg === "--ai-model" || arg.startsWith("--ai-model=")) {
+      aiModel = takeValue(arg, next, "--ai-model");
+      i += consumed();
     } else if (arg === "--metering-config" || arg.startsWith("--metering-config=")) {
       meteringConfig = takeValue(arg, next, "--metering-config");
       i += consumed();
@@ -342,6 +364,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (platformAdmin && store === "memory") {
     throw new CliUsageError("--platform-admin requires a Postgres store (--store pg or pg-columns)");
+  }
+  if ((aiDesign || perTenantManifests) && store === "memory") {
+    throw new CliUsageError("--ai-design / --per-tenant-manifests require a Postgres store (--store pg or pg-columns)");
   }
   if (stripeWebhookSecret !== null && store === "memory") {
     throw new CliUsageError("--stripe-webhook-secret requires a Postgres store (--store pg or pg-columns)");
@@ -487,6 +512,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     auditSamplingRefreshMs,
     platformAdmin,
     platformAdminRoles: platformAdminRoles.length > 0 ? platformAdminRoles : ["platform_admin"],
+    aiDesign,
+    aiDesignRoles: aiDesignRoles.length > 0 ? aiDesignRoles : ["erp_admin", "platform_admin"],
+    perTenantManifests: perTenantManifests || aiDesign,
+    aiModel,
     meteringConfig,
     stripeUsageSyncConfig,
     defaultScheme,
@@ -754,6 +783,15 @@ Options:
                        archive/reactivate tenants + stats over meta.tenants (needs --store pg|pg-columns)
   --platform-admin-role <role>  Role allowed to call the /v1/platform routes (repeatable; default
                        platform_admin). Fail-closed: only these roles reach tenant management
+  --ai-design          Expose the in-product AI Architect under /v1/ai — POST a business description,
+                       get a validated manifest proposal, activate it as the tenant's live system
+                       (needs --store pg|pg-columns + ANTHROPIC_API_KEY or OPENAI_API_KEY, optional
+                       OPENAI_BASE_URL for a self-hosted OSS model). Implies --per-tenant-manifests
+  --ai-design-role <role>  Role allowed to call the /v1/ai routes (repeatable; default erp_admin +
+                       platform_admin). Fail-closed
+  --ai-model <id>      Model override for the AI designer (defaults per provider)
+  --per-tenant-manifests  Serve each tenant's activated custom manifest (meta.operate_tenant_manifests),
+                       falling back to the boot pack for tenants without one (needs --store pg|pg-columns)
   --region <id>        This instance's serving region (e.g. eu-central) — with --residency-file,
                        enables data-residency edge routing (redirect/deny by tenant home region)
   --residency-file <file>  Residency directory JSON ({tenants:[{tenantId, profile}]}) mapping each
