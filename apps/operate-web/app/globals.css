@@ -6,32 +6,79 @@
   html,
   body {
     @apply bg-surface-soft text-ink antialiased;
+    font-feature-settings: "cv11", "ss01";
   }
   * {
     @apply border-line;
   }
+  h1,
+  h2,
+  h3 {
+    @apply font-bold tracking-tight;
+  }
 }
 
 @layer components {
+  /* --- Shell (SAP Fiori-style translucent chrome) --- */
+  .shell-bar {
+    @apply sticky top-0 z-30 flex h-14 items-center gap-4 border-b border-line bg-white/70 px-4 shadow-shell backdrop-blur-shell;
+  }
+  .glass {
+    @apply bg-white/70 backdrop-blur-shell;
+  }
+
+  /* --- Buttons --- */
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-ink/10 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/30 disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-primary {
-    @apply btn bg-brand text-white hover:bg-brand-700;
+    @apply btn bg-brand text-white shadow-tile hover:bg-brand-700 active:bg-brand-800;
   }
   .btn-ghost {
-    @apply btn border border-line bg-white text-ink-muted hover:bg-surface-soft hover:text-ink;
+    @apply btn border border-line bg-white/80 text-ink-muted hover:bg-surface-soft hover:text-ink;
   }
   .btn-danger {
     @apply btn text-brand-700 hover:bg-brand-50;
   }
+
+  /* --- Form controls --- */
   .field {
-    @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-ink/25 focus:outline-none;
+    @apply w-full rounded-lg border border-line bg-white px-3 py-2 text-sm font-medium text-ink placeholder:font-normal placeholder:text-ink-faint focus:border-brand focus:outline-none focus:ring-4 focus:ring-brand/10;
   }
   .label {
-    @apply mb-1 block text-xs font-medium text-ink-muted;
+    @apply mb-1 block text-[11px] font-semibold uppercase tracking-wide text-ink-muted;
   }
+
+  /* --- Tiles / cards (launchpad) --- */
   .card {
-    @apply rounded-xl border border-line bg-white;
+    @apply rounded-xl border border-line bg-white shadow-card;
+  }
+  .tile {
+    @apply rounded-xl border border-line bg-white p-4 shadow-tile transition hover:-translate-y-0.5 hover:border-brand-200 hover:shadow-tile-hover;
+  }
+
+  /* --- Dense data table (SAP-list feel) --- */
+  .data-table {
+    @apply w-full border-separate border-spacing-0 text-sm;
+  }
+  .data-table thead th {
+    @apply sticky top-0 z-10 border-b border-line bg-surface-soft/90 px-3 py-2 text-left text-[11px] font-bold uppercase tracking-wide text-ink-muted backdrop-blur;
+  }
+  .data-table tbody td {
+    @apply border-b border-line px-3 py-2 text-ink;
+  }
+  .data-table tbody tr:nth-child(even) {
+    @apply bg-surface-soft/50;
+  }
+  .data-table tbody tr:hover {
+    @apply bg-brand-50/60;
+  }
+
+  /* --- Object-page header + status chips --- */
+  .page-header {
+    @apply sticky top-0 z-20 flex h-16 items-center justify-between border-b border-line bg-white/70 px-8 backdrop-blur-shell;
+  }
+  .chip {
+    @apply inline-flex items-center rounded-md bg-surface-sunken px-2 py-0.5 text-[11px] font-semibold text-ink-muted;
   }
 }

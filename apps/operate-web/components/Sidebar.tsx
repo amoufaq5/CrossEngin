@@ -35,28 +35,25 @@ export function Sidebar() {
   const inboxCount = inboxItems.length;
 
   return (
-    <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-line bg-white">
-      <div className="flex h-16 items-center gap-2 px-5">
-        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand text-sm font-bold text-white">
-          CE
-        </span>
-        <div className="leading-tight">
-          <div className="text-sm font-bold text-ink">CrossEngin</div>
-          {primaryRole ? (
-            <div className="text-[11px] font-medium text-ink-muted" title="Your role">
-              {roleLabel(schema, primaryRole)}
-            </div>
-          ) : (
-            <div className="text-[11px] font-medium text-ink-faint">Operate</div>
-          )}
+    <aside className="sticky top-14 flex h-[calc(100vh-3.5rem)] w-64 shrink-0 flex-col border-r border-line bg-white/60 backdrop-blur">
+      {primaryRole ? (
+        <div className="px-5 pt-4 pb-1">
+          <div className="text-[11px] font-semibold uppercase tracking-wide text-ink-faint">Signed in as</div>
+          <div className="text-sm font-bold text-ink" title="Your role">
+            {roleLabel(schema, primaryRole)}
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="px-5 pt-4 pb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-faint">
+          Navigation
+        </div>
+      )}
 
-      <div className="px-3 pb-2">
+      <div className="px-3 pt-2 pb-2">
         <Link
           href="/"
-          className={`mb-1 block rounded-lg px-3 py-2 text-sm font-medium transition ${
-            pathname === "/" ? "bg-surface-sunken text-ink" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+          className={`mb-1 block rounded-lg px-3 py-2 text-sm font-semibold transition ${
+            pathname === "/" ? "border-l-2 border-brand bg-brand-50 text-brand-700" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
           }`}
         >
           Dashboard
@@ -65,7 +62,7 @@ export function Sidebar() {
           <Link
             href="/inbox"
             className={`mb-2 flex items-center rounded-lg px-3 py-2 text-sm font-medium transition ${
-              pathname === "/inbox" ? "bg-surface-sunken text-ink" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+              pathname === "/inbox" ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700" : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
             My Inbox
@@ -107,7 +104,7 @@ export function Sidebar() {
                       href={href}
                       className={`block rounded-lg px-3 py-1.5 text-sm transition ${
                         active
-                          ? "bg-surface-sunken font-medium text-ink"
+                          ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                           : "text-ink-muted hover:bg-surface-soft hover:text-ink"
                       }`}
                     >
@@ -126,7 +123,7 @@ export function Sidebar() {
               href="/reports/aging"
               className={`block rounded-lg px-3 py-1.5 text-sm transition ${
                 pathname === "/reports/aging"
-                  ? "bg-surface-sunken font-medium text-ink"
+                  ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                   : "text-ink-muted hover:bg-surface-soft hover:text-ink"
               }`}
             >
@@ -136,7 +133,7 @@ export function Sidebar() {
               href="/reports/period-close"
               className={`block rounded-lg px-3 py-1.5 text-sm transition ${
                 pathname === "/reports/period-close"
-                  ? "bg-surface-sunken font-medium text-ink"
+                  ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                   : "text-ink-muted hover:bg-surface-soft hover:text-ink"
               }`}
             >
@@ -147,7 +144,7 @@ export function Sidebar() {
                 href="/reports/wht"
                 className={`block rounded-lg px-3 py-1.5 text-sm transition ${
                   pathname === "/reports/wht"
-                    ? "bg-surface-sunken font-medium text-ink"
+                    ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                     : "text-ink-muted hover:bg-surface-soft hover:text-ink"
                 }`}
               >
@@ -163,7 +160,7 @@ export function Sidebar() {
             href="/admin/settings"
             className={`block rounded-lg px-3 py-1.5 text-sm transition ${
               pathname === "/admin/settings"
-                ? "bg-surface-sunken font-medium text-ink"
+                ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                 : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
@@ -173,7 +170,7 @@ export function Sidebar() {
             href="/admin/billing"
             className={`block rounded-lg px-3 py-1.5 text-sm transition ${
               pathname === "/admin/billing"
-                ? "bg-surface-sunken font-medium text-ink"
+                ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                 : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
@@ -187,7 +184,7 @@ export function Sidebar() {
             href="/platform"
             className={`block rounded-lg px-3 py-1.5 text-sm transition ${
               pathname === "/platform" || pathname.startsWith("/platform/")
-                ? "bg-surface-sunken font-medium text-ink"
+                ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                 : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
