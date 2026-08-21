@@ -41,23 +41,34 @@ describe("checkPgUuidv7Extension", () => {
     const conn = stubbedConnection([
       {
         match: (sql) => sql.includes("pg_extension"),
-        result: { rows: [{ extname: "pg_uuidv7" }], rowCount: 1 },
+        result: { rows: [{ has_extension: true, has_function: true }], rowCount: 1 },
       },
     ]);
     await expect(checkPgUuidv7Extension(conn)).resolves.toBeNull();
   });
 
-  it("returns a MISSING_EXTENSION problem when absent", async () => {
+  it("returns null when only the pure-SQL function is defined (managed/Supabase path)", async () => {
+    const conn = stubbedConnection([
+      {
+        match: (sql) => sql.includes("pg_proc"),
+        result: { rows: [{ has_extension: false, has_function: true }], rowCount: 1 },
+      },
+    ]);
+    await expect(checkPgUuidv7Extension(conn)).resolves.toBeNull();
+  });
+
+  it("returns a MISSING_EXTENSION problem when neither extension nor function exists", async () => {
     const conn = stubbedConnection([
       {
         match: (sql) => sql.includes("pg_extension"),
-        result: { rows: [], rowCount: 0 },
+        result: { rows: [{ has_extension: false, has_function: false }], rowCount: 1 },
       },
     ]);
     const problem = await checkPgUuidv7Extension(conn);
     expect(problem).not.toBeNull();
     expect(problem?.code).toBe("MISSING_EXTENSION");
     expect(problem?.remedy).toContain("CREATE EXTENSION");
+    expect(problem?.remedy).toContain("Supabase");
   });
 });
 
@@ -172,7 +183,7 @@ describe("checkPreconditions", () => {
     const conn = stubbedConnection([
       {
         match: (sql) => sql.includes("pg_extension WHERE extname = 'pg_uuidv7'"),
-        result: { rows: [{ extname: "pg_uuidv7" }], rowCount: 1 },
+        result: { rows: [{ has_extension: true, has_function: true }], rowCount: 1 },
       },
       {
         match: (sql) => sql.includes("server_version_num"),
@@ -201,7 +212,7 @@ describe("checkPreconditions", () => {
     const conn = stubbedConnection([
       {
         match: (sql) => sql.includes("pg_extension WHERE extname = 'pg_uuidv7'"),
-        result: { rows: [], rowCount: 0 },
+        result: { rows: [{ has_extension: false, has_function: false }], rowCount: 1 },
       },
       {
         match: (sql) => sql.includes("server_version_num"),

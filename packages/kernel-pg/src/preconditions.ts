@@ -23,15 +23,25 @@ export interface PreconditionReport {
 export async function checkPgUuidv7Extension(
   conn: PgConnection,
 ): Promise<PreconditionProblem | null> {
-  const result = await conn.query<{ extname: string }>(
-    "SELECT extname FROM pg_extension WHERE extname = 'pg_uuidv7'",
+  // The schema defaults every id to `uuid_generate_v7()`. That function is
+  // supplied by the pg_uuidv7 extension on self-managed Postgres, but a managed
+  // provider that disallows the C extension (e.g. Supabase) can instead define
+  // `uuid_generate_v7()` as a pure-SQL function (see deploy/supabase). Either
+  // satisfies the requirement — what the DDL needs is the callable function.
+  const result = await conn.query<{ has_extension: boolean; has_function: boolean }>(
+    "SELECT " +
+      "EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_uuidv7') AS has_extension, " +
+      "EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'uuid_generate_v7') AS has_function",
   );
-  if (result.rows.length > 0) return null;
+  const row = result.rows[0];
+  if (row?.has_extension === true || row?.has_function === true) return null;
   return {
     code: "MISSING_EXTENSION",
-    message: "the pg_uuidv7 extension is required but not installed",
+    message: "uuid_generate_v7() is required but is neither an installed extension nor a defined function",
     remedy:
-      "ask a Postgres superuser to run: CREATE EXTENSION IF NOT EXISTS pg_uuidv7;",
+      "on self-managed Postgres run: CREATE EXTENSION IF NOT EXISTS pg_uuidv7; " +
+      "on a managed provider without the extension (e.g. Supabase), define a pure-SQL " +
+      "uuid_generate_v7() first (see deploy/supabase/00-uuidv7.sql)",
   };
 }
 
