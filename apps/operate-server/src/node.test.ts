@@ -63,6 +63,26 @@ describe("createNodeRequestListener", () => {
     expect(Array.isArray(parsed.data)).toBe(true);
   });
 
+  it("rejects a body over MAX_REQUEST_BODY_BYTES with 413 before dispatch", async () => {
+    const listener = createNodeRequestListener(httpServer());
+    const res = mockRes();
+    const megabyte = new Uint8Array(1024 * 1024);
+    const req: NodeReqLike = {
+      method: "POST",
+      url: "/v1/products",
+      headers: { "x-api-key": "key-manager", "content-type": "application/json" },
+      socket: { remoteAddress: "203.0.113.1" },
+      async *[Symbol.asyncIterator]() {
+        for (let i = 0; i < 11; i++) yield megabyte;
+      },
+    };
+    await listener(req, res);
+    expect(res.status).toBe(413);
+    expect(res.headers["content-type"]).toBe("application/problem+json");
+    const parsed = JSON.parse(new TextDecoder().decode(res.body ?? new Uint8Array())) as { status: number };
+    expect(parsed.status).toBe(413);
+  });
+
   it("collects a POST body and creates a record", async () => {
     const listener = createNodeRequestListener(httpServer());
     const res = mockRes();

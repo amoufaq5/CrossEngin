@@ -150,12 +150,22 @@ export interface NodeResLike {
   end(chunk?: Uint8Array): void;
 }
 
+export const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
+
+class BodyTooLargeError extends Error {
+  constructor(limit: number) {
+    super(`request body exceeds ${limit.toString()} bytes`);
+    this.name = "BodyTooLargeError";
+  }
+}
+
 async function readBody(req: NodeReqLike): Promise<Uint8Array | null> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   for await (const chunk of req) {
     chunks.push(chunk);
     total += chunk.byteLength;
+    if (total > MAX_REQUEST_BODY_BYTES) throw new BodyTooLargeError(MAX_REQUEST_BODY_BYTES);
   }
   if (total === 0) return null;
   const out = new Uint8Array(total);
@@ -193,6 +203,23 @@ export function createNodeRequestListener(
       res.writeHead(response.status, response.headers);
       res.end(response.body ?? undefined);
     } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        const payload = new TextEncoder().encode(
+          JSON.stringify({
+            type: "https://crossengin.io/problems/payload-too-large",
+            title: "Payload too large",
+            status: 413,
+            detail: err.message,
+            extensions: {},
+          }),
+        );
+        res.writeHead(413, {
+          "content-type": "application/problem+json",
+          "content-length": payload.byteLength.toString(),
+        });
+        res.end(payload);
+        return;
+      }
       const detail = err instanceof Error ? err.message : "unknown error";
       const payload = new TextEncoder().encode(
         JSON.stringify({
