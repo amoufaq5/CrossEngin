@@ -9829,6 +9829,47 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
   },
 };
 
+export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
+  schema: "meta",
+  name: "operate_tenant_manifests",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "name", type: "TEXT", notNull: true, check: "char_length(name) BETWEEN 1 AND 200" },
+    { name: "description", type: "TEXT", notNull: true },
+    { name: "manifest", type: "JSONB", notNull: true },
+    { name: "manifest_hash", type: "TEXT", notNull: true },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      default: "'draft'",
+      check: "status IN ('draft', 'active', 'archived')",
+    },
+    {
+      name: "source",
+      type: "TEXT",
+      notNull: true,
+      default: "'ai'",
+      check: "source IN ('ai', 'manual')",
+    },
+    { name: "provider_label", type: "TEXT", notNull: false },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "activated_at", type: "TIMESTAMPTZ", notNull: false },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_operate_tenant_manifests_tenant_status", columns: ["tenant_id", "status"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "operate_tenant_manifests_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -9966,4 +10007,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_CERTIFICATION_REPORTS,
   META_FORENSIC_CHAIN_ENTRIES,
   META_FORENSIC_CHAIN_CHECKPOINTS,
+  META_OPERATE_TENANT_MANIFESTS,
 ];

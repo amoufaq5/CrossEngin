@@ -72,6 +72,37 @@ describe("parseServeArgs", () => {
     );
   });
 
+  it("--ai-design defaults roles, implies per-tenant manifests, and requires a pg store", () => {
+    const dflt = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--ai-design"]);
+    expect(dflt.aiDesign).toBe(true);
+    expect(dflt.aiDesignRoles).toEqual(["erp_admin", "platform_admin"]);
+    expect(dflt.perTenantManifests).toBe(true);
+    expect(dflt.aiModel).toBeNull();
+
+    const custom = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg-columns", "--ai-design",
+      "--ai-design-role", "founder", "--ai-model", "gpt-4o",
+    ]);
+    expect(custom.aiDesignRoles).toEqual(["founder"]);
+    expect(custom.aiModel).toBe("gpt-4o");
+
+    const off = parseServeArgs(["--pack", "erp-core"]);
+    expect(off.aiDesign).toBe(false);
+    expect(off.perTenantManifests).toBe(false);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--ai-design"])).toThrow(
+      /--ai-design \/ --per-tenant-manifests require a Postgres store/,
+    );
+  });
+
+  it("--per-tenant-manifests stands alone without --ai-design", () => {
+    const opts = parseServeArgs(["--pack", "erp-core", "--store", "pg", "--per-tenant-manifests"]);
+    expect(opts.perTenantManifests).toBe(true);
+    expect(opts.aiDesign).toBe(false);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--per-tenant-manifests"])).toThrow(
+      /require a Postgres store/,
+    );
+  });
+
   it("requires a value for a value-flag", () => {
     expect(() => parseServeArgs(["--pack"])).toThrow(/requires a value/);
   });

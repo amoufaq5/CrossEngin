@@ -60,6 +60,10 @@ import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
 import { PostgresTenantStore, buildPlatformAdminRoutes } from "./platform-admin.js";
+import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests.js";
+import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
+import { buildAiDesignRoutes } from "./ai-design-routes.js";
+import { TenantGatewayCache, buildPerTenantDispatch } from "./tenant-gateway-cache.js";
 import { loadResidencyDirectory } from "./residency-source.js";
 import type { Region } from "@crossengin/residency";
 import type { TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -146,12 +150,22 @@ export interface NodeResLike {
   end(chunk?: Uint8Array): void;
 }
 
+export const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
+
+class BodyTooLargeError extends Error {
+  constructor(limit: number) {
+    super(`request body exceeds ${limit.toString()} bytes`);
+    this.name = "BodyTooLargeError";
+  }
+}
+
 async function readBody(req: NodeReqLike): Promise<Uint8Array | null> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   for await (const chunk of req) {
     chunks.push(chunk);
     total += chunk.byteLength;
+    if (total > MAX_REQUEST_BODY_BYTES) throw new BodyTooLargeError(MAX_REQUEST_BODY_BYTES);
   }
   if (total === 0) return null;
   const out = new Uint8Array(total);
@@ -163,13 +177,18 @@ async function readBody(req: NodeReqLike): Promise<Uint8Array | null> {
   return out;
 }
 
+/** The dispatch surface the Node listener needs — an `OperateHttpServer` or a per-tenant wrapper. */
+export interface DispatchTarget {
+  dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse>;
+}
+
 /**
  * Builds a Node `http` request listener over an `OperateHttpServer`: collects
  * the body, dispatches through the gateway, and writes the `RawHttpResponse`. A
  * dispatch throw becomes a 500 problem document rather than a hung socket.
  */
 export function createNodeRequestListener(
-  server: OperateHttpServer,
+  server: DispatchTarget,
 ): (req: NodeReqLike, res: NodeResLike) => Promise<void> {
   return async (req, res) => {
     try {
@@ -184,6 +203,23 @@ export function createNodeRequestListener(
       res.writeHead(response.status, response.headers);
       res.end(response.body ?? undefined);
     } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        const payload = new TextEncoder().encode(
+          JSON.stringify({
+            type: "https://crossengin.io/problems/payload-too-large",
+            title: "Payload too large",
+            status: 413,
+            detail: err.message,
+            extensions: {},
+          }),
+        );
+        res.writeHead(413, {
+          "content-type": "application/problem+json",
+          "content-length": payload.byteLength.toString(),
+        });
+        res.end(payload);
+        return;
+      }
       const detail = err instanceof Error ? err.message : "unknown error";
       const payload = new TextEncoder().encode(
         JSON.stringify({
@@ -411,6 +447,47 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         store: new PostgresTenantStore(conn),
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         adminRoles: new Set(options.platformAdminRoles),
+      }),
+    );
+  }
+  // In-product AI Architect: /v1/ai routes let a tenant admin describe their business, get a
+  // kernel-validated manifest proposal (meta.operate_tenant_manifests), and activate it as the
+  // tenant's live system. The designer resolves from env (Anthropic → OpenAI, OPENAI_BASE_URL
+  // for self-hosted OSS servers); with no provider the routes answer 503 but review/activate of
+  // existing proposals still works. Activation invalidates the per-tenant gateway cache below.
+  let manifestStore: PostgresTenantManifestStore | null = null;
+  let gatewayCache: TenantGatewayCache | null = null;
+  if ((options.aiDesign || options.perTenantManifests) && conn !== undefined) {
+    manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
+  }
+  if (options.aiDesign && manifestStore !== null) {
+    const providerBuild = buildDesignProviderFromEnv(
+      process.env,
+      options.aiModel !== null ? { model: options.aiModel } : {},
+    );
+    const designer =
+      providerBuild !== null
+        ? buildDesignDesigner({
+            provider: providerBuild.provider,
+            model: providerBuild.model,
+            providerLabel: providerBuild.providerLabel,
+            ensureRoles: options.aiDesignRoles,
+          })
+        : null;
+    if (providerBuild === null) {
+      console.warn(
+        "[ai-design] no AI provider configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY); POST /v1/ai/design will answer 503",
+      );
+    }
+    const store = manifestStore;
+    extraRouteList.push(
+      ...buildAiDesignRoutes({
+        store,
+        designer,
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        allowedRoles: new Set(options.aiDesignRoles),
+        onActivated: (tenantId) => gatewayCache?.invalidate(tenantId),
+        summarize: manifestSummary,
       }),
     );
   }
@@ -682,6 +759,49 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       intervalMs: options.pruneLinksMs,
     });
   }
+  // Per-tenant manifest serving: a tenant with an activated custom manifest gets a gateway
+  // compiled from it (cached, ttl'd, invalidated on activation); everyone else — and any
+  // request whose tenant can't be resolved — falls through to the default full-featured
+  // server above. Tenant gateways carry auth + store + numbering + settings; the peripheral
+  // observers (SLO, audit chain, metering, billing) stay on the default server for now.
+  let dispatchTarget: DispatchTarget = httpServer;
+  if (options.perTenantManifests && manifestStore !== null) {
+    // The column-mapped store only knows the boot pack's entities (its column plans are derived
+    // at boot), so custom-manifest tenants are served from the manifest-agnostic JSONB store
+    // over the same connection instead of 500ing on every unplanned entity.
+    const tenantStore: EntityStore =
+      store instanceof ColumnMappedEntityStore && conn !== undefined
+        ? new PostgresEntityStore(conn, schemaOpt)
+        : store;
+    gatewayCache = new TenantGatewayCache({
+      source: manifestStore,
+      // Tenant gateways keep the deployment's extra routes (AI design, platform admin), the
+      // subscription gate, and the residency region guard, so activating a custom manifest
+      // never severs a tenant from /v1/ai and never exempts it from residency enforcement.
+      build: (tenantManifest): OperateHttpServer =>
+        buildOperateHttpServer({
+          manifest: tenantManifest,
+          store: tenantStore,
+          apiKeys,
+          allocator,
+          settingsStore,
+          ...(jwt !== null ? { jwt } : {}),
+          ...(extraRoutes !== undefined ? { extraRoutes } : {}),
+          ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
+          ...(regionGuard !== undefined ? { regionGuard } : {}),
+          defaultScheme: options.defaultScheme,
+        }).httpServer,
+      onInvalidManifest: (tenantId, issues) =>
+        console.error(`[ai-design] tenant ${tenantId} stored manifest invalid: ${issues.slice(0, 3).join("; ")}`),
+    });
+    dispatchTarget = {
+      dispatch: buildPerTenantDispatch({
+        defaultDispatch: (raw, body) => httpServer.dispatch(raw, body),
+        cache: gatewayCache,
+        apiKeys,
+      }),
+    };
+  }
   poller?.start();
   jobScheduler?.start();
   pruneScheduler?.start();
@@ -693,7 +813,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   auditPolicy?.refresher.start();
   metering?.flushScheduler?.start();
   stripeUsageSync?.scheduler.start();
-  const listener = createNodeRequestListener(httpServer);
+  const listener = createNodeRequestListener(dispatchTarget);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
   });
