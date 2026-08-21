@@ -96,7 +96,7 @@ export default function DashboardPage() {
                   {workflowEntities.map((e) => {
                     const mine = actions.filter((a) => a.entity.name === e.name);
                     return (
-                      <Link key={e.slug} href={`/e/${e.slug}`} className="card group p-4 hover:border-brand-300">
+                      <Link key={e.slug} href={`/e/${e.slug}`} className="tile group">
                         <div className="flex items-center gap-2">
                           <h3 className="text-sm font-semibold text-ink group-hover:text-brand-700">{e.label}</h3>
                           <span className="ml-auto text-ink-faint group-hover:translate-x-0.5">→</span>
@@ -135,7 +135,7 @@ export default function DashboardPage() {
                       <Link
                         key={e.slug}
                         href={`/e/${e.slug}`}
-                        className="card group p-4 transition hover:border-brand-300 hover:shadow-sm"
+                        className="tile group"
                       >
                         <div className="flex items-center gap-2">
                           <h3 className="text-sm font-semibold text-ink group-hover:text-brand-700">{e.label}</h3>
@@ -176,7 +176,7 @@ function SectionHeader({ title, count }: { title: string; count: number }) {
 
 function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
   return (
-    <div className={`card p-4 ${accent ? "ring-1 ring-brand/20" : ""}`}>
+    <div className={`tile ${accent ? "ring-1 ring-brand/20" : ""}`}>
       <div className={`text-2xl font-black ${accent ? "text-brand" : "text-ink"}`}>{value}</div>
       <div className="text-xs font-medium uppercase tracking-wide text-ink-faint">{label}</div>
     </div>

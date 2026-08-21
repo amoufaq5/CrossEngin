@@ -1,10 +1,10 @@
 import type { Config } from "tailwindcss";
 
 /**
- * CrossEngin Operate design system — minimalist. A near-monochrome canvas with
- * generous whitespace, hairline borders, and no shadows; a single restrained red
- * accent is reserved for the brand mark and primary actions only, so the interface
- * reads as calm and content-first.
+ * CrossEngin Operate design system — an SAP-Fiori-flavored enterprise shell in
+ * the CrossEngin palette: a cool neutral canvas, a translucent shell bar, dense
+ * data tables, and tile launchpads, with the brand red (#E5132B) reserved for
+ * selection, primary actions, and the brand mark. Type is Inter, set bold.
  */
 const config: Config = {
   content: [
@@ -29,16 +29,16 @@ const config: Config = {
           900: "#831421",
         },
         ink: {
-          DEFAULT: "#1a1c20",
-          muted: "#646c78",
-          faint: "#9aa1ac",
+          DEFAULT: "#12141a",
+          muted: "#5b636f",
+          faint: "#8b93a1",
         },
         surface: {
           DEFAULT: "#ffffff",
-          soft: "#fafbfc",
-          sunken: "#f2f4f6",
+          soft: "#f4f6f9",
+          sunken: "#eceef2",
         },
-        line: "#ecedf0",
+        line: "#e2e5ea",
       },
       fontFamily: {
         sans: [
@@ -51,12 +51,19 @@ const config: Config = {
         ],
       },
       boxShadow: {
-        // Minimalist: flat by default; `pop` is a soft, low overlay for menus only.
-        card: "none",
-        pop: "0 6px 20px rgba(16,24,40,0.08)",
+        // Fiori-style elevation: flat tiles that lift on hover; `pop` for menus.
+        card: "0 1px 2px rgba(16,24,40,0.04)",
+        tile: "0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06)",
+        "tile-hover": "0 10px 28px rgba(16,24,40,0.12)",
+        shell: "0 1px 0 rgba(16,24,40,0.06)",
+        pop: "0 8px 24px rgba(16,24,40,0.12)",
       },
       borderRadius: {
-        xl: "0.625rem",
+        xl: "0.75rem",
+        "2xl": "1rem",
+      },
+      backdropBlur: {
+        shell: "18px",
       },
     },
   },
