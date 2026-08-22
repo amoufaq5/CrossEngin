@@ -9876,6 +9876,49 @@ export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
   },
 };
 
+export const META_OPERATE_DESIGN_JOBS: TableDefinition = {
+  schema: "meta",
+  name: "operate_design_jobs",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      default: "'queued'",
+      check: "status IN ('queued', 'running', 'succeeded', 'failed')",
+    },
+    {
+      name: "phase",
+      type: "TEXT",
+      notNull: true,
+      default: "'queued'",
+      check: "phase IN ('queued', 'generating', 'validating', 'retrying', 'done', 'error')",
+    },
+    { name: "attempt", type: "INTEGER", notNull: true, default: "0" },
+    { name: "max_attempts", type: "INTEGER", notNull: true, default: "3" },
+    { name: "name", type: "TEXT", notNull: true, check: "char_length(name) BETWEEN 1 AND 200" },
+    { name: "description", type: "TEXT", notNull: true },
+    { name: "output_chars", type: "INTEGER", notNull: true, default: "0" },
+    { name: "issues", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "proposal_id", type: "UUID", notNull: false },
+    { name: "provider_label", type: "TEXT", notNull: false },
+    { name: "error", type: "TEXT", notNull: false },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    { name: "idx_operate_design_jobs_tenant_updated", columns: ["tenant_id", "updated_at"] },
+    { name: "idx_operate_design_jobs_sweep", columns: ["updated_at"], where: "status IN ('succeeded', 'failed')" },
+  ],
+  rls: {
+    enabled: true,
+    policies: [{ name: "operate_design_jobs_tenant_isolation", using: TENANT_ISOLATION_USING }],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -10014,4 +10057,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_FORENSIC_CHAIN_ENTRIES,
   META_FORENSIC_CHAIN_CHECKPOINTS,
   META_OPERATE_TENANT_MANIFESTS,
+  META_OPERATE_DESIGN_JOBS,
 ];

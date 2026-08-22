@@ -7,6 +7,7 @@ import { ManifestSchema, tryValidateManifest } from "@crossengin/kernel/manifest
 
 import {
   DESIGN_EXAMPLE_MANIFEST,
+  DESIGN_PROGRESS_CHARS_STEP,
   DESIGN_SYSTEM_PROMPT,
   MAX_DESIGN_ATTEMPTS,
   MAX_DESIGN_DESCRIPTION_CHARS,
@@ -18,6 +19,7 @@ import {
   extractJsonObject,
   normalizeGeneratedManifest,
   type DesignCompletionProvider,
+  type DesignProgress,
 } from "./ai-design.js";
 
 type Turn = readonly CompletionChunk[] | Error;
@@ -65,6 +67,23 @@ function brokenManifestJson(): string {
   const customerField = workOrder?.fields.find((f) => f.name === "customer");
   if (customerField?.type.target !== undefined) customerField.type.target = "Missing";
   return JSON.stringify(clone);
+}
+
+function chunkedTurn(text: string, chunkSize: number): Turn {
+  const chunks: CompletionChunk[] = [];
+  for (let i = 0; i < text.length; i += chunkSize) {
+    chunks.push({ kind: "text", text: text.slice(i, i + chunkSize) });
+  }
+  return chunks;
+}
+
+function collector(): { events: DesignProgress[]; listener: (p: DesignProgress) => void } {
+  const events: DesignProgress[] = [];
+  return { events, listener: (p: DesignProgress): void => void events.push(p) };
+}
+
+function phaseSequence(events: readonly DesignProgress[]): string[] {
+  return events.map((e) => e.phase).filter((phase, i, all) => phase !== all[i - 1]);
 }
 
 describe("DESIGN_EXAMPLE_MANIFEST fixture", () => {
@@ -450,5 +469,162 @@ describe("ensureRolesInManifest — transition + field grants", () => {
     const fields = customer["fields"] as Record<string, { read: { roles: string[] } }>;
     expect(fields["contact_email"]?.read.roles).toEqual(["app_admin"]);
     expect((customer["list"] as { roles: string[] }).roles).toContain("erp_admin");
+  });
+});
+
+describe("designManifest — progress", () => {
+  it("reports generating then validating on a first-try success, with no retrying", async () => {
+    const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
+    const { events, listener } = collector();
+    const result = await designManifest({
+      provider,
+      description: "desc",
+      onProgress: listener,
+    });
+    expect(result.ok).toBe(true);
+    expect(phaseSequence(events)).toEqual(["generating", "validating"]);
+    expect(events[0]).toEqual({
+      phase: "generating",
+      attempt: 1,
+      maxAttempts: MAX_DESIGN_ATTEMPTS,
+      outputChars: 0,
+      issues: [],
+    });
+    expect(events.at(-1)?.phase).toBe("validating");
+    expect(events.at(-1)?.outputChars).toBe(VALID_JSON.length);
+  });
+
+  it("reports a retrying phase carrying the issues, then a second generating pass", async () => {
+    const { provider } = scriptedProvider([textTurn(brokenManifestJson()), textTurn(VALID_JSON)]);
+    const { events, listener } = collector();
+    const result = await designManifest({
+      provider,
+      description: "desc",
+      onProgress: listener,
+    });
+    expect(result.ok).toBe(true);
+    expect(phaseSequence(events)).toEqual([
+      "generating",
+      "validating",
+      "retrying",
+      "generating",
+      "validating",
+    ]);
+    const retrying = events.filter((e) => e.phase === "retrying");
+    expect(retrying).toHaveLength(1);
+    expect(retrying[0]?.attempt).toBe(1);
+    expect(retrying[0]?.issues.length).toBeGreaterThan(0);
+    expect(retrying[0]?.issues.join(" ")).toContain("Missing");
+  });
+
+  it("numbers attempts from 1 and carries maxAttempts on every event", async () => {
+    const { provider } = scriptedProvider([textTurn("not json"), textTurn(VALID_JSON)]);
+    const { events, listener } = collector();
+    await designManifest({ provider, description: "desc", maxAttempts: 2, onProgress: listener });
+    expect(events.every((e) => e.maxAttempts === 2)).toBe(true);
+    expect(events[0]?.attempt).toBe(1);
+    expect(new Set(events.map((e) => e.attempt))).toEqual(new Set([1, 2]));
+    expect(events.every((e) => e.attempt >= 1)).toBe(true);
+  });
+
+  it("never emits retrying after the final attempt fails", async () => {
+    const { provider } = scriptedProvider([textTurn(brokenManifestJson())]);
+    const { events, listener } = collector();
+    const result = await designManifest({
+      provider,
+      description: "desc",
+      maxAttempts: 2,
+      onProgress: listener,
+    });
+    expect(result.ok).toBe(false);
+    const retrying = events.filter((e) => e.phase === "retrying");
+    expect(retrying).toHaveLength(1);
+    expect(retrying[0]?.attempt).toBe(1);
+    expect(events.at(-1)?.phase).toBe("validating");
+    expect(events.at(-1)?.attempt).toBe(2);
+  });
+
+  it("throttles streaming updates to one per DESIGN_PROGRESS_CHARS_STEP of growth", async () => {
+    const chunkSize = 40;
+    const total = 4000;
+    const { provider } = scriptedProvider([chunkedTurn("x".repeat(total), chunkSize)]);
+    const { events, listener } = collector();
+    await designManifest({ provider, description: "desc", maxAttempts: 1, onProgress: listener });
+    const generating = events.filter((e) => e.phase === "generating");
+    const expected = total / DESIGN_PROGRESS_CHARS_STEP + 1;
+    expect(generating.length).toBeLessThanOrEqual(expected);
+    expect(generating.length).toBeLessThan(total / chunkSize);
+    expect(generating.map((e) => e.outputChars)).toEqual([
+      0, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 3600, 4000,
+    ]);
+  });
+
+  it("resets outputChars at the start of each attempt", async () => {
+    const { provider } = scriptedProvider([textTurn("y".repeat(1200)), textTurn(VALID_JSON)]);
+    const { events, listener } = collector();
+    await designManifest({ provider, description: "desc", onProgress: listener });
+    const firstOfAttemptTwo = events.find((e) => e.attempt === 2);
+    expect(firstOfAttemptTwo?.phase).toBe("generating");
+    expect(firstOfAttemptTwo?.outputChars).toBe(0);
+    const attemptOneMax = Math.max(
+      ...events.filter((e) => e.attempt === 1).map((e) => e.outputChars),
+    );
+    expect(attemptOneMax).toBe(1200);
+    const validatingTwo = events.find((e) => e.attempt === 2 && e.phase === "validating");
+    expect(validatingTwo?.outputChars).toBe(VALID_JSON.length);
+  });
+
+  it("survives a listener that throws on every event", async () => {
+    const { provider } = scriptedProvider([textTurn(brokenManifestJson()), textTurn(VALID_JSON)]);
+    let calls = 0;
+    const result = await designManifest({
+      provider,
+      description: "desc",
+      onProgress: (): void => {
+        calls += 1;
+        throw new Error("listener exploded");
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.attempts).toBe(2);
+    expect(calls).toBeGreaterThan(1);
+  });
+
+  it("emits retrying with the provider error message when an attempt throws", async () => {
+    const { provider } = scriptedProvider([new Error("boom"), textTurn(VALID_JSON)]);
+    const { events, listener } = collector();
+    const result = await designManifest({
+      provider,
+      description: "desc",
+      onProgress: listener,
+    });
+    expect(result.ok).toBe(true);
+    const retrying = events.filter((e) => e.phase === "retrying");
+    expect(retrying).toHaveLength(1);
+    expect(retrying[0]?.issues[0]).toContain("provider error: boom");
+    expect(retrying[0]?.outputChars).toBe(0);
+  });
+
+  it("buildDesignDesigner accepts a per-call listener", async () => {
+    const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
+    const designer = buildDesignDesigner({ provider });
+    const { events, listener } = collector();
+    const result = await designer({ description: "desc", onProgress: listener });
+    expect(result.ok).toBe(true);
+    expect(phaseSequence(events)).toEqual(["generating", "validating"]);
+  });
+
+  it("buildDesignDesigner uses the builder listener, and a per-call listener wins", async () => {
+    const { provider } = scriptedProvider([textTurn(VALID_JSON)]);
+    const builderSink = collector();
+    const designer = buildDesignDesigner({ provider, onProgress: builderSink.listener });
+    await designer({ description: "desc" });
+    expect(builderSink.events.length).toBeGreaterThan(0);
+
+    const before = builderSink.events.length;
+    const perCall = collector();
+    await designer({ description: "desc", onProgress: perCall.listener });
+    expect(perCall.events.length).toBeGreaterThan(0);
+    expect(builderSink.events).toHaveLength(before);
   });
 });

@@ -123,7 +123,7 @@ import {
 
 describe("META_TABLES", () => {
   it("contains 136 tables", () => {
-    expect(META_TABLES).toHaveLength(137);
+    expect(META_TABLES).toHaveLength(138);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -223,6 +223,7 @@ describe("META_TABLES", () => {
       "notification_suppressions",
       "notification_templates",
       "onboarding_runs",
+      "operate_design_jobs",
       "operate_entity_links",
       "operate_entity_records",
       "operate_sequences",
