@@ -75,6 +75,11 @@ export interface AiDesignContext {
   /** Roles permitted to use the AI Architect. Fail-closed: empty ⇒ nobody. */
   readonly allowedRoles: ReadonlySet<string>;
   readonly onActivated?: (tenantId: string) => void;
+  /** Optional per-tenant AI spend ceiling checked before each design call. */
+  readonly budget?: {
+    check(tenantId: string): Promise<{ allowed: boolean; spentUsd: number; limitUsd: number }>;
+    record(tenantId: string, costUsd: number): Promise<number>;
+  };
   readonly summarize: (manifest: Record<string, unknown>) => unknown;
 }
 
@@ -137,7 +142,24 @@ function buildDesignHandler(ctx: AiDesignContext): Handler {
     }
     const parsed = DesignRequestSchema.safeParse(parsedBody ?? {});
     if (!parsed.success) return json(400, { error: "invalid_request", detail: parsed.error.issues });
+    // Spend gate before the LLM call: an unbounded design loop is the one way a tenant admin
+    // can run up real money on this endpoint. Fail-closed (a ledger read error denies).
+    if (ctx.budget !== undefined) {
+      const budget = await ctx.budget.check(tenant);
+      if (!budget.allowed) {
+        return json(402, {
+          error: "ai_budget_exceeded",
+          detail: `monthly AI design budget of $${budget.limitUsd.toString()} is exhausted`,
+          spentUsd: budget.spentUsd,
+          limitUsd: budget.limitUsd,
+        });
+      }
+    }
     const result = await ctx.designer(parsed.data);
+    // Charge actual usage even when the design failed — the tokens were spent either way.
+    if (ctx.budget !== undefined && result.usage !== null && result.usage.cost > 0) {
+      await ctx.budget.record(tenant, result.usage.cost);
+    }
     if (!result.ok || result.manifest === null || result.manifestHash === null) {
       return json(422, { error: "design_failed", issues: result.issues, attempts: result.attempts });
     }
