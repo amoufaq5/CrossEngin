@@ -193,12 +193,23 @@ export function Sidebar() {
           <Link
             href="/platform"
             className={`block rounded-lg px-3 py-1.5 text-sm transition ${
-              pathname === "/platform" || pathname.startsWith("/platform/")
+              (pathname === "/platform" || pathname.startsWith("/platform/")) &&
+              !pathname.startsWith("/platform/reviews")
                 ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                 : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
             Tenants
+          </Link>
+          <Link
+            href="/platform/reviews"
+            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+              pathname === "/platform/reviews" || pathname.startsWith("/platform/reviews/")
+                ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
+                : "text-ink-muted hover:bg-surface-soft hover:text-ink"
+            }`}
+          >
+            Design Reviews
           </Link>
         </div>
       </nav>

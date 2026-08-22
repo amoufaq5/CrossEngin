@@ -70,6 +70,10 @@ import {
 } from "./manifest-activation-poller.js";
 import { DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, buildAiDesignBudget } from "./ai-design-budget.js";
 import { PostgresDesignJobStore } from "./design-jobs.js";
+import { PostgresDesignReviewStore } from "./design-review-store.js";
+import { buildDesignReviewRoutes } from "./design-review-routes.js";
+import { assessManifestRisk } from "./design-review.js";
+import { enrolNewProposalsForReview } from "./review-enrolment.js";
 import { startDesignJob } from "./design-runner.js";
 import { PostgresTenantCostStore } from "@crossengin/ai-architect-runtime-pg";
 import { loadResidencyDirectory } from "./residency-source.js";
@@ -458,6 +462,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }),
     );
   }
+  // Platform design-review queue: /v1/platform/design-reviews lets an operator triage AI-generated
+  // proposals across every tenant (with an automated risk report) before they can go live. The
+  // cross-tenant reads run under the explicit, transaction-scoped `app.platform_review` grant.
+  let reviewStore: PostgresDesignReviewStore | null = null;
+  if (options.designReview && conn !== undefined) {
+    reviewStore = new PostgresDesignReviewStore(conn, schemaOpt);
+    extraRouteList.push(
+      ...buildDesignReviewRoutes({
+        store: reviewStore,
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        adminRoles: new Set(options.designReviewRoles),
+        assessRisk: assessManifestRisk,
+      }),
+    );
+  }
   // In-product AI Architect: /v1/ai routes let a tenant admin describe their business, get a
   // kernel-validated manifest proposal (meta.operate_tenant_manifests), and activate it as the
   // tenant's live system. The designer resolves from env (Anthropic → OpenAI, OPENAI_BASE_URL
@@ -488,7 +507,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         "[ai-design] no AI provider configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY); POST /v1/ai/design will answer 503",
       );
     }
-    const store = manifestStore;
+    // With review required, a new proposal must enter the queue as `pending` — otherwise it
+    // keeps the default `not_required`, the activation gate denies it forever, and it never
+    // appears for a reviewer. Enrolment is best-effort: a failure never loses the proposal.
+    const store =
+      options.requireDesignReview && reviewStore !== null
+        ? enrolNewProposalsForReview(manifestStore, {
+            enroller: reviewStore,
+            onError: (err, proposalId) =>
+              console.error(`[design-review] failed to enrol proposal ${proposalId} for review`, err),
+          })
+        : manifestStore;
     // Async design: a durable job row carries live phase/attempt/progress so the wizard polls
     // instead of blocking ~a minute on one request. The job survives the client disconnecting
     // and is readable from any replica.
@@ -516,6 +545,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         onActivated: (tenantId) => gatewayCache?.invalidate(tenantId),
         summarize: manifestSummary,
         ...(budget !== undefined ? { budget } : {}),
+        ...(options.requireDesignReview && reviewStore !== null ? { reviewGate: reviewStore } : {}),
         ...(designJobs !== undefined && designer !== null
           ? {
               jobs: designJobs,

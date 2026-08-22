@@ -1092,6 +1092,45 @@ describe("table column shapes", () => {
     );
   });
 
+  it("META_OPERATE_TENANT_MANIFESTS carries the platform review columns", () => {
+    const byName = (n: string) => META_OPERATE_TENANT_MANIFESTS.columns.find((c) => c.name === n);
+    const review = byName("review_status");
+    expect(review?.notNull).toBe(true);
+    expect(review?.default).toBe("'not_required'");
+    for (const s of ["not_required", "pending", "approved", "rejected"]) {
+      expect(review?.check).toContain(`'${s}'`);
+    }
+    expect(byName("reviewed_by")?.notNull).toBe(false);
+    expect(byName("reviewed_at")?.notNull).toBe(false);
+    expect(byName("review_notes")?.notNull).toBe(false);
+  });
+
+  it("META_OPERATE_TENANT_MANIFESTS indexes the pending review queue", () => {
+    const idx = META_OPERATE_TENANT_MANIFESTS.indexes?.find(
+      (i) => i.name === "idx_operate_tenant_manifests_review_queue",
+    );
+    expect(idx?.columns).toEqual(["created_at"]);
+    expect(idx?.where).toBe("review_status = 'pending'");
+    expect(idx?.unique).toBeUndefined();
+  });
+
+  it("META_OPERATE_TENANT_MANIFESTS allows an explicit platform-review escape from tenant isolation", () => {
+    const policy = META_OPERATE_TENANT_MANIFESTS.rls?.policies[0];
+    expect(policy?.name).toBe("operate_tenant_manifests_tenant_or_platform_review");
+    // Tenant isolation still holds by default; the cross-tenant read requires a
+    // transaction-scoped flag the platform review store sets and nothing else does.
+    expect(policy?.using).toContain("tenant_id = current_setting('app.current_tenant_id', true)::UUID");
+    expect(policy?.using).toContain("current_setting('app.platform_review', true) = 'on'");
+    const statements = emitMetaBootstrapSql();
+    expect(
+      statements.some(
+        (s) =>
+          s.includes("operate_tenant_manifests_tenant_or_platform_review") &&
+          s.includes("current_setting('app.platform_review', true) = 'on'"),
+      ),
+    ).toBe(true);
+  });
+
   it("META_INCIDENT_POSTMORTEMS enforces PM-YYYY-NNNN pattern + four-status enum", () => {
     const pid = META_INCIDENT_POSTMORTEMS.columns.find((c) => c.name === "postmortem_id");
     expect(pid?.check).toContain("PM-");
