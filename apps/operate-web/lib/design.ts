@@ -31,9 +31,44 @@ export interface ProposalSummary {
   readonly entities: ReadonlyArray<ProposalEntitySummary>;
 }
 
+export type DesignSummary = ProposalSummary;
+
 export interface DesignResult {
   readonly proposal: Proposal;
   readonly summary: ProposalSummary;
+}
+
+export type DesignJobStatus = "queued" | "running" | "succeeded" | "failed";
+
+export type DesignJobPhase =
+  | "queued"
+  | "generating"
+  | "validating"
+  | "retrying"
+  | "done"
+  | "error";
+
+export interface DesignJob {
+  readonly id: string;
+  readonly status: DesignJobStatus;
+  readonly phase: DesignJobPhase;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly name: string;
+  readonly description: string;
+  readonly outputChars: number;
+  readonly issues: ReadonlyArray<string>;
+  readonly proposalId: string | null;
+  readonly providerLabel: string | null;
+  readonly error: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface DesignJobPoll {
+  readonly job: DesignJob;
+  readonly proposal?: Proposal | null;
+  readonly summary?: DesignSummary | null;
 }
 
 export interface DesignInput {
@@ -46,13 +81,25 @@ export interface ProposalPage {
   readonly nextCursor: string | null;
 }
 
-export type DesignErrorKind = "design_failed" | "ai_unavailable" | "http";
+export type DesignErrorKind =
+  | "design_failed"
+  | "ai_unavailable"
+  | "async_unavailable"
+  | "ai_budget_exceeded"
+  | "http";
+
+export interface DesignErrorDetails {
+  readonly spentUsd?: number;
+  readonly limitUsd?: number;
+}
 
 export class DesignError extends Error {
   readonly kind: DesignErrorKind;
   readonly status: number;
   readonly issues: ReadonlyArray<string>;
   readonly attempts: number | undefined;
+  readonly spentUsd: number | undefined;
+  readonly limitUsd: number | undefined;
 
   constructor(
     kind: DesignErrorKind,
@@ -60,6 +107,7 @@ export class DesignError extends Error {
     message: string,
     issues: ReadonlyArray<string> = [],
     attempts?: number,
+    details: DesignErrorDetails = {},
   ) {
     super(message);
     this.name = "DesignError";
@@ -67,6 +115,8 @@ export class DesignError extends Error {
     this.status = status;
     this.issues = issues;
     this.attempts = attempts;
+    this.spentUsd = details.spentUsd;
+    this.limitUsd = details.limitUsd;
   }
 }
 
@@ -74,11 +124,15 @@ function apiPath(suffix = ""): string {
   return `/api/v1/ai${suffix}`;
 }
 
+const NO_PROVIDER = "No AI provider is configured on the server.";
+const NO_ASYNC = "Background design is not enabled on this server.";
+
 async function throwDesignError(res: Response): Promise<never> {
   let message = res.statusText || `Request failed (${res.status})`;
   let kind: DesignErrorKind = res.status === 503 ? "ai_unavailable" : "http";
   let issues: string[] = [];
   let attempts: number | undefined;
+  let details: DesignErrorDetails = {};
   try {
     const text = await res.text();
     if (text !== "") {
@@ -87,6 +141,8 @@ async function throwDesignError(res: Response): Promise<never> {
           error?: unknown;
           issues?: unknown;
           attempts?: unknown;
+          spentUsd?: unknown;
+          limitUsd?: unknown;
           detail?: unknown;
           title?: unknown;
           message?: unknown;
@@ -98,26 +154,38 @@ async function throwDesignError(res: Response): Promise<never> {
           }
           if (typeof body.attempts === "number") attempts = body.attempts;
           message = "The AI could not produce a valid system from that description.";
+        } else if (res.status === 402 && body.error === "ai_budget_exceeded") {
+          kind = "ai_budget_exceeded";
+          details = {
+            spentUsd: typeof body.spentUsd === "number" ? body.spentUsd : undefined,
+            limitUsd: typeof body.limitUsd === "number" ? body.limitUsd : undefined,
+          };
+          message = "The monthly AI budget for this workspace is exhausted.";
+        } else if (res.status === 503 && body.error === "async_unavailable") {
+          kind = "async_unavailable";
+          message = NO_ASYNC;
+        } else if (res.status === 404 && body.error === "job_not_found") {
+          message = "That design job is no longer available on the server.";
         } else if (kind === "ai_unavailable") {
-          message = "No AI provider is configured on the server.";
+          message = NO_PROVIDER;
         } else {
           const picked = body.detail ?? body.title ?? body.message ?? body.error;
           message = typeof picked === "string" && picked.trim() !== "" ? picked : text;
         }
       } catch {
         if (kind === "ai_unavailable") {
-          message = "No AI provider is configured on the server.";
+          message = NO_PROVIDER;
         } else {
           message = text;
         }
       }
     } else if (kind === "ai_unavailable") {
-      message = "No AI provider is configured on the server.";
+      message = NO_PROVIDER;
     }
   } catch {
     // keep the status-line fallback
   }
-  throw new DesignError(kind, res.status, message, issues, attempts);
+  throw new DesignError(kind, res.status, message, issues, attempts, details);
 }
 
 export async function designSystem(input: DesignInput): Promise<DesignResult> {
@@ -130,6 +198,30 @@ export async function designSystem(input: DesignInput): Promise<DesignResult> {
   });
   if (!res.ok) await throwDesignError(res);
   return (await res.json()) as DesignResult;
+}
+
+export async function startDesignJob(input: DesignInput): Promise<DesignJob> {
+  const body: { description: string; name?: string } = { description: input.description };
+  if (input.name !== undefined && input.name.trim() !== "") body.name = input.name.trim();
+  const res = await fetch(apiPath("/design/jobs"), {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) await throwDesignError(res);
+  const json = (await res.json()) as { job: DesignJob };
+  return json.job;
+}
+
+export async function getDesignJob(id: string): Promise<DesignJobPoll> {
+  const res = await fetch(apiPath(`/design/jobs/${encodeURIComponent(id)}`), {
+    headers: { accept: "application/json" },
+    // A poll must never be served from the bfcache/HTTP cache: a stale 200
+    // would freeze the progress panel on an old phase forever.
+    cache: "no-store",
+  });
+  if (!res.ok) await throwDesignError(res);
+  return (await res.json()) as DesignJobPoll;
 }
 
 export async function listProposals(): Promise<ProposalPage> {

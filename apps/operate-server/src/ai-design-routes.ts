@@ -3,6 +3,8 @@ import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gat
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
+import { DESIGN_JOB_MAX_ATTEMPTS, type DesignJobStoreLike } from "./design-runner.js";
+
 export const AI_MANIFEST_STATUSES = ["draft", "active", "archived"] as const;
 export type AiManifestStatus = (typeof AI_MANIFEST_STATUSES)[number];
 
@@ -81,6 +83,13 @@ export interface AiDesignContext {
     record(tenantId: string, costUsd: number): Promise<number>;
   };
   readonly summarize: (manifest: Record<string, unknown>) => unknown;
+  /** Async design mode. Both must be wired or the job routes self-503. */
+  readonly jobs?: DesignJobStoreLike;
+  readonly startJob?: (
+    tenantId: string,
+    jobId: string,
+    input: { description: string; name: string },
+  ) => void;
 }
 
 export const DesignRequestSchema = z.object({
@@ -175,6 +184,68 @@ function buildDesignHandler(ctx: AiDesignContext): Handler {
   };
 }
 
+function buildDesignJobCreateHandler(ctx: AiDesignContext): Handler {
+  return async ({ principal, parsedBody }) => {
+    const denial = guard(ctx, principal);
+    if (denial !== null) return denial;
+    const tenant = tenantOf(principal);
+    if (tenant === null) return json(400, { error: "tenant_required" });
+    if (ctx.designer === null) {
+      return json(503, { error: "ai_unavailable", detail: "no AI provider configured" });
+    }
+    const { jobs, startJob } = ctx;
+    if (jobs === undefined || startJob === undefined) {
+      return json(503, { error: "async_unavailable", detail: "no design job store configured" });
+    }
+    const parsed = DesignRequestSchema.safeParse(parsedBody ?? {});
+    if (!parsed.success) return json(400, { error: "invalid_request", detail: parsed.error.issues });
+    // Same spend gate as the synchronous route: enqueueing must not be a way around it.
+    if (ctx.budget !== undefined) {
+      const budget = await ctx.budget.check(tenant);
+      if (!budget.allowed) {
+        return json(402, {
+          error: "ai_budget_exceeded",
+          detail: `monthly AI design budget of $${budget.limitUsd.toString()} is exhausted`,
+          spentUsd: budget.spentUsd,
+          limitUsd: budget.limitUsd,
+        });
+      }
+    }
+    const name = parsed.data.name ?? DEFAULT_PROPOSAL_NAME;
+    const job = await jobs.create(tenant, {
+      name,
+      description: parsed.data.description,
+      maxAttempts: DESIGN_JOB_MAX_ATTEMPTS,
+    });
+    startJob(tenant, job.id, { description: parsed.data.description, name });
+    return json(202, { job });
+  };
+}
+
+function buildDesignJobGetHandler(ctx: AiDesignContext): Handler {
+  return async ({ principal, params }) => {
+    const denial = guard(ctx, principal);
+    if (denial !== null) return denial;
+    const tenant = tenantOf(principal);
+    if (tenant === null) return json(400, { error: "tenant_required" });
+    const { jobs } = ctx;
+    if (jobs === undefined) {
+      return json(503, { error: "async_unavailable", detail: "no design job store configured" });
+    }
+    const id = params["id"] ?? "";
+    const job = await jobs.getById(tenant, id);
+    if (job === null) return json(404, { error: "job_not_found", detail: id });
+    if (job.status !== "succeeded" || job.proposalId === null) return json(200, { job });
+    // Hand the wizard the finished proposal in the same poll it learns the job is done.
+    const proposal = await ctx.store.getById(tenant, job.proposalId);
+    return json(200, {
+      job,
+      proposal,
+      summary: proposal === null ? null : ctx.summarize(proposal.manifest),
+    });
+  };
+}
+
 function buildListHandler(ctx: AiDesignContext): Handler {
   return async (input) => {
     const denial = guard(ctx, input.principal);
@@ -236,7 +307,11 @@ function buildArchiveHandler(ctx: AiDesignContext): Handler {
   };
 }
 
-/** The in-product AI Architect routes to inject via the gateway's `extraRoutes` hook. */
+/**
+ * The in-product AI Architect routes to inject via the gateway's `extraRoutes` hook.
+ * The table is fixed at seven routes whether or not async mode is wired — the job
+ * handlers self-503 — so the route table never varies with deployment config.
+ */
 export function buildAiDesignRoutes(ctx: AiDesignContext): readonly ExtraGatewayRoute[] {
   const v = (
     op: string,
@@ -246,6 +321,13 @@ export function buildAiDesignRoutes(ctx: AiDesignContext): readonly ExtraGateway
   ): ExtraGatewayRoute => ({ route: route(op, method, segs), handler });
   return [
     v("ai.design", "POST", ["v1", "ai", "design"], buildDesignHandler(ctx)),
+    v("ai.design.jobs.create", "POST", ["v1", "ai", "design", "jobs"], buildDesignJobCreateHandler(ctx)),
+    v(
+      "ai.design.jobs.get",
+      "GET",
+      ["v1", "ai", "design", "jobs", { param: "id" }],
+      buildDesignJobGetHandler(ctx),
+    ),
     v("ai.manifests.list", "GET", ["v1", "ai", "manifests"], buildListHandler(ctx)),
     v("ai.manifests.get", "GET", ["v1", "ai", "manifests", { param: "id" }], buildGetHandler(ctx)),
     v(

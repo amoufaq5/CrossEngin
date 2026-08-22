@@ -41,14 +41,28 @@ export interface DesignResult {
   usage: DesignUsage | null;
 }
 
+export type DesignPhase = "generating" | "validating" | "retrying";
+
+export interface DesignProgress {
+  readonly phase: DesignPhase;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly outputChars: number;
+  readonly issues: readonly string[];
+}
+
+export type DesignProgressListener = (progress: DesignProgress) => void;
+
 export type ManifestDesigner = (input: {
   description: string;
   name?: string;
+  onProgress?: DesignProgressListener;
 }) => Promise<DesignResult>;
 
 export const MAX_DESIGN_DESCRIPTION_CHARS = 4000;
 export const MAX_DESIGN_ATTEMPTS = 3;
 export const MAX_DESIGN_RESPONSE_CHARS = 262144;
+export const DESIGN_PROGRESS_CHARS_STEP = 400;
 
 const DEFAULT_DESIGN_MAX_TOKENS = 8192;
 const MAX_FEEDBACK_ISSUES = 10;
@@ -303,10 +317,21 @@ export async function designManifest(opts: {
   maxAttempts?: number;
   providerLabel?: string | null;
   ensureRoles?: readonly string[];
+  onProgress?: DesignProgressListener;
 }): Promise<DesignResult> {
   const providerLabel = opts.providerLabel ?? null;
   const maxAttempts = opts.maxAttempts ?? MAX_DESIGN_ATTEMPTS;
   const maxTokens = opts.maxTokens ?? DEFAULT_DESIGN_MAX_TOKENS;
+  const onProgress = opts.onProgress;
+
+  const emit = (progress: DesignProgress): void => {
+    if (onProgress === undefined) return;
+    try {
+      onProgress(progress);
+    } catch {
+      // Progress is observational: a caller's listener must never abort a design run.
+    }
+  };
 
   if (opts.description.length > MAX_DESIGN_DESCRIPTION_CHARS) {
     return {
@@ -340,6 +365,24 @@ export async function designManifest(opts: {
 
   while (attempts < maxAttempts) {
     attempts += 1;
+    const attemptNumber = attempts;
+    const emitRetrying = (reason: readonly string[], outputChars: number): void => {
+      if (attemptNumber >= maxAttempts) return;
+      emit({
+        phase: "retrying",
+        attempt: attemptNumber,
+        maxAttempts,
+        outputChars,
+        issues: reason,
+      });
+    };
+    emit({
+      phase: "generating",
+      attempt: attemptNumber,
+      maxAttempts,
+      outputChars: 0,
+      issues: [],
+    });
     const request: CompletionRequest = {
       task: "planner",
       messages: [...messages],
@@ -352,6 +395,7 @@ export async function designManifest(opts: {
 
     let text = "";
     let oversized = false;
+    let lastEmittedChars = 0;
     try {
       for await (const chunk of opts.provider.complete(request)) {
         if (chunk.kind === "text") {
@@ -360,17 +404,29 @@ export async function designManifest(opts: {
             oversized = true;
             break;
           }
+          if (text.length - lastEmittedChars >= DESIGN_PROGRESS_CHARS_STEP) {
+            lastEmittedChars = text.length;
+            emit({
+              phase: "generating",
+              attempt: attemptNumber,
+              maxAttempts,
+              outputChars: text.length,
+              issues: [],
+            });
+          }
         } else if (chunk.kind === "usage_final") {
           usage = addUsage(usage, chunk.usage);
         }
       }
     } catch (err) {
       issues = [`provider error: ${err instanceof Error ? err.message : String(err)}`];
+      emitRetrying(issues, text.length);
       continue;
     }
 
     if (oversized) {
       issues = [`model response exceeded ${MAX_DESIGN_RESPONSE_CHARS} chars`];
+      emitRetrying(issues, text.length);
       messages.push({
         role: "user",
         content:
@@ -382,6 +438,7 @@ export async function designManifest(opts: {
     const extracted = extractJsonObject(text);
     if (extracted === null) {
       issues = ["model output did not contain a parseable JSON object"];
+      emitRetrying(issues, text.length);
       messages.push({ role: "assistant", content: truncate(text, MAX_ASSISTANT_ECHO_CHARS) });
       messages.push({
         role: "user",
@@ -390,6 +447,14 @@ export async function designManifest(opts: {
       });
       continue;
     }
+
+    emit({
+      phase: "validating",
+      attempt: attemptNumber,
+      maxAttempts,
+      outputChars: text.length,
+      issues: [],
+    });
 
     const normalized = ensureRolesInManifest(
       normalizeGeneratedManifest(extracted, opts.name !== undefined ? { name: opts.name } : {}),
@@ -400,6 +465,7 @@ export async function designManifest(opts: {
       issues = parsed.error.issues
         .slice(0, MAX_FEEDBACK_ISSUES)
         .map((issue) => `${issue.path.join(".")}: ${issue.message}`);
+      emitRetrying(issues, text.length);
       messages.push({ role: "assistant", content: truncate(text, MAX_ASSISTANT_ECHO_CHARS) });
       messages.push({ role: "user", content: correctiveMessage(issues) });
       continue;
@@ -424,6 +490,7 @@ export async function designManifest(opts: {
       // validateManifest throws non-ManifestValidationError kinds (e.g. cycle errors) past tryValidateManifest
       issues = [err instanceof Error ? err.message : String(err)];
     }
+    emitRetrying(issues, text.length);
     messages.push({ role: "assistant", content: truncate(text, MAX_ASSISTANT_ECHO_CHARS) });
     messages.push({ role: "user", content: correctiveMessage(issues) });
   }
@@ -445,9 +512,17 @@ export function buildDesignDesigner(opts: {
   maxTokens?: number;
   providerLabel?: string | null;
   ensureRoles?: readonly string[];
+  onProgress?: DesignProgressListener;
 }): ManifestDesigner {
-  return async (input: { description: string; name?: string }): Promise<DesignResult> =>
-    designManifest({
+  return async (input: {
+    description: string;
+    name?: string;
+    onProgress?: DesignProgressListener;
+  }): Promise<DesignResult> => {
+    // A per-call listener replaces the builder-level one rather than composing with it,
+    // so one invocation's progress never leaks into another caller's stream.
+    const listener = input.onProgress ?? opts.onProgress;
+    return designManifest({
       provider: opts.provider,
       description: input.description,
       ...(input.name !== undefined ? { name: input.name } : {}),
@@ -455,7 +530,9 @@ export function buildDesignDesigner(opts: {
       ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
       ...(opts.providerLabel !== undefined ? { providerLabel: opts.providerLabel } : {}),
       ...(opts.ensureRoles !== undefined ? { ensureRoles: opts.ensureRoles } : {}),
+      ...(listener !== undefined ? { onProgress: listener } : {}),
     });
+  };
 }
 
 export function buildDesignProviderFromEnv(

@@ -14,6 +14,13 @@ import {
   type DesignResultLike,
   type ManifestDesignerLike,
 } from "./ai-design-routes.js";
+import {
+  DESIGN_JOB_MAX_ATTEMPTS,
+  type DesignJobCreateInput,
+  type DesignJobProgressInput,
+  type DesignJobRecordLike,
+  type DesignJobStoreLike,
+} from "./design-runner.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const OTHER_TENANT = "00000000-0000-4000-8000-000000000002";
@@ -85,6 +92,97 @@ class FakeStore implements AiManifestStore {
     const next: AiManifestRecordLike = { ...record, status: "active", activatedAt: now, updatedAt: now };
     this.records.set(id, next);
     return next;
+  }
+}
+
+class FakeJobStore implements DesignJobStoreLike {
+  readonly records = new Map<string, DesignJobRecordLike>();
+  readonly createCalls: Array<{ tenantId: string; input: DesignJobCreateInput }> = [];
+  private seq = 0;
+
+  async create(tenantId: string, input: DesignJobCreateInput): Promise<DesignJobRecordLike> {
+    this.createCalls.push({ tenantId, input });
+    this.seq += 1;
+    const at = new Date(Date.UTC(2026, 5, 1) + this.seq * 1000).toISOString();
+    const record: DesignJobRecordLike = {
+      id: `adj_${String(this.seq).padStart(4, "0")}`,
+      tenantId,
+      status: "queued",
+      phase: "queued",
+      attempt: 0,
+      maxAttempts: input.maxAttempts,
+      name: input.name,
+      description: input.description,
+      outputChars: 0,
+      issues: [],
+      proposalId: null,
+      providerLabel: null,
+      error: null,
+      createdAt: at,
+      updatedAt: at,
+    };
+    this.records.set(record.id, record);
+    return record;
+  }
+
+  async getById(tenantId: string, id: string): Promise<DesignJobRecordLike | null> {
+    const record = this.records.get(id);
+    if (record === undefined || record.tenantId !== tenantId) return null;
+    return record;
+  }
+
+  private async patch(
+    tenantId: string,
+    id: string,
+    patch: Partial<DesignJobRecordLike>,
+  ): Promise<DesignJobRecordLike | null> {
+    const record = await this.getById(tenantId, id);
+    if (record === null) return null;
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+    const next: DesignJobRecordLike = { ...record, ...defined, updatedAt: new Date().toISOString() };
+    this.records.set(id, next);
+    return next;
+  }
+
+  async updateProgress(
+    tenantId: string,
+    id: string,
+    input: DesignJobProgressInput,
+  ): Promise<DesignJobRecordLike | null> {
+    return this.patch(tenantId, id, {
+      status: input.status,
+      phase: input.phase,
+      attempt: input.attempt,
+      outputChars: input.outputChars,
+      issues: input.issues,
+    });
+  }
+
+  async succeed(
+    tenantId: string,
+    id: string,
+    input: { proposalId: string; providerLabel: string | null },
+  ): Promise<DesignJobRecordLike | null> {
+    return this.patch(tenantId, id, {
+      status: "succeeded",
+      phase: "done",
+      proposalId: input.proposalId,
+      providerLabel: input.providerLabel,
+    });
+  }
+
+  async fail(
+    tenantId: string,
+    id: string,
+    input: { error: string; issues?: readonly string[]; providerLabel?: string | null },
+  ): Promise<DesignJobRecordLike | null> {
+    return this.patch(tenantId, id, {
+      status: "failed",
+      phase: "error",
+      error: input.error,
+      issues: input.issues ?? [],
+      providerLabel: input.providerLabel ?? null,
+    });
   }
 }
 
@@ -176,6 +274,41 @@ async function draftId(ctx: AiDesignContext & { store: FakeStore }, description 
   return (out.body["proposal"] as { id: string }).id;
 }
 
+const ALL_OPS = [
+  "ai.design",
+  "ai.design.jobs.create",
+  "ai.design.jobs.get",
+  "ai.manifests.list",
+  "ai.manifests.get",
+  "ai.manifests.activate",
+  "ai.manifests.archive",
+] as const;
+
+interface StartedJob {
+  readonly tenantId: string;
+  readonly jobId: string;
+  readonly input: { description: string; name: string };
+}
+
+interface JobCtx {
+  readonly ctx: AiDesignContext & { store: FakeStore; jobs: FakeJobStore };
+  readonly jobs: FakeJobStore;
+  readonly started: StartedJob[];
+}
+
+function makeJobCtx(overrides: CtxOverrides = {}): JobCtx {
+  const jobs = new FakeJobStore();
+  const started: StartedJob[] = [];
+  const ctx = {
+    ...makeCtx(overrides),
+    jobs,
+    startJob: (tenantId: string, jobId: string, input: { description: string; name: string }): void => {
+      started.push({ tenantId, jobId, input });
+    },
+  };
+  return { ctx, jobs, started };
+}
+
 function pathOf(route: { pathSegments: readonly unknown[] }): string {
   return (route.pathSegments as ReadonlyArray<{ kind: string; value?: string; name?: string }>)
     .map((s) => (s.kind === "literal" ? String(s.value) : `:${String(s.name)}`))
@@ -183,24 +316,31 @@ function pathOf(route: { pathSegments: readonly unknown[] }): string {
 }
 
 describe("ai-design-routes — route table", () => {
-  it("builds exactly the five AI Architect routes with exact ids, methods, and paths", () => {
+  it("builds exactly the seven AI Architect routes with exact ids, methods, and paths", () => {
     const routes = buildAiDesignRoutes(makeCtx());
-    expect(routes).toHaveLength(5);
+    expect(routes).toHaveLength(7);
     const table = routes.map((r) => [r.route.operationId, r.route.method, pathOf(r.route)]);
     expect(table).toEqual([
       ["ai.design", "POST", "v1/ai/design"],
+      ["ai.design.jobs.create", "POST", "v1/ai/design/jobs"],
+      ["ai.design.jobs.get", "GET", "v1/ai/design/jobs/:id"],
       ["ai.manifests.list", "GET", "v1/ai/manifests"],
       ["ai.manifests.get", "GET", "v1/ai/manifests/:id"],
       ["ai.manifests.activate", "POST", "v1/ai/manifests/:id/activate"],
       ["ai.manifests.archive", "POST", "v1/ai/manifests/:id/archive"],
     ]);
   });
+
+  it("keeps the route table stable when async mode is not wired", () => {
+    expect(buildAiDesignRoutes(makeCtx())).toHaveLength(7);
+    expect(buildAiDesignRoutes(makeJobCtx().ctx)).toHaveLength(7);
+  });
 });
 
 describe("ai-design-routes — auth gating", () => {
   it("401s an unauthenticated caller on every route", async () => {
     const ctx = makeCtx();
-    for (const op of ["ai.design", "ai.manifests.list", "ai.manifests.get", "ai.manifests.activate", "ai.manifests.archive"]) {
+    for (const op of ALL_OPS) {
       const out = (await findHandler(ctx, op)(input(null, { params: { id: "aim_0001" } }))) as JsonOut;
       expect(out.status).toBe(401);
       expect(out.body["error"]).toBe("authentication_required");
@@ -209,7 +349,7 @@ describe("ai-design-routes — auth gating", () => {
 
   it("403s a caller without an allowed role on every route", async () => {
     const ctx = makeCtx();
-    for (const op of ["ai.design", "ai.manifests.list", "ai.manifests.get", "ai.manifests.activate", "ai.manifests.archive"]) {
+    for (const op of ALL_OPS) {
       const out = (await findHandler(ctx, op)(input("cashier", { params: { id: "aim_0001" } }))) as JsonOut;
       expect(out.status).toBe(403);
       expect(out.body["error"]).toBe("forbidden");
@@ -225,9 +365,16 @@ describe("ai-design-routes — auth gating", () => {
     expect(out.body["error"]).toBe("tenant_required");
   });
 
-  it("400s a tenantless principal on list, get, activate, and archive", async () => {
+  it("400s a tenantless principal on list, get, activate, archive, and the job routes", async () => {
     const ctx = makeCtx();
-    for (const op of ["ai.manifests.list", "ai.manifests.get", "ai.manifests.activate", "ai.manifests.archive"]) {
+    for (const op of [
+      "ai.manifests.list",
+      "ai.manifests.get",
+      "ai.manifests.activate",
+      "ai.manifests.archive",
+      "ai.design.jobs.create",
+      "ai.design.jobs.get",
+    ]) {
       const out = (await findHandler(ctx, op)(
         input("tenant_admin", { params: { id: "aim_0001" }, tenantId: null }),
       )) as JsonOut;
@@ -531,5 +678,205 @@ describe("ai-design routes — spend ceiling", () => {
   it("is a no-op when no budget is configured", async () => {
     const out = await design(makeCtx(), { description: "a coffee shop" });
     expect(out.status).toBe(201);
+  });
+});
+
+async function createJob(ctx: AiDesignContext, body: Record<string, unknown>): Promise<JsonOut> {
+  return (await findHandler(ctx, "ai.design.jobs.create")(input("tenant_admin", { body }))) as JsonOut;
+}
+
+async function getJob(ctx: AiDesignContext, id: string): Promise<JsonOut> {
+  return (await findHandler(ctx, "ai.design.jobs.get")(input("tenant_admin", { params: { id } }))) as JsonOut;
+}
+
+describe("ai-design-routes — async job create", () => {
+  it("202s, persists a queued job, and hands it to the runner", async () => {
+    const { ctx, jobs, started } = makeJobCtx();
+    const out = await createJob(ctx, { description: "A CRM for plumbers", name: "Plumber CRM" });
+    expect(out.status).toBe(202);
+    const job = out.body["job"] as DesignJobRecordLike;
+    expect(job.status).toBe("queued");
+    expect(job.phase).toBe("queued");
+    expect(job.tenantId).toBe(TENANT);
+    expect(jobs.createCalls).toEqual([
+      {
+        tenantId: TENANT,
+        input: {
+          name: "Plumber CRM",
+          description: "A CRM for plumbers",
+          maxAttempts: DESIGN_JOB_MAX_ATTEMPTS,
+        },
+      },
+    ]);
+    expect(started).toEqual([
+      { tenantId: TENANT, jobId: job.id, input: { description: "A CRM for plumbers", name: "Plumber CRM" } },
+    ]);
+  });
+
+  it("defaults the job name and passes the same default to the runner", async () => {
+    const { ctx, started } = makeJobCtx();
+    const out = await createJob(ctx, { description: "A CRM" });
+    expect((out.body["job"] as DesignJobRecordLike).name).toBe(DEFAULT_PROPOSAL_NAME);
+    expect(started[0]?.input.name).toBe(DEFAULT_PROPOSAL_NAME);
+  });
+
+  it("does not call the synchronous designer — the runner owns that", async () => {
+    let calls = 0;
+    const { ctx } = makeJobCtx({
+      designer: async (i) => {
+        calls += 1;
+        return okDesigner()(i);
+      },
+    });
+    await createJob(ctx, { description: "A CRM" });
+    expect(calls).toBe(0);
+  });
+
+  it("400s an invalid body without creating a job", async () => {
+    const { ctx, jobs, started } = makeJobCtx();
+    const missing = await createJob(ctx, {});
+    const oversized = await createJob(ctx, { description: "x".repeat(4001) });
+    expect(missing.status).toBe(400);
+    expect(missing.body["error"]).toBe("invalid_request");
+    expect(oversized.status).toBe(400);
+    expect(jobs.createCalls).toHaveLength(0);
+    expect(started).toHaveLength(0);
+  });
+
+  it("503s ai_unavailable when no designer is configured", async () => {
+    const { ctx, jobs, started } = makeJobCtx({ designer: null });
+    const out = await createJob(ctx, { description: "A CRM" });
+    expect(out.status).toBe(503);
+    expect(out.body).toEqual({ error: "ai_unavailable", detail: "no AI provider configured" });
+    expect(jobs.createCalls).toHaveLength(0);
+    expect(started).toHaveLength(0);
+  });
+
+  it("503s async_unavailable when the job store or the runner hook is missing", async () => {
+    const bare = makeCtx();
+    const jobsOnly = { ...makeCtx(), jobs: new FakeJobStore() };
+    const startOnly = { ...makeCtx(), startJob: (): void => undefined };
+    for (const ctx of [bare, jobsOnly, startOnly]) {
+      const out = await createJob(ctx, { description: "A CRM" });
+      expect(out.status).toBe(503);
+      expect(out.body["error"]).toBe("async_unavailable");
+    }
+  });
+
+  it("402s an exhausted budget and never enqueues the job", async () => {
+    const { ctx: base, jobs, started } = makeJobCtx();
+    const ctx = {
+      ...base,
+      budget: {
+        check: async () => ({ allowed: false, spentUsd: 30, limitUsd: 25 }),
+        record: async (_t: string, c: number) => c,
+      },
+    };
+    const out = await createJob(ctx, { description: "A CRM" });
+    expect(out.status).toBe(402);
+    expect(out.body["error"]).toBe("ai_budget_exceeded");
+    expect(out.body["limitUsd"]).toBe(25);
+    expect(jobs.createCalls).toHaveLength(0);
+    expect(started).toHaveLength(0);
+  });
+
+  it("202s when the budget allows", async () => {
+    const { ctx: base, started } = makeJobCtx();
+    const ctx = {
+      ...base,
+      budget: {
+        check: async () => ({ allowed: true, spentUsd: 1, limitUsd: 25 }),
+        record: async (_t: string, c: number) => c,
+      },
+    };
+    const out = await createJob(ctx, { description: "A CRM" });
+    expect(out.status).toBe(202);
+    expect(started).toHaveLength(1);
+  });
+});
+
+describe("ai-design-routes — async job get", () => {
+  it("200s a running job with its live progress", async () => {
+    const { ctx, jobs } = makeJobCtx();
+    const created = await createJob(ctx, { description: "A CRM" });
+    const id = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.updateProgress(TENANT, id, {
+      status: "running",
+      phase: "validating",
+      attempt: 2,
+      outputChars: 4096,
+      issues: ["entity Lead has no fields"],
+    });
+    const out = await getJob(ctx, id);
+    expect(out.status).toBe(200);
+    const job = out.body["job"] as DesignJobRecordLike;
+    expect(job.status).toBe("running");
+    expect(job.phase).toBe("validating");
+    expect(job.attempt).toBe(2);
+    expect(job.outputChars).toBe(4096);
+    expect(job.issues).toEqual(["entity Lead has no fields"]);
+    expect(out.body["proposal"]).toBeUndefined();
+  });
+
+  it("404s an unknown job", async () => {
+    const { ctx } = makeJobCtx();
+    const out = await getJob(ctx, "adj_9999");
+    expect(out.status).toBe(404);
+    expect(out.body["error"]).toBe("job_not_found");
+  });
+
+  it("404s another tenant's job", async () => {
+    const { ctx, jobs } = makeJobCtx();
+    const other = await jobs.create(OTHER_TENANT, {
+      name: "Other", description: "x", maxAttempts: DESIGN_JOB_MAX_ATTEMPTS,
+    });
+    const out = await getJob(ctx, other.id);
+    expect(out.status).toBe(404);
+  });
+
+  it("includes the proposal and its summary once the job succeeds", async () => {
+    const { ctx, jobs } = makeJobCtx();
+    const proposalId = await draftId(ctx);
+    const created = await createJob(ctx, { description: "A CRM" });
+    const id = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.succeed(TENANT, id, { proposalId, providerLabel: "anthropic/claude-sonnet-4-6" });
+    const out = await getJob(ctx, id);
+    expect(out.status).toBe(200);
+    expect((out.body["job"] as DesignJobRecordLike).status).toBe("succeeded");
+    expect((out.body["proposal"] as AiManifestRecordLike).id).toBe(proposalId);
+    expect(out.body["summary"]).toEqual({ keys: ["entities", "meta"] });
+  });
+
+  it("200s a succeeded job whose proposal was since deleted", async () => {
+    const { ctx, jobs } = makeJobCtx();
+    const proposalId = await draftId(ctx);
+    const created = await createJob(ctx, { description: "A CRM" });
+    const id = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.succeed(TENANT, id, { proposalId, providerLabel: null });
+    ctx.store.records.delete(proposalId);
+    const out = await getJob(ctx, id);
+    expect(out.status).toBe(200);
+    expect(out.body["proposal"]).toBeNull();
+    expect(out.body["summary"]).toBeNull();
+  });
+
+  it("200s a failed job with its error and issues, and no proposal lookup", async () => {
+    const { ctx, jobs } = makeJobCtx();
+    const created = await createJob(ctx, { description: "A CRM" });
+    const id = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.fail(TENANT, id, { error: "design failed after 3 attempts", issues: ["invalid slug"] });
+    const out = await getJob(ctx, id);
+    expect(out.status).toBe(200);
+    const job = out.body["job"] as DesignJobRecordLike;
+    expect(job.status).toBe("failed");
+    expect(job.phase).toBe("error");
+    expect(job.error).toBe("design failed after 3 attempts");
+    expect(out.body).not.toHaveProperty("proposal");
+  });
+
+  it("503s async_unavailable when no job store is wired", async () => {
+    const out = await getJob(makeCtx(), "adj_0001");
+    expect(out.status).toBe(503);
+    expect(out.body["error"]).toBe("async_unavailable");
   });
 });
