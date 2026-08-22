@@ -9854,6 +9854,16 @@ export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
       check: "source IN ('ai', 'manual')",
     },
     { name: "provider_label", type: "TEXT", notNull: false },
+    {
+      name: "review_status",
+      type: "TEXT",
+      notNull: true,
+      default: "'not_required'",
+      check: "review_status IN ('not_required', 'pending', 'approved', 'rejected')",
+    },
+    { name: "reviewed_by", type: "TEXT", notNull: false },
+    { name: "reviewed_at", type: "TIMESTAMPTZ", notNull: false },
+    { name: "review_notes", type: "TEXT", notNull: false },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "activated_at", type: "TIMESTAMPTZ", notNull: false },
@@ -9867,11 +9877,23 @@ export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
       unique: true,
       where: "status = 'active'",
     },
+    {
+      name: "idx_operate_tenant_manifests_review_queue",
+      columns: ["created_at"],
+      where: "review_status = 'pending'",
+    },
   ],
   rls: {
     enabled: true,
     policies: [
-      { name: "operate_tenant_manifests_tenant_isolation", using: TENANT_ISOLATION_USING },
+      {
+        // A platform reviewer must read + decide proposals across every tenant. Rather than
+        // relying on the API connecting as the table owner (which bypasses RLS silently), the
+        // cross-tenant path is an explicit, auditable opt-in: a transaction-scoped
+        // `app.platform_review` flag the platform store sets and nothing else does.
+        name: "operate_tenant_manifests_tenant_or_platform_review",
+        using: `${TENANT_ISOLATION_USING} OR current_setting('app.platform_review', true) = 'on'`,
+      },
     ],
   },
 };
