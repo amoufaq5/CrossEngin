@@ -69,6 +69,8 @@ import {
   PostgresActivationWatermarkSource,
 } from "./manifest-activation-poller.js";
 import { DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, buildAiDesignBudget } from "./ai-design-budget.js";
+import { PostgresDesignJobStore } from "./design-jobs.js";
+import { startDesignJob } from "./design-runner.js";
 import { PostgresTenantCostStore } from "@crossengin/ai-architect-runtime-pg";
 import { loadResidencyDirectory } from "./residency-source.js";
 import type { Region } from "@crossengin/residency";
@@ -487,6 +489,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     }
     const store = manifestStore;
+    // Async design: a durable job row carries live phase/attempt/progress so the wizard polls
+    // instead of blocking ~a minute on one request. The job survives the client disconnecting
+    // and is readable from any replica.
+    const designJobs = conn !== undefined ? new PostgresDesignJobStore(conn, schemaOpt) : undefined;
     // Durable per-tenant monthly spend ceiling over meta.architect_tenant_cost (the same ledger
     // the Architect CLI writes), so a design loop can't run up an unbounded bill and the limit
     // holds across replicas and restarts.
@@ -510,6 +516,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         onActivated: (tenantId) => gatewayCache?.invalidate(tenantId),
         summarize: manifestSummary,
         ...(budget !== undefined ? { budget } : {}),
+        ...(designJobs !== undefined && designer !== null
+          ? {
+              jobs: designJobs,
+              startJob: (tenantId: string, jobId: string, input: { description: string; name: string }): void =>
+                startDesignJob(
+                  {
+                    jobs: designJobs,
+                    manifests: store,
+                    designer,
+                    ...(budget !== undefined ? { budget } : {}),
+                    onError: (err) => console.error(`[ai-design] job ${jobId} failed`, err),
+                  },
+                  tenantId,
+                  jobId,
+                  input,
+                ),
+            }
+          : {}),
       }),
     );
   }
