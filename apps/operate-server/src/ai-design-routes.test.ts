@@ -14,6 +14,7 @@ import {
   type DesignResultLike,
   type ManifestDesignerLike,
 } from "./ai-design-routes.js";
+import type { ReviewStatusLike } from "./design-review-routes.js";
 import {
   DESIGN_JOB_MAX_ATTEMPTS,
   type DesignJobCreateInput,
@@ -574,6 +575,119 @@ describe("ai-design-routes — activate", () => {
       input("tenant_admin", { params: { id: other.id } }),
     )) as JsonOut;
     expect(out.status).toBe(404);
+  });
+});
+
+describe("ai-design-routes — activation review gate", () => {
+  interface GateHarness {
+    readonly ctx: AiDesignContext & { store: FakeStore };
+    readonly calls: Array<{ tenantId: string; id: string }>;
+  }
+
+  function withGate(status: ReviewStatusLike | null, activated: string[] = []): GateHarness {
+    const calls: Array<{ tenantId: string; id: string }> = [];
+    const ctx = {
+      ...makeCtx({ onActivated: (t: string) => activated.push(t) }),
+      reviewGate: {
+        reviewStatusFor: async (tenantId: string, id: string): Promise<ReviewStatusLike | null> => {
+          calls.push({ tenantId, id });
+          return status;
+        },
+      },
+    };
+    return { ctx, calls };
+  }
+
+  async function activate(ctx: AiDesignContext, id: string): Promise<JsonOut> {
+    return (await findHandler(ctx, "ai.manifests.activate")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+  }
+
+  it("activates without consulting any gate when none is configured", async () => {
+    const ctx = makeCtx();
+    const id = await draftId(ctx);
+    const out = await activate(ctx, id);
+    expect(out.status).toBe(200);
+    expect((out.body["proposal"] as AiManifestRecordLike).status).toBe("active");
+  });
+
+  it("200s when the gate reports approved, passing the tenant + proposal id", async () => {
+    const { ctx, calls } = withGate("approved");
+    const id = await draftId(ctx);
+    const out = await activate(ctx, id);
+    expect(out.status).toBe(200);
+    expect((out.body["proposal"] as AiManifestRecordLike).status).toBe("active");
+    expect(calls).toEqual([{ tenantId: TENANT, id }]);
+  });
+
+  it("403s review_required for every non-approved status and echoes it back", async () => {
+    for (const status of ["pending", "rejected", "not_required"] as const) {
+      const activated: string[] = [];
+      const { ctx } = withGate(status, activated);
+      const id = await draftId(ctx);
+      const out = await activate(ctx, id);
+      expect(out.status).toBe(403);
+      expect(out.body).toEqual({
+        error: "review_required",
+        detail: "this proposal must be approved by a platform reviewer before activation",
+        reviewStatus: status,
+      });
+      expect(ctx.store.records.get(id)?.status).toBe("draft");
+      expect(activated).toEqual([]);
+    }
+  });
+
+  it("403s when the gate resolves nothing — a vanished review is not an approval", async () => {
+    const { ctx } = withGate(null);
+    const id = await draftId(ctx);
+    const out = await activate(ctx, id);
+    expect(out.status).toBe(403);
+    expect(out.body["error"]).toBe("review_required");
+    expect(out.body["reviewStatus"]).toBeNull();
+  });
+
+  it("does not consult the gate for a missing proposal — the 404 check runs first", async () => {
+    const { ctx, calls } = withGate("approved");
+    const out = await activate(ctx, "aim_9999");
+    expect(out.status).toBe(404);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not consult the gate for an already-active proposal — the 409 check runs first", async () => {
+    const { ctx, calls } = withGate("approved");
+    const id = await draftId(ctx);
+    expect((await activate(ctx, id)).status).toBe(200);
+    expect(calls).toHaveLength(1);
+    const again = await activate(ctx, id);
+    expect(again.status).toBe(409);
+    expect(again.body).toEqual({ error: "illegal_transition", detail: "active -> active" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not consult the gate before the auth guard", async () => {
+    const { ctx, calls } = withGate("approved");
+    const id = await draftId(ctx);
+    const unauth = (await findHandler(ctx, "ai.manifests.activate")(
+      input(null, { params: { id } }),
+    )) as JsonOut;
+    expect(unauth.status).toBe(401);
+    const forbidden = (await findHandler(ctx, "ai.manifests.activate")(
+      input("cashier", { params: { id } }),
+    )) as JsonOut;
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body["error"]).toBe("forbidden");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("leaves archive ungated — only activation goes through platform review", async () => {
+    const { ctx, calls } = withGate("pending");
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.archive")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(calls).toHaveLength(0);
   });
 });
 

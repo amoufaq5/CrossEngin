@@ -3,6 +3,7 @@ import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gat
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
+import type { ReviewStatusLike } from "./design-review-routes.js";
 import { DESIGN_JOB_MAX_ATTEMPTS, type DesignJobStoreLike } from "./design-runner.js";
 
 export const AI_MANIFEST_STATUSES = ["draft", "active", "archived"] as const;
@@ -90,6 +91,8 @@ export interface AiDesignContext {
     jobId: string,
     input: { description: string; name: string },
   ) => void;
+  /** When set, activation requires platform approval: resolves the proposal's review status. */
+  readonly reviewGate?: { reviewStatusFor(tenantId: string, id: string): Promise<ReviewStatusLike | null> };
 }
 
 export const DesignRequestSchema = z.object({
@@ -281,6 +284,18 @@ function buildActivateHandler(ctx: AiDesignContext): Handler {
     if (current === null) return json(404, { error: "proposal_not_found", detail: id });
     if (current.status === "active") {
       return json(409, { error: "illegal_transition", detail: `${current.status} -> active` });
+    }
+    // A configured gate admits only an explicit `approved`. `not_required` is denied too:
+    // turning review on must not leave proposals minted beforehand as a back door.
+    if (ctx.reviewGate !== undefined) {
+      const reviewStatus = await ctx.reviewGate.reviewStatusFor(tenant, id);
+      if (reviewStatus !== "approved") {
+        return json(403, {
+          error: "review_required",
+          detail: "this proposal must be approved by a platform reviewer before activation",
+          reviewStatus,
+        });
+      }
     }
     const proposal = await ctx.store.activate(tenant, id);
     if (proposal === null) return json(404, { error: "proposal_not_found", detail: id });

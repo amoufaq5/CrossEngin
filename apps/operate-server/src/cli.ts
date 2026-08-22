@@ -93,6 +93,12 @@ export interface ServeOptions {
   readonly manifestRefreshMs: number | null;
   /** Per-tenant monthly USD ceiling on AI design spend; null uses the built-in default. */
   readonly aiMaxUsdPerMonth: number | null;
+  /** Expose the platform design-review queue under /v1/platform/design-reviews (needs --store pg|pg-columns). */
+  readonly designReview: boolean;
+  /** Roles permitted to decide design reviews (default platform_admin). */
+  readonly designReviewRoles: readonly string[];
+  /** Require platform approval before a tenant can activate an AI proposal. */
+  readonly requireDesignReview: boolean;
   /** Path to a JSON metering config ({meter?, source?, tenantSubscriptions, countStatuses?, flushIntervalMs?}) — meters the live request stream into billing usage (needs --store pg). */
   readonly meteringConfig: string | null;
   /** Path to a JSON Stripe usage-sync config ({intervalMs?, tenants, subscriptionItems}) — periodically reports persisted usage records to Stripe (needs --store pg + --stripe-api-key). */
@@ -174,6 +180,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let aiModel: string | null = null;
   let manifestRefreshMs: number | null = null;
   let aiMaxUsdPerMonth: number | null = null;
+  let designReview = false;
+  const designReviewRoles: string[] = [];
+  let requireDesignReview = false;
   let meteringConfig: string | null = null;
   let stripeUsageSyncConfig: string | null = null;
   let help = false;
@@ -354,6 +363,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--ai-model" || arg.startsWith("--ai-model=")) {
       aiModel = takeValue(arg, next, "--ai-model");
       i += consumed();
+    } else if (arg === "--design-review") {
+      designReview = true;
+    } else if (arg === "--design-review-role" || arg.startsWith("--design-review-role=")) {
+      designReviewRoles.push(takeValue(arg, next, "--design-review-role"));
+      i += consumed();
+    } else if (arg === "--require-design-review") {
+      requireDesignReview = true;
+      designReview = true;
     } else if (arg === "--manifest-refresh-ms" || arg.startsWith("--manifest-refresh-ms=")) {
       const raw = takeValue(arg, next, "--manifest-refresh-ms");
       const n = Number(raw);
@@ -536,6 +553,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     aiModel,
     manifestRefreshMs,
     aiMaxUsdPerMonth,
+    designReview,
+    designReviewRoles: designReviewRoles.length > 0 ? designReviewRoles : ["platform_admin"],
+    requireDesignReview,
     meteringConfig,
     stripeUsageSyncConfig,
     defaultScheme,
@@ -813,6 +833,10 @@ Options:
   --manifest-refresh-ms <n>  Poll interval (ms, >=1000) invalidating the per-tenant gateway
                        cache when another replica activates a manifest (default: TTL only)
   --ai-max-usd-per-month <n>  Per-tenant monthly USD ceiling on AI design spend
+  --design-review      Expose the platform design-review queue (/v1/platform/design-reviews)
+  --design-review-role <r>  Role permitted to decide reviews (repeatable; default platform_admin)
+  --require-design-review   Require platform approval before a tenant activates a proposal
+                       (implies --design-review)
   --per-tenant-manifests  Serve each tenant's activated custom manifest (meta.operate_tenant_manifests),
                        falling back to the boot pack for tenants without one (needs --store pg|pg-columns)
   --region <id>        This instance's serving region (e.g. eu-central) — with --residency-file,
