@@ -9861,6 +9861,12 @@ export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
   primaryKey: ["id"],
   indexes: [
     { name: "idx_operate_tenant_manifests_tenant_status", columns: ["tenant_id", "status"] },
+    {
+      name: "uq_operate_tenant_manifests_active",
+      columns: ["tenant_id"],
+      unique: true,
+      where: "status = 'active'",
+    },
   ],
   rls: {
     enabled: true,

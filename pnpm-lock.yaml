@@ -87,6 +87,9 @@ importers:
       '@crossengin/access-reviews-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/access-reviews-runtime-pg
+      '@crossengin/ai-architect-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/ai-architect-runtime-pg
       '@crossengin/ai-providers':
         specifier: workspace:*
         version: link:../../packages/ai-providers

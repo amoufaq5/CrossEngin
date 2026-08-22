@@ -30,6 +30,8 @@ export * from "./tenant-manifests.js";
 export * from "./ai-design.js";
 export * from "./ai-design-routes.js";
 export * from "./tenant-gateway-cache.js";
+export * from "./manifest-activation-poller.js";
+export * from "./ai-design-budget.js";
 export * from "./residency-source.js";
 export * from "./edge.js";
 export * from "./cli.js";

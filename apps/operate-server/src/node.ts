@@ -64,6 +64,12 @@ import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests
 import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
 import { buildAiDesignRoutes } from "./ai-design-routes.js";
 import { TenantGatewayCache, buildPerTenantDispatch } from "./tenant-gateway-cache.js";
+import {
+  ManifestActivationPoller,
+  PostgresActivationWatermarkSource,
+} from "./manifest-activation-poller.js";
+import { DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, buildAiDesignBudget } from "./ai-design-budget.js";
+import { PostgresTenantCostStore } from "@crossengin/ai-architect-runtime-pg";
 import { loadResidencyDirectory } from "./residency-source.js";
 import type { Region } from "@crossengin/residency";
 import type { TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -457,6 +463,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // existing proposals still works. Activation invalidates the per-tenant gateway cache below.
   let manifestStore: PostgresTenantManifestStore | null = null;
   let gatewayCache: TenantGatewayCache | null = null;
+  let manifestPoller: ManifestActivationPoller | null = null;
   if ((options.aiDesign || options.perTenantManifests) && conn !== undefined) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
   }
@@ -480,6 +487,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     }
     const store = manifestStore;
+    // Durable per-tenant monthly spend ceiling over meta.architect_tenant_cost (the same ledger
+    // the Architect CLI writes), so a design loop can't run up an unbounded bill and the limit
+    // holds across replicas and restarts.
+    const budget =
+      conn !== undefined
+        ? buildAiDesignBudget({
+            store: new PostgresTenantCostStore(conn, schemaOpt),
+            maxUsdPerMonth: options.aiMaxUsdPerMonth ?? DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH,
+            onDenied: (tenantId, spentUsd, limitUsd) =>
+              console.warn(
+                `[ai-design] tenant ${tenantId} denied: $${spentUsd.toFixed(2)} of $${limitUsd.toFixed(2)} monthly budget spent`,
+              ),
+          })
+        : undefined;
     extraRouteList.push(
       ...buildAiDesignRoutes({
         store,
@@ -488,6 +509,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         allowedRoles: new Set(options.aiDesignRoles),
         onActivated: (tenantId) => gatewayCache?.invalidate(tenantId),
         summarize: manifestSummary,
+        ...(budget !== undefined ? { budget } : {}),
       }),
     );
   }
@@ -775,9 +797,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         : store;
     gatewayCache = new TenantGatewayCache({
       source: manifestStore,
-      // Tenant gateways keep the deployment's extra routes (AI design, platform admin), the
-      // subscription gate, and the residency region guard, so activating a custom manifest
-      // never severs a tenant from /v1/ai and never exempts it from residency enforcement.
+      // Tenant gateways mirror the default server's cross-cutting wiring — extra routes (AI
+      // design, platform admin), the subscription gate, the residency guard, the per-request
+      // observer chain (SLO burn/latency, usage metering, audit chain), write effects and job
+      // invocation — so activating a custom manifest never drops a tenant out of enforcement,
+      // billing, or the tamper-evident audit trail. Only the deployment-wide singletons that
+      // are not per-request (the Stripe webhook + billing-portal routes) stay on the default
+      // server, which still handles them for every tenant.
       build: (tenantManifest): OperateHttpServer =>
         buildOperateHttpServer({
           manifest: tenantManifest,
@@ -789,11 +815,34 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ...(extraRoutes !== undefined ? { extraRoutes } : {}),
           ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
           ...(regionGuard !== undefined ? { regionGuard } : {}),
+          ...(additionalWriteEffects.length > 0 ? { additionalWriteEffects } : {}),
+          ...(jobInvoker !== undefined ? { jobInvoker } : {}),
+          ...(jobInvoker !== undefined && options.jobInvokeRoles.length > 0
+            ? { jobInvokeRoles: options.jobInvokeRoles }
+            : {}),
+          ...(jobInvoker !== undefined && invokeActionRoles.size > 0
+            ? { jobInvokeActionRoles: invokeActionRoles }
+            : {}),
+          ...(onExecution !== undefined ? { onExecution } : {}),
           defaultScheme: options.defaultScheme,
         }).httpServer,
       onInvalidManifest: (tenantId, issues) =>
         console.error(`[ai-design] tenant ${tenantId} stored manifest invalid: ${issues.slice(0, 3).join("; ")}`),
     });
+    // Cross-replica invalidation: activation on replica A is invisible to B/C until their TTL
+    // expires. One aggregate query per interval (independent of tenant count) detects changed
+    // activation watermarks — and tenants whose active manifest was archived — and drops just
+    // those cache entries.
+    if (options.manifestRefreshMs !== null && conn !== undefined) {
+      manifestPoller = new ManifestActivationPoller({
+        source: new PostgresActivationWatermarkSource(conn, schemaOpt),
+        cache: gatewayCache,
+        intervalMs: options.manifestRefreshMs,
+        onInvalidated: (tenantId) =>
+          console.info(`[manifest-refresh] tenant ${tenantId} activated elsewhere; cache invalidated`),
+        onError: (err) => console.error("[manifest-refresh] poll error", err),
+      });
+    }
     dispatchTarget = {
       dispatch: buildPerTenantDispatch({
         defaultDispatch: (raw, body) => httpServer.dispatch(raw, body),
@@ -803,6 +852,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     };
   }
   poller?.start();
+  manifestPoller?.start();
   jobScheduler?.start();
   pruneScheduler?.start();
   sloEnforcement?.scheduler.start();
@@ -826,6 +876,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     close: () =>
       new Promise<void>((resolve, reject) => {
         poller?.stop();
+        manifestPoller?.stop();
         jobScheduler?.stop();
         pruneScheduler?.stop();
         sloEnforcement?.scheduler.stop();

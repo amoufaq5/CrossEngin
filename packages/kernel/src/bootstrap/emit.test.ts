@@ -177,6 +177,46 @@ describe("emitIndex", () => {
       }),
     ).toBe(`CREATE INDEX "idx_x_a_b" ON "meta"."x" ("id", "name");`);
   });
+
+  it("omits WHERE entirely when the index is not partial", () => {
+    expect(
+      emitIndex(minimalTable, { name: "idx_x_name", columns: ["name"], where: undefined }),
+    ).toBe(`CREATE INDEX "idx_x_name" ON "meta"."x" ("name");`);
+  });
+
+  it("emits a partial index with a WHERE predicate", () => {
+    expect(
+      emitIndex(minimalTable, {
+        name: "idx_x_name_active",
+        columns: ["name"],
+        where: "status = 'active'",
+      }),
+    ).toBe(`CREATE INDEX "idx_x_name_active" ON "meta"."x" ("name") WHERE status = 'active';`);
+  });
+
+  it("emits a partial UNIQUE index (at-most-one-active invariant)", () => {
+    expect(
+      emitIndex(minimalTable, {
+        name: "uq_x_active",
+        columns: ["id"],
+        unique: true,
+        where: "status = 'active'",
+      }),
+    ).toBe(`CREATE UNIQUE INDEX "uq_x_active" ON "meta"."x" ("id") WHERE status = 'active';`);
+  });
+
+  it("emits a partial index alongside USING and multiple columns", () => {
+    expect(
+      emitIndex(minimalTable, {
+        name: "idx_x_gin_partial",
+        columns: ["id", "name"],
+        kind: "gin",
+        where: "name IS NOT NULL",
+      }),
+    ).toBe(
+      `CREATE INDEX "idx_x_gin_partial" ON "meta"."x" USING GIN ("id", "name") WHERE name IS NOT NULL;`,
+    );
+  });
 });
 
 describe("emitRlsEnable", () => {

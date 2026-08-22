@@ -169,6 +169,13 @@ environment. Tenant admins then get **/setup** in the UI — describe the busine
 review the AI-generated system, activate it as that tenant's live schema
 (per-tenant manifests, served immediately).
 
+Two flags worth setting on a real deployment:
+
+| Flag | Why |
+|---|---|
+| `--ai-max-usd-per-month <n>` | Per-tenant monthly ceiling on AI design spend (default `25`). A tenant that exhausts it gets `402 ai_budget_exceeded`; the ledger is durable and shared across replicas. |
+| `--manifest-refresh-ms 15000` | If you run **more than one API replica**, this makes an activation on one replica invalidate the others within the interval (otherwise they serve the previous manifest for up to 30s). One query per interval regardless of tenant count. |
+
 **Dev-time (local):** the `crossengin chat` CLI, run **locally**, not on Vercel
 or Supabase. To run it against a self-hosted open-source model:
 

@@ -459,3 +459,77 @@ describe("ai-design-routes — archive", () => {
     expect(out.status).toBe(404);
   });
 });
+
+describe("ai-design routes — spend ceiling", () => {
+  function withBudget(allowed: boolean): {
+    ctx: AiDesignContext & { store: FakeStore };
+    recorded: { tenantId: string; costUsd: number }[];
+    designCalls: () => number;
+  } {
+    const recorded: { tenantId: string; costUsd: number }[] = [];
+    let calls = 0;
+    const base = makeCtx({
+      designer: async (i) => {
+        calls += 1;
+        return okDesigner()(i);
+      },
+    });
+    const ctx = {
+      ...base,
+      budget: {
+        check: async () => ({ allowed, spentUsd: allowed ? 1 : 30, limitUsd: 25 }),
+        record: async (tenantId: string, costUsd: number) => {
+          recorded.push({ tenantId, costUsd });
+          return costUsd;
+        },
+      },
+    };
+    return { ctx, recorded, designCalls: () => calls };
+  }
+
+  it("denies with 402 and never calls the designer when the budget is exhausted", async () => {
+    const { ctx, recorded, designCalls } = withBudget(false);
+    const out = await design(ctx, { description: "a coffee shop" });
+    expect(out.status).toBe(402);
+    expect(out.body["error"]).toBe("ai_budget_exceeded");
+    expect(out.body["limitUsd"]).toBe(25);
+    expect(designCalls()).toBe(0);
+    expect(recorded).toHaveLength(0);
+  });
+
+  it("allows under budget and records the actual usage cost", async () => {
+    const { ctx, recorded, designCalls } = withBudget(true);
+    const out = await design(ctx, { description: "a coffee shop" });
+    expect(out.status).toBe(201);
+    expect(designCalls()).toBe(1);
+    expect(recorded).toEqual([{ tenantId: TENANT, costUsd: 0.0123 }]);
+  });
+
+  it("charges a failed design too — the tokens were still spent", async () => {
+    const recorded: { tenantId: string; costUsd: number }[] = [];
+    const base = makeCtx({
+      designer: async () => ({
+        ok: false, manifest: null, manifestHash: null, issues: ["nope"], attempts: 3,
+        providerLabel: "openai/gpt-4o", usage: { inputTokens: 5, outputTokens: 5, cost: 0.02 },
+      }),
+    });
+    const ctx = {
+      ...base,
+      budget: {
+        check: async () => ({ allowed: true, spentUsd: 0, limitUsd: 25 }),
+        record: async (tenantId: string, costUsd: number) => {
+          recorded.push({ tenantId, costUsd });
+          return costUsd;
+        },
+      },
+    };
+    const out = await design(ctx, { description: "a coffee shop" });
+    expect(out.status).toBe(422);
+    expect(recorded).toEqual([{ tenantId: TENANT, costUsd: 0.02 }]);
+  });
+
+  it("is a no-op when no budget is configured", async () => {
+    const out = await design(makeCtx(), { description: "a coffee shop" });
+    expect(out.status).toBe(201);
+  });
+});

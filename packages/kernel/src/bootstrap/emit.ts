@@ -62,7 +62,8 @@ export function emitIndex(table: TableDefinition, idx: IndexSpec): string {
   const using = idx.kind !== undefined && idx.kind !== "btree" ? ` USING ${idx.kind.toUpperCase()}` : "";
   const uniqueKw = idx.unique === true ? "UNIQUE " : "";
   const cols = idx.columns.map(quoteIdent).join(", ");
-  return `CREATE ${uniqueKw}INDEX ${quoteIdent(idx.name)} ON ${tableName}${using} (${cols});`;
+  const where = idx.where !== undefined ? ` WHERE ${idx.where}` : "";
+  return `CREATE ${uniqueKw}INDEX ${quoteIdent(idx.name)} ON ${tableName}${using} (${cols})${where};`;
 }
 
 export function emitRlsEnable(table: TableDefinition): string {
