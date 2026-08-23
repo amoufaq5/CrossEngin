@@ -2,10 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { FINANCE_ROLES } from "@/lib/aging";
 import { useInbox } from "@/lib/inbox";
+import { listNotifications, recentDecisionCount } from "@/lib/notifications";
 import { accessibleEntities, entityByName, featureEnabled, groupByModule, roleLabel, useSchema } from "@/lib/schema";
 
 export function Sidebar() {
@@ -33,6 +34,21 @@ export function Sidebar() {
   const inboxEnabled = featureEnabled(schema, "approvals_inbox", true);
   const { items: inboxItems } = useInbox(inboxEnabled ? schema : null);
   const inboxCount = inboxItems.length;
+
+  // The notification contract carries no per-user read state, so "unacknowledged"
+  // is approximated by recency: design-review decisions from the last 7 days.
+  const [decisionCount, setDecisionCount] = useState(0);
+
+  useEffect(() => {
+    let alive = true;
+    listNotifications({ channel: "in_app", limit: 50 })
+      .then((page) => alive && setDecisionCount(recentDecisionCount(page.data)))
+      // A failed fetch renders no badge — never an error in the nav.
+      .catch(() => alive && setDecisionCount(0));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <aside className="sticky top-14 flex h-[calc(100vh-3.5rem)] w-64 shrink-0 flex-col border-r border-line bg-white/60 backdrop-blur">
@@ -178,13 +194,18 @@ export function Sidebar() {
           </Link>
           <Link
             href="/setup"
-            className={`block rounded-lg px-3 py-1.5 text-sm transition ${
+            className={`flex items-center rounded-lg px-3 py-1.5 text-sm transition ${
               pathname === "/setup"
                 ? "border-l-2 border-brand bg-brand-50 font-semibold text-brand-700"
                 : "text-ink-muted hover:bg-surface-soft hover:text-ink"
             }`}
           >
             AI Studio
+            {decisionCount > 0 && (
+              <span className="ml-auto rounded-full bg-ink px-2 py-0.5 text-[11px] font-semibold text-white">
+                {decisionCount}
+              </span>
+            )}
           </Link>
         </div>
 

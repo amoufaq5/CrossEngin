@@ -206,6 +206,24 @@ export interface ActiveManifestSourceLike {
   activeManifestFor(tenantId: string): Promise<Record<string, unknown> | null>;
 }
 
+/**
+ * Structural mirror of the decision notice the notification builder consumes. Declared here
+ * rather than imported so the route layer stays decoupled from the builder + dispatch store —
+ * the notifier itself is injected, exactly like `assessRisk`.
+ */
+export interface DesignDecisionNoticeLike {
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly proposalName: string;
+  readonly decision: "approved" | "rejected";
+  readonly reviewedBy: string | null;
+  readonly notes: string | null;
+  readonly decidedAt: string;
+}
+
+/** Builds + persists the notification for a decision. Returns true when a new one was recorded. */
+export type DesignDecisionNotifier = (notice: DesignDecisionNoticeLike) => Promise<boolean>;
+
 export interface DesignReviewContext {
   readonly store: DesignReviewStoreLike;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
@@ -217,6 +235,9 @@ export interface DesignReviewContext {
   /** Optional: with `activeManifests`, the detail response also carries what would change. */
   readonly diffManifests?: ManifestDiffer;
   readonly activeManifests?: ActiveManifestSourceLike;
+  /** Optional: when wired, an approve/reject also tells the owning tenant about the decision. */
+  readonly notifyDecision?: DesignDecisionNotifier;
+  readonly onNotifyError?: (err: unknown, proposalId: string) => void;
 }
 
 /** Spreads to nothing when no projector is wired, so the key is absent rather than undefined. */
@@ -373,6 +394,22 @@ function buildDecisionHandler(ctx: DesignReviewContext, target: "approved" | "re
         ? await ctx.store.approve(id, decision)
         : await ctx.store.reject(id, decision);
     if (review === null) return json(404, { error: "review_not_found", detail: id });
+    if (ctx.notifyDecision !== undefined) {
+      try {
+        await ctx.notifyDecision({
+          tenantId: review.tenantId,
+          proposalId: review.id,
+          proposalName: review.name,
+          decision: target,
+          reviewedBy: principal?.principalId ?? null,
+          notes: parsed.data.notes ?? null,
+          decidedAt: review.reviewedAt ?? new Date().toISOString(),
+        });
+      } catch (err) {
+        // The decision is already committed: a notification failure must NEVER fail it.
+        ctx.onNotifyError?.(err, review.id);
+      }
+    }
     return json(200, { review });
   };
 }

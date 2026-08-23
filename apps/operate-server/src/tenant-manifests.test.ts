@@ -195,6 +195,9 @@ function validRecord(): Record<string, unknown> {
     createdAt: "2026-06-01T00:00:00.000Z",
     updatedAt: "2026-06-01T00:00:00.000Z",
     activatedAt: null,
+    reviewStatus: "not_required",
+    reviewNotes: null,
+    reviewedAt: null,
   };
 }
 

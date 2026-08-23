@@ -17,9 +17,19 @@ import {
   type Proposal,
   type ProposalStatus,
 } from "@/lib/design";
+import {
+  decidedAtOf,
+  decisionOf,
+  listNotifications,
+  reviewDecisions,
+  type ReviewDecision,
+  type TenantNotification,
+} from "@/lib/notifications";
 
 const MAX_DESCRIPTION = 4000;
 const POLL_INTERVAL_MS = 1200;
+const DECISION_LIMIT = 50;
+const PROPOSALS_ANCHOR = "previous-proposals";
 
 type Step = "describe" | "review" | "done";
 
@@ -47,6 +57,10 @@ export default function SetupPage() {
   const [rowBusy, setRowBusy] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
 
+  const [decisions, setDecisions] = useState<ReadonlyArray<TenantNotification>>([]);
+  const [decisionsBusy, setDecisionsBusy] = useState(true);
+  const [decisionsError, setDecisionsError] = useState<string | null>(null);
+
   const refreshList = useCallback(() => {
     setListError(null);
     listProposals()
@@ -55,7 +69,21 @@ export default function SetupPage() {
       .finally(() => setListBusy(false));
   }, []);
 
+  // Never allowed to throw into the wizard: a notification failure degrades to a
+  // muted line under the heading and leaves every other section working.
+  const refreshDecisions = useCallback(() => {
+    listNotifications({ channel: "in_app", limit: DECISION_LIMIT })
+      .then((page) => {
+        setDecisions(reviewDecisions(page.data));
+        setDecisionsError(null);
+      })
+      .catch((e: unknown) => setDecisionsError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setDecisionsBusy(false));
+  }, []);
+
   useEffect(() => refreshList(), [refreshList]);
+
+  useEffect(() => refreshDecisions(), [refreshDecisions]);
 
   const inFlight = submitting || jobId !== null;
 
@@ -170,6 +198,7 @@ export default function SetupPage() {
       setResult({ proposal, summary: result.summary, schema: result.schema, diff: result.diff });
       setStep("done");
       refreshList();
+      refreshDecisions();
     } catch (e) {
       if (e instanceof DesignError && e.status === 409) {
         setActivateError("This proposal can no longer be activated — its status changed. Check the proposals list below.");
@@ -177,6 +206,7 @@ export default function SetupPage() {
         setActivateError(e instanceof Error ? e.message : String(e));
       }
       refreshList();
+      refreshDecisions();
     } finally {
       setActivating(false);
     }
@@ -206,8 +236,15 @@ export default function SetupPage() {
     } finally {
       setRowBusy(null);
       refreshList();
+      refreshDecisions();
     }
   }
+
+  // Mirrors the Activate affordance in the proposals table below, so an approved
+  // decision only points there while that button actually exists.
+  const activatableIds = new Set(
+    proposals.filter((p) => p.status === "draft" || p.status === "archived").map((p) => p.id),
+  );
 
   return (
     <>
@@ -451,7 +488,39 @@ export default function SetupPage() {
           </section>
         )}
 
-        <section className="mt-10">
+        {(decisionsBusy || decisionsError !== null || decisions.length > 0) && (
+          <section className="mt-10">
+            <h3 className="text-sm font-bold uppercase tracking-wide text-ink-muted">Review decisions</h3>
+            <p className="mt-1 text-sm text-ink-muted">
+              What the platform reviewers decided about the systems you submitted.
+            </p>
+
+            {decisionsBusy && decisions.length === 0 && decisionsError === null && (
+              <p className="mt-3 text-sm text-ink-faint">Loading decisions…</p>
+            )}
+            {decisionsError !== null && decisions.length === 0 && (
+              <p className="mt-3 text-sm text-ink-faint">
+                Could not load review decisions: {decisionsError}
+              </p>
+            )}
+
+            {decisions.length > 0 && (
+              <div className="card mt-3 divide-y divide-line">
+                {decisions.map((n) => (
+                  <DecisionRow
+                    key={n.dispatchId}
+                    notification={n}
+                    activatable={
+                      n.correlationId !== null && activatableIds.has(n.correlationId)
+                    }
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        <section className="mt-10" id={PROPOSALS_ANCHOR}>
           <h3 className="text-sm font-bold uppercase tracking-wide text-ink-muted">Previous proposals</h3>
 
           {rowError && (
@@ -718,6 +787,73 @@ function Stat({ label, value, accent }: { label: string; value: number; accent?:
         {value.toLocaleString()}
       </div>
       <div className="text-xs font-medium uppercase tracking-wide text-ink-faint">{label}</div>
+    </div>
+  );
+}
+
+function DecisionChip({ decision }: { decision: ReviewDecision }) {
+  if (decision === "approved") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md bg-brand-50 px-2 py-0.5 text-[11px] font-semibold text-brand-700 ring-1 ring-brand-200">
+        <span aria-hidden>✓</span>
+        approved
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-md bg-surface-sunken px-2 py-0.5 text-[11px] font-semibold text-ink-muted ring-1 ring-line">
+      <span aria-hidden>✕</span>
+      rejected
+    </span>
+  );
+}
+
+function DecisionRow({
+  notification,
+  activatable,
+}: {
+  notification: TenantNotification;
+  activatable: boolean;
+}) {
+  const decision = decisionOf(notification);
+  if (decision === null) return null;
+
+  const proposal = notification.proposal ?? null;
+  const name = proposal !== null && proposal.name.trim() !== "" ? proposal.name : null;
+  const notes = proposal?.reviewNotes?.trim() ?? "";
+  const decidedAt = decidedAtOf(notification);
+  const decidedLabel = Number.isNaN(Date.parse(decidedAt))
+    ? decidedAt
+    : new Date(decidedAt).toLocaleString();
+
+  return (
+    <div className="px-4 py-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <DecisionChip decision={decision} />
+        {name !== null ? (
+          <span className="font-semibold text-ink">{name}</span>
+        ) : (
+          <span className="font-mono text-xs text-ink-muted">
+            {notification.correlationId ?? "unknown proposal"}
+          </span>
+        )}
+        <span className="ml-auto text-xs tabular-nums text-ink-faint">{decidedLabel}</span>
+      </div>
+
+      {notes !== "" && (
+        <blockquote className="mt-2 whitespace-pre-wrap break-words border-l-2 border-line pl-3 text-sm text-ink-muted">
+          {notes}
+        </blockquote>
+      )}
+
+      {decision === "approved" && activatable && (
+        <a
+          href={`#${PROPOSALS_ANCHOR}`}
+          className="mt-2 inline-block text-sm font-medium text-brand-600 hover:text-brand-700"
+        >
+          Ready to activate — find it under Previous proposals ↓
+        </a>
+      )}
     </div>
   );
 }

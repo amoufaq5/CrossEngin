@@ -22,6 +22,9 @@ export const TenantManifestRecordSchema = z
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
     activatedAt: z.string().datetime({ offset: true }).nullable(),
+    reviewStatus: z.enum(["not_required", "pending", "approved", "rejected"]),
+    reviewNotes: z.string().nullable(),
+    reviewedAt: z.string().datetime({ offset: true }).nullable(),
   })
   .strict();
 
@@ -128,7 +131,8 @@ export interface PostgresTenantManifestStoreOptions {
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const SELECT_COLUMNS =
-  "id, tenant_id, name, description, manifest, manifest_hash, status, source, provider_label, created_at, updated_at, activated_at";
+  "id, tenant_id, name, description, manifest, manifest_hash, status, source, provider_label, " +
+  "created_at, updated_at, activated_at, review_status, review_notes, reviewed_at";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -211,6 +215,9 @@ export class PostgresTenantManifestStore implements TenantManifestSource {
       createdAt: isoOf(row["created_at"]),
       updatedAt: isoOf(row["updated_at"]),
       activatedAt: row["activated_at"] == null ? null : isoOf(row["activated_at"]),
+      reviewStatus: String(row["review_status"] ?? "not_required"),
+      reviewNotes: row["review_notes"] == null ? null : String(row["review_notes"]),
+      reviewedAt: row["reviewed_at"] == null ? null : isoOf(row["reviewed_at"]),
     });
   }
 
