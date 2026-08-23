@@ -279,8 +279,8 @@ function FieldsTable({ fields }: { fields: ReadonlyArray<FieldView> }) {
           <tr>
             <th>Field</th>
             <th>Type</th>
-            <th>Required</th>
             <th>Classification</th>
+            <th>Required</th>
           </tr>
         </thead>
         <tbody>
@@ -296,15 +296,6 @@ function FieldsTable({ fields }: { fields: ReadonlyArray<FieldView> }) {
                 )}
               </td>
               <td className="whitespace-nowrap">
-                {f.required ? (
-                  <span className="text-[11px] font-bold uppercase tracking-wide text-ink">
-                    required
-                  </span>
-                ) : (
-                  <span className="text-ink-faint">—</span>
-                )}
-              </td>
-              <td className="whitespace-nowrap">
                 {f.classification === null ? (
                   <span className="text-ink-faint">—</span>
                 ) : (
@@ -313,6 +304,15 @@ function FieldsTable({ fields }: { fields: ReadonlyArray<FieldView> }) {
                   >
                     {f.classification}
                   </span>
+                )}
+              </td>
+              <td className="whitespace-nowrap">
+                {f.required ? (
+                  <span className="text-[11px] font-bold uppercase tracking-wide text-ink">
+                    required
+                  </span>
+                ) : (
+                  <span className="text-ink-faint">—</span>
                 )}
               </td>
             </tr>
