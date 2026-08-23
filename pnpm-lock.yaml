@@ -165,6 +165,9 @@ importers:
       '@crossengin/marketplace-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/marketplace-runtime-pg
+      '@crossengin/notifications':
+        specifier: workspace:*
+        version: link:../../packages/notifications
       '@crossengin/observability':
         specifier: workspace:*
         version: link:../../packages/observability

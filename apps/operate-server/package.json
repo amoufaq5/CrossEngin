@@ -47,6 +47,7 @@
     "@crossengin/forensics": "workspace:*",
     "@crossengin/forensics-pg": "workspace:*",
     "@crossengin/dr-runtime-pg": "workspace:*",
+    "@crossengin/notifications": "workspace:*",
     "@crossengin/jobs": "workspace:*",
     "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",

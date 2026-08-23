@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildDesignReviewRoutes,
   type DesignReviewContext,
+  type DesignDecisionNoticeLike,
+  type DesignDecisionNotifier,
   type DesignReviewCountsLike,
   type DesignReviewDecisionInput,
   type DesignReviewListPageLike,
@@ -924,5 +926,160 @@ describe("design-review-routes — activation diff", () => {
     await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
     expect(differ.calls).toHaveLength(2);
     expect(active.asked).toEqual([TENANT, TENANT]);
+  });
+});
+
+interface NotifierStub {
+  readonly notify: DesignDecisionNotifier;
+  readonly calls: DesignDecisionNoticeLike[];
+}
+
+function recordingNotifier(result: boolean | "throw" = true): NotifierStub {
+  const calls: DesignDecisionNoticeLike[] = [];
+  return {
+    calls,
+    notify: async (notice: DesignDecisionNoticeLike): Promise<boolean> => {
+      calls.push(notice);
+      if (result === "throw") throw new Error("dispatch store unreachable");
+      return result;
+    },
+  };
+}
+
+describe("design-review-routes — decision notification", () => {
+  it("notifies once on approve with the decided record's data", async () => {
+    const { ctx, store } = makeCtx();
+    const notifier = recordingNotifier();
+    const withNotify: DesignReviewContext = { ...ctx, notifyDecision: notifier.notify };
+    const seeded = store.seed({ reviewStatus: "pending", name: "Plumber CRM" });
+    const out = await call(withNotify, "platform.designReviews.approve", {
+      params: { id: seeded.id },
+      body: { notes: "schema looks safe" },
+    });
+    expect(out.status).toBe(200);
+    expect(notifier.calls).toEqual([
+      {
+        tenantId: TENANT,
+        proposalId: seeded.id,
+        proposalName: "Plumber CRM",
+        decision: "approved",
+        reviewedBy: REVIEWER,
+        notes: "schema looks safe",
+        decidedAt: "2026-06-02T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("notifies with the REVIEW's tenant, not the reviewing principal's", async () => {
+    const { ctx, store } = makeCtx();
+    const notifier = recordingNotifier();
+    const withNotify: DesignReviewContext = { ...ctx, notifyDecision: notifier.notify };
+    const seeded = store.seed({ reviewStatus: "pending", tenantId: OTHER_TENANT });
+    const handler = findHandler(withNotify, "platform.designReviews.approve");
+    const out = (await handler(otherTenantInput(seeded.id))) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(notifier.calls[0]?.tenantId).toBe(OTHER_TENANT);
+    expect(notifier.calls[0]?.reviewedBy).toBe(REVIEWER);
+  });
+
+  it("notifies on reject with decision 'rejected' and a null notes when none were sent", async () => {
+    const { ctx, store } = makeCtx();
+    const notifier = recordingNotifier();
+    const withNotify: DesignReviewContext = { ...ctx, notifyDecision: notifier.notify };
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = await call(withNotify, "platform.designReviews.reject", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(notifier.calls).toHaveLength(1);
+    expect(notifier.calls[0]?.decision).toBe("rejected");
+    expect(notifier.calls[0]?.notes).toBeNull();
+    expect(notifier.calls[0]?.proposalId).toBe(seeded.id);
+  });
+
+  it("still 200s with an unchanged body when the notifier throws", async () => {
+    const { ctx, store } = makeCtx();
+    const notifier = recordingNotifier("throw");
+    const errors: string[] = [];
+    const withNotify: DesignReviewContext = {
+      ...ctx,
+      notifyDecision: notifier.notify,
+      onNotifyError: (_err, proposalId) => errors.push(proposalId),
+    };
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = await call(withNotify, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(Object.keys(out.body)).toEqual(["review"]);
+    expect((out.body["review"] as DesignReviewRecordLike).reviewStatus).toBe("approved");
+    expect(errors).toEqual([seeded.id]);
+  });
+
+  it("swallows a throwing notifier even with no onNotifyError wired", async () => {
+    const { ctx, store } = makeCtx();
+    const withNotify: DesignReviewContext = {
+      ...ctx,
+      notifyDecision: recordingNotifier("throw").notify,
+    };
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = await call(withNotify, "platform.designReviews.reject", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect((out.body["review"] as DesignReviewRecordLike).reviewStatus).toBe("rejected");
+  });
+
+  it("200s unchanged when the notifier reports the notice was already recorded", async () => {
+    const { ctx, store } = makeCtx();
+    const notifier = recordingNotifier(false);
+    const withNotify: DesignReviewContext = { ...ctx, notifyDecision: notifier.notify };
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = await call(withNotify, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(Object.keys(out.body)).toEqual(["review"]);
+    expect(notifier.calls).toHaveLength(1);
+  });
+
+  it("changes nothing when no notifier is configured", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const out = await call(ctx, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(Object.keys(out.body)).toEqual(["review"]);
+    expect((out.body["review"] as DesignReviewRecordLike).reviewStatus).toBe("approved");
+  });
+
+  it("does not notify on a 404", async () => {
+    const { ctx } = makeCtx();
+    const notifier = recordingNotifier();
+    const withNotify: DesignReviewContext = { ...ctx, notifyDecision: notifier.notify };
+    expect((await call(withNotify, "platform.designReviews.approve", { params: { id: "aim_9999" } })).status).toBe(404);
+    expect((await call(withNotify, "platform.designReviews.reject", { params: { id: "aim_9999" } })).status).toBe(404);
+    expect(notifier.calls).toHaveLength(0);
+  });
+
+  it("does not notify on a 409 illegal transition", async () => {
+    const { ctx, store } = makeCtx();
+    const notifier = recordingNotifier();
+    const withNotify: DesignReviewContext = { ...ctx, notifyDecision: notifier.notify };
+    const seeded = store.seed({ reviewStatus: "rejected" });
+    const out = await call(withNotify, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(out.status).toBe(409);
+    expect(notifier.calls).toHaveLength(0);
+  });
+
+  it("does not notify behind a guard denial or an invalid body", async () => {
+    const { ctx, store } = makeCtx();
+    const notifier = recordingNotifier();
+    const withNotify: DesignReviewContext = { ...ctx, notifyDecision: notifier.notify };
+    const seeded = store.seed({ reviewStatus: "pending" });
+    expect((await call(withNotify, "platform.designReviews.approve", { params: { id: seeded.id } }, null)).status).toBe(401);
+    expect(
+      (await call(withNotify, "platform.designReviews.approve", { params: { id: seeded.id } }, "tenant_admin")).status,
+    ).toBe(403);
+    expect(
+      (
+        await call(withNotify, "platform.designReviews.approve", {
+          params: { id: seeded.id },
+          body: { notes: "x".repeat(2001) },
+        })
+      ).status,
+    ).toBe(400);
+    expect(notifier.calls).toHaveLength(0);
   });
 });

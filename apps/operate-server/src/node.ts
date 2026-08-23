@@ -76,6 +76,9 @@ import { assessManifestRisk } from "./design-review.js";
 import { projectManifestView } from "./manifest-view.js";
 import { diffManifests } from "./manifest-diff.js";
 import { enrolNewProposalsForReview } from "./review-enrolment.js";
+import { buildDesignDecisionDispatch } from "./design-notifications.js";
+import { PostgresNotificationStore } from "./notification-store.js";
+import { buildNotificationRoutes } from "./notification-routes.js";
 import { startDesignJob } from "./design-runner.js";
 import { PostgresTenantCostStore } from "@crossengin/ai-architect-runtime-pg";
 import { loadResidencyDirectory } from "./residency-source.js";
@@ -469,8 +472,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let manifestStore: PostgresTenantManifestStore | null = null;
   let gatewayCache: TenantGatewayCache | null = null;
   let manifestPoller: ManifestActivationPoller | null = null;
+  let notificationStore: PostgresNotificationStore | null = null;
   if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
+    notificationStore = new PostgresNotificationStore(conn, schemaOpt);
   }
   // Platform design-review queue: /v1/platform/design-reviews lets an operator triage AI-generated
   // proposals across every tenant (with an automated risk report) before they can go live. The
@@ -486,6 +491,40 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         assessRisk: assessManifestRisk,
         projectSchema: projectManifestView,
         ...(manifestStore !== null ? { diffManifests, activeManifests: manifestStore } : {}),
+        // A decision the tenant never hears about is not a decision they can act on. The notice
+        // rides the platform's existing notification ledger (meta.notification_dispatches), whose
+        // unique (tenant_id, idempotency_key) makes re-deciding the same way a no-op.
+        ...(notificationStore !== null
+          ? {
+              notifyDecision: async (notice): Promise<boolean> =>
+                notificationStore.record(buildDesignDecisionDispatch(notice)),
+              onNotifyError: (err, proposalId) =>
+                console.error(`[design-review] notification failed for proposal ${proposalId}`, err),
+            }
+          : {}),
+      }),
+    );
+  }
+  // Tenant-facing read side: GET /v1/meta/notifications. The dispatch row stores only a hash of
+  // the message variables, so the readable content is joined from the proposal at read time.
+  if (notificationStore !== null && manifestStore !== null) {
+    const proposals = manifestStore;
+    extraRouteList.push(
+      ...buildNotificationRoutes({
+        source: notificationStore,
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        allowedRoles: new Set(options.aiDesignRoles),
+        resolveProposal: async (tenantId, proposalId) => {
+          const record = await proposals.getById(tenantId, proposalId);
+          return record === null
+            ? null
+            : {
+                name: record.name,
+                reviewStatus: record.reviewStatus,
+                reviewNotes: record.reviewNotes,
+                reviewedAt: record.reviewedAt,
+              };
+        },
       }),
     );
   }
