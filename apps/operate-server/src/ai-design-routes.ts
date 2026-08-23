@@ -4,7 +4,10 @@ import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
 import {
+  diffFragment,
   schemaFragment,
+  type ActiveManifestSourceLike,
+  type ManifestDiffer,
   type ManifestProjector,
   type ReviewStatusLike,
 } from "./design-review-routes.js";
@@ -90,6 +93,9 @@ export interface AiDesignContext {
   readonly summarize: (manifest: Record<string, unknown>) => unknown;
   /** Optional: when wired, proposal detail responses carry a rendered schema view. */
   readonly projectSchema?: ManifestProjector;
+  /** Optional: with `activeManifests`, detail responses also carry what activation would change. */
+  readonly diffManifests?: ManifestDiffer;
+  readonly activeManifests?: ActiveManifestSourceLike;
   /** Async design mode. Both must be wired or the job routes self-503. */
   readonly jobs?: DesignJobStoreLike;
   readonly startJob?: (
@@ -247,11 +253,16 @@ function buildDesignJobGetHandler(ctx: AiDesignContext): Handler {
     if (job.status !== "succeeded" || job.proposalId === null) return json(200, { job });
     // Hand the wizard the finished proposal in the same poll it learns the job is done.
     const proposal = await ctx.store.getById(tenant, job.proposalId);
+    const diff =
+      proposal === null
+        ? {}
+        : await diffFragment(ctx.diffManifests, ctx.activeManifests, tenant, proposal.manifest);
     return json(200, {
       job,
       proposal,
       summary: proposal === null ? null : ctx.summarize(proposal.manifest),
       ...(proposal === null ? {} : schemaFragment(ctx.projectSchema, proposal.manifest)),
+      ...diff,
     });
   };
 }
@@ -276,10 +287,17 @@ function buildGetHandler(ctx: AiDesignContext): Handler {
     const id = params["id"] ?? "";
     const proposal = await ctx.store.getById(tenant, id);
     if (proposal === null) return json(404, { error: "proposal_not_found", detail: id });
+    const diff = await diffFragment(
+      ctx.diffManifests,
+      ctx.activeManifests,
+      tenant,
+      proposal.manifest,
+    );
     return json(200, {
       proposal,
       summary: ctx.summarize(proposal.manifest),
       ...schemaFragment(ctx.projectSchema, proposal.manifest),
+      ...diff,
     });
   };
 }

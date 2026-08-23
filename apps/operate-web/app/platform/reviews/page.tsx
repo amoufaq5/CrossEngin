@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/Badge";
+import { DiffView } from "@/components/DiffView";
 import { SchemaView } from "@/components/SchemaView";
 import { Topbar } from "@/components/Topbar";
 import {
@@ -377,7 +378,7 @@ function DetailPanel({
   acting: ReviewDecision | null;
   onDecide: (d: ReviewDecision) => void;
 }) {
-  const { review, risk, schema } = detail;
+  const { review, risk, schema, diff } = detail;
   const decided = review.reviewStatus === "approved" || review.reviewStatus === "rejected";
   const high = risk.level === "high";
 
@@ -425,6 +426,16 @@ function DetailPanel({
         <CountPill label="Relations" value={risk.counts.relations} />
         <CountPill label="Sensitive fields" value={risk.counts.sensitiveFields} accent={risk.counts.sensitiveFields > 0} />
       </div>
+
+      {diff !== undefined && (
+        <div>
+          <div className="label">Changes on activation</div>
+          <p className="mb-3 text-sm text-ink-muted">
+            What approving this proposal will do to the tenant&rsquo;s currently-active system.
+          </p>
+          <DiffView diff={diff} />
+        </div>
+      )}
 
       {schema !== undefined && (
         <div>

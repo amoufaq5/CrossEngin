@@ -150,6 +150,62 @@ export interface ManifestViewLike {
 
 export type ManifestProjector = (manifest: Record<string, unknown>) => ManifestViewLike;
 
+/**
+ * Structural mirror of the manifest change projection. Declared here rather than imported so
+ * the route layer stays decoupled from the differ implementation — the differ itself is
+ * injected, exactly like `assessRisk` and `projectSchema`.
+ */
+export interface ManifestDiffViewLike {
+  readonly comparable: boolean;
+  readonly impact: "none" | "additive" | "breaking";
+  readonly warnings: readonly {
+    readonly code: string;
+    readonly impact: "additive" | "breaking";
+    readonly message: string;
+    readonly entities: readonly string[];
+  }[];
+  readonly entitiesAdded: readonly string[];
+  readonly entitiesRemoved: readonly string[];
+  readonly entitiesModified: readonly string[];
+  readonly fieldChanges: readonly {
+    readonly entity: string;
+    readonly field: string;
+    readonly change: string;
+    readonly from: string | null;
+    readonly to: string | null;
+  }[];
+  readonly permissionChanges: readonly {
+    readonly entity: string;
+    readonly operation: string;
+    readonly granted: readonly string[];
+    readonly revoked: readonly string[];
+  }[];
+  readonly relationChanges: readonly {
+    readonly change: string;
+    readonly label: string;
+    readonly detail: string | null;
+  }[];
+  readonly rolesAdded: readonly string[];
+  readonly rolesRemoved: readonly string[];
+  readonly lifecycleChanges: readonly { readonly entity: string; readonly detail: string }[];
+  readonly counts: {
+    readonly added: number;
+    readonly removed: number;
+    readonly modified: number;
+    readonly warnings: number;
+  };
+}
+
+export type ManifestDiffer = (
+  active: Record<string, unknown> | null,
+  next: Record<string, unknown>,
+) => ManifestDiffViewLike;
+
+/** Resolves the tenant's currently-active manifest, or null when they have no live system yet. */
+export interface ActiveManifestSourceLike {
+  activeManifestFor(tenantId: string): Promise<Record<string, unknown> | null>;
+}
+
 export interface DesignReviewContext {
   readonly store: DesignReviewStoreLike;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
@@ -158,6 +214,9 @@ export interface DesignReviewContext {
   readonly assessRisk: (manifest: Record<string, unknown>) => RiskReportLike;
   /** Optional: when wired, the detail response carries a rendered schema view alongside the risk. */
   readonly projectSchema?: ManifestProjector;
+  /** Optional: with `activeManifests`, the detail response also carries what would change. */
+  readonly diffManifests?: ManifestDiffer;
+  readonly activeManifests?: ActiveManifestSourceLike;
 }
 
 /** Spreads to nothing when no projector is wired, so the key is absent rather than undefined. */
@@ -166,6 +225,25 @@ export function schemaFragment(
   manifest: Record<string, unknown>,
 ): { schema?: ManifestViewLike } {
   return projectSchema === undefined ? {} : { schema: projectSchema(manifest) };
+}
+
+/** Spreads to nothing unless BOTH halves of the diff seam are wired, so the key is never undefined. */
+export async function diffFragment(
+  diffManifests: ManifestDiffer | undefined,
+  activeManifests: ActiveManifestSourceLike | undefined,
+  tenantId: string,
+  next: Record<string, unknown>,
+): Promise<{ diff?: ManifestDiffViewLike }> {
+  if (diffManifests === undefined || activeManifests === undefined) return {};
+  let active: Record<string, unknown> | null = null;
+  try {
+    active = await activeManifests.activeManifestFor(tenantId);
+  } catch {
+    // The diff is an aid, not the payload: a failure reading the tenant's live manifest degrades
+    // to the not-comparable view rather than 500ing the whole proposal page.
+    active = null;
+  }
+  return { diff: diffManifests(active, next) };
 }
 
 export const ReviewDecisionInputSchema = z.object({
@@ -249,10 +327,19 @@ function buildGetHandler(ctx: DesignReviewContext): Handler {
     const id = params["id"] ?? "";
     const review = await ctx.store.getById(id);
     if (review === null) return json(404, { error: "review_not_found", detail: id });
+    // The diff is resolved against the proposal's OWN tenant, not the reviewer's: this is a
+    // platform route and a platform reviewer has no tenant system of their own to compare to.
+    const diff = await diffFragment(
+      ctx.diffManifests,
+      ctx.activeManifests,
+      review.tenantId,
+      review.manifest,
+    );
     return json(200, {
       review,
       risk: ctx.assessRisk(review.manifest),
       ...schemaFragment(ctx.projectSchema, review.manifest),
+      ...diff,
     });
   };
 }

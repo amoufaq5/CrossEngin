@@ -2,9 +2,10 @@
 // goes to this Next app's /api proxy, which forwards to operate-server with the
 // server's credentials — same-origin, so no CORS. All paths hit /api/v1/ai/...
 
+import type { ManifestDiffView } from "@/components/DiffView";
 import type { ManifestView } from "@/components/SchemaView";
 
-export type { ManifestView };
+export type { ManifestDiffView, ManifestView };
 
 export type ProposalStatus = "draft" | "active" | "archived";
 
@@ -42,6 +43,8 @@ export interface DesignResult {
   readonly summary: ProposalSummary;
   /** Absent when the server has no manifest projector wired — render nothing. */
   readonly schema?: ManifestView;
+  /** Absent when the server has no differ wired — render nothing. */
+  readonly diff?: ManifestDiffView;
 }
 
 export type DesignJobStatus = "queued" | "running" | "succeeded" | "failed";
@@ -76,6 +79,7 @@ export interface DesignJobPoll {
   readonly proposal?: Proposal | null;
   readonly summary?: DesignSummary | null;
   readonly schema?: ManifestView | null;
+  readonly diff?: ManifestDiffView | null;
 }
 
 export interface DesignInput {
