@@ -14,7 +14,11 @@ import {
   type DesignResultLike,
   type ManifestDesignerLike,
 } from "./ai-design-routes.js";
-import type { ReviewStatusLike } from "./design-review-routes.js";
+import type {
+  ManifestProjector,
+  ManifestViewLike,
+  ReviewStatusLike,
+} from "./design-review-routes.js";
 import {
   DESIGN_JOB_MAX_ATTEMPTS,
   type DesignJobCreateInput,
@@ -992,5 +996,147 @@ describe("ai-design-routes — async job get", () => {
     const out = await getJob(makeCtx(), "adj_0001");
     expect(out.status).toBe(503);
     expect(out.body["error"]).toBe("async_unavailable");
+  });
+});
+
+const STUB_VIEW: ManifestViewLike = {
+  meta: { name: "Acme CRM", slug: "acme/crm", version: "1.0.0", description: null },
+  entities: [],
+  relations: [],
+  roles: [],
+  counts: { entities: 1, fields: 0, roles: 0, relations: 0, sensitiveFields: 0, lifecycles: 0 },
+};
+
+interface ProjectorStub {
+  readonly project: ManifestProjector;
+  readonly calls: Record<string, unknown>[];
+}
+
+function recordingProjector(): ProjectorStub {
+  const calls: Record<string, unknown>[] = [];
+  return {
+    calls,
+    project: (manifest: Record<string, unknown>): ManifestViewLike => {
+      calls.push(manifest);
+      return STUB_VIEW;
+    },
+  };
+}
+
+describe("ai-design-routes — schema projection", () => {
+  it("includes the projected schema on proposal get, built from the proposal's manifest", async () => {
+    const projector = recordingProjector();
+    const ctx = { ...makeCtx(), projectSchema: projector.project };
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(projector.calls).toEqual([OK_MANIFEST]);
+    expect(out.body["schema"]).toBe(STUB_VIEW);
+    expect(out.body["summary"]).toEqual({ keys: ["entities", "meta"] });
+    expect(Object.keys(out.body).sort()).toEqual(["proposal", "schema", "summary"]);
+  });
+
+  it("omits the schema key on proposal get when no projector is configured", async () => {
+    const ctx = makeCtx();
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect("schema" in out.body).toBe(false);
+    expect(Object.keys(out.body).sort()).toEqual(["proposal", "summary"]);
+  });
+
+  it("does not project for a missing proposal or behind a guard denial", async () => {
+    const projector = recordingProjector();
+    const ctx = { ...makeCtx(), projectSchema: projector.project };
+    const id = await draftId(ctx);
+    const missing = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id: "aim_9999" } }),
+    )) as JsonOut;
+    expect(missing.status).toBe(404);
+    const unauth = (await findHandler(ctx, "ai.manifests.get")(
+      input(null, { params: { id } }),
+    )) as JsonOut;
+    expect(unauth.status).toBe(401);
+    const forbidden = (await findHandler(ctx, "ai.manifests.get")(
+      input("cashier", { params: { id } }),
+    )) as JsonOut;
+    expect(forbidden.status).toBe(403);
+    expect(projector.calls).toHaveLength(0);
+  });
+
+  it("includes the schema on a succeeded job get alongside job + proposal + summary", async () => {
+    const projector = recordingProjector();
+    const { ctx: base, jobs } = makeJobCtx();
+    const ctx = { ...base, projectSchema: projector.project };
+    const proposalId = await draftId(ctx);
+    const created = await createJob(ctx, { description: "A CRM" });
+    const jobId = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.succeed(TENANT, jobId, { proposalId, providerLabel: null });
+    const out = await getJob(ctx, jobId);
+    expect(out.status).toBe(200);
+    expect((out.body["proposal"] as AiManifestRecordLike).id).toBe(proposalId);
+    expect(out.body["summary"]).toEqual({ keys: ["entities", "meta"] });
+    expect(out.body["schema"]).toBe(STUB_VIEW);
+    expect(projector.calls).toEqual([OK_MANIFEST]);
+  });
+
+  it("omits the schema on a succeeded job whose proposal is gone", async () => {
+    const projector = recordingProjector();
+    const { ctx: base, jobs } = makeJobCtx();
+    const ctx = { ...base, projectSchema: projector.project };
+    const proposalId = await draftId(ctx);
+    const created = await createJob(ctx, { description: "A CRM" });
+    const jobId = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.succeed(TENANT, jobId, { proposalId, providerLabel: null });
+    ctx.store.records.delete(proposalId);
+    const out = await getJob(ctx, jobId);
+    expect(out.status).toBe(200);
+    expect(out.body["proposal"]).toBeNull();
+    expect(out.body["summary"]).toBeNull();
+    expect("schema" in out.body).toBe(false);
+    expect(projector.calls).toHaveLength(0);
+  });
+
+  it("omits the schema on a job that has not succeeded", async () => {
+    const projector = recordingProjector();
+    const { ctx: base, jobs } = makeJobCtx();
+    const ctx = { ...base, projectSchema: projector.project };
+    const created = await createJob(ctx, { description: "A CRM" });
+    const jobId = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.fail(TENANT, jobId, { error: "design failed after 3 attempts" });
+    const out = await getJob(ctx, jobId);
+    expect(out.status).toBe(200);
+    expect(Object.keys(out.body)).toEqual(["job"]);
+    expect(projector.calls).toHaveLength(0);
+  });
+
+  it("leaves the synchronous design 201 response unchanged — no schema", async () => {
+    const projector = recordingProjector();
+    const ctx = { ...makeCtx(), projectSchema: projector.project };
+    const out = await design(ctx, { description: "A CRM" });
+    expect(out.status).toBe(201);
+    expect(Object.keys(out.body).sort()).toEqual(["proposal", "summary"]);
+    expect(projector.calls).toHaveLength(0);
+  });
+
+  it("leaves list, activate, and archive free of a schema", async () => {
+    const projector = recordingProjector();
+    const ctx = { ...makeCtx(), projectSchema: projector.project };
+    const id = await draftId(ctx);
+    const list = (await findHandler(ctx, "ai.manifests.list")(input("tenant_admin"))) as JsonOut;
+    expect(Object.keys(list.body).sort()).toEqual(["data", "page"]);
+    const activated = (await findHandler(ctx, "ai.manifests.activate")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(Object.keys(activated.body)).toEqual(["proposal"]);
+    const archived = (await findHandler(ctx, "ai.manifests.archive")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(Object.keys(archived.body)).toEqual(["proposal"]);
+    expect(projector.calls).toHaveLength(0);
   });
 });

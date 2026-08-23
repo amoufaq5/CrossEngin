@@ -83,12 +83,89 @@ export interface RiskReportLike {
   };
 }
 
+/**
+ * Structural mirror of the manifest display projection. Declared here rather than imported so
+ * the route layer stays decoupled from the projector implementation — the projection itself is
+ * injected, exactly like `assessRisk`.
+ */
+export interface ManifestViewLike {
+  readonly meta: {
+    readonly name: string | null;
+    readonly slug: string | null;
+    readonly version: string | null;
+    readonly description: string | null;
+  };
+  readonly entities: readonly {
+    readonly name: string;
+    readonly label: string;
+    readonly traits: readonly string[];
+    readonly auditable: boolean;
+    readonly fields: readonly {
+      readonly name: string;
+      readonly kind: string;
+      readonly type: string;
+      readonly required: boolean;
+      readonly classification: string | null;
+      readonly sensitive: boolean;
+      readonly referenceTarget: string | null;
+    }[];
+    readonly permissions: readonly { readonly operation: string; readonly roles: readonly string[] }[];
+    readonly lifecycle: {
+      readonly stateField: string | null;
+      readonly initialState: string | null;
+      readonly states: readonly {
+        readonly name: string;
+        readonly label: string;
+        readonly category: string | null;
+      }[];
+      readonly transitions: readonly {
+        readonly name: string;
+        readonly from: readonly string[];
+        readonly to: string;
+      }[];
+    } | null;
+  }[];
+  readonly relations: readonly {
+    readonly kind: string;
+    readonly from: string;
+    readonly to: string;
+    readonly field: string | null;
+    readonly onDelete: string | null;
+  }[];
+  readonly roles: readonly {
+    readonly name: string;
+    readonly label: string;
+    readonly description: string | null;
+    readonly grantCount: number;
+  }[];
+  readonly counts: {
+    readonly entities: number;
+    readonly fields: number;
+    readonly roles: number;
+    readonly relations: number;
+    readonly sensitiveFields: number;
+    readonly lifecycles: number;
+  };
+}
+
+export type ManifestProjector = (manifest: Record<string, unknown>) => ManifestViewLike;
+
 export interface DesignReviewContext {
   readonly store: DesignReviewStoreLike;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /** Roles permitted to review proposals platform-wide. Fail-closed: empty ⇒ nobody. */
   readonly adminRoles: ReadonlySet<string>;
   readonly assessRisk: (manifest: Record<string, unknown>) => RiskReportLike;
+  /** Optional: when wired, the detail response carries a rendered schema view alongside the risk. */
+  readonly projectSchema?: ManifestProjector;
+}
+
+/** Spreads to nothing when no projector is wired, so the key is absent rather than undefined. */
+export function schemaFragment(
+  projectSchema: ManifestProjector | undefined,
+  manifest: Record<string, unknown>,
+): { schema?: ManifestViewLike } {
+  return projectSchema === undefined ? {} : { schema: projectSchema(manifest) };
 }
 
 export const ReviewDecisionInputSchema = z.object({
@@ -172,7 +249,11 @@ function buildGetHandler(ctx: DesignReviewContext): Handler {
     const id = params["id"] ?? "";
     const review = await ctx.store.getById(id);
     if (review === null) return json(404, { error: "review_not_found", detail: id });
-    return json(200, { review, risk: ctx.assessRisk(review.manifest) });
+    return json(200, {
+      review,
+      risk: ctx.assessRisk(review.manifest),
+      ...schemaFragment(ctx.projectSchema, review.manifest),
+    });
   };
 }
 

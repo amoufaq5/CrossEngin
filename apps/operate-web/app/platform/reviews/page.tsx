@@ -3,6 +3,7 @@
 import { Fragment, useCallback, useEffect, useState } from "react";
 
 import { Badge } from "@/components/Badge";
+import { SchemaView } from "@/components/SchemaView";
 import { Topbar } from "@/components/Topbar";
 import {
   approveReview,
@@ -376,7 +377,7 @@ function DetailPanel({
   acting: ReviewDecision | null;
   onDecide: (d: ReviewDecision) => void;
 }) {
-  const { review, risk } = detail;
+  const { review, risk, schema } = detail;
   const decided = review.reviewStatus === "approved" || review.reviewStatus === "rejected";
   const high = risk.level === "high";
 
@@ -424,6 +425,14 @@ function DetailPanel({
         <CountPill label="Relations" value={risk.counts.relations} />
         <CountPill label="Sensitive fields" value={risk.counts.sensitiveFields} accent={risk.counts.sensitiveFields > 0} />
       </div>
+
+      {schema !== undefined && (
+        <div>
+          <div className="label">Designed schema</div>
+          {/* Keyed by review: collapse state must not leak between proposals. */}
+          <SchemaView key={review.id} schema={schema} />
+        </div>
+      )}
 
       {decided ? (
         <div className="rounded-xl border border-line bg-surface-soft px-4 py-3 text-sm">

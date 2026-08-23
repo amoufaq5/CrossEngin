@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { SchemaView } from "@/components/SchemaView";
 import { Topbar } from "@/components/Topbar";
 import {
   activateProposal,
@@ -94,7 +95,11 @@ export default function SetupPage() {
         if (poll.job.status === "succeeded") {
           setJobId(null);
           if (poll.proposal != null && poll.summary != null) {
-            setResult({ proposal: poll.proposal, summary: poll.summary });
+            setResult({
+              proposal: poll.proposal,
+              summary: poll.summary,
+              schema: poll.schema ?? undefined,
+            });
             setActivateError(null);
             setStep("review");
             refreshList();
@@ -160,7 +165,7 @@ export default function SetupPage() {
     setActivateError(null);
     try {
       const proposal = await activateProposal(result.proposal.id);
-      setResult({ proposal, summary: result.summary });
+      setResult({ proposal, summary: result.summary, schema: result.schema });
       setStep("done");
       refreshList();
     } catch (e) {
@@ -380,6 +385,18 @@ export default function SetupPage() {
                   </div>
                 ))}
               </div>
+
+              {result.schema !== undefined && (
+                <div className="mt-6 border-t border-line pt-5">
+                  <div className="label">Designed schema</div>
+                  <p className="mb-3 text-sm text-ink-muted">
+                    Exactly what activating this system will create — every field, permission and
+                    workflow state.
+                  </p>
+                  {/* Keyed by proposal: collapse state must not leak between designs. */}
+                  <SchemaView key={result.proposal.id} schema={result.schema} />
+                </div>
+              )}
 
               {activateError && (
                 <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
