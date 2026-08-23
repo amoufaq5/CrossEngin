@@ -41,6 +41,10 @@ import {
   type MultiTenantSweepReport,
 } from "./link-sweep.js";
 import { PruneScheduler } from "./prune-scheduler.js";
+import { DeliveryScheduler } from "./delivery-scheduler.js";
+import { PostgresDeliveryStore } from "./delivery-store.js";
+import { PostgresRecipientResolver } from "./recipient-resolver.js";
+import { defaultSenderRegistry } from "./delivery-senders.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
@@ -883,6 +887,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       intervalMs: options.pruneLinksMs,
     });
   }
+  // Notification delivery drain: a queued dispatch is only a record of intent until something
+  // sends it. Each tick claims every active tenant's queued dispatches (FOR UPDATE SKIP LOCKED,
+  // so two servers can drain one database), resolves the audience to real recipients, applies
+  // each one's preferences and suppressions, sends through the channel's registered sender, and
+  // records an attempt per recipient before advancing the dispatch to a terminal status.
+  let deliveryScheduler: DeliveryScheduler | null = null;
+  if (options.notificationDrainMs !== null && conn !== undefined) {
+    deliveryScheduler = new DeliveryScheduler({
+      drain: {
+        store: new PostgresDeliveryStore(conn, schemaOpt),
+        resolver: new PostgresRecipientResolver(conn, {
+          ...schemaOpt,
+          adminRoles: options.notificationAdminRoles,
+        }),
+        senders: defaultSenderRegistry(),
+        onError: (err, tenantId) =>
+          console.error(`[notifications] drain failed for tenant ${tenantId}`, err),
+      },
+      tenantSource: new PostgresTenantSource(conn, schemaOpt),
+      intervalMs: options.notificationDrainMs,
+      onError: (err) => console.error("[notifications] drain sweep failed", err),
+    });
+  }
   // Per-tenant manifest serving: a tenant with an activated custom manifest gets a gateway
   // compiled from it (cached, ttl'd, invalidated on activation); everyone else — and any
   // request whose tenant can't be resolved — falls through to the default full-featured
@@ -957,6 +984,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   manifestPoller?.start();
   jobScheduler?.start();
   pruneScheduler?.start();
+  deliveryScheduler?.start();
   sloEnforcement?.scheduler.start();
   drReadiness?.scheduler.start();
   accessReviews?.scheduler.start();
@@ -981,6 +1009,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         manifestPoller?.stop();
         jobScheduler?.stop();
         pruneScheduler?.stop();
+        deliveryScheduler?.stop();
         sloEnforcement?.scheduler.stop();
         drReadiness?.scheduler.stop();
         accessReviews?.scheduler.stop();
