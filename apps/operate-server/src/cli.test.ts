@@ -252,6 +252,47 @@ describe("parseServeArgs", () => {
     expect(parseServeArgs(["--pack", "erp-core"]).pruneLinksMs).toBeNull();
   });
 
+  it("parses --notification-drain-ms with a pg store", () => {
+    const opts = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg", "--notification-drain-ms", "30000",
+    ]);
+    expect(opts.notificationDrainMs).toBe(30000);
+  });
+
+  it("defaults --notification-drain-ms to null and the admin roles to the built-ins", () => {
+    const opts = parseServeArgs(["--pack", "erp-core"]);
+    expect(opts.notificationDrainMs).toBeNull();
+    expect(opts.notificationAdminRoles).toContain("erp_admin");
+  });
+
+  it("rejects --notification-drain-ms with the memory store", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--notification-drain-ms", "30000"]),
+    ).toThrow(/requires a Postgres store/);
+  });
+
+  it("rejects a sub-second --notification-drain-ms", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--notification-drain-ms", "10"]),
+    ).toThrow(/invalid --notification-drain-ms/);
+  });
+
+  it("collects repeatable --notification-admin-role", () => {
+    const opts = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg",
+      "--notification-drain-ms", "30000",
+      "--notification-admin-role", "ops_lead",
+      "--notification-admin-role", "billing_admin",
+    ]);
+    expect(opts.notificationAdminRoles).toEqual(["ops_lead", "billing_admin"]);
+  });
+
+  it("rejects --notification-admin-role without the drain interval", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--notification-admin-role", "ops_lead"]),
+    ).toThrow(/requires --notification-drain-ms/);
+  });
+
   it("parses --pack-catalog with a pg store and defaults it to null", () => {
     expect(parseServeArgs(["--pack", "erp-core", "--store", "pg", "--pack-catalog", "./catalog.json"]).packCatalogFile).toBe(
       "./catalog.json",

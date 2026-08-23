@@ -1,6 +1,7 @@
 import { REGIONS } from "@crossengin/residency";
 
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
+import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 
 export type StoreKind = "memory" | "pg" | "pg-columns";
 
@@ -37,6 +38,10 @@ export interface ServeOptions {
   readonly scheduleAllTenants: boolean;
   /** Dangling-link prune sweep interval (ms) — periodically prunes every active tenant's dangling m2m links (needs --store pg). */
   readonly pruneLinksMs: number | null;
+  /** Notification delivery drain interval (ms) — sends every active tenant's queued dispatches (needs a pg store). */
+  readonly notificationDrainMs: number | null;
+  /** Roles treated as a tenant's admins when resolving a `tenant_admins` notification audience. */
+  readonly notificationAdminRoles: readonly string[];
   /** Emit an entity-write event per create/update/delete/transition → event-triggered jobs (needs pg). */
   readonly emitEntityEvents: boolean;
   /** Optional namespace prefix for emitted entity-event names (e.g. `retail`). */
@@ -152,6 +157,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const scheduleTenants: string[] = [];
   let scheduleAllTenants = false;
   let pruneLinksMs: number | null = null;
+  let notificationDrainMs: number | null = null;
+  const notificationAdminRoles: string[] = [];
   let emitEntityEvents = false;
   let eventPrefix: string | null = null;
   let enableJobInvoke = false;
@@ -284,6 +291,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       const n = Number(raw);
       if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --prune-links-ms: ${raw} (>= 1000)`);
       pruneLinksMs = n;
+      i += consumed();
+    } else if (arg === "--notification-drain-ms" || arg.startsWith("--notification-drain-ms=")) {
+      const raw = takeValue(arg, next, "--notification-drain-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --notification-drain-ms: ${raw} (>= 1000)`);
+      notificationDrainMs = n;
+      i += consumed();
+    } else if (arg === "--notification-admin-role" || arg.startsWith("--notification-admin-role=")) {
+      notificationAdminRoles.push(takeValue(arg, next, "--notification-admin-role"));
       i += consumed();
     } else if (arg === "--emit-entity-events") {
       emitEntityEvents = true;
@@ -437,6 +453,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       "--prune-links-ms requires the JSONB Postgres store (--store pg); the column store cascades and can't dangle",
     );
   }
+  if (notificationDrainMs !== null && store === "memory") {
+    throw new CliUsageError("--notification-drain-ms requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (notificationAdminRoles.length > 0 && notificationDrainMs === null) {
+    throw new CliUsageError("--notification-admin-role requires --notification-drain-ms (the drain interval)");
+  }
   if (emitEntityEvents && store === "memory") {
     throw new CliUsageError("--emit-entity-events requires a Postgres store (--store pg or pg-columns)");
   }
@@ -525,6 +547,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     scheduleTenants,
     scheduleAllTenants,
     pruneLinksMs,
+    notificationDrainMs,
+    notificationAdminRoles:
+      notificationAdminRoles.length > 0 ? notificationAdminRoles : DEFAULT_ADMIN_ROLES,
     emitEntityEvents,
     eventPrefix,
     enableJobInvoke,
@@ -805,6 +830,13 @@ Options:
                        (DB-backed; mutually exclusive with --schedule-tenant)
   --prune-links-ms <n>  Dangling-link prune sweep interval (ms, >=1000) — periodically
                        prunes every active tenant's dangling m2m links (needs --store pg)
+  --notification-drain-ms <n>  Notification delivery drain interval (ms, >=1000) — sends every
+                       active tenant's queued dispatches, applying per-recipient preferences
+                       and suppressions, and records an attempt per recipient
+                       (needs --store pg|pg-columns)
+  --notification-admin-role <r>  Role treated as a tenant admin when resolving a
+                       tenant_admins audience (repeatable; default erp_admin +
+                       tenant_admin + platform_admin)
   --emit-entity-events  Emit a domain event per entity create/update/delete/transition,
                        firing event-triggered jobs into job_runs (needs --store pg|pg-columns)
   --event-prefix <p>   Namespace prefix for emitted event names (with --emit-entity-events)
