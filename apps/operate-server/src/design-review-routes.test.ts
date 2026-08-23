@@ -11,6 +11,8 @@ import {
   type DesignReviewListQueryLike,
   type DesignReviewRecordLike,
   type DesignReviewStoreLike,
+  type ManifestProjector,
+  type ManifestViewLike,
   type ReviewStatusLike,
   type RiskReportLike,
 } from "./design-review-routes.js";
@@ -516,5 +518,132 @@ describe("design-review-routes — reject", () => {
     const again = await call(ctx, "platform.designReviews.reject", { params: { id: seeded.id } });
     expect(again.status).toBe(409);
     expect(again.body["detail"]).toBe("rejected -> rejected");
+  });
+});
+
+const STUB_VIEW: ManifestViewLike = {
+  meta: { name: "Plumber CRM", slug: "acme/crm", version: "1.0.0", description: null },
+  entities: [],
+  relations: [],
+  roles: [],
+  counts: { entities: 2, fields: 0, roles: 0, relations: 0, sensitiveFields: 0, lifecycles: 0 },
+};
+
+interface ProjectorStub {
+  readonly project: ManifestProjector;
+  readonly calls: Record<string, unknown>[];
+}
+
+function recordingProjector(): ProjectorStub {
+  const calls: Record<string, unknown>[] = [];
+  return {
+    calls,
+    project: (manifest: Record<string, unknown>): ManifestViewLike => {
+      calls.push(manifest);
+      return STUB_VIEW;
+    },
+  };
+}
+
+describe("design-review-routes — schema projection", () => {
+  it("includes the projected schema on get, built from the review's own manifest", async () => {
+    const { ctx, store } = makeCtx();
+    const projector = recordingProjector();
+    const withSchema: DesignReviewContext = { ...ctx, projectSchema: projector.project };
+    const seeded = store.seed();
+    const out = await call(withSchema, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(projector.calls).toEqual([MANIFEST]);
+    expect(out.body["schema"]).toBe(STUB_VIEW);
+  });
+
+  it("keeps review + manifest + risk intact alongside the schema", async () => {
+    const { ctx, store } = makeCtx();
+    const projector = recordingProjector();
+    const withSchema: DesignReviewContext = { ...ctx, projectSchema: projector.project };
+    const seeded = store.seed();
+    const out = await call(withSchema, "platform.designReviews.get", { params: { id: seeded.id } });
+    const review = out.body["review"] as DesignReviewRecordLike;
+    expect(review.id).toBe(seeded.id);
+    expect(review.manifest).toEqual(MANIFEST);
+    expect((out.body["risk"] as RiskReportLike).counts.entities).toBe(2);
+    expect(Object.keys(out.body).sort()).toEqual(["review", "risk", "schema"]);
+  });
+
+  it("omits the schema key entirely when no projector is configured", async () => {
+    const { ctx, store } = makeCtx();
+    const seeded = store.seed();
+    const out = await call(ctx, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect("schema" in out.body).toBe(false);
+    expect(Object.keys(out.body).sort()).toEqual(["review", "risk"]);
+  });
+
+  it("leaves the list untouched — no manifest, no schema, projector never called", async () => {
+    const { ctx, store } = makeCtx();
+    const projector = recordingProjector();
+    const withSchema: DesignReviewContext = { ...ctx, projectSchema: projector.project };
+    store.seed();
+    store.seed();
+    const out = await call(withSchema, "platform.designReviews.list");
+    expect(out.status).toBe(200);
+    expect("schema" in out.body).toBe(false);
+    for (const item of out.body["data"] as ReadonlyArray<Record<string, unknown>>) {
+      expect("manifest" in item).toBe(false);
+      expect("schema" in item).toBe(false);
+      expect(item["risk"]).toBeDefined();
+    }
+    expect(projector.calls).toHaveLength(0);
+  });
+
+  it("does not project for a missing review — the 404 body is unchanged", async () => {
+    const { ctx } = makeCtx();
+    const projector = recordingProjector();
+    const withSchema: DesignReviewContext = { ...ctx, projectSchema: projector.project };
+    const out = await call(withSchema, "platform.designReviews.get", { params: { id: "aim_9999" } });
+    expect(out.status).toBe(404);
+    expect(out.body).toEqual({ error: "review_not_found", detail: "aim_9999" });
+    expect(projector.calls).toHaveLength(0);
+  });
+
+  it("does not project behind a guard denial on get", async () => {
+    const { ctx, store } = makeCtx();
+    const projector = recordingProjector();
+    const withSchema: DesignReviewContext = { ...ctx, projectSchema: projector.project };
+    const seeded = store.seed();
+    const unauth = await call(withSchema, "platform.designReviews.get", { params: { id: seeded.id } }, null);
+    expect(unauth.status).toBe(401);
+    const forbidden = await call(
+      withSchema,
+      "platform.designReviews.get",
+      { params: { id: seeded.id } },
+      "tenant_admin",
+    );
+    expect(forbidden.status).toBe(403);
+    expect(projector.calls).toHaveLength(0);
+  });
+
+  it("leaves approve and reject responses free of a schema", async () => {
+    const { ctx, store } = makeCtx();
+    const projector = recordingProjector();
+    const withSchema: DesignReviewContext = { ...ctx, projectSchema: projector.project };
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const approved = await call(withSchema, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(approved.status).toBe(200);
+    expect(Object.keys(approved.body)).toEqual(["review"]);
+    const rejected = await call(withSchema, "platform.designReviews.reject", { params: { id: seeded.id } });
+    expect(rejected.status).toBe(200);
+    expect(Object.keys(rejected.body)).toEqual(["review"]);
+    expect(projector.calls).toHaveLength(0);
+  });
+
+  it("projects once per get call", async () => {
+    const { ctx, store } = makeCtx();
+    const projector = recordingProjector();
+    const withSchema: DesignReviewContext = { ...ctx, projectSchema: projector.project };
+    const seeded = store.seed();
+    await call(withSchema, "platform.designReviews.get", { params: { id: seeded.id } });
+    await call(withSchema, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(projector.calls).toHaveLength(2);
   });
 });

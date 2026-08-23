@@ -3,7 +3,11 @@ import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gat
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { z } from "zod";
 
-import type { ReviewStatusLike } from "./design-review-routes.js";
+import {
+  schemaFragment,
+  type ManifestProjector,
+  type ReviewStatusLike,
+} from "./design-review-routes.js";
 import { DESIGN_JOB_MAX_ATTEMPTS, type DesignJobStoreLike } from "./design-runner.js";
 
 export const AI_MANIFEST_STATUSES = ["draft", "active", "archived"] as const;
@@ -84,6 +88,8 @@ export interface AiDesignContext {
     record(tenantId: string, costUsd: number): Promise<number>;
   };
   readonly summarize: (manifest: Record<string, unknown>) => unknown;
+  /** Optional: when wired, proposal detail responses carry a rendered schema view. */
+  readonly projectSchema?: ManifestProjector;
   /** Async design mode. Both must be wired or the job routes self-503. */
   readonly jobs?: DesignJobStoreLike;
   readonly startJob?: (
@@ -245,6 +251,7 @@ function buildDesignJobGetHandler(ctx: AiDesignContext): Handler {
       job,
       proposal,
       summary: proposal === null ? null : ctx.summarize(proposal.manifest),
+      ...(proposal === null ? {} : schemaFragment(ctx.projectSchema, proposal.manifest)),
     });
   };
 }
@@ -269,7 +276,11 @@ function buildGetHandler(ctx: AiDesignContext): Handler {
     const id = params["id"] ?? "";
     const proposal = await ctx.store.getById(tenant, id);
     if (proposal === null) return json(404, { error: "proposal_not_found", detail: id });
-    return json(200, { proposal, summary: ctx.summarize(proposal.manifest) });
+    return json(200, {
+      proposal,
+      summary: ctx.summarize(proposal.manifest),
+      ...schemaFragment(ctx.projectSchema, proposal.manifest),
+    });
   };
 }
 

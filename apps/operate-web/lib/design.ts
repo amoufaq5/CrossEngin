@@ -2,6 +2,10 @@
 // goes to this Next app's /api proxy, which forwards to operate-server with the
 // server's credentials — same-origin, so no CORS. All paths hit /api/v1/ai/...
 
+import type { ManifestView } from "@/components/SchemaView";
+
+export type { ManifestView };
+
 export type ProposalStatus = "draft" | "active" | "archived";
 
 export interface Proposal {
@@ -36,6 +40,8 @@ export type DesignSummary = ProposalSummary;
 export interface DesignResult {
   readonly proposal: Proposal;
   readonly summary: ProposalSummary;
+  /** Absent when the server has no manifest projector wired — render nothing. */
+  readonly schema?: ManifestView;
 }
 
 export type DesignJobStatus = "queued" | "running" | "succeeded" | "failed";
@@ -69,6 +75,7 @@ export interface DesignJobPoll {
   readonly job: DesignJob;
   readonly proposal?: Proposal | null;
   readonly summary?: DesignSummary | null;
+  readonly schema?: ManifestView | null;
 }
 
 export interface DesignInput {

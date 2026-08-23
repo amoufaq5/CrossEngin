@@ -3,6 +3,10 @@
 // server's x-api-key — so the browser never holds a platform credential and
 // there are no CORS concerns. All paths hit /api/v1/platform/design-reviews...
 
+import type { ManifestView } from "@/components/SchemaView";
+
+export type { ManifestView };
+
 export type ReviewStatus = "not_required" | "pending" | "approved" | "rejected";
 
 export type RiskLevel = "low" | "medium" | "high";
@@ -62,6 +66,8 @@ export interface ReviewPage {
 export interface ReviewDetail {
   readonly review: ReviewWithManifest;
   readonly risk: RiskReport;
+  /** Absent when the server has no manifest projector wired — render nothing. */
+  readonly schema?: ManifestView;
 }
 
 export interface ReviewCounts {

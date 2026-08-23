@@ -73,6 +73,7 @@ import { PostgresDesignJobStore } from "./design-jobs.js";
 import { PostgresDesignReviewStore } from "./design-review-store.js";
 import { buildDesignReviewRoutes } from "./design-review-routes.js";
 import { assessManifestRisk } from "./design-review.js";
+import { projectManifestView } from "./manifest-view.js";
 import { enrolNewProposalsForReview } from "./review-enrolment.js";
 import { startDesignJob } from "./design-runner.js";
 import { PostgresTenantCostStore } from "@crossengin/ai-architect-runtime-pg";
@@ -474,6 +475,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         adminRoles: new Set(options.designReviewRoles),
         assessRisk: assessManifestRisk,
+        projectSchema: projectManifestView,
       }),
     );
   }
@@ -544,6 +546,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         allowedRoles: new Set(options.aiDesignRoles),
         onActivated: (tenantId) => gatewayCache?.invalidate(tenantId),
         summarize: manifestSummary,
+        projectSchema: projectManifestView,
         ...(budget !== undefined ? { budget } : {}),
         ...(options.requireDesignReview && reviewStore !== null ? { reviewGate: reviewStore } : {}),
         ...(designJobs !== undefined && designer !== null
