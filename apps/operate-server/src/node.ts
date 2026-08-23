@@ -74,6 +74,7 @@ import { PostgresDesignReviewStore } from "./design-review-store.js";
 import { buildDesignReviewRoutes } from "./design-review-routes.js";
 import { assessManifestRisk } from "./design-review.js";
 import { projectManifestView } from "./manifest-view.js";
+import { diffManifests } from "./manifest-diff.js";
 import { enrolNewProposalsForReview } from "./review-enrolment.js";
 import { startDesignJob } from "./design-runner.js";
 import { PostgresTenantCostStore } from "@crossengin/ai-architect-runtime-pg";
@@ -463,6 +464,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }),
     );
   }
+  // The proposal store backs both the AI routes and the review queue's activation diff, so it is
+  // built before either. A review-only deployment still needs it to resolve a tenant's live manifest.
+  let manifestStore: PostgresTenantManifestStore | null = null;
+  let gatewayCache: TenantGatewayCache | null = null;
+  let manifestPoller: ManifestActivationPoller | null = null;
+  if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
+    manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
+  }
   // Platform design-review queue: /v1/platform/design-reviews lets an operator triage AI-generated
   // proposals across every tenant (with an automated risk report) before they can go live. The
   // cross-tenant reads run under the explicit, transaction-scoped `app.platform_review` grant.
@@ -476,6 +485,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         adminRoles: new Set(options.designReviewRoles),
         assessRisk: assessManifestRisk,
         projectSchema: projectManifestView,
+        ...(manifestStore !== null ? { diffManifests, activeManifests: manifestStore } : {}),
       }),
     );
   }
@@ -484,12 +494,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // tenant's live system. The designer resolves from env (Anthropic → OpenAI, OPENAI_BASE_URL
   // for self-hosted OSS servers); with no provider the routes answer 503 but review/activate of
   // existing proposals still works. Activation invalidates the per-tenant gateway cache below.
-  let manifestStore: PostgresTenantManifestStore | null = null;
-  let gatewayCache: TenantGatewayCache | null = null;
-  let manifestPoller: ManifestActivationPoller | null = null;
-  if ((options.aiDesign || options.perTenantManifests) && conn !== undefined) {
-    manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
-  }
   if (options.aiDesign && manifestStore !== null) {
     const providerBuild = buildDesignProviderFromEnv(
       process.env,
@@ -547,6 +551,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         onActivated: (tenantId) => gatewayCache?.invalidate(tenantId),
         summarize: manifestSummary,
         projectSchema: projectManifestView,
+        diffManifests,
+        activeManifests: manifestStore,
         ...(budget !== undefined ? { budget } : {}),
         ...(options.requireDesignReview && reviewStore !== null ? { reviewGate: reviewStore } : {}),
         ...(designJobs !== undefined && designer !== null

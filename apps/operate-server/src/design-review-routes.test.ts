@@ -11,6 +11,9 @@ import {
   type DesignReviewListQueryLike,
   type DesignReviewRecordLike,
   type DesignReviewStoreLike,
+  type ActiveManifestSourceLike,
+  type ManifestDiffViewLike,
+  type ManifestDiffer,
   type ManifestProjector,
   type ManifestViewLike,
   type ReviewStatusLike,
@@ -645,5 +648,281 @@ describe("design-review-routes — schema projection", () => {
     await call(withSchema, "platform.designReviews.get", { params: { id: seeded.id } });
     await call(withSchema, "platform.designReviews.get", { params: { id: seeded.id } });
     expect(projector.calls).toHaveLength(2);
+  });
+});
+
+const ACTIVE_MANIFEST: Record<string, unknown> = {
+  meta: { slug: "acme/crm" },
+  entities: [{ name: "Lead" }],
+};
+
+const STUB_DIFF: ManifestDiffViewLike = {
+  comparable: true,
+  impact: "additive",
+  warnings: [],
+  entitiesAdded: ["Deal"],
+  entitiesRemoved: [],
+  entitiesModified: [],
+  fieldChanges: [],
+  permissionChanges: [],
+  relationChanges: [],
+  rolesAdded: [],
+  rolesRemoved: [],
+  lifecycleChanges: [],
+  counts: { added: 1, removed: 0, modified: 0, warnings: 0 },
+};
+
+interface DifferStub {
+  readonly diff: ManifestDiffer;
+  readonly calls: Array<{ active: Record<string, unknown> | null; next: Record<string, unknown> }>;
+}
+
+function recordingDiffer(): DifferStub {
+  const calls: Array<{ active: Record<string, unknown> | null; next: Record<string, unknown> }> = [];
+  return {
+    calls,
+    diff: (active, next): ManifestDiffViewLike => {
+      calls.push({ active, next });
+      return STUB_DIFF;
+    },
+  };
+}
+
+interface ActiveSourceStub {
+  readonly source: ActiveManifestSourceLike;
+  readonly asked: string[];
+}
+
+function recordingActiveSource(
+  resolve: Record<string, unknown> | null = ACTIVE_MANIFEST,
+  fail = false,
+): ActiveSourceStub {
+  const asked: string[] = [];
+  return {
+    asked,
+    source: {
+      activeManifestFor: async (tenantId: string): Promise<Record<string, unknown> | null> => {
+        asked.push(tenantId);
+        if (fail) throw new Error("manifest store unreachable");
+        return resolve;
+      },
+    },
+  };
+}
+
+/** A principal whose own tenant differs from the proposal's — the platform reviewer case. */
+function otherTenantInput(id: string): HandlerInput {
+  return {
+    request: { query: {} } as never,
+    route: {} as never,
+    principal: {
+      principalId: REVIEWER, tenantId: OTHER_TENANT, principalKind: "user",
+      authScheme: "api_key_header", grantedScopes: ["platform_admin"],
+      mfaProofAgeSeconds: null, resolvedAt: "2026-06-01T00:00:00.000Z",
+    } as ResolvedPrincipal,
+    params: { id },
+    parsedBody: null,
+  };
+}
+
+describe("design-review-routes — activation diff", () => {
+  it("includes the diff on get when both the differ and the active source are wired", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed();
+    const out = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(out.body["diff"]).toBe(STUB_DIFF);
+    expect(Object.keys(out.body).sort()).toEqual(["diff", "review", "risk"]);
+  });
+
+  it("diffs the resolved active manifest against the review's own manifest", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed();
+    await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(differ.calls).toEqual([{ active: ACTIVE_MANIFEST, next: MANIFEST }]);
+  });
+
+  it("resolves the active manifest for the review's tenant, not the caller's", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed({ tenantId: OTHER_TENANT });
+    const out = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(active.asked).toEqual([OTHER_TENANT]);
+  });
+
+  it("ignores the reviewer's own tenant even when it differs from the proposal's", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed({ tenantId: TENANT });
+    const handler = findHandler(withDiff, "platform.designReviews.get");
+    const out = (await handler(otherTenantInput(seeded.id))) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(active.asked).toEqual([TENANT]);
+    expect(active.asked).not.toContain(OTHER_TENANT);
+  });
+
+  it("passes a null active manifest through when the tenant has no live system yet", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource(null);
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed();
+    const out = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(differ.calls).toEqual([{ active: null, next: MANIFEST }]);
+  });
+
+  it("still 200s with a null-active diff when resolving the active manifest throws", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource(ACTIVE_MANIFEST, true);
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed();
+    const out = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(out.body["diff"]).toBe(STUB_DIFF);
+    expect(differ.calls).toEqual([{ active: null, next: MANIFEST }]);
+  });
+
+  it("omits the diff key when only the differ is wired", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const withDiff: DesignReviewContext = { ...ctx, diffManifests: differ.diff };
+    const seeded = store.seed();
+    const out = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect("diff" in out.body).toBe(false);
+    expect(Object.keys(out.body).sort()).toEqual(["review", "risk"]);
+    expect(differ.calls).toHaveLength(0);
+  });
+
+  it("omits the diff key when only the active manifest source is wired", async () => {
+    const { ctx, store } = makeCtx();
+    const active = recordingActiveSource();
+    const withDiff: DesignReviewContext = { ...ctx, activeManifests: active.source };
+    const seeded = store.seed();
+    const out = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect("diff" in out.body).toBe(false);
+    expect(active.asked).toHaveLength(0);
+  });
+
+  it("does not diff for a missing review or behind a guard denial", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed();
+    const missing = await call(withDiff, "platform.designReviews.get", { params: { id: "aim_9999" } });
+    expect(missing.status).toBe(404);
+    const unauth = await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } }, null);
+    expect(unauth.status).toBe(401);
+    const forbidden = await call(
+      withDiff,
+      "platform.designReviews.get",
+      { params: { id: seeded.id } },
+      "tenant_admin",
+    );
+    expect(forbidden.status).toBe(403);
+    expect(differ.calls).toHaveLength(0);
+    expect(active.asked).toHaveLength(0);
+  });
+
+  it("leaves list, stats, approve, and reject free of a diff", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed({ reviewStatus: "pending" });
+    const list = await call(withDiff, "platform.designReviews.list");
+    expect(Object.keys(list.body).sort()).toEqual(["data", "page"]);
+    for (const item of list.body["data"] as ReadonlyArray<Record<string, unknown>>) {
+      expect("diff" in item).toBe(false);
+    }
+    expect(Object.keys((await call(withDiff, "platform.designReviews.stats")).body)).toEqual(["counts"]);
+    const approved = await call(withDiff, "platform.designReviews.approve", { params: { id: seeded.id } });
+    expect(Object.keys(approved.body)).toEqual(["review"]);
+    const rejected = await call(withDiff, "platform.designReviews.reject", { params: { id: seeded.id } });
+    expect(Object.keys(rejected.body)).toEqual(["review"]);
+    expect(differ.calls).toHaveLength(0);
+    expect(active.asked).toHaveLength(0);
+  });
+
+  it("composes with the schema projection — both keys ride the same response", async () => {
+    const { ctx, store } = makeCtx();
+    const projector = recordingProjector();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const full: DesignReviewContext = {
+      ...ctx,
+      projectSchema: projector.project,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed();
+    const out = await call(full, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(out.status).toBe(200);
+    expect(Object.keys(out.body).sort()).toEqual(["diff", "review", "risk", "schema"]);
+    expect(out.body["schema"]).toBe(STUB_VIEW);
+    expect(out.body["diff"]).toBe(STUB_DIFF);
+  });
+
+  it("diffs once per get call", async () => {
+    const { ctx, store } = makeCtx();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const withDiff: DesignReviewContext = {
+      ...ctx,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const seeded = store.seed();
+    await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    await call(withDiff, "platform.designReviews.get", { params: { id: seeded.id } });
+    expect(differ.calls).toHaveLength(2);
+    expect(active.asked).toEqual([TENANT, TENANT]);
   });
 });

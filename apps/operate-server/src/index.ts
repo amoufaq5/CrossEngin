@@ -35,6 +35,7 @@ export * from "./ai-design-budget.js";
 export * from "./design-jobs.js";
 export * from "./design-runner.js";
 export * from "./manifest-view.js";
+export * from "./manifest-diff.js";
 export * from "./design-review.js";
 export * from "./design-review-store.js";
 export * from "./design-review-routes.js";

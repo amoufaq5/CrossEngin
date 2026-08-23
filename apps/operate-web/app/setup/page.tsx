@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { DiffView } from "@/components/DiffView";
 import { SchemaView } from "@/components/SchemaView";
 import { Topbar } from "@/components/Topbar";
 import {
@@ -99,6 +100,7 @@ export default function SetupPage() {
               proposal: poll.proposal,
               summary: poll.summary,
               schema: poll.schema ?? undefined,
+              diff: poll.diff ?? undefined,
             });
             setActivateError(null);
             setStep("review");
@@ -165,7 +167,7 @@ export default function SetupPage() {
     setActivateError(null);
     try {
       const proposal = await activateProposal(result.proposal.id);
-      setResult({ proposal, summary: result.summary, schema: result.schema });
+      setResult({ proposal, summary: result.summary, schema: result.schema, diff: result.diff });
       setStep("done");
       refreshList();
     } catch (e) {
@@ -385,6 +387,16 @@ export default function SetupPage() {
                   </div>
                 ))}
               </div>
+
+              {result.diff !== undefined && (
+                <div className="mt-6 border-t border-line pt-5">
+                  <div className="label">Changes on activation</div>
+                  <p className="mb-3 text-sm text-ink-muted">
+                    What activating this system will do to your live system.
+                  </p>
+                  <DiffView diff={result.diff} />
+                </div>
+              )}
 
               {result.schema !== undefined && (
                 <div className="mt-6 border-t border-line pt-5">

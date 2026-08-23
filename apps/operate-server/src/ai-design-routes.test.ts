@@ -15,6 +15,9 @@ import {
   type ManifestDesignerLike,
 } from "./ai-design-routes.js";
 import type {
+  ActiveManifestSourceLike,
+  ManifestDiffViewLike,
+  ManifestDiffer,
   ManifestProjector,
   ManifestViewLike,
   ReviewStatusLike,
@@ -1138,5 +1141,256 @@ describe("ai-design-routes — schema projection", () => {
     )) as JsonOut;
     expect(Object.keys(archived.body)).toEqual(["proposal"]);
     expect(projector.calls).toHaveLength(0);
+  });
+});
+
+const ACTIVE_MANIFEST: Record<string, unknown> = { meta: { slug: "acme/crm" }, entities: [] };
+
+const STUB_DIFF: ManifestDiffViewLike = {
+  comparable: true,
+  impact: "additive",
+  warnings: [],
+  entitiesAdded: ["Lead"],
+  entitiesRemoved: [],
+  entitiesModified: [],
+  fieldChanges: [],
+  permissionChanges: [],
+  relationChanges: [],
+  rolesAdded: [],
+  rolesRemoved: [],
+  lifecycleChanges: [],
+  counts: { added: 1, removed: 0, modified: 0, warnings: 0 },
+};
+
+interface DifferStub {
+  readonly diff: ManifestDiffer;
+  readonly calls: Array<{ active: Record<string, unknown> | null; next: Record<string, unknown> }>;
+}
+
+function recordingDiffer(): DifferStub {
+  const calls: Array<{ active: Record<string, unknown> | null; next: Record<string, unknown> }> = [];
+  return {
+    calls,
+    diff: (active, next): ManifestDiffViewLike => {
+      calls.push({ active, next });
+      return STUB_DIFF;
+    },
+  };
+}
+
+interface ActiveSourceStub {
+  readonly source: ActiveManifestSourceLike;
+  readonly asked: string[];
+}
+
+function recordingActiveSource(
+  resolve: Record<string, unknown> | null = ACTIVE_MANIFEST,
+  fail = false,
+): ActiveSourceStub {
+  const asked: string[] = [];
+  return {
+    asked,
+    source: {
+      activeManifestFor: async (tenantId: string): Promise<Record<string, unknown> | null> => {
+        asked.push(tenantId);
+        if (fail) throw new Error("manifest store unreachable");
+        return resolve;
+      },
+    },
+  };
+}
+
+describe("ai-design-routes — activation diff", () => {
+  it("includes the diff on proposal get when both halves of the seam are wired", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const ctx = { ...makeCtx(), diffManifests: differ.diff, activeManifests: active.source };
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(out.body["diff"]).toBe(STUB_DIFF);
+    expect(Object.keys(out.body).sort()).toEqual(["diff", "proposal", "summary"]);
+  });
+
+  it("diffs the tenant's active manifest against the proposal's own manifest", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const ctx = { ...makeCtx(), diffManifests: differ.diff, activeManifests: active.source };
+    const id = await draftId(ctx);
+    await findHandler(ctx, "ai.manifests.get")(input("tenant_admin", { params: { id } }));
+    expect(differ.calls).toEqual([{ active: ACTIVE_MANIFEST, next: OK_MANIFEST }]);
+    expect(active.asked).toEqual([TENANT]);
+  });
+
+  it("resolves the active manifest for the authenticated tenant", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const base = makeCtx();
+    const ctx = { ...base, diffManifests: differ.diff, activeManifests: active.source };
+    const created = await base.store.create(OTHER_TENANT, {
+      name: "Other", description: "x", manifest: OK_MANIFEST, manifestHash: "sha256:z", source: "manual",
+    });
+    const out = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id: created.id }, tenantId: OTHER_TENANT }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(active.asked).toEqual([OTHER_TENANT]);
+  });
+
+  it("passes a null active manifest through when the tenant has no live system yet", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource(null);
+    const ctx = { ...makeCtx(), diffManifests: differ.diff, activeManifests: active.source };
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(differ.calls).toEqual([{ active: null, next: OK_MANIFEST }]);
+  });
+
+  it("still 200s with a null-active diff when resolving the active manifest throws", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource(ACTIVE_MANIFEST, true);
+    const ctx = { ...makeCtx(), diffManifests: differ.diff, activeManifests: active.source };
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(out.body["diff"]).toBe(STUB_DIFF);
+    expect(differ.calls).toEqual([{ active: null, next: OK_MANIFEST }]);
+  });
+
+  it("omits the diff key when either half of the seam is missing", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const differOnly = { ...makeCtx(), diffManifests: differ.diff };
+    const sourceOnly = { ...makeCtx(), activeManifests: active.source };
+    for (const ctx of [makeCtx(), differOnly, sourceOnly]) {
+      const id = await draftId(ctx);
+      const out = (await findHandler(ctx, "ai.manifests.get")(
+        input("tenant_admin", { params: { id } }),
+      )) as JsonOut;
+      expect(out.status).toBe(200);
+      expect("diff" in out.body).toBe(false);
+      expect(Object.keys(out.body).sort()).toEqual(["proposal", "summary"]);
+    }
+    expect(differ.calls).toHaveLength(0);
+    expect(active.asked).toHaveLength(0);
+  });
+
+  it("includes the diff on a succeeded job get alongside job + proposal + summary", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const { ctx: base, jobs } = makeJobCtx();
+    const ctx = { ...base, diffManifests: differ.diff, activeManifests: active.source };
+    const proposalId = await draftId(ctx);
+    const created = await createJob(ctx, { description: "A CRM" });
+    const jobId = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.succeed(TENANT, jobId, { proposalId, providerLabel: null });
+    const out = await getJob(ctx, jobId);
+    expect(out.status).toBe(200);
+    expect(out.body["diff"]).toBe(STUB_DIFF);
+    expect(Object.keys(out.body).sort()).toEqual(["diff", "job", "proposal", "summary"]);
+    expect(differ.calls).toEqual([{ active: ACTIVE_MANIFEST, next: OK_MANIFEST }]);
+    expect(active.asked).toEqual([TENANT]);
+  });
+
+  it("omits the diff on a succeeded job whose proposal is gone", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const { ctx: base, jobs } = makeJobCtx();
+    const ctx = { ...base, diffManifests: differ.diff, activeManifests: active.source };
+    const proposalId = await draftId(ctx);
+    const created = await createJob(ctx, { description: "A CRM" });
+    const jobId = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.succeed(TENANT, jobId, { proposalId, providerLabel: null });
+    ctx.store.records.delete(proposalId);
+    const out = await getJob(ctx, jobId);
+    expect(out.status).toBe(200);
+    expect(out.body["proposal"]).toBeNull();
+    expect("diff" in out.body).toBe(false);
+    expect(differ.calls).toHaveLength(0);
+    expect(active.asked).toHaveLength(0);
+  });
+
+  it("omits the diff on a job that has not succeeded", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const { ctx: base, jobs } = makeJobCtx();
+    const ctx = { ...base, diffManifests: differ.diff, activeManifests: active.source };
+    const created = await createJob(ctx, { description: "A CRM" });
+    const jobId = (created.body["job"] as DesignJobRecordLike).id;
+    await jobs.fail(TENANT, jobId, { error: "design failed after 3 attempts" });
+    const out = await getJob(ctx, jobId);
+    expect(out.status).toBe(200);
+    expect(Object.keys(out.body)).toEqual(["job"]);
+    expect(differ.calls).toHaveLength(0);
+  });
+
+  it("does not diff for a missing proposal or behind a guard denial", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const ctx = { ...makeCtx(), diffManifests: differ.diff, activeManifests: active.source };
+    const id = await draftId(ctx);
+    const missing = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id: "aim_9999" } }),
+    )) as JsonOut;
+    expect(missing.status).toBe(404);
+    const unauth = (await findHandler(ctx, "ai.manifests.get")(
+      input(null, { params: { id } }),
+    )) as JsonOut;
+    expect(unauth.status).toBe(401);
+    const forbidden = (await findHandler(ctx, "ai.manifests.get")(
+      input("cashier", { params: { id } }),
+    )) as JsonOut;
+    expect(forbidden.status).toBe(403);
+    expect(differ.calls).toHaveLength(0);
+    expect(active.asked).toHaveLength(0);
+  });
+
+  it("leaves the synchronous design 201, list, activate, and archive free of a diff", async () => {
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const ctx = { ...makeCtx(), diffManifests: differ.diff, activeManifests: active.source };
+    const created = await design(ctx, { description: "A CRM" });
+    expect(created.status).toBe(201);
+    expect(Object.keys(created.body).sort()).toEqual(["proposal", "summary"]);
+    const id = (created.body["proposal"] as { id: string }).id;
+    const list = (await findHandler(ctx, "ai.manifests.list")(input("tenant_admin"))) as JsonOut;
+    expect(Object.keys(list.body).sort()).toEqual(["data", "page"]);
+    const activated = (await findHandler(ctx, "ai.manifests.activate")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(Object.keys(activated.body)).toEqual(["proposal"]);
+    const archived = (await findHandler(ctx, "ai.manifests.archive")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(Object.keys(archived.body)).toEqual(["proposal"]);
+    expect(differ.calls).toHaveLength(0);
+    expect(active.asked).toHaveLength(0);
+  });
+
+  it("composes with the schema projection — both keys ride the same proposal get", async () => {
+    const projector = recordingProjector();
+    const differ = recordingDiffer();
+    const active = recordingActiveSource();
+    const ctx = {
+      ...makeCtx(),
+      projectSchema: projector.project,
+      diffManifests: differ.diff,
+      activeManifests: active.source,
+    };
+    const id = await draftId(ctx);
+    const out = (await findHandler(ctx, "ai.manifests.get")(
+      input("tenant_admin", { params: { id } }),
+    )) as JsonOut;
+    expect(out.status).toBe(200);
+    expect(Object.keys(out.body).sort()).toEqual(["diff", "proposal", "schema", "summary"]);
+    expect(out.body["schema"]).toBe(STUB_VIEW);
+    expect(out.body["diff"]).toBe(STUB_DIFF);
   });
 });
