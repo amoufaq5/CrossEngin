@@ -9941,6 +9941,66 @@ export const META_OPERATE_DESIGN_JOBS: TableDefinition = {
   },
 };
 
+/**
+ * Which dispatches were pooled into a digest. `notification_digests` records only a count, which
+ * is enough to hold a pool but not to render one — assembling a digest into a single message
+ * needs to read back the notices it stands for.
+ */
+export const META_NOTIFICATION_DIGEST_ITEMS: TableDefinition = {
+  schema: "meta",
+  name: "notification_digest_items",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "digest_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "notification_digests",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    {
+      name: "dispatch_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "notification_dispatches",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    {
+      name: "recipient_address_sha256",
+      type: "CHAR(64)",
+      notNull: true,
+      check: "recipient_address_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "added_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "notification_digest_items_digest_dispatch_key",
+      columns: ["digest_id", "dispatch_id"],
+    },
+  ],
+  indexes: [
+    { name: "idx_notification_digest_items_digest", columns: ["digest_id", "added_at"] },
+    { name: "idx_notification_digest_items_dispatch", columns: ["dispatch_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "notification_digest_items_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -10080,4 +10140,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_FORENSIC_CHAIN_CHECKPOINTS,
   META_OPERATE_TENANT_MANIFESTS,
   META_OPERATE_DESIGN_JOBS,
+  META_NOTIFICATION_DIGEST_ITEMS,
 ];

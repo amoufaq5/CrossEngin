@@ -5,6 +5,7 @@ import {
   NotificationDispatchSchema,
   RETRYABLE_DELIVERY_OUTCOMES,
   type DeliveryAttempt,
+  type DeliveryOutcome,
   type DispatchStatus,
   type NotificationDispatch,
 } from "@crossengin/notifications";
@@ -36,6 +37,22 @@ export interface DeliveryStoreOptions {
   readonly schema?: string;
 }
 
+/**
+ * Written to the superseded attempt's `error_message` so the audit trail says
+ * why the individual send never went out: the digest replaced it.
+ */
+export const SUPERSEDED_ERROR_MESSAGE = "rolled_into_digest";
+
+export interface ReconcileResult {
+  readonly status: DispatchStatus;
+  readonly recipientCount: number;
+  readonly deliveredCount: number;
+  readonly failedCount: number;
+  readonly suppressedCount: number;
+  readonly pending: number;
+  readonly changed: boolean;
+}
+
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 
 const DEFAULT_LIMIT = 25;
@@ -58,6 +75,18 @@ const TERMINAL_DISPATCH_STATUSES: readonly DispatchStatus[] = DISPATCH_STATUSES.
  */
 const TERMINAL_STATUS_LIST = TERMINAL_DISPATCH_STATUSES.map((s) => `'${s}'`).join(", ");
 const RETRYABLE_OUTCOME_LIST = [...RETRYABLE_DELIVERY_OUTCOMES].map((o) => `'${o}'`).join(", ");
+
+const DELIVERED_OUTCOME: DeliveryOutcome = "delivered";
+const SUPERSEDE_FROM_OUTCOME: DeliveryOutcome = "deferred";
+/**
+ * `suppressed` — not `dropped` — is the honest terminal outcome for a notice
+ * rolled into a digest: the individual send was withheld *by policy* in favour
+ * of the batch, so it must not land in the dispatch's failure bucket.
+ */
+const SUPERSEDE_TO_OUTCOME: DeliveryOutcome = "suppressed";
+
+const RECONCILE_COMPLETED_STATUS: DispatchStatus = "completed";
+const RECONCILE_FAILED_STATUS: DispatchStatus = "failed";
 
 const PRIORITY_RANK_SQL =
   "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2" +
@@ -316,6 +345,135 @@ export class PostgresDeliveryStore {
         recipientAddressSha256: String(row["recipient_address_sha256"]),
         attemptNumber: Number(row["attempt_number"]),
       }));
+    });
+  }
+
+  /**
+   * Terminates the pending attempt a digest has just absorbed for one recipient.
+   *
+   * Clearing `next_retry_at` is what actually neutralizes the retry: `dueRetries`
+   * selects on that column, so leaving it set would re-send the individual notice
+   * after the digest had already covered it — the recipient would get both.
+   */
+  async supersedeDeferred(
+    tenantId: string,
+    rowId: string,
+    recipientAddressSha256: string,
+    at: Date,
+  ): Promise<boolean> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const sql =
+        `UPDATE ${this.deliveryTable} SET outcome = '${SUPERSEDE_TO_OUTCOME}',` +
+        ` next_retry_at = NULL, finalized_at = $4, error_message = $5` +
+        ` WHERE tenant_id = $1 AND dispatch_id = $2 AND recipient_address_sha256 = $3` +
+        ` AND outcome = '${SUPERSEDE_FROM_OUTCOME}' AND next_retry_at IS NOT NULL`;
+      const result = await tx.query(sql, [
+        tenantId,
+        rowId,
+        recipientAddressSha256,
+        at,
+        SUPERSEDED_ERROR_MESSAGE,
+      ]);
+      return result.rowCount > 0;
+    });
+  }
+
+  /**
+   * Recomputes a dispatch's counters from its own delivery rows and finishes it
+   * once nothing of it is still pending.
+   *
+   * The aggregate counts each recipient once, from that recipient's LATEST
+   * attempt only: a retried address is one recipient, not two outcomes, so a
+   * `failed` attempt 1 followed by a `delivered` attempt 2 contributes a single
+   * delivery. `recipient_count` may only ever grow, because the dispatch schema
+   * forbids the three counters summing past it.
+   */
+  async reconcile(tenantId: string, rowId: string, at: Date): Promise<ReconcileResult> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const aggregateSql =
+        `SELECT COUNT(DISTINCT latest.recipient_address_sha256) AS recipient_count,` +
+        ` COUNT(*) FILTER (WHERE latest.outcome = '${DELIVERED_OUTCOME}') AS delivered_count,` +
+        ` COUNT(*) FILTER (WHERE latest.outcome = '${SUPERSEDE_TO_OUTCOME}') AS suppressed_count,` +
+        ` COUNT(*) FILTER (WHERE latest.outcome NOT IN` +
+        ` ('${DELIVERED_OUTCOME}', '${SUPERSEDE_TO_OUTCOME}')` +
+        ` AND latest.next_retry_at IS NULL) AS failed_count,` +
+        ` COUNT(*) FILTER (WHERE latest.next_retry_at IS NOT NULL) AS pending_count` +
+        ` FROM (SELECT recipient_address_sha256, outcome, next_retry_at,` +
+        ` ROW_NUMBER() OVER (PARTITION BY recipient_address_sha256` +
+        ` ORDER BY attempt_number DESC) AS rn` +
+        ` FROM ${this.deliveryTable} WHERE tenant_id = $1 AND dispatch_id = $2) latest` +
+        ` WHERE latest.rn = 1`;
+      const aggregate = await tx.query(aggregateSql, [tenantId, rowId]);
+      const counts = aggregate.rows[0] ?? {};
+      const delivered = Number(counts["delivered_count"] ?? 0);
+      const failed = Number(counts["failed_count"] ?? 0);
+      const suppressed = Number(counts["suppressed_count"] ?? 0);
+      const pending = Number(counts["pending_count"] ?? 0);
+
+      const headSql =
+        `SELECT status, recipient_count, delivered_count, failed_count, suppressed_count` +
+        ` FROM ${this.dispatchTable} WHERE id = $2 AND tenant_id = $1`;
+      const head = await tx.query(headSql, [tenantId, rowId]);
+      const current = head.rows[0];
+      if (current === undefined) {
+        throw new Error(`unknown dispatch row: ${JSON.stringify(rowId)}`);
+      }
+      const unchanged = (pendingCount: number): ReconcileResult => ({
+        status: String(current["status"]) as DispatchStatus,
+        recipientCount: Number(current["recipient_count"]),
+        deliveredCount: Number(current["delivered_count"]),
+        failedCount: Number(current["failed_count"]),
+        suppressedCount: Number(current["suppressed_count"]),
+        pending: pendingCount,
+        changed: false,
+      });
+
+      if (pending > 0) return unchanged(pending);
+
+      // `failed` means recipients genuinely failed, not that nobody was sent to: a dispatch whose
+      // notices were all withheld by policy — a preference opt-out, or a digest that carried them
+      // instead — did exactly what it was told, so it completes.
+      const status: DispatchStatus =
+        failed > 0 && delivered === 0 ? RECONCILE_FAILED_STATUS : RECONCILE_COMPLETED_STATUS;
+      const updateSql =
+        `UPDATE ${this.dispatchTable} SET status = $3, completed_at = $4,` +
+        ` delivered_count = $5::INTEGER, failed_count = $6::INTEGER, suppressed_count = $7::INTEGER,` +
+        // Cast every bound count: inside GREATEST the parameters carry no column context, and
+        // Postgres refuses `unknown + unknown` rather than guessing.
+        ` recipient_count = GREATEST(recipient_count, $5::INTEGER + $6::INTEGER + $7::INTEGER)` +
+        ` WHERE id = $2 AND tenant_id = $1 AND status NOT IN (${TERMINAL_STATUS_LIST})`;
+      const result = await tx.query(updateSql, [
+        tenantId,
+        rowId,
+        status,
+        at,
+        delivered,
+        failed,
+        suppressed,
+      ]);
+      if (result.rowCount === 0) return unchanged(0);
+      return {
+        status,
+        recipientCount: Math.max(
+          Number(current["recipient_count"]),
+          delivered + failed + suppressed,
+        ),
+        deliveredCount: delivered,
+        failedCount: failed,
+        suppressedCount: suppressed,
+        pending: 0,
+        changed: true,
+      };
+    });
+  }
+
+  async pendingRetryCount(tenantId: string, rowId: string): Promise<number> {
+    return withTenantContext(this.conn, tenantId, async (tx) => {
+      const sql =
+        `SELECT COUNT(*) AS pending_count FROM ${this.deliveryTable}` +
+        ` WHERE tenant_id = $1 AND dispatch_id = $2 AND next_retry_at IS NOT NULL`;
+      const result = await tx.query(sql, [tenantId, rowId]);
+      return Number(result.rows[0]?.["pending_count"] ?? 0);
     });
   }
 

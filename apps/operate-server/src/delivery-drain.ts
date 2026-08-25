@@ -35,6 +35,7 @@ import {
 } from "./delivery-throttle.js";
 import type { DigestAddResult } from "./digest-store.js";
 import type { DigestBatch } from "@crossengin/notifications";
+import { isDigestSummary } from "./digest-assembly.js";
 import type { ResolvedRecipient } from "./recipient-resolver.js";
 
 export interface DeliveryStoreLike {
@@ -59,7 +60,11 @@ export interface RecipientResolverLike {
 
 export interface DigestStoreLike {
   openOrReuse(tenantId: string, batch: DigestBatch): Promise<DigestBatch>;
-  addItem(tenantId: string, digestId: string): Promise<DigestAddResult>;
+  addItem(
+    tenantId: string,
+    digestId: string,
+    member: { readonly dispatchRowId: string; readonly recipientAddressSha256: string },
+  ): Promise<DigestAddResult>;
 }
 
 /** Where the drain reads a tenant's quiet-hours + digest policy (its tenant settings document). */
@@ -91,6 +96,12 @@ export interface DrainReport {
   readonly batched: number;
   readonly dropped: number;
 }
+
+const SEND_NOW: ThrottleDecision = {
+  action: "send_now",
+  reason: "digest_summary_bypasses_quiet_hours",
+  releaseAt: null,
+};
 
 export const QUIET_HOURS_DROP_ERROR_CODE = "quiet_hours_drop";
 export const QUIET_HOURS_DEFER_ERROR_CODE = "quiet_hours_defer";
@@ -270,6 +281,7 @@ async function batchRelease(
   userId: string,
   decision: ThrottleDecision,
   now: Date,
+  member: { readonly dispatchRowId: string; readonly recipientAddressSha256: string },
 ): Promise<string | null> {
   if (!isBatchableFrequency(policy.digestFrequency)) return decision.releaseAt;
   // Align to the quantized window even with no digest store wired, so a degraded batch still
@@ -289,7 +301,7 @@ async function batchRelease(
         maxItems: policy.digestMaxItems,
       }),
     );
-    await opts.digests.addItem(tenantId, stored.id);
+    await opts.digests.addItem(tenantId, stored.id, member);
     return stored.scheduledDispatchAt;
   } catch (err) {
     opts.onError?.(err, tenantId);
@@ -354,12 +366,14 @@ async function drainDispatch(
   // Quiet hours is a tenant policy over the dispatch's own category + priority, so the action is
   // the same for every recipient; only a digest pool is per-user.
   const policy = await policyFor(opts, tenantId);
-  const decision = decideThrottle({
-    policy,
-    category: dispatch.category,
-    priority: dispatch.priority,
-    now: now(),
-  });
+  const decision = isDigestSummary(dispatch)
+    ? SEND_NOW
+    : decideThrottle({
+        policy,
+        category: dispatch.category,
+        priority: dispatch.priority,
+        now: now(),
+      });
 
   let deferred = 0;
   let batched = 0;
@@ -377,6 +391,10 @@ async function drainDispatch(
               target.recipient.userId,
               decision,
               now(),
+              {
+                dispatchRowId: claimed.rowId,
+                recipientAddressSha256: target.recipientAddressSha256,
+              },
             )
           : decision.releaseAt;
       attempts.push(
@@ -465,16 +483,21 @@ async function drainRetry(
   // A retry landing back inside quiet hours must defer again, not slip through the window the
   // first pass respected.
   const policy = await policyFor(opts, tenantId);
-  const decision = decideThrottle({
-    policy,
-    category: dispatch.category,
-    priority: dispatch.priority,
-    now: now(),
-  });
+  const decision = isDigestSummary(dispatch)
+    ? SEND_NOW
+    : decideThrottle({
+        policy,
+        category: dispatch.category,
+        priority: dispatch.priority,
+        now: now(),
+      });
   if (decision.action !== "send_now") {
     const releaseAt =
       decision.action === "batch"
-        ? await batchRelease(opts, tenantId, dispatch, policy, target.recipient.userId, decision, now())
+        ? await batchRelease(opts, tenantId, dispatch, policy, target.recipient.userId, decision, now(), {
+            dispatchRowId: due.rowId,
+            recipientAddressSha256: due.recipientAddressSha256,
+          })
         : decision.releaseAt;
     const throttled = throttledAttempt(
       dispatch,

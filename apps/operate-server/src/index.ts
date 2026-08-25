@@ -49,6 +49,8 @@ export * from "./delivery-store.js";
 export * from "./recipient-resolver.js";
 export * from "./delivery-throttle.js";
 export * from "./digest-store.js";
+export * from "./digest-assembly.js";
+export * from "./digest-assembler.js";
 export * from "./delivery-drain.js";
 export * from "./delivery-scheduler.js";
 export * from "./residency-source.js";

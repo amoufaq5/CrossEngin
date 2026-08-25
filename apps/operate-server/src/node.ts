@@ -896,15 +896,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // records an attempt per recipient before advancing the dispatch to a terminal status.
   let deliveryScheduler: DeliveryScheduler | null = null;
   if (options.notificationDrainMs !== null && conn !== undefined) {
+    const deliveryStore = new PostgresDeliveryStore(conn, schemaOpt);
+    const digestStore = new PostgresDigestStore(conn, schemaOpt);
     deliveryScheduler = new DeliveryScheduler({
+      // A pooled digest becomes one summary dispatch when its window closes, and the notices it
+      // stands for have their pending retries retired — otherwise the recipient would get the
+      // digest AND every notice it was meant to replace.
+      assembly: {
+        digests: digestStore,
+        deliveries: deliveryStore,
+        dispatches: new PostgresNotificationStore(conn, schemaOpt),
+        onError: (err, tenantId) =>
+          console.error(`[notifications] digest assembly failed for tenant ${tenantId}`, err),
+      },
       drain: {
-        store: new PostgresDeliveryStore(conn, schemaOpt),
+        store: deliveryStore,
         resolver: new PostgresRecipientResolver(conn, {
           ...schemaOpt,
           adminRoles: options.notificationAdminRoles,
         }),
         senders: defaultSenderRegistry(),
-        digests: new PostgresDigestStore(conn, schemaOpt),
+        digests: digestStore,
         // Quiet hours + digest cadence are live tenant settings, so an admin can change them
         // without a redeploy; an absent or malformed policy means "send now", never a stall.
         policySource: async (tenantId): Promise<NotificationPolicy> =>

@@ -123,7 +123,7 @@ import {
 
 describe("META_TABLES", () => {
   it("contains 136 tables", () => {
-    expect(META_TABLES).toHaveLength(138);
+    expect(META_TABLES).toHaveLength(139);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -217,6 +217,7 @@ describe("META_TABLES", () => {
       "ml_models",
       "ml_training_runs",
       "notification_deliveries",
+      "notification_digest_items",
       "notification_digests",
       "notification_dispatches",
       "notification_preferences",
