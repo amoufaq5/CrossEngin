@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import type { DeliveryDrainOptions, DeliveryStoreLike, RecipientResolverLike } from "./delivery-drain.js";
 import { DeliveryScheduler } from "./delivery-scheduler.js";
+import type { DigestAssemblyOptions } from "./digest-assembler.js";
 import { InAppSender, SenderRegistry } from "./delivery-senders.js";
 import type { ClaimedDispatch, DispatchAdvanceUpdate, DueRetry } from "./delivery-store.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
@@ -271,5 +272,84 @@ describe("delivery-scheduler", () => {
     const report = await s.drainOnce();
 
     expect(report?.tenants).toBe(0);
+  });
+});
+
+describe("delivery-scheduler — assembly", () => {
+  function assemblyOptions(calls: string[]): DigestAssemblyOptions {
+    return {
+      digests: {
+        async dueForAssembly() {
+          calls.push("due");
+          return [];
+        },
+        async itemsFor() {
+          return [];
+        },
+        async markAssembled() {
+          return true;
+        },
+      },
+      deliveries: {
+        async supersedeDeferred() {
+          return true;
+        },
+        async reconcile() {
+          return null;
+        },
+      },
+      dispatches: {
+        async record() {
+          return true;
+        },
+      },
+    };
+  }
+
+  it("assembles even when no onAssembled observer is wired", async () => {
+    const calls: string[] = [];
+    const s = new DeliveryScheduler({
+      drain: drainOptions(new FakeStore()),
+      tenantSource: new StaticTenantSource([TENANT]),
+      intervalMs: 1000,
+      scheduler: new FakeIntervalScheduler(),
+      assembly: assemblyOptions(calls),
+    });
+
+    await s.drainOnce();
+
+    expect(calls).toEqual(["due"]);
+  });
+
+  it("reports what it assembled when an observer is wired", async () => {
+    const calls: string[] = [];
+    const seen: number[] = [];
+    const s = new DeliveryScheduler({
+      drain: drainOptions(new FakeStore()),
+      tenantSource: new StaticTenantSource([TENANT, TENANT]),
+      intervalMs: 1000,
+      scheduler: new FakeIntervalScheduler(),
+      assembly: assemblyOptions(calls),
+      onAssembled: (report) => seen.push(report.tenants),
+    });
+
+    await s.drainOnce();
+
+    expect(calls).toEqual(["due", "due"]);
+    expect(seen).toEqual([2]);
+  });
+
+  it("skips assembly entirely when none is configured", async () => {
+    const store = new FakeStore();
+    const s = new DeliveryScheduler({
+      drain: drainOptions(store),
+      tenantSource: new StaticTenantSource([TENANT]),
+      intervalMs: 1000,
+      scheduler: new FakeIntervalScheduler(),
+    });
+
+    const report = await s.drainOnce();
+
+    expect(report?.tenants).toBe(1);
   });
 });

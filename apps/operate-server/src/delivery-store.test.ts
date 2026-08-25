@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   PostgresDeliveryStore,
+  SUPERSEDED_ERROR_MESSAGE,
   dispatchFromRow,
   priorityRank,
   type DispatchAdvanceUpdate,
@@ -164,6 +165,95 @@ function fakeDeliveryDb(): {
           return projected;
         });
       return { rows: matched, rowCount: matched.length };
+    }
+
+    if (sql.includes("ROW_NUMBER() OVER (PARTITION BY recipient_address_sha256")) {
+      const latest = new Map<string, Row>();
+      for (const d of deliveries) {
+        if (!visible(d) || d["dispatch_id"] !== String(p[1])) continue;
+        const key = String(d["recipient_address_sha256"]);
+        const prev = latest.get(key);
+        if (prev === undefined || Number(d["attempt_number"]) > Number(prev["attempt_number"])) {
+          latest.set(key, d);
+        }
+      }
+      let delivered = 0;
+      let suppressed = 0;
+      let failed = 0;
+      let pending = 0;
+      for (const d of latest.values()) {
+        if (d["next_retry_at"] != null) pending += 1;
+        if (d["outcome"] === "delivered") delivered += 1;
+        else if (d["outcome"] === "suppressed") suppressed += 1;
+        else if (d["next_retry_at"] == null) failed += 1;
+      }
+      return {
+        rows: [
+          {
+            recipient_count: latest.size,
+            delivered_count: delivered,
+            suppressed_count: suppressed,
+            failed_count: failed,
+            pending_count: pending,
+          },
+        ],
+        rowCount: 1,
+      };
+    }
+
+    if (sql.startsWith("SELECT status, recipient_count")) {
+      const rows = dispatches
+        .filter((r) => visible(r) && r["id"] === String(p[1]))
+        .map((r) => ({
+          status: r["status"],
+          recipient_count: r["recipient_count"],
+          delivered_count: r["delivered_count"],
+          failed_count: r["failed_count"],
+          suppressed_count: r["suppressed_count"],
+        }));
+      return { rows, rowCount: rows.length };
+    }
+
+    if (sql.startsWith("SELECT COUNT(*) AS pending_count")) {
+      const n = deliveries.filter(
+        (d) => visible(d) && d["dispatch_id"] === String(p[1]) && d["next_retry_at"] != null,
+      ).length;
+      return { rows: [{ pending_count: n }], rowCount: 1 };
+    }
+
+    if (sql.startsWith("UPDATE") && sql.includes(".notification_deliveries")) {
+      const target = deliveries.find(
+        (d) =>
+          visible(d) &&
+          d["dispatch_id"] === String(p[1]) &&
+          d["recipient_address_sha256"] === String(p[2]) &&
+          d["outcome"] === "deferred" &&
+          d["next_retry_at"] != null,
+      );
+      if (target === undefined) return { rows: [], rowCount: 0 };
+      target["outcome"] = "suppressed";
+      target["next_retry_at"] = null;
+      target["finalized_at"] = p[3];
+      target["error_message"] = p[4];
+      return { rows: [], rowCount: 1 };
+    }
+
+    if (sql.startsWith("UPDATE") && sql.includes("GREATEST(recipient_count")) {
+      const terminal = new Set(["completed", "failed", "cancelled"]);
+      const target = dispatches.find(
+        (r) => visible(r) && r["id"] === String(p[1]) && !terminal.has(String(r["status"])),
+      );
+      if (target === undefined) return { rows: [], rowCount: 0 };
+      target["status"] = p[2];
+      target["completed_at"] = p[3];
+      target["delivered_count"] = p[4];
+      target["failed_count"] = p[5];
+      target["suppressed_count"] = p[6];
+      target["recipient_count"] = Math.max(
+        Number(target["recipient_count"]),
+        Number(p[4]) + Number(p[5]) + Number(p[6]),
+      );
+      return { rows: [], rowCount: 1 };
     }
 
     if (sql.startsWith("UPDATE") && sql.includes("ANY($2::uuid[])")) {
@@ -760,6 +850,522 @@ describe("delivery-store — row mapping", () => {
     expect(asString.correlationId).toBeNull();
     expect(asString.startedAt).toBeNull();
     expect(asString.requestedBy).toBeNull();
+  });
+});
+
+const AT = new Date("2026-08-01T00:30:00.000Z");
+
+let deliverySeq = 0;
+
+function deliveryRow(parent: Row, overrides: Row = {}): Row {
+  deliverySeq += 1;
+  const n = String(deliverySeq).padStart(8, "0");
+  return {
+    id: `33333333-3333-4333-8333-${n.padStart(12, "0")}`,
+    delivery_id: `dlv_digest_${n}`,
+    dispatch_id: parent["id"],
+    tenant_id: parent["tenant_id"],
+    channel: "email",
+    provider: "sendgrid",
+    recipient_address_sha256: RECIPIENT_SHA,
+    attempt_kind: "initial",
+    attempt_number: 1,
+    queued_at: "2026-08-01T00:00:00.000Z",
+    finalized_at: null,
+    outcome: "deferred",
+    error_message: null,
+    next_retry_at: "2026-08-01T00:05:00.000Z",
+    ...overrides,
+  };
+}
+
+describe("delivery-store — supersedeDeferred", () => {
+  it("terminates the pooled attempt as suppressed and reports the write", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn);
+    expect(
+      await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT),
+    ).toBe(true);
+    expect(deliveries[0]?.["outcome"]).toBe("suppressed");
+    expect(deliveries[0]?.["finalized_at"]).toBe(AT);
+    expect(deliveries[0]?.["error_message"]).toBe(SUPERSEDED_ERROR_MESSAGE);
+    expect(SUPERSEDED_ERROR_MESSAGE).toBe("rolled_into_digest");
+  });
+
+  it("clears next_retry_at, which is what actually stops the individual notice re-sending", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent, { attempt_kind: "retry", attempt_number: 2 }));
+    const store = new PostgresDeliveryStore(conn);
+    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"))).toHaveLength(1);
+    await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT);
+    expect(deliveries[0]?.["next_retry_at"]).toBeNull();
+    expect(await store.dueRetries(TENANT_A, new Date("2026-08-01T00:10:00.000Z"))).toEqual([]);
+  });
+
+  it("is a single conditional UPDATE guarded on deferred + a live next_retry_at", async () => {
+    const { conn, captured, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn);
+    await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT);
+    const updates = captured.filter((c) => c.sql.startsWith("UPDATE"));
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.sql).toContain(
+      "UPDATE meta.notification_deliveries SET outcome = 'suppressed'," +
+        " next_retry_at = NULL, finalized_at = $4, error_message = $5",
+    );
+    expect(updates[0]?.sql).toContain(
+      "WHERE tenant_id = $1 AND dispatch_id = $2 AND recipient_address_sha256 = $3" +
+        " AND outcome = 'deferred' AND next_retry_at IS NOT NULL",
+    );
+    expect(updates[0]?.params).toEqual([
+      TENANT_A,
+      parent["id"],
+      RECIPIENT_SHA,
+      AT,
+      "rolled_into_digest",
+    ]);
+  });
+
+  it("suppresses rather than drops — a policy withholding is not a failure", async () => {
+    const { conn, captured, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn);
+    await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT);
+    const update = captured.find((c) => c.sql.startsWith("UPDATE"));
+    expect(update?.sql).not.toContain("'dropped'");
+    expect(update?.sql).not.toContain("'failed'");
+  });
+
+  it("returns false when the attempt already reached a terminal outcome", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent, { outcome: "delivered", next_retry_at: null }));
+    const store = new PostgresDeliveryStore(conn);
+    expect(
+      await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT),
+    ).toBe(false);
+    expect(deliveries[0]?.["outcome"]).toBe("delivered");
+  });
+
+  it("returns false when the retry was already neutralized", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent, { next_retry_at: null }));
+    const store = new PostgresDeliveryStore(conn);
+    expect(
+      await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT),
+    ).toBe(false);
+  });
+
+  it("touches only the named recipient's attempt", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    const other = "c".repeat(64);
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent), deliveryRow(parent, { recipient_address_sha256: other }));
+    const store = new PostgresDeliveryStore(conn);
+    expect(await store.supersedeDeferred(TENANT_A, String(parent["id"]), other, AT)).toBe(true);
+    expect(deliveries[0]?.["outcome"]).toBe("deferred");
+    expect(deliveries[1]?.["outcome"]).toBe("suppressed");
+  });
+
+  it("never supersedes another tenant's pooled attempt", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", tenant_id: TENANT_B });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn);
+    expect(
+      await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT),
+    ).toBe(false);
+    expect(deliveries[0]?.["outcome"]).toBe("deferred");
+    expect(
+      await store.supersedeDeferred(TENANT_B, String(parent["id"]), RECIPIENT_SHA, AT),
+    ).toBe(true);
+  });
+});
+
+describe("delivery-store — reconcile", () => {
+  it("leaves the dispatch alone while any attempt is still pending", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", recipient_count: 2 });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent, { outcome: "delivered", next_retry_at: null }),
+      deliveryRow(parent, { recipient_address_sha256: "c".repeat(64) }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result.changed).toBe(false);
+    expect(result.pending).toBe(1);
+    expect(result.status).toBe("sending");
+    expect(parent["status"]).toBe("sending");
+    expect(parent["completed_at"]).toBeNull();
+  });
+
+  it("completes the dispatch and writes the recomputed counters once nothing is pending", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", recipient_count: 3 });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent, { outcome: "delivered", next_retry_at: null }),
+      deliveryRow(parent, {
+        recipient_address_sha256: "c".repeat(64),
+        outcome: "bounced_hard",
+        next_retry_at: null,
+      }),
+      deliveryRow(parent, {
+        recipient_address_sha256: "d".repeat(64),
+        outcome: "suppressed",
+        next_retry_at: null,
+      }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result).toEqual({
+      status: "completed",
+      recipientCount: 3,
+      deliveredCount: 1,
+      failedCount: 1,
+      suppressedCount: 1,
+      pending: 0,
+      changed: true,
+    });
+    expect(parent["status"]).toBe("completed");
+    expect(parent["completed_at"]).toBe(AT);
+    expect(parent["delivered_count"]).toBe(1);
+  });
+
+  it("fails the dispatch when no recipient was delivered", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", recipient_count: 2 });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent, { outcome: "failed", next_retry_at: null }),
+      deliveryRow(parent, {
+        recipient_address_sha256: "c".repeat(64),
+        outcome: "dropped",
+        next_retry_at: null,
+      }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result.status).toBe("failed");
+    expect(result.failedCount).toBe(2);
+    expect(result.changed).toBe(true);
+    expect(parent["status"]).toBe("failed");
+  });
+
+  it("completes a dispatch whose notices were all withheld by policy", async () => {
+    // Every recipient suppressed — an opt-out, or a digest that carried them instead. Nothing
+    // failed, so the dispatch did exactly what it was told.
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", recipient_count: 2 });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent, { outcome: "suppressed", next_retry_at: null }),
+      deliveryRow(parent, {
+        recipient_address_sha256: "c".repeat(64),
+        outcome: "suppressed",
+        next_retry_at: null,
+      }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result.status).toBe("completed");
+    expect(result.suppressedCount).toBe(2);
+    expect(result.failedCount).toBe(0);
+    expect(parent["status"]).toBe("completed");
+  });
+
+  it("still fails when one recipient failed and none were delivered", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", recipient_count: 2 });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent, { outcome: "suppressed", next_retry_at: null }),
+      deliveryRow(parent, {
+        recipient_address_sha256: "c".repeat(64),
+        outcome: "bounced_hard",
+        next_retry_at: null,
+      }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result.status).toBe("failed");
+  });
+
+  it("treats a dispatch with no delivery rows at all as completed", async () => {
+    const { conn, dispatches } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", recipient_count: 0 });
+    dispatches.push(parent);
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result.status).toBe("completed");
+    expect(result.deliveredCount).toBe(0);
+    expect(result.failedCount).toBe(0);
+    expect(result.changed).toBe(true);
+    expect(parent["status"]).toBe("completed");
+  });
+
+  it("never rewinds a dispatch that already finished", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({
+      status: "cancelled",
+      cancelled_reason: "opt out",
+      recipient_count: 2,
+      delivered_count: 1,
+    });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent, { outcome: "delivered", next_retry_at: null }));
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result.changed).toBe(false);
+    expect(result.status).toBe("cancelled");
+    expect(result.deliveredCount).toBe(1);
+    expect(parent["status"]).toBe("cancelled");
+    expect(parent["completed_at"]).toBeNull();
+  });
+
+  it("only ever grows recipient_count, since the counters may not sum past it", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const wide = dispatchRow({ status: "sending", recipient_count: 9 });
+    const narrow = dispatchRow({ status: "sending", recipient_count: 1 });
+    dispatches.push(wide, narrow);
+    deliveries.push(
+      deliveryRow(wide, { outcome: "delivered", next_retry_at: null }),
+      deliveryRow(narrow, { outcome: "delivered", next_retry_at: null }),
+      deliveryRow(narrow, {
+        recipient_address_sha256: "c".repeat(64),
+        outcome: "delivered",
+        next_retry_at: null,
+      }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    expect((await store.reconcile(TENANT_A, String(wide["id"]), AT)).recipientCount).toBe(9);
+    expect(wide["recipient_count"]).toBe(9);
+    expect((await store.reconcile(TENANT_A, String(narrow["id"]), AT)).recipientCount).toBe(2);
+    expect(narrow["recipient_count"]).toBe(2);
+  });
+
+  it("counts a retried address once, from its latest attempt only", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", recipient_count: 1 });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent, { attempt_number: 1, outcome: "failed", next_retry_at: null }),
+      deliveryRow(parent, {
+        attempt_kind: "retry",
+        attempt_number: 2,
+        outcome: "delivered",
+        next_retry_at: null,
+      }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result.recipientCount).toBe(1);
+    expect(result.deliveredCount).toBe(1);
+    expect(result.failedCount).toBe(0);
+    expect(result.status).toBe("completed");
+  });
+
+  it("closes out a digest-superseded dispatch into the suppressed bucket", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending", recipient_count: 2 });
+    dispatches.push(parent);
+    deliveries.push(
+      deliveryRow(parent, { outcome: "delivered", next_retry_at: null }),
+      deliveryRow(parent, { recipient_address_sha256: "c".repeat(64) }),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    expect((await store.reconcile(TENANT_A, String(parent["id"]), AT)).changed).toBe(false);
+    await store.supersedeDeferred(TENANT_A, String(parent["id"]), "c".repeat(64), AT);
+    const result = await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(result).toEqual({
+      status: "completed",
+      recipientCount: 2,
+      deliveredCount: 1,
+      failedCount: 0,
+      suppressedCount: 1,
+      pending: 0,
+      changed: true,
+    });
+  });
+
+  it("aggregates per-recipient-latest in SQL and guards the finishing UPDATE", async () => {
+    const { conn, captured, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent, { outcome: "delivered", next_retry_at: null }));
+    const store = new PostgresDeliveryStore(conn);
+    await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    const aggregate = captured.find((c) => c.sql.includes("ROW_NUMBER()"));
+    expect(aggregate?.sql).toContain(
+      "ROW_NUMBER() OVER (PARTITION BY recipient_address_sha256 ORDER BY attempt_number DESC) AS rn",
+    );
+    expect(aggregate?.sql).toContain(
+      "FROM meta.notification_deliveries WHERE tenant_id = $1 AND dispatch_id = $2) latest" +
+        " WHERE latest.rn = 1",
+    );
+    expect(aggregate?.sql).toContain(
+      "COUNT(*) FILTER (WHERE latest.next_retry_at IS NOT NULL) AS pending_count",
+    );
+    expect(aggregate?.params).toEqual([TENANT_A, parent["id"]]);
+    const update = captured.find((c) => c.sql.startsWith("UPDATE"));
+    expect(update?.sql).toContain(
+      "SET status = $3, completed_at = $4, delivered_count = $5::INTEGER," +
+        " failed_count = $6::INTEGER, suppressed_count = $7::INTEGER," +
+        " recipient_count = GREATEST(recipient_count, $5::INTEGER + $6::INTEGER + $7::INTEGER)",
+    );
+    expect(update?.sql).toContain(
+      "WHERE id = $2 AND tenant_id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+    );
+    expect(update?.params).toEqual([TENANT_A, parent["id"], "completed", AT, 1, 0, 0]);
+  });
+
+  it("refuses to reconcile an unknown or another tenant's dispatch", async () => {
+    const { conn, dispatches } = fakeDeliveryDb();
+    const other = dispatchRow({ status: "sending", tenant_id: TENANT_B });
+    dispatches.push(other);
+    const store = new PostgresDeliveryStore(conn);
+    await expect(
+      store.reconcile(TENANT_A, "aaaa1111-1111-4111-8111-0000000000ff", AT),
+    ).rejects.toThrow(/unknown dispatch row/);
+    await expect(store.reconcile(TENANT_A, String(other["id"]), AT)).rejects.toThrow(
+      /unknown dispatch row/,
+    );
+    expect(other["status"]).toBe("sending");
+  });
+});
+
+describe("delivery-store — pendingRetryCount", () => {
+  it("counts only that dispatch's attempts with a live next_retry_at", async () => {
+    const { conn, captured, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    const sibling = dispatchRow({ status: "sending" });
+    dispatches.push(parent, sibling);
+    deliveries.push(
+      deliveryRow(parent),
+      deliveryRow(parent, { recipient_address_sha256: "c".repeat(64) }),
+      deliveryRow(parent, {
+        recipient_address_sha256: "d".repeat(64),
+        outcome: "delivered",
+        next_retry_at: null,
+      }),
+      deliveryRow(sibling),
+    );
+    const store = new PostgresDeliveryStore(conn);
+    expect(await store.pendingRetryCount(TENANT_A, String(parent["id"]))).toBe(2);
+    const select = captured.find((c) => c.sql.startsWith("SELECT COUNT(*)"));
+    expect(select?.sql).toBe(
+      "SELECT COUNT(*) AS pending_count FROM meta.notification_deliveries" +
+        " WHERE tenant_id = $1 AND dispatch_id = $2 AND next_retry_at IS NOT NULL",
+    );
+    expect(select?.params).toEqual([TENANT_A, parent["id"]]);
+  });
+
+  it("drops to zero once the pooled attempt is superseded", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn);
+    expect(await store.pendingRetryCount(TENANT_A, String(parent["id"]))).toBe(1);
+    await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT);
+    expect(await store.pendingRetryCount(TENANT_A, String(parent["id"]))).toBe(0);
+  });
+
+  it("returns zero for an unknown dispatch and never counts another tenant's rows", async () => {
+    const { conn, dispatches, deliveries } = fakeDeliveryDb();
+    const other = dispatchRow({ status: "sending", tenant_id: TENANT_B });
+    dispatches.push(other);
+    deliveries.push(deliveryRow(other));
+    const store = new PostgresDeliveryStore(conn);
+    expect(await store.pendingRetryCount(TENANT_A, String(other["id"]))).toBe(0);
+    expect(
+      await store.pendingRetryCount(TENANT_A, "aaaa1111-1111-4111-8111-0000000000ff"),
+    ).toBe(0);
+    expect(await store.pendingRetryCount(TENANT_B, String(other["id"]))).toBe(1);
+  });
+});
+
+describe("delivery-store — digest supersession discipline", () => {
+  it("wraps each new method in its own withTenantContext transaction binding tenant_id as $1", async () => {
+    const { conn, captured, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn);
+    await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT);
+    await store.pendingRetryCount(TENANT_A, String(parent["id"]));
+    await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(captured.filter((c) => c.sql.includes("set_config"))).toHaveLength(3);
+    expect(captured.every((c) => c.inTx)).toBe(true);
+    for (const c of captured) expect(c.params[0]).toBe(TENANT_A);
+  });
+
+  it("never embeds a tenant id, row id, recipient digest or timestamp in the new statements", async () => {
+    const { conn, captured, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn);
+    await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT);
+    await store.pendingRetryCount(TENANT_A, String(parent["id"]));
+    await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(captured.length).toBeGreaterThan(6);
+    for (const c of captured) {
+      expect(c.sql).not.toContain(TENANT_A);
+      expect(c.sql).not.toContain(String(parent["id"]));
+      expect(c.sql).not.toContain(RECIPIENT_SHA);
+      expect(c.sql).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    }
+  });
+
+  it("rejects a malformed tenant id before any SQL is issued", async () => {
+    const { conn, captured } = fakeDeliveryDb();
+    const store = new PostgresDeliveryStore(conn);
+    const evil = "robert'); DROP TABLE tenants;--";
+    await expect(store.supersedeDeferred(evil, "row", RECIPIENT_SHA, AT)).rejects.toThrow(
+      /invalid tenantId/,
+    );
+    await expect(store.reconcile(evil, "row", AT)).rejects.toThrow(/invalid tenantId/);
+    await expect(store.pendingRetryCount(evil, "row")).rejects.toThrow(/invalid tenantId/);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("targets a custom schema in all three statements", async () => {
+    const { conn, captured, dispatches, deliveries } = fakeDeliveryDb();
+    const parent = dispatchRow({ status: "sending" });
+    dispatches.push(parent);
+    deliveries.push(deliveryRow(parent));
+    const store = new PostgresDeliveryStore(conn, { schema: "ops" });
+    await store.supersedeDeferred(TENANT_A, String(parent["id"]), RECIPIENT_SHA, AT);
+    await store.pendingRetryCount(TENANT_A, String(parent["id"]));
+    await store.reconcile(TENANT_A, String(parent["id"]), AT);
+    expect(captured.find((c) => c.sql.startsWith("UPDATE"))?.sql).toContain(
+      "UPDATE ops.notification_deliveries",
+    );
+    expect(captured.find((c) => c.sql.startsWith("SELECT COUNT(*)"))?.sql).toContain(
+      "FROM ops.notification_deliveries",
+    );
+    expect(captured.find((c) => c.sql.includes("ROW_NUMBER()"))?.sql).toContain(
+      "FROM ops.notification_deliveries",
+    );
+    expect(captured.find((c) => c.sql.startsWith("SELECT status, recipient_count"))?.sql).toContain(
+      "FROM ops.notification_dispatches",
+    );
   });
 });
 

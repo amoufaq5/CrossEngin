@@ -24,6 +24,7 @@ import {
   type RecipientResolverLike,
 } from "./delivery-drain.js";
 import type { NotificationPolicy } from "./delivery-throttle.js";
+import { DIGEST_REQUESTING_SYSTEM, DIGEST_TEMPLATE_ID } from "./digest-assembly.js";
 import type { DigestAddResult } from "./digest-store.js";
 import {
   SenderRegistry,
@@ -837,5 +838,97 @@ describe("delivery-drain — digest batching", () => {
     expect(report.batched).toBe(1);
     expect(errors).toHaveLength(1);
     expect(store.attempts[0]?.outcome).toBe("deferred");
+  });
+});
+
+describe("delivery-drain — a digest summary is never re-pooled", () => {
+  const BATCH_ALL: NotificationPolicy = {
+    quietHours: {
+      startTime: "22:00",
+      endTime: "07:00",
+      timezone: "UTC",
+      behavior: "batch_until_morning",
+      bypassCategories: [],
+    },
+    digestFrequency: "hourly",
+    digestMaxItems: 50,
+  };
+  const NIGHT = new Date("2026-08-23T23:30:00.000Z");
+
+  function summaryDispatch(): NotificationDispatch {
+    return dispatch({
+      id: `disp_${"f".repeat(32)}`,
+      templateId: DIGEST_TEMPLATE_ID,
+      requestingSystem: DIGEST_REQUESTING_SYSTEM,
+      correlationId: `dgst_${"d".repeat(32)}`,
+    });
+  }
+
+  function nightBatchOpts(store: FakeStore, resolver: FakeResolver): DeliveryDrainOptions {
+    return {
+      store,
+      resolver,
+      senders: new SenderRegistry([new InAppSender()]),
+      clock: () => NIGHT,
+      policySource: async () => BATCH_ALL,
+    };
+  }
+
+  it("sends a digest summary inside quiet hours instead of pooling it again", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: summaryDispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(nightBatchOpts(store, resolver), TENANT);
+
+    expect(report.delivered).toBe(1);
+    expect(report.batched).toBe(0);
+    expect(store.advances[0]?.update.status).toBe("completed");
+  });
+
+  it("still pools an ordinary notice under the same policy", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(nightBatchOpts(store, resolver), TENANT);
+
+    expect(report.batched).toBe(1);
+    expect(report.delivered).toBe(0);
+  });
+
+  it("does not exempt a notice that only borrows the digest template id", async () => {
+    const store = new FakeStore();
+    store.claims = [
+      { rowId: "row-1", dispatch: dispatch({ templateId: DIGEST_TEMPLATE_ID }) },
+    ];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(nightBatchOpts(store, resolver), TENANT);
+
+    expect(report.batched).toBe(1);
+  });
+
+  it("sends a due digest-summary retry rather than deferring it again", async () => {
+    const probe = new FakeStore();
+    probe.claims = [{ rowId: "row-0", dispatch: summaryDispatch() }];
+    await drainTenant(opts(probe, new FakeResolver([recipient(USER_A, "a@x.test")])), TENANT);
+    const hash = probe.attempts[0]?.recipientAddressSha256 ?? "";
+
+    const store = new FakeStore();
+    store.retries = [
+      {
+        rowId: "row-1",
+        dispatch: { ...summaryDispatch(), status: "sending" },
+        recipientAddressSha256: hash,
+        attemptNumber: 1,
+      },
+    ];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(nightBatchOpts(store, resolver), TENANT);
+
+    expect(report.retriesAttempted).toBe(1);
+    expect(store.attempts[0]?.outcome).toBe("delivered");
   });
 });

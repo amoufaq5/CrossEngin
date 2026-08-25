@@ -1,4 +1,9 @@
 import { drainTenants, type DeliveryDrainOptions, type MultiTenantDrainReport } from "./delivery-drain.js";
+import {
+  assembleForTenants,
+  type DigestAssemblyOptions,
+  type MultiTenantAssemblyReport,
+} from "./digest-assembler.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 import type { TenantSource } from "./scheduler.js";
 
@@ -20,6 +25,9 @@ export interface DeliverySchedulerOptions {
   readonly scheduler?: IntervalScheduler;
   readonly onError?: (err: unknown) => void;
   readonly onDrained?: (report: MultiTenantDrainReport) => void;
+  /** Assembles due digests into one summary dispatch each, before the drain sends. */
+  readonly assembly?: DigestAssemblyOptions;
+  readonly onAssembled?: (report: MultiTenantAssemblyReport) => void;
 }
 
 /**
@@ -53,6 +61,15 @@ export class DeliveryScheduler {
     this.running = true;
     try {
       const tenantIds = await this.opts.tenantSource.activeTenantIds();
+      // Assemble first: a digest that comes due this tick should have its summary queued in time
+      // for the same drain, not wait a whole interval to go out.
+      if (this.opts.assembly !== undefined) {
+        // Assembled on its own line, never inside `onAssembled?.(...)`: optional-call
+        // short-circuiting skips the argument entirely when no observer is wired, which would
+        // silently stop assembling for every deployment that doesn't pass one.
+        const assembled = await assembleForTenants(this.opts.assembly, tenantIds);
+        this.opts.onAssembled?.(assembled);
+      }
       const report = await drainTenants(this.opts.drain, tenantIds);
       this.opts.onDrained?.(report);
       return report;
