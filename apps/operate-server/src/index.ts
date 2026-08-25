@@ -50,6 +50,8 @@ export * from "./recipient-resolver.js";
 export * from "./delivery-throttle.js";
 export * from "./digest-store.js";
 export * from "./digest-assembly.js";
+export * from "./digest-template.js";
+export * from "./template-store.js";
 export * from "./digest-assembler.js";
 export * from "./delivery-drain.js";
 export * from "./delivery-scheduler.js";

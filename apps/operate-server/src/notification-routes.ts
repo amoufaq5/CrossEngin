@@ -46,6 +46,19 @@ export type ProposalNoticeResolver = (
   proposalId: string,
 ) => Promise<ProposalNoticeContentLike | null>;
 
+/** The rendered copy of a digest, resolved from the pool it stands for. */
+export interface DigestNoticeContentLike {
+  readonly title: string;
+  readonly body: string;
+  readonly severity: string;
+  readonly itemCount: number;
+}
+
+export type DigestNoticeResolver = (
+  tenantId: string,
+  digestId: string,
+) => Promise<DigestNoticeContentLike | null>;
+
 export interface NotificationRoutesContext {
   readonly source: TenantNotificationSourceLike;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
@@ -53,6 +66,10 @@ export interface NotificationRoutesContext {
   readonly allowedRoles: ReadonlySet<string>;
   /** Resolves the human-readable content for a notification's correlated proposal. */
   readonly resolveProposal?: ProposalNoticeResolver;
+  /** Renders the copy for a digest notification from the pool it correlates to. */
+  readonly resolveDigest?: DigestNoticeResolver;
+  /** Template id that marks a notification as an assembled digest. */
+  readonly digestTemplateId?: string;
 }
 
 function json(status: number, body: unknown): HandlerOutput {
@@ -119,6 +136,28 @@ export async function proposalFragment(
   }
 }
 
+/**
+ * Only a digest notification carries digest copy, and only the template id says so — the
+ * correlationId of an ordinary notice points at a proposal, not a pool, and resolving one as the
+ * other would render nonsense. Absent, null and populated are all normal.
+ */
+export async function digestFragment(
+  resolveDigest: DigestNoticeResolver | undefined,
+  digestTemplateId: string | undefined,
+  templateId: string,
+  tenantId: string,
+  correlationId: string | null,
+): Promise<{ digest?: DigestNoticeContentLike | null }> {
+  if (resolveDigest === undefined || digestTemplateId === undefined) return {};
+  if (templateId !== digestTemplateId) return {};
+  if (correlationId === null) return { digest: null };
+  try {
+    return { digest: await resolveDigest(tenantId, correlationId) };
+  } catch {
+    return { digest: null };
+  }
+}
+
 function buildListHandler(ctx: NotificationRoutesContext): Handler {
   return async (input) => {
     const denial = guard(ctx, input.principal);
@@ -130,6 +169,13 @@ function buildListHandler(ctx: NotificationRoutesContext): Handler {
       page.data.map(async (notification) => ({
         ...notification,
         ...(await proposalFragment(ctx.resolveProposal, tenant, notification.correlationId)),
+        ...(await digestFragment(
+          ctx.resolveDigest,
+          ctx.digestTemplateId,
+          notification.templateId,
+          tenant,
+          notification.correlationId,
+        )),
       })),
     );
     return json(200, { data, page: { nextCursor: page.nextCursor } });

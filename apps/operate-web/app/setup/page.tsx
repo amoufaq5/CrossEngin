@@ -24,6 +24,7 @@ import {
   reviewDecisions,
   type ReviewDecision,
   type TenantNotification,
+  digestNotices,
 } from "@/lib/notifications";
 
 const MAX_DESCRIPTION = 4000;
@@ -58,6 +59,7 @@ export default function SetupPage() {
   const [rowError, setRowError] = useState<string | null>(null);
 
   const [decisions, setDecisions] = useState<ReadonlyArray<TenantNotification>>([]);
+  const [digests, setDigests] = useState<ReadonlyArray<TenantNotification>>([]);
   const [decisionsBusy, setDecisionsBusy] = useState(true);
   const [decisionsError, setDecisionsError] = useState<string | null>(null);
 
@@ -75,6 +77,7 @@ export default function SetupPage() {
     listNotifications({ channel: "in_app", limit: DECISION_LIMIT })
       .then((page) => {
         setDecisions(reviewDecisions(page.data));
+        setDigests(digestNotices(page.data));
         setDecisionsError(null);
       })
       .catch((e: unknown) => setDecisionsError(e instanceof Error ? e.message : String(e)))
@@ -488,6 +491,20 @@ export default function SetupPage() {
           </section>
         )}
 
+        {digests.length > 0 && (
+          <section className="mt-10">
+            <h3 className="text-sm font-bold uppercase tracking-wide text-ink-muted">Summaries</h3>
+            <p className="mt-1 text-sm text-ink-muted">
+              Notices grouped into one message because of your quiet-hours settings.
+            </p>
+            <div className="card mt-3 divide-y divide-line">
+              {digests.map((n) => (
+                <DigestRow key={n.dispatchId} notification={n} />
+              ))}
+            </div>
+          </section>
+        )}
+
         {(decisionsBusy || decisionsError !== null || decisions.length > 0) && (
           <section className="mt-10">
             <h3 className="text-sm font-bold uppercase tracking-wide text-ink-muted">Review decisions</h3>
@@ -805,6 +822,31 @@ function DecisionChip({ decision }: { decision: ReviewDecision }) {
       <span aria-hidden>✕</span>
       rejected
     </span>
+  );
+}
+
+function DigestRow({ notification }: { notification: TenantNotification }) {
+  const digest = notification.digest;
+  if (digest == null) return null;
+  const at = decidedAtOf(notification);
+  const label = Number.isNaN(Date.parse(at)) ? at : new Date(at).toLocaleString();
+
+  return (
+    <div className="px-4 py-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="inline-flex items-center rounded-md bg-surface-soft px-2 py-0.5 text-[11px] font-semibold text-ink-muted">
+          {digest.itemCount} grouped
+        </span>
+        <span className="font-semibold text-ink">{digest.title}</span>
+        <span className="ml-auto text-xs tabular-nums text-ink-faint">{label}</span>
+      </div>
+      {/* The body is rendered server-side from the digest's own pool, with every substituted
+          value HTML-escaped by the template renderer before it reaches this component. */}
+      <div
+        className="prose-digest mt-2 text-sm text-ink-muted"
+        dangerouslySetInnerHTML={{ __html: digest.body }}
+      />
+    </div>
   );
 }
 
