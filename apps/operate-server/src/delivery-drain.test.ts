@@ -3,6 +3,7 @@ import {
   RETRYABLE_DELIVERY_OUTCOMES,
   type DeliveryAttempt,
   type NotificationChannel,
+  type DigestBatch,
   type NotificationDispatch,
   type SuppressionRecord,
   type UserPreferenceMatrix,
@@ -10,6 +11,8 @@ import {
 import { describe, expect, it } from "vitest";
 
 import {
+  QUIET_HOURS_DEFER_ERROR_CODE,
+  QUIET_HOURS_DROP_ERROR_CODE,
   addressFor,
   drainTenant,
   drainTenants,
@@ -17,8 +20,11 @@ import {
   terminalOutcomeFor,
   type DeliveryDrainOptions,
   type DeliveryStoreLike,
+  type DigestStoreLike,
   type RecipientResolverLike,
 } from "./delivery-drain.js";
+import type { NotificationPolicy } from "./delivery-throttle.js";
+import type { DigestAddResult } from "./digest-store.js";
 import {
   SenderRegistry,
   InAppSender,
@@ -541,5 +547,295 @@ describe("delivery-drain — drainTenants", () => {
   it("returns an empty report for no tenants", async () => {
     const report = await drainTenants(opts(new FakeStore(), new FakeResolver([])), []);
     expect(report).toMatchObject({ tenants: 0, dispatches: 0, delivered: 0 });
+  });
+});
+
+describe("delivery-drain — quiet hours", () => {
+  const QUIET: NotificationPolicy = {
+    quietHours: {
+      startTime: "22:00",
+      endTime: "07:00",
+      timezone: "UTC",
+      behavior: "defer_to_morning",
+      bypassCategories: [],
+    },
+    digestFrequency: "immediate",
+    digestMaxItems: 50,
+  };
+  // 23:30 UTC — inside the 22:00→07:00 window.
+  const NIGHT = new Date("2026-08-23T23:30:00.000Z");
+
+  function nightOpts(
+    store: FakeStore,
+    resolver: FakeResolver,
+    policy: NotificationPolicy,
+    digests?: DigestStoreLike,
+  ): DeliveryDrainOptions {
+    return {
+      store,
+      resolver,
+      senders: new SenderRegistry([new InAppSender()]),
+      clock: () => NIGHT,
+      policySource: async () => policy,
+      ...(digests !== undefined ? { digests } : {}),
+    };
+  }
+
+  it("defers instead of sending inside quiet hours", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(nightOpts(store, resolver, QUIET), TENANT);
+
+    expect(report.delivered).toBe(0);
+    expect(report.deferred).toBe(1);
+    expect(store.attempts[0]?.outcome).toBe("deferred");
+    expect(store.attempts[0]?.errorCode).toBe(QUIET_HOURS_DEFER_ERROR_CODE);
+    expect(() => DeliveryAttemptSchema.parse(store.attempts[0])).not.toThrow();
+  });
+
+  it("releases the deferred notice at the end of the quiet window", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    await drainTenant(nightOpts(store, resolver, QUIET), TENANT);
+
+    const releaseAt = store.attempts[0]?.nextRetryAt ?? "";
+    expect(Date.parse(releaseAt)).toBeGreaterThan(NIGHT.getTime());
+    expect(new Date(releaseAt).toISOString()).toBe("2026-08-24T07:00:00.000Z");
+  });
+
+  it("keeps the dispatch sending, not completed, while notices are deferred", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    await drainTenant(nightOpts(store, resolver, QUIET), TENANT);
+
+    expect(store.advances[0]?.update.status).toBe("sending");
+    expect(store.advances[0]?.update.completedAt).toBeNull();
+  });
+
+  it("sends outside the quiet window", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(
+      { ...nightOpts(store, resolver, QUIET), clock: () => new Date("2026-08-23T12:00:00.000Z") },
+      TENANT,
+    );
+
+    expect(report.delivered).toBe(1);
+    expect(report.deferred).toBe(0);
+  });
+
+  it("lets a critical-priority notice through quiet hours", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch({ priority: "critical" }) }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(nightOpts(store, resolver, QUIET), TENANT);
+
+    expect(report.delivered).toBe(1);
+  });
+
+  it("lets a bypass category through quiet hours", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch({ category: "security_alert" }) }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+    const policy: NotificationPolicy = {
+      ...QUIET,
+      quietHours: { ...QUIET.quietHours!, bypassCategories: ["security_alert"] },
+    };
+
+    const report = await drainTenant(nightOpts(store, resolver, policy), TENANT);
+
+    expect(report.delivered).toBe(1);
+  });
+
+  it("drops silently under a drop_silently policy, terminally", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+    const policy: NotificationPolicy = {
+      ...QUIET,
+      quietHours: { ...QUIET.quietHours!, behavior: "drop_silently" },
+    };
+
+    const report = await drainTenant(nightOpts(store, resolver, policy), TENANT);
+
+    expect(report.dropped).toBe(1);
+    expect(store.attempts[0]?.outcome).toBe("dropped");
+    expect(store.attempts[0]?.nextRetryAt).toBeNull();
+    expect(store.attempts[0]?.errorCode).toBe(QUIET_HOURS_DROP_ERROR_CODE);
+    expect(store.advances[0]?.update.status).toBe("failed");
+  });
+
+  it("sends when the policy source throws", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(
+      {
+        ...nightOpts(store, resolver, QUIET),
+        policySource: async () => {
+          throw new Error("settings unreadable");
+        },
+      },
+      TENANT,
+    );
+
+    expect(report.delivered).toBe(1);
+  });
+
+  it("sends when no policy source is wired at all", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(opts(store, resolver), TENANT);
+
+    expect(report.delivered).toBe(1);
+  });
+});
+
+describe("delivery-drain — digest batching", () => {
+  const BATCH: NotificationPolicy = {
+    quietHours: {
+      startTime: "22:00",
+      endTime: "07:00",
+      timezone: "UTC",
+      behavior: "batch_until_morning",
+      bypassCategories: [],
+    },
+    digestFrequency: "hourly",
+    digestMaxItems: 50,
+  };
+  const NIGHT = new Date("2026-08-23T23:30:00.000Z");
+
+  class FakeDigests implements DigestStoreLike {
+    readonly opened: DigestBatch[] = [];
+    readonly added: string[] = [];
+    async openOrReuse(_t: string, batch: DigestBatch): Promise<DigestBatch> {
+      const existing = this.opened.find((b) => b.id === batch.id);
+      if (existing !== undefined) return existing;
+      this.opened.push(batch);
+      return batch;
+    }
+    async addItem(_t: string, digestId: string): Promise<DigestAddResult> {
+      this.added.push(digestId);
+      return { added: true, itemCount: this.added.length, closed: false };
+    }
+  }
+
+  function batchOpts(
+    store: FakeStore,
+    resolver: FakeResolver,
+    digests: DigestStoreLike,
+  ): DeliveryDrainOptions {
+    return {
+      store,
+      resolver,
+      senders: new SenderRegistry([new InAppSender()]),
+      clock: () => NIGHT,
+      policySource: async () => BATCH,
+      digests,
+    };
+  }
+
+  it("pools each recipient into a digest instead of sending", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([
+      recipient(USER_A, "a@x.test"),
+      recipient(USER_B, "b@x.test"),
+    ]);
+    const digests = new FakeDigests();
+
+    const report = await drainTenant(batchOpts(store, resolver, digests), TENANT);
+
+    expect(report.batched).toBe(2);
+    expect(report.delivered).toBe(0);
+    expect(digests.added).toHaveLength(2);
+  });
+
+  it("opens one digest per user, not one per dispatch", async () => {
+    const store = new FakeStore();
+    store.claims = [
+      { rowId: "row-1", dispatch: dispatch() },
+      { rowId: "row-2", dispatch: dispatch({ id: `disp_${"c".repeat(32)}` }) },
+    ];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+    const digests = new FakeDigests();
+
+    await drainTenant(batchOpts(store, resolver, digests), TENANT);
+
+    expect(digests.opened).toHaveLength(1);
+    expect(digests.added).toHaveLength(2);
+    expect(digests.added[0]).toBe(digests.added[1]);
+  });
+
+  it("releases every notice in a window at the same instant", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([
+      recipient(USER_A, "a@x.test"),
+      recipient(USER_B, "b@x.test"),
+    ]);
+
+    await drainTenant(batchOpts(store, resolver, new FakeDigests()), TENANT);
+
+    const releases = new Set(store.attempts.map((a) => a.nextRetryAt));
+    expect(releases.size).toBe(1);
+    expect([...releases][0]).toBe("2026-08-24T00:00:00.000Z");
+  });
+
+  it("degrades to a plain quiet-hours defer when no digest store is wired", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+
+    const report = await drainTenant(
+      {
+        store,
+        resolver,
+        senders: new SenderRegistry([new InAppSender()]),
+        clock: () => NIGHT,
+        policySource: async () => BATCH,
+      },
+      TENANT,
+    );
+
+    expect(report.batched).toBe(1);
+    // Still the quantized hourly boundary, so a degraded batch releases together.
+    expect(store.attempts[0]?.nextRetryAt).toBe("2026-08-24T00:00:00.000Z");
+  });
+
+  it("degrades to a defer when the digest store throws", async () => {
+    const store = new FakeStore();
+    store.claims = [{ rowId: "row-1", dispatch: dispatch() }];
+    const resolver = new FakeResolver([recipient(USER_A, "a@x.test")]);
+    const errors: unknown[] = [];
+
+    const report = await drainTenant(
+      {
+        ...batchOpts(store, resolver, {
+          openOrReuse: async () => {
+            throw new Error("digest table gone");
+          },
+          addItem: async () => ({ added: false, itemCount: 0, closed: false }),
+        }),
+        onError: (err) => errors.push(err),
+      },
+      TENANT,
+    );
+
+    expect(report.batched).toBe(1);
+    expect(errors).toHaveLength(1);
+    expect(store.attempts[0]?.outcome).toBe("deferred");
   });
 });

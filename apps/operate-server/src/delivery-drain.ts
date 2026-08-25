@@ -24,6 +24,17 @@ import {
   type SendTimer,
 } from "./delivery-senders.js";
 import type { ClaimedDispatch, DispatchAdvanceUpdate, DueRetry } from "./delivery-store.js";
+import {
+  DEFAULT_NOTIFICATION_POLICY,
+  buildDigestBatch,
+  decideThrottle,
+  digestWindowFor,
+  isBatchableFrequency,
+  type NotificationPolicy,
+  type ThrottleDecision,
+} from "./delivery-throttle.js";
+import type { DigestAddResult } from "./digest-store.js";
+import type { DigestBatch } from "@crossengin/notifications";
 import type { ResolvedRecipient } from "./recipient-resolver.js";
 
 export interface DeliveryStoreLike {
@@ -46,10 +57,20 @@ export interface RecipientResolverLike {
   ): Promise<readonly SuppressionRecord[]>;
 }
 
+export interface DigestStoreLike {
+  openOrReuse(tenantId: string, batch: DigestBatch): Promise<DigestBatch>;
+  addItem(tenantId: string, digestId: string): Promise<DigestAddResult>;
+}
+
+/** Where the drain reads a tenant's quiet-hours + digest policy (its tenant settings document). */
+export type NotificationPolicySource = (tenantId: string) => Promise<NotificationPolicy>;
+
 export interface DeliveryDrainOptions {
   readonly store: DeliveryStoreLike;
   readonly resolver: RecipientResolverLike;
   readonly senders: SenderRegistry;
+  readonly policySource?: NotificationPolicySource;
+  readonly digests?: DigestStoreLike;
   readonly clock?: () => Date;
   readonly batchSize?: number;
   readonly sendTimeoutMs?: number;
@@ -66,7 +87,13 @@ export interface DrainReport {
   readonly suppressed: number;
   readonly retryScheduled: number;
   readonly retriesAttempted: number;
+  readonly deferred: number;
+  readonly batched: number;
+  readonly dropped: number;
 }
+
+export const QUIET_HOURS_DROP_ERROR_CODE = "quiet_hours_drop";
+export const QUIET_HOURS_DEFER_ERROR_CODE = "quiet_hours_defer";
 
 export interface MultiTenantDrainReport {
   readonly tenants: number;
@@ -76,6 +103,9 @@ export interface MultiTenantDrainReport {
   readonly failed: number;
   readonly suppressed: number;
   readonly retryScheduled: number;
+  readonly deferred: number;
+  readonly batched: number;
+  readonly dropped: number;
 }
 
 export const DEFAULT_DRAIN_BATCH_SIZE = 25;
@@ -173,11 +203,112 @@ function attemptFromResult(
   });
 }
 
+async function policyFor(
+  opts: DeliveryDrainOptions,
+  tenantId: string,
+): Promise<NotificationPolicy> {
+  if (opts.policySource === undefined) return DEFAULT_NOTIFICATION_POLICY;
+  try {
+    return await opts.policySource(tenantId);
+  } catch {
+    // An unreadable settings document must not stop the queue: no policy means send now.
+    return DEFAULT_NOTIFICATION_POLICY;
+  }
+}
+
+/**
+ * A quiet-hours defer needs no new column or mechanism: `deferred` is already a retryable
+ * delivery outcome, so recording one with `nextRetryAt` set to the release instant puts the
+ * notice back through the existing retry ladder at exactly the right time.
+ */
+function throttledAttempt(
+  dispatch: NotificationDispatch,
+  recipientAddressSha256: string,
+  attemptNumber: number,
+  provider: ProviderKind,
+  decision: ThrottleDecision,
+  releaseAt: string | null,
+  at: string,
+): DeliveryAttempt {
+  if (decision.action === "drop") {
+    return buildDeliveryAttempt({
+      dispatch,
+      recipientAddressSha256,
+      attemptNumber,
+      outcome: "dropped",
+      provider,
+      sentAt: null,
+      finalizedAt: at,
+      errorCode: QUIET_HOURS_DROP_ERROR_CODE,
+      errorMessage: decision.reason,
+    });
+  }
+  return buildDeliveryAttempt({
+    dispatch,
+    recipientAddressSha256,
+    attemptNumber,
+    outcome: "deferred",
+    provider,
+    sentAt: null,
+    finalizedAt: at,
+    errorCode: QUIET_HOURS_DEFER_ERROR_CODE,
+    errorMessage: decision.reason,
+    nextRetryAt: releaseAt,
+  });
+}
+
+/**
+ * Pools one recipient's notice into their digest for the current window and returns when that
+ * window releases, so every notice batched in it goes out together. Degrades to the plain
+ * quiet-hours release when no digest store is wired or the frequency is not batchable.
+ */
+async function batchRelease(
+  opts: DeliveryDrainOptions,
+  tenantId: string,
+  dispatch: NotificationDispatch,
+  policy: NotificationPolicy,
+  userId: string,
+  decision: ThrottleDecision,
+  now: Date,
+): Promise<string | null> {
+  if (!isBatchableFrequency(policy.digestFrequency)) return decision.releaseAt;
+  // Align to the quantized window even with no digest store wired, so a degraded batch still
+  // releases its notices together instead of scattering them across the hour.
+  const window = digestWindowFor(policy.digestFrequency, now);
+  if (opts.digests === undefined) return window.scheduledDispatchAt;
+  try {
+    const stored = await opts.digests.openOrReuse(
+      tenantId,
+      buildDigestBatch({
+        tenantId,
+        userId,
+        channel: dispatch.channel,
+        frequency: policy.digestFrequency,
+        openedAt: window.windowStart,
+        scheduledDispatchAt: window.scheduledDispatchAt,
+        maxItems: policy.digestMaxItems,
+      }),
+    );
+    await opts.digests.addItem(tenantId, stored.id);
+    return stored.scheduledDispatchAt;
+  } catch (err) {
+    opts.onError?.(err, tenantId);
+    return window.scheduledDispatchAt;
+  }
+}
+
 async function drainDispatch(
   opts: DeliveryDrainOptions,
   tenantId: string,
   claimed: ClaimedDispatch,
-): Promise<{ attempts: readonly DeliveryAttempt[]; suppressed: number; retryScheduled: number }> {
+): Promise<{
+  attempts: readonly DeliveryAttempt[];
+  suppressed: number;
+  retryScheduled: number;
+  deferred: number;
+  batched: number;
+  dropped: number;
+}> {
   const now = opts.clock ?? ((): Date => new Date());
   const startedAt = now().toISOString();
   const dispatch = claimed.dispatch;
@@ -220,7 +351,50 @@ async function drainDispatch(
     );
   }
 
+  // Quiet hours is a tenant policy over the dispatch's own category + priority, so the action is
+  // the same for every recipient; only a digest pool is per-user.
+  const policy = await policyFor(opts, tenantId);
+  const decision = decideThrottle({
+    policy,
+    category: dispatch.category,
+    priority: dispatch.priority,
+    now: now(),
+  });
+
+  let deferred = 0;
+  let batched = 0;
+  let dropped = 0;
+
   for (const target of plan.deliverable) {
+    if (decision.action !== "send_now") {
+      const releaseAt =
+        decision.action === "batch"
+          ? await batchRelease(
+              opts,
+              tenantId,
+              dispatch,
+              policy,
+              target.recipient.userId,
+              decision,
+              now(),
+            )
+          : decision.releaseAt;
+      attempts.push(
+        throttledAttempt(
+          dispatch,
+          target.recipientAddressSha256,
+          1,
+          provider,
+          decision,
+          releaseAt,
+          now().toISOString(),
+        ),
+      );
+      if (decision.action === "drop") dropped += 1;
+      else if (decision.action === "batch") batched += 1;
+      else deferred += 1;
+      continue;
+    }
     const sentAt = now().toISOString();
     const result = await sendOnce(opts, dispatch, target.recipient.address, 1);
     attempts.push(
@@ -256,6 +430,9 @@ async function drainDispatch(
     attempts,
     suppressed: advance.suppressedCount,
     retryScheduled: attempts.filter((a) => a.nextRetryAt !== null).length,
+    deferred,
+    batched,
+    dropped,
   };
 }
 
@@ -285,6 +462,33 @@ async function drainRetry(
   if (target === undefined) return null;
 
   const attemptNumber = due.attemptNumber + 1;
+  // A retry landing back inside quiet hours must defer again, not slip through the window the
+  // first pass respected.
+  const policy = await policyFor(opts, tenantId);
+  const decision = decideThrottle({
+    policy,
+    category: dispatch.category,
+    priority: dispatch.priority,
+    now: now(),
+  });
+  if (decision.action !== "send_now") {
+    const releaseAt =
+      decision.action === "batch"
+        ? await batchRelease(opts, tenantId, dispatch, policy, target.recipient.userId, decision, now())
+        : decision.releaseAt;
+    const throttled = throttledAttempt(
+      dispatch,
+      due.recipientAddressSha256,
+      attemptNumber,
+      providerFor(opts.senders, dispatch.channel),
+      decision,
+      releaseAt,
+      now().toISOString(),
+    );
+    await opts.store.recordAttempt(tenantId, due.rowId, throttled);
+    return throttled;
+  }
+
   const sentAt = now().toISOString();
   const result = await sendOnce(opts, dispatch, target.recipient.address, attemptNumber);
   const attempt = attemptFromResult(
@@ -312,6 +516,9 @@ export async function drainTenant(
   let suppressed = 0;
   let retryScheduled = 0;
   let retriesAttempted = 0;
+  let deferred = 0;
+  let batched = 0;
+  let dropped = 0;
 
   const claimed = await opts.store.claimQueued(tenantId, batch);
   for (const one of claimed) {
@@ -322,6 +529,9 @@ export async function drainTenant(
     }
     suppressed += result.suppressed;
     retryScheduled += result.retryScheduled;
+    deferred += result.deferred;
+    batched += result.batched;
+    dropped += result.dropped;
   }
 
   const due = await opts.store.dueRetries(tenantId, now(), batch);
@@ -342,6 +552,9 @@ export async function drainTenant(
     suppressed,
     retryScheduled,
     retriesAttempted,
+    deferred,
+    batched,
+    dropped,
   };
 }
 
@@ -366,5 +579,8 @@ export async function drainTenants(
     failed: reports.reduce((n, r) => n + r.failed, 0),
     suppressed: reports.reduce((n, r) => n + r.suppressed, 0),
     retryScheduled: reports.reduce((n, r) => n + r.retryScheduled, 0),
+    deferred: reports.reduce((n, r) => n + r.deferred, 0),
+    batched: reports.reduce((n, r) => n + r.batched, 0),
+    dropped: reports.reduce((n, r) => n + r.dropped, 0),
   };
 }
