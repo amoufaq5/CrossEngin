@@ -106,6 +106,44 @@ export const AuditSamplingSettingsSchema = z
 
 export type AuditSamplingSettings = z.infer<typeof AuditSamplingSettingsSchema>;
 
+/**
+ * Per-tenant quiet-hours and digest policy an admin can set without a redeploy. Structurally the
+ * `QuietHoursConfig` / digest halves of `@crossengin/notifications`, but declared here so
+ * `operate-runtime` stays independent of that package; the serving layer validates it against the
+ * real `QuietHoursConfigSchema` (whose superRefine rejects an empty window and a marketing bypass)
+ * and degrades an invalid policy to "no quiet hours" rather than failing the drain.
+ */
+export const NotificationSettingsSchema = z
+  .object({
+    quietHours: z
+      .object({
+        startTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+        endTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
+        timezone: z.string().min(1).max(64),
+        behavior: z.enum([
+          "deliver_anyway",
+          "defer_to_morning",
+          "batch_until_morning",
+          "drop_silently",
+        ]),
+        bypassCategories: z.array(z.string().min(1).max(40)).optional(),
+      })
+      .strict()
+      .optional(),
+    digest: z
+      .object({
+        frequency: z
+          .enum(["immediate", "every_15_minutes", "hourly", "daily", "weekly", "never"])
+          .optional(),
+        maxItems: z.number().int().min(1).max(1000).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+export type NotificationSettings = z.infer<typeof NotificationSettingsSchema>;
+
 export const TenantSettingsSchema = z
   .object({
     company: CompanyProfileSchema.optional(),
@@ -117,6 +155,8 @@ export const TenantSettingsSchema = z
     features: z.record(z.string().min(1).max(80), z.boolean()).optional(),
     /** Live audit-chain sampling/filter policy, overlaid over the serving-edge config. */
     auditSampling: AuditSamplingSettingsSchema.optional(),
+    /** Quiet hours + digest batching, consulted by the notification delivery drain. */
+    notifications: NotificationSettingsSchema.optional(),
   })
   .strict();
 

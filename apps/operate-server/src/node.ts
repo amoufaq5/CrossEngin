@@ -45,6 +45,8 @@ import { DeliveryScheduler } from "./delivery-scheduler.js";
 import { PostgresDeliveryStore } from "./delivery-store.js";
 import { PostgresRecipientResolver } from "./recipient-resolver.js";
 import { defaultSenderRegistry } from "./delivery-senders.js";
+import { PostgresDigestStore } from "./digest-store.js";
+import { parseNotificationPolicy, type NotificationPolicy } from "./delivery-throttle.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
   buildJwksProvider,
@@ -902,6 +904,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           adminRoles: options.notificationAdminRoles,
         }),
         senders: defaultSenderRegistry(),
+        digests: new PostgresDigestStore(conn, schemaOpt),
+        // Quiet hours + digest cadence are live tenant settings, so an admin can change them
+        // without a redeploy; an absent or malformed policy means "send now", never a stall.
+        policySource: async (tenantId): Promise<NotificationPolicy> =>
+          parseNotificationPolicy((await settingsStore.get(tenantId)).notifications),
         onError: (err, tenantId) =>
           console.error(`[notifications] drain failed for tenant ${tenantId}`, err),
       },

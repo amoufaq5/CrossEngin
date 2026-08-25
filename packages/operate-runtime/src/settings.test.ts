@@ -124,3 +124,45 @@ describe("sequenceSpecResolver", () => {
     expect(resolve(spec)).toEqual(spec);
   });
 });
+
+describe("NotificationSettingsSchema", () => {
+  it("accepts a full quiet-hours + digest policy", () => {
+    const parsed = TenantSettingsSchema.parse({
+      notifications: {
+        quietHours: {
+          startTime: "22:00",
+          endTime: "07:00",
+          timezone: "Asia/Dubai",
+          behavior: "batch_until_morning",
+          bypassCategories: ["security_alert"],
+        },
+        digest: { frequency: "hourly", maxItems: 25 },
+      },
+    });
+    expect(parsed.notifications?.quietHours?.behavior).toBe("batch_until_morning");
+    expect(parsed.notifications?.digest?.maxItems).toBe(25);
+  });
+
+  it("accepts an absent notifications section", () => {
+    expect(TenantSettingsSchema.parse({}).notifications).toBeUndefined();
+  });
+
+  it("rejects a malformed time, an unknown behavior, and an unknown key", () => {
+    const base = { startTime: "22:00", endTime: "07:00", timezone: "UTC", behavior: "deliver_anyway" };
+    expect(
+      TenantSettingsSchema.safeParse({ notifications: { quietHours: { ...base, startTime: "25:00" } } }).success,
+    ).toBe(false);
+    expect(
+      TenantSettingsSchema.safeParse({ notifications: { quietHours: { ...base, behavior: "nap" } } }).success,
+    ).toBe(false);
+    expect(
+      TenantSettingsSchema.safeParse({ notifications: { quietHours: { ...base, bogus: 1 } } }).success,
+    ).toBe(false);
+  });
+
+  it("rejects an out-of-range digest maxItems and an unknown frequency", () => {
+    expect(TenantSettingsSchema.safeParse({ notifications: { digest: { maxItems: 0 } } }).success).toBe(false);
+    expect(TenantSettingsSchema.safeParse({ notifications: { digest: { maxItems: 1001 } } }).success).toBe(false);
+    expect(TenantSettingsSchema.safeParse({ notifications: { digest: { frequency: "yearly" } } }).success).toBe(false);
+  });
+});
