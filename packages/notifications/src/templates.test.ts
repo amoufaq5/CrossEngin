@@ -7,9 +7,13 @@ import {
   VARIABLE_TYPES,
   canTransitionTemplate,
   isCategorySuppressible,
+  renderTemplateContent,
+  renderedSizeBytes,
   requiresExplicitOptIn,
+  templatePlaceholders,
   validateRenderInput,
   type NotificationTemplate,
+  type TemplateContent,
 } from "./templates.js";
 
 const baseEmailTemplate: NotificationTemplate = {
@@ -280,5 +284,477 @@ describe("validateRenderInput", () => {
         locale: "en-US",
       }).ok,
     ).toBe(false);
+  });
+});
+
+const ctx = (
+  variables: Readonly<Record<string, unknown>>,
+  locale = "en-US",
+): { variables: Readonly<Record<string, unknown>>; locale: string } => ({
+  variables,
+  locale,
+});
+
+const emailContent = (over: Partial<Extract<TemplateContent, { channel: "email" }>> = {}): TemplateContent => ({
+  channel: "email",
+  subject: "Hello {{firstName}}",
+  htmlBody: "<p>Hello {{firstName}}</p>",
+  plaintextBody: "Hello {{firstName}}",
+  ...over,
+});
+
+const inAppContent = (
+  over: Partial<Extract<TemplateContent, { channel: "in_app" }>> = {},
+): TemplateContent => ({
+  channel: "in_app",
+  title: "Notice for {{firstName}}",
+  htmlBody: "<div>{{message}}</div>",
+  severity: "warning",
+  ...over,
+});
+
+const webhookContent = (payloadJsonTemplate: string): TemplateContent => ({
+  channel: "webhook",
+  eventName: "invoice.paid",
+  payloadJsonTemplate,
+  signatureAlgorithm: "hmac-sha256",
+});
+
+const voiceContent = (
+  ssmlBody: string,
+  fallbackTextBody: string,
+): TemplateContent => ({
+  channel: "voice_call",
+  ssmlBody,
+  fallbackTextBody,
+  voice: "polly_joanna",
+});
+
+describe("renderTemplateContent — channel mapping", () => {
+  it("renders email: subject → title, htmlBody → body, plaintextBody → plainBody", () => {
+    const { rendered, missing } = renderTemplateContent(
+      emailContent(),
+      ctx({ firstName: "Ada" }),
+    );
+    expect(rendered).toEqual({
+      channel: "email",
+      title: "Hello Ada",
+      body: "<p>Hello Ada</p>",
+      plainBody: "Hello Ada",
+      severity: null,
+    });
+    expect(missing).toEqual([]);
+  });
+
+  it("renders sms: empty title, no plainBody", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "Your code is {{code}}" },
+      ctx({ code: "884210" }),
+    );
+    expect(rendered.title).toBe("");
+    expect(rendered.body).toBe("Your code is 884210");
+    expect(rendered.plainBody).toBeNull();
+    expect(rendered.severity).toBeNull();
+  });
+
+  it("renders push_mobile: title + body, no plainBody", () => {
+    const { rendered } = renderTemplateContent(
+      {
+        channel: "push_mobile",
+        title: "Order {{orderId}}",
+        body: "Shipped to {{city}}",
+        deepLink: "https://acme.test/orders/{{orderId}}",
+      },
+      ctx({ orderId: "A-91", city: "Dubai" }),
+    );
+    expect(rendered.title).toBe("Order A-91");
+    expect(rendered.body).toBe("Shipped to Dubai");
+    expect(rendered.plainBody).toBeNull();
+  });
+
+  it("renders in_app: htmlBody → body and surfaces severity", () => {
+    const { rendered } = renderTemplateContent(
+      inAppContent(),
+      ctx({ firstName: "Ada", message: "disk almost full" }),
+    );
+    expect(rendered.title).toBe("Notice for Ada");
+    expect(rendered.body).toBe("<div>disk almost full</div>");
+    expect(rendered.plainBody).toBeNull();
+    expect(rendered.severity).toBe("warning");
+  });
+
+  it("renders webhook: eventName → title, payload template → body", () => {
+    const { rendered } = renderTemplateContent(
+      webhookContent('{"invoice":"{{invoiceNumber}}"}'),
+      ctx({ invoiceNumber: "INV-7" }),
+    );
+    expect(rendered.title).toBe("invoice.paid");
+    expect(rendered.body).toBe('{"invoice":"INV-7"}');
+    expect(rendered.severity).toBeNull();
+  });
+
+  it("renders voice_call: ssmlBody → body, fallbackTextBody → plainBody", () => {
+    const { rendered } = renderTemplateContent(
+      voiceContent(
+        "<speak>Hello {{firstName}}</speak>",
+        "Hello {{firstName}}",
+      ),
+      ctx({ firstName: "Ada" }),
+    );
+    expect(rendered.title).toBe("");
+    expect(rendered.body).toBe("<speak>Hello Ada</speak>");
+    expect(rendered.plainBody).toBe("Hello Ada");
+  });
+});
+
+describe("renderTemplateContent — placeholder syntax", () => {
+  it("tolerates whitespace inside the braces", () => {
+    const { rendered, missing } = renderTemplateContent(
+      { channel: "sms", body: "Hi {{  firstName  }}!" },
+      ctx({ firstName: "Ada" }),
+    );
+    expect(rendered.body).toBe("Hi Ada!");
+    expect(missing).toEqual([]);
+  });
+
+  it("leaves single-brace text literal", () => {
+    const { rendered, missing } = renderTemplateContent(
+      { channel: "sms", body: "Hi {firstName}" },
+      ctx({ firstName: "Ada" }),
+    );
+    expect(rendered.body).toBe("Hi {firstName}");
+    expect(missing).toEqual([]);
+  });
+
+  it("leaves names that do not match the variable pattern literal", () => {
+    const { rendered, missing } = renderTemplateContent(
+      { channel: "sms", body: "{{First}} {{1st}} {{first-name}} {{}}" },
+      ctx({}),
+    );
+    expect(rendered.body).toBe("{{First}} {{1st}} {{first-name}} {{}}");
+    expect(missing).toEqual([]);
+  });
+
+  it("substitutes every occurrence of a repeated placeholder", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "{{code}}-{{code}}-{{ code }}" },
+      ctx({ code: "77" }),
+    );
+    expect(rendered.body).toBe("77-77-77");
+  });
+});
+
+describe("renderTemplateContent — value formatting", () => {
+  it("renders a string value as-is", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "{{v}}" },
+      ctx({ v: "  spaced  " }),
+    );
+    expect(rendered.body).toBe("  spaced  ");
+  });
+
+  it("formats a finite number with the context locale (en-US)", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "{{amount}}" },
+      ctx({ amount: 1234567.5 }, "en-US"),
+    );
+    expect(rendered.body).toBe("1,234,567.5");
+  });
+
+  it("formats the same number differently for de-DE", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "{{amount}}" },
+      ctx({ amount: 1234567.5 }, "de-DE"),
+    );
+    expect(rendered.body).toBe("1.234.567,5");
+  });
+
+  it("formats booleans as true / false", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "{{yes}}|{{no}}" },
+      ctx({ yes: true, no: false }),
+    );
+    expect(rendered.body).toBe("true|false");
+  });
+
+  it("formats objects and arrays via JSON.stringify", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "{{obj}} {{arr}}" },
+      ctx({ obj: { a: 1 }, arr: [1, 2] }),
+    );
+    expect(rendered.body).toBe('{"a":1} [1,2]');
+  });
+});
+
+describe("renderTemplateContent — missing variables", () => {
+  it("renders an absent variable as empty string and reports it", () => {
+    const { rendered, missing } = renderTemplateContent(
+      { channel: "sms", body: "Hi {{firstName}}!" },
+      ctx({}),
+    );
+    expect(rendered.body).toBe("Hi !");
+    expect(rendered.body).not.toContain("{{");
+    expect(missing).toEqual(["firstName"]);
+  });
+
+  it("counts a null value as missing", () => {
+    const { rendered, missing } = renderTemplateContent(
+      { channel: "sms", body: "[{{v}}]" },
+      ctx({ v: null }),
+    );
+    expect(rendered.body).toBe("[]");
+    expect(missing).toEqual(["v"]);
+  });
+
+  it("counts an undefined value as missing", () => {
+    const { missing } = renderTemplateContent(
+      { channel: "sms", body: "[{{v}}]" },
+      ctx({ v: undefined }),
+    );
+    expect(missing).toEqual(["v"]);
+  });
+
+  it("dedupes and sorts missing names across fields", () => {
+    const { missing } = renderTemplateContent(
+      emailContent({
+        subject: "{{zeta}} {{alpha}}",
+        htmlBody: "<p>{{alpha}}</p>",
+        plaintextBody: "{{alpha}} {{mid}}",
+      }),
+      ctx({}),
+    );
+    expect(missing).toEqual(["alpha", "mid", "zeta"]);
+  });
+
+  it("reports placeholders from optional email fields that never surface", () => {
+    const { rendered, missing } = renderTemplateContent(
+      emailContent({
+        subject: "static",
+        htmlBody: "<p>static</p>",
+        plaintextBody: "static",
+        preheader: "{{preheaderVar}}",
+        fromName: "{{fromVar}}",
+      }),
+      ctx({}),
+    );
+    expect(missing).toEqual(["fromVar", "preheaderVar"]);
+    expect(rendered.title).toBe("static");
+  });
+
+  it("returns an empty missing list for a template with no placeholders", () => {
+    const { missing } = renderTemplateContent(
+      { channel: "sms", body: "static text" },
+      ctx({}),
+    );
+    expect(missing).toEqual([]);
+  });
+
+  it("does not throw on any value type", () => {
+    expect(() =>
+      renderTemplateContent(
+        { channel: "sms", body: "{{v}}" },
+        ctx({ v: Symbol("x") }),
+      ),
+    ).not.toThrow();
+  });
+});
+
+describe("renderTemplateContent — HTML escaping invariant", () => {
+  it("escapes a script payload in an email html body", () => {
+    const { rendered } = renderTemplateContent(
+      emailContent({
+        htmlBody: "<p>{{firstName}}</p>",
+        plaintextBody: "{{firstName}}",
+      }),
+      ctx({ firstName: "<script>alert(1)</script>" }),
+    );
+    expect(rendered.body).toBe(
+      "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>",
+    );
+  });
+
+  it("leaves the same payload verbatim in the plaintext body", () => {
+    const { rendered } = renderTemplateContent(
+      emailContent({
+        htmlBody: "<p>{{firstName}}</p>",
+        plaintextBody: "{{firstName}}",
+      }),
+      ctx({ firstName: "<script>alert(1)</script>" }),
+    );
+    expect(rendered.plainBody).toBe("<script>alert(1)</script>");
+  });
+
+  it("escapes an in_app html body (stored XSS vector)", () => {
+    const { rendered } = renderTemplateContent(
+      inAppContent({ title: "t", htmlBody: "<div>{{message}}</div>" }),
+      ctx({ message: '<img src=x onerror="alert(1)">' }),
+    );
+    expect(rendered.body).toBe(
+      "<div>&lt;img src=x onerror=&quot;alert(1)&quot;&gt;</div>",
+    );
+  });
+
+  it("escapes the ampersand first — no double escaping", () => {
+    const { rendered } = renderTemplateContent(
+      emailContent({ htmlBody: "<p>{{firstName}}</p>" }),
+      ctx({ firstName: "Ben & Jerry's <b>" }),
+    );
+    expect(rendered.body).toBe("<p>Ben &amp; Jerry&#39;s &lt;b&gt;</p>");
+    expect(rendered.body).not.toContain("&amp;amp;");
+    expect(rendered.body).not.toContain("&amp;lt;");
+  });
+
+  it("does not escape the template's own markup, only substituted values", () => {
+    const { rendered } = renderTemplateContent(
+      inAppContent({ htmlBody: '<a href="/x">{{message}}</a>' }),
+      ctx({ message: "safe" }),
+    );
+    expect(rendered.body).toBe('<a href="/x">safe</a>');
+  });
+
+  it("does not escape a value substituted into a plain title field", () => {
+    const { rendered } = renderTemplateContent(
+      inAppContent({ title: "{{firstName}}" }),
+      ctx({ firstName: "<b>Ada</b>", message: "m" }),
+    );
+    expect(rendered.title).toBe("<b>Ada</b>");
+  });
+});
+
+describe("renderTemplateContent — JSON escaping invariant", () => {
+  it("JSON-escapes a double quote so the payload stays parseable", () => {
+    const { rendered } = renderTemplateContent(
+      webhookContent('{"note":"{{note}}"}'),
+      ctx({ note: 'He said "hi"' }),
+    );
+    expect(rendered.body).toBe('{"note":"He said \\"hi\\""}');
+    expect(JSON.parse(rendered.body)).toEqual({ note: 'He said "hi"' });
+  });
+
+  it("JSON-escapes a backslash", () => {
+    const { rendered } = renderTemplateContent(
+      webhookContent('{"path":"{{path}}"}'),
+      ctx({ path: "C:\\temp\\x" }),
+    );
+    expect(JSON.parse(rendered.body)).toEqual({ path: "C:\\temp\\x" });
+  });
+
+  it("does not HTML-escape a webhook payload value", () => {
+    const { rendered } = renderTemplateContent(
+      webhookContent('{"note":"{{note}}"}'),
+      ctx({ note: "a < b & c" }),
+    );
+    expect(JSON.parse(rendered.body)).toEqual({ note: "a < b & c" });
+    expect(rendered.body).not.toContain("&amp;");
+  });
+});
+
+describe("renderTemplateContent — SSML escaping", () => {
+  it("escapes a value substituted into ssml (XML) but not the fallback text", () => {
+    const { rendered } = renderTemplateContent(
+      voiceContent("<speak>{{note}}</speak>", "{{note}}"),
+      ctx({ note: "Tom & <Jerry>" }),
+    );
+    expect(rendered.body).toBe("<speak>Tom &amp; &lt;Jerry&gt;</speak>");
+    expect(rendered.plainBody).toBe("Tom & <Jerry>");
+  });
+});
+
+describe("templatePlaceholders", () => {
+  it("dedupes and sorts names across every content field", () => {
+    expect(
+      templatePlaceholders(
+        emailContent({
+          subject: "{{zeta}}",
+          htmlBody: "<p>{{alpha}} {{zeta}}</p>",
+          plaintextBody: "{{alpha}}",
+          preheader: "{{mid}}",
+        }),
+      ),
+    ).toEqual(["alpha", "mid", "zeta"]);
+  });
+
+  it("returns an empty list when there are no placeholders", () => {
+    expect(
+      templatePlaceholders({ channel: "sms", body: "no vars here" }),
+    ).toEqual([]);
+  });
+
+  it("covers webhook eventName and payload template", () => {
+    expect(
+      templatePlaceholders(
+        webhookContent('{"a":"{{beta}}","b":"{{alpha}}"}'),
+      ),
+    ).toEqual(["alpha", "beta"]);
+  });
+
+  it("covers both voice_call bodies", () => {
+    expect(
+      templatePlaceholders(
+        voiceContent("<speak>{{ssmlVar}}</speak>", "{{fallbackVar}}"),
+      ),
+    ).toEqual(["fallbackVar", "ssmlVar"]);
+  });
+});
+
+describe("renderedSizeBytes", () => {
+  it("sums title + body + plainBody for ASCII", () => {
+    const { rendered } = renderTemplateContent(
+      emailContent({
+        subject: "abc",
+        htmlBody: "de",
+        plaintextBody: "f",
+      }),
+      ctx({}),
+    );
+    expect(renderedSizeBytes(rendered)).toBe(6);
+  });
+
+  it("counts multi-byte characters by UTF-8 length", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "é😀" },
+      ctx({}),
+    );
+    expect(renderedSizeBytes(rendered)).toBe(6);
+  });
+
+  it("treats a null plainBody as empty", () => {
+    const { rendered } = renderTemplateContent(
+      { channel: "sms", body: "12345" },
+      ctx({}),
+    );
+    expect(rendered.plainBody).toBeNull();
+    expect(renderedSizeBytes(rendered)).toBe(5);
+  });
+});
+
+describe("renderTemplateContent — round trip with a real template", () => {
+  it("leaves missing empty when every declared variable resolves", () => {
+    const template: NotificationTemplate = {
+      ...baseEmailTemplate,
+      content: {
+        channel: "email",
+        subject: "Invoice {{invoiceNumber}} paid",
+        htmlBody: "<p>Thanks for paying invoice {{invoiceNumber}}.</p>",
+        plaintextBody: "Thanks for paying invoice {{invoiceNumber}}.",
+      },
+    };
+    const context = ctx({ invoiceNumber: "INV-2026-001" });
+    expect(validateRenderInput(template, context).ok).toBe(true);
+    expect(templatePlaceholders(template.content)).toEqual(
+      template.variables.map((v) => v.name),
+    );
+
+    const { rendered, missing } = renderTemplateContent(
+      template.content,
+      context,
+    );
+    expect(missing).toEqual([]);
+    expect(rendered.title).toBe("Invoice INV-2026-001 paid");
+    expect(rendered.body).toBe(
+      "<p>Thanks for paying invoice INV-2026-001.</p>",
+    );
+    expect(rendered.plainBody).toBe("Thanks for paying invoice INV-2026-001.");
+    expect(renderedSizeBytes(rendered)).toBeLessThan(5_000_000);
   });
 });

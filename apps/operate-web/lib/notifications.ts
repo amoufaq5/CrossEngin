@@ -18,6 +18,19 @@ export interface NotificationProposal {
   readonly reviewedAt: string | null;
 }
 
+/**
+ * The rendered copy of a digest — several pooled notices summarised into one. The server renders
+ * it from the pool at read time, so it is present only on a digest notification.
+ */
+export interface NotificationDigest {
+  readonly title: string;
+  readonly body: string;
+  readonly severity: string;
+  readonly itemCount: number;
+}
+
+export const DIGEST_TEMPLATE_ID = "notification.digest";
+
 export interface TenantNotification {
   readonly dispatchId: string;
   readonly templateId: string;
@@ -30,6 +43,7 @@ export interface TenantNotification {
   readonly queuedAt: string;
   readonly requestingSystem: string;
   readonly proposal?: NotificationProposal | null;
+  readonly digest?: NotificationDigest | null;
 }
 
 export interface NotificationPage {
@@ -114,6 +128,18 @@ function toProposal(raw: unknown): NotificationProposal | null {
   };
 }
 
+function toDigest(raw: unknown): NotificationDigest | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const d = raw as Record<string, unknown>;
+  const count = d["itemCount"];
+  return {
+    title: str(d["title"]),
+    body: str(d["body"]),
+    severity: str(d["severity"], "info"),
+    itemCount: typeof count === "number" && Number.isFinite(count) ? count : 0,
+  };
+}
+
 function toNotification(raw: unknown): TenantNotification | null {
   if (raw === null || typeof raw !== "object") return null;
   const n = raw as Record<string, unknown>;
@@ -130,6 +156,7 @@ function toNotification(raw: unknown): TenantNotification | null {
     queuedAt: str(n["queuedAt"]),
     requestingSystem: str(n["requestingSystem"]),
     proposal: toProposal(n["proposal"]),
+    digest: toDigest(n["digest"]),
   };
 }
 
@@ -190,6 +217,17 @@ export function byDecidedAtDesc(a: TenantNotification, b: TenantNotification): n
   return tb - ta;
 }
 
+export function isDigest(n: TenantNotification): boolean {
+  return n.templateId === DIGEST_TEMPLATE_ID;
+}
+
+/** Digest notices, newest first. A digest with no rendered copy is dropped — there is nothing to show. */
+export function digestNotices(
+  list: ReadonlyArray<TenantNotification>,
+): ReadonlyArray<TenantNotification> {
+  return list.filter((n) => isDigest(n) && n.digest != null).sort(byDecidedAtDesc);
+}
+
 export function reviewDecisions(
   list: ReadonlyArray<TenantNotification>,
 ): ReadonlyArray<TenantNotification> {
@@ -209,7 +247,9 @@ export function recentDecisionCount(
 ): number {
   let count = 0;
   for (const n of list) {
-    if (decisionOf(n) === null) continue;
+    // A digest stands for decisions the tenant has not otherwise been told about, so it counts
+    // as one notice — otherwise the badge reads zero while a summary is waiting to be read.
+    if (decisionOf(n) === null && !(isDigest(n) && n.digest != null)) continue;
     const at = Date.parse(decidedAtOf(n));
     if (Number.isNaN(at)) continue;
     if (now - at <= RECENT_DECISION_WINDOW_MS) count += 1;

@@ -46,6 +46,10 @@ import { PostgresDeliveryStore } from "./delivery-store.js";
 import { PostgresRecipientResolver } from "./recipient-resolver.js";
 import { defaultSenderRegistry } from "./delivery-senders.js";
 import { PostgresDigestStore } from "./digest-store.js";
+import { PostgresTemplateStore } from "./template-store.js";
+import { renderDigest } from "./digest-template.js";
+import { memberFromItem } from "./digest-assembler.js";
+import { DIGEST_TEMPLATE_ID, digestLocale } from "./digest-assembly.js";
 import { parseNotificationPolicy, type NotificationPolicy } from "./delivery-throttle.js";
 import { JwksRefreshPoller, RemoteJwksProvider } from "./jwks.js";
 import {
@@ -479,9 +483,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let gatewayCache: TenantGatewayCache | null = null;
   let manifestPoller: ManifestActivationPoller | null = null;
   let notificationStore: PostgresNotificationStore | null = null;
+  let digestReadStore: PostgresDigestStore | null = null;
+  let templateStore: PostgresTemplateStore | null = null;
   if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
     notificationStore = new PostgresNotificationStore(conn, schemaOpt);
+    digestReadStore = new PostgresDigestStore(conn, schemaOpt);
+    templateStore = new PostgresTemplateStore(conn, schemaOpt);
   }
   // Platform design-review queue: /v1/platform/design-reviews lets an operator triage AI-generated
   // proposals across every tenant (with an automated risk report) before they can go live. The
@@ -520,6 +528,33 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         source: notificationStore,
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         allowedRoles: new Set(options.aiDesignRoles),
+        digestTemplateId: DIGEST_TEMPLATE_ID,
+        // The dispatch stores only a hash of its variables, so a digest's copy is rendered from
+        // the pool it stands for at read time — with a tenant's authored template winning over
+        // the platform's built-in default when one exists.
+        ...(digestReadStore !== null && templateStore !== null
+          ? {
+              resolveDigest: async (tenantId: string, digestId: string) => {
+                const digest = await digestReadStore.getByDigestId(tenantId, digestId);
+                if (digest === null) return null;
+                const items = await digestReadStore.itemsFor(tenantId, digestId);
+                if (items.length === 0) return null;
+                const members = items.map(memberFromItem);
+                const locale = digestLocale(members);
+                const override = await templateStore.find(tenantId, {
+                  templateId: DIGEST_TEMPLATE_ID,
+                  locale,
+                  channel: digest.channel,
+                });
+                return renderDigest({
+                  digest,
+                  members,
+                  locale,
+                  ...(override !== null ? { content: override.content } : {}),
+                });
+              },
+            }
+          : {}),
         resolveProposal: async (tenantId, proposalId) => {
           const record = await proposals.getById(tenantId, proposalId);
           return record === null

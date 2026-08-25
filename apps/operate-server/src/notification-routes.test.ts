@@ -10,6 +10,7 @@ import {
   type TenantNotificationLike,
   type TenantNotificationListQueryLike,
   type TenantNotificationSourceLike,
+  digestFragment,
 } from "./notification-routes.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -367,5 +368,84 @@ describe("notification-routes — proposal join", () => {
     expect((await call(withResolver, {}, "anon_visitor")).status).toBe(403);
     expect((await call(withResolver, { tenantId: null })).status).toBe(400);
     expect(resolver.calls).toHaveLength(0);
+  });
+});
+
+describe("notification-routes — digestFragment", () => {
+  const DIGEST_ID = `dgst_${"d".repeat(32)}`;
+  const rendered = {
+    title: "3 notifications",
+    body: "<p>3 notifications</p>",
+    severity: "info",
+    itemCount: 3,
+  };
+
+  it("omits the key entirely when no resolver is wired", async () => {
+    expect(await digestFragment(undefined, "notification.digest", "notification.digest", "t", DIGEST_ID)).toEqual({});
+  });
+
+  it("omits the key when no digest template id is configured", async () => {
+    expect(
+      await digestFragment(async () => rendered, undefined, "notification.digest", "t", DIGEST_ID),
+    ).toEqual({});
+  });
+
+  it("omits the key for a notification that is not a digest", async () => {
+    expect(
+      await digestFragment(
+        async () => rendered,
+        "notification.digest",
+        "design_review.approved",
+        "t",
+        DIGEST_ID,
+      ),
+    ).toEqual({});
+  });
+
+  it("resolves the rendered copy for a digest notification", async () => {
+    expect(
+      await digestFragment(async () => rendered, "notification.digest", "notification.digest", "t", DIGEST_ID),
+    ).toEqual({ digest: rendered });
+  });
+
+  it("passes the tenant and the correlated digest id to the resolver", async () => {
+    const seen: string[] = [];
+    await digestFragment(
+      async (tenantId, digestId) => {
+        seen.push(tenantId, digestId);
+        return rendered;
+      },
+      "notification.digest",
+      "notification.digest",
+      "tenant-1",
+      DIGEST_ID,
+    );
+    expect(seen).toEqual(["tenant-1", DIGEST_ID]);
+  });
+
+  it("degrades to null for a digest notice with no correlation id", async () => {
+    expect(
+      await digestFragment(async () => rendered, "notification.digest", "notification.digest", "t", null),
+    ).toEqual({ digest: null });
+  });
+
+  it("degrades to null rather than failing the list when the resolver throws", async () => {
+    expect(
+      await digestFragment(
+        async () => {
+          throw new Error("digest gone");
+        },
+        "notification.digest",
+        "notification.digest",
+        "t",
+        DIGEST_ID,
+      ),
+    ).toEqual({ digest: null });
+  });
+
+  it("degrades to null when the pool no longer resolves", async () => {
+    expect(
+      await digestFragment(async () => null, "notification.digest", "notification.digest", "t", DIGEST_ID),
+    ).toEqual({ digest: null });
   });
 });
