@@ -94,6 +94,7 @@ function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
   const traits = manifest.traits ?? [];
   const relations = manifest.relations ?? [];
 
+  const fieldsByEntity = new Map<string, Set<string>>();
   for (const [i, entity] of entities.entries()) {
     if (entityNames.has(entity.name)) {
       throw new ManifestValidationError(
@@ -102,6 +103,7 @@ function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
       );
     }
     entityNames.add(entity.name);
+    fieldsByEntity.set(entity.name, new Set(entity.fields.map((f) => f.name)));
   }
 
   for (const [i, trait] of traits.entries()) {
@@ -181,6 +183,20 @@ function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
           `relations[${i}].to`,
           `relation references unknown entity '${rel.to}'`,
         );
+      }
+      // Only many_to_one carries a FK-bearing column on `from`; a one_to_many's `field` names
+      // the inverse collection and corresponds to no column anywhere. Unchecked, a relation on
+      // a field that does not exist survives validation and fails later at FK emit — which is
+      // exactly what a pack overriding an inherited entity, or a model inventing a reference,
+      // produces.
+      if (rel.kind === "many_to_one") {
+        const fields = fieldsByEntity.get(rel.from);
+        if (fields !== undefined && !fields.has(rel.field)) {
+          throw new ManifestValidationError(
+            `relations[${i}].field`,
+            `many_to_one relation references unknown field '${rel.field}' on entity '${rel.from}'`,
+          );
+        }
       }
     }
   }

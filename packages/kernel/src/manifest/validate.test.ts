@@ -218,11 +218,60 @@ describe("validateManifest — relations", () => {
       meta: baseMeta,
       entities: [
         { name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "a", type: { kind: "text" } },
+            { name: "patient", type: { kind: "reference", target: "Patient" } },
+          ],
+        },
+      ],
+      relations: [
+        { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("throws on many_to_one whose field does not exist on the 'from' entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] },
         { name: "Prescription", fields: [{ name: "a", type: { kind: "text" } }] },
       ],
       relations: [
         { kind: "many_to_one", from: "Prescription", field: "patient", to: "Patient" },
       ],
+    };
+    expect(() => validateManifest(m)).toThrow(/unknown field 'patient' on entity 'Prescription'/);
+  });
+
+  it("does not require a one_to_many's field to be a column — it names the inverse collection", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] },
+        { name: "Prescription", fields: [{ name: "a", type: { kind: "text" } }] },
+      ],
+      relations: [
+        { kind: "one_to_many", from: "Patient", field: "prescriptions", to: "Prescription" },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("does not check fields on many_to_many, which has none", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] },
+        { name: "Prescription", fields: [{ name: "a", type: { kind: "text" } }] },
+      ],
+      relations: [{ kind: "many_to_many", left: "Patient", right: "Prescription" }],
     };
     expect(() => validateManifest(m)).not.toThrow();
   });

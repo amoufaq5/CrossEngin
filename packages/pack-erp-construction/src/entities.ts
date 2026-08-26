@@ -4,6 +4,8 @@ const AUDITABLE = ["auditable"] as const;
 
 export const PROJECT_ENTITY: Entity = {
   name: "Project",
+  // Deliberately replaces core's Project — construction's is site-oriented (site_address, target_completion_date).
+  overrides: true,
   traits: [...AUDITABLE],
   fields: [
     {
@@ -97,6 +99,8 @@ export const SUBCONTRACTOR_ENTITY: Entity = {
 
 export const WORK_ORDER_ENTITY: Entity = {
   name: "WorkOrder",
+  // Deliberately replaces core's manufacturing WorkOrder — construction's is a subcontractor order.
+  overrides: true,
   traits: [...AUDITABLE],
   fields: [
     {

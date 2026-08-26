@@ -16,6 +16,12 @@ export const EntitySchema = z
     indexes: z.array(IndexDefinitionSchema).optional(),
     /** Functional department/module this entity belongs to (e.g. "Finance", "Human Resources"). UI grouping only. */
     module: z.string().min(1).optional(),
+    /**
+     * Declares that this entity deliberately replaces one of the same name inherited through
+     * `meta.extends`. Resolution refuses an undeclared collision, so a pack cannot silently
+     * destroy a parent's entity — and everything the parent hung off the replaced fields.
+     */
+    overrides: z.boolean().optional(),
   })
   .refine(
     (v) => {

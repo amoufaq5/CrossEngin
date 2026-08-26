@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 275 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 276 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**82 packages + 3 apps, 139 meta-schema tables, ~9,270 tests**, all green, no
+**82 packages + 3 apps, 139 meta-schema tables, ~9,280 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -578,7 +578,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 275 records; 196
+hand-editing, so a title or status change cannot drift. 276 records; 197
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

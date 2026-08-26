@@ -106,7 +106,11 @@ describe("buildErpGroceryPack — transitive resolution (grocery -> retail -> co
 
   it("concatenates relations across the chain (core + 5 retail + 3 grocery)", async () => {
     const resolved = await resolveManifest(buildErpGroceryPack(), { registry: chainRegistry() });
-    expect(resolved.relations).toHaveLength((buildErpCorePack().relations ?? []).length + 5 + 3);
+    // -2: inherited from retail, whose SalesOrder override prunes core's account_id +
+    // quote_id relations (see the retail pack's own test).
+    expect(resolved.relations).toHaveLength(
+      (buildErpCorePack().relations ?? []).length + 5 + 3 - 2,
+    );
   });
 
   it("records both retail and core in the resolution lineage", async () => {
