@@ -35,26 +35,50 @@ export function expandTraits(entity: Entity, customTraits: readonly Trait[]): re
 }
 
 /**
+ * Every domain field an entity resolves to: its own fields, then whatever its traits
+ * contribute. This is the one answer to "which fields of this entity become columns?",
+ * shared by `validateManifest`'s reference checks and by the serving store's column plan,
+ * so validation cannot say a field exists that the served table has no column for.
+ *
+ * The implicit `id` primary key is *not* included — it is a system column whose type each
+ * emitter chooses for itself (the kernel emits UUID, the column-mapped store TEXT), so it
+ * is not a domain field. `resolvedFieldNames` adds it, since for an existence question it
+ * plainly does exist.
+ *
+ * Unlike `expandTraits` this tolerates a name supplied twice: the first wins, and rejecting
+ * the collision is `emitCreateTable`'s job, not an existence check's.
+ */
+export function resolvedFields(entity: Entity, customTraits: readonly Trait[]): readonly Field[] {
+  const customByName = new Map(customTraits.map((t) => [t.name, t]));
+  const out: Field[] = [];
+  const seen = new Set<string>();
+  const add = (field: Field): void => {
+    if (seen.has(field.name)) return;
+    seen.add(field.name);
+    out.push(field);
+  };
+  for (const field of entity.fields) add(field);
+  for (const traitName of entity.traits ?? []) {
+    const traitFields = BUILT_IN_TRAIT_FIELDS.get(traitName) ?? customByName.get(traitName)?.fields;
+    for (const field of traitFields ?? []) add(field);
+  }
+  return out;
+}
+
+/**
  * Every field name an entity resolves to, as the emitted table has them: the implicit `id`
- * primary key, the entity's own fields, and whatever its traits contribute.
+ * primary key plus every domain field from `resolvedFields`.
  *
  * This is the one answer to "does this entity have that field?", shared by every reference
  * check in `validateManifest` — relations, permissions, views and search — so they cannot
- * disagree about what exists. Unlike `expandTraits` it tolerates a name supplied by two
- * traits at once: for an existence question a collision is still an existing field, and it
- * is `emitCreateTable`'s job to reject the collision itself.
+ * disagree about what exists.
  */
 export function resolvedFieldNames(
   entity: Entity,
   customTraits: readonly Trait[],
 ): ReadonlySet<string> {
-  const customByName = new Map(customTraits.map((t) => [t.name, t]));
   const names = new Set<string>(["id"]);
-  for (const field of entity.fields) names.add(field.name);
-  for (const traitName of entity.traits ?? []) {
-    const traitFields = BUILT_IN_TRAIT_FIELDS.get(traitName) ?? customByName.get(traitName)?.fields;
-    for (const field of traitFields ?? []) names.add(field.name);
-  }
+  for (const field of resolvedFields(entity, customTraits)) names.add(field.name);
   return names;
 }
 

@@ -401,3 +401,55 @@ describe("ColumnMappedEntityStore — withTransaction", () => {
     ).rejects.toThrow(/cross-tenant/);
   });
 });
+
+describe("ColumnMappedEntityStore — an auditable entity's trait columns", () => {
+  const AUDITED = {
+    name: "Visit",
+    traits: ["auditable"],
+    fields: [{ name: "reason", type: { kind: "text" } }],
+  };
+  const AUDITED_MANIFEST = { entities: [AUDITED] } as unknown as Manifest;
+  const auditedStore = (cap: Captured): ColumnMappedEntityStore =>
+    new ColumnMappedEntityStore(cap.conn, AUDITED_MANIFEST, { schema: "tenant_app" });
+
+  it("selects the trait columns, so a record carries created_at and created_by", async () => {
+    const cap = capturePg([
+      { id: "v1", reason: "checkup", created_at: "2026-08-26T00:00:00Z", created_by: "u1" },
+    ]);
+    const record = await auditedStore(cap).get(TENANT, "Visit", "v1");
+    expect(record).toEqual({
+      id: "v1",
+      reason: "checkup",
+      created_at: "2026-08-26T00:00:00Z",
+      created_by: "u1",
+    });
+  });
+
+  it("still stamps updated_at when the patch does not name it", async () => {
+    const cap = capturePg([{ id: "v1", reason: "x" }]);
+    await auditedStore(cap).update(TENANT, "Visit", "v1", { reason: "x" });
+    const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
+    expect(upd.sql).toContain('"updated_at" = now()');
+  });
+
+  it("assigns updated_at once when the patch names it, not twice", async () => {
+    const cap = capturePg([{ id: "v1", reason: "x" }]);
+    await auditedStore(cap).update(TENANT, "Visit", "v1", { updated_at: "2026-08-26T00:00:00Z" });
+    const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
+    expect(upd.sql.match(/"updated_at" =/g)).toHaveLength(1);
+    expect(upd.sql).not.toContain('"updated_at" = now()');
+  });
+
+  it("migrates an existing table additively on ensureSchema", async () => {
+    const cap = capturePg();
+    await auditedStore(cap).ensureSchema();
+    const adds = cap.calls.filter((c) => c.sql.includes("ADD COLUMN IF NOT EXISTS"));
+    expect(adds.map((a) => a.sql.match(/IF NOT EXISTS "(\w+)"/)?.[1])).toEqual([
+      "reason",
+      "created_at",
+      "updated_at",
+      "created_by",
+      "updated_by",
+    ]);
+  });
+});

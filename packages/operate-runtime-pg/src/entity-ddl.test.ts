@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 
 import { columnPlanForEntity, joinTablePlansForManifest } from "./column-plan.js";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { emitEntityTableDdl, emitForeignKeyDdl, emitJoinTableDdl, onDeleteClause } from "./entity-ddl.js";
+import {
+  emitAddColumnDdl,
+  emitEntityTableDdl,
+  emitForeignKeyDdl,
+  emitJoinTableDdl,
+  onDeleteClause,
+} from "./entity-ddl.js";
 
 const WIDGET: Entity = {
   name: "Widget",
@@ -146,5 +152,103 @@ describe("emitJoinTableDdl", () => {
     const sql = emitJoinTableDdl(plan, new Set(["Course"])).join("\n");
     expect(sql).toContain('"course_id"'); // table still created
     expect(sql).not.toContain('REFERENCES "tenant_app"."student"');
+  });
+});
+
+describe("emitEntityTableDdl — trait-supplied timestamps", () => {
+  const AUDITED: Entity = {
+    name: "Visit",
+    traits: ["auditable"],
+    fields: [{ name: "reason", type: { kind: "text" } }],
+  };
+  const PLAIN: Entity = { name: "Note", fields: [{ name: "body", type: { kind: "text" } }] };
+
+  it("declares created_at exactly once when the trait already supplies it", () => {
+    const create = emitEntityTableDdl(columnPlanForEntity(AUDITED, { schema: "app" }))[0] ?? "";
+    expect(create.match(/"created_at"/g)).toHaveLength(1);
+    expect(create.match(/"updated_at"/g)).toHaveLength(1);
+  });
+
+  it("keeps the trait column's own default, so inserts that omit it still work", () => {
+    const create = emitEntityTableDdl(columnPlanForEntity(AUDITED, { schema: "app" }))[0] ?? "";
+    expect(create).toContain('"created_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
+  });
+
+  it("emits the trait's other columns as ordinary domain columns", () => {
+    const create = emitEntityTableDdl(columnPlanForEntity(AUDITED, { schema: "app" }))[0] ?? "";
+    expect(create).toContain('"created_by" UUID');
+    expect(create).toContain('"updated_by" UUID');
+  });
+
+  it("still supplies the housekeeping timestamps for an entity with no auditable trait", () => {
+    const create = emitEntityTableDdl(columnPlanForEntity(PLAIN, { schema: "app" }))[0] ?? "";
+    expect(create).toContain('"created_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
+    expect(create).toContain('"updated_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
+  });
+});
+
+describe("emitAddColumnDdl", () => {
+  const WITH_REQUIRED: Entity = {
+    name: "Visit",
+    fields: [
+      { name: "reason", type: { kind: "text" } },
+      { name: "triage", type: { kind: "text" }, required: true },
+      { name: "version", type: { kind: "integer" }, required: true, default: { kind: "literal", value: 1 } },
+    ],
+  };
+  const stmts = emitAddColumnDdl(columnPlanForEntity(WITH_REQUIRED, { schema: "app" }));
+
+  it("emits one idempotent ADD COLUMN per planned column", () => {
+    expect(stmts).toHaveLength(3);
+    for (const s of stmts) expect(s).toContain("ADD COLUMN IF NOT EXISTS");
+  });
+
+  it("drops NOT NULL on a required column with nothing to backfill with", () => {
+    const triage = stmts.find((s) => s.includes('"triage"')) ?? "";
+    expect(triage).toContain('ADD COLUMN IF NOT EXISTS "triage" TEXT;');
+    expect(triage).not.toContain("NOT NULL");
+  });
+
+  it("keeps NOT NULL when a default can backfill the existing rows", () => {
+    const version = stmts.find((s) => s.includes('"version"')) ?? "";
+    expect(version).toContain("NOT NULL DEFAULT 1");
+  });
+
+  it("runs inside the table DDL, before any statement that references a column", () => {
+    const sql = emitEntityTableDdl(columnPlanForEntity(WITH_REQUIRED, { schema: "app" }));
+    const addIdx = sql.findIndex((s) => s.includes("ADD COLUMN IF NOT EXISTS"));
+    const trigramIdx = sql.findIndex((s) => s.includes("gin_trgm_ops"));
+    expect(addIdx).toBe(1);
+    expect(trigramIdx).toBeGreaterThan(addIdx);
+  });
+});
+
+describe("emitEntityTableDdl — trigram indexes", () => {
+  const TEXTY: Entity = {
+    name: "Place",
+    fields: [
+      { name: "label", type: { kind: "text" } },
+      { name: "code", type: { kind: "text", maxLength: 20 } },
+      { name: "country", type: { kind: "country_code" } },
+      { name: "secret", type: { kind: "text" }, classification: "phi" },
+      { name: "count", type: { kind: "integer" } },
+    ],
+  };
+  const sql = emitEntityTableDdl(columnPlanForEntity(TEXTY, { schema: "app" })).join("\n");
+
+  it("indexes TEXT and VARCHAR columns", () => {
+    expect(sql).toContain('"label" gin_trgm_ops');
+    expect(sql).toContain('"code" gin_trgm_ops');
+  });
+
+  it("skips CHAR(n), which gin_trgm_ops does not accept", () => {
+    // bpchar is not binary-coercible to text; indexing it fails outright, and a
+    // country_code field made pack-erp-core unbootable on this store.
+    expect(sql).not.toContain('"country" gin_trgm_ops');
+  });
+
+  it("skips encrypted and non-text columns", () => {
+    expect(sql).not.toContain('"secret" gin_trgm_ops');
+    expect(sql).not.toContain('"count" gin_trgm_ops');
   });
 });

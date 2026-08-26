@@ -1,9 +1,9 @@
 # ADR index
 
-277 records. Generated from the ADR files themselves — regenerate rather than
+278 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table.
 
-- **Accepted:** 198  **Proposed:** 79
+- **Accepted:** 199  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -288,3 +288,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0280](0280-self-hosted-model.md) | Running the model on the same box | Phase 4 | Accepted | 2026-08-26 |
 | [0281](0281-explicit-entity-override.md) | A pack may not silently replace what it inherits | Phase 4 | Accepted | 2026-08-26 |
 | [0282](0282-view-field-references.md) | One answer to "does this entity have that field?" | Phase 4 | Accepted | 2026-08-26 |
+| [0283](0283-emitter-reconciliation.md) | The served table is what the manifest says | Phase 4 | Accepted | 2026-08-26 |
