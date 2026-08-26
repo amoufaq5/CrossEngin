@@ -78,6 +78,12 @@ export interface NotificationRoutesContext {
   readonly resolveIdentity?: NotificationIdentityResolver;
   /** Roles permitted to ask for the whole tenant's notifications via `?scope=tenant`. */
   readonly tenantScopeRoles?: ReadonlySet<string>;
+  /**
+   * Records an attempt to read beyond one's own inbox. When wired, a *granted* escalation is
+   * recorded before any data is returned and a failure to record refuses the read.
+   */
+  readonly auditTenantScope?: TenantScopeAuditor;
+  readonly clock?: () => Date;
 }
 
 export interface NotificationIdentityLike {
@@ -91,6 +97,22 @@ export type NotificationIdentityResolver = (
 
 export const NOTIFICATION_SCOPES = ["self", "tenant"] as const;
 export type NotificationScope = (typeof NOTIFICATION_SCOPES)[number];
+
+export interface TenantScopeAuditEvent {
+  readonly tenantId: string;
+  readonly principalId: string | null;
+  readonly roles: readonly string[];
+  /** Whether the caller's role actually carried the escalation. */
+  readonly granted: boolean;
+  /** The query the caller ran, so the record says what was read, not just that something was. */
+  readonly filters: Readonly<Record<string, string | number | boolean>>;
+  readonly at: string;
+}
+
+export type TenantScopeAuditor = (event: TenantScopeAuditEvent) => Promise<void>;
+
+export const TENANT_SCOPE_GRANTED_OPERATION = "notifications.read_tenant_scope";
+export const TENANT_SCOPE_DENIED_OPERATION = "notifications.tenant_scope_denied";
 
 function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
@@ -178,6 +200,29 @@ export async function digestFragment(
   }
 }
 
+export function tenantScopeEvent(
+  ctx: NotificationRoutesContext,
+  principal: ResolvedPrincipal | null,
+  tenantId: string,
+  granted: boolean,
+  query: TenantNotificationListQueryLike,
+): TenantScopeAuditEvent {
+  const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
+  const filters: Record<string, string | number | boolean> = {};
+  if (query.channel !== undefined) filters["channel"] = query.channel;
+  if (query.templateId !== undefined) filters["templateId"] = query.templateId;
+  if (query.limit !== undefined && Number.isFinite(query.limit)) filters["limit"] = query.limit;
+  filters["paged"] = query.cursor !== undefined && query.cursor.length > 0;
+  return {
+    tenantId,
+    principalId: principal?.principalId ?? null,
+    roles: [primaryRole, ...(secondaryRoles ?? [])],
+    granted,
+    filters,
+    at: (ctx.clock ?? ((): Date => new Date()))().toISOString(),
+  };
+}
+
 export function requestedScope(raw: string | undefined): NotificationScope {
   return raw === "tenant" ? "tenant" : "self";
 }
@@ -230,9 +275,39 @@ function buildListHandler(ctx: NotificationRoutesContext): Handler {
         ],
       ),
     );
-    const hashes = await recipientFilterFor(ctx, input.principal, tenant, scope);
+    const query = readListQuery(input);
+    let effectiveScope: NotificationScope = "self";
+    if (scope === "tenant") {
+      const granted = canReadTenantScope(ctx, input.principal);
+      const event = tenantScopeEvent(ctx, input.principal, tenant, granted, query);
+      if (granted) {
+        // Recorded BEFORE the data is returned, and a failed record refuses the read: unaudited
+        // privileged access is not access we grant. An after-the-fact write could be lost
+        // precisely when the read was one someone later needs to account for.
+        if (ctx.auditTenantScope !== undefined) {
+          try {
+            await ctx.auditTenantScope(event);
+          } catch {
+            return json(503, {
+              error: "audit_unavailable",
+              detail: "tenant-scope reads cannot be granted while they cannot be recorded",
+            });
+          }
+        }
+        effectiveScope = "tenant";
+      } else if (ctx.auditTenantScope !== undefined) {
+        // A refused escalation is worth recording but is not itself privileged access, so a
+        // failure here must not deny the caller the self-scoped list they are entitled to.
+        try {
+          await ctx.auditTenantScope(event);
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+    const hashes = await recipientFilterFor(ctx, input.principal, tenant, effectiveScope);
     const page = await ctx.source.listForTenant(tenant, {
-      ...readListQuery(input),
+      ...query,
       ...(hashes !== null ? { recipientAddressSha256: hashes } : {}),
     });
     const data = await Promise.all(
