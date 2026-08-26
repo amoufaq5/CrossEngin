@@ -55,7 +55,7 @@ Open <http://localhost:3000>.
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `OPERATE_API_URL` | `http://localhost:8787` | operate-server base URL |
-| `OPERATE_API_KEY` | `devkey` | token sent as `x-api-key` |
+| `OPERATE_API_KEY` | `devkey` | token sent as `x-api-key`. The server-side key should bind a real user id (`key:role:tenant:userId`) — the notification inbox is per-recipient, so an unbound key sees an empty one. |
 
 The browser only talks to this app's `/api` proxy, so there are no CORS
 issues and the API key stays server-side. Use a `cashier`/limited role on

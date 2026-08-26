@@ -1,6 +1,8 @@
+import { sha256 } from "@crossengin/crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   AudienceSchema,
+  NOTIFICATION_CHANNELS,
   PreferenceMatrixEntrySchema,
   SuppressionRecordSchema,
   UserPreferenceMatrixSchema,
@@ -13,12 +15,22 @@ import {
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
+import { addressFor } from "./delivery-drain.js";
+
 export interface ResolvedRecipient {
   readonly userId: string;
   readonly email: string;
   readonly displayName: string | null;
   readonly primaryRole: string;
   readonly secondaryRoles: readonly string[];
+}
+
+export interface RecipientIdentity {
+  readonly userId: string;
+  readonly email: string;
+  readonly displayName: string | null;
+  /** sha256 of every address this person can be reached at, across channels. */
+  readonly addressHashes: readonly string[];
 }
 
 export interface RecipientResolverOptions {
@@ -40,6 +52,8 @@ const EPOCH_ISO = "1970-01-01T00:00:00.000Z";
 
 const RECIPIENT_COLUMNS =
   "m.user_id, u.email, u.display_name, m.primary_role, m.secondary_roles";
+
+const IDENTITY_COLUMNS = "m.user_id, u.email, u.display_name";
 
 const PREFERENCE_COLUMNS = "user_id, category, channel, opted_in, source, updated_at";
 
@@ -106,6 +120,46 @@ function rowToRecipient(row: Record<string, unknown>): ResolvedRecipient | null 
     displayName: typeof displayName === "string" ? displayName : null,
     primaryRole: typeof primaryRole === "string" ? primaryRole : "",
     secondaryRoles: toStringArray(row["secondary_roles"]),
+  };
+}
+
+/**
+ * INVARIANT: these are the very hashes the delivery ledger stored when it sent
+ * to this person, so the set is derived by running the drain's own
+ * channel→address rule over every channel rather than restating it here — if
+ * `addressFor` changes, the inbox filter follows it.
+ */
+export function addressHashesFor(input: {
+  readonly userId: string;
+  readonly email: string;
+}): readonly string[] {
+  const recipient: ResolvedRecipient = {
+    userId: input.userId,
+    email: input.email,
+    displayName: null,
+    primaryRole: "",
+    secondaryRoles: [],
+  };
+  const hashes = new Set<string>();
+  for (const channel of NOTIFICATION_CHANNELS) {
+    const address = addressFor(channel, recipient);
+    if (typeof address !== "string" || address.length === 0) continue;
+    hashes.add(sha256(address));
+  }
+  return [...hashes].sort();
+}
+
+function rowToIdentity(row: Record<string, unknown>): RecipientIdentity | null {
+  const userId = row["user_id"];
+  const email = row["email"];
+  if (typeof userId !== "string" || !UUID_RE.test(userId)) return null;
+  if (typeof email !== "string" || email.length === 0) return null;
+  const displayName = row["display_name"];
+  return {
+    userId,
+    email,
+    displayName: typeof displayName === "string" ? displayName : null,
+    addressHashes: addressHashesFor({ userId, email }),
   };
 }
 
@@ -258,6 +312,46 @@ export class PostgresRecipientResolver {
       }
       return recipients;
     });
+  }
+
+  private get identityQuery(): string {
+    return (
+      `SELECT ${IDENTITY_COLUMNS} FROM ${this.membershipTable} m` +
+      ` JOIN ${this.usersTable} u ON u.id = m.user_id` +
+      " WHERE m.tenant_id = $1 AND m.status = 'active' AND u.status = 'active'" +
+      " AND m.user_id = ANY($2::uuid[])" +
+      " ORDER BY u.email, m.user_id"
+    );
+  }
+
+  /**
+   * INVARIANT: an identity is only returned for an active member of THIS
+   * tenant, so a caller can never turn another tenant's user id into the
+   * address hashes that would unlock that person's delivery rows.
+   */
+  async identityFor(tenantId: string, userId: string): Promise<RecipientIdentity | null> {
+    const identities = await this.identitiesFor(tenantId, [userId]);
+    return identities.get(userId) ?? null;
+  }
+
+  async identitiesFor(
+    tenantId: string,
+    userIds: readonly string[],
+  ): Promise<ReadonlyMap<string, RecipientIdentity>> {
+    const ids = uniqueUuids(userIds);
+    const identities = new Map<string, RecipientIdentity>();
+    if (ids.length === 0) return identities;
+    const sql = this.identityQuery;
+    const rows = await withTenantContext(this.conn, tenantId, async (tx) => {
+      const result = await tx.query(sql, [tenantId, [...ids]]);
+      return result.rows;
+    });
+    for (const row of rows) {
+      const identity = rowToIdentity(row);
+      if (identity === null || identities.has(identity.userId)) continue;
+      identities.set(identity.userId, identity);
+    }
+    return identities;
   }
 
   async preferencesFor(

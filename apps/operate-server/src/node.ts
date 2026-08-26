@@ -485,11 +485,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let notificationStore: PostgresNotificationStore | null = null;
   let digestReadStore: PostgresDigestStore | null = null;
   let templateStore: PostgresTemplateStore | null = null;
+  let recipientResolver: PostgresRecipientResolver | null = null;
   if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
     notificationStore = new PostgresNotificationStore(conn, schemaOpt);
     digestReadStore = new PostgresDigestStore(conn, schemaOpt);
     templateStore = new PostgresTemplateStore(conn, schemaOpt);
+    recipientResolver = new PostgresRecipientResolver(conn, {
+      ...schemaOpt,
+      adminRoles: options.notificationAdminRoles,
+    });
   }
   // Platform design-review queue: /v1/platform/design-reviews lets an operator triage AI-generated
   // proposals across every tenant (with an automated risk report) before they can go live. The
@@ -529,6 +534,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         allowedRoles: new Set(options.aiDesignRoles),
         digestTemplateId: DIGEST_TEMPLATE_ID,
+        // Per-recipient by default: a person's inbox is what the delivery ledger actually
+        // delivered to one of their addresses. An unidentifiable principal therefore sees
+        // nothing, which is the safe direction — the leak this closes was seeing everything.
+        ...(recipientResolver !== null
+          ? {
+              resolveIdentity: (tenantId: string, principalId: string) =>
+                recipientResolver.identityFor(tenantId, principalId),
+              tenantScopeRoles: new Set(options.notificationAuditRoles),
+            }
+          : {}),
         // The dispatch stores only a hash of its variables, so a digest's copy is rendered from
         // the pool it stands for at read time — with a tenant's authored template winning over
         // the platform's built-in default when one exists.

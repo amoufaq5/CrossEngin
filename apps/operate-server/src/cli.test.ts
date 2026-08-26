@@ -741,3 +741,18 @@ describe("parseServeArgs — manifest refresh + AI budget flags", () => {
     expect(() => parseServeArgs([...BASE, "--ai-max-usd-per-month", "nope"])).toThrow();
   });
 });
+
+describe("parseServeArgs — notification audit roles", () => {
+  it("defaults to nobody, so the inbox is per-recipient", () => {
+    expect(parseServeArgs(["--pack", "erp-core"]).notificationAuditRoles).toEqual([]);
+  });
+
+  it("collects repeatable --notification-audit-role", () => {
+    const opts = parseServeArgs([
+      "--pack", "erp-core", "--store", "pg",
+      "--notification-audit-role", "platform_admin",
+      "--notification-audit-role", "compliance_officer",
+    ]);
+    expect(opts.notificationAuditRoles).toEqual(["platform_admin", "compliance_officer"]);
+  });
+});

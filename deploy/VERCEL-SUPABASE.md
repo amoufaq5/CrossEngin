@@ -69,8 +69,17 @@ that builds the whole workspace. Deploy it and set the API's command + env.
 ```
 node apps/operate-server/dist/bin/operate-server.js \
   --pack erp-core --store pg --port 8787 --scheme https --platform-admin \
-  --api-key <STRONG_TOKEN>:platform_admin:00000000-0000-4000-8000-000000000000
+  --api-key <STRONG_TOKEN>:platform_admin:00000000-0000-4000-8000-000000000000:<USER_ID>
 ```
+
+> **Bind the user id.** The fourth field of `--api-key` is the principal's
+> `meta.users.id`. The notification inbox (`GET /v1/meta/notifications`) is
+> **per-recipient**: it returns the notifications actually delivered to that
+> person's addresses. A key with no user id — or one naming a user who is not an
+> active member of the tenant — resolves to nobody and gets an **empty inbox**,
+> which is the safe direction but looks like a bug if you were not expecting it.
+> Add `--notification-audit-role <role>` if some role should be able to read the
+> whole tenant's notifications via `?scope=tenant`.
 
 **Environment** (point at Supabase's **session pooler** — a long-lived service
 should use the pooler in *session* mode, Settings → Database → *Connection

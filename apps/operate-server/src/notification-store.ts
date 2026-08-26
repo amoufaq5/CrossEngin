@@ -1,4 +1,6 @@
+import { sha256 } from "@crossengin/crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
+import { DELIVERY_OUTCOMES } from "@crossengin/notifications";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
@@ -52,6 +54,10 @@ export interface NotificationListQuery {
   readonly templateId?: string;
   readonly limit?: number;
   readonly cursor?: string;
+  /** Restrict to dispatches delivered to one of these recipient address hashes. */
+  readonly recipientAddressSha256?: readonly string[];
+  /** Which delivery outcomes count as "in my inbox". Defaults to ["delivered"] when recipient hashes are given. */
+  readonly outcomes?: readonly string[];
 }
 
 export interface NotificationListPage {
@@ -90,6 +96,32 @@ const INSERT_VALUES =
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
+
+/** The dispatch table alias the EXISTS subquery correlates against. */
+const DISPATCH_ALIAS = "n";
+
+/**
+ * A notice still `deferred` by quiet hours has not reached the person yet, and
+ * one `suppressed` because a digest carried it instead was deliberately not sent
+ * to them — neither belongs in an inbox, only an actual `delivered` row does.
+ */
+const DEFAULT_INBOX_OUTCOMES: readonly string[] = ["delivered"];
+
+const KNOWN_OUTCOMES: ReadonlySet<string> = new Set<string>(DELIVERY_OUTCOMES);
+
+function resolveOutcomes(outcomes: readonly string[] | undefined): readonly string[] {
+  if (outcomes === undefined) return DEFAULT_INBOX_OUTCOMES;
+  const known = outcomes.filter((outcome) => KNOWN_OUTCOMES.has(outcome));
+  return known.length > 0 ? known : DEFAULT_INBOX_OUTCOMES;
+}
+
+/**
+ * The hash the delivery ledger stores for a recipient — the only handle a caller
+ * has on "notifications addressed to me", since a dispatch records no identities.
+ */
+export function recipientAddressHash(address: string): string {
+  return sha256(address);
+}
 
 const NotificationRecordSchema = z
   .object({
@@ -162,6 +194,10 @@ export class PostgresNotificationStore implements NotificationStore {
     return `${this.schema}.notification_dispatches`;
   }
 
+  private get deliveryTable(): string {
+    return `${this.schema}.notification_deliveries`;
+  }
+
   private rowToRecord(row: Record<string, unknown>): NotificationRecord {
     return NotificationRecordSchema.parse({
       dispatchId: String(row["dispatch_id"]),
@@ -218,6 +254,12 @@ export class PostgresNotificationStore implements NotificationStore {
   ): Promise<NotificationListPage> {
     const limit = clampLimit(query.limit);
     const offset = decodeCursor(query.cursor);
+    const recipients = query.recipientAddressSha256;
+    // An empty recipient list means "no addresses", never "every address": widening it back
+    // to a tenant-wide listing would hand one admin another admin's inbox.
+    if (recipients !== undefined && recipients.length === 0) {
+      return { data: [], nextCursor: null };
+    }
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const params: unknown[] = [tenantId];
       const conditions: string[] = ["tenant_id = $1"];
@@ -229,12 +271,25 @@ export class PostgresNotificationStore implements NotificationStore {
         params.push(query.templateId);
         conditions.push(`template_id = $${params.length}`);
       }
+      if (recipients !== undefined) {
+        params.push([...recipients]);
+        const recipientParam = params.length;
+        params.push([...resolveOutcomes(query.outcomes)]);
+        const outcomeParam = params.length;
+        conditions.push(
+          `EXISTS (SELECT 1 FROM ${this.deliveryTable} d` +
+            ` WHERE d.dispatch_id = ${DISPATCH_ALIAS}.id AND d.tenant_id = $1` +
+            ` AND d.recipient_address_sha256 = ANY($${recipientParam}::text[])` +
+            ` AND d.outcome = ANY($${outcomeParam}::text[]))`,
+        );
+      }
       params.push(limit + 1);
       const limitParam = params.length;
       params.push(offset);
       const offsetParam = params.length;
+      const from = recipients === undefined ? this.table : `${this.table} ${DISPATCH_ALIAS}`;
       const sql =
-        `SELECT ${SELECT_COLUMNS} FROM ${this.table} WHERE ${conditions.join(" AND ")}` +
+        `SELECT ${SELECT_COLUMNS} FROM ${from} WHERE ${conditions.join(" AND ")}` +
         ` ORDER BY queued_at DESC, dispatch_id LIMIT $${limitParam} OFFSET $${offsetParam}`;
       const result = await tx.query(sql, params);
       const rows = result.rows.map((r) => this.rowToRecord(r));
