@@ -1042,6 +1042,324 @@ describe("validateManifest — views", () => {
   });
 });
 
+describe("validateManifest — view field references", () => {
+  const entityFixture = {
+    name: "Prescription",
+    traits: ["auditable"],
+    fields: [
+      { name: "qty", type: { kind: "integer" as const } },
+      { name: "status", type: { kind: "text" as const } },
+      { name: "filled_on", type: { kind: "date" as const } },
+      { name: "site", type: { kind: "geo_point" as const } },
+      { name: "account_id", type: { kind: "reference" as const, target: "Prescription" } },
+    ],
+  };
+
+  const withView = (view: unknown): Manifest =>
+    ({
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      views: { v: view },
+    }) as Manifest;
+
+  it("accepts a list view whose columns, sort and filters all resolve", () => {
+    const m = withView({
+      kind: "list",
+      entity: "Prescription",
+      columns: [{ field: "qty" }, { field: "status" }],
+      sort: [{ field: "filled_on", direction: "desc" }],
+      filters: [{ field: "status", operator: "eq", value: "filled" }],
+    });
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("rejects a list column naming a field the entity does not have", () => {
+    const m = withView({
+      kind: "list",
+      entity: "Prescription",
+      columns: [{ field: "qty" }, { field: "dosage" }],
+    });
+    expect(() => validateManifest(m)).toThrow(
+      /unknown field 'dosage' on entity 'Prescription'/,
+    );
+  });
+
+  it("names the exact location of the offending column", () => {
+    const m = withView({
+      kind: "list",
+      entity: "Prescription",
+      columns: [{ field: "qty" }, { field: "status" }, { field: "dosage" }],
+    });
+    expect(() => validateManifest(m)).toThrow(/views\.v\.columns\[2\]\.field/);
+  });
+
+  it("rejects an unknown sort field", () => {
+    const m = withView({
+      kind: "list",
+      entity: "Prescription",
+      columns: [{ field: "qty" }],
+      sort: [{ field: "prescribed_on", direction: "asc" }],
+    });
+    expect(() => validateManifest(m)).toThrow(/views\.v\.sort\[0\]\.field/);
+  });
+
+  it("rejects an unknown filter field", () => {
+    const m = withView({
+      kind: "list",
+      entity: "Prescription",
+      columns: [{ field: "qty" }],
+      filters: [{ field: "pharmacy", operator: "eq", value: "x" }],
+    });
+    expect(() => validateManifest(m)).toThrow(/views\.v\.filters\[0\]\.field/);
+  });
+
+  it("rejects an unknown field inside a column group", () => {
+    const m = withView({
+      kind: "list",
+      entity: "Prescription",
+      columns: [{ field: "qty" }],
+      columnGroups: [{ label: { en: "More" }, columns: [{ field: "dosage" }] }],
+    });
+    expect(() => validateManifest(m)).toThrow(
+      /views\.v\.columnGroups\[0\]\.columns\[0\]\.field/,
+    );
+  });
+
+  it("rejects an unknown field in a record section", () => {
+    const m = withView({
+      kind: "record",
+      entity: "Prescription",
+      sections: [{ id: "main", label: { en: "Main" }, fields: ["qty", "dosage"] }],
+    });
+    expect(() => validateManifest(m)).toThrow(/views\.v\.sections\[0\]\.fields\[1\]/);
+  });
+
+  it("rejects an unknown field in a form step", () => {
+    const m = withView({
+      kind: "form",
+      entity: "Prescription",
+      steps: [{ id: "s1", label: { en: "Details" }, fields: [{ field: "dosage" }] }],
+    });
+    expect(() => validateManifest(m)).toThrow(/views\.v\.steps\[0\]\.fields\[0\]\.field/);
+  });
+
+  it("rejects an unknown kanban stateField and cardField", () => {
+    const base = {
+      kind: "kanban",
+      entity: "Prescription",
+      columns: [{ state: "pending", label: { en: "Pending" } }],
+      cardFields: ["qty"],
+    };
+    expect(() =>
+      validateManifest(withView({ ...base, stateField: "phase" })),
+    ).toThrow(/views\.v\.stateField/);
+    expect(() =>
+      validateManifest(withView({ ...base, stateField: "status", cardFields: ["dosage"] })),
+    ).toThrow(/views\.v\.cardFields\[0\]/);
+  });
+
+  it("rejects an unknown calendar date field", () => {
+    const m = withView({
+      kind: "calendar",
+      entity: "Prescription",
+      startField: "dispensed_on",
+      titleField: "status",
+    });
+    expect(() => validateManifest(m)).toThrow(/views\.v\.startField/);
+  });
+
+  it("rejects an unknown map geo field", () => {
+    const m = withView({
+      kind: "map",
+      entity: "Prescription",
+      geoField: "location",
+      layers: [{ id: "l", label: { en: "L" }, kind: "markers" }],
+    });
+    expect(() => validateManifest(m)).toThrow(/views\.v\.geoField/);
+  });
+
+  it("rejects an unknown field in a map layer filter", () => {
+    const m = withView({
+      kind: "map",
+      entity: "Prescription",
+      geoField: "site",
+      layers: [
+        {
+          id: "l",
+          label: { en: "L" },
+          kind: "markers",
+          filters: [{ field: "pharmacy", operator: "eq", value: "x" }],
+        },
+      ],
+    });
+    expect(() => validateManifest(m)).toThrow(/views\.v\.layers\[0\]\.filters\[0\]\.field/);
+  });
+
+  it("accepts a column on a trait-supplied field", () => {
+    const m = withView({
+      kind: "list",
+      entity: "Prescription",
+      columns: [{ field: "created_at" }, { field: "updated_by" }],
+    });
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("accepts a column on the implicit id primary key", () => {
+    const m = withView({
+      kind: "list",
+      entity: "Prescription",
+      columns: [{ field: "id" }],
+    });
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("resolves only the root segment of a dotted path, which traverses a reference", () => {
+    // `account_id.name` belongs to the target entity; the check stops at `account_id`.
+    expect(() =>
+      validateManifest(
+        withView({
+          kind: "list",
+          entity: "Prescription",
+          columns: [{ field: "account_id.name" }],
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateManifest(
+        withView({
+          kind: "list",
+          entity: "Prescription",
+          columns: [{ field: "prescriber_id.name" }],
+        }),
+      ),
+    ).toThrow(/unknown field 'prescriber_id\.name'/);
+  });
+
+  it("checks no fields on a dashboard or pivot view, which declare none", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      reports: {
+        r: { kind: "kpi", entity: "Prescription", measure: { name: "n", kind: "count" } },
+      },
+      views: {
+        v: { kind: "pivot", entity: "Prescription", reportRef: "r" },
+      },
+    } as Manifest;
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+});
+
+describe("validateManifest — view permissions and states", () => {
+  const entityFixture = {
+    name: "Prescription",
+    fields: [
+      { name: "qty", type: { kind: "integer" as const } },
+      { name: "status", type: { kind: "text" as const } },
+    ],
+  };
+
+  const lifecycle = {
+    prescriptionLifecycle: {
+      kind: "entityLifecycle" as const,
+      entity: "Prescription",
+      stateField: "status",
+      states: [
+        { name: "pending", category: "active" as const },
+        { name: "verified", category: "terminal" as const },
+      ],
+      initialState: "pending",
+      transitions: [{ name: "verify", from: "pending", to: "verified" }],
+    },
+  };
+
+  it("rejects a view granting a role that is not declared", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      roles: { pharmacist: { name: "pharmacist" } },
+      views: {
+        v: {
+          kind: "list",
+          entity: "Prescription",
+          columns: [{ field: "qty" }],
+          permissions: { roles: ["auditor"] },
+        },
+      },
+    } as Manifest;
+    expect(() => validateManifest(m)).toThrow(
+      /views\.v\.permissions\.roles.*'auditor' which is not declared/s,
+    );
+  });
+
+  it("accepts a view granting a declared role", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      roles: { pharmacist: { name: "pharmacist" } },
+      views: {
+        v: {
+          kind: "list",
+          entity: "Prescription",
+          columns: [{ field: "qty" }],
+          permissions: { roles: ["pharmacist"] },
+        },
+      },
+    } as Manifest;
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("rejects a kanban column pinned to a state no workflow declares", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      workflows: lifecycle,
+      views: {
+        v: {
+          kind: "kanban",
+          entity: "Prescription",
+          stateField: "status",
+          cardFields: ["qty"],
+          columns: [
+            { state: "pending", label: { en: "Pending" } },
+            { state: "dispensed", label: { en: "Dispensed" } },
+          ],
+        },
+      },
+    } as Manifest;
+    expect(() => validateManifest(m)).toThrow(
+      /state 'dispensed' not declared in any workflow for entity 'Prescription'/,
+    );
+  });
+
+  it("accepts a kanban board whose columns are all declared states", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [entityFixture],
+      workflows: lifecycle,
+      views: {
+        v: {
+          kind: "kanban",
+          entity: "Prescription",
+          stateField: "status",
+          cardFields: ["qty"],
+          columns: [
+            { state: "pending", label: { en: "Pending" } },
+            { state: "verified", label: { en: "Verified" } },
+          ],
+        },
+      },
+    } as Manifest;
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+});
+
 describe("validateManifest — search", () => {
   const entityFixture = {
     name: "Prescription",
@@ -1101,6 +1419,24 @@ describe("validateManifest — search", () => {
     expect(() => validateManifest(m)).toThrow(
       /indexed field 'patient.name' has no matching root field/,
     );
+  });
+
+  it("accepts indexing a trait-supplied field, which the entity resolves to", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [{ ...entityFixture, traits: ["auditable"] }],
+      search: {
+        entities: {
+          Prescription: {
+            indexedFields: [{ field: "drug", weight: "A" }],
+            facets: ["created_at"],
+          },
+        },
+        defaultDictionary: "simple",
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a facet path whose root is not declared on the entity", () => {

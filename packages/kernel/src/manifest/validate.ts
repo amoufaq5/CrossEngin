@@ -7,7 +7,7 @@ import {
   type RbacGrant,
   type RoleDefinition,
 } from "@crossengin/auth";
-import type { DataClassification, Entity, Trait } from "@crossengin/types/meta-schema";
+import type { DataClassification } from "@crossengin/types/meta-schema";
 import { requiresAuditTrail } from "@crossengin/types/meta-schema";
 import type { FileTypeDeclaration } from "@crossengin/files";
 import type { IntegrationDeclaration } from "@crossengin/integrations";
@@ -20,31 +20,54 @@ import { widgetReferencedReports } from "@crossengin/reporting";
 import type { ViewDeclaration } from "@crossengin/views";
 import {
   viewReferencedDashboards,
+  viewReferencedFields,
   viewReferencedReports,
+  viewReferencedRoles,
+  viewReferencedStates,
   viewReferencedViews,
   viewReferencedWorkflows,
 } from "@crossengin/views";
 import type { SearchManifest } from "@crossengin/search";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
-import { expandTraits } from "../ddl/resolution.js";
+import { resolvedFieldNames } from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
 import { validateWorkflow } from "../workflow/validate.js";
 import { ManifestValidationError } from "./errors.js";
 import type { Manifest } from "./types.js";
 
 export function validateManifest(manifest: Manifest): void {
-  const entityNames = validateEntitiesTraitsRelations(manifest);
+  const { entityNames, fieldsByEntity } = validateEntitiesTraitsRelations(manifest);
   const rolesMap = validateRoles(manifest);
-  const entityTransitions = validateWorkflows(manifest, entityNames);
-  validatePermissions(manifest, entityNames, rolesMap, entityTransitions);
+  const { entityTransitions, entityStates } = validateWorkflows(manifest, entityNames);
+  validatePermissions(manifest, entityNames, fieldsByEntity, rolesMap, entityTransitions);
   validateIntegrations(manifest);
   validateJobs(manifest, rolesMap);
   validateFiles(manifest);
   const reportIds = validateReports(manifest, entityNames);
   const dashboardIds = validateDashboards(manifest, reportIds);
-  validateViews(manifest, entityNames, reportIds, dashboardIds, entityTransitions);
-  validateSearch(manifest, entityNames);
+  validateViews(manifest, {
+    entityNames,
+    fieldsByEntity,
+    rolesMap,
+    reportIds,
+    dashboardIds,
+    entityTransitions,
+    entityStates,
+  });
+  validateSearch(manifest, entityNames, fieldsByEntity);
   validateClassifications(manifest);
+}
+
+/** The resolved field names of each entity, keyed by entity name. */
+type FieldsByEntity = ReadonlyMap<string, ReadonlySet<string>>;
+
+/**
+ * A view field path may be dotted to traverse a reference (`account.name`). Only the first
+ * segment names a field of the view's own entity; what lies beyond it belongs to the target
+ * entity and is not resolved here.
+ */
+function rootSegment(path: string): string {
+  return path.split(".")[0] ?? path;
 }
 
 const AUDITABLE_TRAIT = "auditable";
@@ -86,7 +109,12 @@ function validateClassifications(manifest: Manifest): void {
   }
 }
 
-function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
+interface EntityIndex {
+  readonly entityNames: ReadonlySet<string>;
+  readonly fieldsByEntity: FieldsByEntity;
+}
+
+function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
   const entityNames = new Set<string>();
   const traitNames = new Set<string>();
 
@@ -94,7 +122,6 @@ function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
   const traits = manifest.traits ?? [];
   const relations = manifest.relations ?? [];
 
-  const fieldsByEntity = new Map<string, Set<string>>();
   for (const [i, entity] of entities.entries()) {
     if (entityNames.has(entity.name)) {
       throw new ManifestValidationError(
@@ -103,7 +130,6 @@ function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
       );
     }
     entityNames.add(entity.name);
-    fieldsByEntity.set(entity.name, new Set(entity.fields.map((f) => f.name)));
   }
 
   for (const [i, trait] of traits.entries()) {
@@ -133,6 +159,12 @@ function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
         );
       }
     }
+  }
+
+  // Only now that every trait an entity names is known to exist can its fields be resolved.
+  const fieldsByEntity = new Map<string, ReadonlySet<string>>();
+  for (const entity of entities) {
+    fieldsByEntity.set(entity.name, resolvedFieldNames(entity, traits));
   }
 
   for (const [i, entity] of entities.entries()) {
@@ -201,7 +233,7 @@ function validateEntitiesTraitsRelations(manifest: Manifest): Set<string> {
     }
   }
 
-  return entityNames;
+  return { entityNames, fieldsByEntity };
 }
 
 function validateRoles(manifest: Manifest): Map<string, RoleDefinition> {
@@ -238,12 +270,17 @@ function validateRoles(manifest: Manifest): Map<string, RoleDefinition> {
   return rolesMap;
 }
 
-function validateWorkflows(
-  manifest: Manifest,
-  entityNames: ReadonlySet<string>,
-): Map<string, Set<string>> {
+interface WorkflowIndex {
+  /** Transition names declared on each entity, unioned across its lifecycle workflows. */
+  readonly entityTransitions: ReadonlyMap<string, ReadonlySet<string>>;
+  /** State names declared on each entity, unioned the same way. */
+  readonly entityStates: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+function validateWorkflows(manifest: Manifest, entityNames: ReadonlySet<string>): WorkflowIndex {
   const workflows = manifest.workflows ?? {};
   const entityTransitions = new Map<string, Set<string>>();
+  const entityStates = new Map<string, Set<string>>();
 
   for (const [name, workflow] of Object.entries(workflows)) {
     try {
@@ -268,21 +305,26 @@ function validateWorkflows(
         existing.add(t.name);
       }
       entityTransitions.set(workflow.entity, existing);
+
+      const states = entityStates.get(workflow.entity) ?? new Set<string>();
+      for (const s of workflow.states) {
+        states.add(s.name);
+      }
+      entityStates.set(workflow.entity, states);
     }
   }
 
-  return entityTransitions;
+  return { entityTransitions, entityStates };
 }
 
 function validatePermissions(
   manifest: Manifest,
   entityNames: ReadonlySet<string>,
+  fieldsByEntity: FieldsByEntity,
   rolesMap: ReadonlyMap<string, RoleDefinition>,
   entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
 ): void {
   const permissions: Record<string, EntityPermissions> = manifest.permissions ?? {};
-  const customTraits: Trait[] = manifest.traits ?? [];
-  const entities: Entity[] = manifest.entities ?? [];
 
   const checkGrant = (path: string, grant: RbacGrant): void => {
     for (const roleName of grant.roles) {
@@ -322,34 +364,23 @@ function validatePermissions(
     }
 
     if (entityPerms.fields) {
-      const entity = entities.find((e) => e.name === entityName);
-      if (entity !== undefined) {
-        const traitFields = expandTraits(entity, customTraits);
-        const allFieldNames = new Set<string>([
-          ...entity.fields.map((f) => f.name),
-          ...traitFields.map((f) => f.name),
-        ]);
-
-        const fieldPerms: Record<string, FieldPermission> = entityPerms.fields;
-        for (const [fieldName, fieldPerm] of Object.entries(fieldPerms)) {
-          if (!allFieldNames.has(fieldName)) {
-            throw new ManifestValidationError(
-              `permissions.${entityName}.fields.${fieldName}`,
-              `field-level permission for unknown field '${fieldName}' on entity '${entityName}'`,
-            );
-          }
-          if (fieldPerm.read) {
-            checkGrant(
-              `permissions.${entityName}.fields.${fieldName}.read.roles`,
-              fieldPerm.read,
-            );
-          }
-          if (fieldPerm.update) {
-            checkGrant(
-              `permissions.${entityName}.fields.${fieldName}.update.roles`,
-              fieldPerm.update,
-            );
-          }
+      const allFieldNames = fieldsByEntity.get(entityName) ?? new Set<string>();
+      const fieldPerms: Record<string, FieldPermission> = entityPerms.fields;
+      for (const [fieldName, fieldPerm] of Object.entries(fieldPerms)) {
+        if (!allFieldNames.has(fieldName)) {
+          throw new ManifestValidationError(
+            `permissions.${entityName}.fields.${fieldName}`,
+            `field-level permission for unknown field '${fieldName}' on entity '${entityName}'`,
+          );
+        }
+        if (fieldPerm.read) {
+          checkGrant(`permissions.${entityName}.fields.${fieldName}.read.roles`, fieldPerm.read);
+        }
+        if (fieldPerm.update) {
+          checkGrant(
+            `permissions.${entityName}.fields.${fieldName}.update.roles`,
+            fieldPerm.update,
+          );
         }
       }
     }
@@ -475,13 +506,18 @@ function validateDashboards(
   return ids;
 }
 
-function validateViews(
-  manifest: Manifest,
-  entityNames: ReadonlySet<string>,
-  reportIds: ReadonlySet<string>,
-  dashboardIds: ReadonlySet<string>,
-  entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
-): void {
+interface ViewContext {
+  readonly entityNames: ReadonlySet<string>;
+  readonly fieldsByEntity: FieldsByEntity;
+  readonly rolesMap: ReadonlyMap<string, RoleDefinition>;
+  readonly reportIds: ReadonlySet<string>;
+  readonly dashboardIds: ReadonlySet<string>;
+  readonly entityTransitions: ReadonlyMap<string, ReadonlySet<string>>;
+  readonly entityStates: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
+function validateViews(manifest: Manifest, ctx: ViewContext): void {
+  const { entityNames, fieldsByEntity, rolesMap, reportIds, dashboardIds, entityTransitions } = ctx;
   const views: Record<string, ViewDeclaration> = manifest.views ?? {};
   const viewIds = new Set<string>(Object.keys(views));
 
@@ -526,20 +562,52 @@ function validateViews(
         );
       }
     }
+
+    // A view that names a column, filter, sort key or form input the entity does not have
+    // renders an empty cell or silently drops the filter — the view still "works", which is
+    // why this went unnoticed. Checked here rather than in the view schema because only the
+    // manifest knows what fields the entity resolves to.
+    const entityFields = fieldsByEntity.get(view.entity) ?? new Set<string>();
+    for (const ref of viewReferencedFields(view)) {
+      if (!entityFields.has(rootSegment(ref.path))) {
+        throw new ManifestValidationError(
+          `views.${key}.${ref.where}`,
+          `view references unknown field '${ref.path}' on entity '${view.entity}'`,
+        );
+      }
+    }
+
+    const declaredStates = ctx.entityStates.get(view.entity) ?? new Set<string>();
+    for (const state of viewReferencedStates(view)) {
+      if (!declaredStates.has(state)) {
+        throw new ManifestValidationError(
+          `views.${key}`,
+          `view references state '${state}' not declared in any workflow for entity '${view.entity}'`,
+        );
+      }
+    }
+
+    // A view may override the entity's permissions with its own role list; `manifest.permissions`
+    // grants are checked against manifest.roles and these were not, so a view could grant a role
+    // that does not exist — which fails closed at serve time and looks like a missing grant.
+    for (const roleName of viewReferencedRoles(view)) {
+      if (!rolesMap.has(roleName)) {
+        throw new ManifestValidationError(
+          `views.${key}.permissions.roles`,
+          `view grants role '${roleName}' which is not declared in manifest.roles`,
+        );
+      }
+    }
   }
 }
 
 function validateSearch(
   manifest: Manifest,
   entityNames: ReadonlySet<string>,
+  fieldsByEntity: FieldsByEntity,
 ): void {
   const search: SearchManifest | undefined = manifest.search;
   if (search === undefined) return;
-  const entities = manifest.entities ?? [];
-  const fieldsByEntity = new Map<string, Set<string>>();
-  for (const entity of entities) {
-    fieldsByEntity.set(entity.name, new Set(entity.fields.map((f) => f.name)));
-  }
   for (const [entityName, idx] of Object.entries(search.entities)) {
     if (!entityNames.has(entityName)) {
       throw new ManifestValidationError(
@@ -549,8 +617,7 @@ function validateSearch(
     }
     const declaredFields = fieldsByEntity.get(entityName) ?? new Set<string>();
     for (const indexed of idx.indexedFields) {
-      const leaf = indexed.field.split(".")[0];
-      if (leaf !== undefined && !declaredFields.has(leaf)) {
+      if (!declaredFields.has(rootSegment(indexed.field))) {
         throw new ManifestValidationError(
           `search.entities.${entityName}.indexedFields`,
           `indexed field '${indexed.field}' has no matching root field on entity '${entityName}'`,
@@ -558,8 +625,7 @@ function validateSearch(
       }
     }
     for (const facet of idx.facets) {
-      const leaf = facet.split(".")[0];
-      if (leaf !== undefined && !declaredFields.has(leaf)) {
+      if (!declaredFields.has(rootSegment(facet))) {
         throw new ManifestValidationError(
           `search.entities.${entityName}.facets`,
           `facet '${facet}' has no matching root field on entity '${entityName}'`,

@@ -3,6 +3,7 @@ import {
   FieldPathSchema,
   IconNameSchema,
   LocalizedTextSchema,
+  PERMISSION_INHERIT,
   PermissionRefSchema,
   ViewFilterSchema,
   ViewSortSchema,
@@ -269,6 +270,99 @@ export function viewReferencedViews(view: ViewDeclaration): readonly string[] {
     for (const r of view.related ?? []) refs.push(r.view);
   }
   return refs;
+}
+
+/** One place in a view declaration that names a field of the view's entity. */
+export interface ViewFieldRef {
+  /** The declared path, which may be dotted (`account.name`) to traverse a reference. */
+  readonly path: string;
+  /** Where in the declaration it appeared, e.g. `columns[3].field` — for the error message. */
+  readonly where: string;
+}
+
+/**
+ * Every field path a view names, across all eight kinds. Callers resolve these against the
+ * entity; a dotted path traverses a reference, so only the first segment names a field of
+ * *this* entity.
+ */
+export function viewReferencedFields(view: ViewDeclaration): readonly ViewFieldRef[] {
+  const refs: ViewFieldRef[] = [];
+  const push = (path: string | undefined, where: string): void => {
+    if (path !== undefined) refs.push({ path, where });
+  };
+
+  // Every array is read through `?? []`: `validateManifest` runs against hand-built manifests
+  // too, where a schema default like `filters: []` has never been applied.
+  switch (view.kind) {
+    case "list":
+      (view.filters ?? []).forEach((f, i) => push(f.field, `filters[${i}].field`));
+      (view.sort ?? []).forEach((s, i) => push(s.field, `sort[${i}].field`));
+      (view.columns ?? []).forEach((c, i) => push(c.field, `columns[${i}].field`));
+      (view.columnGroups ?? []).forEach((g, i) =>
+        (g.columns ?? []).forEach((c, j) =>
+          push(c.field, `columnGroups[${i}].columns[${j}].field`),
+        ),
+      );
+      break;
+    case "record":
+      (view.sections ?? []).forEach((s, i) =>
+        (s.fields ?? []).forEach((f, j) => push(f, `sections[${i}].fields[${j}]`)),
+      );
+      break;
+    case "form":
+      (view.steps ?? []).forEach((s, i) =>
+        (s.fields ?? []).forEach((f, j) => push(f.field, `steps[${i}].fields[${j}].field`)),
+      );
+      break;
+    case "kanban":
+      push(view.stateField, "stateField");
+      (view.cardFields ?? []).forEach((f, i) => push(f, `cardFields[${i}]`));
+      push(view.groupBy, "groupBy");
+      break;
+    case "calendar":
+      push(view.startField, "startField");
+      push(view.endField, "endField");
+      push(view.titleField, "titleField");
+      push(view.colorField, "colorField");
+      (view.filters ?? []).forEach((f, i) => push(f.field, `filters[${i}].field`));
+      break;
+    case "map":
+      push(view.geoField, "geoField");
+      push(view.markerColorField, "markerColorField");
+      push(view.markerLabelField, "markerLabelField");
+      (view.layers ?? []).forEach((l, i) =>
+        (l.filters ?? []).forEach((f, j) => push(f.field, `layers[${i}].filters[${j}].field`)),
+      );
+      break;
+    // A dashboard or pivot view delegates entirely to the dashboard/report it names, and
+    // declares no field of its own.
+    case "dashboard":
+    case "pivot":
+      break;
+  }
+
+  return refs;
+}
+
+/**
+ * Workflow *state* names a view pins itself to. Only kanban does: each column is one state
+ * of the entity's lifecycle. Distinct from `viewReferencedWorkflows`, which returns
+ * transition names.
+ */
+export function viewReferencedStates(view: ViewDeclaration): readonly string[] {
+  if (view.kind !== "kanban") return [];
+  return (view.columns ?? []).map((c) => c.state);
+}
+
+/**
+ * Role names a view's own permission override grants. Empty when it inherits the entity's
+ * permissions — which is also the answer for an unparsed view, where the `"inherit"` default
+ * has not been applied yet.
+ */
+export function viewReferencedRoles(view: ViewDeclaration): readonly string[] {
+  const permissions: ViewDeclaration["permissions"] | undefined = view.permissions;
+  if (permissions === undefined || permissions === PERMISSION_INHERIT) return [];
+  return [...(permissions.roles ?? [])];
 }
 
 export function viewReferencedWorkflows(view: ViewDeclaration): readonly string[] {
