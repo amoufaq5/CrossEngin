@@ -1,10 +1,13 @@
+import { sha256 } from "@crossengin/crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
-import { UserPreferenceMatrixSchema } from "@crossengin/notifications";
+import { NOTIFICATION_CHANNELS, UserPreferenceMatrixSchema } from "@crossengin/notifications";
 import { describe, expect, it } from "vitest";
 
+import { addressFor } from "./delivery-drain.js";
 import {
   DEFAULT_ADMIN_ROLES,
   PostgresRecipientResolver,
+  addressHashesFor,
 } from "./recipient-resolver.js";
 
 const TENANT_A = "00000000-0000-4000-8000-000000000001";
@@ -15,6 +18,7 @@ const VIEWER = "00000000-0000-4000-8000-0000000000a3";
 const SUSPENDED = "00000000-0000-4000-8000-0000000000a4";
 const REVOKED = "00000000-0000-4000-8000-0000000000a5";
 const OTHER_TENANT_ADMIN = "00000000-0000-4000-8000-0000000000b1";
+const STRANGER = "00000000-0000-4000-8000-0000000000c9";
 
 const NOW = new Date("2026-08-20T12:00:00.000Z");
 
@@ -82,17 +86,23 @@ function fakeRecipientDb(): FakeDb {
 
     if (sql.includes("user_tenant_membership")) {
       const roleMatch = /\$(\d+)::text\[\]/.exec(sql);
-      const userMatch = /m\.user_id = \$(\d+)::uuid/.exec(sql);
+      const userMatch = /m\.user_id = \$(\d+)::uuid(?!\[)/.exec(sql);
+      const userListMatch = /m\.user_id = ANY\(\$(\d+)::uuid\[\]\)/.exec(sql);
       const roles =
         roleMatch === null
           ? null
           : (p[Number.parseInt(roleMatch[1] ?? "0", 10) - 1] as readonly string[]);
       const wantedUser =
         userMatch === null ? null : String(p[Number.parseInt(userMatch[1] ?? "0", 10) - 1]);
+      const wantedUsers =
+        userListMatch === null
+          ? null
+          : (p[Number.parseInt(userListMatch[1] ?? "0", 10) - 1] as readonly string[]);
       const joined: Record<string, unknown>[] = [];
       for (const m of memberships) {
         if (m["tenant_id"] !== tenantId || m["status"] !== "active") continue;
         if (wantedUser !== null && m["user_id"] !== wantedUser) continue;
+        if (wantedUsers !== null && !wantedUsers.includes(String(m["user_id"]))) continue;
         if (roles !== null) {
           const secondary = Array.isArray(m["secondary_roles"])
             ? (m["secondary_roles"] as readonly string[])
@@ -761,5 +771,258 @@ describe("recipient-resolver — activeSuppressions", () => {
     expect(forA.map((r) => r.id)).toEqual(["supp_hardbounce01"]);
     expect(forB.map((r) => r.id)).toEqual(["supp_othertenant1"]);
     expect(await resolver.activeSuppressions(TENANT_A, "push_mobile", NOW)).toEqual([]);
+  });
+});
+
+describe("recipient-resolver — addressHashesFor", () => {
+  it("hashes both the user id and the email a person is reachable at", () => {
+    const hashes = addressHashesFor({ userId: ADMIN, email: "admin@a.example" });
+    expect(hashes).toContain(sha256(ADMIN));
+    expect(hashes).toContain(sha256("admin@a.example"));
+    expect(hashes).toHaveLength(2);
+  });
+
+  it("covers every declared notification channel via the drain's own address rule", () => {
+    const recipient = {
+      userId: ADMIN,
+      email: "admin@a.example",
+      displayName: null,
+      primaryRole: "erp_admin",
+      secondaryRoles: [],
+    };
+    const hashes = addressHashesFor(recipient);
+    const expected = new Set(
+      NOTIFICATION_CHANNELS.map((channel) => sha256(addressFor(channel, recipient))),
+    );
+    expect(new Set(hashes)).toEqual(expected);
+  });
+
+  it("returns a sorted, duplicate-free array", () => {
+    const hashes = addressHashesFor({ userId: VIEWER, email: "viewer@a.example" });
+    expect([...hashes]).toEqual([...hashes].sort());
+    expect(new Set(hashes).size).toBe(hashes.length);
+  });
+
+  it("collapses to a single hash when the email happens to equal the user id", () => {
+    const hashes = addressHashesFor({ userId: ADMIN, email: ADMIN });
+    expect(hashes).toEqual([sha256(ADMIN)]);
+  });
+
+  it("is deterministic across calls and emits 64-char lowercase hex", () => {
+    const first = addressHashesFor({ userId: ADMIN, email: "admin@a.example" });
+    const second = addressHashesFor({ userId: ADMIN, email: "admin@a.example" });
+    expect(first).toEqual(second);
+    for (const hash of first) expect(hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("gives two different people disjoint hash sets", () => {
+    const mine = addressHashesFor({ userId: ADMIN, email: "admin@a.example" });
+    const theirs = addressHashesFor({ userId: VIEWER, email: "viewer@a.example" });
+    expect(mine.some((h) => theirs.includes(h))).toBe(false);
+  });
+});
+
+describe("recipient-resolver — identityFor", () => {
+  it("returns the identity of an active member with the exact address hashes", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    const identity = await resolver.identityFor(TENANT_A, ADMIN);
+    expect(identity?.userId).toBe(ADMIN);
+    expect(identity?.email).toBe("admin@a.example");
+    expect(identity?.displayName).toBe("A Admin");
+    expect(identity?.addressHashes).toEqual([sha256(ADMIN), sha256("admin@a.example")].sort());
+    expect(identity?.addressHashes).toEqual(
+      addressHashesFor({ userId: ADMIN, email: "admin@a.example" }),
+    );
+  });
+
+  it("maps a missing display_name to null", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    const identity = await resolver.identityFor(TENANT_A, SECONDARY_ADMIN);
+    expect(identity?.displayName).toBeNull();
+    expect(identity?.email).toBe("second@a.example");
+  });
+
+  it("runs inside withTenantContext with tenant_id also bound as $1", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    await resolver.identityFor(TENANT_A, ADMIN);
+    const setConfig = db.captured.find((c) => c.sql.includes("set_config"));
+    expect(setConfig?.sql).toContain("app.current_tenant_id");
+    expect(setConfig?.params).toEqual([TENANT_A]);
+    expect(setConfig?.inTx).toBe(true);
+    const read = db.captured.find((c) => isRead(c));
+    expect(read?.inTx).toBe(true);
+    expect(read?.sql).toContain("m.tenant_id = $1");
+    expect(read?.params[0]).toBe(TENANT_A);
+  });
+
+  it("binds the user id as a uuid[] parameter with = ANY, never an inline list", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    await resolver.identityFor(TENANT_A, ADMIN);
+    const read = db.captured.find((c) => isRead(c));
+    expect(read?.sql).toContain("m.user_id = ANY($2::uuid[])");
+    expect(read?.sql).not.toContain(" IN (");
+    expect(read?.params).toEqual([TENANT_A, [ADMIN]]);
+  });
+
+  it("returns null for a user who belongs to another tenant", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    expect(await resolver.identityFor(TENANT_A, OTHER_TENANT_ADMIN)).toBeNull();
+    const theirs = await resolver.identityFor(TENANT_B, OTHER_TENANT_ADMIN);
+    expect(theirs?.userId).toBe(OTHER_TENANT_ADMIN);
+    expect(theirs?.addressHashes).not.toContain(sha256("admin@a.example"));
+  });
+
+  it("returns null for a revoked membership and for a non-active user", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    expect(await resolver.identityFor(TENANT_A, REVOKED)).toBeNull();
+    expect(await resolver.identityFor(TENANT_A, SUSPENDED)).toBeNull();
+    const read = db.captured.find((c) => isRead(c));
+    expect(read?.sql).toContain("m.status = 'active'");
+    expect(read?.sql).toContain("u.status = 'active'");
+  });
+
+  it("returns null for an invited membership", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    db.users.push({ id: STRANGER, email: "invited@a.example", display_name: null, status: "active" });
+    db.memberships.push({
+      user_id: STRANGER,
+      tenant_id: TENANT_A,
+      primary_role: "erp_viewer",
+      secondary_roles: [],
+      status: "invited",
+    });
+    const resolver = new PostgresRecipientResolver(db.conn);
+    expect(await resolver.identityFor(TENANT_A, STRANGER)).toBeNull();
+  });
+
+  it("returns null for a well-formed id with no membership row at all", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    expect(await resolver.identityFor(TENANT_A, STRANGER)).toBeNull();
+    expect(db.captured.filter((c) => isRead(c))).toHaveLength(1);
+  });
+
+  it("returns null for a malformed user id without issuing a query", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    for (const bad of ["", "not-a-uuid", "1 OR 1=1", `${ADMIN}'--`]) {
+      expect(await resolver.identityFor(TENANT_A, bad)).toBeNull();
+    }
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("rejects a malformed tenant id before any SQL is issued", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    await expect(resolver.identityFor("robert'); DROP TABLE users;--", ADMIN)).rejects.toThrow(
+      /invalid tenantId/,
+    );
+    await expect(resolver.identitiesFor("nope", [ADMIN])).rejects.toThrow(/invalid tenantId/);
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("never puts a tenant id, user id, email or address hash in any SQL string", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    await resolver.identityFor(TENANT_A, ADMIN);
+    await resolver.identitiesFor(TENANT_A, [ADMIN, VIEWER]);
+    expect(db.captured.length).toBeGreaterThan(0);
+    for (const call of db.captured) {
+      expect(call.sql).not.toContain(TENANT_A);
+      expect(call.sql).not.toContain(ADMIN);
+      expect(call.sql).not.toContain(VIEWER);
+      expect(call.sql).not.toContain("admin@a.example");
+      expect(call.sql).not.toContain(sha256(ADMIN));
+      expect(call.sql).not.toContain(sha256("admin@a.example"));
+    }
+  });
+
+  it("reads the identity from a custom schema's tables", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn, { schema: "ops" });
+    await resolver.identityFor(TENANT_A, ADMIN);
+    expect(db.captured.find((c) => isRead(c))?.sql).toContain(
+      "FROM ops.user_tenant_membership m JOIN ops.users u",
+    );
+  });
+});
+
+describe("recipient-resolver — identitiesFor", () => {
+  it("resolves many users in one query keyed by user id", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    const identities = await resolver.identitiesFor(TENANT_A, [ADMIN, VIEWER, SECONDARY_ADMIN]);
+    expect([...identities.keys()].sort()).toEqual([ADMIN, SECONDARY_ADMIN, VIEWER].sort());
+    expect(db.captured.filter((c) => isRead(c))).toHaveLength(1);
+    expect(identities.get(VIEWER)?.addressHashes).toEqual(
+      addressHashesFor({ userId: VIEWER, email: "viewer@a.example" }),
+    );
+  });
+
+  it("returns an empty map without issuing any query for an empty list", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    expect((await resolver.identitiesFor(TENANT_A, [])).size).toBe(0);
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("returns an empty map without issuing any query when every id is malformed", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    expect((await resolver.identitiesFor(TENANT_A, ["nope", "", "1;--"])).size).toBe(0);
+    expect(db.captured).toHaveLength(0);
+  });
+
+  it("returns partial results for a mixed valid/invalid list, binding only the valid ids", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    const identities = await resolver.identitiesFor(TENANT_A, [ADMIN, "not-a-uuid", VIEWER]);
+    expect([...identities.keys()].sort()).toEqual([ADMIN, VIEWER].sort());
+    expect(db.captured.find((c) => isRead(c))?.params[1]).toEqual([ADMIN, VIEWER]);
+  });
+
+  it("omits ids that resolve to nobody in this tenant", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    const identities = await resolver.identitiesFor(TENANT_A, [
+      ADMIN,
+      OTHER_TENANT_ADMIN,
+      REVOKED,
+      SUSPENDED,
+      STRANGER,
+    ]);
+    expect([...identities.keys()]).toEqual([ADMIN]);
+  });
+
+  it("deduplicates repeated ids in the bound array", async () => {
+    const db = fakeRecipientDb();
+    seedDirectory(db);
+    const resolver = new PostgresRecipientResolver(db.conn);
+    const identities = await resolver.identitiesFor(TENANT_A, [ADMIN, ADMIN, ADMIN]);
+    expect(db.captured.find((c) => isRead(c))?.params[1]).toEqual([ADMIN]);
+    expect(identities.size).toBe(1);
   });
 });

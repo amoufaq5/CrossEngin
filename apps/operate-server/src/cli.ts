@@ -42,6 +42,8 @@ export interface ServeOptions {
   readonly notificationDrainMs: number | null;
   /** Roles treated as a tenant's admins when resolving a `tenant_admins` notification audience. */
   readonly notificationAdminRoles: readonly string[];
+  /** Roles permitted to read the whole tenant's notifications via `?scope=tenant`. */
+  readonly notificationAuditRoles: readonly string[];
   /** Emit an entity-write event per create/update/delete/transition → event-triggered jobs (needs pg). */
   readonly emitEntityEvents: boolean;
   /** Optional namespace prefix for emitted entity-event names (e.g. `retail`). */
@@ -159,6 +161,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let pruneLinksMs: number | null = null;
   let notificationDrainMs: number | null = null;
   const notificationAdminRoles: string[] = [];
+  const notificationAuditRoles: string[] = [];
   let emitEntityEvents = false;
   let eventPrefix: string | null = null;
   let enableJobInvoke = false;
@@ -300,6 +303,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--notification-admin-role" || arg.startsWith("--notification-admin-role=")) {
       notificationAdminRoles.push(takeValue(arg, next, "--notification-admin-role"));
+      i += consumed();
+    } else if (arg === "--notification-audit-role" || arg.startsWith("--notification-audit-role=")) {
+      notificationAuditRoles.push(takeValue(arg, next, "--notification-audit-role"));
       i += consumed();
     } else if (arg === "--emit-entity-events") {
       emitEntityEvents = true;
@@ -550,6 +556,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     notificationDrainMs,
     notificationAdminRoles:
       notificationAdminRoles.length > 0 ? notificationAdminRoles : DEFAULT_ADMIN_ROLES,
+    notificationAuditRoles,
     emitEntityEvents,
     eventPrefix,
     enableJobInvoke,
@@ -837,6 +844,9 @@ Options:
   --notification-admin-role <r>  Role treated as a tenant admin when resolving a
                        tenant_admins audience (repeatable; default erp_admin +
                        tenant_admin + platform_admin)
+  --notification-audit-role <r>  Role permitted to read the whole tenant's notifications
+                       via ?scope=tenant (repeatable; nobody by default — the inbox is
+                       per-recipient)
   --emit-entity-events  Emit a domain event per entity create/update/delete/transition,
                        firing event-triggered jobs into job_runs (needs --store pg|pg-columns)
   --event-prefix <p>   Namespace prefix for emitted event names (with --emit-entity-events)

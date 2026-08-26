@@ -11,6 +11,8 @@ import {
   type TenantNotificationListQueryLike,
   type TenantNotificationSourceLike,
   digestFragment,
+  recipientFilterFor,
+  requestedScope,
 } from "./notification-routes.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -215,7 +217,7 @@ describe("notification-routes — list", () => {
     source.seed();
     const out = await call(ctx);
     expect(out.status).toBe(200);
-    expect(Object.keys(out.body).sort()).toEqual(["data", "page"]);
+    expect(Object.keys(out.body).sort()).toEqual(["data", "page", "scope"]);
     expect(itemsOf(out)).toHaveLength(2);
     expect(itemsOf(out)[0]?.["dispatchId"]).toBe(first.dispatchId);
     expect(itemsOf(out)[0]?.["templateId"]).toBe("design_review_decision");
@@ -447,5 +449,119 @@ describe("notification-routes — digestFragment", () => {
     expect(
       await digestFragment(async () => null, "notification.digest", "notification.digest", "t", DIGEST_ID),
     ).toEqual({ digest: null });
+  });
+});
+
+describe("notification-routes — recipient scoping", () => {
+  const HASH_A = "a".repeat(64);
+  const HASH_B = "b".repeat(64);
+  const PRINCIPAL = "44444444-4444-4444-8444-444444444444";
+
+  function principalOf(id: string | null): ResolvedPrincipal | null {
+    if (id === null) return null;
+    return { principalId: id, tenantId: "t", grantedScopes: [] } as unknown as ResolvedPrincipal;
+  }
+
+  function ctxOf(over: Partial<NotificationRoutesContext> = {}): NotificationRoutesContext {
+    return {
+      source: { listForTenant: async () => ({ data: [], nextCursor: null }) },
+      principalRoles: () => ({ primaryRole: "erp_admin", secondaryRoles: [] }),
+      allowedRoles: new Set(["erp_admin"]),
+      ...over,
+    };
+  }
+
+  it("lists the whole tenant when no identity resolver is wired", async () => {
+    const ctx = ctxOf();
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "self")).toBeNull();
+  });
+
+  it("filters to the caller's own address hashes", async () => {
+    const ctx = ctxOf({ resolveIdentity: async () => ({ addressHashes: [HASH_A, HASH_B] }) });
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "self")).toEqual([HASH_A, HASH_B]);
+  });
+
+  it("shows nothing — not everything — for an unresolvable identity", async () => {
+    const ctx = ctxOf({ resolveIdentity: async () => null });
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "self")).toEqual([]);
+  });
+
+  it("shows nothing when the resolver throws", async () => {
+    const ctx = ctxOf({
+      resolveIdentity: async () => {
+        throw new Error("users unreadable");
+      },
+    });
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "self")).toEqual([]);
+  });
+
+  it("shows nothing for a principal with no id", async () => {
+    const ctx = ctxOf({ resolveIdentity: async () => ({ addressHashes: [HASH_A] }) });
+    expect(await recipientFilterFor(ctx, principalOf(null), "t", "self")).toEqual([]);
+  });
+
+  it("refuses tenant scope to a role that is not permitted", async () => {
+    const ctx = ctxOf({
+      resolveIdentity: async () => ({ addressHashes: [HASH_A] }),
+      tenantScopeRoles: new Set(["platform_admin"]),
+    });
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "tenant")).toEqual([HASH_A]);
+  });
+
+  it("grants tenant scope to a permitted role that asks for it", async () => {
+    const ctx = ctxOf({
+      resolveIdentity: async () => ({ addressHashes: [HASH_A] }),
+      principalRoles: () => ({ primaryRole: "platform_admin", secondaryRoles: [] }),
+      tenantScopeRoles: new Set(["platform_admin"]),
+    });
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "tenant")).toBeNull();
+  });
+
+  it("keeps a permitted role scoped to self unless tenant scope is asked for", async () => {
+    const ctx = ctxOf({
+      resolveIdentity: async () => ({ addressHashes: [HASH_A] }),
+      principalRoles: () => ({ primaryRole: "platform_admin", secondaryRoles: [] }),
+      tenantScopeRoles: new Set(["platform_admin"]),
+    });
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "self")).toEqual([HASH_A]);
+  });
+
+  it("grants tenant scope via a secondary role", async () => {
+    const ctx = ctxOf({
+      resolveIdentity: async () => ({ addressHashes: [HASH_A] }),
+      principalRoles: () => ({ primaryRole: "erp_admin", secondaryRoles: ["platform_admin"] }),
+      tenantScopeRoles: new Set(["platform_admin"]),
+    });
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "tenant")).toBeNull();
+  });
+
+  it("refuses tenant scope when no role is configured for it", async () => {
+    const ctx = ctxOf({ resolveIdentity: async () => ({ addressHashes: [HASH_A] }) });
+    expect(await recipientFilterFor(ctx, principalOf(PRINCIPAL), "t", "tenant")).toEqual([HASH_A]);
+  });
+
+  it("passes the tenant and principal id to the resolver", async () => {
+    const seen: string[] = [];
+    const ctx = ctxOf({
+      resolveIdentity: async (tenantId, principalId) => {
+        seen.push(tenantId, principalId);
+        return { addressHashes: [HASH_A] };
+      },
+    });
+    await recipientFilterFor(ctx, principalOf(PRINCIPAL), "tenant-9", "self");
+    expect(seen).toEqual(["tenant-9", PRINCIPAL]);
+  });
+});
+
+describe("notification-routes — requestedScope", () => {
+  it("defaults to self", () => {
+    expect(requestedScope(undefined)).toBe("self");
+    expect(requestedScope("")).toBe("self");
+    expect(requestedScope("everything")).toBe("self");
+  });
+
+  it("reads tenant only from the exact literal", () => {
+    expect(requestedScope("tenant")).toBe("tenant");
+    expect(requestedScope("Tenant")).toBe("self");
   });
 });

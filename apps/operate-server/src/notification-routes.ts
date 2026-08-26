@@ -24,6 +24,7 @@ export interface TenantNotificationListQueryLike {
   readonly templateId?: string;
   readonly limit?: number;
   readonly cursor?: string;
+  readonly recipientAddressSha256?: readonly string[];
 }
 
 export interface TenantNotificationSourceLike {
@@ -70,7 +71,26 @@ export interface NotificationRoutesContext {
   readonly resolveDigest?: DigestNoticeResolver;
   /** Template id that marks a notification as an assembled digest. */
   readonly digestTemplateId?: string;
+  /**
+   * Turns the calling principal into the address hashes the delivery ledger recorded for them.
+   * Wiring this switches the inbox from tenant-wide to per-recipient.
+   */
+  readonly resolveIdentity?: NotificationIdentityResolver;
+  /** Roles permitted to ask for the whole tenant's notifications via `?scope=tenant`. */
+  readonly tenantScopeRoles?: ReadonlySet<string>;
 }
+
+export interface NotificationIdentityLike {
+  readonly addressHashes: readonly string[];
+}
+
+export type NotificationIdentityResolver = (
+  tenantId: string,
+  principalId: string,
+) => Promise<NotificationIdentityLike | null>;
+
+export const NOTIFICATION_SCOPES = ["self", "tenant"] as const;
+export type NotificationScope = (typeof NOTIFICATION_SCOPES)[number];
 
 function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
@@ -158,13 +178,63 @@ export async function digestFragment(
   }
 }
 
+export function requestedScope(raw: string | undefined): NotificationScope {
+  return raw === "tenant" ? "tenant" : "self";
+}
+
+export function canReadTenantScope(
+  ctx: NotificationRoutesContext,
+  principal: ResolvedPrincipal | null,
+): boolean {
+  const allowed = ctx.tenantScopeRoles;
+  if (allowed === undefined || allowed.size === 0) return false;
+  const { primaryRole, secondaryRoles } = ctx.principalRoles(principal);
+  return [primaryRole, ...(secondaryRoles ?? [])].some((r) => allowed.has(r));
+}
+
+/**
+ * The recipient filter for this request, or null to list the whole tenant.
+ *
+ * An identity that cannot be resolved yields an EMPTY hash list, not a null one: the caller is
+ * nobody the ledger has delivered to, so they see nothing. Returning null there would hand them
+ * every notification in the tenant — the exact leak this filter exists to close.
+ */
+export async function recipientFilterFor(
+  ctx: NotificationRoutesContext,
+  principal: ResolvedPrincipal | null,
+  tenantId: string,
+  scope: NotificationScope,
+): Promise<readonly string[] | null> {
+  if (ctx.resolveIdentity === undefined) return null;
+  if (scope === "tenant" && canReadTenantScope(ctx, principal)) return null;
+  const principalId = principal?.principalId ?? null;
+  if (principalId === null) return [];
+  try {
+    const identity = await ctx.resolveIdentity(tenantId, principalId);
+    return identity?.addressHashes ?? [];
+  } catch {
+    return [];
+  }
+}
+
 function buildListHandler(ctx: NotificationRoutesContext): Handler {
   return async (input) => {
     const denial = guard(ctx, input.principal);
     if (denial !== null) return denial;
     const tenant = tenantOf(input.principal);
     if (tenant === null) return json(400, { error: "tenant_required" });
-    const page = await ctx.source.listForTenant(tenant, readListQuery(input));
+    const scope = requestedScope(
+      firstQueryValue(
+        (input.request as { query?: Record<string, string | string[]> } | undefined)?.query?.[
+          "scope"
+        ],
+      ),
+    );
+    const hashes = await recipientFilterFor(ctx, input.principal, tenant, scope);
+    const page = await ctx.source.listForTenant(tenant, {
+      ...readListQuery(input),
+      ...(hashes !== null ? { recipientAddressSha256: hashes } : {}),
+    });
     const data = await Promise.all(
       page.data.map(async (notification) => ({
         ...notification,
@@ -178,7 +248,7 @@ function buildListHandler(ctx: NotificationRoutesContext): Handler {
         )),
       })),
     );
-    return json(200, { data, page: { nextCursor: page.nextCursor } });
+    return json(200, { data, page: { nextCursor: page.nextCursor }, scope: hashes === null ? "tenant" : "self" });
   };
 }
 

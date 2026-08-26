@@ -1,8 +1,10 @@
+import { sha256 } from "@crossengin/crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
 import {
   PostgresNotificationStore,
+  recipientAddressHash,
   type DispatchInput,
   type NotificationRecord,
 } from "./notification-store.js";
@@ -19,6 +21,14 @@ interface Captured {
   readonly sql: string;
   readonly params: readonly unknown[];
   readonly inTx: boolean;
+}
+
+/** One row of `meta.notification_deliveries`: `dispatchRowId` is the dispatch's UUID surrogate. */
+interface DeliveryRow {
+  readonly dispatchRowId: string;
+  readonly tenantId: string;
+  readonly recipientAddressSha256: string;
+  readonly outcome: string;
 }
 
 function dispatchInput(overrides: Partial<DispatchInput> = {}): DispatchInput {
@@ -74,9 +84,11 @@ function fakeNotificationDb(): {
   conn: PgConnection;
   captured: Captured[];
   all: () => Record<string, unknown>[];
+  addDelivery: (delivery: DeliveryRow) => void;
 } {
   const captured: Captured[] = [];
   const rows: Record<string, unknown>[] = [];
+  const deliveries: DeliveryRow[] = [];
   let currentTenant: string | null = null;
 
   const run = async (
@@ -142,11 +154,29 @@ function fakeNotificationDb(): {
       const templateParam = boundIndexes(sql, /template_id = \$(\d+)/);
       const limitParam = boundIndexes(sql, /LIMIT \$(\d+)/) ?? 0;
       const offsetParam = boundIndexes(sql, /OFFSET \$(\d+)/) ?? 0;
+      const recipientParam = boundIndexes(
+        sql,
+        /d\.recipient_address_sha256 = ANY\(\$(\d+)::text\[\]\)/,
+      );
+      const outcomeParam = boundIndexes(sql, /d\.outcome = ANY\(\$(\d+)::text\[\]\)/);
       const tenantId = String(p[0]);
+      const hashList = recipientParam === null ? null : (p[recipientParam - 1] as string[]);
+      const outcomeList = outcomeParam === null ? null : (p[outcomeParam - 1] as string[]);
+      const deliveredTo = (dispatchRowId: string): boolean => {
+        if (hashList === null) return true;
+        return deliveries.some(
+          (d) =>
+            d.dispatchRowId === dispatchRowId &&
+            d.tenantId === tenantId &&
+            hashList.includes(d.recipientAddressSha256) &&
+            (outcomeList === null || outcomeList.includes(d.outcome)),
+        );
+      };
       const matched = rows
         .filter((r) => r["tenant_id"] === currentTenant && r["tenant_id"] === tenantId)
         .filter((r) => channelParam === null || r["channel"] === p[channelParam - 1])
         .filter((r) => templateParam === null || r["template_id"] === p[templateParam - 1])
+        .filter((r) => deliveredTo(String(r["id"])))
         .sort((a, b) => {
           const at = new Date(String(a["queued_at"])).getTime();
           const bt = new Date(String(b["queued_at"])).getTime();
@@ -190,7 +220,14 @@ function fakeNotificationDb(): {
       fn()) as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
-  return { conn, captured, all: () => rows };
+  return {
+    conn,
+    captured,
+    all: () => rows,
+    addDelivery: (delivery: DeliveryRow) => {
+      deliveries.push(delivery);
+    },
+  };
 }
 
 async function seed(
@@ -590,6 +627,454 @@ describe("notification-store — listForTenant", () => {
     const page = await store.listForTenant(TENANT_A);
     expect(page.data).toEqual([]);
     expect(page.nextCursor).toBeNull();
+  });
+});
+
+const ALICE = sha256("alice@example.com");
+const BOB = sha256("bob@example.com");
+const CAROL = sha256("carol@example.com");
+
+const EXISTS_CLAUSE =
+  "EXISTS (SELECT 1 FROM meta.notification_deliveries d WHERE d.dispatch_id = n.id" +
+  " AND d.tenant_id = $1";
+
+describe("notification-store — recipientAddressHash", () => {
+  it("returns 64 lowercase hex characters", () => {
+    const hash = recipientAddressHash("alice@example.com");
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("is deterministic and distinguishes distinct addresses", () => {
+    expect(recipientAddressHash("alice@example.com")).toBe(
+      recipientAddressHash("alice@example.com"),
+    );
+    expect(recipientAddressHash("alice@example.com")).not.toBe(
+      recipientAddressHash("bob@example.com"),
+    );
+    expect(recipientAddressHash("alice@example.com")).not.toBe(
+      recipientAddressHash("Alice@example.com"),
+    );
+  });
+
+  it("is the same hash the delivery ledger stores", () => {
+    expect(recipientAddressHash("alice@example.com")).toBe(sha256("alice@example.com"));
+  });
+});
+
+describe("notification-store — listForTenant recipient scoping", () => {
+  it("emits no EXISTS clause and no alias when no recipient hashes are given", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}]);
+    captured.length = 0;
+    await store.listForTenant(TENANT_A, { channel: "email" });
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.sql).not.toContain("EXISTS");
+    expect(select?.sql).not.toContain("notification_deliveries");
+    expect(select?.sql).toContain("FROM meta.notification_dispatches WHERE tenant_id = $1");
+    expect(select?.params).toEqual([TENANT_A, "email", 51, 0]);
+  });
+
+  it("emits no outcome filter when no recipient hashes are given, even if outcomes are", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}, {}]);
+    captured.length = 0;
+    const page = await store.listForTenant(TENANT_A, { outcomes: ["delivered"] });
+    expect(page.data).toHaveLength(2);
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.sql).not.toContain("outcome");
+    expect(select?.params).toEqual([TENANT_A, 51, 0]);
+  });
+
+  it("restricts the listing to dispatches delivered to one hash", async () => {
+    const { conn, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}, {}, {}]);
+    addDelivery({
+      dispatchRowId: "uuid-1",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "delivered",
+    });
+    addDelivery({
+      dispatchRowId: "uuid-2",
+      tenantId: TENANT_A,
+      recipientAddressSha256: BOB,
+      outcome: "delivered",
+    });
+    const page = await store.listForTenant(TENANT_A, { recipientAddressSha256: [ALICE] });
+    expect(page.data.map((r) => r.dispatchId)).toEqual(["disp_seeded_0001"]);
+  });
+
+  it("correlates the EXISTS subquery on the aliased dispatch id and the bound tenant", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await store.listForTenant(TENANT_A, { recipientAddressSha256: [ALICE] });
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.sql).toBe(
+      `SELECT ${PROJECTION_COLUMNS} FROM meta.notification_dispatches n WHERE tenant_id = $1` +
+        ` AND ${EXISTS_CLAUSE}` +
+        " AND d.recipient_address_sha256 = ANY($2::text[])" +
+        " AND d.outcome = ANY($3::text[]))" +
+        " ORDER BY queued_at DESC, dispatch_id LIMIT $4 OFFSET $5",
+    );
+    expect(select?.params).toEqual([TENANT_A, [ALICE], ["delivered"], 51, 0]);
+    expect(select?.inTx).toBe(true);
+  });
+
+  it("binds several hashes as one array parameter rather than an IN list", async () => {
+    const { conn, captured, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}, {}, {}]);
+    addDelivery({
+      dispatchRowId: "uuid-1",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "delivered",
+    });
+    addDelivery({
+      dispatchRowId: "uuid-3",
+      tenantId: TENANT_A,
+      recipientAddressSha256: CAROL,
+      outcome: "delivered",
+    });
+    const page = await store.listForTenant(TENANT_A, {
+      recipientAddressSha256: [ALICE, BOB, CAROL],
+    });
+    expect(page.data.map((r) => r.dispatchId).sort()).toEqual([
+      "disp_seeded_0001",
+      "disp_seeded_0003",
+    ]);
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.params[1]).toEqual([ALICE, BOB, CAROL]);
+    expect(select?.sql).not.toContain(" IN (");
+    expect((select?.sql.match(/::text\[\]/g) ?? []).length).toBe(2);
+  });
+
+  it("returns one row per dispatch even when several delivery rows match", async () => {
+    const { conn, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}]);
+    for (const hash of [ALICE, BOB]) {
+      addDelivery({
+        dispatchRowId: "uuid-1",
+        tenantId: TENANT_A,
+        recipientAddressSha256: hash,
+        outcome: "delivered",
+      });
+    }
+    const page = await store.listForTenant(TENANT_A, {
+      recipientAddressSha256: [ALICE, BOB],
+    });
+    expect(page.data).toHaveLength(1);
+  });
+
+  it("treats an empty hash list as no addresses and issues no query at all", async () => {
+    const { conn, captured, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}, {}]);
+    addDelivery({
+      dispatchRowId: "uuid-1",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "delivered",
+    });
+    captured.length = 0;
+    const page = await store.listForTenant(TENANT_A, { recipientAddressSha256: [] });
+    expect(page.data).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+    expect(captured).toHaveLength(0);
+  });
+
+  it("keeps the empty hash list empty regardless of the other filters", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{ channel: "email" }, { channel: "in_app" }]);
+    captured.length = 0;
+    const page = await store.listForTenant(TENANT_A, {
+      channel: "email",
+      limit: 100,
+      recipientAddressSha256: [],
+      outcomes: ["delivered", "suppressed"],
+    });
+    expect(page.data).toEqual([]);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("defaults the outcome filter to delivered when hashes are given", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await store.listForTenant(TENANT_A, { recipientAddressSha256: [ALICE] });
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.params[2]).toEqual(["delivered"]);
+  });
+
+  it("excludes deferred and suppressed deliveries from the default inbox", async () => {
+    const { conn, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}, {}, {}]);
+    addDelivery({
+      dispatchRowId: "uuid-1",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "delivered",
+    });
+    addDelivery({
+      dispatchRowId: "uuid-2",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "deferred",
+    });
+    addDelivery({
+      dispatchRowId: "uuid-3",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "suppressed",
+    });
+    const page = await store.listForTenant(TENANT_A, { recipientAddressSha256: [ALICE] });
+    expect(page.data.map((r) => r.dispatchId)).toEqual(["disp_seeded_0001"]);
+  });
+
+  it("honours an explicit outcome list", async () => {
+    const { conn, captured, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}, {}]);
+    addDelivery({
+      dispatchRowId: "uuid-1",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "delivered",
+    });
+    addDelivery({
+      dispatchRowId: "uuid-2",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "bounced_hard",
+    });
+    const page = await store.listForTenant(TENANT_A, {
+      recipientAddressSha256: [ALICE],
+      outcomes: ["delivered", "bounced_hard"],
+    });
+    expect(page.data).toHaveLength(2);
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.params[2]).toEqual(["delivered", "bounced_hard"]);
+  });
+
+  it("drops outcome strings that are not declared delivery outcomes", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await store.listForTenant(TENANT_A, {
+      recipientAddressSha256: [ALICE],
+      outcomes: ["delivered", "not_an_outcome", "suppressed", "') OR 1=1 --"],
+    });
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.params[2]).toEqual(["delivered", "suppressed"]);
+    expect(select?.sql).not.toContain("not_an_outcome");
+    expect(select?.sql).not.toContain("1=1");
+  });
+
+  it("falls back to the default rather than an empty array when every outcome is unknown", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await store.listForTenant(TENANT_A, {
+      recipientAddressSha256: [ALICE],
+      outcomes: ["nonsense", "also_nonsense"],
+    });
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.params[2]).toEqual(["delivered"]);
+    expect(select?.sql).not.toContain("'{}'");
+  });
+
+  it("treats an empty outcome list as the default rather than matching nothing", async () => {
+    const { conn, captured, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}]);
+    addDelivery({
+      dispatchRowId: "uuid-1",
+      tenantId: TENANT_A,
+      recipientAddressSha256: ALICE,
+      outcome: "delivered",
+    });
+    const page = await store.listForTenant(TENANT_A, {
+      recipientAddressSha256: [ALICE],
+      outcomes: [],
+    });
+    expect(page.data).toHaveLength(1);
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.params[2]).toEqual(["delivered"]);
+  });
+
+  it("does not admit a dispatch on another tenant's delivery row", async () => {
+    const { conn, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}]);
+    addDelivery({
+      dispatchRowId: "uuid-1",
+      tenantId: TENANT_B,
+      recipientAddressSha256: ALICE,
+      outcome: "delivered",
+    });
+    const page = await store.listForTenant(TENANT_A, { recipientAddressSha256: [ALICE] });
+    expect(page.data).toEqual([]);
+  });
+
+  it("returns an empty page when the recipient has no delivery rows", async () => {
+    const { conn, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{}, {}]);
+    addDelivery({
+      dispatchRowId: "uuid-1",
+      tenantId: TENANT_A,
+      recipientAddressSha256: BOB,
+      outcome: "delivered",
+    });
+    const page = await store.listForTenant(TENANT_A, { recipientAddressSha256: [ALICE] });
+    expect(page.data).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it("pages the filtered listing with the limit + 1 probe and an opaque cursor", async () => {
+    const { conn, captured, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [
+      { queuedAt: "2026-08-01T00:00:00.000Z" },
+      { queuedAt: "2026-08-02T00:00:00.000Z" },
+      { queuedAt: "2026-08-03T00:00:00.000Z" },
+    ]);
+    for (const rowId of ["uuid-1", "uuid-2", "uuid-3"]) {
+      addDelivery({
+        dispatchRowId: rowId,
+        tenantId: TENANT_A,
+        recipientAddressSha256: ALICE,
+        outcome: "delivered",
+      });
+    }
+    const first = await store.listForTenant(TENANT_A, {
+      recipientAddressSha256: [ALICE],
+      limit: 2,
+    });
+    expect(first.data.map((r) => r.queuedAt)).toEqual([
+      "2026-08-03T00:00:00.000Z",
+      "2026-08-02T00:00:00.000Z",
+    ]);
+    expect(first.nextCursor).not.toBeNull();
+    const firstSelect = captured.find((c) => isSelect(c));
+    expect(firstSelect?.params[3]).toBe(3);
+    const second = await store.listForTenant(TENANT_A, {
+      recipientAddressSha256: [ALICE],
+      limit: 2,
+      cursor: first.nextCursor ?? undefined,
+    });
+    expect(second.data.map((r) => r.queuedAt)).toEqual(["2026-08-01T00:00:00.000Z"]);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it("numbers parameters correctly with channel, templateId, hashes, cursor and limit combined", async () => {
+    const { conn, captured, addDelivery } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [
+      { channel: "email", templateId: "manifest_review_decided", queuedAt: "2026-08-01T00:00:00.000Z" },
+      { channel: "email", templateId: "manifest_review_decided", queuedAt: "2026-08-02T00:00:00.000Z" },
+      { channel: "email", templateId: "manifest_review_decided", queuedAt: "2026-08-03T00:00:00.000Z" },
+      { channel: "in_app", templateId: "manifest_review_decided", queuedAt: "2026-08-04T00:00:00.000Z" },
+      { channel: "email", templateId: "quota_warning", queuedAt: "2026-08-05T00:00:00.000Z" },
+    ]);
+    for (const rowId of ["uuid-1", "uuid-2", "uuid-3", "uuid-4", "uuid-5"]) {
+      addDelivery({
+        dispatchRowId: rowId,
+        tenantId: TENANT_A,
+        recipientAddressSha256: ALICE,
+        outcome: "delivered",
+      });
+    }
+    const first = await store.listForTenant(TENANT_A, {
+      channel: "email",
+      templateId: "manifest_review_decided",
+      recipientAddressSha256: [ALICE],
+      limit: 2,
+    });
+    expect(first.data.map((r) => r.queuedAt)).toEqual([
+      "2026-08-03T00:00:00.000Z",
+      "2026-08-02T00:00:00.000Z",
+    ]);
+    captured.length = 0;
+    const second = await store.listForTenant(TENANT_A, {
+      channel: "email",
+      templateId: "manifest_review_decided",
+      recipientAddressSha256: [ALICE],
+      outcomes: ["delivered"],
+      limit: 2,
+      cursor: first.nextCursor ?? undefined,
+    });
+    expect(second.data.map((r) => r.queuedAt)).toEqual(["2026-08-01T00:00:00.000Z"]);
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.sql).toBe(
+      `SELECT ${PROJECTION_COLUMNS} FROM meta.notification_dispatches n WHERE tenant_id = $1` +
+        " AND channel = $2 AND template_id = $3" +
+        ` AND ${EXISTS_CLAUSE}` +
+        " AND d.recipient_address_sha256 = ANY($4::text[])" +
+        " AND d.outcome = ANY($5::text[]))" +
+        " ORDER BY queued_at DESC, dispatch_id LIMIT $6 OFFSET $7",
+    );
+    expect(select?.params).toEqual([
+      TENANT_A,
+      "email",
+      "manifest_review_decided",
+      [ALICE],
+      ["delivered"],
+      3,
+      2,
+    ]);
+  });
+
+  it("never inlines a hash, tenant id or outcome that came from caller input", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await store.listForTenant(TENANT_A, {
+      channel: "email",
+      recipientAddressSha256: [ALICE, BOB],
+      outcomes: ["delivered", "suppressed"],
+    });
+    const select = captured.find((c) => isSelect(c));
+    const sql = select?.sql ?? "";
+    expect(sql).not.toContain(ALICE);
+    expect(sql).not.toContain(BOB);
+    expect(sql).not.toContain(TENANT_A);
+    expect(sql).not.toContain("'delivered'");
+    expect(sql).not.toContain("'suppressed'");
+    expect(sql).not.toContain("'email'");
+  });
+
+  it("still runs the filtered read inside the tenant-context transaction", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await store.listForTenant(TENANT_A, { recipientAddressSha256: [ALICE] });
+    const setConfig = captured.find((c) => c.sql.includes("set_config"));
+    expect(setConfig?.sql).toContain("app.current_tenant_id");
+    expect(setConfig?.params).toEqual([TENANT_A]);
+    expect(setConfig?.inTx).toBe(true);
+    expect(captured.find((c) => isSelect(c))?.inTx).toBe(true);
+  });
+
+  it("rejects a malformed tenant id before issuing the filtered read", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await expect(
+      store.listForTenant("robert'); DROP TABLE tenants;--", {
+        recipientAddressSha256: [ALICE],
+      }),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("resolves the delivery table against a custom schema", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn, { schema: "ops" });
+    await store.listForTenant(TENANT_A, { recipientAddressSha256: [ALICE] });
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.sql).toContain("FROM ops.notification_dispatches n");
+    expect(select?.sql).toContain("FROM ops.notification_deliveries d");
   });
 });
 
