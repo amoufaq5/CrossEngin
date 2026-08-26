@@ -12,7 +12,7 @@ const entity = (over: Partial<Entity> = {}): Entity => ({
 });
 
 describe("resolvedFieldNames", () => {
-  it("includes the implicit id primary key, which emitCreateTable always adds", () => {
+  it("includes the implicit id primary key, which every entity table carries", () => {
     expect(resolvedFieldNames(entity(), []).has("id")).toBe(true);
   });
 
@@ -62,7 +62,7 @@ describe("resolvedFieldNames", () => {
   });
 
   it("tolerates the same name arriving from two traits", () => {
-    // A collision is emitCreateTable's error to raise; for existence, the field still exists.
+    // A collision is checkEntityFieldNames's error to raise; for existence, the field exists.
     const traits: Trait[] = [
       { name: "a", fields: [{ name: "note", type: { kind: "text" } }] },
       { name: "b", fields: [{ name: "note", type: { kind: "text" } }] },

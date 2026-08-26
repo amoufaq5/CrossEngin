@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 278 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 279 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**82 packages + 3 apps, 139 meta-schema tables, ~9,345 tests**, all green, no
+**82 packages + 3 apps, 139 meta-schema tables, ~9,285 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -91,8 +91,10 @@ packages exist at only one layer, noted below where that is true.
 
 - **`kernel`** — the meta-schema and manifest compiler. Four areas: `bootstrap/`
   (`META_TABLES`, the catalog of **139** platform Postgres tables, plus deterministic DDL
-  emit), `ddl/` (manifest entity → column/table DDL, field types, built-in traits,
-  identifier quoting, schema diff), `manifest/` (zod manifest types, validate,
+  emit), `ddl/` (the DDL *vocabulary* — `resolvedFields`, field→Postgres types, built-in
+  traits, column naming, default rendering, identifier quoting, structural entity diff;
+  it does **not** emit entity tables, `operate-runtime-pg` does — ADR-0284),
+  `manifest/` (zod manifest types, validate,
   cross-validate, diff, patch, topology, `manifestHash`, `meta.extends` resolution), and
   `tenancy/` + `workflow/` (tenant resolution, workflow definition validation).
 - **`kernel-pg`** — the impure applier. `PgConnection` + `parsePgEnvConfig` + node-postgres
@@ -559,12 +561,6 @@ opened them.
   URL (ADR-0280). That works and the custom-base-URL fix was needed anyway for
   proxies, but routing the in-product designer through the local provider is the
   cleaner arrangement and is still open.
-- **`kernel/src/ddl/emit.ts` is dead code that emits an untenanted table**
-  (ADR-0283). `emitCreateTable`/`emitEntity`/`emitManifestCreate`/`applyManifest`
-  have no production consumer, and what they emit has no `tenant_id` and no RLS —
-  a tenancy breach waiting for a caller. It now shares the field resolver with the
-  serving store, so the column set cannot drift again, but deleting it is
-  public-API removal and was left as a separate call.
 
 **Contained**
 
@@ -582,6 +578,10 @@ opened them.
   is never dropped and a changed type is never altered, since both need a decision
   about existing data. Per-tenant activated manifests still get no DDL at all — the
   store is built from the boot manifest alone.
+- `topologicalSort` (kernel) and `topologicalEntityOrder` (operate-runtime-pg)
+  compute the same entity dependency order by different routes (ADR-0284). The
+  kernel's is now unused and is the better home; reconciling them is the remaining
+  duplication in that area.
 
 **Cosmetic** — per-field grant display, data-volume estimates on destructive
 diffs, dark theme, per-tenant branding (ADR-0265, 0266, 0271, 0272).
@@ -592,7 +592,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 278 records; 199
+hand-editing, so a title or status change cannot drift. 279 records; 200
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

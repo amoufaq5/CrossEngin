@@ -1,80 +1,15 @@
 import type { DefaultValue, Field } from "@crossengin/types/meta-schema";
-import { fieldTypeToPostgresType } from "./field-type.js";
-import { quoteIdent, referenceColumnName, toTableName } from "./identifiers.js";
-
-export interface EmitColumnOptions {
-  readonly schema: string;
-}
+import { referenceColumnName } from "./identifiers.js";
 
 export function columnNameForField(field: Field): string {
   return field.type.kind === "reference" ? referenceColumnName(field.name) : field.name;
 }
 
-export function emitColumn(field: Field, options: EmitColumnOptions): string {
-  const columnName = columnNameForField(field);
-  const parts: string[] = [quoteIdent(columnName), fieldTypeToPostgresType(field.type)];
-
-  if (field.required) {
-    parts.push("NOT NULL");
-  }
-
-  if (field.unique === true) {
-    parts.push("UNIQUE");
-  }
-
-  if (field.default !== undefined) {
-    const rendered = emitDefault(field.default);
-    if (rendered !== null) {
-      parts.push("DEFAULT", rendered);
-    }
-  }
-
-  if (field.type.kind === "enum") {
-    const values = field.type.values.map((v) => `'${escapeStringLiteral(v)}'`).join(", ");
-    parts.push(`CHECK (${quoteIdent(columnName)} IN (${values}))`);
-  }
-
-  if (field.type.kind === "integer") {
-    const check = emitRangeCheck(columnName, field.type.min, field.type.max);
-    if (check !== null) parts.push(check);
-  }
-
-  if (field.type.kind === "decimal") {
-    const check = emitRangeCheck(columnName, field.type.min, field.type.max);
-    if (check !== null) parts.push(check);
-  }
-
-  if (field.type.kind === "reference") {
-    const targetTable = toTableName(field.type.target);
-    parts.push(
-      `REFERENCES ${quoteIdent(options.schema)}.${quoteIdent(targetTable)}("id") ON DELETE RESTRICT`,
-    );
-  }
-
-  return parts.join(" ");
-}
-
-function emitRangeCheck(
-  columnName: string,
-  min: number | undefined,
-  max: number | undefined,
-): string | null {
-  if (min !== undefined && max !== undefined) {
-    return `CHECK (${quoteIdent(columnName)} BETWEEN ${min} AND ${max})`;
-  }
-  if (min !== undefined) {
-    return `CHECK (${quoteIdent(columnName)} >= ${min})`;
-  }
-  if (max !== undefined) {
-    return `CHECK (${quoteIdent(columnName)} <= ${max})`;
-  }
-  return null;
-}
-
 /**
  * Renders a field default as the SQL that follows `DEFAULT`, or null when the database
- * should have none. Exported because the column-mapped store emits its own per-entity DDL
- * and must render a default the same way this emitter does.
+ * should have none. The column-mapped store in `operate-runtime-pg` is the only caller —
+ * it owns entity DDL, and this keeps default rendering in the kernel beside the field
+ * types it belongs to.
  */
 export function emitDefault(value: DefaultValue): string | null {
   if (value.kind === "expression") return value.expression;

@@ -197,7 +197,7 @@ function kernelEntityLayer(active: Manifest, next: Manifest): EntityLayer {
       }
       if (change.nullabilityChange !== undefined) {
         // The kernel tracks *required*, not nullability: `to === true` means the field
-        // became NOT NULL (emitDiff turns it into SET NOT NULL).
+        // became required, which the store emits as a NOT NULL column.
         fieldChanges.push({
           entity,
           field: change.name,
@@ -217,7 +217,7 @@ function kernelEntityLayer(active: Manifest, next: Manifest): EntityLayer {
   };
 }
 
-// computeManifestDiff refuses changes it cannot emit DDL for (a changed type kind, altered
+// computeManifestDiff refuses changes it deems unsupported (a changed type kind, altered
 // enum values, a flipped unique). A reviewer still has to see those, so degrade to a
 // name-level comparison rather than reporting that nothing changed.
 function fallbackEntityLayer(active: Manifest, next: Manifest): EntityLayer {

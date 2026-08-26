@@ -82,7 +82,7 @@ dispatcher (Phase 2) parses against this schema before routing.
 ## Diff narration
 
 ```ts
-import { applyManifest, computeManifestDiff } from "@crossengin/kernel/manifest";
+import { computeManifestDiff } from "@crossengin/kernel/manifest";
 import { diffSummaryFromManifestDiff } from "@crossengin/ai-architect";
 
 const diff = computeManifestDiff(oldManifest, newManifest);

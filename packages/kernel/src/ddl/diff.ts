@@ -1,8 +1,8 @@
 import type { DefaultValue, Entity, Field, Trait } from "@crossengin/types/meta-schema";
-import { columnNameForField, emitColumn } from "./column.js";
+import { columnNameForField } from "./column.js";
 import { EntityRenameNotSupportedError, UnsupportedDiffChangeError } from "./errors.js";
 import { fieldTypeToPostgresType } from "./field-type.js";
-import { indexName, qualifyTable, quoteIdent, toTableName } from "./identifiers.js";
+import { toTableName } from "./identifiers.js";
 import {
   buildColumnNameMap,
   checkEntityFieldNames,
@@ -36,9 +36,6 @@ export interface DiffContext {
   readonly customTraits?: readonly Trait[];
 }
 
-export interface DiffEmitContext {
-  readonly schema: string;
-}
 
 export function computeEntityDiff(
   old: Entity,
@@ -221,93 +218,4 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return aKeys.every((k) =>
     deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
   );
-}
-
-export function emitDiff(diff: EntityDiff, context: DiffEmitContext): string[] {
-  const statements: string[] = [];
-  const table = qualifyTable(context.schema, diff.tableName);
-
-  for (const idx of diff.removedIndexes) {
-    statements.push(
-      `DROP INDEX ${quoteIdent(context.schema)}.${quoteIdent(indexName(diff.tableName, idx.columns))};`,
-    );
-  }
-
-  for (const colName of diff.removedFields) {
-    statements.push(`ALTER TABLE ${table} DROP COLUMN ${quoteIdent(colName)};`);
-  }
-
-  for (const field of diff.addedFields) {
-    const colDef = emitColumn(field, { schema: context.schema });
-    statements.push(`ALTER TABLE ${table} ADD COLUMN ${colDef};`);
-  }
-
-  for (const mod of diff.modifiedFields) {
-    if (mod.typeChange) {
-      statements.push(
-        `ALTER TABLE ${table} ALTER COLUMN ${quoteIdent(mod.columnName)} TYPE ${mod.typeChange.to};`,
-      );
-    }
-    if (mod.nullabilityChange) {
-      const op = mod.nullabilityChange.to ? "SET NOT NULL" : "DROP NOT NULL";
-      statements.push(`ALTER TABLE ${table} ALTER COLUMN ${quoteIdent(mod.columnName)} ${op};`);
-    }
-    if (mod.defaultChange) {
-      if (mod.defaultChange.to === undefined) {
-        statements.push(
-          `ALTER TABLE ${table} ALTER COLUMN ${quoteIdent(mod.columnName)} DROP DEFAULT;`,
-        );
-      } else {
-        const sql = renderDefault(mod.defaultChange.to);
-        statements.push(
-          `ALTER TABLE ${table} ALTER COLUMN ${quoteIdent(mod.columnName)} SET DEFAULT ${sql};`,
-        );
-      }
-    }
-  }
-
-  for (const idx of diff.addedIndexes) {
-    statements.push(makeCreateIndex(context.schema, diff.tableName, idx));
-  }
-
-  return statements;
-}
-
-function renderDefault(value: DefaultValue): string {
-  if (value.kind === "expression") return value.expression;
-  if (value.kind === "sequence") return `sequence:${value.sequence}`;
-  return renderLiteral(value.value);
-}
-
-function renderLiteral(value: unknown): string {
-  if (value === null) return "NULL";
-  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new Error(`unsupported numeric literal: ${value}`);
-    }
-    return String(value);
-  }
-  if (typeof value === "string") return `'${value.replace(/'/g, "''")}'`;
-  if (typeof value === "object") {
-    return `'${JSON.stringify(value).replace(/'/g, "''")}'::jsonb`;
-  }
-  throw new Error(`unsupported literal type: ${typeof value}`);
-}
-
-function makeCreateIndex(schema: string, tableName: string, idx: ResolvedIndex): string {
-  const using =
-    idx.kind !== undefined && idx.kind !== "btree" ? ` USING ${idx.kind.toUpperCase()}` : "";
-  const uniqueKw = idx.unique === true ? "UNIQUE " : "";
-  const cols = idx.columns.map(quoteIdent).join(", ");
-  return `CREATE ${uniqueKw}INDEX ${quoteIdent(indexName(tableName, idx.columns))} ON ${qualifyTable(schema, tableName)}${using} (${cols});`;
-}
-
-export function diffAndEmit(
-  old: Entity,
-  next: Entity,
-  context: { schema: string; customTraits?: readonly Trait[] },
-): string[] {
-  const diff = computeEntityDiff(old, next, { customTraits: context.customTraits });
-  return emitDiff(diff, { schema: context.schema });
 }

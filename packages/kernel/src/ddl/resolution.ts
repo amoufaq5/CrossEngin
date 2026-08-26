@@ -40,13 +40,12 @@ export function expandTraits(entity: Entity, customTraits: readonly Trait[]): re
  * shared by `validateManifest`'s reference checks and by the serving store's column plan,
  * so validation cannot say a field exists that the served table has no column for.
  *
- * The implicit `id` primary key is *not* included — it is a system column whose type each
- * emitter chooses for itself (the kernel emits UUID, the column-mapped store TEXT), so it
- * is not a domain field. `resolvedFieldNames` adds it, since for an existence question it
- * plainly does exist.
+ * The implicit `id` primary key is *not* included — it is a system column the store types
+ * for itself (TEXT, paired with `tenant_id` in the primary key), so it is not a domain
+ * field. `resolvedFieldNames` adds it, since for an existence question it plainly exists.
  *
- * Unlike `expandTraits` this tolerates a name supplied twice: the first wins, and rejecting
- * the collision is `emitCreateTable`'s job, not an existence check's.
+ * Unlike `expandTraits` this tolerates a name supplied twice: the first wins. Rejecting a
+ * genuine collision belongs to `checkEntityFieldNames`, not to an existence check.
  */
 export function resolvedFields(entity: Entity, customTraits: readonly Trait[]): readonly Field[] {
   const customByName = new Map(customTraits.map((t) => [t.name, t]));
