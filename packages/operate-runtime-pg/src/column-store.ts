@@ -263,12 +263,16 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     const qualified = qualifyTable(plan.schema, plan.table);
     const sets: string[] = [];
     const params: unknown[] = [tenantId, id];
+    let stampsUpdatedAt = false;
     for (const mapping of plan.columns) {
       const v = patch[mapping.field];
       if (v === undefined) continue;
+      // On an `auditable` entity `updated_at` is a planned column, so a patch naming it
+      // would otherwise assign the same column twice in one UPDATE.
+      if (mapping.column === "updated_at") stampsUpdatedAt = true;
       sets.push(`${quoteIdent(mapping.column)} = ${this.writePlaceholder(mapping, v, params)}`);
     }
-    sets.push(`${quoteIdent("updated_at")} = now()`);
+    if (!stampsUpdatedAt) sets.push(`${quoteIdent("updated_at")} = now()`);
     const res = await tx.query<Record<string, unknown>>(
       `UPDATE ${qualified}
           SET ${sets.join(", ")}

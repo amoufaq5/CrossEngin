@@ -1,22 +1,28 @@
 import { qualifyTable, quoteIdent, toTableName } from "@crossengin/kernel/ddl";
 import type { OnDelete } from "@crossengin/types/meta-schema";
 
-import type { EntityTablePlan, JoinTablePlan } from "./column-plan.js";
+import type { ColumnMapping, EntityTablePlan, JoinTablePlan } from "./column-plan.js";
 
 const TENANT_ISOLATION = "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
 
 const MAX_IDENTIFIER_LEN = 63;
 
 /**
- * A plaintext (non-encrypted) text/varchar/char column — the kind a `contains`
+ * A plaintext (non-encrypted) text or varchar column — the kind a `contains`
  * (substring) filter can search, and which a trigram GIN index accelerates.
  * BYTEA (encrypted-at-rest) and non-text types (numeric/uuid/date/bool/json/…)
  * are excluded.
+ *
+ * `CHAR(n)` is excluded too, even though it holds text: `gin_trgm_ops` accepts
+ * `text` and `varchar` (binary-coercible to text) but **not** `bpchar`, so
+ * indexing one fails with `operator class "gin_trgm_ops" does not accept data
+ * type character`. A `country_code` field emits `CHAR(2)`, which is why
+ * `pack-erp-core` could not boot on this store at all.
  */
 function isTrigramIndexable(col: { sqlType: string; encryptAtRest: boolean }): boolean {
   if (col.encryptAtRest) return false;
   const t = col.sqlType.toUpperCase();
-  return t === "TEXT" || t.startsWith("VARCHAR") || t.startsWith("CHAR");
+  return t === "TEXT" || t.startsWith("VARCHAR");
 }
 
 /** Deterministic trigram index name, capped at Postgres's 63-char identifier limit. */
@@ -26,11 +32,53 @@ function trigramIndexName(table: string, column: string): string {
 }
 
 /**
+ * Emits an additive `ADD COLUMN IF NOT EXISTS` per planned column, so a table created by an
+ * earlier version of the manifest gains the fields a later one added. Without it
+ * `CREATE TABLE IF NOT EXISTS` silently no-ops on the existing table and every read and
+ * write of the new field fails against a column that was never created.
+ *
+ * **`NOT NULL` is dropped unless the column has a default.** Adding a NOT NULL column to a
+ * table that already has rows is rejected by Postgres when there is nothing to backfill
+ * with, so a newly required field arrives nullable rather than failing the migration: the
+ * manifest's requirement is still enforced on write by the serving layer, and narrowing the
+ * existing rows is a data decision this emitter cannot make. A column created fresh by the
+ * `CREATE TABLE` above still carries its full `NOT NULL`.
+ */
+export function emitAddColumnDdl(plan: EntityTablePlan): string[] {
+  const qualified = qualifyTable(plan.schema, plan.table);
+  return plan.columns.map((c) => {
+    const backfillable = { ...c, notNull: c.notNull && c.defaultSql !== null };
+    return `ALTER TABLE ${qualified} ADD COLUMN IF NOT EXISTS ${quoteIdent(c.column)} ${columnType(backfillable)};`;
+  });
+}
+
+/**
+ * The housekeeping timestamps every entity table carries. An `auditable` entity declares
+ * these as trait fields, so they arrive in the plan as ordinary domain columns; for every
+ * other entity the emitter supplies them here. Either way the table has exactly one of each
+ * — the plan wins, since a planned column is also readable, filterable and sortable.
+ */
+const SYSTEM_TIMESTAMPS: readonly { readonly name: string; readonly sql: string }[] = [
+  { name: "created_at", sql: "TIMESTAMPTZ NOT NULL DEFAULT now()" },
+  { name: "updated_at", sql: "TIMESTAMPTZ NOT NULL DEFAULT now()" },
+];
+
+/** `<type>[ NOT NULL][ DEFAULT <sql>]` for one planned column. */
+function columnType(c: ColumnMapping): string {
+  const base = c.encryptAtRest ? "BYTEA" : c.sqlType;
+  const notNull = c.notNull ? " NOT NULL" : "";
+  const dflt = c.defaultSql !== null ? ` DEFAULT ${c.defaultSql}` : "";
+  return `${base}${notNull}${dflt}`;
+}
+
+/**
  * Emits idempotent DDL for one entity's per-tenant table: a `CREATE TABLE IF
  * NOT EXISTS` with the system columns (`tenant_id`, TEXT `id`, timestamps) plus
- * each typed domain column, the `(tenant_id, id)` primary key, a tenant index,
- * RLS enabled with the standard tenant-isolation policy
- * (`DROP POLICY IF EXISTS` → `CREATE POLICY`, so re-runs are safe), and a
+ * each typed domain column, an additive `ADD COLUMN IF NOT EXISTS` per planned
+ * column so a table created by an earlier manifest gains what the current one
+ * added, the `(tenant_id, id)` primary key, a tenant index, RLS enabled with the
+ * standard tenant-isolation policy (`DROP POLICY IF EXISTS` → `CREATE POLICY`,
+ * so re-runs are safe), and a
  * `crossengin.data_class=…[; crossengin.encrypt=at_rest]` comment per classified
  * column (the same convention the kernel-pg encryption applier reads). A column
  * flagged `encryptAtRest` is stored as `BYTEA` (pgcrypto ciphertext), not its
@@ -38,14 +86,14 @@ function trigramIndexName(table: string, column: string): string {
  */
 export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
   const qualified = qualifyTable(plan.schema, plan.table);
+  const planned = new Set(plan.columns.map((c) => c.column));
   const columnLines: string[] = [
     `${quoteIdent("tenant_id")} UUID NOT NULL`,
     `${quoteIdent("id")} TEXT NOT NULL`,
-    ...plan.columns.map(
-      (c) => `${quoteIdent(c.column)} ${c.encryptAtRest ? "BYTEA" : c.sqlType}${c.notNull ? " NOT NULL" : ""}`,
+    ...plan.columns.map((c) => `${quoteIdent(c.column)} ${columnType(c)}`),
+    ...SYSTEM_TIMESTAMPS.filter((t) => !planned.has(t.name)).map(
+      (t) => `${quoteIdent(t.name)} ${t.sql}`,
     ),
-    `${quoteIdent("created_at")} TIMESTAMPTZ NOT NULL DEFAULT now()`,
-    `${quoteIdent("updated_at")} TIMESTAMPTZ NOT NULL DEFAULT now()`,
     `PRIMARY KEY (${quoteIdent("tenant_id")}, ${quoteIdent("id")})`,
   ];
 
@@ -54,6 +102,11 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
 
   const stmts: string[] = [
     `CREATE TABLE IF NOT EXISTS ${qualified} (\n  ${columnLines.join(",\n  ")}\n);`,
+    // Immediately after the CREATE and before anything that references a column: the
+    // CREATE is a no-op on a table that already exists, so without this a manifest that
+    // gained a field would leave the column missing and the very next statement (its
+    // trigram index) would fail.
+    ...emitAddColumnDdl(plan),
     `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexNm)} ON ${qualified} (${quoteIdent("tenant_id")});`,
     `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
     `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};`,

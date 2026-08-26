@@ -1,6 +1,6 @@
 import type { Entity, Trait } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
-import { resolvedFieldNames } from "./resolution.js";
+import { resolvedFieldNames, resolvedFields } from "./resolution.js";
 
 const entity = (over: Partial<Entity> = {}): Entity => ({
   name: "Prescription",
@@ -73,5 +73,42 @@ describe("resolvedFieldNames", () => {
 
   it("returns id plus nothing else for a fieldless, traitless entity", () => {
     expect([...resolvedFieldNames(entity({ fields: [] }), [])]).toEqual(["id"]);
+  });
+});
+
+describe("resolvedFields", () => {
+  it("returns the entity's own fields first, then the trait's", () => {
+    const fields = resolvedFields(entity({ traits: ["versioned"] }), []);
+    expect(fields.map((f) => f.name)).toEqual(["qty", "status", "version"]);
+  });
+
+  it("omits the implicit id, which is a system column each emitter types for itself", () => {
+    expect(resolvedFields(entity(), []).map((f) => f.name)).not.toContain("id");
+    expect(resolvedFieldNames(entity(), []).has("id")).toBe(true);
+  });
+
+  it("carries the trait field's type and default, which the serving store needs", () => {
+    const created = resolvedFields(entity({ traits: ["auditable"] }), []).find(
+      (f) => f.name === "created_at",
+    );
+    expect(created?.type).toEqual({ kind: "datetime" });
+    expect(created?.required).toBe(true);
+    expect(created?.default).toEqual({ kind: "expression", expression: "now()" });
+  });
+
+  it("lets the entity's own field win over a trait supplying the same name", () => {
+    const shadowed = entity({
+      traits: ["versioned"],
+      fields: [{ name: "version", type: { kind: "text" } }],
+    });
+    const fields = resolvedFields(shadowed, []);
+    expect(fields).toHaveLength(1);
+    expect(fields[0]?.type).toEqual({ kind: "text" });
+  });
+
+  it("agrees with resolvedFieldNames, which is defined over it", () => {
+    const e = entity({ traits: ["auditable", "soft_deletable"] });
+    const names = new Set(["id", ...resolvedFields(e, []).map((f) => f.name)]);
+    expect([...resolvedFieldNames(e, [])].sort()).toEqual([...names].sort());
   });
 });

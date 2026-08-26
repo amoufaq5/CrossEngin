@@ -71,7 +71,12 @@ function emitRangeCheck(
   return null;
 }
 
-function emitDefault(value: DefaultValue): string | null {
+/**
+ * Renders a field default as the SQL that follows `DEFAULT`, or null when the database
+ * should have none. Exported because the column-mapped store emits its own per-entity DDL
+ * and must render a default the same way this emitter does.
+ */
+export function emitDefault(value: DefaultValue): string | null {
   if (value.kind === "expression") return value.expression;
   // Sequence defaults are allocated by the serving runtime, not the database,
   // so they emit no column DEFAULT clause.

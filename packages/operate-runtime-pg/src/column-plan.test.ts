@@ -161,3 +161,74 @@ describe("topologicalEntityOrder", () => {
     expect([...order].sort()).toEqual(["A", "B"]);
   });
 });
+
+describe("columnPlanForEntity — trait fields", () => {
+  const AUDITED: Entity = {
+    name: "Visit",
+    traits: ["auditable"],
+    fields: [{ name: "reason", type: { kind: "text" } }],
+  };
+
+  it("plans a column for every field the entity resolves to, traits included", () => {
+    const plan = columnPlanForEntity(AUDITED, { schema: "app" });
+    expect(plan.columns.map((c) => c.field)).toEqual([
+      "reason",
+      "created_at",
+      "updated_at",
+      "created_by",
+      "updated_by",
+    ]);
+  });
+
+  it("carries the trait's expression default so a NOT NULL column can be inserted into", () => {
+    const byField = columnIndex(columnPlanForEntity(AUDITED, { schema: "app" }));
+    expect(byField.get("created_at")).toMatchObject({
+      sqlType: "TIMESTAMPTZ",
+      notNull: true,
+      defaultSql: "now()",
+    });
+    expect(byField.get("created_by")).toMatchObject({ sqlType: "UUID", notNull: false, defaultSql: null });
+  });
+
+  it("carries a literal default", () => {
+    const versioned: Entity = { name: "Doc", traits: ["versioned"], fields: [] };
+    const byField = columnIndex(columnPlanForEntity(versioned, { schema: "app" }));
+    expect(byField.get("version")).toMatchObject({ notNull: true, defaultSql: "1" });
+  });
+
+  it("emits no default for a sequence-defaulted field, which the runtime allocates", () => {
+    const seq: Entity = {
+      name: "Inv",
+      fields: [
+        {
+          name: "number",
+          type: { kind: "text" },
+          default: { kind: "sequence", sequence: "inv" },
+        },
+      ],
+    };
+    expect(columnPlanForEntity(seq, { schema: "app" }).columns[0]?.defaultSql).toBeNull();
+  });
+
+  it("expands a manifest-declared custom trait through columnPlansForManifest", () => {
+    const manifest = {
+      manifestVersion: "1.0",
+      meta: { slug: "s", name: "n", version: "1.0.0" },
+      traits: [{ name: "geocoded", fields: [{ name: "lat", type: { kind: "decimal", precision: 9, scale: 6 } }] }],
+      entities: [{ name: "Site", traits: ["geocoded"], fields: [{ name: "label", type: { kind: "text" } }] }],
+    } as unknown as Manifest;
+    const plan = columnPlansForManifest(manifest, { schema: "app" }).get("Site");
+    expect(plan?.columns.map((c) => c.field)).toEqual(["label", "lat"]);
+  });
+
+  it("keeps the entity's own field when a trait supplies the same name", () => {
+    const shadowed: Entity = {
+      name: "Visit",
+      traits: ["versioned"],
+      fields: [{ name: "version", type: { kind: "text" } }],
+    };
+    const cols = columnPlanForEntity(shadowed, { schema: "app" }).columns;
+    expect(cols).toHaveLength(1);
+    expect(cols[0]).toMatchObject({ field: "version", sqlType: "TEXT" });
+  });
+});

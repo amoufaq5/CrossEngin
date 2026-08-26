@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 277 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 278 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**82 packages + 3 apps, 139 meta-schema tables, ~9,320 tests**, all green, no
+**82 packages + 3 apps, 139 meta-schema tables, ~9,345 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -122,8 +122,12 @@ packages exist at only one layer, noted below where that is true.
   JSONB document table) and `ColumnMappedEntityStore` (real per-entity typed tables with
   DDL derived from the manifest — topological create order, composite tenant-scoped FKs
   with per-relation `ON DELETE`, m2m join tables, pgcrypto-encrypted PHI columns, SQL-level
-  filter/sort/keyset/projection pushdown). Plus sequence allocator, settings, entitlement,
-  subscription stores, Stripe webhook ingest and dangling-link pruning.
+  filter/sort/keyset/projection pushdown). Its column plan comes from the kernel's
+  `resolvedFields`, the same function `validateManifest` uses, so **trait fields are real
+  columns** and validation cannot accept a field the served table lacks; `ensureSchema`
+  migrates additively (`ADD COLUMN IF NOT EXISTS`), so a manifest that gains a field no
+  longer bricks the boot. Plus sequence allocator, settings, entitlement, subscription
+  stores, Stripe webhook ingest and dangling-link pruning.
 
 ### Request edge
 
@@ -555,6 +559,12 @@ opened them.
   URL (ADR-0280). That works and the custom-base-URL fix was needed anyway for
   proxies, but routing the in-product designer through the local provider is the
   cleaner arrangement and is still open.
+- **`kernel/src/ddl/emit.ts` is dead code that emits an untenanted table**
+  (ADR-0283). `emitCreateTable`/`emitEntity`/`emitManifestCreate`/`applyManifest`
+  have no production consumer, and what they emit has no `tenant_id` and no RLS —
+  a tenancy breach waiting for a caller. It now shares the field resolver with the
+  serving store, so the column set cannot drift again, but deleting it is
+  public-API removal and was left as a separate call.
 
 **Contained**
 
@@ -568,6 +578,10 @@ opened them.
   fails indistinguishably from any other design failure (ADR-0280).
 - `packages/workflow-runtime/src/engine.ts` still throws on one unimplemented
   action kind — the only genuine stub in the TypeScript.
+- Column-store migration is **additive only** (ADR-0283): a removed field's column
+  is never dropped and a changed type is never altered, since both need a decision
+  about existing data. Per-tenant activated manifests still get no DDL at all — the
+  store is built from the boot manifest alone.
 
 **Cosmetic** — per-field grant display, data-volume estimates on destructive
 diffs, dark theme, per-tenant branding (ADR-0265, 0266, 0271, 0272).
@@ -578,7 +592,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 277 records; 198
+hand-editing, so a title or status change cannot drift. 278 records; 199
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

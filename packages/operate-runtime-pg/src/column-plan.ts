@@ -1,12 +1,13 @@
-import { columnNameForField, fieldTypeToPostgresType } from "@crossengin/kernel/ddl";
+import { columnNameForField, emitDefault, fieldTypeToPostgresType } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { toTableName } from "@crossengin/kernel/ddl";
+import { resolvedFields, toTableName } from "@crossengin/kernel/ddl";
 import {
   requiresEncryptionAtRest,
   type DataClassification,
   type Entity,
   type Field,
   type OnDelete,
+  type Trait,
 } from "@crossengin/types/meta-schema";
 
 /** One manifest field's mapping to a typed SQL column. */
@@ -19,6 +20,12 @@ export interface ColumnMapping {
   readonly encryptAtRest: boolean;
   /** For a reference field: the target entity name (so a FK can be emitted), else null. */
   readonly referenceTarget: string | null;
+  /**
+   * SQL to follow `DEFAULT`, or null for none. Load-bearing for trait-supplied columns: the
+   * `auditable` trait's `created_at` is NOT NULL with `now()`, and an insert that omits it
+   * would fail without the default.
+   */
+  readonly defaultSql: string | null;
 }
 
 /** The full plan for one entity's per-tenant table (domain columns only). */
@@ -45,16 +52,27 @@ function mappingForField(field: Field): ColumnMapping {
     classification,
     encryptAtRest: classification !== null && requiresEncryptionAtRest(classification),
     referenceTarget: field.type.kind === "reference" ? field.type.target : null,
+    defaultSql: field.default !== undefined ? emitDefault(field.default) : null,
   };
 }
 
 /**
- * Derives the column plan for one entity: each manifest field → a typed column
- * (via the kernel's `fieldTypeToPostgresType` + `columnNameForField`), carrying
- * its classification + at-rest-encryption flag. System columns (`tenant_id`,
- * `id`, timestamps) are added by the DDL emitter, not here.
+ * Derives the column plan for one entity: every field it *resolves* to — its own plus
+ * whatever its traits contribute — mapped to a typed column via the kernel's
+ * `fieldTypeToPostgresType` + `columnNameForField`, carrying its classification,
+ * at-rest-encryption flag and default.
+ *
+ * Trait fields are included because the manifest says they are fields: classifying,
+ * granting or listing `created_by` is meaningless if no column exists for it. Resolution
+ * goes through the kernel's `resolvedFields`, the same function `validateManifest` uses, so
+ * validation cannot accept a field this store has no column for.
+ *
+ * `tenant_id` and `id` remain system columns added by the DDL emitter, not planned here.
  */
-export function columnPlanForEntity(entity: Entity, opts: { readonly schema: string }): EntityTablePlan {
+export function columnPlanForEntity(
+  entity: Entity,
+  opts: { readonly schema: string; readonly traits?: readonly Trait[] },
+): EntityTablePlan {
   if (!SCHEMA_RE.test(opts.schema)) {
     throw new Error(`invalid schema name: ${JSON.stringify(opts.schema)}`);
   }
@@ -62,7 +80,7 @@ export function columnPlanForEntity(entity: Entity, opts: { readonly schema: str
     entity: entity.name,
     schema: opts.schema,
     table: toTableName(entity.name),
-    columns: entity.fields.map(mappingForField),
+    columns: resolvedFields(entity, opts.traits ?? []).map(mappingForField),
   };
 }
 
@@ -77,8 +95,9 @@ export function columnPlansForManifest(
   opts: { readonly schema: string },
 ): ReadonlyMap<string, EntityTablePlan> {
   const out = new Map<string, EntityTablePlan>();
+  const traits = manifest.traits ?? [];
   for (const entity of manifest.entities ?? []) {
-    out.set(entity.name, columnPlanForEntity(entity, opts));
+    out.set(entity.name, columnPlanForEntity(entity, { ...opts, traits }));
   }
   return out;
 }
