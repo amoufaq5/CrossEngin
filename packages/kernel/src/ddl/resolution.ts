@@ -34,6 +34,30 @@ export function expandTraits(entity: Entity, customTraits: readonly Trait[]): re
   return result;
 }
 
+/**
+ * Every field name an entity resolves to, as the emitted table has them: the implicit `id`
+ * primary key, the entity's own fields, and whatever its traits contribute.
+ *
+ * This is the one answer to "does this entity have that field?", shared by every reference
+ * check in `validateManifest` — relations, permissions, views and search — so they cannot
+ * disagree about what exists. Unlike `expandTraits` it tolerates a name supplied by two
+ * traits at once: for an existence question a collision is still an existing field, and it
+ * is `emitCreateTable`'s job to reject the collision itself.
+ */
+export function resolvedFieldNames(
+  entity: Entity,
+  customTraits: readonly Trait[],
+): ReadonlySet<string> {
+  const customByName = new Map(customTraits.map((t) => [t.name, t]));
+  const names = new Set<string>(["id"]);
+  for (const field of entity.fields) names.add(field.name);
+  for (const traitName of entity.traits ?? []) {
+    const traitFields = BUILT_IN_TRAIT_FIELDS.get(traitName) ?? customByName.get(traitName)?.fields;
+    for (const field of traitFields ?? []) names.add(field.name);
+  }
+  return names;
+}
+
 export function checkEntityFieldNames(entity: Entity, traitFields: readonly Field[]): void {
   const traitNames = new Set(traitFields.map((f) => f.name));
   for (const field of entity.fields) {

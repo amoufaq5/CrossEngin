@@ -3,7 +3,10 @@ import {
   VIEW_KINDS,
   ViewDeclarationSchema,
   viewReferencedDashboards,
+  viewReferencedFields,
   viewReferencedReports,
+  viewReferencedRoles,
+  viewReferencedStates,
   viewReferencedViews,
   viewReferencedWorkflows,
 } from "./views.js";
@@ -268,5 +271,163 @@ describe("view reference helpers", () => {
       allowedTransitions: ["move"],
     });
     expect(viewReferencedWorkflows(kanban)).toEqual(["move"]);
+  });
+});
+
+describe("viewReferencedFields", () => {
+  const paths = (v: Parameters<typeof viewReferencedFields>[0]): readonly string[] =>
+    viewReferencedFields(v).map((r) => r.path);
+
+  it("collects columns, sort, filters and column groups from a list view", () => {
+    const v = ViewDeclarationSchema.parse({
+      kind: "list",
+      entity: "x",
+      columns: [{ field: "name" }, { field: "total" }],
+      sort: [{ field: "created_at", direction: "desc" }],
+      filters: [{ field: "status", operator: "eq", value: "open" }],
+      columnGroups: [{ label: { en: "More" }, columns: [{ field: "note" }] }],
+    });
+    expect(paths(v).sort()).toEqual(["created_at", "name", "note", "status", "total"]);
+  });
+
+  it("labels each reference with its location in the declaration", () => {
+    const v = ViewDeclarationSchema.parse({
+      kind: "list",
+      entity: "x",
+      columns: [{ field: "a" }, { field: "b" }],
+    });
+    expect(viewReferencedFields(v)).toEqual([
+      { path: "a", where: "columns[0].field" },
+      { path: "b", where: "columns[1].field" },
+    ]);
+  });
+
+  it("collects section fields from a record view", () => {
+    const v = ViewDeclarationSchema.parse({
+      kind: "record",
+      entity: "x",
+      sections: [
+        { id: "s1", label: { en: "s" }, fields: ["a", "b"] },
+        { id: "s2", label: { en: "t" }, fields: ["c"] },
+      ],
+    });
+    expect(paths(v)).toEqual(["a", "b", "c"]);
+    expect(viewReferencedFields(v)[2]?.where).toBe("sections[1].fields[0]");
+  });
+
+  it("collects step fields from a form view", () => {
+    const v = ViewDeclarationSchema.parse({
+      kind: "form",
+      entity: "x",
+      steps: [{ id: "s", label: { en: "s" }, fields: [{ field: "a" }, { field: "b" }] }],
+    });
+    expect(paths(v)).toEqual(["a", "b"]);
+  });
+
+  it("collects stateField, cardFields and groupBy from a kanban view", () => {
+    const v = ViewDeclarationSchema.parse({
+      kind: "kanban",
+      entity: "x",
+      stateField: "status",
+      columns: [{ state: "a", label: { en: "a" } }],
+      cardFields: ["title", "owner"],
+      groupBy: "team",
+    });
+    expect(paths(v)).toEqual(["status", "title", "owner", "team"]);
+  });
+
+  it("collects all four date/label fields from a calendar view, skipping absent optionals", () => {
+    const v = ViewDeclarationSchema.parse({
+      kind: "calendar",
+      entity: "x",
+      startField: "starts_at",
+      titleField: "subject",
+    });
+    expect(paths(v)).toEqual(["starts_at", "subject"]);
+  });
+
+  it("collects geo fields and layer filters from a map view", () => {
+    const v = ViewDeclarationSchema.parse({
+      kind: "map",
+      entity: "x",
+      geoField: "location",
+      layers: [
+        {
+          id: "l",
+          label: { en: "L" },
+          kind: "markers",
+          filters: [{ field: "region", operator: "eq", value: "eu" }],
+        },
+      ],
+    });
+    expect(paths(v)).toEqual(["location", "region"]);
+    expect(viewReferencedFields(v)[1]?.where).toBe("layers[0].filters[0].field");
+  });
+
+  it("returns nothing for dashboard and pivot views, which declare no fields", () => {
+    const dash = ViewDeclarationSchema.parse({
+      kind: "dashboard",
+      entity: "x",
+      dashboardRef: "d",
+    });
+    const pivot = ViewDeclarationSchema.parse({ kind: "pivot", entity: "x", reportRef: "r" });
+    expect(viewReferencedFields(dash)).toEqual([]);
+    expect(viewReferencedFields(pivot)).toEqual([]);
+  });
+
+  it("tolerates an unparsed view whose defaulted arrays are absent", () => {
+    // validateManifest runs against hand-built manifests, where `filters: []` was never applied.
+    const raw = { kind: "list", entity: "x", columns: [{ field: "a" }] } as Parameters<
+      typeof viewReferencedFields
+    >[0];
+    expect(paths(raw)).toEqual(["a"]);
+  });
+});
+
+describe("viewReferencedStates + viewReferencedRoles", () => {
+  it("returns kanban column states, and nothing for other kinds", () => {
+    const kanban = ViewDeclarationSchema.parse({
+      kind: "kanban",
+      entity: "x",
+      stateField: "status",
+      columns: [
+        { state: "open", label: { en: "Open" } },
+        { state: "done", label: { en: "Done" } },
+      ],
+      cardFields: ["n"],
+    });
+    expect(viewReferencedStates(kanban)).toEqual(["open", "done"]);
+
+    const list = ViewDeclarationSchema.parse({
+      kind: "list",
+      entity: "x",
+      columns: [{ field: "n" }],
+    });
+    expect(viewReferencedStates(list)).toEqual([]);
+  });
+
+  it("returns the granted roles of an overriding view, and none when it inherits", () => {
+    const overriding = ViewDeclarationSchema.parse({
+      kind: "list",
+      entity: "x",
+      columns: [{ field: "n" }],
+      permissions: { roles: ["auditor", "clerk"] },
+    });
+    expect(viewReferencedRoles(overriding)).toEqual(["auditor", "clerk"]);
+
+    const inheriting = ViewDeclarationSchema.parse({
+      kind: "list",
+      entity: "x",
+      columns: [{ field: "n" }],
+    });
+    expect(inheriting.permissions).toBe("inherit");
+    expect(viewReferencedRoles(inheriting)).toEqual([]);
+  });
+
+  it("treats an unparsed view with no permissions as inheriting", () => {
+    const raw = { kind: "list", entity: "x", columns: [{ field: "n" }] } as Parameters<
+      typeof viewReferencedRoles
+    >[0];
+    expect(viewReferencedRoles(raw)).toEqual([]);
   });
 });
