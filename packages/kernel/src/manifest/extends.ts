@@ -1,4 +1,9 @@
-import { ExtendsCycleError, UnknownParentManifestError } from "./errors.js";
+import type { Entity, Relation } from "@crossengin/types/meta-schema";
+import {
+  ExtendsCycleError,
+  UndeclaredEntityOverrideError,
+  UnknownParentManifestError,
+} from "./errors.js";
 import { manifestHash } from "./hash.js";
 import type { Manifest, ManifestMeta, ManifestResolutionEntry } from "./types.js";
 
@@ -73,11 +78,14 @@ async function resolveInternal(
     meta: stripExtendsFromMeta(manifest.meta),
   };
 
+  // Parents merge last-wins among themselves: a collision between two independently-authored
+  // parents is the child's ambiguity to resolve by choosing them, and neither parent could
+  // sensibly declare it is overriding the other. Only the local manifest must declare intent.
   for (const parent of resolvedParents) {
-    composed = mergeContent(composed, parent);
+    composed = mergeContent(composed, parent, { requireOverrideMarker: false });
   }
 
-  composed = mergeContent(composed, manifest);
+  composed = mergeContent(composed, manifest, { requireOverrideMarker: true });
 
   return { manifest: composed, parents: entries };
 }
@@ -92,13 +100,21 @@ function stripExtendsFromMeta(meta: ManifestMeta): ManifestMeta {
   return result;
 }
 
-function mergeContent(base: Manifest, overlay: Manifest): Manifest {
+interface MergeOptions {
+  readonly requireOverrideMarker: boolean;
+}
+
+function mergeContent(base: Manifest, overlay: Manifest, opts: MergeOptions): Manifest {
   return {
     manifestVersion: base.manifestVersion,
     meta: base.meta,
-    entities: mergeNamedArray(base.entities, overlay.entities, (e) => e.name),
+    entities: mergeEntities(base.entities, overlay.entities, opts),
     traits: mergeNamedArray(base.traits, overlay.traits, (t) => t.name),
-    relations: concatOrUndefined(base.relations, overlay.relations),
+    relations: pruneOverriddenRelations(
+      concatOrUndefined(base.relations, overlay.relations),
+      mergeEntities(base.entities, overlay.entities, opts),
+      overriddenNames(base.entities, overlay.entities),
+    ),
     roles: mergeRecord(base.roles, overlay.roles),
     permissions: mergeRecord(base.permissions, overlay.permissions),
     workflows: mergeRecord(base.workflows, overlay.workflows),
@@ -181,6 +197,65 @@ function mergeI18nBundles(
     calendar: overlay.calendar ?? base.calendar,
     translations,
   };
+}
+
+/**
+ * Entity names an overlay replaces rather than adds. A replacement must say so via
+ * `overrides: true`; an undeclared collision is refused in `mergeEntities`.
+ */
+function overriddenNames(
+  base: readonly Entity[] | undefined,
+  overlay: readonly Entity[] | undefined,
+): ReadonlySet<string> {
+  const baseNames = new Set((base ?? []).map((e) => e.name));
+  const out = new Set<string>();
+  for (const e of overlay ?? []) if (baseNames.has(e.name)) out.add(e.name);
+  return out;
+}
+
+/**
+ * Last-write-wins by name, as before — but a silent win is the bug this guards. A pack that
+ * reuses an inherited entity name destroys the parent's version and leaves everything the
+ * parent hung off its fields dangling, so the replacement must declare `overrides: true` and
+ * thereby take responsibility for the difference.
+ */
+function mergeEntities(
+  base: readonly Entity[] | undefined,
+  overlay: readonly Entity[] | undefined,
+  opts: MergeOptions,
+): Entity[] | undefined {
+  if (base === undefined && overlay === undefined) return undefined;
+  const byName = new Map<string, Entity>();
+  for (const e of base ?? []) byName.set(e.name, e);
+  for (const e of overlay ?? []) {
+    if (opts.requireOverrideMarker && byName.has(e.name) && e.overrides !== true) {
+      throw new UndeclaredEntityOverrideError(e.name);
+    }
+    byName.set(e.name, e);
+  }
+  return Array.from(byName.values());
+}
+
+/**
+ * A replacement need not carry every field the original had, so relations the parent declared
+ * on fields the replacement dropped can no longer be emitted. Only `many_to_one` binds a column
+ * on its `from` entity; a `one_to_many`'s field names an inverse collection and survives.
+ */
+function pruneOverriddenRelations(
+  relations: readonly Relation[] | undefined,
+  entities: readonly Entity[] | undefined,
+  overridden: ReadonlySet<string>,
+): Relation[] | undefined {
+  if (relations === undefined) return undefined;
+  if (overridden.size === 0) return [...relations];
+  const fieldsByEntity = new Map(
+    (entities ?? []).map((e) => [e.name, new Set(e.fields.map((f) => f.name))] as const),
+  );
+  return relations.filter((rel) => {
+    if (rel.kind !== "many_to_one") return true;
+    if (!overridden.has(rel.from)) return true;
+    return fieldsByEntity.get(rel.from)?.has(rel.field) ?? false;
+  });
 }
 
 function mergeNamedArray<T>(

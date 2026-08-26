@@ -35,3 +35,15 @@ export class UnknownParentManifestError extends Error {
     this.childSlug = childSlug;
   }
 }
+
+export class UndeclaredEntityOverrideError extends Error {
+  override readonly name = "UndeclaredEntityOverrideError";
+  readonly entity: string;
+  constructor(entity: string) {
+    super(
+      `entity '${entity}' already exists in an inherited manifest; declare ` +
+        `'overrides: true' on it to replace the inherited definition deliberately`,
+    );
+    this.entity = entity;
+  }
+}

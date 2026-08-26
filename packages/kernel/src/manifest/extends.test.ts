@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { ExtendsCycleError, UnknownParentManifestError } from "./errors.js";
+import { ExtendsCycleError, UnknownParentManifestError,
+  UndeclaredEntityOverrideError,
+} from "./errors.js";
 import { resolveManifest, type ManifestRegistry } from "./extends.js";
 import type { Manifest } from "./types.js";
 import { validateManifest } from "./validate.js";
@@ -55,7 +57,27 @@ describe("resolveManifest — single parent", () => {
     expect(resolved.entities?.map((e) => e.name).sort()).toEqual(["Child", "Parent"]);
   });
 
-  it("local entity overrides parent entity with the same name", async () => {
+  it("local entity overrides parent entity with the same name when declared", async () => {
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+      entities: [{ name: "Patient", fields: [{ name: "a", type: { kind: "text" } }] }],
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+      entities: [
+        { name: "Patient", overrides: true, fields: [{ name: "b", type: { kind: "integer" } }] },
+      ],
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ base: parent }),
+    });
+    expect(resolved.entities).toHaveLength(1);
+    expect(resolved.entities?.[0]?.fields[0]?.name).toBe("b");
+  });
+
+  it("refuses an undeclared collision with an inherited entity", async () => {
     const parent: Manifest = {
       manifestVersion: "1.0",
       meta: { name: "Base", slug: "base", version: v },
@@ -66,11 +88,91 @@ describe("resolveManifest — single parent", () => {
       meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
       entities: [{ name: "Patient", fields: [{ name: "b", type: { kind: "integer" } }] }],
     };
+    await expect(
+      resolveManifest(child, { registry: registryFrom({ base: parent }) }),
+    ).rejects.toThrow(UndeclaredEntityOverrideError);
+  });
+
+  it("drops a parent's many_to_one relation whose field the replacement lacks", async () => {
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+      entities: [
+        { name: "Item", fields: [{ name: "a", type: { kind: "text" } }] },
+        {
+          name: "WorkOrder",
+          fields: [
+            { name: "a", type: { kind: "text" } },
+            { name: "item_id", type: { kind: "reference", target: "Item" } },
+          ],
+        },
+      ],
+      relations: [{ kind: "many_to_one", from: "WorkOrder", field: "item_id", to: "Item" }],
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+      entities: [
+        { name: "WorkOrder", overrides: true, fields: [{ name: "b", type: { kind: "text" } }] },
+      ],
+    };
     const resolved = await resolveManifest(child, {
       registry: registryFrom({ base: parent }),
     });
-    expect(resolved.entities).toHaveLength(1);
-    expect(resolved.entities?.[0]?.fields[0]?.name).toBe("b");
+    expect(resolved.relations ?? []).toHaveLength(0);
+  });
+
+  it("keeps a relation the replacement still supports", async () => {
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+      entities: [
+        { name: "Item", fields: [{ name: "a", type: { kind: "text" } }] },
+        {
+          name: "WorkOrder",
+          fields: [{ name: "item_id", type: { kind: "reference", target: "Item" } }],
+        },
+      ],
+      relations: [{ kind: "many_to_one", from: "WorkOrder", field: "item_id", to: "Item" }],
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+      entities: [
+        {
+          name: "WorkOrder",
+          overrides: true,
+          fields: [{ name: "item_id", type: { kind: "reference", target: "Item" } }],
+        },
+      ],
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ base: parent }),
+    });
+    expect(resolved.relations ?? []).toHaveLength(1);
+  });
+
+  it("keeps a one_to_many across an override — its field names no column", async () => {
+    const parent: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Base", slug: "base", version: v },
+      entities: [
+        { name: "Project", fields: [{ name: "a", type: { kind: "text" } }] },
+        { name: "Task", fields: [{ name: "a", type: { kind: "text" } }] },
+      ],
+      relations: [{ kind: "one_to_many", from: "Project", field: "tasks", to: "Task" }],
+    };
+    const child: Manifest = {
+      manifestVersion: "1.0",
+      meta: { name: "Child", slug: "child", version: v, extends: ["base"] },
+      entities: [
+        { name: "Project", overrides: true, fields: [{ name: "b", type: { kind: "text" } }] },
+      ],
+    };
+    const resolved = await resolveManifest(child, {
+      registry: registryFrom({ base: parent }),
+    });
+    expect(resolved.relations ?? []).toHaveLength(1);
   });
 
   it("strips extends from the resolved meta", async () => {
@@ -154,7 +256,7 @@ describe("resolveManifest — multi-parent", () => {
     const child: Manifest = {
       manifestVersion: "1.0",
       meta: { name: "Child", slug: "child", version: v, extends: ["p1", "p2"] },
-      entities: [sharedFrom(200)],
+      entities: [{ ...sharedFrom(200), overrides: true }],
     };
     const resolved = await resolveManifest(child, {
       registry: registryFrom({ p1, p2 }),

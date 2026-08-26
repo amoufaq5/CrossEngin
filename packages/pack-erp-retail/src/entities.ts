@@ -77,6 +77,8 @@ export const STORE_ENTITY: Entity = {
 
 export const SALES_ORDER_ENTITY: Entity = {
   name: "SalesOrder",
+  // Deliberately replaces the core ERP SalesOrder — retail's is a till/basket order, not the core sales-cycle one.
+  overrides: true,
   traits: [...AUDITABLE],
   fields: [
     {

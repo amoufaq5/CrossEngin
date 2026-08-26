@@ -96,7 +96,10 @@ describe("buildErpConstructionPack — resolved against core", () => {
     const resolved = await resolveManifest(buildErpConstructionPack(), {
       registry: coreRegistry(),
     });
-    expect(resolved.relations).toHaveLength((buildErpCorePack().relations ?? []).length + 3);
+    // -4: construction overrides core's manufacturing WorkOrder and its Project, so core's
+    // WorkOrder.item_id / bom_id / warehouse_id and Project.manager_id relations bind columns
+    // the construction versions do not have and are pruned at resolution.
+    expect(resolved.relations).toHaveLength((buildErpCorePack().relations ?? []).length + 3 - 4);
   });
 
   it("keeps all lifecycle workflows (construction overrides project_lifecycle)", async () => {

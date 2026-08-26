@@ -87,7 +87,10 @@ describe("buildErpRetailPack — resolved against core", () => {
 
   it("concatenates relations across packs (core + 5 retail)", async () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
-    expect(resolved.relations).toHaveLength((buildErpCorePack().relations ?? []).length + 5);
+    // -2: retail's SalesOrder overrides core's, and core's SalesOrder.account_id +
+    // SalesOrder.quote_id relations bind columns the retail till-order does not have, so
+    // resolution prunes them rather than emitting FKs on missing columns.
+    expect(resolved.relations).toHaveLength((buildErpCorePack().relations ?? []).length + 5 - 2);
   });
 
   it("keeps all lifecycle workflows (retail overrides sales_order_lifecycle)", async () => {
