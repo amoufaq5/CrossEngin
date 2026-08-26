@@ -47,6 +47,12 @@ import { PostgresRecipientResolver } from "./recipient-resolver.js";
 import { defaultSenderRegistry } from "./delivery-senders.js";
 import { PostgresDigestStore } from "./digest-store.js";
 import { PostgresTemplateStore } from "./template-store.js";
+import { PostgresAuditEmitter, auditActor, auditEntry } from "./audit-log-store.js";
+import {
+  TENANT_SCOPE_DENIED_OPERATION,
+  TENANT_SCOPE_GRANTED_OPERATION,
+} from "./notification-routes.js";
+import { randomUUID } from "node:crypto";
 import { renderDigest } from "./digest-template.js";
 import { memberFromItem } from "./digest-assembler.js";
 import { DIGEST_TEMPLATE_ID, digestLocale } from "./digest-assembly.js";
@@ -486,11 +492,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let digestReadStore: PostgresDigestStore | null = null;
   let templateStore: PostgresTemplateStore | null = null;
   let recipientResolver: PostgresRecipientResolver | null = null;
+  let auditEmitter: PostgresAuditEmitter | null = null;
   if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
     notificationStore = new PostgresNotificationStore(conn, schemaOpt);
     digestReadStore = new PostgresDigestStore(conn, schemaOpt);
     templateStore = new PostgresTemplateStore(conn, schemaOpt);
+    auditEmitter = new PostgresAuditEmitter(conn, schemaOpt);
     recipientResolver = new PostgresRecipientResolver(conn, {
       ...schemaOpt,
       adminRoles: options.notificationAdminRoles,
@@ -542,6 +550,32 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               resolveIdentity: (tenantId: string, principalId: string) =>
                 recipientResolver.identityFor(tenantId, principalId),
               tenantScopeRoles: new Set(options.notificationAuditRoles),
+              // Reading beyond your own inbox leaves a record in meta.audit_log — written
+              // before the data is served, so a failure to record refuses the read.
+              ...(auditEmitter !== null
+                ? {
+                    auditTenantScope: async (event): Promise<void> => {
+                      await auditEmitter.emit(
+                        auditEntry({
+                          id: randomUUID(),
+                          tenantId: event.tenantId,
+                          occurredAt: event.at,
+                          actor: auditActor({
+                            userId: event.principalId,
+                          }),
+                          operation: event.granted
+                            ? TENANT_SCOPE_GRANTED_OPERATION
+                            : TENANT_SCOPE_DENIED_OPERATION,
+                          entity: "notification_dispatches",
+                          after: { roles: event.roles, filters: event.filters },
+                          reason: event.granted
+                            ? "tenant-scope notification read"
+                            : "tenant-scope notification read refused",
+                        }),
+                      );
+                    },
+                  }
+                : {}),
             }
           : {}),
         // The dispatch stores only a hash of its variables, so a digest's copy is rendered from

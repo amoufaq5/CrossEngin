@@ -13,6 +13,7 @@ import {
   digestFragment,
   recipientFilterFor,
   requestedScope,
+  type TenantScopeAuditEvent,
 } from "./notification-routes.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -563,5 +564,130 @@ describe("notification-routes — requestedScope", () => {
   it("reads tenant only from the exact literal", () => {
     expect(requestedScope("tenant")).toBe("tenant");
     expect(requestedScope("Tenant")).toBe("self");
+  });
+});
+
+describe("notification-routes — tenant-scope audit", () => {
+  const AUDITED_ROLE = "auditor";
+
+  function auditedCtx(over: Partial<NotificationRoutesContext> = {}): {
+    ctx: NotificationRoutesContext;
+    events: TenantScopeAuditEvent[];
+  } {
+    const events: TenantScopeAuditEvent[] = [];
+    const ctx: NotificationRoutesContext = {
+      source: { listForTenant: async () => ({ data: [], nextCursor: null }) },
+      principalRoles: (p) => ({ primaryRole: p?.grantedScopes[0] ?? "anon", secondaryRoles: [] }),
+      allowedRoles: new Set([AUDITED_ROLE, "tenant_admin"]),
+      resolveIdentity: async () => ({ addressHashes: ["a".repeat(64)] }),
+      tenantScopeRoles: new Set([AUDITED_ROLE]),
+      auditTenantScope: async (e) => {
+        events.push(e);
+      },
+      clock: () => new Date("2026-08-25T12:00:00.000Z"),
+      ...over,
+    };
+    return { ctx, events };
+  }
+
+  it("records a granted escalation before serving it", async () => {
+    const { ctx, events } = auditedCtx();
+    const out = await call(ctx, { query: { scope: "tenant" } }, AUDITED_ROLE);
+    expect(out.status).toBe(200);
+    expect(out.body["scope"]).toBe("tenant");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.granted).toBe(true);
+  });
+
+  it("refuses the read with 503 when the record cannot be written", async () => {
+    const { ctx } = auditedCtx({
+      auditTenantScope: async () => {
+        throw new Error("audit table gone");
+      },
+    });
+    const out = await call(ctx, { query: { scope: "tenant" } }, AUDITED_ROLE);
+    expect(out.status).toBe(503);
+    expect(out.body["error"]).toBe("audit_unavailable");
+  });
+
+  it("does not read the tenant's data when the record fails", async () => {
+    let listed = 0;
+    const { ctx } = auditedCtx({
+      source: {
+        listForTenant: async () => {
+          listed += 1;
+          return { data: [], nextCursor: null };
+        },
+      },
+      auditTenantScope: async () => {
+        throw new Error("nope");
+      },
+    });
+    await call(ctx, { query: { scope: "tenant" } }, AUDITED_ROLE);
+    expect(listed).toBe(0);
+  });
+
+  it("records a refused escalation as not granted", async () => {
+    const { ctx, events } = auditedCtx();
+    const out = await call(ctx, { query: { scope: "tenant" } }, "tenant_admin");
+    expect(out.status).toBe(200);
+    expect(out.body["scope"]).toBe("self");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.granted).toBe(false);
+  });
+
+  it("still serves the self-scoped list when recording a refusal fails", async () => {
+    const { ctx } = auditedCtx({
+      auditTenantScope: async () => {
+        throw new Error("audit table gone");
+      },
+    });
+    const out = await call(ctx, { query: { scope: "tenant" } }, "tenant_admin");
+    expect(out.status).toBe(200);
+    expect(out.body["scope"]).toBe("self");
+  });
+
+  it("records nothing for an ordinary self-scoped read", async () => {
+    const { ctx, events } = auditedCtx();
+    await call(ctx, {}, AUDITED_ROLE);
+    expect(events).toEqual([]);
+  });
+
+  it("serves tenant scope unaudited when no auditor is wired", async () => {
+    const { ctx } = auditedCtx();
+    const noAuditor: NotificationRoutesContext = { ...ctx };
+    delete (noAuditor as { auditTenantScope?: unknown }).auditTenantScope;
+    const out = await call(noAuditor, { query: { scope: "tenant" } }, AUDITED_ROLE);
+    expect(out.body["scope"]).toBe("tenant");
+  });
+
+  it("captures what was read, not just that something was", async () => {
+    const { ctx, events } = auditedCtx();
+    await call(
+      ctx,
+      { query: { scope: "tenant", channel: "in_app", templateId: "design_review.approved", limit: "5", cursor: "c1" } },
+      AUDITED_ROLE,
+    );
+    expect(events[0]?.filters).toEqual({
+      channel: "in_app",
+      templateId: "design_review.approved",
+      limit: 5,
+      paged: true,
+    });
+  });
+
+  it("records the caller's principal, roles and time", async () => {
+    const { ctx, events } = auditedCtx();
+    await call(ctx, { query: { scope: "tenant" } }, AUDITED_ROLE);
+    expect(events[0]?.tenantId).toBe(TENANT);
+    expect(events[0]?.roles).toContain(AUDITED_ROLE);
+    expect(events[0]?.at).toBe("2026-08-25T12:00:00.000Z");
+    expect(events[0]?.principalId).toBeTruthy();
+  });
+
+  it("marks an unpaged read as not paged", async () => {
+    const { ctx, events } = auditedCtx();
+    await call(ctx, { query: { scope: "tenant" } }, AUDITED_ROLE);
+    expect(events[0]?.filters["paged"]).toBe(false);
   });
 });

@@ -42,6 +42,7 @@ export * from "./design-review-routes.js";
 export * from "./review-enrolment.js";
 export * from "./design-notifications.js";
 export * from "./notification-store.js";
+export * from "./audit-log-store.js";
 export * from "./notification-routes.js";
 export * from "./delivery-plan.js";
 export * from "./delivery-senders.js";
