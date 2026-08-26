@@ -89,9 +89,86 @@ checkpoints, billing, marketplace, etc.) — add the flags you want to the `api`
 - **Supabase + Vercel:** for the managed-cloud path (Supabase DB + Vercel UI + a container
   host for the API) see [`VERCEL-SUPABASE.md`](./VERCEL-SUPABASE.md).
 - **AI features are optional.** By default `operate-server` never calls an LLM at
-  runtime. Adding `--ai-design` to the `api` command (plus `ANTHROPIC_API_KEY` or
-  `OPENAI_API_KEY` — with `OPENAI_BASE_URL` for a self-hosted OSS model such as
-  Ollama/vLLM — in its environment) enables the in-product AI Architect: tenants
-  describe their business at `/setup` in the UI, review the generated system, and
-  activate it as their live, per-tenant schema. Without the flag, nothing calls a
-  model; the dev-time `crossengin chat` CLI remains available either way.
+  runtime. See [Running the model here too](#running-the-model-here-too) below.
+  Without it, nothing calls a model; the dev-time `crossengin chat` CLI remains
+  available either way.
+- **API keys and the notification inbox.** The 4th field of an api-key spec
+  (`token:role:tenant:user`) is the principal's `meta.users.id`. The notification
+  inbox is per-recipient, so a key without it gets an empty one. That is correct
+  for the platform-admin bootstrap key — it is an operator, not a tenant user —
+  but any key belonging to a real person should carry their user id.
+
+## Running the model here too
+
+The compose file above runs the database, API, UI and TLS on one box. The **model**
+is the one piece that is not in it, because where it runs is a real decision rather
+than a default:
+
+| | Model runs | Machine | Rough cost |
+|---|---|---|---|
+| **A. Hosted API** | Anthropic / OpenAI | any 2-4 vCPU VM | VM + per-token usage |
+| **B. Self-hosted** | this box | **GPU**, 12+ GB VRAM for a useful model | 10-20x the VM |
+
+**A is the right default.** The AI Architect runs once per tenant onboarding, not
+per request, so hosted tokens cost very little. Choose **B** only when "no third
+party sees our tenants' business descriptions" is a hard requirement — a data
+residency or procurement constraint, not a preference.
+
+### A — hosted model
+
+Add `--ai-design` to the `api` service command in `docker-compose.yml`, put
+`ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) in `.env`, and `docker compose up -d`.
+
+### B — self-hosted model, all on this VM
+
+No edits needed. Bring the stack up with the AI overlay:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.ai.yml up -d --build
+
+# On a GPU host (NVIDIA Container Toolkit installed):
+docker compose -f docker-compose.yml -f docker-compose.ai.yml \
+               -f docker-compose.ai-gpu.yml up -d --build
+```
+
+That adds two services: `ollama`, which is never published and is reachable only by
+the API over the compose network, and a one-shot `ai-pull` that fetches
+`OPERATE_AI_MODEL` into a named volume before the API starts. Re-running `up` is a
+no-op once the model is present.
+
+Set `OPERATE_AI_MODEL` in `.env` to any Ollama tag. Two things matter more than
+raw speed:
+
+- **It must emit strict JSON.** The Architect's output is parsed into a manifest and
+  cross-validated; a model that drifts out of JSON fails the design, however quickly
+  it fails. Instruction-tuned 14B-class models are the smallest that hold up.
+- **It must fit in VRAM.** ~10-12 GB for a 14B at 4-bit, ~6 GB for a 7-8B. Spilling
+  to system RAM costs most of the GPU's advantage.
+
+Without a GPU this still runs, but a design takes minutes instead of seconds — fine
+to try, not fine to put in front of tenants.
+
+## Which host to run this on
+
+Everything above needs one thing that rules most platforms out: **a long-running
+process**. `operate-server` runs its schedulers in-process — cron jobs, the dangling-
+link prune, the notification drain, JWKS refresh, manifest-activation polling,
+chain checkpoints. Serverless and edge runtimes stop the process between requests, so
+those never fire. Vercel and friends can host `operate-web`, never the API.
+
+| Path | Provider | Best when |
+|---|---|---|
+| One VM, everything | **Hetzner Cloud** (CCX + volume) | Pre-revenue, cost matters. Runs this compose file unchanged |
+| Managed database, less ops | **Railway** / **Render** | You would rather not run Postgres yourself |
+| Room to grow | **Fly.io** (apps + Managed Postgres + GPU machines) | Multi-region later — see the `residency` package |
+| Regulated buyers | **AWS** / **GCP** / **Azure** | You need a signed BAA or DPA. Hetzner will not sign one |
+
+Two notes that matter more than price:
+
+- **Take managed Postgres earlier than feels necessary.** Point `PGHOST` at it and
+  drop the `db` service — this compose file already supports that. Backups and PITR
+  are the last thing you want to be writing yourself, and the `dr` package's RPO/RTO
+  targets are aspirational without them.
+- **Managed Postgres usually forbids C extensions**, so `pg_uuidv7` is unavailable.
+  That is already handled: run `supabase/00-uuidv7.sql` once to define the pure-SQL
+  `uuid_generate_v7()`. The migration applier accepts either.

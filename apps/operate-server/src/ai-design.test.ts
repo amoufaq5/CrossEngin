@@ -379,6 +379,42 @@ describe("buildDesignProviderFromEnv", () => {
     expect((built?.provider as OpenAiProvider).endpoint).toBe("https://api.openai.com");
   });
 
+  it("passes a self-hosted model id through verbatim against a custom base URL", () => {
+    // The whole point of OPENAI_BASE_URL: Ollama serves `qwen2.5:14b-instruct`, never `gpt-4o`.
+    const built = buildDesignProviderFromEnv(
+      { OPENAI_API_KEY: "local", OPENAI_BASE_URL: "http://ollama:11434" },
+      { model: "qwen2.5:14b-instruct" },
+    );
+    expect(built?.model).toBe("qwen2.5:14b-instruct");
+    expect(built?.providerLabel).toBe("openai/qwen2.5:14b-instruct");
+    expect((built?.provider as OpenAiProvider).endpoint).toBe("http://ollama:11434");
+  });
+
+  it("still rewrites an unlisted model to the default against OpenAI itself", () => {
+    const built = buildDesignProviderFromEnv(
+      { OPENAI_API_KEY: "sk-x" },
+      { model: "qwen2.5:14b-instruct" },
+    );
+    expect(built?.model).toBe("gpt-4o");
+  });
+
+  it("keeps the OpenAI default when a custom base URL names no model", () => {
+    const built = buildDesignProviderFromEnv({
+      OPENAI_API_KEY: "local",
+      OPENAI_BASE_URL: "http://ollama:11434",
+    });
+    expect(built?.model).toBe("gpt-4o");
+  });
+
+  it("treats an empty OPENAI_BASE_URL as no base URL at all", () => {
+    const built = buildDesignProviderFromEnv(
+      { OPENAI_API_KEY: "sk-x", OPENAI_BASE_URL: "" },
+      { model: "qwen2.5:14b-instruct" },
+    );
+    expect(built?.model).toBe("gpt-4o");
+    expect((built?.provider as OpenAiProvider).endpoint).toBe("https://api.openai.com");
+  });
+
   it("honors OPENAI_BASE_URL and an OpenAI model override", () => {
     const built = buildDesignProviderFromEnv(
       { OPENAI_API_KEY: "sk-x", OPENAI_BASE_URL: "https://gateway.example.com" },

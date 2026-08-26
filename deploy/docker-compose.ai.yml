@@ -1,0 +1,80 @@
+# Overlay: run the LLM on this box too, so the whole platform — database, API, UI,
+# TLS *and* the model — is one `docker compose up` with nothing leaving the VM.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ai.yml up -d --build
+#
+# Add docker-compose.ai-gpu.yml as a third -f on a GPU host. Without a GPU this
+# still works, but generation is slow enough that designing a system takes
+# minutes rather than seconds — fine to try, not fine for tenants.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    # Never published: only the api service reaches it, over the compose network.
+    expose:
+      - "11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # One-shot: pulls the model into the shared volume before the API needs it.
+  # Idempotent — a model already present is a no-op, so this is safe on every `up`.
+  ai-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama"]
+    command: ["pull", "${OPERATE_AI_MODEL:-qwen2.5:14b-instruct}"]
+    restart: "no"
+
+  api:
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ai-pull:
+        condition: service_completed_successfully
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      NODE_ENV: production
+      # The provider appends /v1/chat/completions, which is exactly Ollama's
+      # OpenAI-compatible path. The key is required by the client but unused by
+      # Ollama — it is not a secret and does not need to be one.
+      OPENAI_BASE_URL: http://ollama:11434
+      OPENAI_API_KEY: ${OPERATE_AI_API_KEY:-local}
+    # Compose REPLACES `command` rather than merging it, so this repeats the base
+    # command and adds the AI flags. Keep the two in step when either changes.
+    command:
+      - node
+      - apps/operate-server/dist/bin/operate-server.js
+      - --pack
+      - ${OPERATE_PACK:-erp-core}
+      - --store
+      - pg
+      - --port
+      - "8787"
+      - --scheme
+      - https
+      - --platform-admin
+      - --api-key
+      - ${OPERATE_ADMIN_API_KEY}
+      - --ai-design
+      - --ai-model
+      - ${OPERATE_AI_MODEL:-qwen2.5:14b-instruct}
+
+volumes:
+  ollama-models:
