@@ -44,14 +44,31 @@ export function isOpenAiEmbeddingModel(value: unknown): value is OpenAiEmbedding
   return typeof value === "string" && (OPENAI_EMBEDDING_MODELS as readonly string[]).includes(value);
 }
 
+/** INVARIANT: `OPENAI_PRICING` describes `api.openai.com` only. A model served
+ * by an OpenAI-compatible endpoint (Ollama, vLLM, LiteLLM, OpenRouter, Azure)
+ * is absent from it, and that absence is not an error — it means the vendor
+ * price is unknown, not that the model is invalid. */
+export function openAiPricingFor(model: string): OpenAiModelPricing | undefined {
+  if (!Object.prototype.hasOwnProperty.call(OPENAI_PRICING, model)) return undefined;
+  return (OPENAI_PRICING as Readonly<Record<string, OpenAiModelPricing>>)[model];
+}
+
+export function hasKnownPricing(model: string): boolean {
+  return openAiPricingFor(model) !== undefined;
+}
+
 export interface UsageCostInput {
   readonly inputTokens: number;
   readonly cachedInputTokens?: number;
   readonly outputTokens: number;
 }
 
-export function computeUsageCost(model: OpenAiModel, usage: UsageCostInput): number {
-  const pricing = OPENAI_PRICING[model];
+/** Total, never throwing: an unpriced model costs 0. A self-hosted model has no
+ * per-token vendor cost, and charging OpenAI's list price for someone else's
+ * endpoint would put a wrong number in a cost ledger. */
+export function computeUsageCost(model: string, usage: UsageCostInput): number {
+  const pricing = openAiPricingFor(model);
+  if (pricing === undefined) return 0;
   const cached = usage.cachedInputTokens ?? 0;
   const uncachedInput = Math.max(0, usage.inputTokens - cached);
   const inputDollars = (uncachedInput * pricing.inputUsdPerMillion) / 1_000_000;

@@ -9,11 +9,7 @@ import {
   isAnthropicModel,
   type AnthropicModel,
 } from "@crossengin/ai-providers-anthropic";
-import {
-  OpenAiProvider,
-  isOpenAiChatModel,
-  type OpenAiChatModel,
-} from "@crossengin/ai-providers-openai";
+import { OpenAiProvider, isOpenAiChatModel } from "@crossengin/ai-providers-openai";
 import {
   ManifestSchema,
   manifestHash,
@@ -548,13 +544,19 @@ export function buildDesignProviderFromEnv(
   }
   const openaiKey = env["OPENAI_API_KEY"];
   if (openaiKey !== undefined && openaiKey.length > 0) {
-    const model: OpenAiChatModel =
-      opts?.model !== undefined && isOpenAiChatModel(opts.model) ? opts.model : "gpt-4o";
     const baseUrl = env["OPENAI_BASE_URL"];
+    const custom = baseUrl !== undefined && baseUrl.length > 0;
+    // A custom base URL means a self-hosted or proxied endpoint, whose model ids have
+    // nothing to do with OpenAI's catalogue — validating against it there would silently
+    // rewrite `qwen2.5:14b` to `gpt-4o` and ask Ollama for a model it does not have.
+    const model: string =
+      opts?.model !== undefined && (custom || isOpenAiChatModel(opts.model))
+        ? opts.model
+        : "gpt-4o";
     const provider = new OpenAiProvider({
       apiKey: openaiKey,
       defaultModel: model,
-      ...(baseUrl !== undefined && baseUrl.length > 0 ? { baseUrl } : {}),
+      ...(custom ? { baseUrl } : {}),
     });
     return { provider, providerLabel: `openai/${model}`, model };
   }

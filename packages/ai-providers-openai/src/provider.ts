@@ -24,13 +24,39 @@ import {
   computeUsageCost,
   isOpenAiChatModel,
   isOpenAiEmbeddingModel,
+  openAiPricingFor,
   type OpenAiChatModel,
   type OpenAiEmbeddingModel,
+  type OpenAiModel,
+  type OpenAiModelPricing,
 } from "./pricing.js";
 import { chunksFromSse, readSseStream } from "./streaming.js";
 
 export const OPENAI_API_BASE_URL = "https://api.openai.com";
 export const DEFAULT_EMBEDDING_MODEL: OpenAiEmbeddingModel = "text-embedding-3-small";
+
+/** A chat model id: one of OpenAI's own, or any id an OpenAI-compatible
+ * endpoint serves. The union keeps literal-type ergonomics for the former. */
+export type OpenAiChatModelId = OpenAiChatModel | (string & {});
+export type OpenAiEmbeddingModelId = OpenAiEmbeddingModel | (string & {});
+
+const UNKNOWN_MODEL_PRICING: OpenAiModelPricing = {
+  inputUsdPerMillion: 0,
+  cachedInputUsdPerMillion: 0,
+  outputUsdPerMillion: 0,
+};
+
+function normalizeBaseUrl(baseUrl: string): string {
+  return baseUrl.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+/** INVARIANT: OpenAI's model catalogue describes `api.openai.com`. Point the
+ * client anywhere else — a different engine (Ollama serving `qwen2.5:14b`) or a
+ * proxy in front of OpenAI (OpenRouter serving `anthropic/claude-3.5-sonnet`) —
+ * and that catalogue is no longer authoritative, so it must not gate model ids. */
+function isCustomBaseUrl(baseUrl: string): boolean {
+  return normalizeBaseUrl(baseUrl) !== normalizeBaseUrl(OPENAI_API_BASE_URL);
+}
 
 export type FetchLike = (
   url: string,
@@ -39,8 +65,8 @@ export type FetchLike = (
 
 export interface OpenAiProviderOptions {
   readonly apiKey: string;
-  readonly defaultModel: OpenAiChatModel;
-  readonly defaultEmbeddingModel?: OpenAiEmbeddingModel;
+  readonly defaultModel: OpenAiChatModelId;
+  readonly defaultEmbeddingModel?: OpenAiEmbeddingModelId;
   readonly defaultMaxTokens?: number;
   readonly baseUrl?: string;
   readonly organization?: string;
@@ -73,10 +99,11 @@ export class OpenAiProvider implements LlmProvider {
   readonly pricing: ProviderPricing;
 
   private readonly apiKey: string;
-  private readonly defaultModel: OpenAiChatModel;
-  private readonly defaultEmbeddingModel: OpenAiEmbeddingModel;
+  private readonly defaultModel: string;
+  private readonly defaultEmbeddingModel: string;
   private readonly defaultMaxTokens: number | undefined;
   private readonly baseUrl: string;
+  private readonly customBaseUrl: boolean;
   private readonly organization: string | undefined;
   private readonly project: string | undefined;
   private readonly fetchImpl: FetchLike;
@@ -85,20 +112,27 @@ export class OpenAiProvider implements LlmProvider {
     if (opts.apiKey.length === 0) {
       throw new Error("OpenAiProvider: apiKey is required");
     }
-    if (!isOpenAiChatModel(opts.defaultModel)) {
+    this.baseUrl = opts.baseUrl ?? OPENAI_API_BASE_URL;
+    this.customBaseUrl = isCustomBaseUrl(this.baseUrl);
+    if (
+      opts.defaultModel.length === 0 ||
+      (!this.customBaseUrl && !isOpenAiChatModel(opts.defaultModel))
+    ) {
       throw new Error(`OpenAiProvider: unsupported defaultModel ${opts.defaultModel}`);
     }
     this.apiKey = opts.apiKey;
     this.defaultModel = opts.defaultModel;
     this.defaultEmbeddingModel = opts.defaultEmbeddingModel ?? DEFAULT_EMBEDDING_MODEL;
     this.defaultMaxTokens = opts.defaultMaxTokens;
-    this.baseUrl = opts.baseUrl ?? OPENAI_API_BASE_URL;
     this.organization = opts.organization;
     this.project = opts.project;
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as FetchLike);
-    this.models = Object.keys(OPENAI_PRICING);
+    const catalogue = Object.keys(OPENAI_PRICING);
+    this.models = catalogue.includes(this.defaultModel)
+      ? catalogue
+      : [this.defaultModel, ...catalogue];
     this.residency = opts.residency ?? ["us", "eu"];
-    const defaultPricing = OPENAI_PRICING[this.defaultModel];
+    const defaultPricing = openAiPricingFor(this.defaultModel) ?? UNKNOWN_MODEL_PRICING;
     this.pricing = {
       inputPerMillionTokens: defaultPricing.inputUsdPerMillion,
       outputPerMillionTokens: defaultPricing.outputUsdPerMillion,
@@ -140,7 +174,9 @@ export class OpenAiProvider implements LlmProvider {
         status: response.status,
       });
     }
-    yield* readSseStream(response.body, model);
+    // The stream reader only carries the model id into `computeUsageCost`, which
+    // is total over arbitrary ids, so a non-catalogue id is safe here.
+    yield* readSseStream(response.body, model as OpenAiModel);
   }
 
   async embed(req: EmbeddingRequest): Promise<EmbeddingResponse> {
@@ -171,7 +207,9 @@ export class OpenAiProvider implements LlmProvider {
     }
     const ordered = [...parsed.data].sort((a, b) => a.index - b.index);
     const vectors = ordered.map((d) => [...d.embedding]);
-    const dim = vectors[0]?.length ?? OPENAI_EMBEDDING_DIMENSIONS[model];
+    const dim =
+      vectors[0]?.length ??
+      (isOpenAiEmbeddingModel(model) ? OPENAI_EMBEDDING_DIMENSIONS[model] : 0);
     const usage: Usage = {
       inputTokens: parsed.usage.prompt_tokens,
       outputTokens: 0,
@@ -214,13 +252,13 @@ export class OpenAiProvider implements LlmProvider {
     }
   }
 
-  chunksFromTextStream(sse: string, model?: OpenAiChatModel): readonly CompletionChunk[] {
-    return [...chunksFromSse(sse, model ?? this.defaultModel)];
+  chunksFromTextStream(sse: string, model?: OpenAiChatModelId): readonly CompletionChunk[] {
+    return [...chunksFromSse(sse, (model ?? this.defaultModel) as OpenAiModel)];
   }
 
-  private resolveModel(requested: string | undefined): OpenAiChatModel {
+  private resolveModel(requested: string | undefined): string {
     if (requested === undefined) return this.defaultModel;
-    if (!isOpenAiChatModel(requested)) {
+    if (requested.length === 0 || (!this.customBaseUrl && !isOpenAiChatModel(requested))) {
       throw new OpenAiError({
         kind: "invalid_request_error",
         message: `OpenAI provider does not support chat model: ${requested}`,
@@ -229,9 +267,9 @@ export class OpenAiProvider implements LlmProvider {
     return requested;
   }
 
-  private resolveEmbeddingModel(requested: string | undefined): OpenAiEmbeddingModel {
+  private resolveEmbeddingModel(requested: string | undefined): string {
     if (requested === undefined) return this.defaultEmbeddingModel;
-    if (!isOpenAiEmbeddingModel(requested)) {
+    if (requested.length === 0 || (!this.customBaseUrl && !isOpenAiEmbeddingModel(requested))) {
       throw new OpenAiError({
         kind: "invalid_request_error",
         message: `OpenAI provider does not support embedding model: ${requested}`,

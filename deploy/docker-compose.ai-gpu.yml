@@ -1,0 +1,22 @@
+# Overlay: give the model an NVIDIA GPU. Layer it on top of docker-compose.ai.yml.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.ai.yml \
+#                  -f docker-compose.ai-gpu.yml up -d --build
+#
+# Requires the NVIDIA Container Toolkit on the host (`nvidia-ctk runtime configure`);
+# without it the ollama service fails to start rather than silently falling back to
+# CPU — which is the behaviour you want, since a silent fallback would look like the
+# model simply being slow.
+#
+# Sizing: the model must fit in VRAM or Ollama spills to system RAM and the speed
+# advantage disappears. A 14B model at 4-bit needs ~10-12 GB; 7-8B needs ~6 GB.
+
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: ["gpu"]
