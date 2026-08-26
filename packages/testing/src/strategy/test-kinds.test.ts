@@ -10,11 +10,11 @@ import {
 } from "./test-kinds.js";
 
 const baseSpec = {
-  id: "kernel-emit-create-table",
+  id: "kernel-emit-meta-bootstrap",
   kind: "unit" as const,
-  description: "emitCreateTable produces deterministic SQL",
+  description: "emitMetaBootstrapSql produces deterministic SQL",
   package: "@crossengin/kernel",
-  filePath: "packages/kernel/src/ddl/emit.test.ts",
+  filePath: "packages/kernel/src/bootstrap/emit.test.ts",
   estimatedRuntimeMs: 50,
 };
 

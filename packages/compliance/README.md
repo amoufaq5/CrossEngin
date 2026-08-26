@@ -23,7 +23,7 @@ workflows to a tenant's manifest at apply time.
 ## API
 
 ```ts
-import { resolveManifest, validateManifest, applyManifest } from "@crossengin/kernel/manifest";
+import { resolveManifest, validateManifest } from "@crossengin/kernel/manifest";
 import { resolveCompliancePacks } from "@crossengin/compliance";
 import { pack as part11Pack } from "@crossengin/compliance/packs/21-cfr-part-11";
 
@@ -42,9 +42,8 @@ const r2 = await resolveCompliancePacks(r1, { registry });
 
 // 3. validate the fully-resolved manifest
 validateManifest(r2);
-
-// 4. emit DDL
-const sql = applyManifest(oldManifest, r2, { schema: "t_acme" });
+// Serving it — creating and migrating the tables — is
+// ColumnMappedEntityStore.ensureSchema() in @crossengin/operate-runtime-pg.
 ```
 
 ## Manifest meta extensions

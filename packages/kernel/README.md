@@ -59,25 +59,36 @@ yields no tenant.
 
 ### `@crossengin/kernel/ddl`
 
-DDL emitter per **ADR-0003**. Pure function from `Entity` to Postgres
-DDL statements (no Postgres connection required).
+The DDL **vocabulary** per **ADR-0003** — pure, connection-free functions
+that answer "what does this field become in Postgres?". The kernel no
+longer emits entity tables itself; `ColumnMappedEntityStore` in
+`@crossengin/operate-runtime-pg` owns that, because only it knows the
+tenancy shape (`tenant_id`, the composite `(tenant_id, id)` key, RLS).
+See ADR-0283.
+
+What this module exports:
+
+- `resolvedFields(entity, customTraits)` — every domain field an entity
+  resolves to (its own, then its traits'). **The single answer** to which
+  fields become columns, shared by `validateManifest` and the store.
+- `resolvedFieldNames(entity, customTraits)` — the same, as a name set,
+  plus the implicit `id`.
+- `fieldTypeToPostgresType(type)` — the mapping table below.
+- `columnNameForField(field)` — a `reference` field's column is suffixed
+  `_id`; everything else keeps its name.
+- `emitDefault(value)` — a field default rendered as the SQL after
+  `DEFAULT` (null for `sequence`, which the serving runtime allocates).
+- `computeEntityDiff(old, new, ctx?)` — the structural diff (see below).
+- `expandTraits` / `checkEntityFieldNames` / `computeResolvedIndexes` —
+  trait expansion with collision and reserved-name checks, and the
+  resolved index set a diff compares.
 
 ```ts
-import { emitEntity } from "@crossengin/kernel/ddl";
+import { resolvedFields, fieldTypeToPostgresType } from "@crossengin/kernel/ddl";
 
-const statements = emitEntity(
-  {
-    name: "Patient",
-    fields: [
-      { name: "first_name", type: { kind: "text", maxLength: 100 }, required: true },
-      { name: "email", type: { kind: "email" }, unique: true },
-    ],
-    traits: ["auditable", "soft_deletable"],
-  },
-  { schema: "t_acme_pharma" },
-);
-// statements[0] = CREATE TABLE "t_acme_pharma"."patient" (...)
-// statements[1+] = CREATE INDEX ... (per reference / enum / indexed / explicit index)
+const fields = resolvedFields(patient, customTraits);
+// [first_name, email, created_at, updated_at, created_by, updated_by, deleted_at, ...]
+fieldTypeToPostgresType(fields[0].type); // "VARCHAR(100)"
 ```
 
 #### Mapping rules
@@ -103,14 +114,12 @@ const statements = emitEntity(
 
 #### Implicit `id` column
 
-Every emitted table gets:
-
-```sql
-"id" UUID NOT NULL DEFAULT uuid_generate_v7() PRIMARY KEY
-```
-
-The kernel runtime is responsible for installing `uuid_generate_v7()`
-in each tenant schema before applying tenant DDL.
+`resolvedFields` deliberately omits `id`: it is a system column the
+serving store types for itself. `ColumnMappedEntityStore` emits it as
+`TEXT`, paired with `tenant_id` in a composite `(tenant_id, id)` primary
+key so a reference can only point inside its own tenant.
+`resolvedFieldNames` still reports `id`, since for an existence question
+it plainly exists.
 
 #### Built-in traits
 
@@ -125,43 +134,35 @@ in each tenant schema before applying tenant DDL.
 
 Custom traits pass through `context.customTraits`.
 
-#### Indexes (auto-emitted)
+#### Resolved indexes
 
-- Every `reference` field → B-tree index on the `_id` column
-- Every `enum` field → B-tree index
-- Every field with `indexed: true` → B-tree index
-- Every field with `indexed: { kind: "gin" | "gist" }` → typed index
-- Every explicit composite index from `entity.indexes`
+`computeResolvedIndexes(entity, customTraits)` derives the index set an
+entity implies — one per `reference` field, per `enum` field, per field
+with `indexed: true` or `indexed: { kind: "gin" | "gist" }`, plus every
+explicit composite index from `entity.indexes`. `computeEntityDiff` uses
+it to report added and removed indexes.
 
-`unique: true` produces an inline `UNIQUE` (Postgres auto-indexes
-that). `unique: { scope: [...] }` produces a composite `UNIQUE`
-constraint at table level.
-
-#### Not yet emitted (Phase 2)
-
-- Triggers (auditable `updated_at` auto-update, versioned increment,
-  soft-delete logic)
-- Shadow tables (versioned `previous_versions`, gxp_signed `signatures`)
-- Generated columns (`computed:` expressions)
-- RLS policies for `tenant_owned`
-- Compliance-pack trait overrides (per ADR-0012)
+Nothing here emits `CREATE INDEX`. The serving store decides which of
+these to create, and adds its own (a `tenant_id` index, and a pg_trgm
+GIN index per plaintext text column to accelerate `contains` filters).
 
 ### Diff engine (in `@crossengin/kernel/ddl`)
 
 `computeEntityDiff(old, new, ctx?)` computes the structural diff
-between two versions of an entity; `emitDiff(diff, ctx)` turns the
-diff into ALTER statements. `diffAndEmit(old, new, ctx)` composes
-the two.
+between two versions of an entity — added, removed and modified fields
+(type, nullability, default), and added and removed indexes. It reports
+*what changed*; turning that into SQL is the serving store's job.
 
 ```ts
-import { diffAndEmit } from "@crossengin/kernel/ddl";
+import { computeEntityDiff } from "@crossengin/kernel/ddl";
 
-const statements = diffAndEmit(oldEntity, newEntity, { schema: "t_acme" });
-// e.g.
-//   ALTER TABLE "t_acme"."patient" ADD COLUMN "email" VARCHAR(320);
-//   ALTER TABLE "t_acme"."patient" ALTER COLUMN "name" TYPE VARCHAR(200);
-//   CREATE INDEX "idx_patient_email" ON "t_acme"."patient" ("email");
+const diff = computeEntityDiff(oldEntity, newEntity);
+// { tableName, addedFields, removedFields, modifiedFields, addedIndexes, removedIndexes }
 ```
+
+A change it cannot describe safely — an entity rename, an altered enum,
+a flipped `unique` — throws `EntityRenameNotSupportedError` or
+`UnsupportedDiffChangeError` rather than reporting a partial diff.
 
 Emit order is fixed:
 
@@ -206,7 +207,6 @@ files, etc. — deferred to their own ADRs.
 import {
   ManifestSchema,
   validateManifest,
-  applyManifest,
   computeManifestDiff,
 } from "@crossengin/kernel/manifest";
 
@@ -216,18 +216,15 @@ const manifest = ManifestSchema.parse(rawJson);
 // 2. Cross-section integrity validate
 validateManifest(manifest);    // throws ManifestValidationError on issues
 
-// 3. Compute SQL to apply
-const sql = applyManifest(null, manifest, { schema: "t_acme" });
-//   first-time application: returns ordered CREATE TABLE + CREATE INDEX
-
-// 4. Or compute SQL to evolve
-const sql2 = applyManifest(oldManifest, newManifest, { schema: "t_acme" });
-//   evolution: returns DROP / ALTER / CREATE in dependency order
-
-// 5. Or inspect the diff first
+// 3. Inspect what changed against the active manifest
 const diff = computeManifestDiff(oldManifest, newManifest);
 //   { addedEntities, removedEntities, modifiedEntities, destructive }
 ```
+
+The manifest module analyses and compares; it does not emit SQL.
+Serving a manifest — creating the tables and migrating them as it
+evolves — belongs to `ColumnMappedEntityStore.ensureSchema()` in
+`@crossengin/operate-runtime-pg` (ADR-0283).
 
 #### Top-level structure (v1)
 
@@ -375,7 +372,7 @@ via `meta.extends`:
 The kernel resolves inheritance via a caller-provided registry:
 
 ```ts
-import { resolveManifest, validateManifest, applyManifest } from "@crossengin/kernel/manifest";
+import { resolveManifest, validateManifest } from "@crossengin/kernel/manifest";
 
 const resolved = await resolveManifest(manifest, {
   registry: {
@@ -385,8 +382,7 @@ const resolved = await resolveManifest(manifest, {
     },
   },
 });
-validateManifest(resolved);                         // run cross-section checks on resolved
-const sql = applyManifest(oldManifest, resolved, ctx); // apply
+validateManifest(resolved);   // run cross-section checks on the resolved manifest
 ```
 
 Merge semantics (depth-first, left-to-right; current wins):
@@ -500,17 +496,14 @@ concern; the v1 types treat it as an opaque string.
 
 #### DDL emission
 
-Three entry points:
-
-- `emitManifestCreate(manifest, ctx)` — first-time application; emits
-  CREATE TABLE for every entity in topological order (FK dependencies
-  first), then CREATE INDEX per entity.
-- `emitManifestDiff(manifest, diff, ctx)` — evolution; ordering:
-  1. `DROP TABLE ... CASCADE` for removed entities (in reverse topo)
-  2. Per-entity ALTERs from `emitDiff` (for each modified entity)
-  3. `CREATE TABLE` + indexes for added entities (in topo order)
-- `applyManifest(old | null, next, ctx)` — wraps both; null `old`
-  means first-time.
+Not here. `ColumnMappedEntityStore.ensureSchema()` in
+`@crossengin/operate-runtime-pg` creates each entity's tenant-scoped
+table and migrates it additively (`ADD COLUMN IF NOT EXISTS`) as the
+manifest gains fields. The kernel supplies the vocabulary it works
+from — `resolvedFields`, `fieldTypeToPostgresType`, `columnNameForField`,
+`emitDefault` — so validation and the served table cannot disagree about
+which fields exist. ADR-0283 records why the kernel's own entity emitter
+was removed: it had no caller and emitted an untenanted table.
 
 #### Topological sort
 

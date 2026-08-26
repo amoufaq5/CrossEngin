@@ -3,7 +3,6 @@ export * from "./types.js";
 export * from "./validate.js";
 export * from "./topology.js";
 export * from "./diff.js";
-export * from "./emit.js";
 export * from "./extends.js";
 export * from "./hash.js";
 export * from "./patch.js";
