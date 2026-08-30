@@ -1,0 +1,63 @@
+name: amgad_samir_app
+description: "تطبيق أمجد سمير — Islamic lectures, audio-first, offline-capable."
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # State + navigation
+  flutter_riverpod: ^3.4.2
+  go_router: ^17.5.0
+
+  # Persistence
+  shared_preferences: ^2.5.5
+
+  # The rest of the stack is added at the step that wires it, so no native
+  # plugin lands in the merged manifest or the Podfile before the step that
+  # justifies its permissions. Resolution against this SDK was verified up
+  # front — see README.md, "Dependency plan".
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/
+
+  fonts:
+    # Titles, numerals, brand. Design calls for 600–700; 400/500 are bundled
+    # because a few title styles sit at 500.
+    - family: NotoKufiArabic
+      fonts:
+        - asset: assets/fonts/NotoKufiArabic-400.ttf
+          weight: 400
+        - asset: assets/fonts/NotoKufiArabic-500.ttf
+          weight: 500
+        - asset: assets/fonts/NotoKufiArabic-600.ttf
+          weight: 600
+        - asset: assets/fonts/NotoKufiArabic-700.ttf
+          weight: 700
+    # Body, meta, labels. Design calls for 300–600; 700 rounds out the family.
+    - family: IBMPlexSansArabic
+      fonts:
+        - asset: assets/fonts/IBMPlexSansArabic-300.ttf
+          weight: 300
+        - asset: assets/fonts/IBMPlexSansArabic-400.ttf
+          weight: 400
+        - asset: assets/fonts/IBMPlexSansArabic-500.ttf
+          weight: 500
+        - asset: assets/fonts/IBMPlexSansArabic-600.ttf
+          weight: 600
+        - asset: assets/fonts/IBMPlexSansArabic-700.ttf
+          weight: 700

@@ -1,0 +1,9 @@
+tags:
+  golden:
+    # Goldens are review artifacts, not a portable regression gate: text
+    # rasterisation differs between hosts, so a shot rendered on one machine
+    # will not match byte-for-byte on another. Skipped by default.
+    #
+    #   flutter test --tags golden --run-skipped                 # verify
+    #   flutter test --tags golden --run-skipped --update-goldens # refresh
+    skip: "run explicitly: flutter test --tags golden --run-skipped"
