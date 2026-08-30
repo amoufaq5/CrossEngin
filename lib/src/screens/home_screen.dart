@@ -11,6 +11,7 @@ import '../theme/app_metrics.dart';
 import '../theme/app_typography.dart';
 import '../theme/series_palette.dart';
 import '../widgets/arabic_text.dart';
+import '../widgets/brand_mark.dart';
 import '../widgets/directional.dart';
 
 /// Step 3 replaces this with the real home screen.
@@ -86,15 +87,7 @@ class _Header extends StatelessWidget {
     return Row(
       spacing: AppSpace.x10,
       children: <Widget>[
-        ClipRRect(
-          borderRadius: BorderRadius.circular(10),
-          child: Image.asset(
-            'assets/images/logo.png',
-            width: 34,
-            height: 34,
-            fit: BoxFit.cover,
-          ),
-        ),
+        const BrandMark(),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
