@@ -28,6 +28,9 @@ abstract final class AppRadii {
   /// Header icon buttons (34x34).
   static const double iconButton = 11;
 
+  /// The brand mark's tile in the home header (34x34).
+  static const double brandTile = 10;
+
   /// Search field.
   static const double field = 14;
 

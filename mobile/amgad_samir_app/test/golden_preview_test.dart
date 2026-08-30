@@ -9,6 +9,7 @@ import 'package:amgad_samir_app/src/settings/settings_controller.dart';
 import 'package:amgad_samir_app/src/settings/settings_store.dart';
 import 'package:amgad_samir_app/src/theme/app_typography.dart';
 import 'package:amgad_samir_app/src/widgets/arabic_text.dart';
+import 'package:amgad_samir_app/src/widgets/brand_mark.dart';
 import 'package:amgad_samir_app/src/widgets/directional.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -74,7 +75,7 @@ void main() {
     // the golden shows an empty box where the logo belongs.
     await tester.runAsync(() async {
       await precacheImage(
-        const AssetImage('assets/images/logo.png'),
+        const AssetImage(BrandMark.assetPath),
         tester.element(find.byType(MaterialApp)),
       );
     });

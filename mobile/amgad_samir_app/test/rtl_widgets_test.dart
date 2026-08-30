@@ -1,5 +1,9 @@
+import 'package:amgad_samir_app/src/theme/app_colors.dart';
+import 'package:amgad_samir_app/src/theme/app_metrics.dart';
+import 'package:amgad_samir_app/src/theme/app_theme.dart';
 import 'package:amgad_samir_app/src/theme/app_typography.dart';
 import 'package:amgad_samir_app/src/widgets/arabic_text.dart';
+import 'package:amgad_samir_app/src/widgets/brand_mark.dart';
 import 'package:amgad_samir_app/src/widgets/directional.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -172,6 +176,28 @@ void main() {
       final Size size = tester.getSize(find.byType(CustomPaint).first);
       expect(size.width, 30);
       expect(size.height, closeTo(30 * 17 / 15, 0.001));
+    });
+  });
+
+  group('BrandMark', () {
+    testWidgets('is tinted from the theme, not baked into the asset', (
+      WidgetTester tester,
+    ) async {
+      for (final AppColors c in <AppColors>[AppColors.dark, AppColors.light]) {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.of(c.brightness),
+            themeAnimationDuration: AppMotion.theme,
+            home: const Scaffold(body: Center(child: BrandMark())),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final Image image = tester.widget<Image>(find.byType(Image));
+        expect(image.color, c.txt);
+        // srcIn, so the mask's alpha survives and only the colour is replaced.
+        expect(image.colorBlendMode, BlendMode.srcIn);
+        expect(tester.getSize(find.byType(BrandMark)), const Size(34, 34));
+      }
     });
   });
 
