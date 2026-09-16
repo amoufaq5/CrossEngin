@@ -1,3 +1,4 @@
+import { mutationReceipt } from "./mutation-receipt.js";
 import { qualifyTable, quoteIdent } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
@@ -203,14 +204,14 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     return withTenantContext(this.conn, tenantId, (tx) => this.listPageOn(tx, tenantId, entity, query));
   }
 
-  private async getOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
+  private async getOn(tx: PgConnection, tenantId: string, entity: string, id: string, lock = false): Promise<EntityRecord | null> {
     const plan = this.planFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
     const res = await tx.query<Record<string, unknown>>(
       `SELECT ${this.selectList(plan)}
          FROM ${qualified}
         WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2
-        LIMIT 1`,
+        LIMIT 1${lock ? " FOR UPDATE" : ""}`,
       [tenantId, id],
     );
     const row = res.rows[0];
@@ -313,7 +314,14 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
    * or rolls back atomically). A cross-tenant call inside is rejected.
    */
   withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
-    return withTenantContext(this.conn, tenantId, (tx) => {
+    return withTenantContext(this.conn, tenantId, tx => fn(this.boundStore(tx, tenantId)));
+  }
+
+  withIdempotency<T>(tenantId: string, key: string, fingerprint: string, body: (tx: EntityStore) => Promise<T>): Promise<T> {
+    return withTenantContext(this.conn, tenantId, tx => mutationReceipt(tx, tenantId, key, fingerprint, () => body(this.boundStore(tx, tenantId))));
+  }
+
+  private boundStore(tx: PgConnection, tenantId: string): EntityStore {
       const assertTenant = (t: string): void => {
         if (t !== tenantId) throw new Error("cross-tenant access inside a transaction is not allowed");
       };
@@ -328,7 +336,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         },
         get: (t, entity, id) => {
           assertTenant(t);
-          return this.getOn(tx, t, entity, id);
+          return this.getOn(tx, t, entity, id, true);
         },
         create: (t, entity, record) => {
           assertTenant(t);
@@ -343,8 +351,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
           return this.removeOn(tx, t, entity, id);
         },
       };
-      return fn(bound);
-    });
+      return bound;
   }
 
   // ----- many_to_many association links -------------------------------------

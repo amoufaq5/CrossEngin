@@ -1,3 +1,4 @@
+import type { DesignResultLike } from "./ai-design-routes.js";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
@@ -73,6 +74,8 @@ export interface DesignJobStore {
 }
 
 export interface PostgresDesignJobStoreOptions {
+  readonly leaseToken?: string;
+  readonly requireReview?: boolean;
   readonly schema?: string;
 }
 
@@ -132,6 +135,8 @@ const PROGRESS_KEYS = ["status", "phase", "attempt", "outputChars", "issues"] as
 export class PostgresDesignJobStore implements DesignJobStore {
   private readonly conn: PgConnection;
   private readonly schema: string;
+  private readonly leaseToken: string | undefined;
+  private readonly requireReview: boolean;
 
   constructor(conn: PgConnection, opts: PostgresDesignJobStoreOptions = {}) {
     const schema = opts.schema ?? "meta";
@@ -140,10 +145,68 @@ export class PostgresDesignJobStore implements DesignJobStore {
     }
     this.conn = conn;
     this.schema = schema;
+    if (opts.leaseToken !== undefined && !/^[0-9a-f-]{36}$/i.test(opts.leaseToken)) throw new Error("Invalid lease token");
+    this.leaseToken = opts.leaseToken;
+    this.requireReview = opts.requireReview ?? false;
   }
 
   private get table(): string {
     return `${this.schema}.operate_design_jobs`;
+  }
+
+  private get leaseFence(): string {
+    // Tokens are generated UUIDs, validated at construction. Fences stop an expired worker
+    // overwriting the result of a worker that reclaimed its job.
+    return this.leaseToken === undefined ? "" : ` AND lease_token = '${this.leaseToken}'::uuid AND lease_until > now() AND status = 'running'`;
+  }
+  forLease(token: string): PostgresDesignJobStore {
+    return new PostgresDesignJobStore(this.conn, { schema: this.schema, leaseToken: token, requireReview: this.requireReview });
+  }
+  async claim(tenantId: string, token: string, leaseMs: number): Promise<DesignJobRecord | null> {
+    return withTenantContext(this.conn, tenantId, async tx => {
+      await tx.query(`UPDATE ${this.table} SET status = 'failed', phase = 'error', error = 'Worker recovery attempts exhausted', updated_at = now()
+        WHERE tenant_id = $1 AND status = 'running' AND (lease_until IS NULL OR lease_until < now()) AND run_count >= 3`, [tenantId]);
+      const result = await tx.query(`UPDATE ${this.table} SET status = 'running', phase = 'generating', lease_token = $2,
+        lease_until = now() + $3::int * interval '1 millisecond', run_count = run_count + 1, updated_at = now()
+        WHERE tenant_id = $1 AND id = (SELECT id FROM ${this.table} WHERE tenant_id = $1
+          AND (status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < now())))
+          AND run_count < 3 ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+        RETURNING ${SELECT_COLUMNS}`, [tenantId, token, leaseMs]);
+      return result.rows[0] ? this.rowToRecord(result.rows[0]) : null;
+    });
+  }
+  async renew(tenantId: string, id: string, leaseMs: number): Promise<boolean> {
+    if (!this.leaseToken) throw new Error("Lease required");
+    return withTenantContext(this.conn, tenantId, async tx => {
+      const result = await tx.query(`UPDATE ${this.table} SET lease_until = now() + $3::int * interval '1 millisecond'
+        WHERE tenant_id = $1 AND id = $2${this.leaseFence}`, [tenantId, id, leaseMs]);
+      return result.rowCount === 1;
+    });
+  }
+  async requeue(tenantId: string, id: string): Promise<void> {
+    if (!this.leaseToken) throw new Error("Lease required");
+    await withTenantContext(this.conn, tenantId, tx => tx.query(`UPDATE ${this.table}
+      SET status = 'queued', phase = 'queued', lease_token = NULL, lease_until = NULL, run_count = greatest(run_count - 1, 0), updated_at = now()
+      WHERE tenant_id = $1 AND id = $2${this.leaseFence}`, [tenantId, id]));
+  }
+  async completeWithProposal(tenantId: string, id: string, result: DesignResultLike): Promise<string | null> {
+    if (!this.leaseToken || !result.ok || !result.manifest || !result.manifestHash) throw new Error("Validated result and lease required");
+    return withTenantContext(this.conn, tenantId, async tx => {
+      const locked = await tx.query<{ name: string; description: string }>(`SELECT name, description FROM ${this.table}
+        WHERE tenant_id = $1 AND id = $2${this.leaseFence} FOR UPDATE`, [tenantId, id]);
+      const job = locked.rows[0];
+      if (!job) return null;
+      const inserted = await tx.query<{ id: string }>(`INSERT INTO ${this.schema}.operate_tenant_manifests
+        (tenant_id, name, description, manifest, manifest_hash, status, source, provider_label, review_status)
+        VALUES ($1, $2, $3, $4::jsonb, $5, 'draft', 'ai', $6, $7) RETURNING id`,
+        [tenantId, job.name, job.description, JSON.stringify(result.manifest), result.manifestHash, result.providerLabel, this.requireReview ? "pending" : "not_required"]);
+      const proposalId = inserted.rows[0]?.id;
+      if (!proposalId) throw new Error("Proposal insert failed");
+      await tx.query(`UPDATE ${this.table} SET status = 'succeeded', phase = 'done', proposal_id = $3,
+        provider_label = $4, updated_at = now(), lease_token = NULL, lease_until = NULL WHERE tenant_id = $1 AND id = $2`,
+        [tenantId, id, proposalId, result.providerLabel]);
+      return proposalId;
+    });
   }
 
   rowToRecord(row: Record<string, unknown>): DesignJobRecord {
@@ -214,7 +277,7 @@ export class PostgresDesignJobStore implements DesignJobStore {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query(
         `UPDATE ${this.table} SET ${sets.join(", ")}` +
-          ` WHERE tenant_id = $1 AND id = $2 RETURNING ${SELECT_COLUMNS}`,
+          ` WHERE tenant_id = $1 AND id = $2${this.leaseFence} RETURNING ${SELECT_COLUMNS}`,
         params,
       );
       const row = result.rows[0];
@@ -231,7 +294,7 @@ export class PostgresDesignJobStore implements DesignJobStore {
       const result = await tx.query(
         `UPDATE ${this.table} SET status = 'succeeded', phase = 'done', proposal_id = $3,` +
           ` provider_label = $4, updated_at = now()` +
-          ` WHERE tenant_id = $1 AND id = $2 RETURNING ${SELECT_COLUMNS}`,
+          ` WHERE tenant_id = $1 AND id = $2${this.leaseFence} RETURNING ${SELECT_COLUMNS}`,
         [tenantId, id, input.proposalId, input.providerLabel],
       );
       const row = result.rows[0];
@@ -258,7 +321,7 @@ export class PostgresDesignJobStore implements DesignJobStore {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query(
         `UPDATE ${this.table} SET ${sets.join(", ")}` +
-          ` WHERE tenant_id = $1 AND id = $2 RETURNING ${SELECT_COLUMNS}`,
+          ` WHERE tenant_id = $1 AND id = $2${this.leaseFence} RETURNING ${SELECT_COLUMNS}`,
         params,
       );
       const row = result.rows[0];

@@ -67,7 +67,7 @@ that builds the whole workspace. Deploy it and set the API's command + env.
 **Command** (args in list form so the API key is never shell-split):
 
 ```
-node apps/operate-server/dist/bin/operate-server.js \
+node dist/bin/operate-server.js \
   --pack erp-core --store pg --port 8787 --scheme https --platform-admin \
   --api-key <STRONG_TOKEN>:platform_admin:00000000-0000-4000-8000-000000000000:<USER_ID>
 ```
@@ -99,7 +99,7 @@ NODE_ENV=production
   `deploy/Dockerfile`, the start command above, and the env vars. Railway gives
   you a public `https://<app>.up.railway.app` URL.
 - **Render:** New → Web Service → Docker → `deploy/Dockerfile`, same command +
-  env. Health check path `/` .
+  env. Health check path `/readyz`.
 - **Fly.io:** `fly launch --dockerfile deploy/Dockerfile`, set secrets with
   `fly secrets set PGHOST=… PGPASSWORD=…`, `internal_port = 8787`.
 
@@ -111,27 +111,28 @@ safe: tenant isolation holds.)
 
 ## 3. Vercel: the admin UI (`operate-web`)
 
-`operate-web` is a self-contained Next.js 14 app with **no** backend
-dependencies — it calls the API through its own server-side `/api` proxy, so the
-API key never reaches the browser.
+`operate-web` is a self-contained Next.js 14 app. Each user signs in with their
+own API credential; the app stores it only in an encrypted, HttpOnly session
+cookie and calls the API through its server-side `/api` proxy.
 
 1. Vercel → **Add New Project** → import this repo.
 2. Set **Root Directory** to `apps/operate-web`. Framework preset **Next.js** is
    auto-detected; leave build/install commands at their defaults.
-3. Add two **Environment Variables**:
+3. Add three **Environment Variables**:
 
    | Name | Value |
    |---|---|
    | `OPERATE_API_URL` | the API URL from step 2, e.g. `https://<app>.up.railway.app` |
-   | `OPERATE_API_KEY` | the **token part only** of the API key (the `<STRONG_TOKEN>` before the first `:`) |
+   | `OPERATE_SESSION_SECRET` | 64 random hexadecimal characters (`openssl rand -hex 32`) |
+   | `OPERATE_PUBLIC_ORIGIN` | the exact Vercel UI origin, e.g. `https://<project>.vercel.app` |
 
 4. Deploy. Vercel serves the UI at `https://<project>.vercel.app`; the
    `/platform` route is the tenant-management console.
 
-> The browser only ever talks to the Vercel app; the Vercel app's `/api/[...path]`
-> route ([`app/api/[...path]/route.ts`](../apps/operate-web/app/api/%5B...path%5D/route.ts))
-> forwards to `OPERATE_API_URL` with the `x-api-key`. No CORS, and the secret
-> stays server-side.
+> The browser only talks to the Vercel app. Its `/api/[...path]` route
+> ([`app/api/[...path]/route.ts`](../apps/operate-web/app/api/%5B...path%5D/route.ts))
+> opens the encrypted session server-side and forwards the credential as Bearer
+> authentication. No credential is exposed to browser JavaScript after sign-in.
 
 ---
 
@@ -140,8 +141,9 @@ API key never reaches the browser.
 Open the Vercel UI → **Platform → New tenant**, or via the API directly:
 
 ```bash
+ADMIN_TOKEN='<the token before the first colon in your --api-key binding>'
 curl -sS -X POST https://<your-api-host>/v1/platform/tenants \
-  -H "x-api-key: $OPERATE_WEB_API_KEY" -H 'content-type: application/json' \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"slug":"acme","name":"Acme Inc.","tier":"small","region":"eu"}'
 ```
 
@@ -222,6 +224,6 @@ deployment.
   direct connection.
 - **UI shows `upstream_unreachable`** → `OPERATE_API_URL` is wrong or the API
   isn't public. It must be the API's external HTTPS URL, reachable from Vercel.
-- **UI 401 / empty lists** → `OPERATE_API_KEY` on Vercel must be only the token
-  part (before the first `:`), matching the `<STRONG_TOKEN>` in the API's
+- **UI 401 / empty lists** → sign in with only the token portion of the credential
+  (before the first `:`), matching the `<STRONG_TOKEN>` in the API's
   `--api-key`.

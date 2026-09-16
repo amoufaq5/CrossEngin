@@ -6,10 +6,11 @@ import type {
 } from "@crossengin/ai-providers";
 import {
   AnthropicProvider,
+  ANTHROPIC_PRICING,
   isAnthropicModel,
   type AnthropicModel,
 } from "@crossengin/ai-providers-anthropic";
-import { OpenAiProvider, isOpenAiChatModel } from "@crossengin/ai-providers-openai";
+import { OpenAiProvider, isOpenAiChatModel, openAiPricingFor } from "@crossengin/ai-providers-openai";
 import {
   ManifestSchema,
   manifestHash,
@@ -310,6 +311,8 @@ export async function designManifest(opts: {
   name?: string;
   model?: string;
   maxTokens?: number;
+  maxCostUsd?: number;
+  pricing?: { inputUsdPerMillion: number; outputUsdPerMillion: number };
   maxAttempts?: number;
   providerLabel?: string | null;
   ensureRoles?: readonly string[];
@@ -358,6 +361,7 @@ export async function designManifest(opts: {
   let attempts = 0;
   let issues: readonly string[] = [];
   let usage: DesignUsage | null = null;
+  let committedUpperCost = 0;
 
   while (attempts < maxAttempts) {
     attempts += 1;
@@ -389,6 +393,17 @@ export async function designManifest(opts: {
       ...(opts.model !== undefined ? { model: opts.model } : {}),
     };
 
+    // Byte-count input bound plus protocol overhead; never rely on a chars/4 estimate for admission.
+    // Every attempted call consumes its worst-case allowance, including failed streams.
+    const upperCost = opts.pricing === undefined ? 0 :
+      ((new TextEncoder().encode(JSON.stringify(request.messages)).length + 4096) * opts.pricing.inputUsdPerMillion +
+        maxTokens * opts.pricing.outputUsdPerMillion) / 1_000_000;
+    if (opts.maxCostUsd !== undefined && committedUpperCost + upperCost > opts.maxCostUsd) {
+      issues = ["AI request cost ceiling prevents another provider attempt"];
+      break;
+    }
+    committedUpperCost += upperCost;
+    let attemptUsageKnown = false;
     let text = "";
     let oversized = false;
     let lastEmittedChars = 0;
@@ -411,14 +426,17 @@ export async function designManifest(opts: {
             });
           }
         } else if (chunk.kind === "usage_final") {
+          attemptUsageKnown = true;
           usage = addUsage(usage, chunk.usage);
         }
       }
     } catch (err) {
       issues = [`provider error: ${err instanceof Error ? err.message : String(err)}`];
+      if (!attemptUsageKnown && upperCost > 0) usage = addUsage(usage, { inputTokens: 0, outputTokens: 0, cost: upperCost });
       emitRetrying(issues, text.length);
       continue;
     }
+    if (!attemptUsageKnown && upperCost > 0) usage = addUsage(usage, { inputTokens: 0, outputTokens: 0, cost: upperCost });
 
     if (oversized) {
       issues = [`model response exceeded ${MAX_DESIGN_RESPONSE_CHARS} chars`];
@@ -506,6 +524,8 @@ export function buildDesignDesigner(opts: {
   provider: DesignCompletionProvider;
   model?: string;
   maxTokens?: number;
+  maxCostUsd?: number;
+  pricing?: { inputUsdPerMillion: number; outputUsdPerMillion: number };
   providerLabel?: string | null;
   ensureRoles?: readonly string[];
   onProgress?: DesignProgressListener;
@@ -524,6 +544,8 @@ export function buildDesignDesigner(opts: {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(opts.model !== undefined ? { model: opts.model } : {}),
       ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
+      ...(opts.maxCostUsd !== undefined ? { maxCostUsd: opts.maxCostUsd } : {}),
+      ...(opts.pricing !== undefined ? { pricing: opts.pricing } : {}),
       ...(opts.providerLabel !== undefined ? { providerLabel: opts.providerLabel } : {}),
       ...(opts.ensureRoles !== undefined ? { ensureRoles: opts.ensureRoles } : {}),
       ...(listener !== undefined ? { onProgress: listener } : {}),
@@ -534,13 +556,13 @@ export function buildDesignDesigner(opts: {
 export function buildDesignProviderFromEnv(
   env: NodeJS.ProcessEnv,
   opts?: { model?: string },
-): { provider: DesignCompletionProvider; providerLabel: string; model: string } | null {
+): { provider: DesignCompletionProvider; providerLabel: string; model: string; pricing: { inputUsdPerMillion: number; outputUsdPerMillion: number } } | null {
   const anthropicKey = env["ANTHROPIC_API_KEY"];
   if (anthropicKey !== undefined && anthropicKey.length > 0) {
     const model: AnthropicModel =
       opts?.model !== undefined && isAnthropicModel(opts.model) ? opts.model : "claude-sonnet-4-6";
-    const provider = new AnthropicProvider({ apiKey: anthropicKey, defaultModel: model });
-    return { provider, providerLabel: `anthropic/${model}`, model };
+    const provider = new AnthropicProvider({ apiKey: anthropicKey, defaultModel: model, fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(180_000) }) });
+    return { provider, providerLabel: `anthropic/${model}`, model, pricing: ANTHROPIC_PRICING[model] };
   }
   const openaiKey = env["OPENAI_API_KEY"];
   if (openaiKey !== undefined && openaiKey.length > 0) {
@@ -556,9 +578,18 @@ export function buildDesignProviderFromEnv(
     const provider = new OpenAiProvider({
       apiKey: openaiKey,
       defaultModel: model,
+      fetch: (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(180_000) }),
       ...(custom ? { baseUrl } : {}),
     });
-    return { provider, providerLabel: `openai/${model}`, model };
+    const known = custom ? undefined : openAiPricingFor(model);
+    const pricing = known ?? {
+      inputUsdPerMillion: Number(env["OPERATE_AI_INPUT_USD_PER_MILLION"]),
+      outputUsdPerMillion: Number(env["OPERATE_AI_OUTPUT_USD_PER_MILLION"]),
+    };
+    if (process.env.NODE_ENV === "production" && ![pricing.inputUsdPerMillion, pricing.outputUsdPerMillion].every(n => Number.isFinite(n) && n >= 0)) {
+      throw new Error("Custom AI endpoints require explicit input/output USD-per-million rates (set both to 0 only for a genuinely unbilled local model)");
+    }
+    return { provider, providerLabel: `openai/${model}`, model, pricing };
   }
   return null;
 }

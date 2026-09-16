@@ -305,3 +305,10 @@ export class InMemoryEntityStore implements EntityStore {
     }
   }
 }
+
+export interface IdempotentEntityStore extends EntityStore {
+  withIdempotency<T>(tenantId: string, key: string, fingerprint: string, body: (tx: EntityStore) => Promise<T>): Promise<T>;
+}
+export function isIdempotent(store: EntityStore): store is IdempotentEntityStore {
+  return typeof (store as Partial<IdempotentEntityStore>).withIdempotency === "function";
+}

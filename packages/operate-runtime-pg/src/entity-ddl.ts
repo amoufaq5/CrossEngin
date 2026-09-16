@@ -113,6 +113,9 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (${TENANT_ISOLATION});`,
   ];
 
+  if (plan.entity === "JournalEntry" && planned.has("entry_number")) {
+    stmts.push(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdent(`${plan.table}_posting_identity`)} ON ${qualified} (${quoteIdent("tenant_id")}, ${quoteIdent("entry_number")});`);
+  }
   for (const col of plan.columns) {
     if (col.classification === null) continue;
     const directives = [`crossengin.data_class=${col.classification}`];

@@ -27,6 +27,10 @@ export function ShellBar() {
       </Link>
 
       <div className="ml-auto flex items-center gap-3">
+        <button className="text-xs" onClick={async () => {
+          const res = await fetch("/auth/session", { method: "DELETE" });
+          if (res.ok) window.location.assign("/login");
+        }}>Sign out</button>
         <span className="hidden items-center gap-1.5 rounded-lg bg-surface-soft/80 px-3 py-1.5 text-xs font-semibold text-ink-muted md:inline-flex">
           <span className="h-1.5 w-1.5 rounded-full bg-brand" />
           Workspace

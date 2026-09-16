@@ -102,6 +102,19 @@ export function createNodePgConnection(config: PgConfig): PgConnection {
         client.release();
       }
     },
+    async tryWithAdvisoryLock<T>(lockKey: bigint, fn: () => Promise<T>) {
+      const client = await pool.connect();
+      let acquired = false;
+      try {
+        const result = await client.query("SELECT pg_try_advisory_lock($1) AS acquired", [lockKey.toString()]);
+        acquired = (result.rows[0] as { acquired: boolean } | undefined)?.acquired === true;
+        if (!acquired) return { acquired: false as const };
+        return { acquired: true as const, result: await fn() };
+      } finally {
+        if (acquired) await client.query("SELECT pg_advisory_unlock($1)", [lockKey.toString()]);
+        client.release();
+      }
+    },
     async close() {
       await pool.end();
     },

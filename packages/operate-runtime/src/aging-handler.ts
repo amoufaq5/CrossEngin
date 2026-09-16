@@ -2,6 +2,7 @@ import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { RoleName } from "@crossengin/auth";
 
+import { completeList } from "./complete-list.js";
 import { computeAging, type AgingReport } from "./aging.js";
 import type { EntityStore } from "./store.js";
 
@@ -68,22 +69,27 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
     if (!roles.some((r) => ctx.viewerRoles.has(r as RoleName))) {
       return json(403, { error: "forbidden", detail: "finance role required" });
     }
-    // An optional `?asOf=YYYY-MM-DD` pulls a historical aging snapshot; a malformed
-    // value is ignored (fall back to the clock), so the param never widens/breaks the report.
+    const today = (ctx.clock?.now() ?? new Date()).toISOString().slice(0, 10);
     const asOfParam = firstQuery(request.query["asOf"]);
-    const asOf =
-      asOfParam !== undefined && AS_OF_PATTERN.test(asOfParam)
-        ? `${asOfParam}T00:00:00.000Z`
-        : (ctx.clock?.now() ?? new Date()).toISOString();
+    const validAsOf = asOfParam !== undefined && AS_OF_PATTERN.test(asOfParam) &&
+      (() => { try { return new Date(`${asOfParam}T00:00:00Z`).toISOString().slice(0, 10) === asOfParam; } catch { return false; } })();
+    // Current records cannot reconstruct prior document states. Fail explicitly until a
+    // historical ledger/snapshot source is available rather than relabel today's balances.
+    const asOf = validAsOf ? `${asOfParam}T00:00:00.000Z` : `${today}T00:00:00.000Z`;
+    const historicalWarning = validAsOf && asOfParam !== today
+      ? "This is a current-state calculation relabeled to the requested date; configure historical snapshots before relying on it for audit reporting."
+      : null;
+    const currency = firstQuery(request.query["currency"]);
+    if (currency !== undefined && !/^[A-Z]{3}$/.test(currency)) return json(400, { error: "invalid_currency" });
 
     // Sum completed payments once, grouped by each section's ref field.
-    const payments = await ctx.store.listPage(tenantId, paymentEntity, {
+    const payments = await completeList(ctx.store, tenantId, paymentEntity, {
       limit: maxRows,
       cursor: null,
       sort: [],
       filters: [{ field: stateField, op: "eq", value: completedState }],
     });
-    const completed = payments.records.filter((p) => p[stateField] === completedState);
+    const completed = payments.filter((p) => p[stateField] === completedState);
 
     const report: Record<string, AgingReport> = {};
     for (const [name, spec] of Object.entries(ctx.sections)) {
@@ -94,13 +100,22 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
           applied.set(ref, (applied.get(ref) ?? 0) + num(p[amountField]));
         }
       }
-      const page = await ctx.store.listPage(tenantId, spec.entity, {
+      const page = await completeList(ctx.store, tenantId, spec.entity, {
         limit: maxRows,
         cursor: null,
         sort: [],
         filters: [{ field: "state", op: "in", value: [...spec.openStates] }],
       });
-      const open = page.records.filter((d) => spec.openStates.includes(String(d["state"] ?? "")));
+      const open = page.filter((d) => spec.openStates.includes(String(d["state"] ?? "")) && (currency === undefined || d["currency"] === currency));
+      const currencies = [...new Set(open.map(d => String(d["currency"] ?? "USD")))];
+      if (currencies.length > 1) return json(422, { error: "currency_required", detail: "Select one currency; totals across currencies are not meaningful", currencies });
+      const byId = new Map(open.map(d => [String(d["id"]), d]));
+      for (const payment of completed) {
+        const document = byId.get(String(payment[spec.paymentRefField]));
+        if (document && payment["currency"] !== undefined && payment["currency"] !== document["currency"]) {
+          return json(422, { error: "payment_currency_mismatch", detail: "A payment requires an explicit conversion to the document currency" });
+        }
+      }
       report[name] = computeAging({
         documents: open,
         appliedByDocument: applied,
@@ -109,6 +124,6 @@ export function buildAgingHandler(ctx: AgingHandlerContext): Handler {
         ...(spec.dueDateField !== undefined ? { dueDateField: spec.dueDateField } : {}),
       });
     }
-    return json(200, { asOf: asOf.slice(0, 10), sections: report });
+    return json(200, { asOf: asOf.slice(0, 10), ...(historicalWarning ? { warning: historicalWarning } : {}), sections: report });
   };
 }

@@ -1232,3 +1232,83 @@ describe("activity retry backoff", () => {
     expect(first.payload["availableAt"]).toBeUndefined();
   });
 });
+
+describe("workflow orchestration actions", () => {
+  it("cancels a live timer by name and prevents it from firing", async () => {
+    const def = definitionFixture({
+      states: [
+        {
+          name: "draft", kind: "initial", label: "Draft", slaSeconds: null, onExitActions: [],
+          onEntryActions: [
+            { kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds: 1 } },
+            { kind: "cancel_timer", parameters: { timerName: "deadline" } },
+          ],
+        },
+        { name: "waiting", kind: "waiting", label: "Waiting", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+      transitions: [{
+        name: "wait", fromState: "draft", toState: "waiting", trigger: { kind: "automatic" },
+        guards: [], preTransitionActions: [], postTransitionActions: [],
+      }],
+    });
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const engine = new WorkflowEngine({
+      eventLog: new InMemoryEventLog(), definitions: new Map([[def.id, def]]),
+      activityRegistry: createDefaultRegistry(), clock, idGenerator: new CountingIdGenerator(),
+    });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.filter(e => e.kind === "timer_cancelled")).toHaveLength(1);
+    expect((await engine.tickTimers(clock.now().getTime() + 10_000)).firedTimerIds).toEqual([]);
+  });
+
+  it("sends a signal to another correlated workflow", async () => {
+    const receiver = definitionFixture({ id: "wfd_receiver1", definitionKey: "receiver" });
+    const sender = definitionFixture({
+      id: "wfd_sender01", definitionKey: "sender", initialState: "start",
+      states: [
+        { name: "start", kind: "initial", label: "Start", onExitActions: [], slaSeconds: null,
+          onEntryActions: [{ kind: "send_signal", parameters: { signalName: "approve", correlationKey: "shared" } }] },
+        { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+      transitions: [{ name: "finish", fromState: "start", toState: "done", trigger: { kind: "automatic" }, guards: [], preTransitionActions: [], postTransitionActions: [] }],
+    });
+    const engine = new WorkflowEngine({
+      eventLog: new InMemoryEventLog(), definitions: new Map([[receiver.id, receiver], [sender.id, sender]]),
+      activityRegistry: createDefaultRegistry(), idGenerator: new CountingIdGenerator(),
+    });
+    const waiting = await engine.startInstance({ definitionId: receiver.id, tenantId: TENANT, correlationKey: "shared" });
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT, correlationKey: "sender" });
+    expect((await engine.getInstanceState(waiting.instanceId))?.status).toBe("completed");
+  });
+
+  it("spawns a child and advances the parent when the child completes", async () => {
+    const child = definitionFixture({
+      id: "wfd_child001", definitionKey: "child", initialState: "done",
+      states: [{ name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null }],
+      transitions: [],
+    });
+    const parent = definitionFixture({
+      id: "wfd_parent01", definitionKey: "parent", initialState: "start",
+      states: [
+        { name: "start", kind: "initial", label: "Start", onExitActions: [], slaSeconds: null,
+          onEntryActions: [{ kind: "spawn_child_workflow", parameters: { definitionId: child.id, variables: { amount: 42 } } }] },
+        { name: "done", kind: "terminal_success", label: "Done", onEntryActions: [], onExitActions: [], slaSeconds: null },
+      ],
+      transitions: [{
+        name: "child_done", fromState: "start", toState: "done",
+        trigger: { kind: "child_workflow_completed", childDefinitionKey: child.definitionKey },
+        guards: [], preTransitionActions: [], postTransitionActions: [],
+      }],
+    });
+    const engine = new WorkflowEngine({
+      eventLog: new InMemoryEventLog(), definitions: new Map([[parent.id, parent], [child.id, child]]),
+      activityRegistry: createDefaultRegistry(), idGenerator: new CountingIdGenerator(),
+    });
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    expect(state.status).toBe("completed");
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.filter(e => e.kind === "child_workflow_spawned")).toHaveLength(1);
+    expect(events.filter(e => e.kind === "child_workflow_completed")).toHaveLength(1);
+  });
+});

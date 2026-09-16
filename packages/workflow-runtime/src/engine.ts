@@ -149,6 +149,13 @@ export class WorkflowEngine {
   }
 
   async startInstance(input: StartInstanceInput): Promise<ProjectedInstance> {
+    return this.startInstanceWithId(input, this.ids.generate("wfi"));
+  }
+
+  private async startInstanceWithId(
+    input: StartInstanceInput,
+    instanceId: string,
+  ): Promise<ProjectedInstance> {
     const definition = this.definitions.get(input.definitionId);
     if (definition === undefined) {
       throw new Error(`unknown workflow definition: ${input.definitionId}`);
@@ -164,7 +171,6 @@ export class WorkflowEngine {
       );
     }
 
-    const instanceId = this.ids.generate("wfi");
     const occurredAt = this.clock.nowIso();
     const timeoutAt = new Date(
       this.clock.now().getTime() + definition.timeoutSeconds * 1000,
@@ -551,9 +557,14 @@ export class WorkflowEngine {
         await this.applyScheduleTimer(instanceId, tenantId, action);
         return;
       case "cancel_timer":
+        await this.applyCancelTimer(instanceId, tenantId, action);
+        return;
       case "spawn_child_workflow":
+        await this.applySpawnChildWorkflow(instanceId, tenantId, action);
+        return;
       case "send_signal":
-        throw new Error(`action kind ${action.kind} is not implemented in M3`);
+        await this.applySendSignal(instanceId, tenantId, action);
+        return;
     }
     void signalId;
     void timerId;
@@ -857,6 +868,57 @@ export class WorkflowEngine {
     }
   }
 
+  private async notifyParentOfChildCompletion(
+    childInstanceId: string,
+    childState: ProjectedInstance,
+  ): Promise<void> {
+    if (childState.parentInstanceId === null) return;
+    const parentState = await this.getInstanceState(childState.parentInstanceId);
+    if (parentState === null || parentState.tenantId !== childState.tenantId) return;
+    const parentDefinition = this.definitions.get(parentState.definitionId);
+    const childDefinition = this.definitions.get(childState.definitionId);
+    if (parentDefinition === undefined || childDefinition === undefined) return;
+    const existing = await this.eventLog.listByInstance(parentState.instanceId);
+    if (existing.some(e => e.kind === "child_workflow_completed" && e.childInstanceId === childInstanceId)) return;
+    const nextSeq = (await this.eventLog.latestSequence(parentState.instanceId))!;
+    await this.appendEvent({
+      instanceId: parentState.instanceId,
+      tenantId: parentState.tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "child_workflow_completed",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId,
+      variableName: null,
+      payload: {
+        childDefinitionId: childDefinition.id,
+        childDefinitionKey: childDefinition.definitionKey,
+        childStatus: (await this.getInstanceState(childInstanceId))?.status ?? childState.status,
+      },
+      correlationId: parentState.correlationKey,
+      causationEventId: null,
+    });
+    const liveParent = await this.getInstanceState(parentState.instanceId);
+    if (liveParent === null) return;
+    const transition = evaluateNextTransition({
+      definition: parentDefinition,
+      fromState: liveParent.currentState,
+      trigger: { kind: "child_workflow_completed", childDefinitionKey: childDefinition.definitionKey },
+      variables: liveParent.variables,
+      evaluator: this.guardEvaluator,
+    });
+    if (transition !== null) {
+      await this.applyTransition(parentState.instanceId, parentDefinition, transition, liveParent, null, null);
+      await this.runStepLoop(parentState.instanceId, parentDefinition);
+    }
+  }
+
   /**
    * Distributed executor: runs a scheduled-but-unstarted activity from the event log, so a worker
    * that claimed it (in another process) can execute it — the activity analog of
@@ -1139,6 +1201,101 @@ export class WorkflowEngine {
     });
   }
 
+  private async applyCancelTimer(
+    instanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const wantedId = typeof action.parameters["timerId"] === "string" ? action.parameters["timerId"] : null;
+    const wantedName = typeof action.parameters["timerName"] === "string" ? action.parameters["timerName"] : null;
+    const live = new Map<string, string>();
+    for (const event of await this.eventLog.listByInstance(instanceId)) {
+      if (event.timerId === null) continue;
+      if (event.kind === "timer_scheduled") {
+        const name = typeof event.payload["timerName"] === "string" ? event.payload["timerName"] : "";
+        live.set(event.timerId, name);
+      } else if (event.kind === "timer_fired" || event.kind === "timer_cancelled") {
+        live.delete(event.timerId);
+      }
+    }
+    for (const [id, name] of live) {
+      if ((wantedId !== null && id !== wantedId) || (wantedId === null && wantedName !== name)) continue;
+      const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+      await this.appendEvent({
+        instanceId, tenantId, sequenceNumber: nextSeq + 1, kind: "timer_cancelled",
+        occurredAt: this.clock.nowIso(), actorPrincipalId: null, actorSystemId: this.systemActorId,
+        previousState: null, newState: null, activityId: null, signalId: null, timerId: id,
+        childInstanceId: null, variableName: null,
+        payload: { timerName: name, reason: "cancel_timer action" },
+        correlationId: null, causationEventId: null,
+      });
+    }
+  }
+
+  private async applySendSignal(
+    instanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const signalName = action.parameters["signalName"];
+    if (typeof signalName !== "string") return;
+    const configuredCorrelation = action.parameters["correlationKey"];
+    const correlationKey = typeof configuredCorrelation === "string"
+      ? configuredCorrelation
+      : this.instanceCorrelation.get(instanceId);
+    if (correlationKey === undefined) return;
+    const payload = action.parameters["payload"];
+    await this.submitSignal({
+      signalName,
+      correlationKey,
+      tenantId,
+      payload: payload !== null && typeof payload === "object" && !Array.isArray(payload)
+        ? payload as Record<string, unknown>
+        : {},
+      ...(typeof action.parameters["idempotencyKey"] === "string"
+        ? { idempotencyKey: action.parameters["idempotencyKey"] }
+        : {}),
+      sourceSystem: this.systemActorId,
+    });
+  }
+
+  private async applySpawnChildWorkflow(
+    instanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const definitionId = typeof action.parameters["definitionId"] === "string"
+      ? action.parameters["definitionId"]
+      : [...this.definitions.values()].find(d => d.definitionKey === action.parameters["definitionKey"])?.id;
+    if (definitionId === undefined) throw new Error("spawn_child_workflow references an unknown definition");
+    const childDefinition = this.definitions.get(definitionId);
+    if (childDefinition === undefined) throw new Error(`unknown child workflow definition: ${definitionId}`);
+    const childInstanceId = this.ids.generate("wfi");
+    const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId, tenantId, sequenceNumber: nextSeq + 1, kind: "child_workflow_spawned",
+      occurredAt: this.clock.nowIso(), actorPrincipalId: null, actorSystemId: this.systemActorId,
+      previousState: null, newState: null, activityId: null, signalId: null, timerId: null,
+      childInstanceId, variableName: null,
+      payload: { childDefinitionId: childDefinition.id, childDefinitionKey: childDefinition.definitionKey },
+      correlationId: this.instanceCorrelation.get(instanceId) ?? null, causationEventId: null,
+    });
+    const variables = action.parameters["variables"];
+    const configuredCorrelation = action.parameters["correlationKey"];
+    await this.startInstanceWithId({
+      definitionId,
+      tenantId,
+      variables: variables !== null && typeof variables === "object" && !Array.isArray(variables)
+        ? variables as Record<string, unknown>
+        : {},
+      correlationKey: typeof configuredCorrelation === "string"
+        ? configuredCorrelation
+        : `${this.instanceCorrelation.get(instanceId) ?? instanceId}:${childDefinition.definitionKey}`,
+      parentInstanceId: instanceId,
+      startedBySystem: this.systemActorId,
+    }, childInstanceId);
+  }
+
   private async emitTerminalForStateKind(
     instanceId: string,
     state: ProjectedInstance,
@@ -1212,6 +1369,7 @@ export class WorkflowEngine {
         causationEventId: null,
       });
     }
+    await this.notifyParentOfChildCompletion(instanceId, state);
   }
 
   registerInstance(instanceId: string, tenantId: string, correlationKey?: string): void {

@@ -197,6 +197,27 @@ export const StateActionSchema = z
         message: "schedule_timer action requires timerName parameter",
       });
     }
+    if (a.kind === "cancel_timer" && !a.parameters.timerName && !a.parameters.timerId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameters", "timerName"],
+        message: "cancel_timer action requires timerName or timerId parameter",
+      });
+    }
+    if (a.kind === "spawn_child_workflow" && !a.parameters.definitionId && !a.parameters.definitionKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameters", "definitionId"],
+        message: "spawn_child_workflow action requires definitionId or definitionKey parameter",
+      });
+    }
+    if (a.kind === "send_signal" && !a.parameters.signalName) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parameters", "signalName"],
+        message: "send_signal action requires signalName parameter",
+      });
+    }
     if (a.kind === "set_variable" && !a.parameters.variableName) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

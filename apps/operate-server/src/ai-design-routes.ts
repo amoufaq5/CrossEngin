@@ -81,6 +81,7 @@ export interface AiDesignContext {
   readonly store: AiManifestStore;
   /** null ⇒ no AI provider configured — design requests get 503. */
   readonly designer: ManifestDesignerLike | null;
+  readonly designForTenant?: (tenantId: string, input: { description: string; name?: string }) => Promise<DesignResultLike>;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /** Roles permitted to use the AI Architect. Fail-closed: empty ⇒ nobody. */
   readonly allowedRoles: ReadonlySet<string>;
@@ -179,9 +180,15 @@ function buildDesignHandler(ctx: AiDesignContext): Handler {
         });
       }
     }
-    const result = await ctx.designer(parsed.data);
+    let result: DesignResultLike;
+    try {
+      result = ctx.designForTenant ? await ctx.designForTenant(tenant, parsed.data) : await ctx.designer(parsed.data);
+    } catch (err) {
+      const status = typeof err === "object" && err !== null && "status" in err && (err.status === 402 || err.status === 429) ? err.status : 503;
+      return json(status, { error: "ai_admission_failed", detail: err instanceof Error ? err.message : "AI temporarily unavailable" });
+    }
     // Charge actual usage even when the design failed — the tokens were spent either way.
-    if (ctx.budget !== undefined && result.usage !== null && result.usage.cost > 0) {
+    if (ctx.designForTenant === undefined && ctx.budget !== undefined && result.usage !== null && result.usage.cost > 0) {
       await ctx.budget.record(tenant, result.usage.cost);
     }
     if (!result.ok || result.manifest === null || result.manifestHash === null) {

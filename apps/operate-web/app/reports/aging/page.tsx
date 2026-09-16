@@ -14,13 +14,14 @@ export default function AgingPage() {
   const [forbidden, setForbidden] = useState(false);
   // Empty string = "today" (server clock); a YYYY-MM-DD value pulls a back-dated snapshot.
   const [asOf, setAsOf] = useState("");
+  const [currency, setCurrency] = useState("");
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setError(null);
     setForbidden(false);
-    fetchAging(asOf || undefined)
+    fetchAging(asOf || undefined, currency || undefined)
       .then((res) => {
         if (!alive) return;
         setData(res);
@@ -36,7 +37,7 @@ export default function AgingPage() {
     return () => {
       alive = false;
     };
-  }, [asOf]);
+  }, [asOf, currency]);
 
   const sections: ReadonlyArray<{ key: "ar" | "ap"; label: string; report: AgingReport }> = data
     ? ([
@@ -62,6 +63,10 @@ export default function AgingPage() {
               className="rounded-lg border border-line bg-white px-3 py-1.5 text-sm font-normal normal-case text-ink"
             />
           </label>
+          <label className="text-xs">Currency
+            <input className="ml-2 rounded border p-2" placeholder="USD" maxLength={3} value={currency} onChange={e => setCurrency(e.target.value.toUpperCase())} />
+          </label>
+          <p className="text-xs text-ink-muted">Current balances only. Historical snapshots are not yet available.</p>
           {asOf && (
             <button
               type="button"
@@ -83,7 +88,7 @@ export default function AgingPage() {
 
         {error && (
           <div className="rounded-lg border border-brand-200 bg-brand-50 px-4 py-3 text-sm text-brand-700">
-            Could not load the aging report: {error}. Is operate-server running?
+            Could not load the aging report: {error}
           </div>
         )}
 

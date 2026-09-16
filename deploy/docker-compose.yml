@@ -41,7 +41,10 @@ services:
         condition: service_healthy
     environment:
       <<: *pg-env
-    command: ["node", "apps/architect-cli/dist/bin/crossengin.js", "apply", "--confirm"]
+      APP_DB_USER: ${APP_DB_USER:-crossengin_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}
+      OPERATE_PACK: ${OPERATE_PACK:-erp-core}
+    command: ["node", "deploy/migrate.mjs"]
     restart: "no"
 
   api:
@@ -53,11 +56,19 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *pg-env
+      PGUSER: ${APP_DB_USER:-crossengin_app}
+      PGPASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}
       NODE_ENV: production
+      STRICT_ACCOUNT_RESOLUTION: "true"
+      OPERATE_RATE_LIMIT: ${OPERATE_RATE_LIMIT:-1000}
+      OPERATE_RATE_LIMIT_WINDOW_SECONDS: ${OPERATE_RATE_LIMIT_WINDOW_SECONDS:-60}
+      OPERATE_RATE_LIMIT_AUDIT: ${OPERATE_RATE_LIMIT_AUDIT:-false}
+      OPERATE_PREAUTH_RATE_LIMIT: ${OPERATE_PREAUTH_RATE_LIMIT:-6000}
+      OPERATE_PREAUTH_WINDOW_SECONDS: ${OPERATE_PREAUTH_WINDOW_SECONDS:-60}
     # Args in list form so the api-key (token:role:tenant) is never shell-split.
     command:
       - node
-      - apps/operate-server/dist/bin/operate-server.js
+      - dist/bin/operate-server.js
       - --pack
       - ${OPERATE_PACK:-erp-core}
       - --store
@@ -71,20 +82,27 @@ services:
       - ${OPERATE_ADMIN_API_KEY}
     expose:
       - "8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
     restart: unless-stopped
 
   web:
     build: *app-build
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
     environment:
       NODE_ENV: production
       # The web app's server-side proxy calls the API over the internal network.
       OPERATE_API_URL: http://api:8787
-      OPERATE_API_KEY: ${OPERATE_WEB_API_KEY}
-    # next start binds 0.0.0.0:3000 by default; Caddy reaches it as web:3000.
-    command: ["pnpm", "--filter", "@crossengin/operate-web", "start"]
+      OPERATE_SESSION_SECRET: ${OPERATE_SESSION_SECRET:?Set OPERATE_SESSION_SECRET}
+      OPERATE_PUBLIC_ORIGIN: https://${DOMAIN}
+    # The standalone Next.js server binds 0.0.0.0:3000; Caddy reaches it as web:3000.
+    command: ["node", "/web/apps/operate-web/server.js"]
     expose:
       - "3000"
     restart: unless-stopped

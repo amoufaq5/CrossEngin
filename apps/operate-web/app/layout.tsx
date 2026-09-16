@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 
 import "./globals.css";
+import { SessionGate } from "@/components/SessionGate";
 import { ShellBar } from "@/components/ShellBar";
 import { Sidebar } from "@/components/Sidebar";
 import { SubscriptionBanner } from "@/components/SubscriptionBanner";
@@ -22,7 +23,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={inter.variable}>
       <body className="font-sans">
-        <div className="flex min-h-screen flex-col">
+        <SessionGate><div className="flex min-h-screen flex-col">
           <ShellBar />
           <div className="flex flex-1 overflow-hidden">
             <Sidebar />
@@ -32,7 +33,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </main>
           </div>
         </div>
-      </body>
+      </SessionGate></body>
     </html>
   );
 }
