@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: crossengin_test
+          POSTGRES_PASSWORD: integration_test_only
+          POSTGRES_DB: crossengin_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crossengin_test -d crossengin_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CI: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build workspace
+        run: pnpm build
+      - name: Typecheck workspace
+        run: pnpm typecheck
+      - name: Unit tests
+        run: pnpm test
+      - name: PostgreSQL concurrency test
+        env:
+          RUN_PG_INTEGRATION: "1"
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: crossengin_test
+          PGPASSWORD: integration_test_only
+          PGDATABASE: crossengin_test
+          PGSSLMODE: disable
+        run: pnpm --filter @crossengin/api-gateway-pg exec vitest run src/rate-limit-checker.integration.test.ts

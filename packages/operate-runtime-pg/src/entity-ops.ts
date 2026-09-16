@@ -65,9 +65,10 @@ export async function getOp(
   tenantId: string,
   entity: string,
   id: string,
+  lock = false,
 ): Promise<EntityRecord | null> {
   const res = await tx.query<DocumentRow>(
-    `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 LIMIT 1`,
+    `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 LIMIT 1${lock ? " FOR UPDATE" : ""}`,
     [tenantId, entity, id],
   );
   return res.rows[0]?.document ?? null;

@@ -1431,7 +1431,7 @@ export const META_BACKUP_RECORDS: TableDefinition = {
     },
     { name: "verified_at", type: "TIMESTAMPTZ" },
     { name: "verified_by", type: "TEXT" },
-    { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "expires_at", type: "TIMESTAMPTZ", notNull: true, check: "expires_at > window_start" },
     { name: "error_message", type: "TEXT" },
   ],
   primaryKey: ["id"],
@@ -9898,6 +9898,48 @@ export const META_OPERATE_TENANT_MANIFESTS: TableDefinition = {
   },
 };
 
+export const META_OPERATE_MUTATION_RECEIPTS: TableDefinition = {
+  schema: "meta", name: "operate_mutation_receipts",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "request_key", type: "TEXT", notNull: true },
+    { name: "fingerprint", type: "TEXT", notNull: true },
+    { name: "response", type: "JSONB", notNull: true },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tenant_id", "request_key"],
+  rls: { enabled: true, policies: [{ name: "mutation_receipts_tenant", using: TENANT_ISOLATION_USING }] },
+};
+export const META_OPERATE_AI_RESERVATIONS: TableDefinition = {
+  schema: "meta", name: "operate_ai_reservations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "period_key", type: "TEXT", notNull: true },
+    { name: "reserved_usd", type: "NUMERIC(16,6)", notNull: true, check: "reserved_usd > 0" },
+    { name: "actual_usd", type: "NUMERIC(16,6)", notNull: false },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "settled_at", type: "TIMESTAMPTZ", notNull: false },
+  ],
+  primaryKey: ["tenant_id", "id"],
+  rls: { enabled: true, policies: [{ name: "ai_reservations_tenant", using: TENANT_ISOLATION_USING }] },
+};
+
+/** Shared fixed-window counters used by every API replica. Scope keys are SHA-256 hashes. */
+export const META_OPERATE_RATE_LIMIT_BUCKETS: TableDefinition = {
+  schema: "meta",
+  name: "operate_rate_limit_buckets",
+  columns: [
+    { name: "scope_hash", type: "TEXT", notNull: true, check: "scope_hash ~ '^[0-9a-f]{64}$'" },
+    { name: "window_start", type: "TIMESTAMPTZ", notNull: true },
+    { name: "request_count", type: "BIGINT", notNull: true, check: "request_count >= 0" },
+    { name: "expires_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["scope_hash"],
+  indexes: [{ name: "idx_operate_rate_limit_buckets_expiry", columns: ["expires_at"] }],
+};
+
 export const META_OPERATE_DESIGN_JOBS: TableDefinition = {
   schema: "meta",
   name: "operate_design_jobs",
@@ -9918,6 +9960,9 @@ export const META_OPERATE_DESIGN_JOBS: TableDefinition = {
       default: "'queued'",
       check: "phase IN ('queued', 'generating', 'validating', 'retrying', 'done', 'error')",
     },
+    { name: "lease_token", type: "UUID", notNull: false },
+    { name: "lease_until", type: "TIMESTAMPTZ", notNull: false },
+    { name: "run_count", type: "INTEGER", notNull: true, default: "0" },
     { name: "attempt", type: "INTEGER", notNull: true, default: "0" },
     { name: "max_attempts", type: "INTEGER", notNull: true, default: "3" },
     { name: "name", type: "TEXT", notNull: true, check: "char_length(name) BETWEEN 1 AND 200" },
@@ -10140,5 +10185,8 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_FORENSIC_CHAIN_CHECKPOINTS,
   META_OPERATE_TENANT_MANIFESTS,
   META_OPERATE_DESIGN_JOBS,
+  META_OPERATE_MUTATION_RECEIPTS,
+  META_OPERATE_AI_RESERVATIONS,
+  META_OPERATE_RATE_LIMIT_BUCKETS,
   META_NOTIFICATION_DIGEST_ITEMS,
 ];

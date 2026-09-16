@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
 
 import type { PipelineExecution } from "@crossengin/api-gateway";
+import { PostgresRateLimitChecker } from "@crossengin/api-gateway-pg";
 import { StripeClient } from "@crossengin/billing-stripe";
 import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
@@ -95,7 +96,8 @@ import { enrolNewProposalsForReview } from "./review-enrolment.js";
 import { buildDesignDecisionDispatch } from "./design-notifications.js";
 import { PostgresNotificationStore } from "./notification-store.js";
 import { buildNotificationRoutes } from "./notification-routes.js";
-import { startDesignJob } from "./design-runner.js";
+import { DesignWorker } from "./design-worker.js";
+import { PostgresDesignReservations } from "./ai-reservations.js";
 import { PostgresTenantCostStore } from "@crossengin/ai-architect-runtime-pg";
 import { loadResidencyDirectory } from "./residency-source.js";
 import type { Region } from "@crossengin/residency";
@@ -164,6 +166,12 @@ function firstHeader(v: string | readonly string[] | undefined): string | undefi
   return v === undefined ? undefined : Array.isArray(v) ? v[0] : (v as string);
 }
 
+function positiveRateLimit(raw: string, name: string): number {
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive safe integer`);
+  return parsed;
+}
+
 function jsonRaw(status: number, body: unknown): RawHttpResponse {
   const bytes = new TextEncoder().encode(JSON.stringify(body));
   return { status, headers: { "content-type": "application/json", "content-length": bytes.byteLength.toString() }, body: bytes };
@@ -215,6 +223,35 @@ export interface DispatchTarget {
   dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse>;
 }
 
+export interface NodeRequestListenerOptions {
+  /** Readiness dependency probe. Omit for deployments without external dependencies. */
+  readonly readiness?: () => Promise<boolean>;
+  /** Internal error sink; error details are never returned to the caller. */
+  readonly onError?: (error: unknown) => void;
+  /** Shared pre-authentication limit, keyed by the socket peer address. */
+  readonly preAuthLimiter?: {
+    checkScope(scope: string, now: Date): Promise<{ allowed: boolean; retryAfterSeconds: number }>;
+  };
+}
+
+function probePath(url: string | undefined): string {
+  try {
+    return new URL(url ?? "/", "http://health.invalid").pathname;
+  } catch {
+    return "/";
+  }
+}
+
+function healthResponse(res: NodeResLike, status: number, method: string, state: "ok" | "unavailable"): void {
+  const payload = new TextEncoder().encode(JSON.stringify({ status: state }));
+  res.writeHead(status, {
+    "cache-control": "no-store",
+    "content-type": "application/json",
+    "content-length": payload.byteLength.toString(),
+  });
+  res.end(method === "HEAD" ? undefined : payload);
+}
+
 /**
  * Builds a Node `http` request listener over an `OperateHttpServer`: collects
  * the body, dispatches through the gateway, and writes the `RawHttpResponse`. A
@@ -222,9 +259,49 @@ export interface DispatchTarget {
  */
 export function createNodeRequestListener(
   server: DispatchTarget,
+  options: NodeRequestListenerOptions = {},
 ): (req: NodeReqLike, res: NodeResLike) => Promise<void> {
   return async (req, res) => {
+    const method = (req.method ?? "GET").toUpperCase();
+    const path = probePath(req.url);
+    if ((method === "GET" || method === "HEAD") && path === "/healthz") {
+      healthResponse(res, 200, method, "ok");
+      return;
+    }
+    if ((method === "GET" || method === "HEAD") && path === "/readyz") {
+      try {
+        const ready = options.readiness === undefined || await options.readiness();
+        healthResponse(res, ready ? 200 : 503, method, ready ? "ok" : "unavailable");
+      } catch (err) {
+        options.onError?.(err);
+        healthResponse(res, 503, method, "unavailable");
+      }
+      return;
+    }
     try {
+      if (options.preAuthLimiter !== undefined) {
+        // Never trust a caller-supplied X-Forwarded-For value here. A reverse proxy
+        // counts as one peer; configure this limit for its aggregate traffic.
+        const peer = req.socket?.remoteAddress ?? "unknown";
+        const decision = await options.preAuthLimiter.checkScope(peer, new Date());
+        if (!decision.allowed) {
+          const payload = new TextEncoder().encode(JSON.stringify({
+            type: "https://crossengin.io/problems/too-many-requests",
+            title: "Too many requests",
+            status: 429,
+            detail: "Request limit exceeded",
+            extensions: { retryAfterSeconds: decision.retryAfterSeconds },
+          }));
+          res.writeHead(429, {
+            "cache-control": "no-store",
+            "content-type": "application/problem+json",
+            "content-length": payload.byteLength.toString(),
+            "retry-after": decision.retryAfterSeconds.toString(),
+          });
+          res.end(payload);
+          return;
+        }
+      }
       const body = await readBody(req);
       const raw: RawHttpRequest = {
         method: req.method ?? "GET",
@@ -253,13 +330,13 @@ export function createNodeRequestListener(
         res.end(payload);
         return;
       }
-      const detail = err instanceof Error ? err.message : "unknown error";
+      options.onError?.(err);
       const payload = new TextEncoder().encode(
         JSON.stringify({
           type: "https://crossengin.io/problems/internal-error",
           title: "Internal server error",
           status: 500,
-          detail,
+          detail: "Request processing failed",
           extensions: {},
         }),
       );
@@ -321,12 +398,22 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     };
   }
   const conn = createNodePgConnection(parsePgEnvConfig());
+  if (process.env["NODE_ENV"] === "production") {
+    const checked = await conn.query<{ unsafe: boolean }>(`SELECT EXISTS (
+      SELECT 1 FROM pg_roles WHERE rolname = current_user AND (rolsuper OR rolbypassrls)
+      UNION ALL SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE r.rolname = current_user AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND c.relkind IN ('r', 'p')
+    ) AS unsafe`);
+    if (checked.rows[0]?.unsafe !== false) { await conn.close(); throw new Error("API database role must not own tables, be superuser, or bypass RLS"); }
+  }
   const schema = options.schema ?? undefined;
   const allocator = new PostgresSequenceAllocator(conn, schema);
   const settingsStore = new PostgresSettingsStore(conn, schema);
   if (options.store === "pg-columns") {
     const store = new ColumnMappedEntityStore(conn, manifest, options.schema !== null ? { schema: options.schema } : {});
-    await store.ensureSchema();
+    if (process.env["NODE_ENV"] !== "production") await store.ensureSchema();
     return { store, allocator, settingsStore, conn };
   }
   const store = new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
@@ -349,8 +436,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.manifestPath !== null
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
-  const { store, allocator, settingsStore, conn } = await resolveStore(options, manifest);
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
+  if (process.env["NODE_ENV"] === "production") {
+    for (const raw of options.apiKeys) {
+      const parts = raw.split(":");
+      if (parts.length !== 4 || (parts[0]?.length ?? 0) < 32 ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(parts[3] ?? "") ||
+          /devkey|REPLACE_WITH|change-me/i.test(parts[0] ?? "")) {
+        throw new Error("Production API keys require a strong token and an explicit individual principal UUID");
+      }
+    }
+    if (apiKeys.length === 0 && options.jwtIssuer === null) throw new Error("Production requires configured authentication");
+  }
+  const { store, allocator, settingsStore, conn } = await resolveStore(options, manifest);
   const { config: jwt, poller } = await resolveJwtConfig(options);
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
   // Offline subscription entitlement: verify an Ed25519 license token against the
@@ -623,11 +721,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // tenant's live system. The designer resolves from env (Anthropic → OpenAI, OPENAI_BASE_URL
   // for self-hosted OSS servers); with no provider the routes answer 503 but review/activate of
   // existing proposals still works. Activation invalidates the per-tenant gateway cache below.
+  let designWorker: DesignWorker | undefined;
   if (options.aiDesign && manifestStore !== null) {
     const providerBuild = buildDesignProviderFromEnv(
       process.env,
       options.aiModel !== null ? { model: options.aiModel } : {},
     );
+    const perRequestLimit = Number(process.env["OPERATE_AI_MAX_USD_PER_REQUEST"] ?? "1");
     const designer =
       providerBuild !== null
         ? buildDesignDesigner({
@@ -635,6 +735,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             model: providerBuild.model,
             providerLabel: providerBuild.providerLabel,
             ensureRoles: options.aiDesignRoles,
+            maxCostUsd: perRequestLimit,
+            pricing: providerBuild.pricing,
           })
         : null;
     if (providerBuild === null) {
@@ -656,7 +758,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // Async design: a durable job row carries live phase/attempt/progress so the wizard polls
     // instead of blocking ~a minute on one request. The job survives the client disconnecting
     // and is readable from any replica.
-    const designJobs = conn !== undefined ? new PostgresDesignJobStore(conn, schemaOpt) : undefined;
+    const designJobs = conn !== undefined ? new PostgresDesignJobStore(conn, { ...schemaOpt, requireReview: options.requireDesignReview }) : undefined;
     // Durable per-tenant monthly spend ceiling over meta.architect_tenant_cost (the same ledger
     // the Architect CLI writes), so a design loop can't run up an unbounded bill and the limit
     // holds across replicas and restarts.
@@ -671,10 +773,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               ),
           })
         : undefined;
+    const reservations = conn ? new PostgresDesignReservations(conn,
+      options.aiMaxUsdPerMonth ?? DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, perRequestLimit) : undefined;
+    if (designer && designJobs && reservations && conn) {
+      designWorker = new DesignWorker({
+        jobs: designJobs, tenants: new PostgresTenantSource(conn, schemaOpt), designer, reservations,
+        onError: err => console.error("[ai-design] worker error", err),
+      });
+    }
     extraRouteList.push(
       ...buildAiDesignRoutes({
         store,
         designer,
+        ...(designer && reservations ? { designForTenant: (tenantId: string, input: { description: string; name?: string }) => reservations.run(tenantId, () => designer(input)) } : {}),
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         allowedRoles: new Set(options.aiDesignRoles),
         onActivated: (tenantId) => gatewayCache?.invalidate(tenantId),
@@ -687,19 +798,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ...(designJobs !== undefined && designer !== null
           ? {
               jobs: designJobs,
-              startJob: (tenantId: string, jobId: string, input: { description: string; name: string }): void =>
-                startDesignJob(
-                  {
-                    jobs: designJobs,
-                    manifests: store,
-                    designer,
-                    ...(budget !== undefined ? { budget } : {}),
-                    onError: (err) => console.error(`[ai-design] job ${jobId} failed`, err),
-                  },
-                  tenantId,
-                  jobId,
-                  input,
-                ),
+              // The durable worker polls queued rows; request handlers never launch inference.
+              startJob: (): void => {},
             }
           : {}),
       }),
@@ -921,6 +1021,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           for (const sink of executionSinks) sink(execution);
         }
       : undefined;
+  const rateLimit = positiveRateLimit(process.env["OPERATE_RATE_LIMIT"] ?? "1000", "OPERATE_RATE_LIMIT");
+  const rateWindowSeconds = positiveRateLimit(process.env["OPERATE_RATE_LIMIT_WINDOW_SECONDS"] ?? "60", "OPERATE_RATE_LIMIT_WINDOW_SECONDS");
+  const rateLimitChecker = conn !== undefined
+    ? new PostgresRateLimitChecker({
+        conn,
+        limit: rateLimit,
+        windowSeconds: rateWindowSeconds,
+        persistDecisions: process.env["OPERATE_RATE_LIMIT_AUDIT"] === "true",
+      })
+    : undefined;
   const { httpServer } = buildOperateHttpServer({
     manifest,
     store,
@@ -943,6 +1053,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
     ...(onExecution !== undefined ? { onExecution } : {}),
+    ...(rateLimitChecker !== undefined ? { rateLimitChecker } : {}),
   });
   // In-process cron scheduler: enqueue the manifest's scheduled jobs into job_runs per tenant, so the
   // distributed worker fleet runs them. Enabled by --schedule-ms + --schedule-tenant over a pg store;
@@ -1017,7 +1128,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // compiled from it (cached, ttl'd, invalidated on activation); everyone else — and any
   // request whose tenant can't be resolved — falls through to the default full-featured
   // server above. Tenant gateways carry auth + store + numbering + settings; the peripheral
-  // observers (SLO, audit chain, metering, billing) stay on the default server for now.
+  // observers and enforcement controls are shared with every compiled tenant server.
   let dispatchTarget: DispatchTarget = httpServer;
   if (options.perTenantManifests && manifestStore !== null) {
     // The column-mapped store only knows the boot pack's entities (its column plans are derived
@@ -1033,9 +1144,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // design, platform admin), the subscription gate, the residency guard, the per-request
       // observer chain (SLO burn/latency, usage metering, audit chain), write effects and job
       // invocation — so activating a custom manifest never drops a tenant out of enforcement,
-      // billing, or the tamper-evident audit trail. Only the deployment-wide singletons that
-      // are not per-request (the Stripe webhook + billing-portal routes) stay on the default
-      // server, which still handles them for every tenant.
+      // billing, rate limiting, or the tamper-evident audit trail. The unauthenticated Stripe
+      // webhook stays on the default server; the authenticated billing-portal route must be
+      // present on tenant servers because tenant-aware dispatch routes those calls here.
       build: (tenantManifest): OperateHttpServer =>
         buildOperateHttpServer({
           manifest: tenantManifest,
@@ -1056,6 +1167,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             ? { jobInvokeActionRoles: invokeActionRoles }
             : {}),
           ...(onExecution !== undefined ? { onExecution } : {}),
+          ...(rateLimitChecker !== undefined ? { rateLimitChecker } : {}),
+          ...(billingPortal !== undefined ? { billingPortal } : {}),
           defaultScheme: options.defaultScheme,
         }).httpServer,
       onInvalidManifest: (tenantId, issues) =>
@@ -1083,6 +1196,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }),
     };
   }
+  designWorker?.start();
   poller?.start();
   manifestPoller?.start();
   jobScheduler?.start();
@@ -1096,36 +1210,61 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   auditPolicy?.refresher.start();
   metering?.flushScheduler?.start();
   stripeUsageSync?.scheduler.start();
-  const listener = createNodeRequestListener(dispatchTarget);
+  const listener = createNodeRequestListener(dispatchTarget, {
+    readiness: conn === undefined
+      ? async () => true
+      : async () => (await conn.query("SELECT 1 AS ready")).rowCount === 1,
+    onError: (err) => console.error("[http] request failed", err),
+    ...(conn !== undefined ? {
+      preAuthLimiter: new PostgresRateLimitChecker({
+        conn,
+        limit: positiveRateLimit(process.env["OPERATE_PREAUTH_RATE_LIMIT"] ?? "6000", "OPERATE_PREAUTH_RATE_LIMIT"),
+        windowSeconds: positiveRateLimit(process.env["OPERATE_PREAUTH_WINDOW_SECONDS"] ?? "60", "OPERATE_PREAUTH_WINDOW_SECONDS"),
+        persistDecisions: false,
+      }),
+    } : {}),
+  });
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
   });
   await new Promise<void>((resolve) => server.listen(options.port, resolve));
   const address = server.address();
   const port = typeof address === "object" && address !== null ? address.port : options.port;
+  let closePromise: Promise<void> | null = null;
+  const close = (): Promise<void> => {
+    if (closePromise !== null) return closePromise;
+    poller?.stop();
+    manifestPoller?.stop();
+    jobScheduler?.stop();
+    pruneScheduler?.stop();
+    deliveryScheduler?.stop();
+    sloEnforcement?.scheduler.stop();
+    drReadiness?.scheduler.stop();
+    accessReviews?.scheduler.stop();
+    certification?.scheduler.stop();
+    checkpoints?.scheduler.stop();
+    auditPolicy?.refresher.stop();
+    metering?.flushScheduler?.stop();
+    stripeUsageSync?.scheduler.stop();
+    closePromise = (async () => {
+      const drains = await Promise.allSettled([auditChain?.observer.drain(), designWorker?.stop()]);
+      for (const result of drains) {
+        if (result.status === "rejected") console.error("[shutdown] drain failed", result.reason);
+      }
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve()));
+        });
+      } finally {
+        await conn?.close();
+      }
+    })();
+    return closePromise;
+  };
   return {
     port,
     server,
-    close: () =>
-      new Promise<void>((resolve, reject) => {
-        poller?.stop();
-        manifestPoller?.stop();
-        jobScheduler?.stop();
-        pruneScheduler?.stop();
-        deliveryScheduler?.stop();
-        sloEnforcement?.scheduler.stop();
-        drReadiness?.scheduler.stop();
-        accessReviews?.scheduler.stop();
-        certification?.scheduler.stop();
-        checkpoints?.scheduler.stop();
-        auditPolicy?.refresher.stop();
-        metering?.flushScheduler?.stop();
-        stripeUsageSync?.scheduler.stop();
-        // Drain any queued audit-chain appends before closing, so no request's entry is lost on shutdown.
-        void (auditChain?.observer.drain() ?? Promise.resolve()).finally(() => {
-          server.close((err) => (err ? reject(err) : resolve()));
-        });
-      }),
+    close,
   };
 }
 

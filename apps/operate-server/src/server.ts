@@ -1,4 +1,5 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
+import type { RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
 import { decideRegionRouting, type TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -213,6 +214,8 @@ export interface BuildOperateHttpServerOptions {
   readonly defaultScheme?: ForwardedProto;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
+  /** Shared rate limiter; production PostgreSQL deployments inject a durable implementation. */
+  readonly rateLimitChecker?: RateLimitChecker;
   /** Optional live-request observer sink (e.g. the SLO request observer). */
   readonly onExecution?: (execution: PipelineExecution) => void;
 }
@@ -251,6 +254,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.jobInvokeRoles !== undefined ? { jobInvokeRoles: options.jobInvokeRoles as never } : {}),
     ...(options.jobInvokeActionRoles !== undefined ? { jobInvokeActionRoles: options.jobInvokeActionRoles } : {}),
     ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
+    ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   const httpServer = new OperateHttpServer({

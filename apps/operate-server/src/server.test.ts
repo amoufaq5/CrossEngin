@@ -1,4 +1,5 @@
 import { generateEd25519Keypair } from "@crossengin/crypto";
+import type { RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import { InMemoryEntityStore, LicenseEntitlementResolver, signLicense } from "@crossengin/operate-runtime";
 import { buildProfileFromTemplate } from "@crossengin/residency";
 import { InMemoryTenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -68,6 +69,41 @@ describe("OperateHttpServer — serving a pack over raw HTTP", () => {
     const server = makeServer();
     const res = await server.dispatch(req("GET", "/v1/products", "key-nobody"), null);
     expect(res.status).toBe(401);
+  });
+
+  it("uses an injected shared rate limiter and returns its retry interval", async () => {
+    let calls = 0;
+    const rateLimitChecker: RateLimitChecker = {
+      async check(input) {
+        calls += 1;
+        expect(input.tenantId).toBe(TENANT);
+        expect(input.principalId).toBe("00000000-0000-4000-8000-0000000000aa");
+        expect(input.route?.operationId).toBe("product.list");
+        return {
+          allowed: false,
+          retryAfterSeconds: 12,
+          decisionId: "rld_test0000000000000001",
+          limit: 1,
+          remaining: 0,
+          resetAt: "2026-06-03T12:00:12.000Z",
+          reason: "test_limit_exceeded",
+        };
+      },
+    };
+    const { httpServer } = buildOperateHttpServer({
+      manifest,
+      store: new InMemoryEntityStore(),
+      apiKeys: API_KEYS,
+      rateLimitChecker,
+      now: () => new Date("2026-06-03T12:00:00.000Z"),
+    });
+
+    const res = await httpServer.dispatch(req("GET", "/v1/products", "key-manager"), null);
+
+    expect(res.status).toBe(429);
+    expect(res.headers["retry-after"]).toBe("12");
+    expect(parse(res.body).detail).toContain("test_limit_exceeded");
+    expect(calls).toBe(1);
   });
 
   it("creates a product (manager) then lists it back", async () => {

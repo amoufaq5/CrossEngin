@@ -16,7 +16,7 @@ import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from ".
 import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { validateBody, type EntityValidationPlan } from "./validation.js";
-import { isTransactional, projectRecord, type EntityStore } from "./store.js";
+import { isIdempotent, isTransactional, projectRecord, type EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
@@ -30,6 +30,7 @@ const FALLBACK_LIST_CONFIG: ListConfig = {
 
 export interface HandlerContext {
   readonly store: EntityStore;
+  readonly transactionOwned?: boolean;
   readonly permissions: PermissionMap;
   readonly roles: ReadonlyMap<RoleName, RoleDefinition>;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
@@ -96,6 +97,20 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
       return json(403, { error: "forbidden", detail: decision.reason });
     }
 
+    if (!["list", "read"].includes(spec.action) && isIdempotent(ctx.store)) {
+      const key = request.headers["idempotency-key"];
+      if (typeof key !== "string" || !/^[A-Za-z0-9_.:-]{8,200}$/.test(key)) {
+        return json(400, { error: "idempotency_key_required", detail: "Provide an 8–200 character Idempotency-Key for writes" });
+      }
+      const fingerprint = JSON.stringify([principal?.principalId, spec.operationId, params, parsedBody]);
+      try {
+        return await ctx.store.withIdempotency(tenantId, key, fingerprint, async tx =>
+          buildSpecHandler(spec, { ...ctx, store: tx, transactionOwned: true })({ request, principal, params, parsedBody, route: undefined as never }));
+      } catch (err) {
+        const status = typeof err === "object" && err !== null && "status" in err && err.status === 409 ? 409 : 500;
+        return json(status, { error: status === 409 ? "idempotency_conflict" : "write_failed", detail: err instanceof Error ? err.message : "Write failed" });
+      }
+    }
     const id = params["id"] ?? "";
     switch (spec.action) {
       case "list": {
@@ -345,6 +360,7 @@ async function writeTxn(
   tenantId: string,
   body: (store: EntityStore) => Promise<HandlerOutput>,
 ): Promise<HandlerOutput> {
+  if (ctx.transactionOwned) return body(ctx.store);
   try {
     if (isTransactional(ctx.store)) {
       return await ctx.store.withTransaction(tenantId, (tx) => body(tx));

@@ -30,15 +30,27 @@ function fixtureRoute(): RouteDefinition {
 function mockConnection(
   capture?: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
-  return {
+  const buckets = new Map<string, { window: string; count: number }>();
+  const conn: PgConnection = {
     query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       if (capture !== undefined) capture.push({ sql, params });
+      if (sql.includes("INSERT INTO meta.operate_rate_limit_buckets")) {
+        const key = String(params?.[0]);
+        const window = String(params?.[1]);
+        const prior = buckets.get(key);
+        const advances = prior === undefined || prior.window < window;
+        const effectiveWindow = advances ? window : prior.window;
+        const count = advances ? 1 : prior.count + 1;
+        buckets.set(key, { window: effectiveWindow, count });
+        return { rows: [{ request_count: String(count), window_start: effectiveWindow }], rowCount: 1 };
+      }
       return { rows: [], rowCount: 1 };
     }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
+  return conn;
 }
 
 describe("PostgresRateLimitChecker — constructor validation", () => {
@@ -160,8 +172,9 @@ describe("PostgresRateLimitChecker — decision persistence", () => {
 
   it("skips persistence when persistDecisions=false", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(capture);
     const checker = new PostgresRateLimitChecker({
-      conn: mockConnection(capture),
+      conn,
       limit: 1,
       windowSeconds: 60,
       persistDecisions: false,
@@ -175,7 +188,49 @@ describe("PostgresRateLimitChecker — decision persistence", () => {
       request: req,
       now: new Date("2026-05-16T12:00:00.000Z"),
     });
-    expect(capture).toHaveLength(0);
+    const bucketWrite = capture.find(c => c.sql.includes("operate_rate_limit_buckets"));
+    expect(bucketWrite).toBeDefined();
+    expect(bucketWrite?.params?.[0]).toMatch(/^[0-9a-f]{64}$/);
+    expect(bucketWrite?.params?.[0]).not.toContain(TENANT);
+    expect(capture.some(c => c.sql.includes("rate_limit_decisions"))).toBe(false);
+    expect(conn.transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("PostgresRateLimitChecker — shared atomic bucket", () => {
+  it("shares pre-authentication counts across replicas without recording raw peer addresses", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(capture);
+    const first = new PostgresRateLimitChecker({ conn, limit: 1, windowSeconds: 60, persistDecisions: false });
+    const second = new PostgresRateLimitChecker({ conn, limit: 1, windowSeconds: 60, persistDecisions: false });
+    const at = new Date("2026-05-16T12:00:00.000Z");
+    expect((await first.checkScope("203.0.113.1", at)).allowed).toBe(true);
+    const denied = await second.checkScope("203.0.113.1", at);
+    expect(denied.allowed).toBe(false);
+    expect(denied.retryAfterSeconds).toBe(60);
+    expect(capture.filter(c => c.sql.includes("operate_rate_limit_buckets"))).toHaveLength(2);
+    expect(String(capture[0]?.params?.[0])).toMatch(/^[a-f0-9]{64}$/);
+    expect(capture.some(c => c.sql.includes("rate_limit_decisions"))).toBe(false);
+  });
+
+  it("uses one database counter across checker instances", async () => {
+    const conn = mockConnection();
+    const first = new PostgresRateLimitChecker({ conn, limit: 1, windowSeconds: 60 });
+    const second = new PostgresRateLimitChecker({ conn, limit: 1, windowSeconds: 60 });
+    const input = {
+      tenantId: TENANT, principalId: USER, route: fixtureRoute(), request: {} as IncomingRequest,
+      now: new Date("2026-05-16T12:00:00.000Z"),
+    };
+    expect((await first.check(input)).allowed).toBe(true);
+    expect((await second.check(input)).allowed).toBe(false);
+  });
+
+  it("does not reset a newer bucket when one replica has a stale clock", async () => {
+    const conn = mockConnection();
+    const checker = new PostgresRateLimitChecker({ conn, limit: 1, windowSeconds: 60 });
+    const common = { tenantId: TENANT, principalId: USER, route: fixtureRoute(), request: {} as IncomingRequest };
+    expect((await checker.check({ ...common, now: new Date("2026-05-16T12:02:00.000Z") })).allowed).toBe(true);
+    expect((await checker.check({ ...common, now: new Date("2026-05-16T12:01:59.000Z") })).allowed).toBe(false);
   });
 });
 

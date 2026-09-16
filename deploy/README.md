@@ -21,8 +21,8 @@ and **Caddy** for automatic HTTPS.
 git clone <your-fork-url> crossengin && cd crossengin/deploy
 
 cp .env.example .env
-# Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, and a strong token in
-# OPERATE_ADMIN_API_KEY + OPERATE_WEB_API_KEY (same token in both).
+# Edit .env: set POSTGRES_PASSWORD, APP_DB_PASSWORD, DOMAIN, ACME_EMAIL,
+# OPERATE_SESSION_SECRET, and a strong token in OPERATE_ADMIN_API_KEY.
 
 docker compose up -d --build          # build images + start everything
 docker compose logs -f migrate        # watch the schema apply, then exit 0
@@ -43,14 +43,19 @@ Once up, use the platform console you just launched. In the UI go to **Platform 
 New tenant**, or via the API:
 
 ```bash
+ADMIN_TOKEN='<the token before the first colon in OPERATE_ADMIN_API_KEY>'
 curl -sS -X POST https://api.erp.example.com/v1/platform/tenants \
-  -H "x-api-key: $OPERATE_WEB_API_KEY" -H 'content-type: application/json' \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"slug":"acme","name":"Acme Inc.","tier":"small","region":"eu"}'
 ```
 
 The console can list / create / suspend / archive / reactivate tenants; the `schema_name`
 is auto-derived from the slug. (Hard deletion is intentionally not exposed — that's the
 audited GDPR flow.)
+
+The production image uses a multi-stage build: compilers, test dependencies, and the
+workspace package store remain in the builder stage. The API and standalone web runtime
+run as the unprivileged `node` operating-system user.
 
 ## Going to production (auth)
 
@@ -172,3 +177,28 @@ Two notes that matter more than price:
 - **Managed Postgres usually forbids C extensions**, so `pg_uuidv7` is unavailable.
   That is already handled: run `supabase/00-uuidv7.sql` once to define the pure-SQL
   `uuid_generate_v7()`. The migration applier accepts either.
+
+## Measure API latency
+
+After deployment, run the dependency-free benchmark against a non-production test tenant:
+
+```bash
+OPERATE_BENCH_URL=https://erp.example.com \
+OPERATE_BENCH_CREDENTIAL=your-test-api-key \
+OPERATE_BENCH_TENANT=00000000-0000-4000-8000-000000000001 \
+OPERATE_BENCH_CONCURRENCY=20 OPERATE_BENCH_SECONDS=30 \
+pnpm bench:operate
+```
+
+It reports throughput, status counts, transport failures, and p50/p95/p99/max latency.
+Use `OPERATE_BENCH_PATH` to target a representative read route and
+`OPERATE_BENCH_AUTH=bearer` for JWTs. The production gateway uses one shared,
+atomic PostgreSQL rate-limit bucket per tenant/principal/operation; tune
+`OPERATE_RATE_LIMIT` and `OPERATE_RATE_LIMIT_WINDOW_SECONDS` for the expected workload.
+`OPERATE_PREAUTH_RATE_LIMIT` caps requests before credential verification. It
+uses the direct socket address: with Caddy in front, one budget applies to all
+traffic from that proxy. Configure it for the proxy's total expected throughput.
+
+The API exposes unauthenticated `GET`/`HEAD /healthz` for liveness and `/readyz`
+for dependency readiness. The readiness probe checks PostgreSQL when the server uses
+a PostgreSQL store; it returns only `ok` or `unavailable` and never leaks connection errors.

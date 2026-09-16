@@ -385,6 +385,13 @@ describe("ColumnMappedEntityStore — withTransaction", () => {
     expect(cap.calls.some((c) => c.sql.includes('INSERT INTO "tenant_app"."widget"'))).toBe(true);
   });
 
+  it("locks records read inside a mutation transaction", async () => {
+    const cap = capturePg([{ id: "widget-1", sku: "LOCKED" }]);
+    await store(cap).withTransaction(TENANT, async tx => tx.get(TENANT, "Widget", "widget-1"));
+    const select = cap.calls.find(c => c.sql.includes('FROM "tenant_app"."widget"'));
+    expect(select?.sql).toContain("FOR UPDATE");
+  });
+
   it("propagates a throw from the unit of work (so the tx rolls back)", async () => {
     const cap = capturePg();
     await expect(

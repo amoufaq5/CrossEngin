@@ -25,6 +25,7 @@ import {
   buildAdminSettingsUpdateHandler,
   type AdminContext,
 } from "./admin-handlers.js";
+import { isIdempotent } from "./store.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
 import {
@@ -727,7 +728,12 @@ export function buildOperateGateway(
     routes: compiled.routes,
     handlers: compiled.handlers,
     principalResolver: options.principalResolver ?? new InMemoryPrincipalResolver(),
-    idempotencyStore: options.idempotencyStore ?? new InMemoryIdempotencyStore(),
+    // Durable entity receipts replay through normal RBAC/redaction. The legacy gateway cache
+    // stores no response body and must not short-circuit those handlers.
+    idempotencyStore: isIdempotent(options.store) ? {
+      async get() { return null; }, async put() {},
+      async update() { throw new Error("Entity mutation receipts own idempotency"); },
+    } : options.idempotencyStore ?? new InMemoryIdempotencyStore(),
     rateLimitChecker: options.rateLimitChecker ?? new InMemoryRateLimitChecker({ limit: 10_000 }),
     redactionRegistry: compiled.redactionRegistry,
     ...(options.opaqueTokenLookup !== undefined ? { opaqueTokenLookup: options.opaqueTokenLookup } : {}),

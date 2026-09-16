@@ -1,3 +1,4 @@
+import { completeList } from "./complete-list.js";
 import type { EntityRecord, ListFilter } from "./store.js";
 import type { WriteGuardInput } from "./write-guards.js";
 
@@ -111,12 +112,12 @@ export function journalReversalEffect(config: JournalReversalConfig = {}): Write
     const newId = String(created["id"]);
 
     const filter: ListFilter = { field: c.lineEntryRefField, op: "eq", value: originalId };
-    const page = await input.store.listPage(input.tenantId, c.lineEntity, {
+    const page = { records: await completeList(input.store, input.tenantId, c.lineEntity, {
       limit: c.maxLines,
       cursor: null,
       sort: [],
       filters: [filter],
-    });
+    }) };
     const lines = page.records.filter((r) => String(r[c.lineEntryRefField] ?? "") === originalId);
 
     const skip = new Set([
@@ -307,12 +308,12 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
     }
 
     const filter: ListFilter = { field: c.lineInvoiceRefField, op: "eq", value: originalId };
-    const page = await input.store.listPage(input.tenantId, lineEntity, {
+    const page = { records: await completeList(input.store, input.tenantId, lineEntity, {
       limit: c.maxLines,
       cursor: null,
       sort: [],
       filters: [filter],
-    });
+    }) };
     const lines = page.records.filter((r) => String(r[c.lineInvoiceRefField] ?? "") === originalId);
     const lineSkip = new Set(["id", c.lineInvoiceRefField, c.descriptionField, "created_at", "updated_at"]);
     for (const line of lines) {
@@ -417,8 +418,8 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
 
     // Resolve configured account codes to real LedgerAccount ids; fall back to placeholders.
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
-    const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
-    const revenueAccount = (await resolveAccountId(input, c, codes.revenue)) ?? c.revenueAccountRef;
+    const arAccount = await requireAccountId(input, c, codes.ar, c.arAccountRef);
+    const revenueAccount = await requireAccountId(input, c, codes.revenue, c.revenueAccountRef);
 
     const entry = await input.store.create(input.tenantId, c.entryEntity, {
       entry_number: `${origNumber}-CN-GL`,
@@ -467,8 +468,23 @@ async function resolveAccountId(
     sort: [],
     filters: [{ field: c.accountCodeField, op: "eq", value: code }],
   });
-  const rec = page.records.find((r) => String(r[c.accountCodeField] ?? "") === code) ?? page.records[0];
+  const rec = page.records.find((r) => String(r[c.accountCodeField] ?? "") === code);
   return rec !== undefined ? String(rec["id"]) : null;
+}
+
+async function requireAccountId(input: WriteEffectInput, c: { ledgerAccountEntity: string; accountCodeField: string }, code: string | undefined, explicitRef: string): Promise<string> {
+  if (code !== undefined && code.length > 0) {
+    const resolved = await resolveAccountId(input, c, code);
+    if (resolved !== null) return resolved;
+    if (process.env["STRICT_ACCOUNT_RESOLUTION"] === "true") throw new Error(`Ledger account code '${code}' is not configured for this tenant`);
+    return explicitRef;
+  }
+  const existing = await input.store.get(input.tenantId, c.ledgerAccountEntity, explicitRef);
+  // Legacy manifests use stable symbolic references. Production deployments should
+  // set STRICT_ACCOUNT_RESOLUTION and provide real chart-of-accounts mappings.
+  if (existing !== null) return String(existing["id"]);
+  if (process.env["STRICT_ACCOUNT_RESOLUTION"] === "true") throw new Error("Configure the required chart-of-accounts mappings before posting");
+  return explicitRef;
 }
 
 export interface BillGlConfig {
@@ -537,8 +553,8 @@ export function billGlPostingEffect(config: BillGlConfig = {}): WriteEffect {
     const currency = typeof bill[c.currencyField] === "string" ? (bill[c.currencyField] as string) : "USD";
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
-    const apAccount = (await resolveAccountId(input, c, codes.ap)) ?? c.apAccountRef;
-    const expenseAccount = (await resolveAccountId(input, c, codes.expense)) ?? c.expenseAccountRef;
+    const apAccount = await requireAccountId(input, c, codes.ap, c.apAccountRef);
+    const expenseAccount = await requireAccountId(input, c, codes.expense, c.expenseAccountRef);
 
     const entry = await input.store.create(input.tenantId, c.entryEntity, {
       entry_number: `${billNumber}-GL`,
@@ -646,8 +662,8 @@ export function paymentGlPostingEffect(config: PaymentGlConfig): WriteEffect {
     const currency = typeof doc[c.currencyField] === "string" ? (doc[c.currencyField] as string) : "USD";
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
-    const debitAccount = (await resolveAccountId(input, c, codes.debit)) ?? c.debitAccountRef;
-    const creditAccount = (await resolveAccountId(input, c, codes.credit)) ?? c.creditAccountRef;
+    const debitAccount = await requireAccountId(input, c, codes.debit, c.debitAccountRef);
+    const creditAccount = await requireAccountId(input, c, codes.credit, c.creditAccountRef);
 
     const entry = await input.store.create(input.tenantId, c.entryEntity, {
       entry_number: `${docNumber}${c.entrySuffix}`,
@@ -995,9 +1011,9 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
     const currency = typeof doc[c.currencyField] === "string" ? (doc[c.currencyField] as string) : "USD";
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
-    const controlAccount = (await resolveAccountId(input, c, codes.control)) ?? c.controlAccountRef;
-    const netAccount = (await resolveAccountId(input, c, codes.net)) ?? c.netAccountRef;
-    const taxAccount = (await resolveAccountId(input, c, codes.tax)) ?? c.taxAccountRef;
+    const controlAccount = await requireAccountId(input, c, codes.control, c.controlAccountRef);
+    const netAccount = await requireAccountId(input, c, codes.net, c.netAccountRef);
+    const taxAccount = await requireAccountId(input, c, codes.tax, c.taxAccountRef);
 
     const entry = await input.store.create(input.tenantId, c.entryEntity, {
       entry_number: `${docNumber}${c.entrySuffix}`,
@@ -1029,7 +1045,7 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
       const resolveCode = async (code: string): Promise<string> => {
         const cached = acctCache.get(code);
         if (cached !== undefined) return cached;
-        const resolved = (await resolveAccountId(input, c, code)) ?? taxAccount;
+        const resolved = await requireAccountId(input, c, code, taxAccount);
         acctCache.set(code, resolved);
         return resolved;
       };
@@ -1133,10 +1149,10 @@ export function paymentSettlementGlPostingEffect(config: PaymentSettlementGlConf
     const currency = typeof pay[c.currencyField] === "string" ? (pay[c.currencyField] as string) : "USD";
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
-    const cashAccount = (await resolveAccountId(input, c, codes.cash)) ?? c.cashAccountRef;
-    const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
-    const apAccount = (await resolveAccountId(input, c, codes.ap)) ?? c.apAccountRef;
-    const fxAccount = (await resolveAccountId(input, c, codes.fx)) ?? c.fxAccountRef;
+    const cashAccount = await requireAccountId(input, c, codes.cash, c.cashAccountRef);
+    const arAccount = await requireAccountId(input, c, codes.ar, c.arAccountRef);
+    const apAccount = await requireAccountId(input, c, codes.ap, c.apAccountRef);
+    const fxAccount = await requireAccountId(input, c, codes.fx, c.fxAccountRef);
 
     const entry = await input.store.create(input.tenantId, c.entryEntity, {
       entry_number: `${payNumber}${c.entrySuffix}`,
@@ -1394,9 +1410,9 @@ export function unrealizedFxRevaluationEffect(config: UnrealizedFxRevaluationCon
     if (functionalCurrencyId === null) return; // can't revalue without a functional currency record
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
-    const fxAccount = (await resolveAccountId(input, c, codes.fx)) ?? c.fxAccountRef;
-    const arAccount = (await resolveAccountId(input, c, codes.ar)) ?? c.arAccountRef;
-    const apAccount = (await resolveAccountId(input, c, codes.ap)) ?? c.apAccountRef;
+    const fxAccount = await requireAccountId(input, c, codes.fx, c.fxAccountRef);
+    const arAccount = await requireAccountId(input, c, codes.ar, c.arAccountRef);
+    const apAccount = await requireAccountId(input, c, codes.ap, c.apAccountRef);
 
     // Sum completed payments once, grouped by each document side's ref field.
     const payments = await input.store.listPage(input.tenantId, c.paymentEntity, {
@@ -1707,8 +1723,8 @@ export function whtCertificateClearingEffect(config: WhtCertificateClearingConfi
     const currency = typeof cert[c.currencyField] === "string" ? (cert[c.currencyField] as string) : "USD";
 
     const codes = config.resolveAccountCodes ? await config.resolveAccountCodes(input.tenantId) : {};
-    const recoverableAccount = (await resolveAccountId(input, c, codes.taxRecoverable)) ?? c.taxRecoverableAccountRef;
-    const whtAccount = (await resolveAccountId(input, c, codes.whtReceivable)) ?? c.whtReceivableAccountRef;
+    const recoverableAccount = await requireAccountId(input, c, codes.taxRecoverable, c.taxRecoverableAccountRef);
+    const whtAccount = await requireAccountId(input, c, codes.whtReceivable, c.whtReceivableAccountRef);
 
     const entry = await input.store.create(input.tenantId, c.entryEntity, {
       entry_number: `${certNumber}-WHT`,

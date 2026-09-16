@@ -98,6 +98,14 @@ describe("PostgresEntityStore — CRUD round-trips", () => {
     expect(await store.get(TENANT, "Product", "prod-1")).toEqual(PRODUCT);
   });
 
+  it("locks records read inside a mutation transaction", async () => {
+    const { conn, calls } = fakePg();
+    const store = new PostgresEntityStore(conn);
+    await store.create(TENANT, "Product", PRODUCT);
+    await store.withTransaction(TENANT, tx => tx.get(TENANT, "Product", "prod-1"));
+    expect(calls.some(sql => sql.includes("SELECT document") && sql.includes("FOR UPDATE"))).toBe(true);
+  });
+
   it("mints an id when the record has none", async () => {
     const { conn } = fakePg();
     const store = new PostgresEntityStore(conn);

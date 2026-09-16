@@ -1,3 +1,4 @@
+import { mutationReceipt } from "./mutation-receipt.js";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   type AssociationCounter,
@@ -65,7 +66,7 @@ class TxEntityStore implements EntityStore {
 
   get(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
     this.assertTenant(tenantId);
-    return getOp(this.tx, this.table, tenantId, entity, id);
+    return getOp(this.tx, this.table, tenantId, entity, id, true);
   }
 
   create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
@@ -132,6 +133,11 @@ export class PostgresEntityStore
 
   remove(tenantId: string, entity: string, id: string): Promise<boolean> {
     return withTenantContext(this.conn, tenantId, (tx) => removeOp(tx, this.table, tenantId, entity, id));
+  }
+
+  withIdempotency<T>(tenantId: string, key: string, fingerprint: string, body: (tx: EntityStore) => Promise<T>): Promise<T> {
+    return withTenantContext(this.conn, tenantId, tx => mutationReceipt(tx, tenantId, key, fingerprint,
+      () => body(new TxEntityStore(tx, this.table, tenantId))));
   }
 
   /** Runs `fn` in one tenant-scoped transaction; every op on the supplied store shares it. */

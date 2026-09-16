@@ -42,7 +42,7 @@ async function checkResponse(res: Response): Promise<void> {
 }
 
 export async function listRecords(slug: string, query = ""): Promise<ListResult> {
-  const res = await fetch(apiPath(slug, query), { headers: { accept: "application/json" } });
+  const res = await apiFetch(apiPath(slug, query), { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   const json = (await res.json()) as unknown;
@@ -70,7 +70,7 @@ export async function listAssociations(
   if (opts.cursor) params.set("cursor", opts.cursor);
   const qs = params.toString();
   const suffix = `/${encodeURIComponent(id)}/${relatedSlug}${qs ? `?${qs}` : ""}`;
-  const res = await fetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
+  const res = await apiFetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   const json = (await res.json()) as {
@@ -83,7 +83,7 @@ export async function listAssociations(
 /** The exact number of m2m-linked records: `GET /v1/<ownerSlug>/<id>/<relatedSlug>/count`. */
 export async function countAssociation(ownerSlug: string, id: string, relatedSlug: string): Promise<number> {
   const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/count`;
-  const res = await fetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
+  const res = await apiFetch(apiPath(ownerSlug, suffix), { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   const json = (await res.json()) as { count?: number };
@@ -93,7 +93,7 @@ export async function countAssociation(ownerSlug: string, id: string, relatedSlu
 /** Links a related record via a m2m relation: `PUT /v1/<ownerSlug>/<id>/<relatedSlug>/<relatedId>`. */
 export async function linkAssociation(ownerSlug: string, id: string, relatedSlug: string, relatedId: string): Promise<void> {
   const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/${encodeURIComponent(relatedId)}`;
-  const res = await fetch(apiPath(ownerSlug, suffix), { method: "PUT", headers: { accept: "application/json" } });
+  const res = await apiFetch(apiPath(ownerSlug, suffix), { method: "PUT", headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
 }
@@ -101,7 +101,7 @@ export async function linkAssociation(ownerSlug: string, id: string, relatedSlug
 /** Unlinks a related record via a m2m relation: `DELETE /v1/<ownerSlug>/<id>/<relatedSlug>/<relatedId>`. */
 export async function unlinkAssociation(ownerSlug: string, id: string, relatedSlug: string, relatedId: string): Promise<void> {
   const suffix = `/${encodeURIComponent(id)}/${relatedSlug}/${encodeURIComponent(relatedId)}`;
-  const res = await fetch(apiPath(ownerSlug, suffix), { method: "DELETE", headers: { accept: "application/json" } });
+  const res = await apiFetch(apiPath(ownerSlug, suffix), { method: "DELETE", headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
 }
@@ -110,7 +110,7 @@ export async function createRecord(
   slug: string,
   payload: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(apiPath(slug), {
+  const res = await apiFetch(apiPath(slug), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
@@ -121,7 +121,7 @@ export async function createRecord(
 }
 
 export async function getRecord(slug: string, id: string): Promise<Record<string, unknown>> {
-  const res = await fetch(apiPath(slug, `/${encodeURIComponent(id)}`), {
+  const res = await apiFetch(apiPath(slug, `/${encodeURIComponent(id)}`), {
     headers: { accept: "application/json" },
   });
   await checkResponse(res);
@@ -134,7 +134,7 @@ export async function updateRecord(
   id: string,
   patch: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(apiPath(slug, `/${encodeURIComponent(id)}`), {
+  const res = await apiFetch(apiPath(slug, `/${encodeURIComponent(id)}`), {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(patch),
@@ -145,7 +145,7 @@ export async function updateRecord(
 }
 
 export async function deleteRecord(slug: string, id: string): Promise<void> {
-  const res = await fetch(apiPath(slug, `/${encodeURIComponent(id)}`), { method: "DELETE" });
+  const res = await apiFetch(apiPath(slug, `/${encodeURIComponent(id)}`), { method: "DELETE" });
   await checkResponse(res);
   if (!res.ok && res.status !== 204) throw new Error(`${res.status}: ${await safeText(res)}`);
 }
@@ -155,7 +155,7 @@ export async function runTransition(
   id: string,
   transition: string,
 ): Promise<Record<string, unknown>> {
-  const res = await fetch(apiPath(slug, `/${encodeURIComponent(id)}/${encodeURIComponent(transition)}`), {
+  const res = await apiFetch(apiPath(slug, `/${encodeURIComponent(id)}/${encodeURIComponent(transition)}`), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{}",
@@ -166,14 +166,14 @@ export async function runTransition(
 }
 
 export async function getSettings(): Promise<Record<string, unknown>> {
-  const res = await fetch("/api/v1/admin/settings", { headers: { accept: "application/json" } });
+  const res = await apiFetch("/api/v1/admin/settings", { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   return (await res.json()) as Record<string, unknown>;
 }
 
 export async function putSettings(settings: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await fetch("/api/v1/admin/settings", {
+  const res = await apiFetch("/api/v1/admin/settings", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(settings),
@@ -183,30 +183,33 @@ export async function putSettings(settings: Record<string, unknown>): Promise<Re
   return (await res.json()) as Record<string, unknown>;
 }
 
-export async function fetchAging(asOf?: string): Promise<AgingResponse> {
-  const query = asOf ? `?asOf=${encodeURIComponent(asOf)}` : "";
-  const res = await fetch(`/api/v1/meta/aging${query}`, { headers: { accept: "application/json" } });
+export async function fetchAging(asOf?: string, currency?: string): Promise<AgingResponse> {
+  const params = new URLSearchParams();
+  if (asOf) params.set("asOf", asOf);
+  if (currency) params.set("currency", currency);
+  const query = params.size ? `?${params}` : "";
+  const res = await apiFetch(`/api/v1/meta/aging${query}`, { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   return (await res.json()) as AgingResponse;
 }
 
 export async function fetchEntitlement(): Promise<TenantEntitlement> {
-  const res = await fetch("/api/v1/meta/entitlement", { headers: { accept: "application/json" } });
+  const res = await apiFetch("/api/v1/meta/entitlement", { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   return (await res.json()) as TenantEntitlement;
 }
 
 export async function fetchUsage(): Promise<TenantUsage> {
-  const res = await fetch("/api/v1/meta/usage", { headers: { accept: "application/json" } });
+  const res = await apiFetch("/api/v1/meta/usage", { headers: { accept: "application/json" } });
   await checkResponse(res);
   if (!res.ok) throw new Error(`${res.status}: ${await safeText(res)}`);
   return (await res.json()) as TenantUsage;
 }
 
 export async function createBillingPortalSession(): Promise<{ url: string }> {
-  const res = await fetch("/api/v1/meta/billing-portal", {
+  const res = await apiFetch("/api/v1/meta/billing-portal", {
     method: "POST",
     headers: { accept: "application/json" },
   });
@@ -220,7 +223,7 @@ export async function fetchWhtReconciliation(from?: string, to?: string): Promis
   if (from) params.set("from", from);
   if (to) params.set("to", to);
   const query = params.toString();
-  const res = await fetch(`/api/v1/meta/wht-reconciliation${query ? `?${query}` : ""}`, {
+  const res = await apiFetch(`/api/v1/meta/wht-reconciliation${query ? `?${query}` : ""}`, {
     headers: { accept: "application/json" },
   });
   await checkResponse(res);
@@ -234,4 +237,12 @@ async function safeText(res: Response): Promise<string> {
   } catch {
     return res.statusText;
   }
+}
+
+async function apiFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (["POST", "PATCH", "PUT", "DELETE"].includes(init.method ?? "GET") && !headers.has("idempotency-key")) {
+    headers.set("idempotency-key", crypto.randomUUID());
+  }
+  return fetch(url, { ...init, headers });
 }

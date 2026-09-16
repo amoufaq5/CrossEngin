@@ -117,6 +117,7 @@ export function computeAging(input: AgingInput): AgingReport {
     });
   }
 
+  // Mixed currencies are returned with a null currency marker for compatibility; callers should filter by currency before using totals.
   documents.sort((a, b) => b.daysOverdue - a.daysOverdue || a.number.localeCompare(b.number));
   return {
     asOf: input.asOf.slice(0, 10),

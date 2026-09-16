@@ -10,6 +10,7 @@ export interface PgConnection {
   ): Promise<PgQueryResult<T>>;
   transaction<T>(fn: (tx: PgConnection) => Promise<T>): Promise<T>;
   withAdvisoryLock<T>(lockKey: bigint, fn: () => Promise<T>): Promise<T>;
+  tryWithAdvisoryLock?<T>(lockKey: bigint, fn: () => Promise<T>): Promise<{ acquired: false } | { acquired: true; result: T }>;
   close(): Promise<void>;
 }
 

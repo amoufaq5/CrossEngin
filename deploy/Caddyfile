@@ -4,8 +4,18 @@
 	email {$ACME_EMAIL}
 }
 
+(security_headers) {
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}
+
 # The admin/operator web UI.
 {$DOMAIN} {
+	import security_headers
 	encode zstd gzip
 	reverse_proxy web:3000
 }
@@ -13,6 +23,7 @@
 # The API directly — for integrations, webhooks, and JWT clients. The browser UI
 # does NOT use this; it talks to the web app's own /api proxy over the internal net.
 api.{$DOMAIN} {
+	import security_headers
 	encode zstd gzip
 	reverse_proxy api:8787
 }

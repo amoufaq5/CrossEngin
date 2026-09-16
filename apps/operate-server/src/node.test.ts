@@ -54,6 +54,101 @@ function mockRes(): NodeResLike & { status: number; headers: Record<string, stri
 }
 
 describe("createNodeRequestListener", () => {
+  it("throttles a socket peer before reading a body or verifying a credential", async () => {
+    const scopes: string[] = [];
+    const listener = createNodeRequestListener(
+      { dispatch: async () => { throw new Error("must not dispatch"); } },
+      {
+        preAuthLimiter: {
+          async checkScope(scope) {
+            scopes.push(scope);
+            return { allowed: false, retryAfterSeconds: 17 };
+          },
+        },
+      },
+    );
+    const req: NodeReqLike = {
+      ...mockReq({ method: "POST", url: "/v1/products", headers: { "x-forwarded-for": "198.51.100.99" } }),
+      async *[Symbol.asyncIterator]() { throw new Error("body must not be read"); },
+    };
+    const res = mockRes();
+    await listener(req, res);
+    expect(res.status).toBe(429);
+    expect(res.headers["retry-after"]).toBe("17");
+    expect(scopes).toEqual(["203.0.113.1"]);
+  });
+
+  it("serves unauthenticated liveness and readiness probes without gateway dispatch", async () => {
+    let dispatches = 0;
+    let readinessChecks = 0;
+    const listener = createNodeRequestListener(
+      {
+        dispatch: async () => {
+          dispatches += 1;
+          throw new Error("must not dispatch");
+        },
+      },
+      {
+        readiness: async () => {
+          readinessChecks += 1;
+          return true;
+        },
+      },
+    );
+
+    const live = mockRes();
+    await listener(mockReq({ method: "GET", url: "/healthz" }), live);
+    expect(live.status).toBe(200);
+    expect(JSON.parse(new TextDecoder().decode(live.body ?? new Uint8Array()))).toEqual({ status: "ok" });
+
+    const ready = mockRes();
+    await listener(mockReq({ method: "HEAD", url: "/readyz?from=orchestrator" }), ready);
+    expect(ready.status).toBe(200);
+    expect(ready.body).toBeNull();
+    expect(readinessChecks).toBe(1);
+    expect(dispatches).toBe(0);
+  });
+
+  it("returns a non-sensitive 503 when the readiness dependency fails", async () => {
+    const errors: unknown[] = [];
+    const listener = createNodeRequestListener(httpServer(), {
+      readiness: async () => {
+        throw new Error("postgres password=secret");
+      },
+      onError: error => errors.push(error),
+    });
+    const res = mockRes();
+
+    await listener(mockReq({ method: "GET", url: "/readyz" }), res);
+
+    expect(res.status).toBe(503);
+    const text = new TextDecoder().decode(res.body ?? new Uint8Array());
+    expect(text).toContain("unavailable");
+    expect(text).not.toContain("password");
+    expect(errors).toHaveLength(1);
+  });
+
+  it("does not expose internal dispatch errors in a 500 response", async () => {
+    const errors: unknown[] = [];
+    const listener = createNodeRequestListener(
+      {
+        dispatch: async () => {
+          throw new Error("relation private_payroll does not exist");
+        },
+      },
+      { onError: error => errors.push(error) },
+    );
+    const res = mockRes();
+
+    await listener(mockReq({ method: "GET", url: "/v1/private" }), res);
+
+    expect(res.status).toBe(500);
+    const text = new TextDecoder().decode(res.body ?? new Uint8Array());
+    expect(text).toContain("Request processing failed");
+    expect(text).not.toContain("private_payroll");
+    expect(errors).toHaveLength(1);
+  });
+
   it("serves a GET through the Node glue", async () => {
     const listener = createNodeRequestListener(httpServer());
     const res = mockRes();
@@ -108,8 +203,9 @@ describe("serve — real loopback boot", () => {
     try {
       const status = await get(running.port, "/v1/products", "key-manager");
       expect(status).toBe(200);
+      expect(await get(running.port, "/readyz", "")).toBe(200);
     } finally {
-      await running.close();
+      await Promise.all([running.close(), running.close()]);
     }
   });
 });

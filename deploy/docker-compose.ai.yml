@@ -47,20 +47,23 @@ services:
     environment:
       PGHOST: db
       PGPORT: "5432"
-      PGUSER: ${POSTGRES_USER}
-      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGUSER: ${APP_DB_USER:-crossengin_app}
+      PGPASSWORD: ${APP_DB_PASSWORD:?Set APP_DB_PASSWORD}
       PGDATABASE: ${POSTGRES_DB}
       NODE_ENV: production
+      STRICT_ACCOUNT_RESOLUTION: "true"
       # The provider appends /v1/chat/completions, which is exactly Ollama's
       # OpenAI-compatible path. The key is required by the client but unused by
       # Ollama — it is not a secret and does not need to be one.
       OPENAI_BASE_URL: http://ollama:11434
       OPENAI_API_KEY: ${OPERATE_AI_API_KEY:-local}
+      OPERATE_AI_INPUT_USD_PER_MILLION: "0"
+      OPERATE_AI_OUTPUT_USD_PER_MILLION: "0"
     # Compose REPLACES `command` rather than merging it, so this repeats the base
     # command and adds the AI flags. Keep the two in step when either changes.
     command:
       - node
-      - apps/operate-server/dist/bin/operate-server.js
+      - dist/bin/operate-server.js
       - --pack
       - ${OPERATE_PACK:-erp-core}
       - --store

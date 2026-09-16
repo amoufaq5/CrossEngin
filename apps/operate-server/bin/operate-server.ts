@@ -94,8 +94,18 @@ async function main(): Promise<number> {
     `operate-server listening on http://localhost:${running.port.toString()} (${source}, store=${options.store})\n`,
   );
 
+  let shuttingDown = false;
   const shutdown = (): void => {
-    void running.close().then(() => process.exit(0));
+    if (shuttingDown) return;
+    shuttingDown = true;
+    void running.close().then(
+      () => process.exit(0),
+      (err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`shutdown failed: ${detail}\n`);
+        process.exit(1);
+      },
+    );
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
