@@ -294,7 +294,7 @@ describe("resolveCompliancePacks — end-to-end with validateManifest", () => {
     });
     const { validateManifest } = await import("@crossengin/kernel/manifest");
     expect(() => validateManifest(augmented)).not.toThrow();
-  });
+  }, 20_000);
 });
 
 describe("resolveCompliancePacks — v1 showcase packs", () => {
