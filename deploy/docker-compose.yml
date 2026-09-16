@@ -65,6 +65,9 @@ services:
       OPERATE_RATE_LIMIT_AUDIT: ${OPERATE_RATE_LIMIT_AUDIT:-false}
       OPERATE_PREAUTH_RATE_LIMIT: ${OPERATE_PREAUTH_RATE_LIMIT:-6000}
       OPERATE_PREAUTH_WINDOW_SECONDS: ${OPERATE_PREAUTH_WINDOW_SECONDS:-60}
+      # Optional hosted AI Architect provider, enabled with --ai-design below.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     # Args in list form so the api-key (token:role:tenant) is never shell-split.
     command:
       - node
