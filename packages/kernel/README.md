@@ -507,12 +507,15 @@ was removed: it had no caller and emitted an untenanted table.
 
 #### Topological sort
 
-`topologicalSort(entities)` orders entities so each entity comes
-after its FK targets. Self-references are allowed (they're skipped
-in the dependency graph; the FK is resolved at row insert time).
-Cycles throw `CycleDetectedError` with the cycle path —
-deferred-FK constraint support to break cycles is a Phase 2
-extension.
+Not here either. `topologicalEntityOrder` in
+`@crossengin/operate-runtime-pg` orders the entity tables, and it
+belongs beside the `ensureSchema` that creates them: it reads the
+graph from the **column plan** (so a reference contributed by a trait
+orders the tables too) and **tolerates a reference cycle**, because
+FKs are added in a second pass once every table exists. The kernel
+used to carry a rival `topologicalSort` that threw on a cycle — right
+only for the inline-FK emitter it served, and deleted with it
+(ADR-0285).
 
 #### Not yet supported (Phase 2+)
 

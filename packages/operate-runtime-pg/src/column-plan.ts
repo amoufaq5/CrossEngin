@@ -176,8 +176,19 @@ export function relationDeleteIndex(manifest: Manifest): ReadonlyMap<string, OnD
  * Orders entity names so a referenced entity precedes the entity that references
  * it (Kahn's algorithm over the reference graph) — the order to create tables in
  * so a FK target already exists. References to entities not in the set are
- * ignored; on a cycle the remaining nodes are appended in insertion order (FKs
- * are added in a second pass, so a cycle is still safe to apply).
+ * ignored.
+ *
+ * **A cycle is not an error here.** The remaining nodes are appended in insertion
+ * order, because `ensureSchema` adds foreign keys in a *second pass* once every
+ * table exists — so two entities that reference each other apply cleanly. The
+ * kernel once carried a rival `topologicalSort` that threw `CycleDetectedError`
+ * instead; that was right only for the emitter which put FKs inline in
+ * `CREATE TABLE`, and it was deleted with it (ADR-0285). This is the single
+ * implementation.
+ *
+ * The graph is read from `plan.columns`, not the entity's own fields, so a
+ * reference contributed by a **trait** orders the tables too — the entity's
+ * field list alone would miss it.
  */
 export function topologicalEntityOrder(plans: ReadonlyMap<string, EntityTablePlan>): readonly string[] {
   const names = [...plans.keys()];
