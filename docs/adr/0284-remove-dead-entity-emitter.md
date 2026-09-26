@@ -43,6 +43,10 @@ waiting for a caller.
   (`topologicalEntityOrder`) that should be reconciled *toward* it. Deleting it would
   foreclose that. Unlike the emitter it is correct and harmless — the distinction that
   drives this ADR is not "unused" but "unused *and* would breach tenancy if used".
+  > **Superseded by ADR-0285.** Comparing the two implementations' edge cases showed they
+  > are not interchangeable: `topologicalSort` *throws* on a reference cycle, which was
+  > right only for the inline-FK emitter this ADR deleted, while the store deliberately
+  > tolerates one because it applies FKs in a second pass. `topologicalSort` was deleted.
 - **Fix the documentation rather than leave it describing removed API.** The kernel README's
   DDL section now describes the vocabulary the module actually exports and says plainly that
   the serving store owns entity DDL.
@@ -71,4 +75,5 @@ waiting for a caller.
 - Full workspace build + typecheck + test green.
 - Follow-up: `topologicalSort` (kernel) and `topologicalEntityOrder` (operate-runtime-pg)
   compute the same entity dependency order by different routes. Reconciling them is the
-  remaining duplication in this area, and the kernel's is the better home.
+  remaining duplication in this area. *(Resolved by ADR-0285, which found the claim that
+  "the kernel's is the better home" to be wrong and deleted `topologicalSort` instead.)*

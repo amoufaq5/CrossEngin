@@ -155,10 +155,31 @@ describe("topologicalEntityOrder", () => {
   });
 
   it("returns all nodes even with a reference cycle", () => {
+    // Deliberate: ensureSchema adds FKs in a second pass once every table exists, so two
+    // entities referencing each other apply cleanly. Throwing here would refuse a legal
+    // manifest — which is why the kernel's rival throw-on-cycle sort was deleted (ADR-0285).
     const a: Entity = { name: "A", fields: [{ name: "b", type: { kind: "reference", target: "B" } }] };
     const b: Entity = { name: "B", fields: [{ name: "a", type: { kind: "reference", target: "A" } }] };
     const order = topologicalEntityOrder(plansOf(a, b));
     expect([...order].sort()).toEqual(["A", "B"]);
+  });
+
+  it("orders on a reference contributed by a trait, not just the entity's own fields", () => {
+    // The graph comes from plan.columns, which includes trait fields. Reading the entity's
+    // own `fields` alone would see no edge and could create Doc before Author.
+    const manifest = {
+      traits: [
+        { name: "owned", fields: [{ name: "author", type: { kind: "reference", target: "Author" } }] },
+      ],
+      entities: [
+        { name: "Doc", traits: ["owned"], fields: [{ name: "title", type: { kind: "text" } }] },
+        { name: "Author", fields: [{ name: "name", type: { kind: "text" } }] },
+      ],
+    } as unknown as Manifest;
+    const plans = columnPlansForManifest(manifest, { schema: "tenant_app" });
+    expect(referencedEntities(plans.get("Doc")!)).toEqual(["Author"]);
+    const order = topologicalEntityOrder(plans);
+    expect(order.indexOf("Author")).toBeLessThan(order.indexOf("Doc"));
   });
 });
 

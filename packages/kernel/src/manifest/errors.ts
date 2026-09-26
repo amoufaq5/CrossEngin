@@ -7,15 +7,6 @@ export class ManifestValidationError extends Error {
   }
 }
 
-export class CycleDetectedError extends Error {
-  override readonly name = "CycleDetectedError";
-  readonly cycle: readonly string[];
-  constructor(cycle: readonly string[]) {
-    super(`circular foreign-key dependency: ${cycle.join(" -> ")}`);
-    this.cycle = cycle;
-  }
-}
-
 export class ExtendsCycleError extends Error {
   override readonly name = "ExtendsCycleError";
   readonly cycle: readonly string[];
