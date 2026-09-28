@@ -16,7 +16,7 @@ import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from ".
 import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { validateBody, type EntityValidationPlan } from "./validation.js";
-import { isTransactional, projectRecord, type EntityStore } from "./store.js";
+import { isConditional, isTransactional, projectRecord, type EntityStore } from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
@@ -292,6 +292,46 @@ async function applyTransition(
       store,
     });
     if (block !== null) return block;
+    // The from-state check above read `current`; this write requires it to STILL
+    // be `current`, so the check and the write are one decision rather than two
+    // instants a concurrent caller can slip between. Without it both of two
+    // simultaneous callers read the same legal from-state, both pass, and both
+    // write — the second one firing a transition the serialised history forbids.
+    //
+    // Fenced only when there IS a from-state, i.e. when `current` is a string:
+    // that is exactly the condition under which the check above does anything,
+    // and it is also the guarantee that the field is a real column (a record
+    // reads back a field only when its store has one). A store without the
+    // capability keeps the unfenced write — racy, as before, never broken.
+    if (typeof current === "string" && isConditional(store)) {
+      const cas = await store.updateIf(tenantId, spec.entity, id, patch, [
+        { field: t.stateField, value: current },
+      ]);
+      if (cas.outcome === "not_found") return json(404, { error: "not_found" });
+      if (cas.outcome === "precondition_failed") {
+        const now = cas.record?.[t.stateField];
+        return json(409, {
+          error: "concurrent_modification",
+          detail:
+            `'${t.name}' read '${current}' but the record now holds `
+            + `'${typeof now === "string" ? now : String(now)}'; the transition was not applied`,
+          field: t.stateField,
+          expected: current,
+        });
+      }
+      const casAfter = cas.record ?? record;
+      await runEffects(ctx, {
+        operation: "transition",
+        entity: spec.entity,
+        tenantId,
+        id,
+        before: record,
+        after: casAfter,
+        store,
+        transitionTo: t.toState,
+      });
+      return json(200, casAfter);
+    }
     const updated = await store.update(tenantId, spec.entity, id, patch);
     const after = updated ?? record;
     await runEffects(ctx, {

@@ -79,6 +79,129 @@ export function isTransactional(store: EntityStore): store is TransactionalEntit
   return typeof (store as Partial<TransactionalEntityStore>).withTransaction === "function";
 }
 
+/**
+ * An expected-value precondition on one field: the stored row must currently
+ * hold `value` for `field`, or the write does not happen.
+ *
+ * `null` means "absent or SQL NULL" — the two are one state as far as a store is
+ * concerned, because a record's absent field and a nullable column's NULL both
+ * read back as "no value". A precondition is therefore expressible for a row
+ * that has never been written to, which is what a counter guard needs: its first
+ * increment expects nothing there.
+ *
+ * Everything else compares **as text**, exactly as a `ListFilter` with `eq`
+ * does. A precondition is a guard's own prior read handed back to the store, and
+ * a guard reads through `EntityRecord`, where an integer column arrives as a
+ * number from the column store and as a JSON number or string from the document
+ * store. Comparing as text is the one rule that gives the same answer for all
+ * three, and it is the rule the existing filter path already uses.
+ */
+export interface FieldPrecondition {
+  readonly field: string;
+  readonly value: string | number | boolean | null;
+}
+
+/**
+ * What a conditional update did. Three outcomes, kept apart on purpose:
+ *
+ * - `applied` — every precondition held and the patch was written.
+ * - `precondition_failed` — the row exists and at least one precondition did not
+ *   hold, so nothing was written. This is the concurrent-writer case.
+ * - `not_found` — no such row, so there was nothing to compare against. A caller
+ *   that must distinguish "someone else got there first" from "it was never
+ *   there" cannot be handed one code for both.
+ */
+export const CONDITIONAL_UPDATE_OUTCOMES = ["applied", "precondition_failed", "not_found"] as const;
+export type ConditionalUpdateOutcome = (typeof CONDITIONAL_UPDATE_OUTCOMES)[number];
+
+/** The result of `updateIf`: the outcome, plus the record when one is available. */
+export interface ConditionalUpdateResult {
+  readonly outcome: ConditionalUpdateOutcome;
+  /**
+   * On `applied`, the merged record. On `precondition_failed`, the row as it
+   * actually stands — the value that beat the caller's expectation, so a refusal
+   * can say what it lost to rather than only that it lost. On `not_found`, null.
+   */
+  readonly record: EntityRecord | null;
+}
+
+/**
+ * An `EntityStore` that can write **only if** the row still looks the way the
+ * caller last read it: compare-and-set, the missing half of every read-then-write
+ * guard built on this contract.
+ *
+ * Without it a guard reads a row, decides, and writes, and two interleaved
+ * requests both pass a check that should admit one — the read is not held
+ * against the write by anything. `updateIf` closes that window by moving the
+ * decision's evidence into the write's own predicate: the expectations become
+ * part of the `UPDATE ... WHERE`, so the loser's write matches no row and is
+ * reported rather than silently overwriting the winner's.
+ *
+ * It is a **separate capability interface**, not a member of `EntityStore`, for
+ * the same reason `TransactionalEntityStore` is: every existing implementation
+ * (in-process fakes, wrappers, adapters) keeps compiling, and a caller asks with
+ * {@link isConditional} and keeps its non-atomic path for a store that cannot.
+ * A store that cannot compare-and-set is still correct, just racy — so the
+ * narrowing is a capability check, never an assertion.
+ */
+export interface ConditionalEntityStore extends EntityStore {
+  updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expect: readonly FieldPrecondition[],
+  ): Promise<ConditionalUpdateResult>;
+}
+
+/** Narrows a store to one that supports compare-and-set writes. */
+export function isConditional(store: EntityStore): store is ConditionalEntityStore {
+  return typeof (store as Partial<ConditionalEntityStore>).updateIf === "function";
+}
+
+/**
+ * Whether a record satisfies every precondition. The single definition of the
+ * comparison, shared by the in-memory store and mirrored by the SQL the Postgres
+ * stores emit — so a guard that passes an in-memory test means the same thing
+ * against a real table.
+ *
+ * `null` matches an absent key and a stored `null` alike; anything else compares
+ * as text. An empty precondition list vacuously holds, which makes `updateIf`
+ * with no expectations behave exactly like `update`.
+ */
+export function matchesPreconditions(
+  record: EntityRecord,
+  expect: readonly FieldPrecondition[],
+): boolean {
+  return expect.every((p) => {
+    const actual = record[p.field];
+    if (p.value === null) return actual === undefined || actual === null;
+    if (actual === undefined || actual === null) return false;
+    return String(actual) === String(p.value);
+  });
+}
+
+/**
+ * Builds the precondition that a field is unchanged from what a caller read —
+ * the common case, and the one worth having a name for so a guard does not
+ * hand-roll the absent-is-null rule.
+ *
+ * A value the store cannot express as a precondition (an object, an array) reads
+ * as `null`, i.e. "expected absent", which would be wrong — so such a value is
+ * refused rather than silently weakened. Fail closed: a precondition that
+ * quietly means something else is worse than no precondition at all, because the
+ * caller believes it has one.
+ */
+export function expectUnchanged(field: string, read: unknown): FieldPrecondition {
+  if (read === undefined || read === null) return { field, value: null };
+  if (typeof read === "string" || typeof read === "number" || typeof read === "boolean") {
+    return { field, value: read };
+  }
+  throw new Error(
+    `cannot build a precondition on '${field}': a ${typeof read} value is not comparable`,
+  );
+}
+
 /** A keyset position: the previous page's last row — its sort-field values (aligned to `ListQuery.sort`) + id. */
 export interface KeysetCursor {
   readonly k: readonly string[];
@@ -239,7 +362,7 @@ function nextId(): string {
  * In-memory `EntityStore`, keyed by `(tenantId, entity)` — the test/dev binding.
  * The Postgres binding (entity-schema tables under RLS) is the next increment.
  */
-export class InMemoryEntityStore implements EntityStore {
+export class InMemoryEntityStore implements ConditionalEntityStore {
   private readonly records: Map<string, Map<string, EntityRecord>> = new Map();
 
   private bucket(tenantId: string, entity: string): Map<string, EntityRecord> {
@@ -283,6 +406,31 @@ export class InMemoryEntityStore implements EntityStore {
     const merged: EntityRecord = { ...existing, ...patch, id };
     bucket.set(id, merged);
     return merged;
+  }
+
+  /**
+   * Compare-and-set. Single-threaded JavaScript makes this trivially atomic here
+   * — nothing can interleave between the check and the set — which is exactly
+   * why an in-memory test cannot demonstrate the race the Postgres stores have.
+   * What it *can* do is pin the semantics: which outcome each case yields, and
+   * that a failed precondition writes nothing.
+   */
+  async updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expect: readonly FieldPrecondition[],
+  ): Promise<ConditionalUpdateResult> {
+    const bucket = this.bucket(tenantId, entity);
+    const existing = bucket.get(id);
+    if (existing === undefined) return { outcome: "not_found", record: null };
+    if (!matchesPreconditions(existing, expect)) {
+      return { outcome: "precondition_failed", record: existing };
+    }
+    const merged: EntityRecord = { ...existing, ...patch, id };
+    bucket.set(id, merged);
+    return { outcome: "applied", record: merged };
   }
 
   async remove(tenantId: string, entity: string, id: string): Promise<boolean> {

@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
 import { routeFromSpec } from "./operations.js";
-import { InMemoryEntityStore } from "./store.js";
+import { InMemoryEntityStore, type EntityRecord, type EntityStore } from "./store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -243,5 +243,132 @@ describe("operate handlers — transactional effects", () => {
     expect(out.status).toBe(500);
     // The create was rolled back: nothing persisted for Product.
     expect((await store.list(TENANT, "Product")).length).toBe(0);
+  });
+});
+
+/**
+ * A store that lets a rival commit land in the window between the handler's read
+ * and its write — the interleaving `applyTransition` could not see. `get`
+ * returns the pre-rival view (which is what a real concurrent caller holds) and
+ * commits the rival behind it, exactly once.
+ *
+ * Built in two flavours from one body so the pair measures one difference: with
+ * `updateIf` the handler refuses; without it, the handler writes over the rival.
+ */
+function interleavingStore(
+  inner: InMemoryEntityStore,
+  rival: EntityRecord,
+  opts: { readonly conditional: boolean },
+): EntityStore {
+  let fired = false;
+  const base: EntityStore = {
+    list: (t, e) => inner.list(t, e),
+    listPage: (t, e, q) => inner.listPage(t, e, q),
+    async get(t, e, id) {
+      const record = await inner.get(t, e, id);
+      if (record === null) return null;
+      if (!fired) {
+        fired = true;
+        await inner.update(t, e, id, rival);
+      }
+      return record;
+    },
+    create: (t, e, r) => inner.create(t, e, r),
+    update: (t, e, id, p) => inner.update(t, e, id, p),
+    remove: (t, e, id) => inner.remove(t, e, id),
+  };
+  if (!opts.conditional) return base;
+  return {
+    ...base,
+    updateIf: (t, e, id, p, expect) => inner.updateIf(t, e, id, p, expect),
+  };
+}
+
+describe("operate handlers — the transition write is compare-and-set", () => {
+  async function placeAgainstRival(conditional: boolean): Promise<{
+    out: HandlerOutput;
+    finalState: unknown;
+  }> {
+    const inner = new InMemoryEntityStore();
+    const seeded = await inner.create(TENANT, "SalesOrder", {
+      store_id: "st1", order_number: "SO-RACE", state: "cart", channel: "in_store",
+      currency: "USD", total: 0,
+    });
+    const id = String(seeded["id"]);
+    // The rival is another caller's `place`, committed while this one is still
+    // holding its `cart` read.
+    const store = interleavingStore(inner, { state: "placed" }, { conditional });
+    const raced = compileOperateServer(resolved, { store, principalRoles });
+    const spec = raced.routeSpecs.find((s) => s.operationId === "salesOrder.place")!;
+    const out = await raced.handlers.resolve("salesOrder.place")!({
+      request: buildIncomingRequest({
+        id: "req_cas0000001",
+        receivedAt: "2026-06-03T12:00:00.000Z",
+        method: spec.method,
+        path: "/v1/x",
+        headers: {},
+        host: "api.example.com",
+        scheme: "https",
+        bodyBytes: null,
+        clientIp: "203.0.113.1",
+      }),
+      route: routeFromSpec(spec),
+      principal: principal("store_manager"),
+      params: { id },
+      parsedBody: null,
+    });
+    const after = await inner.get(TENANT, "SalesOrder", id);
+    return { out, finalState: after?.["state"] };
+  }
+
+  it("refuses 409 concurrent_modification when the state moved under the read", async () => {
+    const { out, finalState } = await placeAgainstRival(true);
+    expect(out.status).toBe(409);
+    const body = bodyOf(out);
+    expect(body["error"]).toBe("concurrent_modification");
+    // The refusal names the field, what was read, and what is actually there.
+    expect(body["field"]).toBe("state");
+    expect(body["expected"]).toBe("cart");
+    expect(String(body["detail"])).toContain("'placed'");
+    expect(finalState).toBe("placed");
+  });
+
+  it("is the SAME interleaving a non-conditional store lets through — the race, measured", async () => {
+    // The control. One store difference, two answers: this is the window every
+    // read-then-write guard on this contract has been carrying.
+    const { out, finalState } = await placeAgainstRival(false);
+    expect(out.status).toBe(200);
+    expect(finalState).toBe("placed");
+  });
+
+  it("leaves an ordinary uncontended transition at 200", async () => {
+    // The fence must cost nothing when nothing raced: the conditional path is
+    // taken for every transition on a capable store, so this is the common case.
+    const store = new InMemoryEntityStore();
+    const plain = compileOperateServer(resolved, { store, principalRoles });
+    const spec = plain.routeSpecs.find((s) => s.operationId === "salesOrder.place")!;
+    const seeded = await store.create(TENANT, "SalesOrder", {
+      store_id: "st1", order_number: "SO-OK", state: "cart", channel: "in_store",
+      currency: "USD", total: 0,
+    });
+    const out = await plain.handlers.resolve("salesOrder.place")!({
+      request: buildIncomingRequest({
+        id: "req_cas0000002",
+        receivedAt: "2026-06-03T12:00:00.000Z",
+        method: spec.method,
+        path: "/v1/x",
+        headers: {},
+        host: "api.example.com",
+        scheme: "https",
+        bodyBytes: null,
+        clientIp: "203.0.113.1",
+      }),
+      route: routeFromSpec(spec),
+      principal: principal("store_manager"),
+      params: { id: String(seeded["id"]) },
+      parsedBody: null,
+    });
+    expect(out.status).toBe(200);
+    expect(bodyOf(out)["state"]).toBe("placed");
   });
 });

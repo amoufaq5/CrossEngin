@@ -3,14 +3,17 @@ import {
   type AssociationCounter,
   type AssociationReader,
   type AssociationWriter,
+  type ConditionalEntityStore,
+  type ConditionalUpdateResult,
   type EntityRecord,
   type EntityStore,
+  type FieldPrecondition,
   type ListPage,
   type ListQuery,
   type TransactionalEntityStore,
 } from "@crossengin/operate-runtime";
 
-import { createOp, getOp, listOp, listPageOp, removeOp, updateOp } from "./entity-ops.js";
+import { createOp, getOp, listOp, listPageOp, removeOp, updateIfOp, updateOp } from "./entity-ops.js";
 import { planLinkPrune } from "./link-integrity.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -40,7 +43,7 @@ export interface PostgresEntityStoreOptions {
  * write → effect sequence commit (or roll back) as one unit. A call for a
  * different tenant than the bound one is rejected (RLS would deny it anyway).
  */
-class TxEntityStore implements EntityStore {
+class TxEntityStore implements ConditionalEntityStore {
   constructor(
     private readonly tx: PgConnection,
     private readonly table: string,
@@ -78,6 +81,17 @@ class TxEntityStore implements EntityStore {
     return updateOp(this.tx, this.table, tenantId, entity, id, patch);
   }
 
+  updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expect: readonly FieldPrecondition[],
+  ): Promise<ConditionalUpdateResult> {
+    this.assertTenant(tenantId);
+    return updateIfOp(this.tx, this.table, tenantId, entity, id, patch, expect);
+  }
+
   remove(tenantId: string, entity: string, id: string): Promise<boolean> {
     this.assertTenant(tenantId);
     return removeOp(this.tx, this.table, tenantId, entity, id);
@@ -94,7 +108,12 @@ class TxEntityStore implements EntityStore {
  * + its guards + its effects (e.g. an auto-reversal) atomically.
  */
 export class PostgresEntityStore
-  implements TransactionalEntityStore, AssociationReader, AssociationWriter, AssociationCounter
+  implements
+    TransactionalEntityStore,
+    ConditionalEntityStore,
+    AssociationReader,
+    AssociationWriter,
+    AssociationCounter
 {
   private readonly conn: PgConnection;
   private readonly table: string;
@@ -128,6 +147,26 @@ export class PostgresEntityStore
 
   update(tenantId: string, entity: string, id: string, patch: EntityRecord): Promise<EntityRecord | null> {
     return withTenantContext(this.conn, tenantId, (tx) => updateOp(tx, this.table, tenantId, entity, id, patch));
+  }
+
+  /**
+   * Compare-and-set in one tenant-scoped transaction, so the row lock the
+   * conditional op takes is held across its own check and write. Calling this on
+   * the standalone store (rather than inside `withTransaction`) is still atomic
+   * for the update itself — the transaction is the unit — but a guard that must
+   * also read something else under the same snapshot should use
+   * `withTransaction` and call `updateIf` on the bound store.
+   */
+  updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expect: readonly FieldPrecondition[],
+  ): Promise<ConditionalUpdateResult> {
+    return withTenantContext(this.conn, tenantId, (tx) =>
+      updateIfOp(tx, this.table, tenantId, entity, id, patch, expect),
+    );
   }
 
   remove(tenantId: string, entity: string, id: string): Promise<boolean> {

@@ -1,6 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { encodeKeyset } from "@crossengin/operate-runtime";
+import { encodeKeyset, isConditional } from "@crossengin/operate-runtime";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
@@ -451,5 +451,158 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
       "created_by",
       "updated_by",
     ]);
+  });
+});
+
+/**
+ * A capture whose `UPDATE … RETURNING` and follow-up `SELECT` answer
+ * independently, so the three conditional outcomes can each be driven: a
+ * returned row is `applied`, no row plus a readable row is
+ * `precondition_failed`, and no row plus no row is `not_found`.
+ */
+function captureCasPg(opts: {
+  readonly updateRows?: Record<string, unknown>[];
+  readonly readBackRows?: Record<string, unknown>[];
+}): Captured {
+  const calls: { sql: string; params: readonly unknown[] }[] = [];
+  const query = (async (sql: string, params?: readonly unknown[]) => {
+    if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
+    calls.push({ sql, params: params ?? [] });
+    if (sql.trimStart().startsWith("UPDATE")) {
+      const rows = opts.updateRows ?? [];
+      return { rows, rowCount: rows.length };
+    }
+    if (sql.includes("SELECT")) {
+      const rows = opts.readBackRows ?? [];
+      return { rows, rowCount: rows.length };
+    }
+    return { rows: [], rowCount: 1 };
+  }) as PgConnection["query"];
+  const conn: PgConnection = {
+    query,
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
+    withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+    close: (async () => undefined) as PgConnection["close"],
+  };
+  return { conn, calls, setRows: () => undefined };
+}
+
+describe("ColumnMappedEntityStore.updateIf — compare-and-set", () => {
+  it("appends the expectation to the UPDATE's WHERE, compared as text", async () => {
+    const cap = captureCasPg({ updateRows: [{ id: "w1", status: "archived" }] });
+    const res = await store(cap).updateIf(TENANT, "Widget", "w1", { status: "archived" }, [
+      { field: "status", value: "active" },
+    ]);
+    expect(res.outcome).toBe("applied");
+    const upd = cap.calls.find((c) => c.sql.trimStart().startsWith("UPDATE"))!;
+    expect(upd.sql).toContain('WHERE "tenant_id" = $1 AND "id" = $2 AND "status"::text = $');
+    expect(upd.sql).toContain('RETURNING "id"');
+    expect(upd.params.at(-1)).toBe("active");
+  });
+
+  it("still stamps updated_at, exactly as the unconditional update does", async () => {
+    const cap = captureCasPg({ updateRows: [{ id: "w1" }] });
+    await store(cap).updateIf(TENANT, "Widget", "w1", { sku: "S9" }, [
+      { field: "sku", value: "S1" },
+    ]);
+    const upd = cap.calls.find((c) => c.sql.trimStart().startsWith("UPDATE"))!;
+    expect(upd.sql).toContain('"updated_at" = now()');
+  });
+
+  it("emits IS NULL for an absent expectation and binds nothing for it", async () => {
+    const cap = captureCasPg({ updateRows: [{ id: "w1", price: "1.00" }] });
+    await store(cap).updateIf(TENANT, "Widget", "w1", { price: 1 }, [
+      { field: "price", value: null },
+    ]);
+    const upd = cap.calls.find((c) => c.sql.trimStart().startsWith("UPDATE"))!;
+    expect(upd.sql).toContain('AND "price" IS NULL');
+    // tenant, id, the patch value — and no bound expectation.
+    expect(upd.params).toHaveLength(3);
+  });
+
+  it("reports precondition_failed when nothing was written but the row exists", async () => {
+    const cap = captureCasPg({ updateRows: [], readBackRows: [{ id: "w1", status: "archived" }] });
+    const res = await store(cap).updateIf(TENANT, "Widget", "w1", { status: "archived" }, [
+      { field: "status", value: "active" },
+    ]);
+    expect(res.outcome).toBe("precondition_failed");
+    // The value that beat the caller's expectation, so a refusal can name it.
+    expect(res.record).toMatchObject({ id: "w1", status: "archived" });
+  });
+
+  it("reports not_found when nothing was written and nothing is there", async () => {
+    const cap = captureCasPg({ updateRows: [], readBackRows: [] });
+    const res = await store(cap).updateIf(TENANT, "Widget", "gone", { status: "archived" }, [
+      { field: "status", value: "active" },
+    ]);
+    expect(res.outcome).toBe("not_found");
+    expect(res.record).toBeNull();
+  });
+
+  it("REFUSES a precondition on an unknown column rather than dropping it", async () => {
+    // `buildListSql` may drop a field it cannot express, because a dropped filter
+    // widens a result set. A dropped precondition removes a fence, so it throws.
+    const cap = captureCasPg({ updateRows: [{ id: "w1" }] });
+    await expect(
+      store(cap).updateIf(TENANT, "Widget", "w1", { sku: "S9" }, [
+        { field: "nope", value: "x" },
+      ]),
+    ).rejects.toThrow(/no such column/);
+    expect(cap.calls.filter((c) => c.sql.trimStart().startsWith("UPDATE"))).toHaveLength(0);
+  });
+
+  it("REFUSES a precondition on an encrypted column", async () => {
+    // `pgp_sym_encrypt` is randomised, so ciphertext equality is not value
+    // equality — a comparison there would be meaningless, not merely unsupported.
+    const cap = captureCasPg({ updateRows: [{ id: "w1" }] });
+    await expect(
+      store(cap).updateIf(TENANT, "Widget", "w1", { sku: "S9" }, [
+        { field: "mrn", value: "MRN-1" },
+      ]),
+    ).rejects.toThrow(/encrypted at rest/);
+    expect(cap.calls.filter((c) => c.sql.trimStart().startsWith("UPDATE"))).toHaveLength(0);
+  });
+
+  it("throws before issuing any statement, so a refused fence writes nothing", async () => {
+    const cap = captureCasPg({ updateRows: [{ id: "w1" }] });
+    await expect(
+      store(cap).updateIf(TENANT, "Widget", "w1", { sku: "S9" }, [
+        { field: "sku", value: "S1" },
+        { field: "ghost", value: "x" },
+      ]),
+    ).rejects.toThrow(/no such column/);
+    expect(cap.calls).toHaveLength(0);
+  });
+
+  it("needs no FOR UPDATE — one statement both checks and writes", async () => {
+    const cap = captureCasPg({ updateRows: [{ id: "w1" }] });
+    await store(cap).updateIf(TENANT, "Widget", "w1", { sku: "S9" }, [
+      { field: "sku", value: "S1" },
+    ]);
+    expect(cap.calls.map((c) => c.sql).join("\n")).not.toContain("FOR UPDATE");
+    expect(cap.calls).toHaveLength(1);
+  });
+
+  it("is reachable on the transaction-bound store", async () => {
+    const cap = captureCasPg({ updateRows: [{ id: "w1", status: "archived" }] });
+    const outcome = await store(cap).withTransaction(TENANT, async (tx) => {
+      expect(isConditional(tx)).toBe(true);
+      if (!isConditional(tx)) throw new Error("unreachable");
+      const res = await tx.updateIf(TENANT, "Widget", "w1", { status: "archived" }, [
+        { field: "status", value: "active" },
+      ]);
+      return res.outcome;
+    });
+    expect(outcome).toBe("applied");
+  });
+
+  it("rejects a cross-tenant conditional write inside the transaction", async () => {
+    const cap = captureCasPg({ updateRows: [{ id: "w1" }] });
+    await expect(
+      store(cap).withTransaction(TENANT, async (tx) => {
+        if (!isConditional(tx)) throw new Error("unreachable");
+        return tx.updateIf("99999999-0000-4000-8000-000000000002", "Widget", "w1", {}, []);
+      }),
+    ).rejects.toThrow(/cross-tenant/);
   });
 });

@@ -2,7 +2,10 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   encodeKeyset,
   keysetOf,
+  matchesPreconditions,
+  type ConditionalUpdateResult,
   type EntityRecord,
+  type FieldPrecondition,
   type ListPage,
   type ListQuery,
 } from "@crossengin/operate-runtime";
@@ -109,6 +112,87 @@ export async function updateOp(
     [tenantId, entity, id, JSON.stringify(merged)],
   );
   return merged;
+}
+
+/**
+ * Refuses a field name that cannot be interpolated into a JSON key path.
+ *
+ * Called on every precondition BEFORE the pure check runs, and the order is the
+ * whole point: an unsafe name happens not to exist in any document, so the pure
+ * check would answer `precondition_failed` and the caller would read a rejected
+ * *race* where it actually has a rejected *program*. Fail loud on a caller
+ * mistake; fail quiet only on a genuine lost race.
+ */
+function assertSafePreconditionField(field: string): void {
+  if (!FIELD_RE.test(field)) {
+    throw new Error(`cannot build a precondition on '${field}': unsafe field name`);
+  }
+}
+
+/**
+ * Renders one precondition as SQL over the JSONB document, appending its bound
+ * value to `params`. `->>` yields text for every scalar and SQL NULL for both an
+ * absent key and a JSON `null`, which is exactly the "absent is null" rule
+ * `matchesPreconditions` applies — so the predicate and the pure check agree.
+ *
+ * The field name is interpolated (there is no placeholder form for a JSON key),
+ * so it is validated against `FIELD_RE` first; an unsafe name throws rather than
+ * being dropped, because a precondition that silently disappears leaves a caller
+ * believing it has a fence.
+ */
+function preconditionSql(p: FieldPrecondition, params: unknown[]): string {
+  assertSafePreconditionField(p.field);
+  if (p.value === null) return `document ->> '${p.field}' IS NULL`;
+  params.push(String(p.value));
+  return `document ->> '${p.field}' = $${params.length.toString()}`;
+}
+
+/**
+ * Compare-and-set over the JSONB document store.
+ *
+ * Two fences, both load-bearing. `SELECT … FOR UPDATE` takes the row lock, so a
+ * second caller on the same row waits and then — READ COMMITTED re-reads a
+ * locked row after the lock clears — sees the winner's document rather than its
+ * own stale copy. And the preconditions are repeated in the `UPDATE`'s own
+ * `WHERE`, so the decision's evidence is part of the write rather than something
+ * checked beside it; a zero row count is the store reporting that it lost,
+ * instead of overwriting.
+ *
+ * The `RETURNING` clause is what makes the second fence free: no row back means
+ * the predicate did not hold, and the locked read is already in hand to report
+ * what it lost to.
+ */
+export async function updateIfOp(
+  tx: PgConnection,
+  table: string,
+  tenantId: string,
+  entity: string,
+  id: string,
+  patch: EntityRecord,
+  expect: readonly FieldPrecondition[],
+): Promise<ConditionalUpdateResult> {
+  for (const p of expect) assertSafePreconditionField(p.field);
+  const locked = await tx.query<DocumentRow>(
+    `SELECT document FROM ${table} WHERE tenant_id = $1 AND entity = $2 AND record_id = $3 FOR UPDATE`,
+    [tenantId, entity, id],
+  );
+  const current = locked.rows[0]?.document;
+  if (current === undefined) return { outcome: "not_found", record: null };
+  if (!matchesPreconditions(current, expect)) {
+    return { outcome: "precondition_failed", record: current };
+  }
+  const merged = mergeRecord(current, patch, id);
+  const params: unknown[] = [tenantId, entity, id, JSON.stringify(merged)];
+  const preds = expect.map((p) => preconditionSql(p, params));
+  const res = await tx.query<DocumentRow>(
+    `UPDATE ${table} SET document = $4::jsonb, updated_at = now()
+      WHERE tenant_id = $1 AND entity = $2 AND record_id = $3${preds.map((s) => ` AND ${s}`).join("")}
+      RETURNING document`,
+    params,
+  );
+  const written = res.rows[0]?.document;
+  if (written === undefined) return { outcome: "precondition_failed", record: current };
+  return { outcome: "applied", record: written };
 }
 
 export async function removeOp(

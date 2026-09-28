@@ -9,8 +9,11 @@ import {
 import {
   encodeKeyset,
   keysetOf,
+  type ConditionalEntityStore,
+  type ConditionalUpdateResult,
   type EntityRecord,
   type EntityStore,
+  type FieldPrecondition,
   type ListPage,
   type ListQuery,
   type TransactionalEntityStore,
@@ -58,7 +61,7 @@ export interface ColumnMappedEntityStoreOptions {
  * by SQL reference; encrypted columns are excluded from sort/filter (you can't
  * meaningfully order ciphertext).
  */
-export class ColumnMappedEntityStore implements TransactionalEntityStore {
+export class ColumnMappedEntityStore implements TransactionalEntityStore, ConditionalEntityStore {
   private readonly conn: PgConnection;
   private readonly plans: ReadonlyMap<string, EntityTablePlan>;
   private readonly indexes: Map<string, ReadonlyMap<string, ColumnMapping>> = new Map();
@@ -293,6 +296,112 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     return withTenantContext(this.conn, tenantId, (tx) => this.updateOn(tx, tenantId, entity, id, patch));
   }
 
+  /**
+   * Renders one precondition as a typed-table predicate, appending its bound
+   * value to `params`.
+   *
+   * Comparison is on `column::text`, which is the rule `matchesPreconditions`
+   * applies in process — and the only rule that agrees across the two stores,
+   * because the same integer arrives as a JS number here and as JSONB text
+   * there. It also sidesteps the cast-failure hazard the filter path has: a
+   * caller's expectation is whatever they read back, never a hand-typed literal.
+   *
+   * Two field kinds are REFUSED rather than dropped, and the difference matters
+   * more than it looks. `buildListSql` may silently skip a field it cannot
+   * express because a dropped filter widens a result set — visibly wrong, and
+   * harmless. A dropped *precondition* narrows nothing and removes the fence
+   * while the caller still believes it holds one, so:
+   *
+   * - an **unknown field** (not in this entity's column plan) throws;
+   * - an **encrypted column** throws, because `pgp_sym_encrypt` is randomised —
+   *   two encryptions of one plaintext differ, so ciphertext equality is not
+   *   value equality and a comparison on it would be meaningless rather than
+   *   merely unsupported.
+   */
+  private preconditionSql(
+    entity: string,
+    p: FieldPrecondition,
+    params: unknown[],
+  ): string {
+    const m = this.indexFor(entity).get(p.field);
+    if (m === undefined) {
+      throw new Error(`cannot build a precondition on '${entity}.${p.field}': no such column`);
+    }
+    if (m.encryptAtRest) {
+      throw new Error(
+        `cannot build a precondition on '${entity}.${p.field}': the column is encrypted at rest, `
+        + "and randomised ciphertext does not compare as a value",
+      );
+    }
+    if (p.value === null) return `${quoteIdent(m.column)} IS NULL`;
+    params.push(String(p.value));
+    return `${quoteIdent(m.column)}::text = $${params.length.toString()}`;
+  }
+
+  private async updateIfOn(
+    tx: PgConnection,
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expect: readonly FieldPrecondition[],
+  ): Promise<ConditionalUpdateResult> {
+    const plan = this.planFor(entity);
+    const qualified = qualifyTable(plan.schema, plan.table);
+    const sets: string[] = [];
+    const params: unknown[] = [tenantId, id];
+    let stampsUpdatedAt = false;
+    for (const mapping of plan.columns) {
+      const v = patch[mapping.field];
+      if (v === undefined) continue;
+      if (mapping.column === "updated_at") stampsUpdatedAt = true;
+      sets.push(`${quoteIdent(mapping.column)} = ${this.writePlaceholder(mapping, v, params)}`);
+    }
+    if (!stampsUpdatedAt) sets.push(`${quoteIdent("updated_at")} = now()`);
+    // Built BEFORE the query runs, so an unexpressible precondition throws
+    // instead of the write going out with a weaker fence than asked for.
+    const preds = expect.map((p) => this.preconditionSql(entity, p, params));
+    const res = await tx.query<Record<string, unknown>>(
+      `UPDATE ${qualified}
+          SET ${sets.join(", ")}
+        WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent("id")} = $2${preds.map((s) => ` AND ${s}`).join("")}
+        RETURNING ${this.selectList(plan)}`,
+      params,
+    );
+    const row = res.rows[0];
+    if (row !== undefined) return { outcome: "applied", record: rowToRecord(plan, row) };
+    // No row written. The predicate either lost a race or named a row that does
+    // not exist, and a caller has to be able to tell those apart — so read it
+    // back, in the SAME transaction, and let the pure check say which.
+    const actual = await this.getOn(tx, tenantId, entity, id);
+    if (actual === null) return { outcome: "not_found", record: null };
+    return { outcome: "precondition_failed", record: actual };
+  }
+
+  /**
+   * Compare-and-set on the typed table. One statement: the expectations ride in
+   * the `UPDATE`'s own `WHERE`, so a concurrent writer that has already moved the
+   * row makes this write match nothing — reported, never overwritten.
+   *
+   * No `SELECT … FOR UPDATE` is needed, and that is the point. The document store
+   * has to read before it writes (it merges a whole JSONB blob), so it locks; here
+   * the patch is column assignments and the predicate is evaluated by the same
+   * statement that writes, which under READ COMMITTED re-checks it against the
+   * committed row after waiting on any conflicting lock. A loser therefore sees
+   * the winner's value in its predicate, not its own stale read.
+   */
+  async updateIf(
+    tenantId: string,
+    entity: string,
+    id: string,
+    patch: EntityRecord,
+    expect: readonly FieldPrecondition[],
+  ): Promise<ConditionalUpdateResult> {
+    return withTenantContext(this.conn, tenantId, (tx) =>
+      this.updateIfOn(tx, tenantId, entity, id, patch, expect),
+    );
+  }
+
   private async removeOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<boolean> {
     const plan = this.planFor(entity);
     const qualified = qualifyTable(plan.schema, plan.table);
@@ -317,7 +426,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       const assertTenant = (t: string): void => {
         if (t !== tenantId) throw new Error("cross-tenant access inside a transaction is not allowed");
       };
-      const bound: EntityStore = {
+      const bound: ConditionalEntityStore = {
         list: (t, entity) => {
           assertTenant(t);
           return this.listPageOn(tx, t, entity, { limit: 1_000_000, cursor: null, sort: [], filters: [] }).then((p) => p.records);
@@ -337,6 +446,10 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         update: (t, entity, id, patch) => {
           assertTenant(t);
           return this.updateOn(tx, t, entity, id, patch);
+        },
+        updateIf: (t, entity, id, patch, expect) => {
+          assertTenant(t);
+          return this.updateIfOn(tx, t, entity, id, patch, expect);
         },
         remove: (t, entity, id) => {
           assertTenant(t);

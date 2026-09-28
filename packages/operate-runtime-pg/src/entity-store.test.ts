@@ -1,5 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { EntityRecord } from "@crossengin/operate-runtime";
+import { isConditional, type EntityRecord } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
 import { PostgresEntityStore } from "./entity-store.js";
@@ -562,5 +562,229 @@ describe("PostgresEntityStore.pruneDanglingLinks", () => {
     const result = await store.pruneDanglingLinks(OTHER_TENANT, "Product", "Tag");
     expect(result).toEqual({ pruned: 0, kept: 0 });
     expect(remainingLinks()).toHaveLength(1);
+  });
+});
+
+/**
+ * A fake that INTERPRETS the conditional update's predicates rather than
+ * ignoring them, so a test proving `updateIf` proves the emitted SQL is what
+ * fences the write — not a JS check standing next to a SQL statement that would
+ * have overwritten anyway. Records `{sql, params}` per call, house style.
+ */
+function fakeCasPg(seed: ReadonlyArray<{ entity: string; document: EntityRecord }> = []): {
+  conn: PgConnection;
+  calls: { sql: string; params: readonly unknown[] }[];
+  documentOf: (id: string) => EntityRecord | undefined;
+} {
+  const backing = seed.map((s) => ({
+    tenant_id: TENANT,
+    entity: s.entity,
+    record_id: String(s.document["id"]),
+    document: { ...s.document },
+  }));
+  const calls: { sql: string; params: readonly unknown[] }[] = [];
+  let tenantCtx: string | null = null;
+
+  /** Reads the `document ->> 'f' = $n` / `IS NULL` predicates back out of the SQL. */
+  const predicatesOf = (sql: string, params: readonly unknown[]): Array<(d: EntityRecord) => boolean> => {
+    const out: Array<(d: EntityRecord) => boolean> = [];
+    const re = /document ->> '([A-Za-z_][A-Za-z0-9_]*)' (?:= \$(\d+)|IS NULL)/g;
+    for (const m of sql.matchAll(re)) {
+      const field = m[1]!;
+      const idx = m[2];
+      if (idx === undefined) {
+        out.push((d) => d[field] === undefined || d[field] === null);
+      } else {
+        const expected = String(params[Number(idx) - 1]);
+        out.push((d) => d[field] !== undefined && d[field] !== null && String(d[field]) === expected);
+      }
+    }
+    return out;
+  };
+
+  const run = async (sql: string, params?: readonly unknown[]) => {
+    const p = params ?? [];
+    if (sql.includes("set_config")) {
+      tenantCtx = String(p[0]);
+      return { rows: [], rowCount: 0 };
+    }
+    calls.push({ sql, params: p });
+    const visible = backing.filter((r) => tenantCtx !== null && r.tenant_id === tenantCtx);
+    const row = visible.find(
+      (r) => r.tenant_id === p[0] && r.entity === p[1] && r.record_id === p[2],
+    );
+    if (sql.includes("SELECT document")) {
+      return row === undefined
+        ? { rows: [], rowCount: 0 }
+        : { rows: [{ document: row.document }], rowCount: 1 };
+    }
+    if (sql.includes("INSERT INTO")) {
+      backing.push({
+        tenant_id: String(p[0]), entity: String(p[1]), record_id: String(p[2]),
+        document: JSON.parse(String(p[3])) as EntityRecord,
+      });
+      return { rows: [], rowCount: 1 };
+    }
+    if (sql.trimStart().startsWith("UPDATE")) {
+      if (row === undefined) return { rows: [], rowCount: 0 };
+      if (!predicatesOf(sql, p).every((f) => f(row.document))) return { rows: [], rowCount: 0 };
+      row.document = JSON.parse(String(p[3])) as EntityRecord;
+      return { rows: [{ document: row.document }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  };
+
+  const conn: PgConnection = {
+    query: run as PgConnection["query"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => {
+      const before = tenantCtx;
+      try {
+        return await fn(conn);
+      } finally {
+        tenantCtx = before;
+      }
+    }) as PgConnection["transaction"],
+    withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+    close: (async () => undefined) as PgConnection["close"],
+  };
+  return { conn, calls, documentOf: (id) => backing.find((r) => r.record_id === id)?.document };
+}
+
+describe("PostgresEntityStore.updateIf — compare-and-set", () => {
+  const CLAIM: EntityRecord = { id: "c1", state: "in_review", info_request_count: 1 };
+
+  it("puts the expectations in the UPDATE's own WHERE and binds them as text", async () => {
+    const { conn, calls } = fakeCasPg([{ entity: "Claim", document: CLAIM }]);
+    const store = new PostgresEntityStore(conn);
+    await store.updateIf(TENANT, "Claim", "c1", { info_request_count: 2 }, [
+      { field: "info_request_count", value: 1 },
+    ]);
+    const update = calls.find((c) => c.sql.trimStart().startsWith("UPDATE"));
+    expect(update?.sql).toContain("document ->> 'info_request_count' = $5");
+    expect(update?.sql).toContain("RETURNING document");
+    // The expectation is bound, never interpolated, and as TEXT — the one
+    // comparison rule that agrees with the column store and the pure check.
+    expect(update?.params[4]).toBe("1");
+  });
+
+  it("takes the row lock before deciding", async () => {
+    const { conn, calls } = fakeCasPg([{ entity: "Claim", document: CLAIM }]);
+    const store = new PostgresEntityStore(conn);
+    await store.updateIf(TENANT, "Claim", "c1", { state: "pended" }, [
+      { field: "state", value: "in_review" },
+    ]);
+    // FOR UPDATE is what makes a second caller re-read the winner's document
+    // rather than its own stale copy, under READ COMMITTED.
+    expect(calls[0]?.sql).toContain("FOR UPDATE");
+    expect(calls.findIndex((c) => c.sql.trimStart().startsWith("UPDATE"))).toBeGreaterThan(0);
+  });
+
+  it("applies the patch and merges it into the stored document", async () => {
+    const { conn, documentOf } = fakeCasPg([{ entity: "Claim", document: CLAIM }]);
+    const store = new PostgresEntityStore(conn);
+    const res = await store.updateIf(TENANT, "Claim", "c1", { info_request_count: 2 }, [
+      { field: "info_request_count", value: 1 },
+    ]);
+    expect(res.outcome).toBe("applied");
+    expect(res.record).toMatchObject({ id: "c1", state: "in_review", info_request_count: 2 });
+    expect(documentOf("c1")).toMatchObject({ info_request_count: 2 });
+  });
+
+  it("refuses and writes NOTHING when the row has moved on", async () => {
+    const { conn, documentOf } = fakeCasPg([
+      { entity: "Claim", document: { id: "c1", state: "pended", info_request_count: 2 } },
+    ]);
+    const store = new PostgresEntityStore(conn);
+    const res = await store.updateIf(TENANT, "Claim", "c1", { info_request_count: 2 }, [
+      { field: "info_request_count", value: 1 },
+    ]);
+    expect(res.outcome).toBe("precondition_failed");
+    expect(res.record).toMatchObject({ info_request_count: 2, state: "pended" });
+    expect(documentOf("c1")).toMatchObject({ state: "pended", info_request_count: 2 });
+  });
+
+  it("emits `IS NULL` for an absent expectation, with no bound value", async () => {
+    const { conn, calls } = fakeCasPg([{ entity: "Claim", document: { id: "c1" } }]);
+    const store = new PostgresEntityStore(conn);
+    const res = await store.updateIf(TENANT, "Claim", "c1", { info_request_count: 1 }, [
+      { field: "info_request_count", value: null },
+    ]);
+    expect(res.outcome).toBe("applied");
+    const update = calls.find((c) => c.sql.trimStart().startsWith("UPDATE"));
+    expect(update?.sql).toContain("document ->> 'info_request_count' IS NULL");
+    expect(update?.params).toHaveLength(4);
+  });
+
+  it("reports not_found rather than precondition_failed for a missing row", async () => {
+    const { conn } = fakeCasPg();
+    const store = new PostgresEntityStore(conn);
+    const res = await store.updateIf(TENANT, "Claim", "nope", { state: "pended" }, [
+      { field: "state", value: "in_review" },
+    ]);
+    expect(res.outcome).toBe("not_found");
+    expect(res.record).toBeNull();
+  });
+
+  it("admits exactly ONE of two writers that read the same count", async () => {
+    const { conn, documentOf } = fakeCasPg([{ entity: "Claim", document: CLAIM }]);
+    const store = new PostgresEntityStore(conn);
+    const expectation = [{ field: "info_request_count", value: 1 }];
+    const a = await store.updateIf(TENANT, "Claim", "c1", { info_request_count: 2 }, expectation);
+    const b = await store.updateIf(TENANT, "Claim", "c1", { info_request_count: 2 }, expectation);
+    expect([a.outcome, b.outcome]).toEqual(["applied", "precondition_failed"]);
+    expect(documentOf("c1")).toMatchObject({ info_request_count: 2 });
+  });
+
+  it("refuses an unsafe field name instead of dropping the predicate", async () => {
+    // A dropped filter widens a result set; a dropped PRECONDITION removes the
+    // fence while the caller still believes it holds one.
+    const { conn, calls } = fakeCasPg([{ entity: "Claim", document: CLAIM }]);
+    const store = new PostgresEntityStore(conn);
+    await expect(
+      store.updateIf(TENANT, "Claim", "c1", { state: "pended" }, [
+        { field: "state'; DROP TABLE claim; --", value: "in_review" },
+      ]),
+    ).rejects.toThrow(/unsafe field name/);
+    // Refused BEFORE the read, not after: an unsafe name exists in no document,
+    // so checking it first would have answered `precondition_failed` and told
+    // the caller it had lost a race it never entered.
+    expect(calls).toHaveLength(0);
+  });
+
+  it("is reachable on the transaction-bound store, sharing one transaction", async () => {
+    const { conn, calls, documentOf } = fakeCasPg([{ entity: "Claim", document: CLAIM }]);
+    const store = new PostgresEntityStore(conn);
+    const outcome = await store.withTransaction(TENANT, async (tx) => {
+      expect(isConditional(tx)).toBe(true);
+      if (!isConditional(tx)) throw new Error("unreachable");
+      const read = await tx.get(TENANT, "Claim", "c1");
+      const res = await tx.updateIf(TENANT, "Claim", "c1", { info_request_count: 2 }, [
+        { field: "info_request_count", value: Number(read?.["info_request_count"]) },
+      ]);
+      return res.outcome;
+    });
+    expect(outcome).toBe("applied");
+    expect(documentOf("c1")).toMatchObject({ info_request_count: 2 });
+    // One tenant context for the whole unit: the bound store does not re-enter.
+    expect(calls.filter((c) => c.sql.includes("set_config"))).toHaveLength(0);
+  });
+
+  it("refuses a cross-tenant conditional write inside a transaction", async () => {
+    const { conn } = fakeCasPg([{ entity: "Claim", document: CLAIM }]);
+    const store = new PostgresEntityStore(conn);
+    await expect(
+      store.withTransaction(TENANT, async (tx) => {
+        if (!isConditional(tx)) throw new Error("unreachable");
+        return tx.updateIf(OTHER_TENANT, "Claim", "c1", { state: "pended" }, []);
+      }),
+    ).rejects.toThrow(/cross-tenant/);
+  });
+
+  it("behaves like a plain update when given no expectations", async () => {
+    const { conn, documentOf } = fakeCasPg([{ entity: "Claim", document: CLAIM }]);
+    const store = new PostgresEntityStore(conn);
+    const res = await store.updateIf(TENANT, "Claim", "c1", { state: "pended" }, []);
+    expect(res.outcome).toBe("applied");
+    expect(documentOf("c1")).toMatchObject({ state: "pended" });
   });
 });
