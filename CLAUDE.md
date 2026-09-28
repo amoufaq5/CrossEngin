@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 280 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 281 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**82 packages + 3 apps, 139 meta-schema tables, ~9,278 tests**, all green, no
+**82 packages + 3 apps, 139 meta-schema tables, ~9,330 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -178,8 +178,10 @@ packages exist at only one layer, noted below where that is true.
 ### Identity, security, data protection
 
 - **`auth`** — RBAC + ABAC. Role definitions with inheritance, grants, per-entity and
-  per-field permissions, write masks, and the classification-aware redaction
-  (`computeClassifiedFieldRedaction`) that fails closed on pii/phi/regulated fields.
+  per-field permissions, write masks, the classification-aware redaction
+  (`computeClassifiedFieldRedaction`) that fails closed on pii/phi/regulated fields, and
+  `canonicalAuditEntryPayload` — the round-trip-stable bytes a forensic chain commits to for
+  one audit entry (ADR-0286).
 - **`sso`** — federated identity contracts: SAML 2.0 + OIDC provider configs, SCIM 2.0
   provisioning, claim mappings with transforms and JIT user policies, session lifecycle,
   login audit.
@@ -324,6 +326,8 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   attestations.
 - **`forensics-pg`** — the append-only chain in Postgres: an advisory-lock-serialized chain
   log writer, Ed25519 entry signer, chain-suffix verification and periodic checkpoints.
+  `appendWithin(tx, …)` appends into a caller's transaction, so a record and its anchor
+  commit together (ADR-0286).
 - **`access-reviews`** — periodic attestation campaigns (SOC 2 / ISO 27001 / HIPAA / PCI /
   GDPR / 21 CFR Part 11): campaigns, scoped items, decisions with attestation kinds and
   four-eyes, exceptions with per-reason duration caps, templates, sealed evidence with
@@ -546,10 +550,12 @@ opened them.
 
 **Load-bearing**
 
-- **Audit entries are neither chained nor signed** (ADR-0279), while the
-  `forensics` package ships a hash-chained signed log and the audit-chain config
-  writes one per request. Two audit paths that don't know about each other;
-  reconciling them is the most consequential open item.
+- **Nothing runs the audit-integrity proof.** ADR-0286 reconciled the two audit
+  paths — every `meta.audit_log` row is now committed to by an entry in the same
+  per-tenant forensic chain, so rewriting a row is detectable — but a proof needs
+  **both** halves run together (`verifyAuditAnchors` for row↔anchor, `verifyChainFull`
+  for the chain's own links and signatures), and nothing schedules that or exposes
+  it over HTTP. Rows written before ADR-0286 are permanently `unanchored`.
 - **No real email/SMS senders** (ADR-0274). The `ChannelSender` seam, retry
   ladder and suppression handling all work; only `in_app` has an implementation.
 - **No provider webhooks feeding bounces into suppressions** (ADR-0274) — the
@@ -589,7 +595,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 280 records; 201
+hand-editing, so a title or status change cannot drift. 281 records; 202
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

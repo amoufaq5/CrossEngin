@@ -167,25 +167,46 @@ export class PostgresChainLogStore extends PostgresChainLogReader {
 
   async append(input: ChainAppendInput): Promise<ChainedLogEntry> {
     const valid = ChainAppendInputSchema.parse(input);
-    return this.serialized(valid.tenantId, async (tx) => {
-      const tail = await this.tailWithin(tx);
-      const sequenceNumber = tail === null ? 0 : tail.sequenceNumber + 1;
-      const priorEntryHash = tail === null ? GENESIS_HASH : tail.entryHash;
-      const sealed = await buildChainEntry({
-        sequenceNumber,
-        priorEntryHash,
-        entry: {
-          kind: valid.kind,
-          recordedAt: valid.recordedAt,
-          actorReference: valid.actorReference,
-          payloadBytes: valid.payload,
-        },
-        signingKeyFingerprint: this.signer.fingerprint,
-        sign: (bytes) => this.signer.sign(bytes),
-      });
-      await this.insertWithin(tx, valid.tenantId, sealed.entry);
-      return sealed.entry;
+    return this.serialized(valid.tenantId, async (tx) => this.appendSealed(tx, valid));
+  }
+
+  /**
+   * Appends into a transaction the **caller** owns, so the chain entry and whatever the caller
+   * is writing commit or roll back together. That atomicity is the point: an audit record
+   * anchored by a chain entry that did not survive the same commit is an unanchored record,
+   * and one the chain attests to but which was rolled back is a phantom.
+   *
+   * The per-scope advisory lock is still taken here — chain linearity depends on it — but the
+   * **RLS context is the caller's responsibility**, since the caller's transaction has already
+   * established whatever scope it is writing under. Passing a `tenantId` that differs from the
+   * context the caller set would be caught by RLS on insert, not silently accepted.
+   */
+  async appendWithin(tx: PgConnection, input: ChainAppendInput): Promise<ChainedLogEntry> {
+    const valid = ChainAppendInputSchema.parse(input);
+    if (valid.tenantId !== null) assertTenantId(valid.tenantId);
+    await tx.query("SELECT pg_advisory_xact_lock($1)", [advisoryKeyFor(valid.tenantId)]);
+    return this.appendSealed(tx, valid);
+  }
+
+  /** Reads the tail, builds + signs the next entry from it, inserts it. Assumes lock + context. */
+  private async appendSealed(tx: PgConnection, valid: ChainAppendInput): Promise<ChainedLogEntry> {
+    const tail = await this.tailWithin(tx);
+    const sequenceNumber = tail === null ? 0 : tail.sequenceNumber + 1;
+    const priorEntryHash = tail === null ? GENESIS_HASH : tail.entryHash;
+    const sealed = await buildChainEntry({
+      sequenceNumber,
+      priorEntryHash,
+      entry: {
+        kind: valid.kind,
+        recordedAt: valid.recordedAt,
+        actorReference: valid.actorReference,
+        payloadBytes: valid.payload,
+      },
+      signingKeyFingerprint: this.signer.fingerprint,
+      sign: (bytes) => this.signer.sign(bytes),
     });
+    await this.insertWithin(tx, valid.tenantId, sealed.entry);
+    return sealed.entry;
   }
 
   private async insertWithin(

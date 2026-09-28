@@ -10,6 +10,7 @@ import {
 import { PostgresChainLogReader, PostgresChainLogStore, advisoryKeyFor } from "./chain-log-store.js";
 import { keyStoreChainSigner } from "./signer.js";
 import { fakeChainPg } from "./test-fakes.js";
+import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
@@ -229,5 +230,99 @@ describe("advisoryKeyFor", () => {
     expect(advisoryKeyFor(null)).not.toBe(advisoryKeyFor(TENANT_A));
     const k = advisoryKeyFor(TENANT_A);
     expect(k >= -(2n ** 63n) && k < 2n ** 63n).toBe(true);
+  });
+});
+
+describe("PostgresChainLogStore.appendWithin", () => {
+  it("links onto the caller's transaction and produces the same chain as append", async () => {
+    const keyStore = new InMemoryKeyStore();
+    const record = await keyStore.createKey({
+      tenantId: null,
+      algorithm: "ed25519",
+      purpose: "evidence_sealing",
+    });
+    const conn = fakeChainPg();
+    const store = new PostgresChainLogStore(conn, keyStoreChainSigner(keyStore, record, null));
+
+    const e0 = await conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.appendWithin(tx, {
+        tenantId: TENANT_A,
+        kind: "audit_event",
+        actorReference: "emitter",
+        recordedAt: AT,
+        payload: "anchored-0",
+      });
+    });
+    const e1 = await conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.appendWithin(tx, {
+        tenantId: TENANT_A,
+        kind: "audit_event",
+        actorReference: "emitter",
+        recordedAt: AT,
+        payload: "anchored-1",
+      });
+    });
+
+    expect([e0.sequenceNumber, e1.sequenceNumber]).toEqual([0, 1]);
+    expect(e0.priorEntryHash).toBe(GENESIS_HASH);
+    expect(e1.priorEntryHash).toBe(e0.entryHash);
+    expect(await store.verify(TENANT_A)).toMatchObject({ valid: true });
+  });
+
+  it("continues a chain started by append, so both paths share one chain per scope", async () => {
+    const { store } = await newStore();
+    const viaAppend = await append(store, TENANT_A, 0);
+    const conn = (store as unknown as { conn: PgConnection }).conn;
+    const viaWithin = await conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.appendWithin(tx, {
+        tenantId: TENANT_A,
+        kind: "audit_event",
+        actorReference: "emitter",
+        recordedAt: AT,
+        payload: "anchored",
+      });
+    });
+    expect(viaWithin.sequenceNumber).toBe(1);
+    expect(viaWithin.priorEntryHash).toBe(viaAppend.entryHash);
+  });
+
+  it("takes the per-scope advisory lock itself, since chain linearity depends on it", async () => {
+    const { store } = await newStore();
+    const conn = (store as unknown as { conn: PgConnection }).conn;
+    const seen: string[] = [];
+    const spy: PgConnection = {
+      ...conn,
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        seen.push(sql);
+        return conn.query(sql, params);
+      }) as PgConnection["query"],
+    };
+    await store.appendWithin(spy, {
+      tenantId: TENANT_A,
+      kind: "audit_event",
+      actorReference: "emitter",
+      recordedAt: AT,
+      payload: "x",
+    });
+    expect(seen.some((s) => s.includes("pg_advisory_xact_lock"))).toBe(true);
+  });
+
+  it("rejects an invalid tenant id before touching the transaction", async () => {
+    const { store } = await newStore();
+    const conn = (store as unknown as { conn: PgConnection }).conn;
+    await expect(
+      conn.transaction((tx) =>
+        store.appendWithin(tx, {
+          tenantId: "not a uuid; DROP TABLE x",
+          kind: "audit_event",
+          actorReference: "emitter",
+          recordedAt: AT,
+          payload: "x",
+        }),
+      ),
+    ).rejects.toThrow();
   });
 });

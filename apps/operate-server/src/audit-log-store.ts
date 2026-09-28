@@ -5,12 +5,38 @@ import type {
   AuditLogEntry,
   PrincipalKind,
 } from "@crossengin/auth";
+import { canonicalAuditEntryPayload } from "@crossengin/auth";
+import type { ChainAppendInput, ChainedLogEntry } from "@crossengin/forensics-pg";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
 export interface AuditLogStoreOptions {
   readonly schema?: string;
+  /**
+   * When present, every `emit` also appends an `audit_event` chain entry committing to the
+   * row's canonical content — in the **same transaction**, so the row and its anchor share a
+   * fate. Omit it and rows are written unanchored, which is what a deployment with no signing
+   * key can do (ADR-0286).
+   */
+  readonly chain?: AuditAnchorChain;
+}
+
+/** The slice of `PostgresChainLogStore` the emitter needs — an append into its own transaction. */
+export interface AuditAnchorChain {
+  appendWithin(tx: PgConnection, input: ChainAppendInput): Promise<ChainedLogEntry>;
+}
+
+/** One audit row's stored anchor coordinates, as verification reads them back. */
+export interface AuditAnchorRef {
+  readonly sequenceNumber: number;
+  readonly entryHash: string;
+}
+
+/** An audit row paired with the anchor it was written with, if any. */
+export interface AnchoredAuditEntry {
+  readonly entry: AuditLogEntry;
+  readonly anchor: AuditAnchorRef | null;
 }
 
 export interface AuditLogQuery {
@@ -38,14 +64,17 @@ const DEFAULT_ACTOR_KIND: PrincipalKind = "user";
  */
 const INSERT_COLUMNS =
   "tenant_id, id, occurred_at, actor, operation, entity, entity_id," +
-  " before, after, diff, reason, e_signature, rego_decision_trace";
+  " before, after, diff, reason, e_signature, rego_decision_trace," +
+  " chain_sequence_number, chain_entry_hash";
 
 const INSERT_VALUES =
-  "$1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12::jsonb, $13";
+  "$1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12::jsonb, $13," +
+  " $14, $15";
 
 const SELECT_COLUMNS =
   "id, tenant_id, occurred_at, actor, operation, entity, entity_id," +
-  " before, after, diff, reason, e_signature, rego_decision_trace";
+  " before, after, diff, reason, e_signature, rego_decision_trace," +
+  " chain_sequence_number, chain_entry_hash";
 
 const ActorSchema = z
   .object({
@@ -208,6 +237,19 @@ export function auditEntryFromRow(row: Record<string, unknown>): AuditLogEntry {
   };
 }
 
+/**
+ * Reads a row's chain coordinates. Both columns must be present for an anchor to exist — half
+ * an anchor is no anchor, and reporting it as missing is the safe reading.
+ */
+export function anchorFromRow(row: Record<string, unknown>): AuditAnchorRef | null {
+  const seq = row["chain_sequence_number"];
+  const hash = row["chain_entry_hash"];
+  if (seq == null || hash == null) return null;
+  const sequenceNumber = Number(seq);
+  if (!Number.isInteger(sequenceNumber) || sequenceNumber < 0) return null;
+  return { sequenceNumber, entryHash: String(hash) };
+}
+
 export function tryAuditEntryFromRow(row: Record<string, unknown>): AuditLogEntry | null {
   try {
     return auditEntryFromRow(row);
@@ -234,6 +276,7 @@ export function tryAuditEntryFromRow(row: Record<string, unknown>): AuditLogEntr
 export class PostgresAuditEmitter implements AuditEmitter {
   private readonly conn: PgConnection;
   private readonly schema: string;
+  private readonly chain: AuditAnchorChain | null;
 
   constructor(conn: PgConnection, opts: AuditLogStoreOptions = {}) {
     const schema = opts.schema ?? "meta";
@@ -242,15 +285,36 @@ export class PostgresAuditEmitter implements AuditEmitter {
     }
     this.conn = conn;
     this.schema = schema;
+    this.chain = opts.chain ?? null;
   }
 
   private get table(): string {
     return `${this.schema}.audit_log`;
   }
 
+  /** Whether this emitter anchors what it writes into a tamper-evident chain. */
+  anchors(): boolean {
+    return this.chain !== null;
+  }
+
   async emit(entry: AuditLogEntry): Promise<void> {
     assertEmittable(entry);
     await withTenantContext(this.conn, entry.tenantId, async (tx) => {
+      // The anchor is appended BEFORE the row, so the row can be inserted with its chain
+      // coordinates already known — no UPDATE, which would give this append-only table a
+      // rewrite path. Both statements are in the caller's transaction: a failed anchor rolls
+      // the row back, so `emit` throwing means nothing was written, and ADR-0279's fail-closed
+      // caller (503 `audit_unavailable`) covers an unanchorable record too.
+      const anchor =
+        this.chain === null
+          ? null
+          : await this.chain.appendWithin(tx, {
+              tenantId: entry.tenantId,
+              kind: "audit_event",
+              actorReference: entry.actor.userId ?? "system",
+              recordedAt: entry.occurredAt,
+              payload: canonicalAuditEntryPayload(entry),
+            });
       const sql = `INSERT INTO ${this.table} (${INSERT_COLUMNS}) VALUES (${INSERT_VALUES})`;
       await tx.query(sql, [
         entry.tenantId,
@@ -268,48 +332,71 @@ export class PostgresAuditEmitter implements AuditEmitter {
         entry.reason ?? null,
         entry.eSignature === undefined ? null : JSON.stringify(entry.eSignature),
         entry.regoDecisionTrace ?? null,
+        anchor === null ? null : anchor.sequenceNumber,
+        anchor === null ? null : anchor.entryHash,
       ]);
     });
+  }
+
+  /** Shared filter construction for both list paths, so they can never drift apart. */
+  private whereFor(tenantId: string, query: AuditLogQuery): {
+    readonly conditions: readonly string[];
+    readonly params: unknown[];
+  } {
+    const params: unknown[] = [tenantId];
+    const conditions: string[] = ["tenant_id = $1"];
+    if (query.operation !== undefined) {
+      params.push(query.operation);
+      conditions.push(`operation = $${params.length}`);
+    }
+    if (query.entity !== undefined) {
+      params.push(query.entity);
+      conditions.push(`entity = $${params.length}`);
+    }
+    if (query.since !== undefined) {
+      params.push(query.since);
+      conditions.push(`occurred_at >= $${params.length}`);
+    }
+    return { conditions, params };
   }
 
   async listForTenant(
     tenantId: string,
     query: AuditLogQuery = {},
   ): Promise<readonly AuditLogEntry[]> {
+    const anchored = await this.listAnchoredForTenant(tenantId, query);
+    return anchored.map((a) => a.entry);
+  }
+
+  /**
+   * The same read as `listForTenant`, but keeping each row's chain coordinates — what
+   * verification needs to find the entry that commits to a given row. Ordered oldest-first,
+   * the order a chain is verified in, rather than the newest-first a human reads in.
+   */
+  async listAnchoredForTenant(
+    tenantId: string,
+    query: AuditLogQuery = {},
+  ): Promise<readonly AnchoredAuditEntry[]> {
     const limit = clampLimit(query.limit);
     return withTenantContext(this.conn, tenantId, async (tx) => {
-      const params: unknown[] = [tenantId];
-      const conditions: string[] = ["tenant_id = $1"];
-      if (query.operation !== undefined) {
-        params.push(query.operation);
-        conditions.push(`operation = $${params.length}`);
-      }
-      if (query.entity !== undefined) {
-        params.push(query.entity);
-        conditions.push(`entity = $${params.length}`);
-      }
-      if (query.since !== undefined) {
-        params.push(query.since);
-        conditions.push(`occurred_at >= $${params.length}`);
-      }
+      const { conditions, params } = this.whereFor(tenantId, query);
       params.push(limit);
       const sql =
         `SELECT ${SELECT_COLUMNS} FROM ${this.table} WHERE ${conditions.join(" AND ")}` +
         ` ORDER BY occurred_at DESC, id DESC LIMIT $${params.length}`;
       const result = await tx.query(sql, params);
-      const entries: AuditLogEntry[] = [];
+      const out: AnchoredAuditEntry[] = [];
       for (const row of result.rows) {
         // A row the current contract cannot represent is dropped rather than
         // failing the whole read: an old record must not hide every newer one.
         const entry = tryAuditEntryFromRow(row);
-        if (entry !== null) entries.push(entry);
+        if (entry !== null) out.push({ entry, anchor: anchorFromRow(row) });
       }
-      return entries;
+      return out;
     });
   }
 
-  async countSince(tenantId: string, since: Date, operation?: string): Promise<number> {
-    return withTenantContext(this.conn, tenantId, async (tx) => {
+  async countSince(tenantId: string, since: Date, operation?: string): Promise<number> {    return withTenantContext(this.conn, tenantId, async (tx) => {
       const params: unknown[] = [tenantId, since];
       const conditions: string[] = ["tenant_id = $1", "occurred_at >= $2"];
       if (operation !== undefined) {
