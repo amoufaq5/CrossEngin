@@ -1,4 +1,4 @@
-import type { AuditLogEntry } from "@crossengin/auth";
+import { canonicalAuditEntryPayload, type AuditLogEntry } from "@crossengin/auth";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { describe, expect, it } from "vitest";
 
@@ -246,7 +246,17 @@ describe("audit-log-store — emit is append-only", () => {
   it("exposes no update or delete path on the class", () => {
     const names = Object.getOwnPropertyNames(PostgresAuditEmitter.prototype);
     expect(names.filter((n) => /delete|remove|update|purge|truncate/i.test(n))).toEqual([]);
-    expect(names.sort()).toEqual(["constructor", "countSince", "emit", "listForTenant", "table"]);
+    // An exact list, so a future rewrite path cannot be added without this test noticing.
+    expect(names.sort()).toEqual([
+      "anchors",
+      "constructor",
+      "countSince",
+      "emit",
+      "listAnchoredForTenant",
+      "listForTenant",
+      "table",
+      "whereFor",
+    ]);
   });
 
   it("appends a second row for a re-emitted id rather than de-duplicating", async () => {
@@ -278,7 +288,8 @@ describe("audit-log-store — emit is append-only", () => {
     const { conn, captured } = fakeAuditDb();
     await new PostgresAuditEmitter(conn).emit(entryOf());
     const insert = statements(captured)[0];
-    expect(insert?.params).toHaveLength(13);
+    // 13 entry columns + the two forensic-chain anchor coordinates.
+    expect(insert?.params).toHaveLength(15);
     expect(insert?.sql).toContain("VALUES ($1, $2, $3, $4::jsonb");
   });
 
@@ -700,5 +711,132 @@ describe("audit-log-store — pure builders", () => {
     const row = rows[0];
     expect(row).toBeDefined();
     expect(tryAuditEntryFromRow(row as Record<string, unknown>)).toEqual(entry);
+  });
+});
+
+describe("audit-log-store — forensic chain anchoring", () => {
+  /** A chain stub that records what it was asked to append and hands back coordinates. */
+  function fakeChain(seq = 0) {
+    const appends: { tx: PgConnection; payload: string; tenantId: string | null }[] = [];
+    return {
+      appends,
+      chain: {
+        appendWithin: async (tx: PgConnection, input: { tenantId: string | null; payload: string }) => {
+          appends.push({ tx, payload: input.payload, tenantId: input.tenantId });
+          return { sequenceNumber: seq, entryHash: `hash-${seq.toString()}` } as never;
+        },
+      },
+    };
+  }
+
+  it("writes the row unanchored when no chain is configured", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    expect(store.anchors()).toBe(false);
+    await store.emit(entryOf());
+    const insert = statements(captured)[0];
+    expect(insert?.params[13]).toBeNull();
+    expect(insert?.params[14]).toBeNull();
+  });
+
+  it("anchors the row's canonical payload and stores the coordinates", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const { chain, appends } = fakeChain(4);
+    const store = new PostgresAuditEmitter(conn, { chain });
+    expect(store.anchors()).toBe(true);
+    const entry = entryOf();
+    await store.emit(entry);
+
+    expect(appends).toHaveLength(1);
+    expect(appends[0]?.tenantId).toBe(TENANT_A);
+    expect(appends[0]?.payload).toBe(canonicalAuditEntryPayload(entry));
+
+    const insert = statements(captured)[0];
+    expect(insert?.params[13]).toBe(4);
+    expect(insert?.params[14]).toBe("hash-4");
+  });
+
+  it("anchors inside the SAME transaction as the insert, so the two share a fate", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const { chain, appends } = fakeChain();
+    await new PostgresAuditEmitter(conn, { chain }).emit(entryOf());
+    // Every captured statement in this emit ran in a transaction, and the chain append was
+    // handed that same transaction object rather than the bare connection.
+    expect(captured.every((c) => c.inTx)).toBe(true);
+    expect(appends[0]?.tx).not.toBe(conn);
+  });
+
+  it("appends the anchor BEFORE the insert, so no UPDATE is ever needed", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const order: string[] = [];
+    const chain = {
+      appendWithin: async () => {
+        order.push("anchor");
+        return { sequenceNumber: 0, entryHash: "h" } as never;
+      },
+    };
+    await new PostgresAuditEmitter(conn, { chain }).emit(entryOf());
+    for (const c of statements(captured)) order.push(c.sql.trimStart().slice(0, 6).toUpperCase());
+    expect(order).toEqual(["anchor", "INSERT"]);
+  });
+
+  it("refuses the whole write when the anchor cannot be appended", async () => {
+    // Fail-closed: an unanchorable audit record is not written at all, so ADR-0279's caller
+    // returns 503 rather than keeping a record nothing can vouch for.
+    const { conn, rows } = fakeAuditDb();
+    const chain = {
+      appendWithin: async () => {
+        throw new Error("chain unavailable");
+      },
+    };
+    await expect(new PostgresAuditEmitter(conn, { chain }).emit(entryOf())).rejects.toThrow(
+      /chain unavailable/,
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it("anchors under the entry's own tenant", async () => {
+    const { conn } = fakeAuditDb();
+    const { chain, appends } = fakeChain();
+    await new PostgresAuditEmitter(conn, { chain }).emit(entryOf({ tenantId: TENANT_B }));
+    expect(appends[0]?.tenantId).toBe(TENANT_B);
+  });
+
+  it("reads the anchor back with the row", async () => {
+    const { conn, rows } = fakeAuditDb();
+    const { chain } = fakeChain(9);
+    const store = new PostgresAuditEmitter(conn, { chain });
+    await store.emit(entryOf());
+    // The fake stores what was bound; give the read path the anchor columns it will select.
+    rows[0]!["chain_sequence_number"] = 9;
+    rows[0]!["chain_entry_hash"] = "hash-9";
+    const anchored = await store.listAnchoredForTenant(TENANT_A);
+    expect(anchored[0]?.anchor).toEqual({ sequenceNumber: 9, entryHash: "hash-9" });
+  });
+
+  it("reports a row with no anchor columns as unanchored", async () => {
+    const { conn } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(entryOf());
+    const anchored = await store.listAnchoredForTenant(TENANT_A);
+    expect(anchored[0]?.anchor).toBeNull();
+  });
+
+  it("treats half an anchor as no anchor", async () => {
+    const { conn, rows } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(entryOf());
+    rows[0]!["chain_sequence_number"] = 3;
+    rows[0]!["chain_entry_hash"] = null;
+    expect((await store.listAnchoredForTenant(TENANT_A))[0]?.anchor).toBeNull();
+  });
+
+  it("listForTenant still returns plain entries", async () => {
+    const { conn } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(entryOf());
+    const entries = await store.listForTenant(TENANT_A);
+    expect(entries[0]?.id).toBe(ENTRY_1);
+    expect(entries[0]).not.toHaveProperty("anchor");
   });
 });

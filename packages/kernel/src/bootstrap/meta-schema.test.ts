@@ -367,6 +367,24 @@ describe("table column shapes", () => {
     expect(actorIdx?.kind).toBe("gin");
   });
 
+  it("META_AUDIT_LOG carries nullable forensic-chain anchor columns", () => {
+    // Nullable on purpose: a deployment with no signing key has no chain to anchor into, and
+    // verification must be able to report an unanchored row rather than assume it is intact.
+    const seq = META_AUDIT_LOG.columns.find((c) => c.name === "chain_sequence_number");
+    const hash = META_AUDIT_LOG.columns.find((c) => c.name === "chain_entry_hash");
+    expect(seq?.type).toBe("BIGINT");
+    expect(seq?.notNull).toBeUndefined();
+    expect(hash?.type).toBe("TEXT");
+    expect(hash?.notNull).toBeUndefined();
+  });
+
+  it("META_AUDIT_LOG indexes the chain anchor for per-row verification lookups", () => {
+    const idx = META_AUDIT_LOG.indexes?.find((i) =>
+      i.columns.includes("chain_sequence_number"),
+    );
+    expect(idx?.columns).toEqual(["tenant_id", "chain_sequence_number"]);
+  });
+
   it("META_AI_CONVERSATIONS tracks total cost as NUMERIC(12, 6)", () => {
     const col = META_AI_CONVERSATIONS.columns.find((c) => c.name === "total_cost_usd");
     expect(col?.type).toBe("NUMERIC(12, 6)");

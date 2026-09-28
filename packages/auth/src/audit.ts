@@ -34,3 +34,74 @@ export interface AuditLogEntry {
 export interface AuditEmitter {
   emit(entry: AuditLogEntry): Promise<void>;
 }
+
+/**
+ * Deterministic JSON: object keys sorted, so two structurally equal values always render to
+ * the same string. Postgres `JSONB` does not preserve key order, so a `before`/`after`/`diff`
+ * object read back from the database only matches what was written once both are sorted.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+}
+
+/**
+ * Normalizes a timestamp to its UTC instant. The writer supplies whatever offset the caller
+ * used; `TIMESTAMPTZ` comes back as an instant, so `…T10:00:00+02:00` and `…T08:00:00.000Z`
+ * are the same moment written two ways. Without this the payload computed before the insert
+ * would not match the one computed after reading the row back, and every entry would look
+ * tampered with.
+ */
+function canonicalInstant(value: string): string {
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? value : new Date(ms).toISOString();
+}
+
+/**
+ * The exact bytes a tamper-evident chain commits to for one audit entry.
+ *
+ * Every semantic field is included, so altering any of them after the fact changes the
+ * payload and breaks the commitment. `created_at` is deliberately excluded: it is the
+ * database's own insert clock, not part of what the actor did, and it is not carried on
+ * `AuditLogEntry`.
+ *
+ * This must be stable across a Postgres round-trip — the writer hashes the entry it is about
+ * to insert and a verifier hashes the row it reads back, and the two must agree. Hence sorted
+ * keys (JSONB loses order), normalized instants (TIMESTAMPTZ loses the written offset), and
+ * absent-vs-null collapsed to absent for the three optional fields (a `NULL` column reads
+ * back as an omitted key).
+ */
+export function canonicalAuditEntryPayload(entry: AuditLogEntry): string {
+  return canonicalJson({
+    id: entry.id,
+    tenantId: entry.tenantId,
+    occurredAt: canonicalInstant(entry.occurredAt),
+    actor: {
+      kind: entry.actor.kind,
+      userId: entry.actor.userId,
+      sessionId: entry.actor.sessionId,
+      ip: entry.actor.ip,
+      userAgent: entry.actor.userAgent,
+    },
+    operation: entry.operation,
+    entity: entry.entity,
+    entityId: entry.entityId,
+    before: entry.before ?? null,
+    after: entry.after ?? null,
+    diff: entry.diff ?? null,
+    reason: entry.reason ?? null,
+    eSignature:
+      entry.eSignature === undefined
+        ? null
+        : {
+            method: entry.eSignature.method,
+            challengeId: entry.eSignature.challengeId,
+            signedAt: canonicalInstant(entry.eSignature.signedAt),
+          },
+    regoDecisionTrace: entry.regoDecisionTrace ?? null,
+  });
+}

@@ -127,6 +127,7 @@ import {
   type CertificationLifecycle,
 } from "./certification.js";
 import {
+  auditChainStore,
   buildAuditChain,
   ed25519ChainSigner,
   loadAuditChainConfig,
@@ -493,12 +494,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let templateStore: PostgresTemplateStore | null = null;
   let recipientResolver: PostgresRecipientResolver | null = null;
   let auditEmitter: PostgresAuditEmitter | null = null;
+  // The audit chain's producer is built here, ahead of its per-request observer, because the
+  // audit-log emitter anchors into the SAME chain and needs it at wiring time. Both paths
+  // appending to one chain per tenant is the point: a single tamper-evident trail, not two.
+  let auditConfig: AuditChainConfig | null = null;
+  let auditChainProducer: ReturnType<typeof auditChainStore> | null = null;
+  if (options.auditChainConfig !== null && conn !== undefined) {
+    auditConfig = await loadAuditChainConfig(options.auditChainConfig);
+    auditChainProducer = auditChainStore(conn, auditConfig);
+  }
   if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
     notificationStore = new PostgresNotificationStore(conn, schemaOpt);
     digestReadStore = new PostgresDigestStore(conn, schemaOpt);
     templateStore = new PostgresTemplateStore(conn, schemaOpt);
-    auditEmitter = new PostgresAuditEmitter(conn, schemaOpt);
+    auditEmitter = new PostgresAuditEmitter(conn, {
+      ...schemaOpt,
+      // No chain configured ⇒ rows are written unanchored. Verification reports them as
+      // unproven rather than pretending they are intact (ADR-0286).
+      ...(auditChainProducer !== null ? { chain: auditChainProducer } : {}),
+    });
     recipientResolver = new PostgresRecipientResolver(conn, {
       ...schemaOpt,
       adminRoles: options.notificationAdminRoles,
@@ -839,13 +854,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // so certification's forensic-chain source has a live chain to verify. Enabled by --audit-chain-config
   // over a pg store.
   let auditChain: AuditChain | null = null;
-  let auditConfig: AuditChainConfig | null = null;
   let auditPolicy: TenantAuditPolicyLifecycle | null = null;
   if (options.auditChainConfig !== null) {
-    if (conn === undefined) {
+    if (conn === undefined || auditConfig === null || auditChainProducer === null) {
       console.warn("[audit-chain] --audit-chain-config requires a Postgres store (--store pg); skipping");
     } else {
-      auditConfig = await loadAuditChainConfig(options.auditChainConfig);
       // Live per-tenant sampling from meta.operate_tenant_settings (overrides the config map, no redeploy).
       // Enabled by --audit-sampling-refresh-ms; refreshed into an in-memory snapshot the observer reads.
       if (options.auditSamplingRefreshMs !== null) {
@@ -859,6 +872,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         });
       }
       auditChain = buildAuditChain(conn, auditConfig, {
+        // The producer the audit-log emitter already anchors into, so per-request entries and
+        // per-record anchors share one chain (and one advisory lock) per tenant.
+        store: auditChainProducer,
         onError: (err) => console.error("[audit-chain] append error", err),
         ...(auditPolicy !== null ? { policyCache: auditPolicy.cache } : {}),
       });

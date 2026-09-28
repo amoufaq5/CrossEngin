@@ -299,6 +299,12 @@ export const META_AUDIT_LOG: TableDefinition = {
     { name: "reason", type: "TEXT" },
     { name: "e_signature", type: "JSONB" },
     { name: "rego_decision_trace", type: "TEXT" },
+    // Where this row is anchored in the tenant's forensic chain. Nullable because a
+    // deployment with no signing key configured has no chain to anchor into, and because
+    // rows written before anchoring existed have none — an unanchored row is reported as
+    // such by verification rather than silently treated as intact.
+    { name: "chain_sequence_number", type: "BIGINT" },
+    { name: "chain_entry_hash", type: "TEXT" },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
@@ -309,6 +315,7 @@ export const META_AUDIT_LOG: TableDefinition = {
       columns: ["tenant_id", "entity", "occurred_at"],
     },
     { name: "idx_audit_actor", columns: ["actor"], kind: "gin" },
+    { name: "idx_audit_tenant_chain_sequence", columns: ["tenant_id", "chain_sequence_number"] },
   ],
   rls: {
     enabled: true,
