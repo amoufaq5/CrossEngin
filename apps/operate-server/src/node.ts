@@ -127,6 +127,12 @@ import {
   type CertificationLifecycle,
 } from "./certification.js";
 import {
+  buildIntegrityProofLifecycle,
+  loadIntegrityProofConfig,
+  formatIntegrityProof,
+  type IntegrityProofLifecycle,
+} from "./integrity-proof.js";
+import {
   auditChainStore,
   buildAuditChain,
   ed25519ChainSigner,
@@ -926,6 +932,49 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       });
     }
   }
+  // Audit-integrity proof: periodically run BOTH halves of the proof ADR-0286 built — each audit row
+  // against the chain entry that commits to it, and the chain's own links + signatures — and append the
+  // verdict to the chain. A check nobody performs proves nothing; this is the thing that performs it.
+  let integrityProof: IntegrityProofLifecycle | null = null;
+  if (options.integrityProofConfig !== null) {
+    if (conn === undefined) {
+      console.warn(
+        "[integrity-proof] --integrity-proof-config requires a Postgres store (--store pg); skipping",
+      );
+    } else if (auditConfig === null) {
+      console.warn(
+        "[integrity-proof] --integrity-proof-config requires --audit-chain-config (for the chain signing key); skipping",
+      );
+    } else {
+      const proofConfig = await loadIntegrityProofConfig(options.integrityProofConfig);
+      // The tenant registry (meta.tenants) is always in `meta`, independent of the chain `schema`.
+      const liveScopes = proofConfig.allTenants
+        ? {
+            tenants: tenantSourceScopes(
+              new PostgresTenantSource(
+                conn,
+                proofConfig.tenantStatuses !== undefined
+                  ? { statuses: proofConfig.tenantStatuses }
+                  : {},
+              ),
+              { includePlatform: proofConfig.includePlatform },
+            ),
+          }
+        : {};
+      integrityProof = buildIntegrityProofLifecycle(conn, proofConfig, {
+        signer: ed25519ChainSigner(auditConfig),
+        registry: new PostgresKeyRegistry(conn),
+        ...liveScopes,
+        onPass: (report) =>
+          console.info(
+            `[integrity-proof] scope=${report.scope ?? "platform"} verdict=${report.verdict}`,
+          ),
+        // A provable tamper is the one outcome worth shouting about; `unproven` is not a finding.
+        onFinding: (report) => console.error(`[integrity-proof] COMPROMISED\n${formatIntegrityProof(report)}`),
+        onError: (err) => console.error("[integrity-proof] pass error", err),
+      });
+    }
+  }
   // Compose the per-request observers (SLO + metering + audit chain) into one execution sink.
   const executionSinks: ((execution: PipelineExecution) => void)[] = [];
   if (sloEnforcement !== null) executionSinks.push(sloEnforcement.observer.asExecutionSink());
@@ -1109,6 +1158,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   accessReviews?.scheduler.start();
   certification?.scheduler.start();
   checkpoints?.scheduler.start();
+  integrityProof?.scheduler.start();
   auditPolicy?.refresher.start();
   metering?.flushScheduler?.start();
   stripeUsageSync?.scheduler.start();
@@ -1134,6 +1184,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         accessReviews?.scheduler.stop();
         certification?.scheduler.stop();
         checkpoints?.scheduler.stop();
+        integrityProof?.scheduler.stop();
         auditPolicy?.refresher.stop();
         metering?.flushScheduler?.stop();
         stripeUsageSync?.scheduler.stop();
