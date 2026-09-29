@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 281 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 282 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**82 packages + 3 apps, 139 meta-schema tables, ~9,330 tests**, all green, no
+**82 packages + 3 apps, 139 meta-schema tables, ~9,381 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -406,7 +406,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   budget guard, design jobs, and a design-review approval gate; access-review campaign
   lifecycle; certification reports; DR readiness; SLO evaluation; usage metering and Stripe
   usage sync; marketplace admin/authoring; platform-tenant administration; residency
-  routing; and background schedulers for jobs, pruning and checkpoints.
+  routing; and background schedulers for jobs, pruning, checkpoints and the **audit-integrity
+  proof** (`--integrity-proof-config` — runs row↔anchor *and* chain link/signature verification
+  per tenant, plus a checkpoint-witnessed truncation check, and records the verdict in the
+  chain; ADR-0287).
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -550,12 +553,17 @@ opened them.
 
 **Load-bearing**
 
-- **Nothing runs the audit-integrity proof.** ADR-0286 reconciled the two audit
-  paths — every `meta.audit_log` row is now committed to by an entry in the same
-  per-tenant forensic chain, so rewriting a row is detectable — but a proof needs
-  **both** halves run together (`verifyAuditAnchors` for row↔anchor, `verifyChainFull`
-  for the chain's own links and signatures), and nothing schedules that or exposes
-  it over HTTP. Rows written before ADR-0286 are permanently `unanchored`.
+- **A compromised verdict only logs, and nothing reads verdicts back.** ADR-0287
+  runs the proof on a schedule (`--integrity-proof-config`) and records each verdict
+  in the chain, but a `compromised` finding goes to stderr and no further — the
+  `incident-response` package models the escalation and `observability-runtime` has
+  the planners, and wiring the two is open. Nothing exposes verdicts over HTTP
+  either, and since the chain stores only a commitment, a verdict's *content* is not
+  retrievable from it; that needs a route or an anchored report table.
+- **Truncation detection depends on checkpoint cadence** (ADR-0287). Tail removal is
+  invisible to hash links, so `--integrity-proof-config` must run alongside
+  `--checkpoint-config` or its truncation check has no witness — and entries written
+  *and* deleted between two checkpoints leave no trace at all.
 - **No real email/SMS senders** (ADR-0274). The `ChannelSender` seam, retry
   ladder and suppression handling all work; only `in_app` has an implementation.
 - **No provider webhooks feeding bounces into suppressions** (ADR-0274) — the
@@ -595,7 +603,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 281 records; 202
+hand-editing, so a title or status change cannot drift. 282 records; 203
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

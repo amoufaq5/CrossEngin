@@ -511,6 +511,14 @@ describe("parseServeArgs", () => {
   });
 
   it("parses --slo-config and defaults it to null", () => {
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--integrity-proof-config", "./ip.json"])
+        .integrityProofConfig,
+    ).toBe("./ip.json");
+    expect(
+      parseServeArgs(["--pack=erp-core", "--integrity-proof-config=./ip.json"]).integrityProofConfig,
+    ).toBe("./ip.json");
+    expect(parseServeArgs(["--pack", "erp-core"]).integrityProofConfig).toBeNull();
     expect(parseServeArgs(["--pack", "erp-core", "--slo-config", "./slo.json"]).sloConfig).toBe("./slo.json");
     expect(parseServeArgs(["--pack=erp-core", "--slo-config=./slo.json"]).sloConfig).toBe("./slo.json");
     expect(parseServeArgs(["--pack", "erp-core"]).sloConfig).toBeNull();

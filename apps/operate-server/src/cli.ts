@@ -82,6 +82,8 @@ export interface ServeOptions {
   readonly auditChainConfig: string | null;
   /** Path to a JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?, includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain checkpoint per tenant (or every active tenant when allTenants) so verification stays bounded (needs --store pg + --audit-chain-config). */
   readonly checkpointConfig: string | null;
+  /** Path to a JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?, tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?, fromCheckpoint?, recordVerdict?}) — periodically runs BOTH halves of the audit-integrity proof (row↔anchor and the chain's own links + signatures) per tenant and records the verdict in the chain (needs --store pg + --audit-chain-config). */
+  readonly integrityProofConfig: string | null;
   /** Refresh interval (ms) for live per-tenant audit sampling read from meta.operate_tenant_settings; enables the live policy cache (needs --store pg + --audit-chain-config). Null disables it. */
   readonly auditSamplingRefreshMs: number | null;
   /** Expose the platform super-admin tenant-management routes under /v1/platform (list/create/suspend/archive/reactivate tenants + stats over meta.tenants; needs --store pg|pg-columns). */
@@ -181,6 +183,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let certificationConfig: string | null = null;
   let auditChainConfig: string | null = null;
   let checkpointConfig: string | null = null;
+  let integrityProofConfig: string | null = null;
   let auditSamplingRefreshMs: number | null = null;
   let platformAdmin = false;
   const platformAdminRoles: string[] = [];
@@ -361,6 +364,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--checkpoint-config" || arg.startsWith("--checkpoint-config=")) {
       checkpointConfig = takeValue(arg, next, "--checkpoint-config");
+      i += consumed();
+    } else if (arg === "--integrity-proof-config" || arg.startsWith("--integrity-proof-config=")) {
+      integrityProofConfig = takeValue(arg, next, "--integrity-proof-config");
       i += consumed();
     } else if (arg === "--audit-sampling-refresh-ms" || arg.startsWith("--audit-sampling-refresh-ms=")) {
       const raw = takeValue(arg, next, "--audit-sampling-refresh-ms");
@@ -576,6 +582,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     certificationConfig,
     auditChainConfig,
     checkpointConfig,
+    integrityProofConfig,
     auditSamplingRefreshMs,
     platformAdmin,
     platformAdminRoles: platformAdminRoles.length > 0 ? platformAdminRoles : ["platform_admin"],
@@ -919,6 +926,12 @@ Options:
                        includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain
                        checkpoint per tenant (allTenants: every active tenant from the live registry,
                        tenantStatuses: which statuses to include) so verifying a long chain stays bounded
+                       (needs --store pg + --audit-chain-config)
+  --integrity-proof-config <file>  JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?,
+                       tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?,
+                       fromCheckpoint?, recordVerdict?}) — periodically runs BOTH halves of the
+                       audit-integrity proof (each audit row against its anchor, and the chain's own
+                       links + signatures) and appends the verdict to the chain as a security_event
                        (needs --store pg + --audit-chain-config)
   --audit-sampling-refresh-ms <n>  Refresh interval (ms, >=1000) for live per-tenant audit sampling read
                        from meta.operate_tenant_settings (overrides the config map without a redeploy);
