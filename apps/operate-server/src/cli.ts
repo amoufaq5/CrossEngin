@@ -82,7 +82,7 @@ export interface ServeOptions {
   readonly auditChainConfig: string | null;
   /** Path to a JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?, includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain checkpoint per tenant (or every active tenant when allTenants) so verification stays bounded (needs --store pg + --audit-chain-config). */
   readonly checkpointConfig: string | null;
-  /** Path to a JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?, tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?, fromCheckpoint?, recordVerdict?}) — periodically runs BOTH halves of the audit-integrity proof (row↔anchor and the chain's own links + signatures) per tenant and records the verdict in the chain (needs --store pg + --audit-chain-config). */
+  /** Path to a JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?, tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?, fromCheckpoint?, recordVerdict?, escalation?}) — periodically runs BOTH halves of the audit-integrity proof (row↔anchor and the chain's own links + signatures) per tenant, records the verdict in the chain, and with `escalation` declares an incident + pages once per compromised episode (needs --store pg + --audit-chain-config). */
   readonly integrityProofConfig: string | null;
   /** Refresh interval (ms) for live per-tenant audit sampling read from meta.operate_tenant_settings; enables the live policy cache (needs --store pg + --audit-chain-config). Null disables it. */
   readonly auditSamplingRefreshMs: number | null;
@@ -929,9 +929,12 @@ Options:
                        (needs --store pg + --audit-chain-config)
   --integrity-proof-config <file>  JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?,
                        tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?,
-                       fromCheckpoint?, recordVerdict?}) — periodically runs BOTH halves of the
-                       audit-integrity proof (each audit row against its anchor, and the chain's own
-                       links + signatures) and appends the verdict to the chain as a security_event
+                       fromCheckpoint?, recordVerdict?, escalation?}) — periodically runs BOTH
+                       halves of the audit-integrity proof (each audit row against its anchor, and
+                       the chain's own links + signatures), checks for chain truncation against the
+                       latest checkpoint, and appends the verdict to the chain as a security_event.
+                       With escalation ({severity?, category?, declaredBy?, alertPolicy}) a
+                       compromised verdict declares an incident and pages once per episode
                        (needs --store pg + --audit-chain-config)
   --audit-sampling-refresh-ms <n>  Refresh interval (ms, >=1000) for live per-tenant audit sampling read
                        from meta.operate_tenant_settings (overrides the config map without a redeploy);

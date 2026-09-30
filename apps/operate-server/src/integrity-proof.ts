@@ -10,6 +10,7 @@ import {
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 import { verifyAuditAnchors, type AuditAnchorReport } from "./audit-anchor.js";
+import { IntegrityEscalationConfigSchema } from "./integrity-escalation-config.js";
 import { PostgresAuditEmitter } from "./audit-log-store.js";
 import {
   verifyChainFromCheckpoint,
@@ -46,6 +47,11 @@ export const IntegrityProofConfigSchema = z
      * — which is why a checkpoint has to cover it before it is truly beyond reach.
      */
     recordVerdict: z.boolean().default(true),
+    /**
+     * Turn a `compromised` verdict into a declared incident and a page. Absent ⇒ findings are
+     * reported through the callbacks and nothing else, which is where ADR-0287 left them.
+     */
+    escalation: IntegrityEscalationConfigSchema.optional(),
   })
   .strict();
 export type IntegrityProofConfig = z.infer<typeof IntegrityProofConfigSchema>;
@@ -113,12 +119,23 @@ export interface IntegrityProofReport {
   readonly truncation: ChainTruncationCheck;
 }
 
+/**
+ * The minimum the scheduler needs back from an escalation hook. Kept structural so this module
+ * never imports `integrity-escalation.ts`, which imports this one — `IntegrityEscalation`
+ * satisfies it without either side depending on the other's shape.
+ */
+export interface IntegrityEscalationOutcome {
+  readonly kind: string;
+  readonly incidentId: string | null;
+}
+
 export interface IntegrityProofPassResult {
   readonly scope: string | null;
   readonly outcome: "proved" | "skipped_empty" | "error";
   readonly report?: IntegrityProofReport;
   /** Sequence of the verdict entry appended to the chain, when one was. */
   readonly recordedAt?: number;
+  readonly escalation?: IntegrityEscalationOutcome;
   readonly error?: unknown;
 }
 
@@ -258,6 +275,11 @@ export interface IntegrityProofSchedulerOptions {
   readonly onPass?: (report: IntegrityProofReport) => void;
   /** Fires only for `compromised` — the one outcome that means something is provably wrong. */
   readonly onFinding?: (report: IntegrityProofReport) => void;
+  /**
+   * Escalation, consulted on **every** proved pass rather than only on findings — a scope
+   * returning to health is what closes an open incident, so recovery has to be observed too.
+   */
+  readonly escalate?: (report: IntegrityProofReport) => Promise<IntegrityEscalationOutcome>;
   readonly onError?: (err: unknown) => void;
 }
 
@@ -324,11 +346,15 @@ export class IntegrityProofScheduler {
         this.opts.onPass?.(report);
         if (report.verdict === "compromised") this.opts.onFinding?.(report);
         const recorded = await this.opts.record?.(report);
+        // After the verdict is in the chain: escalating first would risk paging about a finding
+        // that no durable record backs.
+        const escalation = await this.opts.escalate?.(report);
         results.push({
           scope,
           outcome: "proved",
           report,
           ...(recorded !== undefined ? { recordedAt: recorded } : {}),
+          ...(escalation !== undefined ? { escalation } : {}),
         });
       } catch (err) {
         this.opts.onError?.(err);
@@ -393,6 +419,7 @@ export interface IntegrityProofLifecycleOptions {
   readonly runOnStart?: boolean;
   readonly onPass?: (report: IntegrityProofReport) => void;
   readonly onFinding?: (report: IntegrityProofReport) => void;
+  readonly escalate?: (report: IntegrityProofReport) => Promise<IntegrityEscalationOutcome>;
   readonly onError?: (err: unknown) => void;
   readonly now?: () => Date;
 }
@@ -454,6 +481,7 @@ export function buildIntegrityProofLifecycle(
     ...(opts.runOnStart !== undefined ? { runOnStart: opts.runOnStart } : {}),
     ...(opts.onPass !== undefined ? { onPass: opts.onPass } : {}),
     ...(opts.onFinding !== undefined ? { onFinding: opts.onFinding } : {}),
+    ...(opts.escalate !== undefined ? { escalate: opts.escalate } : {}),
     ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
   });
 
