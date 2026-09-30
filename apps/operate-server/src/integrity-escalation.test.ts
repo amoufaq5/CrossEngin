@@ -1,9 +1,11 @@
+import { IncidentRecordSchema, type IncidentRecord } from "@crossengin/incident-response";
 import type { AlertPolicy } from "@crossengin/observability";
 import { describe, expect, it } from "vitest";
 
 import type { AuditAnchorReport, AuditAnchorResult } from "./audit-anchor.js";
 import type { ChainVerificationReport } from "./chain-verify.js";
 import {
+  INCIDENT_DISPOSITIONS,
   INTEGRITY_ESCALATIONS,
   INTEGRITY_INCIDENT_OPERATION,
   INTEGRITY_RECOVERY_OPERATION,
@@ -401,5 +403,236 @@ describe("formatIntegrityEscalation", () => {
 describe("INTEGRITY_ESCALATIONS", () => {
   it("enumerates exactly the four outcomes", () => {
     expect([...INTEGRITY_ESCALATIONS]).toEqual(["opened", "ongoing", "recovered", "none"]);
+  });
+});
+
+/**
+ * A fake incident ledger with the two methods an escalation uses. Ids are allocated from what has
+ * already been "stored", which is the property that matters: it continues rather than restarts.
+ */
+function fakeLedger(opts: { readonly failDeclare?: boolean; readonly triaged?: boolean } = {}) {
+  const declared: IncidentRecord[] = [];
+  const cancelled: string[] = [];
+  let seq = 0;
+  const ledger = {
+    declare: async (input: {
+      readonly title: string;
+      readonly severity: string;
+      readonly declaredBy: string;
+      readonly declaredAt?: string;
+      readonly detail: string;
+      readonly affectedTenantIds?: readonly string[];
+      readonly metadata?: Record<string, unknown>;
+    }): Promise<{ record: IncidentRecord }> => {
+      if (opts.failDeclare === true) throw new Error("ledger unavailable");
+      seq += 1;
+      const at = input.declaredAt ?? AT;
+      const record = IncidentRecordSchema.parse({
+        id: `INC-2026-${String(seq).padStart(4, "0")}`,
+        title: input.title,
+        severity: input.severity,
+        category: "security",
+        status: "declared",
+        declaredAt: at,
+        declaredBy: input.declaredBy,
+        affectedTenantIds: [...(input.affectedTenantIds ?? [])],
+        timeline: [
+          {
+            occurredAt: at,
+            actorUserId: input.declaredBy,
+            kind: "declared",
+            message: input.detail,
+            metadata: input.metadata ?? {},
+          },
+        ],
+      });
+      declared.push(record);
+      return { record };
+    },
+    cancelIfUntriaged: async (
+      incidentId: string,
+    ): Promise<{ record: IncidentRecord } | null> => {
+      if (opts.triaged === true) return null;
+      cancelled.push(incidentId);
+      const record = declared.find((d) => d.id === incidentId);
+      if (record === undefined) return null;
+      return { record };
+    },
+  };
+  return { declared, cancelled, ledger: ledger as never };
+}
+
+describe("IntegrityEscalator — persisting the incident record", () => {
+  it("declares through the ledger and reports it persisted", async () => {
+    const { declared, ledger } = fakeLedger();
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    const escalation = await esc.observe(report());
+    expect(escalation.kind).toBe("opened");
+    expect(escalation.disposition).toBe("declared");
+    expect(declared).toHaveLength(1);
+    expect(declared[0]?.id).toBe("INC-2026-0001");
+  });
+
+  it("takes the incident id from the ledger, not the in-process counter", async () => {
+    // The ledger has already issued three ids; a restart must continue the sequence rather than
+    // reuse INC-2026-0001, which the counter would have produced.
+    const { ledger, declared } = fakeLedger();
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    await esc.observe(report({ scope: TENANT_B, verdict: "compromised" }));
+    expect(declared.map((d) => d.id)).toEqual(["INC-2026-0001", "INC-2026-0002"]);
+    expect(esc.openIncidentFor(TENANT_B)).toBe("INC-2026-0002");
+  });
+
+  it("declares at the proof's verification time", async () => {
+    const { declared, ledger } = fakeLedger();
+    await new IntegrityEscalator({ config: config(), incidents: ledger }).observe(report());
+    expect(declared[0]?.declaredAt).toBe(AT);
+  });
+
+  it("names the tenant scope as an affected tenant", async () => {
+    const { declared, ledger } = fakeLedger();
+    await new IntegrityEscalator({ config: config(), incidents: ledger }).observe(report());
+    expect(declared[0]?.affectedTenantIds).toEqual([TENANT_A]);
+  });
+
+  it("names no affected tenant for the platform chain", async () => {
+    const { declared, ledger } = fakeLedger();
+    await new IntegrityEscalator({ config: config(), incidents: ledger }).observe(
+      report({ scope: null }),
+    );
+    expect(declared[0]?.affectedTenantIds).toEqual([]);
+    expect(declared[0]?.title).toContain("platform");
+  });
+
+  it("records the surface in the declaration entry's metadata", async () => {
+    const { declared, ledger } = fakeLedger();
+    await new IntegrityEscalator({ config: config(), incidents: ledger }).observe(report());
+    expect(declared[0]?.timeline[0]?.metadata).toMatchObject({
+      surface: `audit-integrity/${TENANT_A}`,
+      autoDeclared: true,
+    });
+  });
+
+  it("still pages with the ledger's id", async () => {
+    const { ledger } = fakeLedger();
+    const escalation = await new IntegrityEscalator({
+      config: config(),
+      incidents: ledger,
+    }).observe(report());
+    expect(escalation.page?.incidentId).toBe("INC-2026-0001");
+  });
+
+  it("declares only once across repeated compromised passes", async () => {
+    const { declared, ledger } = fakeLedger();
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    await esc.observe(report());
+    await esc.observe(report());
+    expect(declared).toHaveLength(1);
+  });
+
+  it("reports an ongoing episode as still declared", async () => {
+    const { ledger } = fakeLedger();
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    expect((await esc.observe(report())).disposition).toBe("declared");
+  });
+
+  it("cancels the incident when the trail recovers before anyone took it", async () => {
+    const { cancelled, ledger } = fakeLedger();
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    expect(recovered.kind).toBe("recovered");
+    expect(recovered.disposition).toBe("cancelled");
+    expect(cancelled).toEqual(["INC-2026-0001"]);
+  });
+
+  it("leaves a triaged incident to its responders", async () => {
+    // Cancelling an incident a human has taken would erase their ownership of it.
+    const { cancelled, ledger } = fakeLedger({ triaged: true });
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    expect(recovered.disposition).toBe("human_owned");
+    expect(cancelled).toEqual([]);
+  });
+
+  it("pages anyway when the ledger cannot be written", async () => {
+    // Losing the alert is the worse failure, exactly as for an unwritable audit log.
+    const errors: unknown[] = [];
+    const { ledger } = fakeLedger({ failDeclare: true });
+    const escalation = await new IntegrityEscalator({
+      config: config(),
+      incidents: ledger,
+      onError: (err) => errors.push(err),
+      now: () => new Date(AT),
+    }).observe(report());
+    expect(escalation.kind).toBe("opened");
+    expect(escalation.disposition).toBe("unpersisted");
+    expect(escalation.page?.channels).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("falls back to the in-process counter when the ledger fails", async () => {
+    const { ledger } = fakeLedger({ failDeclare: true });
+    const escalation = await new IntegrityEscalator({
+      config: config(),
+      incidents: ledger,
+      onError: () => undefined,
+      now: () => new Date(AT),
+    }).observe(report());
+    expect(escalation.incidentId).toBe("INC-2026-0001");
+  });
+
+  it("reports unpersisted when no ledger is wired", async () => {
+    const escalation = await new IntegrityEscalator({
+      config: config(),
+      now: () => new Date(AT),
+    }).observe(report());
+    expect(escalation.disposition).toBe("unpersisted");
+  });
+
+  it("still writes the audit row alongside the incident", async () => {
+    const { audit, emitted } = fakeAudit();
+    const { ledger } = fakeLedger();
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger, audit });
+    await esc.observe(report());
+    expect(emitted.map((e) => e.operation)).toEqual([INTEGRITY_INCIDENT_OPERATION]);
+    await esc.observe(report({ verdict: "verified" }));
+    expect(emitted.map((e) => e.operation)).toEqual([
+      INTEGRITY_INCIDENT_OPERATION,
+      INTEGRITY_RECOVERY_OPERATION,
+    ]);
+  });
+});
+
+describe("INCIDENT_DISPOSITIONS", () => {
+  it("enumerates what can become of the record", () => {
+    expect([...INCIDENT_DISPOSITIONS]).toEqual([
+      "unpersisted",
+      "declared",
+      "cancelled",
+      "human_owned",
+    ]);
+  });
+});
+
+describe("formatIntegrityEscalation — dispositions", () => {
+  it("says a recovered incident was cancelled", async () => {
+    const { ledger } = fakeLedger();
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    const text = formatIntegrityEscalation(await esc.observe(report({ verdict: "verified" })));
+    expect(text).toContain("cancelled INC-2026-0001");
+  });
+
+  it("says a triaged incident was left to its responders", async () => {
+    const { ledger } = fakeLedger({ triaged: true });
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    const text = formatIntegrityEscalation(await esc.observe(report({ verdict: "verified" })));
+    expect(text).toContain("left to its responders INC-2026-0001");
   });
 });

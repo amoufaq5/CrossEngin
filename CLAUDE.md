@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 283 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 284 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**82 packages + 3 apps, 139 meta-schema tables, ~9,411 tests**, all green, no
+**84 packages + 3 apps, 139 meta-schema tables, ~9,647 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -61,7 +61,7 @@ increment. See **What's actually left** at the bottom for the current open ends.
 
 ## Package map
 
-82 packages under `packages/`, 3 apps under `apps/`. Almost every package is
+84 packages under `packages/`, 3 apps under `apps/`. Almost every package is
 `packages/<name>` with `src/index.ts` re-exporting 3-30 sibling `src/*.ts` modules and a
 matching `*.test.ts` per module.
 
@@ -298,7 +298,23 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   replayer that flags ongoing-without-open, duplicate-open and paged-without-channels.
 - **`incident-response`** — 5 SEV levels with SLA profiles, 7 incident roles, an 8-state
   incident lifecycle, runbook executions with per-step outcomes, blameless postmortems with
-  prioritized action items, and customer comms carrying the GDPR 72h breach deadline.
+  prioritized action items, and customer comms carrying the GDPR 72h breach deadline. Also owns
+  the `INC-YYYY-NNNN` vocabulary (`formatIncidentId` / `parseIncidentId`), which
+  `observability-runtime` re-exports.
+- **`incident-response-runtime`** — the pure `IncidentExecutor` over one incident's record:
+  declare, assign/hand off roles, change severity, note, attach a postmortem, transition. Two
+  rules carry the weight. `incidentTransitionBlockers` answers "may this move?" by building the
+  candidate record and asking `IncidentRecordSchema`, never by re-listing its rules; and a target
+  status back-fills the timestamps it *transitively* implies, because `mitigating → resolved`
+  skips where `mitigatedAt` is normally stamped. `cancelIfUntriaged` is the only automatic exit —
+  `triaged` needs the on-call roles assigned, so no scheduler can resolve an incident. Plus
+  `assessIncidentSla`, which scores an *open* incident against the wall clock (the contracts
+  helpers only answer for targets already reached).
+- **`incident-response-runtime-pg`** — `meta.incidents` as the store, with ids allocated from
+  `MAX(sequence_number) + 1` under an advisory lock (so a restart continues the year's sequence),
+  a `revision` guard on every write, an append-only timeline the engine enforces before any SQL,
+  and a replayer that **re-parses** each row — the only way to catch a row edited into a state the
+  contract forbids but a CHECK constraint permits (ADR-0289).
 - **`dr`** — 5 DR tiers with RPO/RTO targets, replication topology, backup kinds, failover
   records, drills with finding severities, runbooks.
 - **`dr-runtime`** — executes it: a `FailoverExecutor` state machine (plan → start →
@@ -410,8 +426,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   proof** (`--integrity-proof-config` — runs row↔anchor *and* chain link/signature verification
   per tenant, plus a checkpoint-witnessed truncation check, and records the verdict in the
   chain, and with an `escalation` block declares a `sev1` incident + pages once per
-  compromised episode, recording it as an anchored `audit.integrity_compromised` row;
-  ADR-0287, ADR-0288).
+  compromised episode, recording it as an anchored `audit.integrity_compromised` row and
+  persisting the `IncidentRecord` in `meta.incidents` — cancelled on recovery unless a human
+  has triaged it; ADR-0287, ADR-0288, ADR-0289).
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -555,11 +572,32 @@ opened them.
 
 **Load-bearing**
 
-- **Nothing persists an `IncidentRecord`.** `incident-response` has no `-pg` sibling,
-  so both the SLO enforcement loop and the audit-integrity escalation (ADR-0288)
-  declare a valid incident that lives only in memory, a log line and an audit row's
-  summary — its lifecycle (triage, roles, mitigation, postmortem) has nowhere to
-  live. Shared between the two signals rather than specific to either.
+- **Editing an existing meta-schema table breaks `crossengin apply` on an already-applied
+  database.** Statements are keyed by hash, `emitCreateTable` emits a bare `CREATE TABLE`,
+  and the applier halts on first failure — so a changed table definition is a new hash that
+  runs and fails with `relation … already exists`, leaving every later statement unapplied
+  (measured: halted at #312 of 840). ADR-0286 and ADR-0289 both edited a table this way, so
+  `main` carries it. The remedy is manual: drop the table **and** delete its statements from
+  `meta._meta_migrations` before re-applying — dropping alone brings the table back missing
+  the indexes whose unchanged `CREATE INDEX` statements are still marked applied. The real
+  fix is additive meta-schema migration (`IF NOT EXISTS` on the table plus per-column
+  `ADD COLUMN IF NOT EXISTS`), which is ADR-0283's reasoning applied to the kernel's own
+  emitter and is unbuilt.
+- **The SLO enforcement loop still does not persist its incidents** (ADR-0289). The
+  audit-integrity escalation does, but `SloEnforcementEngine.evaluate()` is synchronous and
+  mints ids from a per-process counter, so its `INC-2026-0001` collides with a
+  database-allocated one — and persisting under a second id would make the log line and the
+  stored row name different incidents. Allocating from the database means making evaluation
+  async, across both engines, `observability-runtime-pg` and `slo_enforcement_actions`.
+- **Open-episode state is per-process** (ADR-0289). Ids no longer collide across a restart,
+  but `IntegrityEscalator.open` is in memory, so a restart re-declares a still-present tamper
+  under a new id. Hydrating it needs a way to ask "which open incident did this signal open?",
+  and `IncidentRecord` has no `surface` field — a column outside the record would break the
+  property the replayer depends on (the row *is* the record).
+- **Three incident tables are still dead** (ADR-0289): `incident_runbook_executions`,
+  `incident_postmortems`, `incident_communications`. `RunbookExecution`, `Postmortem` and
+  `CustomerComms` exist in contracts with nothing persisting them — the same
+  reconcile-or-delete question ADR-0289 answered for `incidents`.
 - **Verdicts are still not readable over HTTP.** ADR-0288 made a *compromised*
   finding leave a readable `audit.integrity_compromised` row, but routine verdicts
   live only as chain commitments, and the chain stores no payload — so "show me last
@@ -607,7 +645,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 283 records; 204
+hand-editing, so a title or status change cannot drift. 284 records; 205
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

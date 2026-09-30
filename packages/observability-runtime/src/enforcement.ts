@@ -26,11 +26,9 @@ export function alertSeverityFor(severity: Severity): AlertSeverity {
   return SEVERITY_TO_ALERT_SEVERITY[severity];
 }
 
-export function formatIncidentId(year: number, seq: number): string {
-  if (!Number.isInteger(year) || year < 1970) throw new Error("invalid year");
-  if (!Number.isInteger(seq) || seq < 0) throw new Error("invalid sequence");
-  return `INC-${year}-${String(seq).padStart(4, "0")}`;
-}
+// Re-exported, not redefined: the formatter belongs with the pattern it must satisfy, which
+// lives in the contracts package alongside `IncidentRecordSchema`.
+export { formatIncidentId } from "@crossengin/incident-response";
 
 export function formatKillSwitchId(seq: number): string {
   if (!Number.isInteger(seq) || seq < 0) throw new Error("invalid sequence");

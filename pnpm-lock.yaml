@@ -150,6 +150,12 @@ importers:
       '@crossengin/incident-response':
         specifier: workspace:*
         version: link:../../packages/incident-response
+      '@crossengin/incident-response-runtime':
+        specifier: workspace:*
+        version: link:../../packages/incident-response-runtime
+      '@crossengin/incident-response-runtime-pg':
+        specifier: workspace:*
+        version: link:../../packages/incident-response-runtime-pg
       '@crossengin/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs
@@ -1271,6 +1277,62 @@ importers:
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../testing
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/incident-response-runtime:
+    dependencies:
+      '@crossengin/incident-response':
+        specifier: workspace:*
+        version: link:../incident-response
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/incident-response-runtime-pg:
+    dependencies:
+      '@crossengin/incident-response':
+        specifier: workspace:*
+        version: link:../incident-response
+      '@crossengin/incident-response-runtime':
+        specifier: workspace:*
+        version: link:../incident-response-runtime
+      '@crossengin/kernel-pg':
+        specifier: workspace:*
+        version: link:../kernel-pg
+      zod:
+        specifier: ^3.23.0
+        version: 3.25.76
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

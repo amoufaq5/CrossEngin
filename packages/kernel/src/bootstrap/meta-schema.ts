@@ -3590,6 +3590,14 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
   },
 };
 
+/**
+ * Declared incidents. **Platform-wide, no RLS**: one incident is one response to one event and may
+ * name many tenants or none at all, so there is no single `tenant_id` to confine it by — the same
+ * class as deployments and e-discovery requests.
+ *
+ * `year` + `sequence_number` are derived from `incident_id` under a unique constraint, so the
+ * database, not a per-process counter, is what makes two incidents sharing an id impossible.
+ */
 export const META_INCIDENTS: TableDefinition = {
   schema: "meta",
   name: "incidents",
@@ -3601,6 +3609,13 @@ export const META_INCIDENTS: TableDefinition = {
       notNull: true,
       unique: { constraintName: "incidents_incident_id_key" },
       check: "incident_id ~ '^INC-[0-9]{4}-[0-9]{4,8}$'",
+    },
+    { name: "year", type: "INTEGER", notNull: true, check: "year >= 1970" },
+    {
+      name: "sequence_number",
+      type: "INTEGER",
+      notNull: true,
+      check: "sequence_number >= 0",
     },
     { name: "title", type: "TEXT", notNull: true },
     {
@@ -3627,7 +3642,15 @@ export const META_INCIDENTS: TableDefinition = {
     { name: "affected_regions", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "publicly_visible", type: "BOOLEAN", notNull: true, default: "false" },
     { name: "declared_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "declared_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      // TEXT, not a `meta.users` foreign key. `IncidentRecord.declaredBy` is any non-empty
+      // string, and every incident this platform declares automatically is declared by a
+      // scheduler ("operate-server") that has no user row — a UUID FK here made the table
+      // unable to store the only incidents anything actually produces.
+      name: "declared_by",
+      type: "TEXT",
+      notNull: true,
+    },
     { name: "acked_at", type: "TIMESTAMPTZ" },
     { name: "mitigated_at", type: "TIMESTAMPTZ" },
     { name: "resolved_at", type: "TIMESTAMPTZ" },
@@ -3643,14 +3666,34 @@ export const META_INCIDENTS: TableDefinition = {
     { name: "security_incident", type: "BOOLEAN", notNull: true, default: "false" },
     { name: "breach_data_classes", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "postmortem_id", type: "TEXT" },
+    {
+      // Optimistic concurrency. Two schedulers can hold the same incident — the SLO loop and the
+      // audit-integrity escalator both declare and both close out — and a lost update would
+      // silently drop a transition. Every write states the revision it read.
+      name: "revision",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "revision >= 1",
+    },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
+  uniqueConstraints: [
+    { name: "incidents_year_sequence_key", columns: ["year", "sequence_number"] },
+  ],
   indexes: [
     { name: "idx_incidents_severity", columns: ["severity"] },
     { name: "idx_incidents_status", columns: ["status"] },
     { name: "idx_incidents_declared_at", columns: ["declared_at"] },
     { name: "idx_incidents_security", columns: ["security_incident"] },
     { name: "idx_incidents_declared_by", columns: ["declared_by"] },
+    {
+      name: "idx_incidents_open",
+      columns: ["declared_at"],
+      where: "status NOT IN ('closed', 'cancelled')",
+    },
+    { name: "idx_incidents_tenants", columns: ["affected_tenant_ids"], kind: "gin" },
   ],
 };
 
