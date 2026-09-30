@@ -1,9 +1,9 @@
 # ADR index
 
-282 records. Generated from the ADR files themselves — regenerate rather than
+283 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table.
 
-- **Accepted:** 203  **Proposed:** 79
+- **Accepted:** 204  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -293,3 +293,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0285](0285-one-topological-order.md) | One topological order, and it is the store's | Phase 4 | Accepted | 2026-09-26 |
 | [0286](0286-audit-chain-anchoring.md) | Anchoring the audit log in the forensic chain | Phase 4 | Accepted | 2026-09-28 |
 | [0287](0287-integrity-proof-scheduler.md) | Running the audit-integrity proof, and what it could not see | Phase 4 | Accepted | 2026-09-29 |
+| [0288](0288-integrity-incident-escalation.md) | A compromised audit trail declares an incident | Phase 4 | Accepted | 2026-09-30 |

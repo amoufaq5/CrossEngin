@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 282 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 283 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**82 packages + 3 apps, 139 meta-schema tables, ~9,381 tests**, all green, no
+**82 packages + 3 apps, 139 meta-schema tables, ~9,411 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -409,7 +409,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   routing; and background schedulers for jobs, pruning, checkpoints and the **audit-integrity
   proof** (`--integrity-proof-config` — runs row↔anchor *and* chain link/signature verification
   per tenant, plus a checkpoint-witnessed truncation check, and records the verdict in the
-  chain; ADR-0287).
+  chain, and with an `escalation` block declares a `sev1` incident + pages once per
+  compromised episode, recording it as an anchored `audit.integrity_compromised` row;
+  ADR-0287, ADR-0288).
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -553,13 +555,15 @@ opened them.
 
 **Load-bearing**
 
-- **A compromised verdict only logs, and nothing reads verdicts back.** ADR-0287
-  runs the proof on a schedule (`--integrity-proof-config`) and records each verdict
-  in the chain, but a `compromised` finding goes to stderr and no further — the
-  `incident-response` package models the escalation and `observability-runtime` has
-  the planners, and wiring the two is open. Nothing exposes verdicts over HTTP
-  either, and since the chain stores only a commitment, a verdict's *content* is not
-  retrievable from it; that needs a route or an anchored report table.
+- **Nothing persists an `IncidentRecord`.** `incident-response` has no `-pg` sibling,
+  so both the SLO enforcement loop and the audit-integrity escalation (ADR-0288)
+  declare a valid incident that lives only in memory, a log line and an audit row's
+  summary — its lifecycle (triage, roles, mitigation, postmortem) has nowhere to
+  live. Shared between the two signals rather than specific to either.
+- **Verdicts are still not readable over HTTP.** ADR-0288 made a *compromised*
+  finding leave a readable `audit.integrity_compromised` row, but routine verdicts
+  live only as chain commitments, and the chain stores no payload — so "show me last
+  month's verifications" needs a route or an anchored report table (ADR-0287).
 - **Truncation detection depends on checkpoint cadence** (ADR-0287). Tail removal is
   invisible to hash links, so `--integrity-proof-config` must run alongside
   `--checkpoint-config` or its truncation check has no witness — and entries written
@@ -603,7 +607,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 282 records; 203
+hand-editing, so a title or status change cannot drift. 283 records; 204
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

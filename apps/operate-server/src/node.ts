@@ -127,6 +127,10 @@ import {
   type CertificationLifecycle,
 } from "./certification.js";
 import {
+  IntegrityEscalator,
+  formatIntegrityEscalation,
+} from "./integrity-escalation.js";
+import {
   buildIntegrityProofLifecycle,
   loadIntegrityProofConfig,
   formatIntegrityProof,
@@ -961,6 +965,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             ),
           }
         : {};
+      // Escalation: a compromised verdict becomes a declared incident + a page, once per
+      // episode rather than once per pass. The audit emitter is passed so the escalation
+      // itself lands in meta.audit_log and is anchored in the chain (ADR-0286/0288).
+      const escalator =
+        proofConfig.escalation === undefined
+          ? null
+          : new IntegrityEscalator({
+              config: proofConfig.escalation,
+              ...(auditEmitter !== null ? { audit: auditEmitter } : {}),
+              page: (page, incident) =>
+                console.error(
+                  `[integrity-proof] PAGE ${incident.id} severity=${incident.severity}` +
+                    ` channels=${page.channels.map((c) => c.kind).join(",")}`,
+                ),
+              onError: (err) => console.error("[integrity-proof] escalation error", err),
+            });
       integrityProof = buildIntegrityProofLifecycle(conn, proofConfig, {
         signer: ed25519ChainSigner(auditConfig),
         registry: new PostgresKeyRegistry(conn),
@@ -971,6 +991,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ),
         // A provable tamper is the one outcome worth shouting about; `unproven` is not a finding.
         onFinding: (report) => console.error(`[integrity-proof] COMPROMISED\n${formatIntegrityProof(report)}`),
+        ...(escalator !== null
+          ? {
+              escalate: async (report) => {
+                const escalation = await escalator.observe(report);
+                if (escalation.kind !== "none") {
+                  console.error(`[integrity-proof] ${formatIntegrityEscalation(escalation)}`);
+                }
+                return escalation;
+              },
+            }
+          : {}),
         onError: (err) => console.error("[integrity-proof] pass error", err),
       });
     }
