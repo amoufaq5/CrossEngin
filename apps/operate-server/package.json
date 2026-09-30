@@ -61,6 +61,8 @@
     "@crossengin/marketplace-runtime": "workspace:*",
     "@crossengin/marketplace-runtime-pg": "workspace:*",
     "@crossengin/incident-response": "workspace:*",
+    "@crossengin/incident-response-runtime": "workspace:*",
+    "@crossengin/incident-response-runtime-pg": "workspace:*",
     "@crossengin/observability": "workspace:*",
     "@crossengin/observability-runtime": "workspace:*",
     "@crossengin/pack-erp-grocery": "workspace:*",

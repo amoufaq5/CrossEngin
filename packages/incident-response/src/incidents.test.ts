@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  INCIDENT_ID_REGEX,
   INCIDENT_STATUSES,
   IncidentRecordSchema,
   canTransitionIncident,
+  formatIncidentId,
+  parseIncidentId,
   metAckSla,
   metMitigateSla,
   timeToAckMinutes,
@@ -263,5 +266,65 @@ describe("helpers", () => {
     expect(
       metAckSla({ ...base, ackedAt: "2026-05-14T10:30:00Z" }),
     ).toBe(false);
+  });
+});
+
+describe("incident id vocabulary", () => {
+  it("formats a sequence to four padded digits", () => {
+    expect(formatIncidentId(2026, 7)).toBe("INC-2026-0007");
+    expect(formatIncidentId(2026, 1234)).toBe("INC-2026-1234");
+  });
+
+  it("formats past four digits without truncating", () => {
+    expect(formatIncidentId(2026, 12345)).toBe("INC-2026-12345");
+  });
+
+  it("produces an id the schema's own pattern accepts", () => {
+    expect(INCIDENT_ID_REGEX.test(formatIncidentId(2026, 1))).toBe(true);
+    expect(INCIDENT_ID_REGEX.test(formatIncidentId(2026, 0))).toBe(true);
+  });
+
+  it("rejects a year before 1970 or a non-integer", () => {
+    expect(() => formatIncidentId(1969, 1)).toThrow(/invalid year/);
+    expect(() => formatIncidentId(2026.5, 1)).toThrow(/invalid year/);
+  });
+
+  it("rejects a negative or non-integer sequence", () => {
+    expect(() => formatIncidentId(2026, -1)).toThrow(/invalid sequence/);
+    expect(() => formatIncidentId(2026, 1.5)).toThrow(/invalid sequence/);
+  });
+
+  it("parses back what it formatted", () => {
+    // The property a store depends on: year/sequence columns derived from the id cannot
+    // disagree with the id that produced them.
+    for (const seq of [0, 1, 42, 9999, 12345]) {
+      expect(parseIncidentId(formatIncidentId(2026, seq))).toEqual({ year: 2026, sequence: seq });
+    }
+  });
+
+  it("parses a padded sequence as a number, not a string", () => {
+    expect(parseIncidentId("INC-2026-0007").sequence).toBe(7);
+  });
+
+  it("refuses an id the schema would refuse", () => {
+    for (const bad of ["INC-2026-1", "INC-26-0001", "inc-2026-0001", "INC-2026-123456789", ""]) {
+      expect(() => parseIncidentId(bad)).toThrow(/invalid incident id/);
+    }
+  });
+
+  it("accepts an id the schema accepts", () => {
+    const record = IncidentRecordSchema.parse({
+      id: formatIncidentId(2026, 3),
+      title: "t",
+      severity: "sev3",
+      category: "availability",
+      status: "declared",
+      declaredAt: "2026-05-14T10:00:00Z",
+      declaredBy: "operate-server",
+      timeline: [
+        { occurredAt: "2026-05-14T10:00:00Z", actorUserId: "operate-server", kind: "declared", message: "m" },
+      ],
+    });
+    expect(parseIncidentId(record.id).sequence).toBe(3);
   });
 });

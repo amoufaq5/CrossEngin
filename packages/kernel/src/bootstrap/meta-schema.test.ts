@@ -1014,6 +1014,55 @@ describe("table column shapes", () => {
     expect(status?.check).toContain("'postmortem_pending'");
   });
 
+  it("META_INCIDENTS declares declared_by as TEXT, not a users foreign key", () => {
+    // `IncidentRecord.declaredBy` is any non-empty string, and every incident the platform
+    // declares automatically is declared by a scheduler with no `meta.users` row. A UUID FK made
+    // the table unable to store the only incidents anything actually produces.
+    const by = META_INCIDENTS.columns.find((c) => c.name === "declared_by");
+    expect(by?.type).toBe("TEXT");
+    expect(by?.notNull).toBe(true);
+    expect(by?.references).toBeUndefined();
+  });
+
+  it("META_INCIDENTS derives year + sequence_number and constrains them uniquely", () => {
+    // What makes two incidents sharing an id impossible in the database rather than in a
+    // per-process counter.
+    const year = META_INCIDENTS.columns.find((c) => c.name === "year");
+    const seq = META_INCIDENTS.columns.find((c) => c.name === "sequence_number");
+    expect(year?.type).toBe("INTEGER");
+    expect(year?.notNull).toBe(true);
+    expect(seq?.notNull).toBe(true);
+    expect(
+      META_INCIDENTS.uniqueConstraints?.some(
+        (u) => u.columns.includes("year") && u.columns.includes("sequence_number"),
+      ),
+    ).toBe(true);
+  });
+
+  it("META_INCIDENTS carries a revision for optimistic concurrency", () => {
+    const rev = META_INCIDENTS.columns.find((c) => c.name === "revision");
+    expect(rev?.type).toBe("INTEGER");
+    expect(rev?.notNull).toBe(true);
+    expect(rev?.default).toBe("1");
+    expect(rev?.check).toContain("revision >= 1");
+  });
+
+  it("META_INCIDENTS indexes open incidents partially and tenants as GIN", () => {
+    const open = META_INCIDENTS.indexes?.find((i) => i.name === "idx_incidents_open");
+    expect(open?.where).toContain("closed");
+    expect(open?.where).toContain("cancelled");
+    const tenants = META_INCIDENTS.indexes?.find((i) =>
+      i.columns.includes("affected_tenant_ids"),
+    );
+    expect(tenants?.kind).toBe("gin");
+  });
+
+  it("META_INCIDENTS has no RLS, being a platform-wide record", () => {
+    // An incident may name many tenants or none, so there is no single tenant_id to confine by.
+    expect(META_INCIDENTS.columns.some((c) => c.name === "tenant_id")).toBe(false);
+    expect(META_INCIDENTS.rls).toBeUndefined();
+  });
+
   it("META_INCIDENT_RUNBOOK_EXECUTIONS check-constrains status to six values", () => {
     const status = META_INCIDENT_RUNBOOK_EXECUTIONS.columns.find((c) => c.name === "status");
     expect(status?.check).toContain("'queued'");

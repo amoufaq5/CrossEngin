@@ -8,7 +8,36 @@ import {
 } from "./roles.js";
 
 const Iso8601 = z.string().datetime({ offset: true });
-const INCIDENT_ID_REGEX = /^INC-\d{4}-\d{4,8}$/;
+
+/**
+ * Incident ids are `INC-YYYY-NNNN`. The pattern, the formatter and the parser live together
+ * here because a store that persists `year` and `sequence_number` as real columns must derive
+ * them from the id by exactly the rule that produced it — two spellings of this would let a
+ * row's columns disagree with its own id.
+ */
+export const INCIDENT_ID_REGEX = /^INC-\d{4}-\d{4,8}$/;
+
+export function formatIncidentId(year: number, seq: number): string {
+  if (!Number.isInteger(year) || year < 1970) throw new Error("invalid year");
+  if (!Number.isInteger(seq) || seq < 0) throw new Error("invalid sequence");
+  return `INC-${year}-${String(seq).padStart(4, "0")}`;
+}
+
+export interface ParsedIncidentId {
+  readonly year: number;
+  readonly sequence: number;
+}
+
+export function parseIncidentId(id: string): ParsedIncidentId {
+  if (!INCIDENT_ID_REGEX.test(id)) {
+    throw new Error(`invalid incident id '${id}' (expected 'INC-YYYY-NNNN')`);
+  }
+  const parts = id.split("-");
+  return {
+    year: Number.parseInt(parts[1] as string, 10),
+    sequence: Number.parseInt(parts[2] as string, 10),
+  };
+}
 
 export const INCIDENT_STATUSES = [
   "declared",

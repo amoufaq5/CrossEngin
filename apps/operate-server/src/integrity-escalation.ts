@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { IncidentRecord } from "@crossengin/incident-response";
+import type { PersistentIncidentEngine } from "@crossengin/incident-response-runtime-pg";
 import type { AlertChannelTarget, AlertPolicy } from "@crossengin/observability";
 import {
   formatIncidentId,
@@ -25,16 +26,36 @@ export {
 export const INTEGRITY_ESCALATIONS = ["opened", "ongoing", "recovered", "none"] as const;
 export type IntegrityEscalationKind = (typeof INTEGRITY_ESCALATIONS)[number];
 
+export const INCIDENT_DISPOSITIONS = [
+  "unpersisted",
+  "declared",
+  "cancelled",
+  "human_owned",
+] as const;
+export type IncidentDisposition = (typeof INCIDENT_DISPOSITIONS)[number];
+
 export interface IntegrityEscalation {
   readonly scope: string | null;
   readonly kind: IntegrityEscalationKind;
   readonly incidentId: string | null;
-  /** Only on `opened` — the declared record. Nothing persists `IncidentRecord`s platform-wide. */
+  /** Only on `opened` — the declared record, persisted when a ledger is wired. */
   readonly incident?: IncidentRecord;
   readonly page?: PageDirective | null;
   /** True when the escalation was written to `meta.audit_log` (and so anchored). */
   readonly audited: boolean;
+  /**
+   * What became of the incident record. `unpersisted` when no ledger is wired; on recovery,
+   * `cancelled` when the record was closed out and `human_owned` when it had been triaged and was
+   * therefore left alone.
+   */
+  readonly disposition: IncidentDisposition;
 }
+
+/** The subset of `PersistentIncidentEngine` an escalation needs. */
+export type IncidentLedger = Pick<
+  PersistentIncidentEngine,
+  "declare" | "cancelIfUntriaged"
+>;
 
 export interface IntegrityEscalationPlan {
   readonly incident: IncidentRecord;
@@ -84,6 +105,12 @@ export interface IntegrityEscalatorOptions {
    * escalations page but leave no readable row.
    */
   readonly audit?: PostgresAuditEmitter;
+  /**
+   * Persists the declared `IncidentRecord` and closes it out on recovery. Omitted ⇒ the incident
+   * exists only in the log line and the audit row, and its id comes from a per-process counter
+   * that restarts at 0001.
+   */
+  readonly incidents?: IncidentLedger;
   readonly page?: PageSink;
   readonly now?: () => Date;
   readonly onError?: (err: unknown) => void;
@@ -115,38 +142,130 @@ export class IntegrityEscalator {
     const openId = this.open.get(key);
 
     if (report.verdict !== "compromised") {
-      if (openId === undefined) return { scope: report.scope, kind: "none", incidentId: null, audited: false };
+      if (openId === undefined) {
+        return {
+          scope: report.scope,
+          kind: "none",
+          incidentId: null,
+          audited: false,
+          disposition: "unpersisted",
+        };
+      }
       this.open.delete(key);
+      const disposition = await this.closeOut(openId);
       const audited = await this.record(report, openId, INTEGRITY_RECOVERY_OPERATION);
-      return { scope: report.scope, kind: "recovered", incidentId: openId, audited };
+      return {
+        scope: report.scope,
+        kind: "recovered",
+        incidentId: openId,
+        audited,
+        disposition,
+      };
     }
 
     if (openId !== undefined) {
-      return { scope: report.scope, kind: "ongoing", incidentId: openId, audited: false };
+      return {
+        scope: report.scope,
+        kind: "ongoing",
+        incidentId: openId,
+        audited: false,
+        disposition: this.opts.incidents === undefined ? "unpersisted" : "declared",
+      };
     }
 
+    const declared = await this.declare(report);
+    // Marked open before paging, so a failing pager cannot cause a re-declare next pass.
+    this.open.set(key, declared.incident.id);
+    const audited = await this.record(
+      report,
+      declared.incident.id,
+      INTEGRITY_INCIDENT_OPERATION,
+    );
+    await this.emitPage({ incident: declared.incident, page: declared.page });
+    return {
+      scope: report.scope,
+      kind: "opened",
+      incidentId: declared.incident.id,
+      incident: declared.incident,
+      page: declared.page,
+      audited,
+      disposition: declared.persisted ? "declared" : "unpersisted",
+    };
+  }
+
+  /**
+   * Declares the incident, from the ledger when one is wired.
+   *
+   * With a ledger the id is allocated from the rows that exist, so a restart continues the year's
+   * sequence instead of reusing `INC-YYYY-0001`; without one it comes from a counter in this
+   * process, which is the behaviour that made a restart re-declare under a colliding id.
+   */
+  private async declare(report: IntegrityProofReport): Promise<{
+    readonly incident: IncidentRecord;
+    readonly page: PageDirective | null;
+    readonly persisted: boolean;
+  }> {
+    const scope = report.scope ?? "platform";
+    const ledger = this.opts.incidents;
+    if (ledger !== undefined) {
+      try {
+        const stored = await ledger.declare({
+          title: `Audit integrity compromised for ${scope}`,
+          severity: this.opts.config.severity,
+          category: this.opts.config.category,
+          declaredBy: this.opts.config.declaredBy,
+          detail: formatIntegrityProof(report),
+          declaredAt: report.verifiedAt,
+          affectedTenantIds: report.scope === null ? [] : [report.scope],
+          metadata: { surface: `audit-integrity/${scope}`, autoDeclared: true },
+        });
+        return {
+          incident: stored.record,
+          page: planPageDirective(
+            this.opts.config.alertPolicy,
+            this.opts.config.severity,
+            stored.record.id,
+          ),
+          persisted: true,
+        };
+      } catch (err) {
+        // An unwritable incident ledger must not swallow the page, for the same reason an
+        // unwritable audit log must not: losing the alert is the worse failure.
+        this.opts.onError?.(err);
+      }
+    }
     const now = (this.opts.now ?? ((): Date => new Date()))();
     this.incidentSeq += 1;
-    const incidentId = formatIncidentId(now.getUTCFullYear(), this.incidentSeq);
     const plan = planIntegrityEscalation(report, {
-      incidentId,
+      incidentId: formatIncidentId(now.getUTCFullYear(), this.incidentSeq),
       severity: this.opts.config.severity,
       category: this.opts.config.category,
       declaredBy: this.opts.config.declaredBy,
       alertPolicy: this.opts.config.alertPolicy,
     });
-    // Marked open before paging, so a failing pager cannot cause a re-declare next pass.
-    this.open.set(key, incidentId);
-    const audited = await this.record(report, incidentId, INTEGRITY_INCIDENT_OPERATION);
-    await this.emitPage(plan);
-    return {
-      scope: report.scope,
-      kind: "opened",
-      incidentId,
-      incident: plan.incident,
-      page: plan.page,
-      audited,
-    };
+    return { incident: plan.incident, page: plan.page, persisted: false };
+  }
+
+  /**
+   * Cancels the persisted incident if nobody has taken it.
+   *
+   * Cancelling rather than resolving is not a shortcut: `triaged` requires the on-call roles to be
+   * assigned — five of them at sev1 — so no automated recovery can reach a resolved state, and
+   * recording one would claim a response that never happened. A triaged incident is left alone.
+   */
+  private async closeOut(incidentId: string): Promise<IncidentDisposition> {
+    const ledger = this.opts.incidents;
+    if (ledger === undefined) return "unpersisted";
+    try {
+      const cancelled = await ledger.cancelIfUntriaged(incidentId, {
+        reason: "audit-integrity proof no longer finds the trail altered",
+        actorUserId: this.opts.config.declaredBy,
+      });
+      return cancelled === null ? "human_owned" : "cancelled";
+    } catch (err) {
+      this.opts.onError?.(err);
+      return "declared";
+    }
   }
 
   /** Whether a scope currently has an open integrity incident (for tests / metrics). */
@@ -223,7 +342,15 @@ export function formatIntegrityEscalation(escalation: IntegrityEscalation): stri
   if (escalation.kind === "ongoing") {
     return `audit integrity for ${scope}: still compromised under ${escalation.incidentId ?? "?"}`;
   }
-  return `audit integrity for ${scope}: recovered, closing ${escalation.incidentId ?? "?"}`;
+  const outcome =
+    escalation.disposition === "human_owned"
+      ? "left to its responders"
+      : escalation.disposition === "cancelled"
+        ? "cancelled"
+        : "closing";
+  return (
+    `audit integrity for ${scope}: recovered, ${outcome} ${escalation.incidentId ?? "?"}`
+  );
 }
 
 function channelLabel(target: AlertChannelTarget): string {

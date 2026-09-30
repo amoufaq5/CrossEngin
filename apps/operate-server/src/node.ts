@@ -153,6 +153,7 @@ import {
 } from "./checkpoint-scheduler.js";
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import { PostgresChainCheckpointStore, PostgresChainLogReader } from "@crossengin/forensics-pg";
+import { PersistentIncidentEngine } from "@crossengin/incident-response-runtime-pg";
 import {
   buildTenantAuditPolicyCache,
   type TenantAuditPolicyLifecycle,
@@ -513,17 +514,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     auditConfig = await loadAuditChainConfig(options.auditChainConfig);
     auditChainProducer = auditChainStore(conn, auditConfig);
   }
-  if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
-    manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
-    notificationStore = new PostgresNotificationStore(conn, schemaOpt);
-    digestReadStore = new PostgresDigestStore(conn, schemaOpt);
-    templateStore = new PostgresTemplateStore(conn, schemaOpt);
+  // Built for anything that writes audit rows, not only the design features: the integrity-proof
+  // escalation records `audit.integrity_compromised` here (ADR-0288), and gating the emitter on
+  // --ai-design meant a deployment running only --integrity-proof-config reported `audited=false`
+  // for every escalation — the row ADR-0288 relies on was never written.
+  if (
+    conn !== undefined &&
+    (options.aiDesign ||
+      options.perTenantManifests ||
+      options.designReview ||
+      options.integrityProofConfig !== null)
+  ) {
     auditEmitter = new PostgresAuditEmitter(conn, {
       ...schemaOpt,
       // No chain configured ⇒ rows are written unanchored. Verification reports them as
       // unproven rather than pretending they are intact (ADR-0286).
       ...(auditChainProducer !== null ? { chain: auditChainProducer } : {}),
     });
+  }
+  if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
+    manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
+    notificationStore = new PostgresNotificationStore(conn, schemaOpt);
+    digestReadStore = new PostgresDigestStore(conn, schemaOpt);
+    templateStore = new PostgresTemplateStore(conn, schemaOpt);
     recipientResolver = new PostgresRecipientResolver(conn, {
       ...schemaOpt,
       adminRoles: options.notificationAdminRoles,
@@ -967,13 +980,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         : {};
       // Escalation: a compromised verdict becomes a declared incident + a page, once per
       // episode rather than once per pass. The audit emitter is passed so the escalation
-      // itself lands in meta.audit_log and is anchored in the chain (ADR-0286/0288).
+      // itself lands in meta.audit_log and is anchored in the chain (ADR-0286/0288); the
+      // incident ledger persists the `IncidentRecord` so its lifecycle outlives this process
+      // and its id is allocated from the rows that exist rather than a restarting counter
+      // (ADR-0289).
       const escalator =
         proofConfig.escalation === undefined
           ? null
           : new IntegrityEscalator({
               config: proofConfig.escalation,
               ...(auditEmitter !== null ? { audit: auditEmitter } : {}),
+              incidents: new PersistentIncidentEngine({ conn }),
               page: (page, incident) =>
                 console.error(
                   `[integrity-proof] PAGE ${incident.id} severity=${incident.severity}` +
