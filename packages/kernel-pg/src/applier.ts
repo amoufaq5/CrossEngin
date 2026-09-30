@@ -37,6 +37,16 @@ export interface MigrationApplierOptions {
   readonly schema: string;
   readonly statements: readonly string[];
   readonly now?: () => number;
+  /**
+   * Whether a statement whose hash is already recorded as applied may be skipped. Default true.
+   *
+   * Pass **false** when the statement list was computed from the live schema. The log records what
+   * was executed, not what the database currently holds, so a statement that ran once and whose
+   * object was later dropped is still marked applied — and skipping it would leave the object
+   * missing. A reconciliation plan already contains only statements the database needs, so the
+   * skip has nothing to save and can only do harm.
+   */
+  readonly skipApplied?: boolean;
 }
 
 export class MigrationApplier {
@@ -44,12 +54,14 @@ export class MigrationApplier {
   private readonly schema: string;
   private readonly statements: readonly string[];
   private readonly now: () => number;
+  private readonly skipApplied: boolean;
 
   constructor(opts: MigrationApplierOptions) {
     this.connection = opts.connection;
     this.schema = opts.schema;
     this.statements = opts.statements;
     this.now = opts.now ?? (() => Date.now());
+    this.skipApplied = opts.skipApplied ?? true;
   }
 
   async apply(): Promise<ApplyReport> {
@@ -82,7 +94,10 @@ export class MigrationApplier {
         const statementHash = hashStatement(sql);
         const excerpt = excerptStatement(sql);
 
-        if (await isStatementApplied(this.connection, this.schema, statementHash)) {
+        if (
+          this.skipApplied &&
+          (await isStatementApplied(this.connection, this.schema, statementHash))
+        ) {
           records.push({
             statementHash,
             excerpt,

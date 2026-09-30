@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseArgs, type ParsedCommand } from "./cli.js";
+import { helpText, parseArgs, type ParsedCommand } from "./cli.js";
 import { runApply } from "./apply.js";
 import type { RunContext } from "./commands.js";
 
@@ -68,5 +68,34 @@ describe("runApply (live) — env validation", () => {
     const code = await runApply(parsed("apply"), ctx);
     expect(code).toBe(2);
     expect(err()).toContain("production-looking");
+  });
+});
+
+describe("runApply --plan", () => {
+  it("still validates the environment before reaching the database", async () => {
+    const { ctx, err } = buffers({});
+    const code = await runApply(parsed("apply", "--plan"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("apply:");
+  });
+
+  it("refuses a production-looking database without --confirm, like apply does", async () => {
+    const { ctx, err } = buffers({
+      PGHOST: "db.internal",
+      PGUSER: "postgres",
+      PGDATABASE: "crossengin_production",
+    });
+    const code = await runApply(parsed("apply", "--plan"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("--confirm");
+  });
+});
+
+describe("apply help", () => {
+  it("documents --plan next to --dry-run", () => {
+    const text = helpText();
+    expect(text).toContain("--plan");
+    expect(text).toContain("--dry-run");
+    expect(text).toContain("reconciliation plan");
   });
 });

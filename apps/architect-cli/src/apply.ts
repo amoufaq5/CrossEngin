@@ -1,10 +1,17 @@
-import { emitMetaBootstrapSql, META_SCHEMA_NAME, META_TABLES } from "@crossengin/kernel/bootstrap";
+import {
+  emitMetaBootstrapSql,
+  emitSchemaCreate,
+  META_SCHEMA_NAME,
+  META_TABLES,
+} from "@crossengin/kernel/bootstrap";
 import {
   MigrationApplier,
   createNodePgConnection,
   formatApplyReport,
+  formatReconciliationPlan,
   looksLikeProductionDatabase,
   parsePgEnvConfig,
+  planLiveReconciliation,
 } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
@@ -17,6 +24,7 @@ export async function runApply(
   ctx: RunContext,
 ): Promise<number> {
   const dryRun = getBooleanFlag(command, "dry-run");
+  const planOnly = getBooleanFlag(command, "plan");
   const confirm = getBooleanFlag(command, "confirm");
   if (dryRun) {
     return emitDryRun(ctx.io, command);
@@ -37,16 +45,36 @@ export async function runApply(
   }
   const conn = createNodePgConnection(config);
   try {
+    // Reconcile against the live schema rather than replaying the bootstrap SQL. On an empty
+    // database the plan *is* the bootstrap SQL, so a fresh install is unchanged; on a database
+    // that already has the schema, only the differences are applied — which is what lets an
+    // edited table definition migrate instead of re-running `CREATE TABLE` and halting.
+    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES);
+    if (planOnly) {
+      if (command.format === "json") {
+        printJson(ctx.io, plan);
+      } else {
+        printSuccess(ctx.io, formatReconciliationPlan(plan));
+      }
+      return 0;
+    }
     const applier = new MigrationApplier({
       connection: conn,
       schema: META_SCHEMA_NAME,
-      statements: emitMetaBootstrapSql(),
+      statements: [emitSchemaCreate(META_SCHEMA_NAME), ...plan.statements],
+      // The plan was computed from the live schema, so every statement in it is needed; the hash
+      // log records what ran, not what the database holds, and skipping on it here would leave a
+      // dropped object missing.
+      skipApplied: false,
     });
     const report = await applier.apply();
     if (command.format === "json") {
-      printJson(ctx.io, report);
+      printJson(ctx.io, { report, plan });
     } else {
       printSuccess(ctx.io, formatApplyReport(report));
+      if (plan.unreconciled.length > 0) {
+        printSuccess(ctx.io, formatReconciliationPlan(plan));
+      }
     }
     if (!report.preconditions.ok || report.failed > 0) return 1;
     return 0;

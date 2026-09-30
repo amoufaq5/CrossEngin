@@ -283,3 +283,124 @@ describe("formatSchemaDiff", () => {
     expect(out).toContain("RLS target=true live=false");
   });
 });
+
+describe("diffSchema — no false drift on a correct schema", () => {
+  /**
+   * The regression this guards. Comparing declared SQL against what `pg_catalog` reports back
+   * reported 138 of 139 tables as modified on a database that had just been applied correctly,
+   * which made the drift report unusable and would have made a reconciler act on nothing real.
+   */
+  const target: TableDefinition = {
+    schema: "meta",
+    name: "widgets",
+    columns: [
+      { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+      { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+      { name: "status", type: "TEXT", notNull: true, default: "'active'" },
+      { name: "hash", type: "CHAR(64)" },
+      { name: "rate", type: "NUMERIC(12, 6)" },
+      { name: "tags", type: "TEXT[]", notNull: true, default: "'{}'" },
+      { name: "payload", type: "JSONB", notNull: true, default: "'{}'::jsonb" },
+      { name: "code", type: "TEXT", notNull: true, unique: { constraintName: "widgets_code_key" } },
+    ],
+    primaryKey: ["id"],
+    uniqueConstraints: [{ name: "widgets_id_code_key", columns: ["id", "code"] }],
+    indexes: [{ name: "idx_widgets_status", columns: ["status"] }],
+  };
+
+  const liveTable: LiveTable = {
+    schema: "meta",
+    name: "widgets",
+    columns: [
+      { name: "id", dataType: "uuid", isNullable: false, defaultExpr: "uuid_generate_v7()" },
+      {
+        name: "created_at",
+        dataType: "timestamp with time zone",
+        isNullable: false,
+        defaultExpr: "now()",
+      },
+      { name: "status", dataType: "text", isNullable: false, defaultExpr: "'active'::text" },
+      { name: "hash", dataType: "character(64)", isNullable: true, defaultExpr: null },
+      { name: "rate", dataType: "numeric(12,6)", isNullable: true, defaultExpr: null },
+      { name: "tags", dataType: "text[]", isNullable: false, defaultExpr: "'{}'::text[]" },
+      { name: "payload", dataType: "jsonb", isNullable: false, defaultExpr: "'{}'::jsonb" },
+      { name: "code", dataType: "text", isNullable: false, defaultExpr: null },
+    ],
+    indexes: [
+      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true },
+      { name: "idx_widgets_status", columns: ["status"], unique: false, primary: false },
+      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false },
+      { name: "widgets_id_code_key", columns: ["id", "code"], unique: true, primary: false },
+    ],
+    policies: [],
+    rlsEnabled: false,
+  };
+
+  it("reports no drift for a table Postgres renders differently than it was declared", () => {
+    const diff = diffSchema([target], { schema: "meta", tables: [liveTable] });
+    expect(diff.hasDrift).toBe(false);
+    expect(diff.unchangedTables).toEqual(["widgets"]);
+  });
+
+  it("does not report TIMESTAMPTZ as a type change", () => {
+    const diff = diffSchema([target], { schema: "meta", tables: [liveTable] });
+    expect(diff.modifiedTables).toEqual([]);
+  });
+
+  it("does not report a constraint-backed index as removed", () => {
+    const diff = diffSchema([target], { schema: "meta", tables: [liveTable] });
+    expect(diff.modifiedTables.flatMap((m) => m.removedIndexes)).toEqual([]);
+  });
+
+  it("ignores the applier's own migration-log table", () => {
+    const diff = diffSchema([target], {
+      schema: "meta",
+      tables: [liveTable, { ...liveTable, name: "_meta_migrations" }],
+    });
+    expect(diff.removedTables).toEqual([]);
+    expect(diff.hasDrift).toBe(false);
+  });
+
+  it("still sees a real type change", () => {
+    const drifted: LiveTable = {
+      ...liveTable,
+      columns: liveTable.columns.map((c) =>
+        c.name === "code" ? { ...c, dataType: "uuid" } : c,
+      ),
+    };
+    const diff = diffSchema([target], { schema: "meta", tables: [drifted] });
+    expect(diff.modifiedTables[0]?.changedColumns[0]?.reasons).toEqual(["type"]);
+  });
+
+  it("still sees a real default change", () => {
+    const drifted: LiveTable = {
+      ...liveTable,
+      columns: liveTable.columns.map((c) =>
+        c.name === "status" ? { ...c, defaultExpr: "'archived'::text" } : c,
+      ),
+    };
+    const diff = diffSchema([target], { schema: "meta", tables: [drifted] });
+    expect(diff.modifiedTables[0]?.changedColumns[0]?.reasons).toEqual(["default"]);
+  });
+
+  it("still sees a genuinely missing constraint-backed index", () => {
+    const drifted: LiveTable = {
+      ...liveTable,
+      indexes: liveTable.indexes.filter((i) => i.name !== "widgets_id_code_key"),
+    };
+    const diff = diffSchema([target], { schema: "meta", tables: [drifted] });
+    expect(diff.modifiedTables[0]?.addedIndexes).toEqual(["widgets_id_code_key"]);
+  });
+
+  it("still sees a genuinely extra index", () => {
+    const drifted: LiveTable = {
+      ...liveTable,
+      indexes: [
+        ...liveTable.indexes,
+        { name: "idx_widgets_adhoc", columns: ["hash"], unique: false, primary: false },
+      ],
+    };
+    const diff = diffSchema([target], { schema: "meta", tables: [drifted] });
+    expect(diff.modifiedTables[0]?.removedIndexes).toEqual(["idx_widgets_adhoc"]);
+  });
+});

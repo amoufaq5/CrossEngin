@@ -4,6 +4,7 @@ import {
   META_SCHEMA_NAME,
   META_TABLES,
   emitMetaBootstrapSql,
+  emitSchemaCreate,
 } from "@crossengin/kernel/bootstrap";
 
 import { MigrationApplier, formatApplyReport } from "../src/applier.js";
@@ -13,6 +14,7 @@ import {
   parsePgEnvConfig,
 } from "../src/connection.js";
 import { diffSchema, formatSchemaDiff } from "../src/diff.js";
+import { formatReconciliationPlan, planLiveReconciliation } from "../src/reconcile.js";
 import {
   EncryptionApplier,
   formatEncryptionCoverage,
@@ -62,8 +64,9 @@ function printHelp(): void {
       "Usage: crossengin-pg <command> [flags]",
       "",
       "Commands:",
-      "  apply                Apply the meta-schema to the database",
-      "  apply --dry-run      Print the SQL that would be executed without running it",
+      "  apply                Reconcile the meta-schema with the database",
+      "  apply --dry-run      Print the full bootstrap SQL without running it",
+      "  apply --plan         Introspect and print the reconciliation plan without running it",
       "  drift                Introspect the live schema and report drift vs META_TABLES",
       "  inspect              Print the live schema as JSON",
       "  encrypt --verify     Report at-rest encryption coverage for hinted columns",
@@ -91,8 +94,8 @@ function printHelp(): void {
 }
 
 async function runApply(flags: ReadonlySet<string>): Promise<number> {
-  const statements = emitMetaBootstrapSql();
   if (flags.has("--dry-run")) {
+    const statements = emitMetaBootstrapSql();
     for (const s of statements) process.stdout.write(s + "\n");
     process.stdout.write(`-- ${statements.length} statement(s)\n`);
     return 0;
@@ -106,13 +109,24 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
   }
   const conn: PgConnection = createNodePgConnection(config);
   try {
+    // Same reconciliation path as `crossengin apply`: replaying the bootstrap SQL against a
+    // database that already has the schema re-runs CREATE TABLE and halts.
+    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES);
+    if (flags.has("--plan")) {
+      process.stdout.write(formatReconciliationPlan(plan) + "\n");
+      return 0;
+    }
     const applier = new MigrationApplier({
       connection: conn,
       schema: META_SCHEMA_NAME,
-      statements,
+      statements: [emitSchemaCreate(META_SCHEMA_NAME), ...plan.statements],
+      skipApplied: false,
     });
     const report = await applier.apply();
     process.stdout.write(formatApplyReport(report) + "\n");
+    if (plan.unreconciled.length > 0) {
+      process.stdout.write(formatReconciliationPlan(plan) + "\n");
+    }
     if (!report.preconditions.ok || report.failed > 0) return 1;
     return 0;
   } finally {

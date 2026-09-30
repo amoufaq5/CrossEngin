@@ -88,16 +88,44 @@ export async function checkPostgresVersion(
   return { problem: null, serverVersionNum: num };
 }
 
+export async function schemaExists(conn: PgConnection, schema: string): Promise<boolean> {
+  const result = await conn.query<{ present: boolean }>(
+    "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1) AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+/**
+ * Whether the current user can create what the migration needs.
+ *
+ * The existence check is not decoration. `has_schema_privilege` **raises** for a schema that does
+ * not exist, so asking it first made `apply` throw on exactly the case it is meant to handle — a
+ * database with no `meta` schema yet, which its own first statement (`CREATE SCHEMA IF NOT EXISTS`)
+ * would have created. Every setup that worked had the schema created by hand beforehand, which hid
+ * it. When the schema is absent the right question is whether the user may create one at all, which
+ * is a database-level privilege.
+ */
 export async function checkCreatePrivilege(
   conn: PgConnection,
   schema: string,
 ): Promise<PreconditionProblem | null> {
+  if (!(await schemaExists(conn, schema))) {
+    const result = await conn.query<{ has_privilege: boolean }>(
+      "SELECT has_database_privilege(current_user, current_database(), 'CREATE') AS has_privilege",
+    );
+    if (result.rows[0]?.has_privilege === true) return null;
+    return {
+      code: "NO_CREATE_PRIVILEGE",
+      message: `schema ${schema} does not exist and current_user cannot create it`,
+      remedy: `CREATE SCHEMA ${schema}; (run as a privileged role), or grant CREATE on the database`,
+    };
+  }
   const result = await conn.query<{ has_privilege: boolean }>(
     "SELECT has_schema_privilege(current_user, $1, 'CREATE') AS has_privilege",
     [schema],
   );
-  const row = result.rows[0];
-  if (row?.has_privilege === true) return null;
+  if (result.rows[0]?.has_privilege === true) return null;
   return {
     code: "NO_CREATE_PRIVILEGE",
     message: `current_user does not have CREATE on schema ${schema}`,
