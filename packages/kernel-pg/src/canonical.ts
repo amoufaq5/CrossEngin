@@ -1,4 +1,6 @@
-import type { TableDefinition } from "@crossengin/kernel/bootstrap";
+import type { ColumnReference, TableDefinition } from "@crossengin/kernel/bootstrap";
+
+import type { ForeignKeyAction } from "./introspection.js";
 
 /**
  * Tables that live in the meta schema but are not part of `META_TABLES`.
@@ -150,4 +152,55 @@ export function expectedIndexNames(table: TableDefinition): ExpectedIndexes {
     }
   }
   return { indexes, constraints };
+}
+
+/**
+ * The ON DELETE action a declared reference actually produces.
+ *
+ * `emitColumn` writes `ON DELETE RESTRICT` when `references.onDelete` is omitted, so a reference
+ * that leaves it unset is not "unspecified" in the database — it is RESTRICT. Comparing the
+ * declared `undefined` against the introspected `RESTRICT` would report drift on every such
+ * column.
+ */
+export const DEFAULT_ON_DELETE: ForeignKeyAction = "RESTRICT";
+
+export function declaredOnDelete(ref: ColumnReference): ForeignKeyAction {
+  return (ref.onDelete ?? DEFAULT_ON_DELETE) as ForeignKeyAction;
+}
+
+export interface DeclaredForeignKey {
+  /** The column carrying the reference; a declared FK is always single-column. */
+  readonly column: string;
+  readonly targetSchema: string;
+  readonly targetTable: string;
+  readonly targetColumn: string;
+  readonly onDelete: ForeignKeyAction;
+  /** What Postgres names an inline column reference. */
+  readonly expectedConstraintName: string;
+}
+
+/**
+ * The foreign keys a table declares, one per column carrying `references`.
+ *
+ * `TableDefinition` has no table-level foreign key, so every declared FK is single-column and is
+ * identified by its column rather than by a name — the emitter writes the reference inline and lets
+ * Postgres name it.
+ */
+export function declaredForeignKeys(table: TableDefinition): readonly DeclaredForeignKey[] {
+  const out: DeclaredForeignKey[] = [];
+  for (const col of table.columns) {
+    const ref = col.references;
+    if (ref === undefined) continue;
+    out.push({
+      column: col.name,
+      // An unqualified reference resolves through the search path, which for the meta-schema means
+      // the table's own schema.
+      targetSchema: ref.schema ?? table.schema,
+      targetTable: ref.table,
+      targetColumn: ref.column,
+      onDelete: declaredOnDelete(ref),
+      expectedConstraintName: `${table.name}_${col.name}_fkey`,
+    });
+  }
+  return out;
 }

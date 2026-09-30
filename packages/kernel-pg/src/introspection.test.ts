@@ -130,13 +130,17 @@ describe("parseLiveSchema", () => {
 });
 
 describe("introspectSchema", () => {
-  it("issues the four queries in parallel and feeds them into parseLiveSchema", async () => {
+  it("issues the five catalog queries in parallel and feeds them into parseLiveSchema", async () => {
     const observedSqls: string[] = [];
     const conn: PgConnection = {
       query: vi.fn(async <T,>(sql: string): Promise<PgQueryResult<T>> => {
         observedSqls.push(sql);
         if (sql.includes("relkind = 'r'") && sql.includes("relrowsecurity")) {
           return { rows: [{ schema: "meta", name: "x", rls_enabled: false }] as unknown as readonly T[], rowCount: 1 };
+        }
+        // Matched before the pg_attribute branch: the foreign-key query joins pg_attribute too.
+        if (sql.includes("pg_constraint")) {
+          return { rows: [] as readonly T[], rowCount: 0 };
         }
         if (sql.includes("pg_attribute")) {
           return { rows: [] as readonly T[], rowCount: 0 };
@@ -154,7 +158,9 @@ describe("introspectSchema", () => {
       close: vi.fn() as PgConnection["close"],
     };
     const live = await introspectSchema(conn, "meta");
-    expect(observedSqls).toHaveLength(4);
+    expect(observedSqls).toHaveLength(5);
+    expect(observedSqls.some((s) => s.includes("contype = 'f'"))).toBe(true);
     expect(live.tables.map((t) => t.name)).toEqual(["x"]);
+    expect(live.tables[0]?.foreignKeys).toEqual([]);
   });
 });

@@ -11,6 +11,7 @@ function liveTable(name: string, columns: LiveTable["columns"], extras: Partial<
     columns,
     indexes: [],
     policies: [],
+    foreignKeys: [],
     rlsEnabled: false,
     ...extras,
   };
@@ -263,6 +264,19 @@ describe("formatSchemaDiff", () => {
           removedIndexes: ["i_old"],
           addedPolicies: ["p_new"],
           removedPolicies: ["p_old"],
+          addedForeignKeys: ["owner_id"],
+          removedForeignKeys: [
+            { name: "tenants_old_fkey", columns: ["old_id"], target: "meta.old(id)" },
+          ],
+          changedForeignKeys: [
+            {
+              column: "tenant_id",
+              constraintName: "tenants_tenant_id_fkey",
+              target: { table: "meta.tenants", column: "id", onDelete: "CASCADE" },
+              live: { table: "meta.tenants", column: "id", onDelete: "RESTRICT" },
+              reasons: ["on_delete"],
+            },
+          ],
           rlsTargetEnabled: true,
           rlsLiveEnabled: false,
         },
@@ -280,6 +294,9 @@ describe("formatSchemaDiff", () => {
     expect(out).toContain("- index i_old");
     expect(out).toContain("+ policy p_new");
     expect(out).toContain("- policy p_old");
+    expect(out).toContain("+ foreign key on owner_id");
+    expect(out).toContain("- foreign key tenants_old_fkey");
+    expect(out).toContain("~ foreign key on tenant_id [on_delete]");
     expect(out).toContain("RLS target=true live=false");
   });
 });
@@ -333,6 +350,7 @@ describe("diffSchema — no false drift on a correct schema", () => {
       { name: "widgets_id_code_key", columns: ["id", "code"], unique: true, primary: false },
     ],
     policies: [],
+    foreignKeys: [],
     rlsEnabled: false,
   };
 

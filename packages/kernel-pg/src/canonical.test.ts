@@ -3,9 +3,12 @@ import { META_TABLES, type TableDefinition } from "@crossengin/kernel/bootstrap"
 
 import {
   APPLIER_OWNED_TABLES,
+  DEFAULT_ON_DELETE,
   PG_TYPE_ALIASES,
   canonicalPgDefault,
   canonicalPgType,
+  declaredForeignKeys,
+  declaredOnDelete,
   expectedIndexNames,
 } from "./canonical.js";
 
@@ -190,5 +193,73 @@ describe("expectedIndexNames", () => {
       }
     }
     expect(constraintBacked).toBeGreaterThan(100);
+  });
+});
+
+describe("declaredOnDelete", () => {
+  it("is RESTRICT when the reference omits it, because that is what the emitter writes", () => {
+    expect(declaredOnDelete({ schema: "meta", table: "users", column: "id" })).toBe("RESTRICT");
+    expect(DEFAULT_ON_DELETE).toBe("RESTRICT");
+  });
+
+  it("is whatever the reference declares", () => {
+    expect(
+      declaredOnDelete({ schema: "meta", table: "tenants", column: "id", onDelete: "CASCADE" }),
+    ).toBe("CASCADE");
+    expect(
+      declaredOnDelete({ schema: "meta", table: "tenants", column: "id", onDelete: "SET NULL" }),
+    ).toBe("SET NULL");
+  });
+});
+
+describe("declaredForeignKeys", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "children",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      {
+        name: "tenant_id",
+        type: "UUID",
+        references: { schema: "meta", table: "tenants", column: "id", onDelete: "CASCADE" },
+      },
+      { name: "owner_id", type: "UUID", references: { table: "users", column: "id" } },
+      { name: "label", type: "TEXT" },
+    ],
+  };
+
+  it("finds one per column carrying a reference", () => {
+    const fks = declaredForeignKeys(table);
+    expect(fks.map((f) => f.column)).toEqual(["tenant_id", "owner_id"]);
+  });
+
+  it("predicts the name Postgres gives an inline reference", () => {
+    expect(declaredForeignKeys(table)[0]?.expectedConstraintName).toBe("children_tenant_id_fkey");
+  });
+
+  it("resolves an unqualified target to the table's own schema", () => {
+    // An unqualified REFERENCES resolves through the search path, which for the meta-schema is
+    // the schema the table lives in.
+    expect(declaredForeignKeys(table)[1]?.targetSchema).toBe("meta");
+  });
+
+  it("carries the effective onDelete for each", () => {
+    const fks = declaredForeignKeys(table);
+    expect(fks[0]?.onDelete).toBe("CASCADE");
+    expect(fks[1]?.onDelete).toBe("RESTRICT");
+  });
+
+  it("is empty for a table with no references", () => {
+    expect(declaredForeignKeys({ ...table, columns: [{ name: "id", type: "UUID" }] })).toEqual([]);
+  });
+
+  it("finds every reference in the real catalog and names them uniquely per table", () => {
+    let total = 0;
+    for (const t of META_TABLES) {
+      const fks = declaredForeignKeys(t);
+      total += fks.length;
+      expect(new Set(fks.map((f) => f.expectedConstraintName)).size).toBe(fks.length);
+    }
+    expect(total).toBeGreaterThan(100);
   });
 });
