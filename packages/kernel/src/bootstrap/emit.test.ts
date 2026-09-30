@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   emitAddColumn,
+  emitAddForeignKey,
   emitAddUniqueConstraint,
+  emitAlterColumnTypeIfEmpty,
+  emitDropConstraint,
+  foreignKeyConstraintName,
   emitColumn,
   emitCreateTable,
   emitDropColumnDefault,
@@ -347,5 +351,68 @@ describe("migration emitters", () => {
       emitDropColumnNotNull(table, "kind"),
     ].join("\n");
     expect(all).not.toMatch(/DROP (TABLE|COLUMN|POLICY|INDEX)/);
+  });
+});
+
+describe("foreign-key and type-change emitters", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "children",
+    columns: [{ name: "id", type: "UUID", notNull: true }],
+    primaryKey: ["id"],
+  };
+
+  it("foreignKeyConstraintName matches what Postgres names an inline reference", () => {
+    expect(foreignKeyConstraintName("children", "tenant_id")).toBe("children_tenant_id_fkey");
+  });
+
+  it("emitAddForeignKey names the constraint so a later introspection matches it", () => {
+    const sql = emitAddForeignKey(
+      table,
+      "tenant_id",
+      { schema: "meta", table: "tenants", column: "id" },
+      "CASCADE",
+    );
+    expect(sql).toContain('ALTER TABLE "meta"."children"');
+    expect(sql).toContain('ADD CONSTRAINT "children_tenant_id_fkey"');
+    expect(sql).toContain('FOREIGN KEY ("tenant_id") REFERENCES "meta"."tenants"("id")');
+    expect(sql).toContain("ON DELETE CASCADE");
+  });
+
+  it("emitAddForeignKey leaves an unqualified target unqualified", () => {
+    const sql = emitAddForeignKey(table, "owner_id", { table: "users", column: "id" }, "RESTRICT");
+    expect(sql).toContain('REFERENCES "users"("id")');
+  });
+
+  it("emitDropConstraint tolerates the constraint already being gone", () => {
+    expect(emitDropConstraint(table, "children_tenant_id_fkey")).toBe(
+      'ALTER TABLE "meta"."children" DROP CONSTRAINT IF EXISTS "children_tenant_id_fkey";',
+    );
+  });
+
+  it("emitAlterColumnTypeIfEmpty re-checks emptiness in the same transaction", () => {
+    // The plan's row count was taken earlier; this is what stops a row inserted since then from
+    // being silently rewritten.
+    const sql = emitAlterColumnTypeIfEmpty(table, "owner_id", "text");
+    expect(sql).toContain("SELECT count(*) INTO existing FROM \"meta\".\"children\"");
+    expect(sql).toContain("IF existing > 0 THEN");
+    expect(sql).toContain("RAISE EXCEPTION");
+    expect(sql).toContain('ALTER COLUMN "owner_id" TYPE text USING "owner_id"::text');
+  });
+
+  it("emitAlterColumnTypeIfEmpty names the column in its refusal", () => {
+    expect(emitAlterColumnTypeIfEmpty(table, "owner_id", "text")).toContain(
+      "meta.children.owner_id",
+    );
+  });
+
+  it("refuses unsafe identifiers in every new emitter", () => {
+    expect(() => emitDropConstraint(table, "od'd")).toThrow(/unsafe SQL identifier/);
+    expect(() => emitAlterColumnTypeIfEmpty(table, "od'd", "text")).toThrow(
+      /unsafe SQL identifier/,
+    );
+    expect(() =>
+      emitAddForeignKey(table, "od'd", { table: "users", column: "id" }, "RESTRICT"),
+    ).toThrow(/unsafe SQL identifier/);
   });
 });

@@ -14,6 +14,33 @@ export interface LiveIndex {
   readonly primary: boolean;
 }
 
+/** Postgres's `confdeltype` codes, spelled the way DDL spells them. */
+export const FOREIGN_KEY_ACTIONS = [
+  "NO ACTION",
+  "RESTRICT",
+  "CASCADE",
+  "SET NULL",
+  "SET DEFAULT",
+] as const;
+export type ForeignKeyAction = (typeof FOREIGN_KEY_ACTIONS)[number];
+
+export const CONFDELTYPE_TO_ACTION: Readonly<Record<string, ForeignKeyAction>> = Object.freeze({
+  a: "NO ACTION",
+  r: "RESTRICT",
+  c: "CASCADE",
+  n: "SET NULL",
+  d: "SET DEFAULT",
+});
+
+export interface LiveForeignKey {
+  readonly name: string;
+  readonly columns: readonly string[];
+  readonly targetSchema: string;
+  readonly targetTable: string;
+  readonly targetColumns: readonly string[];
+  readonly onDelete: ForeignKeyAction;
+}
+
 export interface LivePolicy {
   readonly name: string;
   readonly using: string | null;
@@ -26,6 +53,7 @@ export interface LiveTable {
   readonly columns: readonly LiveColumn[];
   readonly indexes: readonly LiveIndex[];
   readonly policies: readonly LivePolicy[];
+  readonly foreignKeys: readonly LiveForeignKey[];
   readonly rlsEnabled: boolean;
 }
 
@@ -93,6 +121,43 @@ export const POLICY_QUERY = `
    ORDER BY c.relname, p.polname
 `;
 
+/**
+ * Foreign keys, with the columns on both sides in key order and the ON DELETE action.
+ *
+ * `WITH ORDINALITY` is what keeps a composite key's columns in the order the constraint declares
+ * them; `unnest` alone does not promise it, and a reordered pair would read as a different
+ * constraint. `attname::text` matters just as much: `attname` is Postgres's `name` type, and
+ * node-postgres has no array parser for `name[]`, so without the cast every column list arrives as
+ * the raw literal `{tenant_id}` and each foreign key reads as simultaneously added and removed.
+ */
+export const FOREIGN_KEY_QUERY = `
+  SELECT c.relname AS table_name,
+         con.conname AS constraint_name,
+         ARRAY(
+           SELECT a.attname::text
+             FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+            ORDER BY k.ord
+         ) AS columns,
+         tn.nspname AS target_schema,
+         tc.relname AS target_table,
+         ARRAY(
+           SELECT a.attname::text
+             FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord)
+             JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum
+            ORDER BY k.ord
+         ) AS target_columns,
+         con.confdeltype AS on_delete
+    FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_class tc ON tc.oid = con.confrelid
+    JOIN pg_namespace tn ON tn.oid = tc.relnamespace
+   WHERE con.contype = 'f'
+     AND n.nspname = $1
+   ORDER BY c.relname, con.conname
+`;
+
 export interface TableRow {
   readonly schema: string;
   readonly name: string;
@@ -116,6 +181,16 @@ export interface IndexRow {
   readonly columns: readonly string[];
 }
 
+export interface ForeignKeyRow {
+  readonly table_name: string;
+  readonly constraint_name: string;
+  readonly columns: readonly string[];
+  readonly target_schema: string;
+  readonly target_table: string;
+  readonly target_columns: readonly string[];
+  readonly on_delete: string;
+}
+
 export interface PolicyRow {
   readonly table_name: string;
   readonly policy_name: string;
@@ -129,6 +204,7 @@ export function parseLiveSchema(
   columns: readonly ColumnRow[],
   indexes: readonly IndexRow[],
   policies: readonly PolicyRow[],
+  foreignKeys: readonly ForeignKeyRow[] = [],
 ): LiveSchema {
   const columnsByTable = new Map<string, LiveColumn[]>();
   for (const row of columns) {
@@ -177,6 +253,26 @@ export function parseLiveSchema(
     }
   }
 
+  const foreignKeysByTable = new Map<string, LiveForeignKey[]>();
+  for (const row of foreignKeys) {
+    const existing = foreignKeysByTable.get(row.table_name);
+    const fk: LiveForeignKey = {
+      name: row.constraint_name,
+      columns: row.columns,
+      targetSchema: row.target_schema,
+      targetTable: row.target_table,
+      targetColumns: row.target_columns,
+      // An unrecognized code would be a Postgres version introducing a new action; treating it as
+      // NO ACTION under-reports rather than inventing a stricter rule than the database holds.
+      onDelete: CONFDELTYPE_TO_ACTION[row.on_delete] ?? "NO ACTION",
+    };
+    if (existing === undefined) {
+      foreignKeysByTable.set(row.table_name, [fk]);
+    } else {
+      existing.push(fk);
+    }
+  }
+
   const liveTables: LiveTable[] = tables.map((row) => ({
     schema: row.schema,
     name: row.name,
@@ -184,6 +280,7 @@ export function parseLiveSchema(
     columns: columnsByTable.get(row.name) ?? [],
     indexes: indexesByTable.get(row.name) ?? [],
     policies: policiesByTable.get(row.name) ?? [],
+    foreignKeys: foreignKeysByTable.get(row.name) ?? [],
   }));
 
   return { schema, tables: liveTables };
@@ -193,11 +290,12 @@ export async function introspectSchema(
   conn: PgConnection,
   schema: string,
 ): Promise<LiveSchema> {
-  const [tables, columns, indexes, policies] = await Promise.all([
+  const [tables, columns, indexes, policies, foreignKeys] = await Promise.all([
     conn.query<TableRow>(TABLE_QUERY, [schema]),
     conn.query<ColumnRow>(COLUMN_QUERY, [schema]),
     conn.query<IndexRow>(INDEX_QUERY, [schema]),
     conn.query<PolicyRow>(POLICY_QUERY, [schema]),
+    conn.query<ForeignKeyRow>(FOREIGN_KEY_QUERY, [schema]),
   ]);
   return parseLiveSchema(
     schema,
@@ -205,5 +303,6 @@ export async function introspectSchema(
     columns.rows,
     indexes.rows,
     policies.rows,
+    foreignKeys.rows,
   );
 }

@@ -4,15 +4,48 @@ import {
   APPLIER_OWNED_TABLES,
   canonicalPgDefault,
   canonicalPgType,
+  declaredForeignKeys,
   expectedIndexNames,
 } from "./canonical.js";
-import type { LiveColumn, LiveSchema, LiveTable } from "./introspection.js";
+import type {
+  ForeignKeyAction,
+  LiveColumn,
+  LiveSchema,
+  LiveTable,
+} from "./introspection.js";
 
 export interface ColumnDelta {
   readonly column: string;
   readonly target: { readonly type: string; readonly nullable: boolean; readonly defaultExpr: string | null };
   readonly live: { readonly type: string; readonly nullable: boolean; readonly defaultExpr: string | null };
   readonly reasons: readonly ("type" | "nullable" | "default")[];
+}
+
+export interface ForeignKeyEndpoint {
+  readonly table: string;
+  readonly column: string;
+  readonly onDelete: ForeignKeyAction;
+}
+
+export interface ForeignKeyDelta {
+  /** The column carrying the declared reference. */
+  readonly column: string;
+  readonly constraintName: string;
+  readonly target: ForeignKeyEndpoint;
+  readonly live: ForeignKeyEndpoint;
+  readonly reasons: readonly ("target" | "on_delete")[];
+}
+
+/**
+ * A foreign key the database holds that no column declares. Carries its columns because the planner
+ * has to know whether it sits on a column whose type is changing — `ALTER COLUMN TYPE` cannot run
+ * while a constraint depends on the old type.
+ */
+export interface RemovedForeignKey {
+  readonly name: string;
+  readonly columns: readonly string[];
+  /** `schema.table(column)` of the referenced side, for the report. */
+  readonly target: string;
 }
 
 export interface TableDiff {
@@ -24,6 +57,11 @@ export interface TableDiff {
   readonly removedIndexes: readonly string[];
   readonly addedPolicies: readonly string[];
   readonly removedPolicies: readonly string[];
+  /** Columns whose declared reference has no matching constraint in the database. */
+  readonly addedForeignKeys: readonly string[];
+  /** Foreign keys the database holds that no column declares. */
+  readonly removedForeignKeys: readonly RemovedForeignKey[];
+  readonly changedForeignKeys: readonly ForeignKeyDelta[];
   readonly rlsTargetEnabled: boolean;
   readonly rlsLiveEnabled: boolean;
 }
@@ -122,6 +160,58 @@ function diffOneTable(target: TableDefinition, live: LiveTable): TableDiff {
     if (!targetPolicies.has(name)) removedPolicies.push(name);
   }
 
+  // Foreign keys are matched by the column they sit on, not by name: the emitter writes an inline
+  // reference and lets Postgres name it, so the declaration has no name to match against.
+  const declaredFks = declaredForeignKeys(target);
+  const liveFkByColumn = new Map<string, (typeof live.foreignKeys)[number]>();
+  for (const fk of live.foreignKeys) {
+    if (fk.columns.length === 1) liveFkByColumn.set(fk.columns[0] as string, fk);
+  }
+  const addedForeignKeys: string[] = [];
+  const removedForeignKeys: RemovedForeignKey[] = [];
+  const changedForeignKeys: ForeignKeyDelta[] = [];
+  const matchedFkNames = new Set<string>();
+  for (const declared of declaredFks) {
+    const liveFk = liveFkByColumn.get(declared.column);
+    if (liveFk === undefined) {
+      addedForeignKeys.push(declared.column);
+      continue;
+    }
+    matchedFkNames.add(liveFk.name);
+    const reasons: ForeignKeyDelta["reasons"][number][] = [];
+    const liveTarget = `${liveFk.targetSchema}.${liveFk.targetTable}`;
+    const liveColumn = (liveFk.targetColumns[0] ?? "") as string;
+    if (
+      liveTarget !== `${declared.targetSchema}.${declared.targetTable}` ||
+      liveColumn !== declared.targetColumn ||
+      liveFk.targetColumns.length !== 1
+    ) {
+      reasons.push("target");
+    }
+    if (liveFk.onDelete !== declared.onDelete) reasons.push("on_delete");
+    if (reasons.length > 0) {
+      changedForeignKeys.push({
+        column: declared.column,
+        constraintName: liveFk.name,
+        target: {
+          table: `${declared.targetSchema}.${declared.targetTable}`,
+          column: declared.targetColumn,
+          onDelete: declared.onDelete,
+        },
+        live: { table: liveTarget, column: liveColumn, onDelete: liveFk.onDelete },
+        reasons,
+      });
+    }
+  }
+  for (const fk of live.foreignKeys) {
+    if (matchedFkNames.has(fk.name)) continue;
+    removedForeignKeys.push({
+      name: fk.name,
+      columns: fk.columns,
+      target: `${fk.targetSchema}.${fk.targetTable}(${fk.targetColumns.join(", ")})`,
+    });
+  }
+
   return {
     table: target.name,
     addedColumns,
@@ -131,6 +221,9 @@ function diffOneTable(target: TableDefinition, live: LiveTable): TableDiff {
     removedIndexes,
     addedPolicies,
     removedPolicies,
+    addedForeignKeys,
+    removedForeignKeys,
+    changedForeignKeys,
     rlsTargetEnabled: target.rls?.enabled === true,
     rlsLiveEnabled: live.rlsEnabled,
   };
@@ -145,6 +238,9 @@ function tableHasDrift(diff: TableDiff): boolean {
     diff.removedIndexes.length > 0 ||
     diff.addedPolicies.length > 0 ||
     diff.removedPolicies.length > 0 ||
+    diff.addedForeignKeys.length > 0 ||
+    diff.removedForeignKeys.length > 0 ||
+    diff.changedForeignKeys.length > 0 ||
     diff.rlsTargetEnabled !== diff.rlsLiveEnabled
   );
 }
@@ -220,6 +316,11 @@ export function formatSchemaDiff(diff: SchemaDiff): string {
       for (const i of m.removedIndexes) lines.push(`          - index ${i}`);
       for (const p of m.addedPolicies) lines.push(`          + policy ${p}`);
       for (const p of m.removedPolicies) lines.push(`          - policy ${p}`);
+      for (const f of m.addedForeignKeys) lines.push(`          + foreign key on ${f}`);
+      for (const f of m.removedForeignKeys) lines.push(`          - foreign key ${f.name}`);
+      for (const f of m.changedForeignKeys) {
+        lines.push(`          ~ foreign key on ${f.column} [${f.reasons.join(", ")}]`);
+      }
       if (m.rlsTargetEnabled !== m.rlsLiveEnabled) {
         lines.push(
           `          ! RLS target=${m.rlsTargetEnabled} live=${m.rlsLiveEnabled}`,

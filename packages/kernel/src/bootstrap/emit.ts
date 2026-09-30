@@ -1,6 +1,7 @@
 import { qualifyTable, quoteIdent } from "../ddl/identifiers.js";
 import type {
   ColumnDefinition,
+  ColumnReference,
   IndexSpec,
   RlsPolicy,
   TableDefinition,
@@ -92,6 +93,71 @@ export function emitAddUniqueConstraint(
     "  ) THEN",
     `    ALTER TABLE ${fq} ADD CONSTRAINT ${quoteIdent(name)} UNIQUE (${cols});`,
     "  END IF;",
+    "END $$;",
+  ].join("\n");
+}
+
+/**
+ * `ADD CONSTRAINT … FOREIGN KEY` for a reference the database is missing, named the way Postgres
+ * names an inline column reference so a later introspection matches it to the same declaration.
+ *
+ * Unlike a UNIQUE constraint this is not guarded: if the table holds rows the target does not, the
+ * database contradicts a constraint the catalog declares, and that is an integrity problem the
+ * operator needs to see rather than one a migration should quietly work around.
+ */
+export function emitAddForeignKey(
+  table: TableDefinition,
+  column: string,
+  ref: ColumnReference,
+  onDelete: string,
+): string {
+  const target =
+    ref.schema !== undefined
+      ? qualifyTable(ref.schema, ref.table)
+      : quoteIdent(ref.table);
+  return (
+    `ALTER TABLE ${qualifyTable(table.schema, table.name)} ` +
+    `ADD CONSTRAINT ${quoteIdent(foreignKeyConstraintName(table.name, column))} ` +
+    `FOREIGN KEY (${quoteIdent(column)}) REFERENCES ${target}(${quoteIdent(ref.column)}) ` +
+    `ON DELETE ${onDelete};`
+  );
+}
+
+/** What Postgres names a foreign key declared inline on a column. */
+export function foreignKeyConstraintName(table: string, column: string): string {
+  return `${table}_${column}_fkey`;
+}
+
+export function emitDropConstraint(table: TableDefinition, name: string): string {
+  return `ALTER TABLE ${qualifyTable(table.schema, table.name)} DROP CONSTRAINT IF EXISTS ${quoteIdent(name)};`;
+}
+
+/**
+ * Changes a column's type, but only on an empty table, re-checking that in the same transaction.
+ *
+ * Unlike adding a `NOT NULL` column, Postgres will not stop you rewriting a populated column — it
+ * casts every row, reinterpreting data or failing part-way on the first value that will not
+ * convert. Whether that reinterpretation is the intended one is a decision about existing data, so
+ * the statement refuses rather than guess. The count is taken here, not when the plan was built, so
+ * a row inserted in between cannot slip past it.
+ */
+export function emitAlterColumnTypeIfEmpty(
+  table: TableDefinition,
+  column: string,
+  type: string,
+): string {
+  const fq = qualifyTable(table.schema, table.name);
+  const col = quoteIdent(column);
+  const label = `${table.schema}.${table.name}.${column}`;
+  return [
+    "DO $$",
+    "DECLARE existing bigint;",
+    "BEGIN",
+    `  SELECT count(*) INTO existing FROM ${fq};`,
+    "  IF existing > 0 THEN",
+    `    RAISE EXCEPTION 'refusing to change ${label} to ${type}: table holds % row(s) — migrate the data explicitly', existing;`,
+    "  END IF;",
+    `  ALTER TABLE ${fq} ALTER COLUMN ${col} TYPE ${type} USING ${col}::${type};`,
     "END $$;",
   ].join("\n");
 }

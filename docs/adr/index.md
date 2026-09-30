@@ -1,9 +1,9 @@
 # ADR index
 
-285 records. Generated from the ADR files themselves — regenerate rather than
+286 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table.
 
-- **Accepted:** 206  **Proposed:** 79
+- **Accepted:** 207  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -296,3 +296,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0288](0288-integrity-incident-escalation.md) | A compromised audit trail declares an incident | Phase 4 | Accepted | 2026-09-30 |
 | [0289](0289-incident-record-persistence.md) | Giving a declared incident somewhere to live | Phase 4 | Accepted | 2026-09-30 |
 | [0290](0290-meta-schema-reconciliation.md) | Migrating the meta-schema, and the diff that could not see | Phase 4 | Accepted | 2026-09-30 |
+| [0291](0291-foreign-key-reconciliation.md) | Foreign keys the migrator can see, and the steps that were never safe | Phase 4 | Accepted | 2026-09-30 |

@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 285 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 286 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**84 packages + 3 apps, 139 meta-schema tables, ~9,732 tests**, all green, no
+**84 packages + 3 apps, 139 meta-schema tables, ~9,770 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -108,13 +108,21 @@ packages exist at only one layer, noted below where that is true.
   into statements. `apply` runs the plan, so an empty database gets the full bootstrap (the plan
   *is* `emitBootstrapSql` there, pinned by a test) and a migrated one gets only its deltas. Both
   `crossengin apply` and `crossengin-pg apply` take this path and both accept `--plan` to print it
-  without executing. The plan holds one invariant — **every step in it is expected to succeed** —
-  so it contains only additions plus the two always-safe column changes (a default, relaxing
-  `NOT NULL`); a type change, a tightening to `NOT NULL`, and anything that would drop or loosen
-  are reported as `unreconciled` with the SQL, never run.
+  without executing. The plan holds one invariant — **every step in it is expected to succeed** — so
+  anything whose outcome depends on existing data is reported as `unreconciled` with the SQL instead:
+  a type change or a `NOT NULL` tightening on a populated table, a `NOT NULL` column with no default
+  that has nothing to fill existing rows with, an undeclared index or policy, and anything that would
+  drop or loosen. Refusals propagate — an index or constraint covering a column the plan is not
+  adding is refused too (ADR-0291). What *is* planned: every addition, a default change, relaxing
+  `NOT NULL`, and a column type change **on an empty table**, guarded by a `DO` block that re-checks
+  emptiness in its own transaction.
+  **Foreign keys are reconciled** (ADR-0291), matched by column since the emitter writes them inline
+  and unnamed: a declared one missing is added, a changed target or `ON DELETE` is replaced, an
+  undeclared one is reported — unless it blocks a type change, where dropping it is a visible step.
   `canonical.ts` is what makes the diff trustworthy: it rewrites a declared type into
-  `format_type`'s spelling and strips the casts Postgres adds to a default, because comparing the
-  raw text called 138 of 139 tables drifted on a schema that was exactly correct.
+  `format_type`'s spelling, strips the casts Postgres adds to a default, and treats an omitted
+  `ON DELETE` as the RESTRICT the emitter writes — because comparing the raw text called 138 of 139
+  tables drifted on a schema that was exactly correct.
 - **`types`** — deliberately tiny: branded primitive id types (`TenantId`, `UserId`,
   `RequestId`, `ManifestId`). One file.
 - **`config`** — shared TypeScript / ESLint / Prettier config bases. No `src/`.
@@ -589,11 +597,15 @@ opened them.
   `using` clause reconciles to no change. Comparing definitions means normalizing Postgres's own
   rendering of an expression, which is a much less mechanical problem than the type and default
   spellings ADR-0290 fixed. Until then such a change needs a new name or a manual drop.
-- **Foreign keys are not introspected** (ADR-0290), so a declared FK the database lacks goes
-  undetected, an undeclared FK it holds goes unreported, and a column type change cannot be
-  planned around one — which is why type changes are refused rather than attempted (a live run
-  failed with `foreign key constraint … cannot be implemented`). This is the piece that would make
-  type changes safely automatable.
+- **A composite foreign key cannot be declared, only introspected** (ADR-0291). `TableDefinition`
+  has no table-level constraint, so a multi-column foreign key in the database always reads as
+  undeclared and is reported rather than reconciled. Nothing in the catalog wants one yet.
+- **Type changes on a populated table, and `NOT NULL` backfills, remain manual** (ADR-0291). The
+  plan hands over the exact SQL for both; automating either means deciding what happens to existing
+  rows, which is the one thing a migrator should not decide.
+- **The applier halts on the first failure.** Much less consequential now the plan is built to
+  succeed, but for a plan whose steps are largely independent, continuing and reporting every
+  outcome would be strictly more useful (ADR-0290, 0291).
 - **The SLO enforcement loop still does not persist its incidents** (ADR-0289). The
   audit-integrity escalation does, but `SloEnforcementEngine.evaluate()` is synchronous and
   mints ids from a per-process counter, so its `INC-2026-0001` collides with a
@@ -656,7 +668,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 285 records; 206
+hand-editing, so a title or status change cannot drift. 286 records; 207
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 
