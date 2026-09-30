@@ -7,6 +7,7 @@ import {
   checkPostgresVersion,
   checkPreconditions,
   listInstalledExtensions,
+  schemaExists,
   MIN_POSTGRES_MAJOR,
   REQUIRED_EXTENSIONS,
 } from "./preconditions.js";
@@ -135,9 +136,37 @@ describe("checkPostgresVersion", () => {
   });
 });
 
-describe("checkCreatePrivilege", () => {
-  it("returns null when CREATE is granted", async () => {
+const SCHEMA_PRESENT: QueryStub = {
+  match: (sql) => sql.includes("pg_namespace"),
+  result: { rows: [{ present: true }], rowCount: 1 },
+};
+
+const SCHEMA_ABSENT: QueryStub = {
+  match: (sql) => sql.includes("pg_namespace"),
+  result: { rows: [{ present: false }], rowCount: 1 },
+};
+
+describe("schemaExists", () => {
+  it("is true when pg_namespace holds the schema", async () => {
+    await expect(schemaExists(stubbedConnection([SCHEMA_PRESENT]), "meta")).resolves.toBe(true);
+  });
+
+  it("is false when it does not", async () => {
+    await expect(schemaExists(stubbedConnection([SCHEMA_ABSENT]), "meta")).resolves.toBe(false);
+  });
+
+  it("is false when the query returns no rows", async () => {
     const conn = stubbedConnection([
+      { match: (sql) => sql.includes("pg_namespace"), result: { rows: [], rowCount: 0 } },
+    ]);
+    await expect(schemaExists(conn, "meta")).resolves.toBe(false);
+  });
+});
+
+describe("checkCreatePrivilege", () => {
+  it("returns null when CREATE is granted on an existing schema", async () => {
+    const conn = stubbedConnection([
+      SCHEMA_PRESENT,
       {
         match: (sql) => sql.includes("has_schema_privilege"),
         result: { rows: [{ has_privilege: true }], rowCount: 1 },
@@ -148,6 +177,7 @@ describe("checkCreatePrivilege", () => {
 
   it("returns a NO_CREATE_PRIVILEGE problem when denied", async () => {
     const conn = stubbedConnection([
+      SCHEMA_PRESENT,
       {
         match: (sql) => sql.includes("has_schema_privilege"),
         result: { rows: [{ has_privilege: false }], rowCount: 1 },
@@ -156,6 +186,35 @@ describe("checkCreatePrivilege", () => {
     const problem = await checkCreatePrivilege(conn, "meta");
     expect(problem?.code).toBe("NO_CREATE_PRIVILEGE");
     expect(problem?.remedy).toContain("GRANT CREATE");
+  });
+
+  it("never asks has_schema_privilege for a schema that does not exist", async () => {
+    // Postgres raises for a missing schema, which made `apply` throw on the one case its own
+    // first statement (CREATE SCHEMA IF NOT EXISTS) exists to handle.
+    const conn = stubbedConnection([
+      SCHEMA_ABSENT,
+      {
+        match: (sql) => sql.includes("has_database_privilege"),
+        result: { rows: [{ has_privilege: true }], rowCount: 1 },
+      },
+    ]);
+    await expect(checkCreatePrivilege(conn, "meta")).resolves.toBeNull();
+    const calls = (conn.query as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.some((c) => String(c[0]).includes("has_schema_privilege"))).toBe(false);
+  });
+
+  it("falls back to the database CREATE privilege when the schema is absent", async () => {
+    const conn = stubbedConnection([
+      SCHEMA_ABSENT,
+      {
+        match: (sql) => sql.includes("has_database_privilege"),
+        result: { rows: [{ has_privilege: false }], rowCount: 1 },
+      },
+    ]);
+    const problem = await checkCreatePrivilege(conn, "meta");
+    expect(problem?.code).toBe("NO_CREATE_PRIVILEGE");
+    expect(problem?.message).toContain("does not exist");
+    expect(problem?.remedy).toContain("CREATE SCHEMA meta");
   });
 });
 
@@ -181,6 +240,10 @@ describe("listInstalledExtensions", () => {
 describe("checkPreconditions", () => {
   it("returns ok when all checks pass", async () => {
     const conn = stubbedConnection([
+      {
+        match: (sql) => sql.includes("pg_namespace"),
+        result: { rows: [{ present: true }], rowCount: 1 },
+      },
       {
         match: (sql) => sql.includes("pg_extension WHERE extname = 'pg_uuidv7'"),
         result: { rows: [{ has_extension: true, has_function: true }], rowCount: 1 },
@@ -210,6 +273,10 @@ describe("checkPreconditions", () => {
 
   it("aggregates multiple problems", async () => {
     const conn = stubbedConnection([
+      {
+        match: (sql) => sql.includes("pg_namespace"),
+        result: { rows: [{ present: true }], rowCount: 1 },
+      },
       {
         match: (sql) => sql.includes("pg_extension WHERE extname = 'pg_uuidv7'"),
         result: { rows: [{ has_extension: false, has_function: false }], rowCount: 1 },

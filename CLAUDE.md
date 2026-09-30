@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 284 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 285 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**84 packages + 3 apps, 139 meta-schema tables, ~9,647 tests**, all green, no
+**84 packages + 3 apps, 139 meta-schema tables, ~9,732 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -100,9 +100,21 @@ packages exist at only one layer, noted below where that is true.
   `tenancy/` + `workflow/` (tenant resolution, workflow definition validation).
 - **`kernel-pg`** — the impure applier. `PgConnection` + `parsePgEnvConfig` + node-postgres
   binding, advisory-lock-gated per-statement migration application with `_meta_migrations`
-  hash bookkeeping, preconditions, `pg_catalog` introspection + `diffSchema` drift, and the
-  pgcrypto at-rest encryption stack (coverage report, encrypt-on-write column migration,
-  encrypting-view triggers, key rotation planner). Ships the `crossengin-pg` CLI.
+  hash bookkeeping, preconditions, and the pgcrypto at-rest encryption stack (coverage report,
+  encrypt-on-write column migration, encrypting-view triggers, key rotation planner). Ships the
+  `crossengin-pg` CLI.
+  **Migration is reconciliation, not replay** (ADR-0290): `introspectSchema` reads `pg_catalog`,
+  `diffSchema` compares it to `META_TABLES`, and `planSchemaReconciliation` turns the difference
+  into statements. `apply` runs the plan, so an empty database gets the full bootstrap (the plan
+  *is* `emitBootstrapSql` there, pinned by a test) and a migrated one gets only its deltas. Both
+  `crossengin apply` and `crossengin-pg apply` take this path and both accept `--plan` to print it
+  without executing. The plan holds one invariant — **every step in it is expected to succeed** —
+  so it contains only additions plus the two always-safe column changes (a default, relaxing
+  `NOT NULL`); a type change, a tightening to `NOT NULL`, and anything that would drop or loosen
+  are reported as `unreconciled` with the SQL, never run.
+  `canonical.ts` is what makes the diff trustworthy: it rewrites a declared type into
+  `format_type`'s spelling and strips the casts Postgres adds to a default, because comparing the
+  raw text called 138 of 139 tables drifted on a schema that was exactly correct.
 - **`types`** — deliberately tiny: branded primitive id types (`TenantId`, `UserId`,
   `RequestId`, `ManifestId`). One file.
 - **`config`** — shared TypeScript / ESLint / Prettier config bases. No `src/`.
@@ -572,17 +584,16 @@ opened them.
 
 **Load-bearing**
 
-- **Editing an existing meta-schema table breaks `crossengin apply` on an already-applied
-  database.** Statements are keyed by hash, `emitCreateTable` emits a bare `CREATE TABLE`,
-  and the applier halts on first failure — so a changed table definition is a new hash that
-  runs and fails with `relation … already exists`, leaving every later statement unapplied
-  (measured: halted at #312 of 840). ADR-0286 and ADR-0289 both edited a table this way, so
-  `main` carries it. The remedy is manual: drop the table **and** delete its statements from
-  `meta._meta_migrations` before re-applying — dropping alone brings the table back missing
-  the indexes whose unchanged `CREATE INDEX` statements are still marked applied. The real
-  fix is additive meta-schema migration (`IF NOT EXISTS` on the table plus per-column
-  `ADD COLUMN IF NOT EXISTS`), which is ADR-0283's reasoning applied to the kernel's own
-  emitter and is unbuilt.
+- **An index or policy changed *in place* is invisible to the diff** (ADR-0290). `diffSchema`
+  compares both by name only, so renaming nothing and editing an index predicate or a policy's
+  `using` clause reconciles to no change. Comparing definitions means normalizing Postgres's own
+  rendering of an expression, which is a much less mechanical problem than the type and default
+  spellings ADR-0290 fixed. Until then such a change needs a new name or a manual drop.
+- **Foreign keys are not introspected** (ADR-0290), so a declared FK the database lacks goes
+  undetected, an undeclared FK it holds goes unreported, and a column type change cannot be
+  planned around one — which is why type changes are refused rather than attempted (a live run
+  failed with `foreign key constraint … cannot be implemented`). This is the piece that would make
+  type changes safely automatable.
 - **The SLO enforcement loop still does not persist its incidents** (ADR-0289). The
   audit-integrity escalation does, but `SloEnforcementEngine.evaluate()` is synchronous and
   mints ids from a per-process counter, so its `INC-2026-0001` collides with a
@@ -645,7 +656,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 284 records; 205
+hand-editing, so a title or status change cannot drift. 285 records; 206
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

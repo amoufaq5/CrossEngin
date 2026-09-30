@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  emitAddColumn,
+  emitAddUniqueConstraint,
   emitColumn,
   emitCreateTable,
+  emitDropColumnDefault,
+  emitDropColumnNotNull,
   emitIndex,
+  emitSetColumnDefault,
   emitRlsEnable,
   emitRlsPolicy,
   emitSchemaCreate,
@@ -274,5 +279,73 @@ describe("emitTable", () => {
     expect(statements[2]).toMatch(/^ALTER TABLE.*ENABLE ROW LEVEL SECURITY/);
     expect(statements[3]).toMatch(/^CREATE POLICY/);
     expect(statements).toHaveLength(4);
+  });
+});
+
+describe("migration emitters", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "widgets",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "kind", type: "TEXT", notNull: true, default: "'basic'", check: "kind <> ''" },
+      { name: "owner", type: "UUID", references: { schema: "meta", table: "users", column: "id" } },
+    ],
+    primaryKey: ["id"],
+  };
+
+  it("emitAddColumn tolerates the column having appeared already", () => {
+    // A plan is computed from a live schema and applied a moment later.
+    const sql = emitAddColumn(table, table.columns[1] as never);
+    expect(sql).toContain('ALTER TABLE "meta"."widgets" ADD COLUMN IF NOT EXISTS');
+    expect(sql).toContain('"kind" TEXT NOT NULL DEFAULT \'basic\'');
+  });
+
+  it("emitAddColumn carries the column's check and reference", () => {
+    expect(emitAddColumn(table, table.columns[1] as never)).toContain("CHECK (kind <> '')");
+    expect(emitAddColumn(table, table.columns[2] as never)).toContain('REFERENCES "meta"."users"');
+  });
+
+  it("emitAddUniqueConstraint guards on pg_constraint, since Postgres has no IF NOT EXISTS", () => {
+    const sql = emitAddUniqueConstraint(table, "widgets_kind_key", ["kind", "id"]);
+    expect(sql).toContain("SELECT 1 FROM pg_constraint");
+    expect(sql).toContain("conname = 'widgets_kind_key'");
+    expect(sql).toContain("'meta.widgets'::regclass");
+    expect(sql).toContain('ADD CONSTRAINT "widgets_kind_key" UNIQUE ("kind", "id")');
+  });
+
+  it("emitAddUniqueConstraint refuses an unsafe constraint name outright", () => {
+    // The name is interpolated into both an identifier and a string literal, so it is rejected by
+    // `quoteIdent` before it can reach either — failing closed rather than escaping and hoping.
+    expect(() => emitAddUniqueConstraint(table, "od'd", ["id"])).toThrow(/unsafe SQL identifier/);
+    expect(() => emitAddUniqueConstraint(table, "ok_name", ["od'd"])).toThrow(
+      /unsafe SQL identifier/,
+    );
+  });
+
+  it("emitSetColumnDefault and emitDropColumnDefault touch only the default", () => {
+    expect(emitSetColumnDefault(table, "kind", "'basic'")).toBe(
+      'ALTER TABLE "meta"."widgets" ALTER COLUMN "kind" SET DEFAULT \'basic\';',
+    );
+    expect(emitDropColumnDefault(table, "kind")).toBe(
+      'ALTER TABLE "meta"."widgets" ALTER COLUMN "kind" DROP DEFAULT;',
+    );
+  });
+
+  it("emitDropColumnNotNull relaxes nullability", () => {
+    expect(emitDropColumnNotNull(table, "kind")).toBe(
+      'ALTER TABLE "meta"."widgets" ALTER COLUMN "kind" DROP NOT NULL;',
+    );
+  });
+
+  it("emits no statement that drops a column, table or policy", () => {
+    const all = [
+      emitAddColumn(table, table.columns[1] as never),
+      emitAddUniqueConstraint(table, "k", ["id"]),
+      emitSetColumnDefault(table, "kind", "'b'"),
+      emitDropColumnDefault(table, "kind"),
+      emitDropColumnNotNull(table, "kind"),
+    ].join("\n");
+    expect(all).not.toMatch(/DROP (TABLE|COLUMN|POLICY|INDEX)/);
   });
 });

@@ -1,5 +1,11 @@
 import type { TableDefinition } from "@crossengin/kernel/bootstrap";
 
+import {
+  APPLIER_OWNED_TABLES,
+  canonicalPgDefault,
+  canonicalPgType,
+  expectedIndexNames,
+} from "./canonical.js";
 import type { LiveColumn, LiveSchema, LiveTable } from "./introspection.js";
 
 export interface ColumnDelta {
@@ -31,29 +37,21 @@ export interface SchemaDiff {
   readonly hasDrift: boolean;
 }
 
-function normalizeType(value: string): string {
-  return value.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function normalizeDefault(value: string | null | undefined): string | null {
-  if (value === null || value === undefined) return null;
-  const trimmed = value.replace(/\s+/g, " ").trim().toLowerCase();
-  return trimmed.length === 0 ? null : trimmed;
-}
-
 function compareColumn(
   target: { readonly type: string; readonly notNull?: boolean; readonly default?: string | undefined },
   live: LiveColumn,
 ): ColumnDelta["reasons"] {
   const reasons: ColumnDelta["reasons"][number][] = [];
-  if (normalizeType(target.type) !== normalizeType(live.dataType)) {
+  // Both sides are rewritten into `format_type`'s spelling before comparing; see `canonical.ts`
+  // for why comparing the declared and introspected text directly cannot work.
+  if (canonicalPgType(target.type) !== canonicalPgType(live.dataType)) {
     reasons.push("type");
   }
   const targetNullable = target.notNull !== true;
   if (targetNullable !== live.isNullable) {
     reasons.push("nullable");
   }
-  if (normalizeDefault(target.default) !== normalizeDefault(live.defaultExpr)) {
+  if (canonicalPgDefault(target.default) !== canonicalPgDefault(live.defaultExpr)) {
     reasons.push("default");
   }
   return reasons;
@@ -96,14 +94,17 @@ function diffOneTable(target: TableDefinition, live: LiveTable): TableDiff {
   }
 
   const liveIndexes = new Map(live.indexes.map((i) => [i.name, i] as const));
-  const targetIndexes = new Map((target.indexes ?? []).map((i) => [i.name, i] as const));
+  // Every non-primary index the table should carry, including the ones a UNIQUE constraint
+  // creates — those are declared in `uniqueConstraints` or on a column, never in `indexes`.
+  const expected = expectedIndexNames(target);
   const addedIndexes: string[] = [];
   const removedIndexes: string[] = [];
-  for (const name of targetIndexes.keys()) {
+  for (const name of [...expected.indexes, ...expected.constraints]) {
     if (!liveIndexes.has(name)) addedIndexes.push(name);
   }
   for (const idx of liveIndexes.values()) {
-    if (!targetIndexes.has(idx.name) && !idx.primary) {
+    if (idx.primary) continue;
+    if (!expected.indexes.has(idx.name) && !expected.constraints.has(idx.name)) {
       removedIndexes.push(idx.name);
     }
   }
@@ -174,9 +175,9 @@ export function diffSchema(
     }
   }
   for (const liveTable of live.tables) {
-    if (!targetByName.has(liveTable.name)) {
-      removedTables.push(liveTable.name);
-    }
+    if (targetByName.has(liveTable.name)) continue;
+    if (APPLIER_OWNED_TABLES.has(liveTable.name)) continue;
+    removedTables.push(liveTable.name);
   }
 
   return {

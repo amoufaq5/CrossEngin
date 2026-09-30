@@ -48,6 +48,11 @@ function fakeConnection(state: FakeDbState): PgConnection {
         rowCount: 1,
       };
     }
+    if (sql.includes("pg_namespace")) {
+      // The fake database always has the schema; the absent-schema path is covered in
+      // preconditions.test.ts.
+      return { rows: [{ present: true }] as unknown as readonly T[], rowCount: 1 };
+    }
     if (sql.includes("has_schema_privilege")) {
       return {
         rows: [{ has_privilege: state.hasCreatePrivilege }] as unknown as readonly T[],
@@ -143,6 +148,55 @@ describe("MigrationApplier.apply", () => {
     expect(report.haltedAt).toBeNull();
     expect(state.lockAcquisitions).toHaveLength(1);
     expect(state.lockAcquisitions[0]?.key).toBe(ADVISORY_LOCK_KEY);
+  });
+
+  it("re-executes every statement when skipApplied is false", async () => {
+    // What a reconciliation plan needs. The log records what *ran*, not what the database holds, so
+    // a statement whose object was later dropped is still marked applied — and skipping it would
+    // leave the object missing.
+    const state = freshState();
+    const conn = fakeConnection(state);
+    const statements = ["CREATE TABLE foo (id UUID PRIMARY KEY);"];
+    const applier = new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements,
+      skipApplied: false,
+    });
+
+    const first = await applier.apply();
+    expect(first.executed).toBe(1);
+
+    const second = await applier.apply();
+    expect(second.executed).toBe(1);
+    expect(second.skipped).toBe(0);
+    expect(second.failed).toBe(0);
+  });
+
+  it("skips by default, so the bootstrap path is unchanged", async () => {
+    const state = freshState();
+    const conn = fakeConnection(state);
+    const applier = new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: ["CREATE TABLE foo (id UUID PRIMARY KEY);"],
+    });
+    await applier.apply();
+    expect((await applier.apply()).skipped).toBe(1);
+  });
+
+  it("never consults the log at all when skipApplied is false", async () => {
+    const state = freshState();
+    const conn = fakeConnection(state);
+    const applier = new MigrationApplier({
+      connection: conn,
+      schema: "meta",
+      statements: ["CREATE TABLE foo (id UUID PRIMARY KEY);"],
+      skipApplied: false,
+    });
+    await applier.apply();
+    const calls = (conn.query as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    expect(calls.some((c) => String(c[0]).includes("SELECT succeeded FROM"))).toBe(false);
   });
 
   it("is a no-op on a re-run against a populated database", async () => {

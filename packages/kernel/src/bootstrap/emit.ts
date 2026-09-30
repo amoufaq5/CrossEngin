@@ -57,6 +57,65 @@ export function emitCreateTable(def: TableDefinition): string {
   return `CREATE TABLE ${tableName} (\n${lines.join(",\n")}\n);`;
 }
 
+/**
+ * `ADD COLUMN` for a column an existing table is missing. `IF NOT EXISTS` because a plan is
+ * computed from a live schema and applied a moment later, so the statement has to tolerate the
+ * column having appeared in between.
+ *
+ * The column's own `NOT NULL`, `DEFAULT`, `CHECK` and `REFERENCES` come along, which is what makes
+ * this faithful to the declaration rather than a nullable approximation of it. A `NOT NULL` column
+ * with no default on a populated table is refused by Postgres — correctly, since filling it is a
+ * decision about existing data.
+ */
+export function emitAddColumn(table: TableDefinition, col: ColumnDefinition): string {
+  return `ALTER TABLE ${qualifyTable(table.schema, table.name)} ADD COLUMN IF NOT EXISTS ${emitColumn(col)};`;
+}
+
+/**
+ * `ADD CONSTRAINT … UNIQUE`, guarded by a `pg_constraint` lookup because Postgres has no
+ * `IF NOT EXISTS` for constraints. A missing UNIQUE constraint cannot be repaired with
+ * `CREATE INDEX`: that would leave a unique index with no constraint behind it, which nothing
+ * declaring the table asked for.
+ */
+export function emitAddUniqueConstraint(
+  table: TableDefinition,
+  name: string,
+  columns: readonly string[],
+): string {
+  const fq = qualifyTable(table.schema, table.name);
+  const cols = columns.map(quoteIdent).join(", ");
+  return [
+    "DO $$ BEGIN",
+    "  IF NOT EXISTS (",
+    "    SELECT 1 FROM pg_constraint",
+    `     WHERE conname = ${quoteLiteral(name)} AND conrelid = ${quoteLiteral(`${table.schema}.${table.name}`)}::regclass`,
+    "  ) THEN",
+    `    ALTER TABLE ${fq} ADD CONSTRAINT ${quoteIdent(name)} UNIQUE (${cols});`,
+    "  END IF;",
+    "END $$;",
+  ].join("\n");
+}
+
+export function emitSetColumnDefault(
+  table: TableDefinition,
+  column: string,
+  defaultExpr: string,
+): string {
+  return `ALTER TABLE ${qualifyTable(table.schema, table.name)} ALTER COLUMN ${quoteIdent(column)} SET DEFAULT ${defaultExpr};`;
+}
+
+export function emitDropColumnDefault(table: TableDefinition, column: string): string {
+  return `ALTER TABLE ${qualifyTable(table.schema, table.name)} ALTER COLUMN ${quoteIdent(column)} DROP DEFAULT;`;
+}
+
+export function emitDropColumnNotNull(table: TableDefinition, column: string): string {
+  return `ALTER TABLE ${qualifyTable(table.schema, table.name)} ALTER COLUMN ${quoteIdent(column)} DROP NOT NULL;`;
+}
+
+function quoteLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 export function emitIndex(table: TableDefinition, idx: IndexSpec): string {
   const tableName = qualifyTable(table.schema, table.name);
   const using = idx.kind !== undefined && idx.kind !== "btree" ? ` USING ${idx.kind.toUpperCase()}` : "";
