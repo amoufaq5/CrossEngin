@@ -1,13 +1,21 @@
-import type { TableDefinition } from "@crossengin/kernel/bootstrap";
+import type { TableConstraintKind, TableDefinition } from "@crossengin/kernel/bootstrap";
 
 import {
   APPLIER_OWNED_TABLES,
   canonicalPgDefault,
   canonicalPgType,
   canonicalPolicyRoles,
+  declaredCheckConstraints,
+  declaredConstraintOnDelete,
+  declaredConstraintOnUpdate,
+  declaredConstraintTarget,
+  declaredForeignKeyConstraints,
   declaredForeignKeys,
   declaredPolicyCommand,
+  declaredPolicyPermissive,
   declaredPolicyRoles,
+  declaredUniqueConstraints,
+  expectedCheckConstraintNames,
   expectedIndexNames,
   samePolicyRoles,
 } from "./canonical.js";
@@ -68,13 +76,56 @@ export interface IndexDelta {
   readonly constraintBacked: boolean;
 }
 
-export const POLICY_DELTA_REASONS = ["using", "check", "command", "roles"] as const;
+export const POLICY_DELTA_REASONS = [
+  "using",
+  "check",
+  "command",
+  "roles",
+  "permissive",
+] as const;
 export type PolicyDeltaReason = (typeof POLICY_DELTA_REASONS)[number];
 
 export interface PolicyDelta {
   readonly name: string;
   readonly reasons: readonly PolicyDeltaReason[];
   readonly detail: string;
+}
+
+export const CONSTRAINT_DELTA_REASONS = [
+  "kind",
+  "columns",
+  "expression",
+  "target",
+  "on_delete",
+  "on_update",
+] as const;
+export type ConstraintDeltaReason = (typeof CONSTRAINT_DELTA_REASONS)[number];
+
+/** A table-level constraint the catalog declares and the database does not hold. */
+export interface AddedConstraint {
+  readonly name: string;
+  readonly kind: TableConstraintKind;
+}
+
+/** A table-level constraint present under the declared name but not the declared constraint. */
+export interface ConstraintDelta {
+  readonly name: string;
+  readonly kind: TableConstraintKind;
+  readonly reasons: readonly ConstraintDeltaReason[];
+  readonly detail: string;
+}
+
+/**
+ * A CHECK constraint the database holds that nothing in the catalog accounts for.
+ *
+ * Only checks appear here. An undeclared foreign key already has `removedForeignKeys`, and an
+ * undeclared UNIQUE constraint shows up as `removedIndexes` through its backing index — both predate
+ * table-level constraints and neither needed a second home.
+ */
+export interface RemovedConstraint {
+  readonly name: string;
+  readonly columns: readonly string[];
+  readonly expression: string | null;
 }
 
 export interface TableDiff {
@@ -94,6 +145,14 @@ export interface TableDiff {
   /** Foreign keys the database holds that no column declares. */
   readonly removedForeignKeys: readonly RemovedForeignKey[];
   readonly changedForeignKeys: readonly ForeignKeyDelta[];
+  /**
+   * Table-level constraints the database lacks. Only `check` and `foreign_key` land here: a
+   * `kind: "unique"` constraint is the same object as a `uniqueConstraints` entry and goes through
+   * `addedIndexes`, so planning it from both would plan it twice.
+   */
+  readonly addedConstraints: readonly AddedConstraint[];
+  readonly removedConstraints: readonly RemovedConstraint[];
+  readonly changedConstraints: readonly ConstraintDelta[];
   readonly rlsTargetEnabled: boolean;
   readonly rlsLiveEnabled: boolean;
 }
@@ -160,6 +219,29 @@ function comparePredicate(
   return declaredRendering === live ? null : `${live} → ${declaredRendering}`;
 }
 
+/**
+ * Compares a declared CHECK expression against the stored one.
+ *
+ * Unlike `comparePredicate` this never reads a missing side as absent. The constraint row exists on
+ * both sides by the time this is called, so a null rendering or a null `pg_get_expr` is *undetermined*
+ * and the expression is simply not compared — the ADR-0292 rule, and the one that keeps a deparser
+ * this version cannot read from reporting drift on a schema nobody touched.
+ */
+function compareCheckExpression(
+  table: string,
+  declared: string,
+  live: string | null,
+  rendered: RenderedExpressions,
+): string | null {
+  const declaredRendering = rendered.byRequest.get(expressionKey(table, declared));
+  if (declaredRendering === undefined) return null;
+  if (declaredRendering === null) {
+    return `declared expression cannot be applied to this table: ${declared}`;
+  }
+  if (live === null) return null;
+  return declaredRendering === live ? null : `${live} → ${declaredRendering}`;
+}
+
 /** Every declared expression on a table, for the renderer to deparse. */
 export function expressionRequestsFor(
   table: TableDefinition,
@@ -172,7 +254,127 @@ export function expressionRequestsFor(
     out.push({ table: table.name, expr: policy.using });
     if (policy.check !== undefined) out.push({ table: table.name, expr: policy.check });
   }
+  // A table-level CHECK is a boolean expression over the table's columns, exactly like an index
+  // predicate and a policy clause, so it goes through the same deparser rather than a second one.
+  for (const check of declaredCheckConstraints(table)) {
+    out.push({ table: table.name, expr: check.expression });
+  }
   return out;
+}
+
+/**
+ * Compares the table-level constraints the catalog declares against what the database holds.
+ *
+ * Matched **by name**, which is why the name is required on the declaration. ADR-0291's trick of
+ * matching a foreign key by its column only worked because an inline reference is single-column and
+ * unnamed; two composite keys over overlapping column sets cannot be told apart that way.
+ *
+ * `claimedForeignKeys` is filled in with every live foreign key a declaration here accounts for, so
+ * the column-matching pass that follows does not claim it a second time and the undeclared-key report
+ * does not name it.
+ */
+function diffTableConstraints(
+  target: TableDefinition,
+  live: LiveTable,
+  rendered: RenderedExpressions,
+  claimedForeignKeys: Set<string>,
+): {
+  readonly added: AddedConstraint[];
+  readonly changed: ConstraintDelta[];
+  readonly removed: RemovedConstraint[];
+} {
+  const added: AddedConstraint[] = [];
+  const changed: ConstraintDelta[] = [];
+  const removed: RemovedConstraint[] = [];
+
+  const liveChecks = new Map(live.checkConstraints.map((c) => [c.name, c] as const));
+  const liveFks = new Map(live.foreignKeys.map((f) => [f.name, f] as const));
+
+  for (const check of declaredCheckConstraints(target)) {
+    const liveCheck = liveChecks.get(check.name);
+    if (liveCheck === undefined) {
+      // The name may exist as a foreign key instead, which is a different constraint wearing the
+      // declared name rather than a missing one.
+      const asFk = liveFks.get(check.name);
+      if (asFk !== undefined) {
+        claimedForeignKeys.add(asFk.name);
+        changed.push({
+          name: check.name,
+          kind: "check",
+          reasons: ["kind"],
+          detail: `database holds a foreign key under this name, not a CHECK`,
+        });
+        continue;
+      }
+      added.push({ name: check.name, kind: "check" });
+      continue;
+    }
+    const delta = compareCheckExpression(
+      target.name,
+      check.expression,
+      liveCheck.expression,
+      rendered,
+    );
+    if (delta !== null) {
+      changed.push({ name: check.name, kind: "check", reasons: ["expression"], detail: delta });
+    }
+  }
+
+  for (const fk of declaredForeignKeyConstraints(target)) {
+    const liveFk = liveFks.get(fk.name);
+    if (liveFk === undefined) {
+      const asCheck = liveChecks.get(fk.name);
+      if (asCheck !== undefined) {
+        changed.push({
+          name: fk.name,
+          kind: "foreign_key",
+          reasons: ["kind"],
+          detail: "database holds a CHECK under this name, not a foreign key",
+        });
+        continue;
+      }
+      added.push({ name: fk.name, kind: "foreign_key" });
+      continue;
+    }
+    claimedForeignKeys.add(liveFk.name);
+    const reasons: ConstraintDeltaReason[] = [];
+    const details: string[] = [];
+    if (!sameColumns(fk.columns, liveFk.columns)) {
+      reasons.push("columns");
+      details.push(`columns (${liveFk.columns.join(", ")}) → (${fk.columns.join(", ")})`);
+    }
+    const declaredTarget = `${declaredConstraintTarget(target, fk)}(${fk.references.columns.join(", ")})`;
+    const liveTarget = `${liveFk.targetSchema}.${liveFk.targetTable}(${liveFk.targetColumns.join(", ")})`;
+    if (declaredTarget !== liveTarget) {
+      reasons.push("target");
+      details.push(`${liveTarget} → ${declaredTarget}`);
+    }
+    const declaredDelete = declaredConstraintOnDelete(fk);
+    if (liveFk.onDelete !== declaredDelete) {
+      reasons.push("on_delete");
+      details.push(`ON DELETE ${liveFk.onDelete} → ${declaredDelete}`);
+    }
+    const declaredUpdate = declaredConstraintOnUpdate(fk);
+    if (liveFk.onUpdate !== declaredUpdate) {
+      reasons.push("on_update");
+      details.push(`ON UPDATE ${liveFk.onUpdate} → ${declaredUpdate}`);
+    }
+    if (reasons.length > 0) {
+      changed.push({ name: fk.name, kind: "foreign_key", reasons, detail: details.join("; ") });
+    }
+  }
+
+  const expectedChecks = expectedCheckConstraintNames(target);
+  for (const liveCheck of live.checkConstraints) {
+    if (expectedChecks.has(liveCheck.name)) continue;
+    removed.push({
+      name: liveCheck.name,
+      columns: liveCheck.columns,
+      expression: liveCheck.expression,
+    });
+  }
+
+  return { added, changed, removed };
 }
 
 function diffOneTable(
@@ -262,14 +464,17 @@ function diffOneTable(
         name: idx.name,
         reasons,
         detail: details.join("; "),
-        constraintBacked: false,
+        // From the live index, not from how the catalog declares it. An index the catalog declares
+        // plainly can still be owned by a constraint in the database — a unique constraint that
+        // became a predicated unique index is exactly that — and `DROP INDEX` on it is refused.
+        constraintBacked: liveIdx.constraintBacked,
       });
     }
   }
 
   // A UNIQUE constraint's backing index carries its columns too, and changing them is a constraint
   // operation rather than an index one — `DROP INDEX` on it is refused outright.
-  for (const uc of target.uniqueConstraints ?? []) {
+  for (const uc of declaredUniqueConstraints(target)) {
     const liveIdx = liveIndexes.get(uc.name);
     if (liveIdx === undefined) continue;
     if (sameColumns(uc.columns, liveIdx.columns) && liveIdx.unique) continue;
@@ -330,22 +535,40 @@ function diffOneTable(
         `TO ${canonicalPolicyRoles(liveRoles).join(", ")} → TO ${declaredRoles.join(", ")}`,
       );
     }
+    // `polpermissive` is a boolean, so there is nothing to canonicalise on the live side — but null
+    // still means undetermined rather than permissive, so it is skipped like the other two. Reading
+    // an absent value as the default is exactly how a restrictive policy came to look permissive.
+    const livePermissive = livePolicy.permissive ?? null;
+    const declaredPermissive = declaredPolicyPermissive(policy);
+    if (livePermissive !== null && livePermissive !== declaredPermissive) {
+      reasons.push("permissive");
+      details.push(
+        `AS ${livePermissive ? "PERMISSIVE" : "RESTRICTIVE"} → ` +
+          `AS ${declaredPermissive ? "PERMISSIVE" : "RESTRICTIVE"}`,
+      );
+    }
     if (reasons.length > 0) {
       changedPolicies.push({ name, reasons, detail: details.join("; ") });
     }
   }
 
-  // Foreign keys are matched by the column they sit on, not by name: the emitter writes an inline
-  // reference and lets Postgres name it, so the declaration has no name to match against.
+  // Table-level constraints go first, because a declared one matched **by name** claims the live
+  // foreign key it names — otherwise the column-matching pass below would claim it a second time and
+  // the undeclared-key report would name a key the catalog does declare.
+  const matchedFkNames = new Set<string>();
+  const tableConstraints = diffTableConstraints(target, live, rendered, matchedFkNames);
+
+  // A column-level reference is matched by the column it sits on, not by name: the emitter writes it
+  // inline and lets Postgres name it, so the declaration has no name to match against.
   const declaredFks = declaredForeignKeys(target);
   const liveFkByColumn = new Map<string, (typeof live.foreignKeys)[number]>();
   for (const fk of live.foreignKeys) {
+    if (matchedFkNames.has(fk.name)) continue;
     if (fk.columns.length === 1) liveFkByColumn.set(fk.columns[0] as string, fk);
   }
   const addedForeignKeys: string[] = [];
   const removedForeignKeys: RemovedForeignKey[] = [];
   const changedForeignKeys: ForeignKeyDelta[] = [];
-  const matchedFkNames = new Set<string>();
   for (const declared of declaredFks) {
     const liveFk = liveFkByColumn.get(declared.column);
     if (liveFk === undefined) {
@@ -401,6 +624,9 @@ function diffOneTable(
     addedForeignKeys,
     removedForeignKeys,
     changedForeignKeys,
+    addedConstraints: tableConstraints.added,
+    removedConstraints: tableConstraints.removed,
+    changedConstraints: tableConstraints.changed,
     rlsTargetEnabled: target.rls?.enabled === true,
     rlsLiveEnabled: live.rlsEnabled,
   };
@@ -420,6 +646,9 @@ function tableHasDrift(diff: TableDiff): boolean {
     diff.addedForeignKeys.length > 0 ||
     diff.removedForeignKeys.length > 0 ||
     diff.changedForeignKeys.length > 0 ||
+    diff.addedConstraints.length > 0 ||
+    diff.removedConstraints.length > 0 ||
+    diff.changedConstraints.length > 0 ||
     diff.rlsTargetEnabled !== diff.rlsLiveEnabled
   );
 }
@@ -513,6 +742,17 @@ export function formatSchemaDiff(diff: SchemaDiff): string {
       for (const f of m.removedForeignKeys) lines.push(`          - foreign key ${f.name}`);
       for (const f of m.changedForeignKeys) {
         lines.push(`          ~ foreign key on ${f.column} [${f.reasons.join(", ")}]`);
+      }
+      for (const c of m.addedConstraints) {
+        lines.push(`          + ${c.kind} constraint ${c.name}`);
+      }
+      for (const c of m.removedConstraints) {
+        lines.push(`          - check constraint ${c.name}`);
+      }
+      for (const c of m.changedConstraints) {
+        lines.push(
+          `          ~ ${c.kind} constraint ${c.name} [${c.reasons.join(", ")}] ${c.detail}`,
+        );
       }
       if (m.rlsTargetEnabled !== m.rlsLiveEnabled) {
         lines.push(

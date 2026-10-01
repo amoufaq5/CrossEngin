@@ -52,7 +52,12 @@ describe("runApply --dry-run", () => {
       statements: string[];
     };
     expect(result.schema).toBe("meta");
-    expect(result.tableCount).toBe(139);
+    // Checked against what was emitted rather than against a literal. A hardcoded count goes stale
+    // every time the catalog gains a table — a failure that says nothing about the CLI — while this
+    // asserts the property that matters: the count reported is the number of tables actually emitted.
+    const created = result.statements.filter((sql) => sql.startsWith("CREATE TABLE"));
+    expect(result.tableCount).toBe(created.length);
+    expect(result.tableCount).toBeGreaterThan(100);
     expect(result.statementCount).toBeGreaterThan(100);
     expect(result.statements.length).toBe(result.statementCount);
   });

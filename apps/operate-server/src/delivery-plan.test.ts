@@ -161,15 +161,29 @@ describe("planDelivery", () => {
     );
   });
 
-  it("keeps a suppressed address deliverable for a non-suppressible category", () => {
+  it("keeps a consent-suppressed address deliverable for a non-suppressible category", () => {
+    // An unsubscribe cannot stop a security alert.
+    const plan = planDelivery({
+      dispatch: dispatch({ category: "security_alert" }),
+      recipients: [recipient(1, "a@example.com")],
+      suppressions: [{ ...suppression("a@example.com"), reason: "unsubscribe" }],
+      now: NOW,
+    });
+    expect(plan.deliverable).toHaveLength(1);
+    expect(plan.ineligible).toHaveLength(0);
+  });
+
+  it("withholds a non-suppressible category from a hard-bounced address", () => {
+    // A dead mailbox is not a preference: the alert cannot arrive, and sending anyway feeds the
+    // bounce rate a provider throttles the whole sending domain over.
     const plan = planDelivery({
       dispatch: dispatch({ category: "security_alert" }),
       recipients: [recipient(1, "a@example.com")],
       suppressions: [suppression("a@example.com")],
       now: NOW,
     });
-    expect(plan.deliverable).toHaveLength(1);
-    expect(plan.ineligible).toHaveLength(0);
+    expect(plan.deliverable).toHaveLength(0);
+    expect(plan.ineligible[0]?.eligibility.reason).toBe("suppressed");
   });
 
   it("routes a marketing recipient without explicit opt-in to not_opted_in", () => {

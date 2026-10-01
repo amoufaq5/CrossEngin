@@ -1262,6 +1262,16 @@ export const META_FEATURE_FLAGS: TableDefinition = {
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
     {
+      // The contract's own id. Without it this table could not store a `FeatureFlag` — only a
+      // surrogate and a `key` — which is why every `flag_id UUID` reference elsewhere in the catalog
+      // pointed at something no contract record carries (ADR-0296).
+      name: "flag_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "feature_flags_flag_id_key" },
+      check: "flag_id ~ '^ff_[a-z0-9]{8,32}$'",
+    },
+    {
       name: "key",
       type: "TEXT",
       notNull: true,
@@ -1269,19 +1279,80 @@ export const META_FEATURE_FLAGS: TableDefinition = {
       check: "key ~ '^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$'",
     },
     {
+      // Seven kinds, not four. The CHECK admitted half the contract's vocabulary, so a
+      // multivariate, percentage_rollout or kill_switch flag was unstorable.
       name: "kind",
       type: "TEXT",
       notNull: true,
-      check: "kind IN ('boolean', 'string', 'number', 'json')",
+      check:
+        "kind IN ('boolean', 'string', 'number', 'json', 'multivariate', 'percentage_rollout', 'kill_switch')",
     },
     { name: "description", type: "TEXT", notNull: true },
-    { name: "default_value", type: "JSONB", notNull: true },
+    { name: "label", type: "TEXT", notNull: true },
+    {
+      // TEXT, not JSONB. The contract holds this as text it has already validated as parseable;
+      // JSONB hands back Postgres's own re-serialisation — keys resorted, `1e3` become `1000` — so a
+      // round trip would not return what was stored. Its sibling
+      // `feature_flag_kill_switches.overridden_value_json` is TEXT for the same reason.
+      //
+      // The *name* stays `default_value` deliberately, though `default_value_json` would read
+      // better: the reconciler has no concept of a rename, so renaming would add the new column and
+      // report the old one as undeclared without dropping it — leaving a `NOT NULL` column with no
+      // default that every insert would then fail on (ADR-0291 refuses to drop or loosen).
+      name: "default_value",
+      type: "TEXT",
+      notNull: true,
+    },
+    { name: "killed_value_json", type: "TEXT" },
+    {
+      name: "status",
+      type: "TEXT",
+      notNull: true,
+      check: "status IN ('draft', 'active', 'paused', 'archived')",
+    },
     {
       name: "environments",
       type: "JSONB",
       notNull: true,
       default: "'[]'::jsonb",
     },
+    { name: "variants", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    {
+      name: "risk_level",
+      type: "TEXT",
+      notNull: true,
+      check: "risk_level IN ('low', 'medium', 'high', 'critical')",
+    },
+    // UUID without a `meta.users` reference, for the reason ADR-0296 measured live on
+    // `armed_by_user_id`: the contract types these as plain UUIDs, and a flag created by the
+    // in-product Architect or a pack installer is a well-formed UUID with no user row.
+    { name: "owner_user_id", type: "UUID", notNull: true },
+    { name: "owner_team", type: "TEXT", notNull: true },
+    { name: "tags", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    { name: "related_deployment_id", type: "TEXT" },
+    { name: "related_incident_id", type: "TEXT" },
+    { name: "targeting_rule_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    {
+      name: "requires_four_eyes_to_toggle",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    {
+      name: "requires_incident_to_kill",
+      type: "BOOLEAN",
+      notNull: true,
+      default: "false",
+    },
+    { name: "expires_at", type: "TIMESTAMPTZ" },
+    { name: "created_by", type: "UUID", notNull: true },
+    { name: "archived_by", type: "UUID" },
+    { name: "archived_reason", type: "TEXT" },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    // Superseded but kept: `enabled` is subsumed by `status` and `rules` by `targeting_rule_ids`.
+    // Both carry defaults so an insert that names neither still succeeds, and dropping a column is
+    // what ADR-0291 refuses — so they stay declared rather than becoming permanent drift.
+    // `idx_feature_flags_enabled` loses its reader the same way ADR-0296's six orphans did.
     {
       name: "rules",
       type: "JSONB",
@@ -1297,7 +1368,24 @@ export const META_FEATURE_FLAGS: TableDefinition = {
   indexes: [
     { name: "idx_feature_flags_enabled", columns: ["enabled"] },
     { name: "idx_feature_flags_archived_at", columns: ["archived_at"] },
+    { name: "idx_feature_flags_tenant", columns: ["tenant_id"] },
+    { name: "idx_feature_flags_status", columns: ["status"] },
+    { name: "idx_feature_flags_environments", columns: ["environments"], kind: "gin" },
   ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        // `IS NULL OR …`, unlike `meta.audit_integrity_verdicts`, and the difference is the point: a
+        // platform-wide flag is *meant* to be evaluated by every tenant's gateway, whereas a
+        // platform-chain tamper verdict is the last thing to broadcast. Same nullable column, opposite
+        // intent, so opposite policy.
+        name: "feature_flags_tenant_or_platform",
+        using:
+          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      },
+    ],
+  },
 };
 
 export const META_DEPLOYMENTS: TableDefinition = {
@@ -4015,6 +4103,25 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
+  constraints: [
+    {
+      // The two cross-column rules ADR-0296 recorded as having nowhere to live: a two-column
+      // comparison is not expressible as a column CHECK, so until `TableDefinition.constraints`
+      // existed both were enforced only by the re-parse on read.
+      kind: "check",
+      name: "incident_communications_bounces_check",
+      expression: "bounces_count <= recipient_count",
+    },
+    {
+      // `IS NULL OR` is load-bearing, not defensive. `breach_notification_deadline_at` is nullable,
+      // and a CHECK that evaluates to NULL is *passed* by Postgres — so without the guard this would
+      // look like it worked while meaning nothing for every non-breach communication.
+      kind: "check",
+      name: "incident_communications_breach_window_check",
+      expression:
+        "breach_notification_deadline_at IS NULL OR published_at <= breach_notification_deadline_at",
+    },
+  ],
   indexes: [
     {
       name: "idx_incident_communications_incident_published",
@@ -5223,13 +5330,21 @@ export const META_NOTIFICATION_SUPPRESSIONS: TableDefinition = {
     { name: "notes", type: "TEXT" },
   ],
   primaryKey: ["id"],
-  uniqueConstraints: [
+  indexes: [
+    // A unique *index*, not a unique constraint, because only an index takes a predicate. Declared as
+    // a constraint this was total despite its name, and two consequences were measured: a lapsed
+    // suppression occupied its address forever, so an address that once soft-bounced could never be
+    // hard-bounce-suppressed; and a complaint could not be recorded for an address that had already
+    // bounced. The predicate cannot mention `now()` — Postgres requires an IMMUTABLE index predicate
+    // — so "permanent" stands in for "active": a permanent suppression is unique per address, and
+    // temporary ones may accumulate, which the reader already tolerates since it filters on
+    // `expires_at` and prefers an unconditional reason.
     {
       name: "notification_suppressions_tenant_channel_address_active",
       columns: ["tenant_id", "channel", "recipient_address"],
+      unique: true,
+      where: "expires_at IS NULL",
     },
-  ],
-  indexes: [
     {
       name: "idx_notification_suppressions_expires",
       columns: ["expires_at"],
@@ -10186,6 +10301,132 @@ export const META_NOTIFICATION_DIGEST_ITEMS: TableDefinition = {
   },
 };
 
+/**
+ * The readable projection of an audit-integrity verdict.
+ *
+ * The chain commitment remains the proof — this table makes the verdict *queryable*, which it was
+ * not: ADR-0287 left "show me last month's verifications" unanswerable because the chain stores no
+ * payload. `chain_entry_hash` ties a row back to its commitment, so a reader can tell the two agree;
+ * a row with no matching chain entry proves nothing on its own.
+ *
+ * `tenant_id` is nullable because the platform chain has no tenant — the same constraint that stopped
+ * a platform-scope escalation leaving a tenant-scoped audit row (ADR-0288). It still carries RLS,
+ * because every `tenant_id`-bearing table does and the test suite enforces it. The policy is the
+ * `operate_tenant_manifests` pattern, not the `feature_flag_kill_switches` one: plain tenant isolation
+ * plus an explicit opt-in flag. `tenant_id = current_setting(...)` is false for a NULL, so a platform
+ * verdict is invisible to every tenant session rather than visible to all of them — which an
+ * `IS NULL OR …` policy would have made it, and a platform-chain tamper finding is the last thing to
+ * broadcast. The flag is its own, not `app.platform_review`: reading every tenant's integrity
+ * verdicts is a different privilege from reviewing design proposals, and one grant should not carry
+ * the other.
+ */
+export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
+  schema: "meta",
+  name: "audit_integrity_verdicts",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "verdict_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "audit_integrity_verdicts_verdict_id_key" },
+      check: "verdict_id ~ '^aiv_[a-z0-9]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
+    {
+      name: "verdict",
+      type: "TEXT",
+      notNull: true,
+      check: "verdict IN ('verified', 'unproven', 'compromised')",
+    },
+    { name: "verified_at", type: "TIMESTAMPTZ", notNull: true },
+    {
+      name: "anchors_checked",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "anchors_checked >= 0",
+    },
+    {
+      name: "anchors_verified",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "anchors_verified >= 0",
+    },
+    {
+      name: "anchors_tampered",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "anchors_tampered >= 0",
+    },
+    {
+      // The count that separates `unproven` from `verified` — `anchors.ok` also requires nothing
+      // unanchored (ADR-0287). Without a column, "which tenants still have unanchored rows, and how
+      // many" is unanswerable in SQL, which is the one thing this table exists for.
+      //
+      // All four anchor counts are `NOT NULL DEFAULT 0`, so a platform verdict — which has no anchor
+      // half at all — reads as 0/0/0/0, the same as a tenant with nothing to check. `tenant_id IS
+      // NULL` is what tells the two apart, and `report.anchors` is null for the former.
+      name: "anchors_unanchored",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "anchors_unanchored >= 0",
+    },
+    { name: "chain_ok", type: "BOOLEAN" },
+    { name: "truncated", type: "BOOLEAN", notNull: true, default: "false" },
+    { name: "report", type: "JSONB", notNull: true },
+    { name: "chain_entry_hash", type: "TEXT" },
+    {
+      // `meta.audit_log` stores both the hash and the sequence for its anchor (ADR-0286), and a
+      // reader checking that this row and its chain entry agree can then seek instead of scanning.
+      // Nullable like the hash, since a pass configured not to record a verdict writes neither.
+      name: "chain_sequence_number",
+      type: "INTEGER",
+      check: "chain_sequence_number >= 0",
+    },
+    {
+      // What the chain entry actually committed to. `report` is JSONB, so a round trip reorders keys
+      // and the digest cannot be recomputed from it reliably — the same reason `feature_flags`
+      // keeps its default value as TEXT. With this a reader can confirm the row's content *equals*
+      // what was committed, rather than only that it names an entry.
+      name: "payload_sha256",
+      type: "TEXT",
+      check: "payload_sha256 IS NULL OR payload_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    {
+      name: "idx_audit_integrity_verdicts_tenant_time",
+      columns: ["tenant_id", "verified_at"],
+    },
+    { name: "idx_audit_integrity_verdicts_verdict", columns: ["verdict"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "audit_integrity_verdicts_tenant_or_platform_audit",
+        // `NULLIF(…, '')` rather than the shared `TENANT_ISOLATION_USING`, and the reason is
+        // measured: a transaction-local `set_config` leaves the custom GUC *defined* in the session
+        // after the transaction ends, holding `''` rather than reverting to NULL. So on a pooled
+        // connection that previously served a tenant, `current_setting(…, true)::UUID` is
+        // `''::UUID`, which raises — and Postgres does not guarantee short-circuit evaluation of
+        // `OR`, so putting the flag first would not save it. That is precisely the platform-audit
+        // path, which sets no tenant: without the NULLIF, reading platform verdicts fails on any
+        // reused connection. With it, the comparison is NULL and the row is simply filtered out.
+        using:
+          "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID" +
+          " OR current_setting('app.platform_audit', true) = 'on'",
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -10326,4 +10567,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_OPERATE_TENANT_MANIFESTS,
   META_OPERATE_DESIGN_JOBS,
   META_NOTIFICATION_DIGEST_ITEMS,
+  META_AUDIT_INTEGRITY_VERDICTS,
 ];

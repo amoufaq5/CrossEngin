@@ -96,6 +96,9 @@ importers:
       '@crossengin/ai-providers-anthropic':
         specifier: workspace:*
         version: link:../../packages/ai-providers-anthropic
+      '@crossengin/ai-providers-local':
+        specifier: workspace:*
+        version: link:../../packages/ai-providers-local
       '@crossengin/ai-providers-openai':
         specifier: workspace:*
         version: link:../../packages/ai-providers-openai
@@ -174,6 +177,9 @@ importers:
       '@crossengin/marketplace-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/marketplace-runtime-pg
+      '@crossengin/notification-providers':
+        specifier: workspace:*
+        version: link:../../packages/notification-providers
       '@crossengin/notifications':
         specifier: workspace:*
         version: link:../../packages/notifications
@@ -1619,6 +1625,31 @@ importers:
       '@crossengin/testing':
         specifier: workspace:*
         version: link:../testing
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.19)
+
+  packages/notification-providers:
+    dependencies:
+      '@crossengin/crypto':
+        specifier: workspace:*
+        version: link:../crypto
+      '@crossengin/notifications':
+        specifier: workspace:*
+        version: link:../notifications
+    devDependencies:
+      '@crossengin/config':
+        specifier: workspace:*
+        version: link:../config
+      '@crossengin/testing':
+        specifier: workspace:*
+        version: link:../testing
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.19.19
       typescript:
         specifier: ^5.6.0
         version: 5.9.3

@@ -3,7 +3,10 @@ import {
   type ColumnReference,
   type RlsPolicy,
   type RlsPolicyCommand,
+  type TableCheckConstraint,
   type TableDefinition,
+  type TableForeignKeyConstraint,
+  type TableUniqueConstraint,
 } from "@crossengin/kernel/bootstrap";
 
 import type { ForeignKeyAction } from "./introspection.js";
@@ -148,7 +151,9 @@ export function expectedIndexNames(table: TableDefinition): ExpectedIndexes {
   const indexes = new Set<string>();
   const constraints = new Set<string>();
   for (const idx of table.indexes ?? []) indexes.add(idx.name);
-  for (const uc of table.uniqueConstraints ?? []) constraints.add(uc.name);
+  // `uniqueConstraints` and a `kind: "unique"` table constraint are the same thing spelled two ways,
+  // so both land here and both are repaired by `ADD CONSTRAINT`.
+  for (const uc of declaredUniqueConstraints(table)) constraints.add(uc.name);
   for (const col of table.columns) {
     if (typeof col.unique === "object" && col.unique !== null) {
       constraints.add(col.unique.constraintName);
@@ -290,4 +295,139 @@ export function declaredForeignKeys(table: TableDefinition): readonly DeclaredFo
     });
   }
   return out;
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Table-level constraints
+ * ---------------------------------------------------------------------------------------------- */
+
+/** What `ON UPDATE` means when the clause is omitted, and so what an omitted `onUpdate` means. */
+export const DEFAULT_ON_UPDATE: ForeignKeyAction = "NO ACTION";
+
+export function declaredConstraintOnDelete(fk: TableForeignKeyConstraint): ForeignKeyAction {
+  return (fk.onDelete ?? DEFAULT_ON_DELETE) as ForeignKeyAction;
+}
+
+export function declaredConstraintOnUpdate(fk: TableForeignKeyConstraint): ForeignKeyAction {
+  return (fk.onUpdate ?? DEFAULT_ON_UPDATE) as ForeignKeyAction;
+}
+
+/** `schema.table` of a table constraint's referenced side; an omitted schema is the table's own. */
+export function declaredConstraintTarget(
+  table: TableDefinition,
+  fk: TableForeignKeyConstraint,
+): string {
+  return `${fk.references.schema ?? table.schema}.${fk.references.table}`;
+}
+
+export function declaredCheckConstraints(
+  table: TableDefinition,
+): readonly TableCheckConstraint[] {
+  return (table.constraints ?? []).filter(
+    (c): c is TableCheckConstraint => c.kind === "check",
+  );
+}
+
+export function declaredForeignKeyConstraints(
+  table: TableDefinition,
+): readonly TableForeignKeyConstraint[] {
+  return (table.constraints ?? []).filter(
+    (c): c is TableForeignKeyConstraint => c.kind === "foreign_key",
+  );
+}
+
+/**
+ * Every named UNIQUE constraint the table declares over an explicit column list, from either
+ * spelling. The column-level forms are deliberately left out: `expectedIndexNames` already derives
+ * their names, and one of them lets Postgres do the naming.
+ */
+export function declaredUniqueConstraints(
+  table: TableDefinition,
+): readonly { readonly name: string; readonly columns: readonly string[] }[] {
+  return [
+    ...(table.uniqueConstraints ?? []),
+    ...(table.constraints ?? []).filter(
+      (c): c is TableUniqueConstraint => c.kind === "unique",
+    ),
+  ];
+}
+
+/** Postgres's identifier length limit, `NAMEDATALEN - 1`. */
+export const PG_NAME_MAX_LENGTH = 63;
+
+/**
+ * Postgres's `makeObjectName`, which is how every constraint it names for itself is spelled.
+ *
+ * This is not `${name1}_${name2}_${label}` truncated at 63 characters. When the whole thing is too
+ * long Postgres shortens the *longer of the two names* one character at a time until it fits,
+ * keeping the label intact — so `access_review_templates` + `default_remediation_days_from_completion`
+ * + `check` becomes `access_review_templates_default_remediation_days_from_com_check`, not the first
+ * 63 characters of the full name, which would have dropped `_check` altogether. Two of the catalog's
+ * 741 column-level checks are long enough for the difference to matter, and getting it wrong would
+ * report both as undeclared on a database that is exactly correct.
+ *
+ * Truncation is by bytes in Postgres; every identifier here is ASCII, so characters and bytes agree.
+ */
+export function makeObjectName(
+  name1: string,
+  name2: string | null,
+  label: string,
+): string {
+  let name1Chars = name1.length;
+  let name2Chars = 0;
+  let overhead = label.length + 1;
+  if (name2 !== null) {
+    name2Chars = name2.length;
+    overhead += 1;
+  }
+  const available = PG_NAME_MAX_LENGTH - overhead;
+  while (name1Chars + name2Chars > available) {
+    if (name1Chars > name2Chars) name1Chars--;
+    else name2Chars--;
+  }
+  const head = name1.slice(0, name1Chars);
+  const middle = name2 === null ? "" : `_${name2.slice(0, name2Chars)}`;
+  return `${head}${middle}_${label}`;
+}
+
+/**
+ * Every CHECK constraint name a correctly-applied table carries.
+ *
+ * A declared table-level check is matched by the name it declares. A column-level `check` is named by
+ * Postgres, and which name it picks depends on how many columns the *expression* references: one
+ * column gives `<table>_<column>_check`, while none or several give `<table>_check`, because
+ * `AddRelationNewConstraints` only passes a column name along when the parsed expression resolves to
+ * exactly one. Knowing which applies means parsing the expression, which is the problem ADR-0292
+ * refused to solve — `tenant_credits.remaining_cents` already declares
+ * `remaining_cents <= amount_cents` on a column and so carries the second spelling.
+ *
+ * So both are expected whenever the table has any column-level check. That over-approximates by one
+ * name: an unnamed table-level CHECK someone added by hand to such a table would be read as
+ * accounted for instead of reported. It never invents drift, which is the direction that matters —
+ * the alternative reports every correct cross-column column check as undeclared. A table-level
+ * constraint declared here always carries a name, so it is never the ambiguous case.
+ */
+export function expectedCheckConstraintNames(table: TableDefinition): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const check of declaredCheckConstraints(table)) names.add(check.name);
+  let hasColumnCheck = false;
+  for (const col of table.columns) {
+    if (col.check === undefined) continue;
+    hasColumnCheck = true;
+    names.add(makeObjectName(table.name, col.name, "check"));
+  }
+  if (hasColumnCheck) names.add(makeObjectName(table.name, null, "check"));
+  return names;
+}
+
+/** What `CREATE POLICY` means when `AS` is omitted, and so what an omitted `permissive` means. */
+export const DEFAULT_POLICY_PERMISSIVE = true;
+
+/**
+ * Whether a declared policy is permissive. A boolean needs no canonicalisation, but its *absence*
+ * does: omitting `AS` means `AS PERMISSIVE`, so an omitted field is `true` rather than unknown — the
+ * same reasoning as `declaredOnDelete` and `declaredPolicyCommand`.
+ */
+export function declaredPolicyPermissive(policy: RlsPolicy): boolean {
+  return policy.permissive ?? DEFAULT_POLICY_PERMISSIVE;
 }

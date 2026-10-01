@@ -51,11 +51,16 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: ${POSTGRES_DB}
       NODE_ENV: production
-      # The provider appends /v1/chat/completions, which is exactly Ollama's
-      # OpenAI-compatible path. The key is required by the client but unused by
-      # Ollama — it is not a secret and does not need to be one.
-      OPENAI_BASE_URL: http://ollama:11434
-      OPENAI_API_KEY: ${OPERATE_AI_API_KEY:-local}
+      # `ai-providers-local`, not `ai-providers-openai` with a base URL (ADR-0306). Both reach Ollama's
+      # OpenAI-compatible endpoint, but the local provider prices at zero — so the per-tenant AI budget
+      # guard stops refusing design requests over tokens that cost nothing, and the transcript names the
+      # provider that actually served the turn.
+      LOCAL_LLM_BASE_URL: http://ollama:11434
+      # Optional — the local provider omits the header when this is empty, which is what Ollama wants;
+      # a vLLM box behind an auth proxy needs it. Deliberately not `OPENAI_API_KEY`: that name would be
+      # picked up by the real OpenAI client if the base URL above were ever unset, turning a
+      # self-hosted deployment into cloud calls with a placeholder key.
+      LOCAL_LLM_API_KEY: ${OPERATE_AI_API_KEY:-}
     # Compose REPLACES `command` rather than merging it, so this repeats the base
     # command and adds the AI flags. Keep the two in step when either changes.
     command:

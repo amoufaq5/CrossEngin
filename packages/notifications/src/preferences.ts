@@ -25,6 +25,28 @@ export const PERMANENT_SUPPRESSION_REASONS: ReadonlySet<SuppressionReason> = new
   "regulatory_block",
 ]);
 
+/**
+ * Reasons a non-suppressible category does **not** override.
+ *
+ * A receipt or a security alert outranks a preference — nobody gets to unsubscribe from one. It does
+ * not outrank a dead mailbox. A hard bounce says the address does not exist, and a complaint says the
+ * recipient reported us; mail sent anyway cannot arrive, and the bounce and complaint rates it feeds
+ * are what providers throttle or pause a whole sending domain over, taking every other tenant's mail
+ * with it. A legal block is not consent either. So these reasons refuse the send whatever the
+ * category, and `manual_block` / `unsubscribe` remain overridable, which is what keeps an address
+ * from blocking its own security alerts.
+ */
+export const UNCONDITIONAL_SUPPRESSION_REASONS: ReadonlySet<SuppressionReason> = new Set([
+  "hard_bounce",
+  "soft_bounce_exceeded",
+  "spam_complaint",
+  "do_not_contact_register",
+  "regulatory_block",
+]);
+
+export const isSuppressionUnconditional = (reason: SuppressionReason): boolean =>
+  UNCONDITIONAL_SUPPRESSION_REASONS.has(reason);
+
 export const PreferenceMatrixEntrySchema = z.object({
   category: z.enum(CONTENT_CATEGORIES),
   channel: z.enum(NOTIFICATION_CHANNELS),
@@ -149,12 +171,18 @@ export const findActiveSuppression = (
   recipientAddress: string,
   now: Date,
 ): SuppressionRecord | null => {
+  let first: SuppressionRecord | null = null;
   for (const s of suppressions) {
     if (s.channel !== channel) continue;
     if (s.recipientAddress !== recipientAddress) continue;
-    if (isSuppressionActive(s, now)) return s;
+    if (!isSuppressionActive(s, now)) continue;
+    // An unconditional reason decides, whatever the caller's ordering: an address carrying both an
+    // unsubscribe and a hard bounce must not become deliverable for a transactional category just
+    // because the unsubscribe was listed first.
+    if (isSuppressionUnconditional(s.reason)) return s;
+    if (first === null) first = s;
   }
-  return null;
+  return first;
 };
 
 export interface DispatchEligibility {
@@ -183,7 +211,9 @@ export const computeDispatchEligibility = (input: {
     input.now,
   );
   if (active !== null) {
-    if (!isCategorySuppressible(input.category)) {
+    // A non-suppressible category overrides consent, not deliverability: an unsubscribe cannot stop a
+    // receipt, but a hard bounce or a complaint is not a preference and nothing overrides it.
+    if (!isCategorySuppressible(input.category) && !isSuppressionUnconditional(active.reason)) {
       return {
         eligible: true,
         reason: "ok",

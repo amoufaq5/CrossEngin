@@ -1,7 +1,13 @@
 import type { TableDefinition } from "@crossengin/kernel/bootstrap";
 import { describe, expect, it } from "vitest";
 
-import { POLICY_DELTA_REASONS, diffSchema, formatSchemaDiff } from "./diff.js";
+import {
+  CONSTRAINT_DELTA_REASONS,
+  POLICY_DELTA_REASONS,
+  diffSchema,
+  expressionRequestsFor,
+  formatSchemaDiff,
+} from "./diff.js";
 import { expressionKey } from "./expression-render.js";
 import type { LiveSchema, LiveTable } from "./introspection.js";
 
@@ -13,6 +19,7 @@ function liveTable(name: string, columns: LiveTable["columns"], extras: Partial<
     indexes: [],
     policies: [],
     foreignKeys: [],
+    checkConstraints: [],
     rlsEnabled: false,
     ...extras,
   };
@@ -44,7 +51,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
       ),
@@ -92,7 +99,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
       ),
@@ -111,7 +118,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
       ),
@@ -137,7 +144,7 @@ describe("diffSchema", () => {
             { name: "tenants_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
             { name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null },
           ],
-          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
       ),
@@ -159,7 +166,7 @@ describe("diffSchema", () => {
           indexes: [
             { name: "tenants_legacy_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null },
           ],
-          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
       ),
@@ -179,7 +186,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "old_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
+          policies: [{ name: "old_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
       ),
@@ -199,7 +206,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: false,
         },
       ),
@@ -219,7 +226,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           rlsEnabled: true,
         },
       ),
@@ -289,6 +296,21 @@ describe("formatSchemaDiff", () => {
               reasons: ["on_delete"],
             },
           ],
+          addedConstraints: [
+            { name: "widgets_window_check", kind: "check" },
+            { name: "widgets_pair_fkey", kind: "foreign_key" },
+          ],
+          removedConstraints: [
+            { name: "widgets_adhoc_check", columns: ["label"], expression: "(label <> ''::text)" },
+          ],
+          changedConstraints: [
+            {
+              name: "widgets_bounds_check",
+              kind: "check",
+              reasons: ["expression"],
+              detail: "(a < b) → (a <= b)",
+            },
+          ],
           rlsTargetEnabled: true,
           rlsLiveEnabled: false,
         },
@@ -311,6 +333,10 @@ describe("formatSchemaDiff", () => {
     expect(out).toContain("+ foreign key on owner_id");
     expect(out).toContain("- foreign key tenants_old_fkey");
     expect(out).toContain("~ foreign key on tenant_id [on_delete]");
+    expect(out).toContain("+ check constraint widgets_window_check");
+    expect(out).toContain("+ foreign_key constraint widgets_pair_fkey");
+    expect(out).toContain("- check constraint widgets_adhoc_check");
+    expect(out).toContain("~ check constraint widgets_bounds_check [expression] (a < b) → (a <= b)");
     expect(out).toContain("RLS target=true live=false");
   });
 });
@@ -365,6 +391,7 @@ describe("diffSchema — no false drift on a correct schema", () => {
     ],
     policies: [],
     foreignKeys: [],
+    checkConstraints: [],
     rlsEnabled: false,
   };
 
@@ -439,7 +466,13 @@ describe("diffSchema — no false drift on a correct schema", () => {
 
 describe("POLICY_DELTA_REASONS", () => {
   it("lists every way a policy can differ under an unchanged name", () => {
-    expect([...POLICY_DELTA_REASONS]).toEqual(["using", "check", "command", "roles"]);
+    expect([...POLICY_DELTA_REASONS]).toEqual([
+      "using",
+      "check",
+      "command",
+      "roles",
+      "permissive",
+    ]);
   });
 });
 
@@ -515,7 +548,7 @@ describe("diffSchema — in-place index and policy changes", () => {
             predicate: null,
           },
         ],
-        policies: [{ name: "widgets_isolation", using: "(tenant_id IS NOT NULL)", check: null, command: "ALL", roles: ["PUBLIC"] }],
+        policies: [{ name: "widgets_isolation", using: "(tenant_id IS NOT NULL)", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
         rlsEnabled: true,
         ...over,
       },
@@ -620,7 +653,7 @@ describe("diffSchema — in-place index and policy changes", () => {
 
   it("sees a changed policy clause", () => {
     const changed = diffWith({
-      policies: [{ name: "widgets_isolation", using: "(tenant_id IS NULL)", check: null, command: "ALL", roles: ["PUBLIC"] }],
+      policies: [{ name: "widgets_isolation", using: "(tenant_id IS NULL)", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
     }).modifiedTables[0]?.changedPolicies;
     expect(changed?.[0]?.name).toBe("widgets_isolation");
     expect(changed?.[0]?.reasons).toEqual(["using"]);
@@ -638,7 +671,7 @@ describe("diffSchema — in-place index and policy changes", () => {
         schema: "meta",
         tables: [
           liveWidgets({
-            policies: [{ name: "widgets_isolation", using: "(something else)", check: null, command: "ALL", roles: ["PUBLIC"] }],
+            policies: [{ name: "widgets_isolation", using: "(something else)", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
           }),
         ],
       },
@@ -655,6 +688,7 @@ describe("diffSchema — in-place index and policy changes", () => {
           check: null,
           command: "SELECT",
           roles: ["PUBLIC"],
+          permissive: true,
         },
       ],
     }).modifiedTables[0]?.changedPolicies;
@@ -672,6 +706,7 @@ describe("diffSchema — in-place index and policy changes", () => {
           check: null,
           command: "ALL",
           roles: ["app_reader"],
+          permissive: true,
         },
       ],
     }).modifiedTables[0]?.changedPolicies;
@@ -688,6 +723,7 @@ describe("diffSchema — in-place index and policy changes", () => {
           check: null,
           command: "DELETE",
           roles: ["app_reader", "app_writer"],
+          permissive: true,
         },
       ],
     }).modifiedTables[0]?.changedPolicies;
@@ -720,6 +756,7 @@ describe("diffSchema — in-place index and policy changes", () => {
               check: null,
               command: "SELECT",
               roles: ["app_reader", "app_writer"],
+              permissive: true,
             },
           ],
         }),
@@ -760,6 +797,7 @@ describe("diffSchema — in-place index and policy changes", () => {
           check: null,
           command: null,
           roles: null,
+          permissive: true,
         },
       ],
     });
@@ -774,5 +812,464 @@ describe("diffSchema — in-place index and policy changes", () => {
     };
     const diff = diffSchema([target], { schema: "meta", tables: [liveWidgets()] }, rendered);
     expect(diff.modifiedTables[0]?.changedPolicies[0]?.detail).toContain("cannot be applied");
+  });
+});
+
+describe("diffSchema — a policy's permissiveness", () => {
+  const target: TableDefinition = {
+    schema: "meta",
+    name: "widgets",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "tenant_id", type: "UUID", notNull: true },
+    ],
+    primaryKey: ["id"],
+    rls: { enabled: true, policies: [{ name: "widgets_isolation", using: "tenant_id IS NOT NULL" }] },
+  };
+  const RENDERED = {
+    byRequest: new Map<string, string | null>([
+      [expressionKey("widgets", "tenant_id IS NOT NULL"), "(tenant_id IS NOT NULL)"],
+    ]),
+  };
+
+  function liveWith(permissive: boolean | null, over: Partial<LiveTable> = {}): LiveTable {
+    return liveTable(
+      "widgets",
+      [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "tenant_id", dataType: "uuid", isNullable: false, defaultExpr: null },
+      ],
+      {
+        indexes: [
+          { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+        ],
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "(tenant_id IS NOT NULL)",
+            check: null,
+            command: "ALL",
+            roles: ["PUBLIC"],
+            permissive,
+          },
+        ],
+        rlsEnabled: true,
+        ...over,
+      },
+    );
+  }
+
+  function diffFor(declared: TableDefinition, live: LiveTable) {
+    return diffSchema([declared], { schema: "meta", tables: [live] }, RENDERED);
+  }
+
+  it("reports no drift when a permissive policy is declared without saying so", () => {
+    expect(diffFor(target, liveWith(true)).hasDrift).toBe(false);
+  });
+
+  it("sees a restrictive policy in the database that the catalog declares permissive", () => {
+    // The gap: this read as permissive before and the policy would have been silently replaced.
+    const changed = diffFor(target, liveWith(false)).modifiedTables[0]?.changedPolicies;
+    expect(changed?.[0]?.name).toBe("widgets_isolation");
+    expect(changed?.[0]?.reasons).toEqual(["permissive"]);
+    expect(changed?.[0]?.detail).toContain("AS RESTRICTIVE → AS PERMISSIVE");
+  });
+
+  it("sees a permissive policy in the database that the catalog declares restrictive", () => {
+    const restrictive: TableDefinition = {
+      ...target,
+      rls: {
+        enabled: true,
+        policies: [
+          { name: "widgets_isolation", using: "tenant_id IS NOT NULL", permissive: false },
+        ],
+      },
+    };
+    const changed = diffFor(restrictive, liveWith(true)).modifiedTables[0]?.changedPolicies;
+    expect(changed?.[0]?.reasons).toEqual(["permissive"]);
+    expect(changed?.[0]?.detail).toContain("AS PERMISSIVE → AS RESTRICTIVE");
+  });
+
+  it("reports no drift when a restrictive policy is declared and stored restrictive", () => {
+    const restrictive: TableDefinition = {
+      ...target,
+      rls: {
+        enabled: true,
+        policies: [
+          { name: "widgets_isolation", using: "tenant_id IS NOT NULL", permissive: false },
+        ],
+      },
+    };
+    expect(diffFor(restrictive, liveWith(false)).hasDrift).toBe(false);
+  });
+
+  it("reports no drift when the declaration spells the default out", () => {
+    const explicit: TableDefinition = {
+      ...target,
+      rls: {
+        enabled: true,
+        policies: [
+          { name: "widgets_isolation", using: "tenant_id IS NOT NULL", permissive: true },
+        ],
+      },
+    };
+    expect(diffFor(explicit, liveWith(true)).hasDrift).toBe(false);
+  });
+
+  it("treats an undetermined permissiveness as unknown, not as drift", () => {
+    // Null means the row did not carry it; comparing against the default would invent drift.
+    expect(diffFor(target, liveWith(null)).hasDrift).toBe(false);
+  });
+
+  it("reports permissiveness alongside the other policy reasons, in reason order", () => {
+    const narrowed: TableDefinition = {
+      ...target,
+      rls: {
+        enabled: true,
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "tenant_id IS NOT NULL",
+            command: "SELECT",
+            roles: ["app_reader"],
+            permissive: false,
+          },
+        ],
+      },
+    };
+    const changed = diffFor(narrowed, liveWith(true)).modifiedTables[0]?.changedPolicies;
+    expect(changed?.[0]?.reasons).toEqual(["command", "roles", "permissive"]);
+  });
+});
+
+describe("diffSchema — table-level constraints", () => {
+  const target: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "tenant_id", type: "UUID", notNull: true },
+      { name: "recipient_count", type: "INTEGER", notNull: true },
+      { name: "bounces_count", type: "INTEGER", notNull: true },
+      { name: "status", type: "TEXT", notNull: true, check: "status IN ('draft','sent')" },
+    ],
+    primaryKey: ["id"],
+    constraints: [
+      {
+        kind: "check",
+        name: "comms_bounces_check",
+        expression: "bounces_count <= recipient_count",
+      },
+      {
+        kind: "foreign_key",
+        name: "comms_incident_fkey",
+        columns: ["tenant_id", "id"],
+        references: { schema: "meta", table: "incidents", columns: ["tenant_id", "id"] },
+        onDelete: "CASCADE",
+      },
+      { kind: "unique", name: "comms_pair_key", columns: ["tenant_id", "id"] },
+    ],
+  };
+
+  const RENDERED = {
+    byRequest: new Map<string, string | null>([
+      [
+        expressionKey("comms", "bounces_count <= recipient_count"),
+        "(bounces_count <= recipient_count)",
+      ],
+    ]),
+  };
+
+  function liveComms(over: Partial<LiveTable> = {}): LiveTable {
+    return liveTable(
+      "comms",
+      [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "tenant_id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "recipient_count", dataType: "integer", isNullable: false, defaultExpr: null },
+        { name: "bounces_count", dataType: "integer", isNullable: false, defaultExpr: null },
+        { name: "status", dataType: "text", isNullable: false, defaultExpr: null },
+      ],
+      {
+        indexes: [
+          { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+          { name: "comms_pair_key", columns: ["tenant_id", "id"], unique: true, primary: false, method: "btree", predicate: null },
+        ],
+        foreignKeys: [
+          {
+            name: "comms_incident_fkey",
+            columns: ["tenant_id", "id"],
+            targetSchema: "meta",
+            targetTable: "incidents",
+            targetColumns: ["tenant_id", "id"],
+            onDelete: "CASCADE",
+            onUpdate: "NO ACTION",
+          },
+        ],
+        checkConstraints: [
+          {
+            name: "comms_bounces_check",
+            expression: "(bounces_count <= recipient_count)",
+            columns: ["recipient_count", "bounces_count"],
+          },
+          {
+            name: "comms_status_check",
+            expression: "(status = ANY (ARRAY['draft'::text, 'sent'::text]))",
+            columns: ["status"],
+          },
+        ],
+        ...over,
+      },
+    );
+  }
+
+  function diffWith(over: Partial<LiveTable> = {}) {
+    return diffSchema([target], { schema: "meta", tables: [liveComms(over)] }, RENDERED);
+  }
+
+  it("reports no drift when every constraint matches", () => {
+    expect(diffWith().hasDrift).toBe(false);
+  });
+
+  it("does not report a column-level check as an undeclared constraint", () => {
+    // Postgres names a column check itself; reading it as undeclared would flag every one of the
+    // catalog's 700-plus on a database that is exactly correct.
+    expect(diffWith().modifiedTables).toEqual([]);
+  });
+
+  it("reports a declared CHECK the database lacks", () => {
+    const d = diffWith({
+      checkConstraints: liveComms().checkConstraints.filter(
+        (c) => c.name !== "comms_bounces_check",
+      ),
+    }).modifiedTables[0];
+    expect(d?.addedConstraints).toEqual([{ name: "comms_bounces_check", kind: "check" }]);
+  });
+
+  it("reports a declared composite foreign key the database lacks", () => {
+    const d = diffWith({ foreignKeys: [] }).modifiedTables[0];
+    expect(d?.addedConstraints).toEqual([
+      { name: "comms_incident_fkey", kind: "foreign_key" },
+    ]);
+    // And not as an undeclared one, which is what matching by column alone used to produce.
+    expect(d?.removedForeignKeys).toEqual([]);
+  });
+
+  it("sees a CHECK expression changed under the same name", () => {
+    const changed = diffWith({
+      checkConstraints: liveComms().checkConstraints.map((c) =>
+        c.name === "comms_bounces_check"
+          ? { ...c, expression: "(bounces_count < recipient_count)" }
+          : c,
+      ),
+    }).modifiedTables[0]?.changedConstraints;
+    expect(changed?.[0]?.name).toBe("comms_bounces_check");
+    expect(changed?.[0]?.reasons).toEqual(["expression"]);
+    expect(changed?.[0]?.detail).toContain(
+      "(bounces_count < recipient_count) → (bounces_count <= recipient_count)",
+    );
+  });
+
+  it("compares a CHECK through Postgres's own deparsing, not the declared text", () => {
+    // `bounces_count <= recipient_count` is stored with parentheses it was not written with. The
+    // probe's rendering is what makes an exact string comparison correct.
+    expect(diffWith().hasDrift).toBe(false);
+  });
+
+  it("compares nothing without a rendering, rather than inventing drift", () => {
+    const noRenderings = diffSchema([target], { schema: "meta", tables: [liveComms()] });
+    expect(noRenderings.hasDrift).toBe(false);
+    const wrong = diffSchema([target], {
+      schema: "meta",
+      tables: [
+        liveComms({
+          checkConstraints: liveComms().checkConstraints.map((c) =>
+            c.name === "comms_bounces_check" ? { ...c, expression: "(something else)" } : c,
+          ),
+        }),
+      ],
+    });
+    expect(wrong.hasDrift).toBe(false);
+  });
+
+  it("treats an undeparsable stored expression as unknown, not as absent", () => {
+    expect(
+      diffWith({
+        checkConstraints: liveComms().checkConstraints.map((c) =>
+          c.name === "comms_bounces_check" ? { ...c, expression: null } : c,
+        ),
+      }).hasDrift,
+    ).toBe(false);
+  });
+
+  it("reports an expression the table cannot even carry", () => {
+    const rendered = {
+      byRequest: new Map<string, string | null>([
+        [expressionKey("comms", "bounces_count <= recipient_count"), null],
+      ]),
+    };
+    const d = diffSchema([target], { schema: "meta", tables: [liveComms()] }, rendered);
+    expect(d.modifiedTables[0]?.changedConstraints[0]?.detail).toContain("cannot be applied");
+  });
+
+  it("reports an undeclared CHECK with its columns and expression", () => {
+    const d = diffWith({
+      checkConstraints: [
+        ...liveComms().checkConstraints,
+        {
+          name: "comms_adhoc_check",
+          expression: "(recipient_count > 0)",
+          columns: ["recipient_count"],
+        },
+      ],
+    }).modifiedTables[0];
+    expect(d?.removedConstraints).toEqual([
+      {
+        name: "comms_adhoc_check",
+        columns: ["recipient_count"],
+        expression: "(recipient_count > 0)",
+      },
+    ]);
+  });
+
+  it("sees a composite foreign key's column order change", () => {
+    const changed = diffWith({
+      foreignKeys: liveComms().foreignKeys.map((f) => ({ ...f, columns: ["id", "tenant_id"] })),
+    }).modifiedTables[0]?.changedConstraints;
+    expect(changed?.[0]?.reasons).toEqual(["columns"]);
+    expect(changed?.[0]?.detail).toContain("columns (id, tenant_id) → (tenant_id, id)");
+  });
+
+  it("sees a changed target", () => {
+    const changed = diffWith({
+      foreignKeys: liveComms().foreignKeys.map((f) => ({ ...f, targetTable: "tenants" })),
+    }).modifiedTables[0]?.changedConstraints;
+    expect(changed?.[0]?.reasons).toEqual(["target"]);
+    expect(changed?.[0]?.detail).toContain("meta.tenants(tenant_id, id) → meta.incidents(tenant_id, id)");
+  });
+
+  it("sees a changed ON DELETE", () => {
+    const changed = diffWith({
+      foreignKeys: liveComms().foreignKeys.map((f) => ({ ...f, onDelete: "RESTRICT" as const })),
+    }).modifiedTables[0]?.changedConstraints;
+    expect(changed?.[0]?.reasons).toEqual(["on_delete"]);
+    expect(changed?.[0]?.detail).toContain("ON DELETE RESTRICT → CASCADE");
+  });
+
+  it("sees a changed ON UPDATE, which an inline reference cannot even express", () => {
+    const changed = diffWith({
+      foreignKeys: liveComms().foreignKeys.map((f) => ({ ...f, onUpdate: "CASCADE" as const })),
+    }).modifiedTables[0]?.changedConstraints;
+    expect(changed?.[0]?.reasons).toEqual(["on_update"]);
+    expect(changed?.[0]?.detail).toContain("ON UPDATE CASCADE → NO ACTION");
+  });
+
+  it("reports several reasons at once", () => {
+    const changed = diffWith({
+      foreignKeys: liveComms().foreignKeys.map((f) => ({
+        ...f,
+        columns: ["id", "tenant_id"],
+        targetTable: "tenants",
+        onDelete: "SET NULL" as const,
+        onUpdate: "CASCADE" as const,
+      })),
+    }).modifiedTables[0]?.changedConstraints;
+    expect(changed?.[0]?.reasons).toEqual(["columns", "target", "on_delete", "on_update"]);
+  });
+
+  it("reports a name held by the wrong kind of constraint", () => {
+    const changed = diffWith({
+      checkConstraints: liveComms().checkConstraints.filter(
+        (c) => c.name !== "comms_bounces_check",
+      ),
+      foreignKeys: [
+        ...liveComms().foreignKeys,
+        {
+          name: "comms_bounces_check",
+          columns: ["tenant_id"],
+          targetSchema: "meta",
+          targetTable: "tenants",
+          targetColumns: ["id"],
+          onDelete: "RESTRICT",
+          onUpdate: "NO ACTION",
+        },
+      ],
+    }).modifiedTables[0];
+    const delta = changed?.changedConstraints.find((c) => c.name === "comms_bounces_check");
+    expect(delta?.reasons).toEqual(["kind"]);
+    // Claimed, so it is not also reported as an undeclared foreign key.
+    expect(changed?.removedForeignKeys).toEqual([]);
+  });
+
+  it("routes a kind:unique constraint through the index machinery, not addedConstraints", () => {
+    const d = diffWith({
+      indexes: liveComms().indexes.filter((i) => i.name !== "comms_pair_key"),
+    }).modifiedTables[0];
+    expect(d?.addedIndexes).toEqual(["comms_pair_key"]);
+    expect(d?.addedConstraints).toEqual([]);
+  });
+
+  it("sees a kind:unique constraint's columns change, as constraint-backed", () => {
+    const changed = diffWith({
+      indexes: liveComms().indexes.map((i) =>
+        i.name === "comms_pair_key" ? { ...i, columns: ["id", "tenant_id"] } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.name).toBe("comms_pair_key");
+    expect(changed?.[0]?.constraintBacked).toBe(true);
+  });
+
+  it("still reports a genuinely undeclared foreign key", () => {
+    const d = diffWith({
+      foreignKeys: [
+        ...liveComms().foreignKeys,
+        {
+          name: "comms_adhoc_fkey",
+          columns: ["recipient_count"],
+          targetSchema: "meta",
+          targetTable: "tenants",
+          targetColumns: ["id"],
+          onDelete: "NO ACTION",
+          onUpdate: "NO ACTION",
+        },
+      ],
+    }).modifiedTables[0];
+    expect(d?.removedForeignKeys.map((f) => f.name)).toEqual(["comms_adhoc_fkey"]);
+  });
+
+  it("asks the renderer to deparse a declared table CHECK", () => {
+    expect(
+      expressionRequestsFor(target).some(
+        (r) => r.expr === "bounces_count <= recipient_count" && r.table === "comms",
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves a table declaring no constraints with all three fields empty", () => {
+    const d = diffSchema(
+      [{ schema: "meta", name: "t", columns: [{ name: "id", type: "UUID" }] }],
+      {
+        schema: "meta",
+        tables: [
+          liveTable("t", [
+            { name: "id", dataType: "uuid", isNullable: true, defaultExpr: null },
+          ]),
+        ],
+      },
+    );
+    expect(d.hasDrift).toBe(false);
+  });
+});
+
+describe("CONSTRAINT_DELTA_REASONS", () => {
+  it("lists every way a table-level constraint can differ under an unchanged name", () => {
+    expect([...CONSTRAINT_DELTA_REASONS]).toEqual([
+      "kind",
+      "columns",
+      "expression",
+      "target",
+      "on_delete",
+      "on_update",
+    ]);
   });
 });

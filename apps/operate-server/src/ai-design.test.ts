@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { CompletionChunk, CompletionRequest } from "@crossengin/ai-providers";
 import { AnthropicProvider } from "@crossengin/ai-providers-anthropic";
+import { DEFAULT_LOCAL_MODEL, LocalLlmProvider } from "@crossengin/ai-providers-local";
 import { OpenAiProvider } from "@crossengin/ai-providers-openai";
 import { ManifestSchema, tryValidateManifest } from "@crossengin/kernel/manifest";
 
@@ -662,5 +663,126 @@ describe("designManifest — progress", () => {
     await designer({ description: "desc", onProgress: perCall.listener });
     expect(perCall.events.length).toBeGreaterThan(0);
     expect(builderSink.events).toHaveLength(before);
+  });
+});
+
+describe("buildDesignProviderFromEnv — self-hosted model", () => {
+  const LOCAL_SSE = [
+    'data: {"choices":[{"delta":{"content":"{}"}}]}',
+    "",
+    'data: {"usage":{"prompt_tokens":1200,"completion_tokens":4800}}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n");
+
+  it("builds a LocalLlmProvider from LOCAL_LLM_BASE_URL with the package default model", () => {
+    const built = buildDesignProviderFromEnv({ LOCAL_LLM_BASE_URL: "http://ollama:11434/v1" });
+    expect(built?.provider).toBeInstanceOf(LocalLlmProvider);
+    expect(built?.model).toBe(DEFAULT_LOCAL_MODEL);
+    expect(built?.providerLabel).toBe(`local/${DEFAULT_LOCAL_MODEL}`);
+  });
+
+  it("accepts OLLAMA_BASE_URL as the same signal", () => {
+    const built = buildDesignProviderFromEnv({ OLLAMA_BASE_URL: "http://ollama:11434/v1" });
+    expect(built?.provider).toBeInstanceOf(LocalLlmProvider);
+  });
+
+  it("prefers LOCAL_LLM_BASE_URL over OLLAMA_BASE_URL", () => {
+    const built = buildDesignProviderFromEnv({
+      LOCAL_LLM_BASE_URL: "http://vllm:8000/v1",
+      OLLAMA_BASE_URL: "http://ollama:11434/v1",
+    });
+    expect(built?.provider).toBeInstanceOf(LocalLlmProvider);
+  });
+
+  it("passes a self-hosted model id through verbatim — there is no catalogue to gate against", () => {
+    const built = buildDesignProviderFromEnv(
+      { LOCAL_LLM_BASE_URL: "http://ollama:11434/v1" },
+      { model: "qwen2.5:14b-instruct" },
+    );
+    expect(built?.model).toBe("qwen2.5:14b-instruct");
+    expect(built?.providerLabel).toBe("local/qwen2.5:14b-instruct");
+  });
+
+  it("wins over both cloud keys, so an opted-out operator's prose never leaves the box", () => {
+    const built = buildDesignProviderFromEnv({
+      LOCAL_LLM_BASE_URL: "http://ollama:11434/v1",
+      ANTHROPIC_API_KEY: "sk-ant-x",
+      OPENAI_API_KEY: "sk-x",
+    });
+    expect(built?.provider).toBeInstanceOf(LocalLlmProvider);
+  });
+
+  it("builds with an optional LOCAL_LLM_API_KEY bearer token", () => {
+    const built = buildDesignProviderFromEnv({
+      LOCAL_LLM_BASE_URL: "http://lmstudio:1234/v1",
+      LOCAL_LLM_API_KEY: "lm-token",
+    });
+    expect(built?.provider).toBeInstanceOf(LocalLlmProvider);
+    expect(built?.providerLabel).toBe(`local/${DEFAULT_LOCAL_MODEL}`);
+  });
+
+  it("treats an empty LOCAL_LLM_BASE_URL as unset and falls through to the cloud", () => {
+    const built = buildDesignProviderFromEnv({ LOCAL_LLM_BASE_URL: "", ANTHROPIC_API_KEY: "sk-ant-x" });
+    expect(built?.provider).toBeInstanceOf(AnthropicProvider);
+  });
+
+  it("treats an empty OLLAMA_BASE_URL as unset too", () => {
+    const built = buildDesignProviderFromEnv({ OLLAMA_BASE_URL: "", OPENAI_API_KEY: "sk-x" });
+    expect(built?.provider).toBeInstanceOf(OpenAiProvider);
+  });
+
+  it("fails closed on a malformed local base URL rather than silently using a cloud vendor", () => {
+    const built = buildDesignProviderFromEnv({
+      LOCAL_LLM_BASE_URL: "ollama:11434",
+      ANTHROPIC_API_KEY: "sk-ant-x",
+      OPENAI_API_KEY: "sk-x",
+    });
+    expect(built).toBeNull();
+  });
+
+  it("fails closed on a non-http local base URL", () => {
+    expect(
+      buildDesignProviderFromEnv({ LOCAL_LLM_BASE_URL: "file:///models/qwen", OPENAI_API_KEY: "sk-x" }),
+    ).toBeNull();
+  });
+
+  it("fails closed on a malformed OLLAMA_BASE_URL as well", () => {
+    expect(buildDesignProviderFromEnv({ OLLAMA_BASE_URL: "not a url", ANTHROPIC_API_KEY: "sk-ant-x" })).toBeNull();
+  });
+
+  it("prices self-hosted inference at zero, so a cost ceiling never trips on it", () => {
+    const built = buildDesignProviderFromEnv({ LOCAL_LLM_BASE_URL: "http://ollama:11434/v1" });
+    const provider = built?.provider as LocalLlmProvider;
+    expect(provider.pricing).toEqual({
+      inputPerMillionTokens: 0,
+      outputPerMillionTokens: 0,
+      cachedInputPerMillionTokens: 0,
+    });
+    const final = provider.chunksFromTextStream(LOCAL_SSE).find((c) => c.kind === "usage_final");
+    expect(final).toEqual({
+      kind: "usage_final",
+      usage: { inputTokens: 1200, outputTokens: 4800, cost: 0 },
+    });
+  });
+
+  it("accumulates a zero cost across design attempts while still counting tokens", async () => {
+    const { provider } = scriptedProvider([
+      textTurn("not json", { input: 100, output: 200, cost: 0 }),
+      textTurn(VALID_JSON, { input: 150, output: 900, cost: 0 }),
+    ]);
+    const result = await designManifest({ provider, description: "a field service business" });
+    expect(result.ok).toBe(true);
+    expect(result.usage).toEqual({ inputTokens: 250, outputTokens: 1100, cost: 0 });
+  });
+
+  it("falls back to the default model when --ai-model is an empty string", () => {
+    const built = buildDesignProviderFromEnv({ LOCAL_LLM_BASE_URL: "http://ollama:11434/v1" }, { model: "" });
+    expect(built?.model).toBe(DEFAULT_LOCAL_MODEL);
+  });
+
+  it("still returns null when neither a local endpoint nor an API key is configured", () => {
+    expect(buildDesignProviderFromEnv({ LOCAL_LLM_API_KEY: "lm-token" })).toBeNull();
   });
 });

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   emitAddColumn,
   emitAddForeignKey,
+  emitAddTableConstraintIfEmpty,
   emitAddUniqueConstraint,
   emitAlterColumnTypeIfEmpty,
+  emitBootstrapSql,
   emitDropConstraint,
   foreignKeyConstraintName,
   emitColumn,
@@ -13,14 +15,23 @@ import {
   emitIndex,
   emitReplaceIndex,
   emitReplaceRlsPolicy,
+  emitReplaceTableConstraintIfEmpty,
   emitSetColumnDefault,
   emitRlsEnable,
   emitRlsPolicy,
   emitSchemaCreate,
   emitTable,
+  emitTableConstraint,
 } from "./emit.js";
-import { META_TABLES } from "./meta-schema.js";
-import { PUBLIC_ROLE, RLS_POLICY_COMMANDS, type TableDefinition } from "./types.js";
+import { META_SCHEMA_NAME, META_TABLES } from "./meta-schema.js";
+import {
+  PUBLIC_ROLE,
+  REFERENTIAL_ACTIONS,
+  RLS_POLICY_COMMANDS,
+  TABLE_CONSTRAINT_KINDS,
+  type TableConstraint,
+  type TableDefinition,
+} from "./types.js";
 
 describe("emitSchemaCreate", () => {
   it("emits CREATE SCHEMA IF NOT EXISTS", () => {
@@ -327,6 +338,330 @@ describe("emitRlsPolicy", () => {
     expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", roles: [] })).toBe(
       `CREATE POLICY "p" ON "meta"."x" USING (true);`,
     );
+  });
+
+  it("writes no AS clause when permissiveness is not declared", () => {
+    // The rule that lets the field be added at all: `CREATE POLICY` already means `AS PERMISSIVE`.
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true" })).not.toContain(" AS ");
+  });
+
+  it("emits AS RESTRICTIVE for a restrictive policy", () => {
+    expect(
+      emitRlsPolicy(minimalTable, { name: "p", using: "true", permissive: false }),
+    ).toBe(`CREATE POLICY "p" ON "meta"."x" AS RESTRICTIVE USING (true);`);
+  });
+
+  it("emits AS PERMISSIVE when the default is spelled out", () => {
+    expect(
+      emitRlsPolicy(minimalTable, { name: "p", using: "true", permissive: true }),
+    ).toBe(`CREATE POLICY "p" ON "meta"."x" AS PERMISSIVE USING (true);`);
+  });
+
+  it("orders AS before FOR before TO, which is the order CREATE POLICY accepts", () => {
+    expect(
+      emitRlsPolicy(minimalTable, {
+        name: "p",
+        using: "a",
+        check: "b",
+        permissive: false,
+        command: "UPDATE",
+        roles: ["app_writer"],
+      }),
+    ).toBe(
+      `CREATE POLICY "p" ON "meta"."x" AS RESTRICTIVE FOR UPDATE TO "app_writer" ` +
+        `USING (a) WITH CHECK (b);`,
+    );
+  });
+
+  it("carries permissiveness through a replacement, so a restrictive policy is replaced as one", () => {
+    const sql = emitReplaceRlsPolicy(minimalTable, {
+      name: "p",
+      using: "true",
+      permissive: false,
+    });
+    expect(sql).toBe(
+      `DROP POLICY "p" ON "meta"."x"; CREATE POLICY "p" ON "meta"."x" AS RESTRICTIVE USING (true);`,
+    );
+  });
+});
+
+describe("emitTableConstraint", () => {
+  it("lists the kinds a table-level constraint can have", () => {
+    expect([...TABLE_CONSTRAINT_KINDS]).toEqual(["check", "foreign_key", "unique"]);
+  });
+
+  it("lists the referential actions", () => {
+    expect([...REFERENTIAL_ACTIONS]).toEqual([
+      "NO ACTION",
+      "RESTRICT",
+      "CASCADE",
+      "SET NULL",
+      "SET DEFAULT",
+    ]);
+  });
+
+  it("emits a cross-column CHECK", () => {
+    expect(
+      emitTableConstraint({
+        kind: "check",
+        name: "x_bounds_check",
+        expression: "bounces_count <= recipient_count",
+      }),
+    ).toBe(`CONSTRAINT "x_bounds_check" CHECK (bounces_count <= recipient_count)`);
+  });
+
+  it("emits a composite UNIQUE", () => {
+    expect(
+      emitTableConstraint({ kind: "unique", name: "x_pair_key", columns: ["a", "b"] }),
+    ).toBe(`CONSTRAINT "x_pair_key" UNIQUE ("a", "b")`);
+  });
+
+  it("emits a composite FOREIGN KEY with ON DELETE defaulting to RESTRICT", () => {
+    // RESTRICT is what `emitColumn` already writes for an inline reference that omits the action, and
+    // what the reconciling side reads an omitted action as.
+    expect(
+      emitTableConstraint({
+        kind: "foreign_key",
+        name: "x_parent_fkey",
+        columns: ["tenant_id", "parent_id"],
+        references: { schema: "meta", table: "parents", columns: ["tenant_id", "id"] },
+      }),
+    ).toBe(
+      `CONSTRAINT "x_parent_fkey" FOREIGN KEY ("tenant_id", "parent_id") ` +
+        `REFERENCES "meta"."parents"("tenant_id", "id") ON DELETE RESTRICT`,
+    );
+  });
+
+  it("emits a declared ON DELETE and ON UPDATE", () => {
+    expect(
+      emitTableConstraint({
+        kind: "foreign_key",
+        name: "x_parent_fkey",
+        columns: ["parent_id"],
+        references: { schema: "meta", table: "parents", columns: ["id"] },
+        onDelete: "CASCADE",
+        onUpdate: "SET NULL",
+      }),
+    ).toContain("ON DELETE CASCADE ON UPDATE SET NULL");
+  });
+
+  it("writes no ON UPDATE when it is not declared, since omitting it means NO ACTION", () => {
+    expect(
+      emitTableConstraint({
+        kind: "foreign_key",
+        name: "x_parent_fkey",
+        columns: ["parent_id"],
+        references: { table: "parents", columns: ["id"] },
+      }),
+    ).not.toContain("ON UPDATE");
+  });
+
+  it("leaves an unqualified target unqualified, to resolve through the search path", () => {
+    expect(
+      emitTableConstraint({
+        kind: "foreign_key",
+        name: "x_parent_fkey",
+        columns: ["parent_id"],
+        references: { table: "parents", columns: ["id"] },
+      }),
+    ).toContain(`REFERENCES "parents"("id")`);
+  });
+
+  it("refuses an unsafe identifier rather than interpolating it", () => {
+    expect(() =>
+      emitTableConstraint({ kind: "check", name: 'x"; DROP', expression: "true" }),
+    ).toThrow(/unsafe SQL identifier/);
+    expect(() =>
+      emitTableConstraint({ kind: "unique", name: "ok", columns: ['a"; DROP'] }),
+    ).toThrow(/unsafe SQL identifier/);
+  });
+});
+
+describe("emitCreateTable — table-level constraints", () => {
+  const base: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "tenant_id", type: "UUID", notNull: true },
+      { name: "recipient_count", type: "INTEGER", notNull: true },
+      { name: "bounces_count", type: "INTEGER", notNull: true },
+    ],
+    primaryKey: ["id"],
+  };
+
+  it("emits nothing extra when no constraints are declared", () => {
+    // The byte-identity rule: a table that declares none emits exactly what it emitted before the
+    // field existed.
+    expect(emitCreateTable(base)).toBe(
+      `CREATE TABLE "meta"."comms" (\n` +
+        `  "id" UUID NOT NULL,\n` +
+        `  "tenant_id" UUID NOT NULL,\n` +
+        `  "recipient_count" INTEGER NOT NULL,\n` +
+        `  "bounces_count" INTEGER NOT NULL,\n` +
+        `  PRIMARY KEY ("id")\n` +
+        `);`,
+    );
+    expect(emitCreateTable({ ...base, constraints: [] })).toBe(emitCreateTable(base));
+  });
+
+  it("emits a cross-column CHECK as a table-level line, not an ALTER afterwards", () => {
+    const sql = emitCreateTable({
+      ...base,
+      constraints: [
+        {
+          kind: "check",
+          name: "comms_bounces_check",
+          expression: "bounces_count <= recipient_count",
+        },
+      ],
+    });
+    expect(sql).toContain(
+      `  CONSTRAINT "comms_bounces_check" CHECK (bounces_count <= recipient_count)`,
+    );
+    expect(sql).not.toContain("ALTER TABLE");
+    expect(sql.split(";").filter((s) => s.trim().length > 0)).toHaveLength(1);
+  });
+
+  it("emits a composite foreign key inside the CREATE TABLE", () => {
+    const sql = emitCreateTable({
+      ...base,
+      constraints: [
+        {
+          kind: "foreign_key",
+          name: "comms_incident_fkey",
+          columns: ["tenant_id", "id"],
+          references: { schema: "meta", table: "incidents", columns: ["tenant_id", "id"] },
+          onDelete: "CASCADE",
+        },
+      ],
+    });
+    expect(sql).toContain(
+      `  CONSTRAINT "comms_incident_fkey" FOREIGN KEY ("tenant_id", "id") ` +
+        `REFERENCES "meta"."incidents"("tenant_id", "id") ON DELETE CASCADE`,
+    );
+  });
+
+  it("puts the new constraints after the pre-existing table-level lines", () => {
+    const sql = emitCreateTable({
+      ...base,
+      uniqueConstraints: [{ name: "comms_tenant_id_key", columns: ["tenant_id", "id"] }],
+      constraints: [{ kind: "check", name: "comms_positive_check", expression: "recipient_count > 0" }],
+    });
+    const lines = sql.split("\n");
+    expect(lines.findIndex((l) => l.includes("PRIMARY KEY"))).toBeLessThan(
+      lines.findIndex((l) => l.includes("comms_tenant_id_key")),
+    );
+    expect(lines.findIndex((l) => l.includes("comms_tenant_id_key"))).toBeLessThan(
+      lines.findIndex((l) => l.includes("comms_positive_check")),
+    );
+  });
+
+  it("emits several constraints in declaration order", () => {
+    const constraints: readonly TableConstraint[] = [
+      { kind: "check", name: "c1", expression: "a" },
+      { kind: "unique", name: "c2", columns: ["id"] },
+      {
+        kind: "foreign_key",
+        name: "c3",
+        columns: ["tenant_id"],
+        references: { table: "tenants", columns: ["id"] },
+      },
+    ];
+    const sql = emitCreateTable({ ...base, constraints });
+    const order = ["c1", "c2", "c3"].map((n) => sql.indexOf(`"${n}"`));
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(order.every((i) => i > 0)).toBe(true);
+  });
+});
+
+describe("guarded table-constraint emitters", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [{ name: "id", type: "UUID", notNull: true }],
+    primaryKey: ["id"],
+  };
+  const check: TableConstraint = {
+    kind: "check",
+    name: "comms_window_check",
+    expression: "published_at <= deadline_at",
+  };
+
+  it("re-checks emptiness in the statement, not only when the plan was built", () => {
+    const sql = emitAddTableConstraintIfEmpty(table, check);
+    expect(sql).toContain("SELECT count(*) INTO existing FROM \"meta\".\"comms\"");
+    expect(sql).toContain("IF existing > 0 THEN");
+    expect(sql).toContain("RAISE EXCEPTION");
+    expect(sql).toContain("refusing to add constraint comms_window_check to meta.comms");
+  });
+
+  it("adds the constraint once the guard passes", () => {
+    expect(emitAddTableConstraintIfEmpty(table, check)).toContain(
+      `ALTER TABLE "meta"."comms" ADD CONSTRAINT "comms_window_check" ` +
+        `CHECK (published_at <= deadline_at);`,
+    );
+  });
+
+  it("never uses NOT VALID, which would record a rule the data may violate", () => {
+    expect(emitAddTableConstraintIfEmpty(table, check)).not.toContain("NOT VALID");
+    expect(emitReplaceTableConstraintIfEmpty(table, check)).not.toContain("NOT VALID");
+  });
+
+  it("drops before adding, inside the same guarded block, when it replaces one", () => {
+    const sql = emitReplaceTableConstraintIfEmpty(table, check);
+    const drop = sql.indexOf("DROP CONSTRAINT");
+    const add = sql.indexOf("ADD CONSTRAINT");
+    expect(drop).toBeGreaterThan(0);
+    expect(add).toBeGreaterThan(drop);
+    expect(sql.indexOf("IF existing > 0")).toBeLessThan(drop);
+    expect(sql.startsWith("DO $$")).toBe(true);
+    expect(sql.endsWith("END $$;")).toBe(true);
+  });
+
+  it("tolerates the constraint already being gone on a replacement", () => {
+    expect(emitReplaceTableConstraintIfEmpty(table, check)).toContain(
+      "DROP CONSTRAINT IF EXISTS",
+    );
+  });
+});
+
+describe("the catalog's own emission is unchanged", () => {
+  /**
+   * The rule that let `constraints` and `permissive` be added at all. Nothing in the catalog declares
+   * either yet, so nothing in the emitted SQL may mention them — written against live `META_TABLES`
+   * so a table added later cannot quietly change what the other hundred-odd emit.
+   */
+  const statements = emitBootstrapSql(META_SCHEMA_NAME, META_TABLES);
+
+  it("writes no AS PERMISSIVE or AS RESTRICTIVE anywhere", () => {
+    expect(statements.filter((s) => / AS (PERMISSIVE|RESTRICTIVE)/.test(s))).toEqual([]);
+  });
+
+  it("writes a table-level CHECK line only for the table that declares one", () => {
+    // A column's own CHECK and inline REFERENCES are written on the column, so a `CONSTRAINT … `
+    // line appears only where `constraints` is used — today exactly one table, for the two
+    // cross-column rules ADR-0296 had nowhere to put. This test exists to catch a table gaining one
+    // by accident, so it is scoped by table rather than deleted.
+    const withCheckLine = statements.filter((sql) => /CONSTRAINT "[^"]+" CHECK \(/.test(sql));
+    expect(withCheckLine).toHaveLength(1);
+    expect(withCheckLine[0]).toContain('CREATE TABLE "meta"."incident_communications"');
+    for (const sql of statements) {
+      expect(sql).not.toMatch(/CONSTRAINT "[^"]+" FOREIGN KEY \(/);
+    }
+  });
+
+  it("declares a table-level constraint only where intended, and no permissiveness anywhere", () => {
+    const declaring = META_TABLES.filter((t) => t.constraints !== undefined).map((t) => t.name);
+    expect(declaring).toEqual(["incident_communications"]);
+    for (const table of META_TABLES) {
+      for (const policy of table.rls?.policies ?? []) {
+        // Nothing declares permissiveness yet; a restrictive policy added by hand would still be
+        // detected, which is the point of ADR-0298 — but the catalog itself must stay silent, or
+        // every existing policy's emitted SQL would change.
+        expect(policy.permissive, `${table.name}.${policy.name}`).toBeUndefined();
+      }
+    }
   });
 });
 

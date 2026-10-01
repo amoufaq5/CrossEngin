@@ -223,12 +223,81 @@ describe("computeDispatchEligibility", () => {
     expect(r.suppressionId).toBe("supp_abc12345");
   });
 
-  it("allows transactional even when suppression exists (non-suppressible category)", () => {
+  it("allows transactional over a consent-based suppression", () => {
+    // Nobody gets to unsubscribe from a receipt, so a non-suppressible category outranks consent.
+    const r = computeDispatchEligibility({
+      category: "transactional",
+      channel: "email",
+      preferences: baseMatrix,
+      suppressions: [{ ...baseSuppression, reason: "unsubscribe" }],
+      recipientAddress: "alice@acme.com",
+      now: new Date("2026-05-20T10:00:00Z"),
+    });
+    expect(r.eligible).toBe(true);
+    expect(r.suppressionId).toBeNull();
+  });
+
+  it("refuses transactional over a hard bounce, which is not consent", () => {
+    // The mailbox does not exist, so the mail cannot arrive however entitled the category is — and
+    // the bounce rate it feeds is what gets a whole sending domain throttled.
     const r = computeDispatchEligibility({
       category: "transactional",
       channel: "email",
       preferences: baseMatrix,
       suppressions: [baseSuppression],
+      recipientAddress: "alice@acme.com",
+      now: new Date("2026-05-20T10:00:00Z"),
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe("suppressed");
+    expect(r.suppressionId).toBe("supp_abc12345");
+  });
+
+  it("refuses a security alert over a complaint and a regulatory block too", () => {
+    for (const reason of ["spam_complaint", "regulatory_block", "do_not_contact_register"] as const) {
+      const r = computeDispatchEligibility({
+        category: "security_alert",
+        channel: "email",
+        preferences: baseMatrix,
+        suppressions: [{ ...baseSuppression, reason }],
+        recipientAddress: "alice@acme.com",
+        now: new Date("2026-05-20T10:00:00Z"),
+      });
+      expect(r.eligible, reason).toBe(false);
+    }
+  });
+
+  it("lets an unconditional reason decide whatever order the rows arrive in", () => {
+    // The resolver orders by applied_at DESC, so an older hard bounce can sit behind a newer
+    // unsubscribe; whichever is listed first, the address is undeliverable.
+    const unsubscribe: SuppressionRecord = {
+      ...baseSuppression,
+      id: "supp_unsub123",
+      reason: "unsubscribe",
+    };
+    for (const rows of [
+      [unsubscribe, baseSuppression],
+      [baseSuppression, unsubscribe],
+    ]) {
+      const r = computeDispatchEligibility({
+        category: "transactional",
+        channel: "email",
+        preferences: baseMatrix,
+        suppressions: rows,
+        recipientAddress: "alice@acme.com",
+        now: new Date("2026-05-20T10:00:00Z"),
+      });
+      expect(r.eligible).toBe(false);
+      expect(r.suppressionId).toBe("supp_abc12345");
+    }
+  });
+
+  it("still allows transactional when an expired hard bounce is all there is", () => {
+    const r = computeDispatchEligibility({
+      category: "transactional",
+      channel: "email",
+      preferences: baseMatrix,
+      suppressions: [{ ...baseSuppression, expiresAt: "2026-05-18T10:00:00.000Z" }],
       recipientAddress: "alice@acme.com",
       now: new Date("2026-05-20T10:00:00Z"),
     });

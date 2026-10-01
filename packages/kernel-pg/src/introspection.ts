@@ -19,6 +19,12 @@ export interface LiveIndex {
   readonly method: string;
   /** The partial-index predicate as Postgres renders it, or null for a full index. */
   readonly predicate: string | null;
+  /**
+   * Whether a constraint owns this index. `DROP INDEX` on one is refused, so replacing it has to go
+   * through `ALTER TABLE … DROP CONSTRAINT` — and that depends on what the *database* holds, not on
+   * how the catalog declares the object.
+   */
+  readonly constraintBacked: boolean;
 }
 
 /** Postgres's `confdeltype` codes, spelled the way DDL spells them. */
@@ -39,6 +45,13 @@ export const CONFDELTYPE_TO_ACTION: Readonly<Record<string, ForeignKeyAction>> =
   d: "SET DEFAULT",
 });
 
+/**
+ * `confupdtype` uses the same code letters as `confdeltype`; the two columns differ only in which
+ * event they govern.
+ */
+export const CONFUPDTYPE_TO_ACTION: Readonly<Record<string, ForeignKeyAction>> =
+  CONFDELTYPE_TO_ACTION;
+
 export interface LiveForeignKey {
   readonly name: string;
   readonly columns: readonly string[];
@@ -46,6 +59,26 @@ export interface LiveForeignKey {
   readonly targetTable: string;
   readonly targetColumns: readonly string[];
   readonly onDelete: ForeignKeyAction;
+  /**
+   * The `ON UPDATE` action. A declared table-level foreign key can state one, so it is read back;
+   * a column-level `references` cannot, and is not compared on it.
+   */
+  readonly onUpdate: ForeignKeyAction;
+}
+
+/**
+ * A CHECK constraint, with the expression as Postgres deparses it and the columns `conkey` names.
+ *
+ * `pg_get_expr(conbin, …)` prints exactly what `pg_get_expr` prints for an index predicate or a
+ * policy clause, so a declared expression rendered through the ADR-0292 probe compares against this
+ * character for character.
+ */
+export interface LiveCheckConstraint {
+  readonly name: string;
+  /** Null when `conbin` could not be deparsed, which makes the expression undetermined, not absent. */
+  readonly expression: string | null;
+  /** The columns the expression references, in `conkey` order; empty for one that references none. */
+  readonly columns: readonly string[];
 }
 
 export interface LivePolicy {
@@ -63,6 +96,13 @@ export interface LivePolicy {
    * oid in `polroles` did not resolve to a role. Null is undetermined for the same reason.
    */
   readonly roles: readonly string[] | null;
+  /**
+   * `polpermissive`: true for a permissive policy, false for a restrictive one, null when the row did
+   * not carry it. Null is *undetermined*, never permissive — reading an absent value as the default
+   * would make a restrictive policy look like a permissive one and get it silently replaced, which is
+   * the gap this closes.
+   */
+  readonly permissive: boolean | null;
 }
 
 export interface LiveTable {
@@ -72,6 +112,7 @@ export interface LiveTable {
   readonly indexes: readonly LiveIndex[];
   readonly policies: readonly LivePolicy[];
   readonly foreignKeys: readonly LiveForeignKey[];
+  readonly checkConstraints: readonly LiveCheckConstraint[];
   readonly rlsEnabled: boolean;
 }
 
@@ -117,6 +158,9 @@ export const INDEX_QUERY = `
          x.indisprimary AS is_primary,
          am.amname AS method,
          pg_get_expr(x.indpred, x.indrelid) AS predicate,
+         EXISTS (
+           SELECT 1 FROM pg_constraint k WHERE k.conindid = x.indexrelid
+         ) AS constraint_backed,
          ARRAY(
            SELECT pg_get_indexdef(x.indexrelid, k + 1, true)
              FROM generate_subscripts(x.indkey, 1) AS k
@@ -146,6 +190,7 @@ export const POLICY_QUERY = `
   SELECT c.relname AS table_name,
          p.polname AS policy_name,
          p.polcmd::text AS command,
+         p.polpermissive AS permissive,
          ARRAY(
            SELECT CASE WHEN t.rid = 0 THEN 'PUBLIC' ELSE r.rolname::text END
              FROM unnest(p.polroles) AS t(rid)
@@ -189,13 +234,41 @@ export const FOREIGN_KEY_QUERY = `
              JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum
             ORDER BY k.ord
          ) AS target_columns,
-         con.confdeltype AS on_delete
+         con.confdeltype AS on_delete,
+         con.confupdtype AS on_update
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
     JOIN pg_class tc ON tc.oid = con.confrelid
     JOIN pg_namespace tn ON tn.oid = tc.relnamespace
    WHERE con.contype = 'f'
+     AND n.nspname = $1
+   ORDER BY c.relname, con.conname
+`;
+
+/**
+ * CHECK constraints, deparsed and with the columns they cover.
+ *
+ * `conkey` is how a cross-column rule announces itself: a check over two columns names both, which is
+ * what distinguishes it from the single-column checks declared on a `ColumnDefinition`. It is nullable
+ * for a check that references no column at all, and `unnest(NULL)` yields no rows, so that arrives as
+ * an empty array rather than failing the query. `attname::text` for the ADR-0291 reason — a `name[]`
+ * has no driver array parser and would arrive as the literal string `{status}`.
+ */
+export const CHECK_CONSTRAINT_QUERY = `
+  SELECT c.relname AS table_name,
+         con.conname AS constraint_name,
+         pg_get_expr(con.conbin, con.conrelid) AS expression,
+         ARRAY(
+           SELECT a.attname::text
+             FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
+             JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum
+            ORDER BY k.ord
+         ) AS columns
+    FROM pg_constraint con
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE con.contype = 'c'
      AND n.nspname = $1
    ORDER BY c.relname, con.conname
 `;
@@ -222,6 +295,7 @@ export interface IndexRow {
   readonly is_primary: boolean;
   readonly method: string;
   readonly predicate: string | null;
+  readonly constraint_backed: boolean;
   readonly columns: readonly string[];
 }
 
@@ -233,6 +307,15 @@ export interface ForeignKeyRow {
   readonly target_table: string;
   readonly target_columns: readonly string[];
   readonly on_delete: string;
+  /** `confupdtype`; absent from a row a caller assembled before it was asked for. */
+  readonly on_update?: string;
+}
+
+export interface CheckConstraintRow {
+  readonly table_name: string;
+  readonly constraint_name: string;
+  readonly expression: string | null;
+  readonly columns: readonly string[];
 }
 
 export interface PolicyRow {
@@ -246,6 +329,8 @@ export interface PolicyRow {
   readonly roles?: readonly string[];
   /** `cardinality(polroles)` — how many oids there were before resolution. */
   readonly role_count?: number;
+  /** `pg_policy.polpermissive`. */
+  readonly permissive?: boolean;
 }
 
 /**
@@ -269,6 +354,7 @@ export function parseLiveSchema(
   indexes: readonly IndexRow[],
   policies: readonly PolicyRow[],
   foreignKeys: readonly ForeignKeyRow[] = [],
+  checkConstraints: readonly CheckConstraintRow[] = [],
 ): LiveSchema {
   const columnsByTable = new Map<string, LiveColumn[]>();
   for (const row of columns) {
@@ -296,6 +382,7 @@ export function parseLiveSchema(
       primary: row.is_primary,
       method: row.method ?? "btree",
       predicate: row.predicate ?? null,
+      constraintBacked: row.constraint_backed === true,
     };
     if (existing === undefined) {
       indexesByTable.set(row.table_name, [index]);
@@ -313,6 +400,7 @@ export function parseLiveSchema(
       check: row.check_expr,
       command: row.command === undefined ? null : canonicalPolicyCommand(row.command),
       roles: resolvedPolicyRoles(row),
+      permissive: row.permissive ?? null,
     };
     if (existing === undefined) {
       policiesByTable.set(row.table_name, [policy]);
@@ -333,11 +421,32 @@ export function parseLiveSchema(
       // An unrecognized code would be a Postgres version introducing a new action; treating it as
       // NO ACTION under-reports rather than inventing a stricter rule than the database holds.
       onDelete: CONFDELTYPE_TO_ACTION[row.on_delete] ?? "NO ACTION",
+      // An absent code is a row assembled without asking for it; NO ACTION is both Postgres's
+      // default and the under-reporting direction, which is the safe one.
+      onUpdate:
+        row.on_update === undefined
+          ? "NO ACTION"
+          : CONFUPDTYPE_TO_ACTION[row.on_update] ?? "NO ACTION",
     };
     if (existing === undefined) {
       foreignKeysByTable.set(row.table_name, [fk]);
     } else {
       existing.push(fk);
+    }
+  }
+
+  const checksByTable = new Map<string, LiveCheckConstraint[]>();
+  for (const row of checkConstraints) {
+    const existing = checksByTable.get(row.table_name);
+    const check: LiveCheckConstraint = {
+      name: row.constraint_name,
+      expression: row.expression,
+      columns: row.columns,
+    };
+    if (existing === undefined) {
+      checksByTable.set(row.table_name, [check]);
+    } else {
+      existing.push(check);
     }
   }
 
@@ -349,6 +458,7 @@ export function parseLiveSchema(
     indexes: indexesByTable.get(row.name) ?? [],
     policies: policiesByTable.get(row.name) ?? [],
     foreignKeys: foreignKeysByTable.get(row.name) ?? [],
+    checkConstraints: checksByTable.get(row.name) ?? [],
   }));
 
   return { schema, tables: liveTables };
@@ -358,12 +468,13 @@ export async function introspectSchema(
   conn: PgConnection,
   schema: string,
 ): Promise<LiveSchema> {
-  const [tables, columns, indexes, policies, foreignKeys] = await Promise.all([
+  const [tables, columns, indexes, policies, foreignKeys, checks] = await Promise.all([
     conn.query<TableRow>(TABLE_QUERY, [schema]),
     conn.query<ColumnRow>(COLUMN_QUERY, [schema]),
     conn.query<IndexRow>(INDEX_QUERY, [schema]),
     conn.query<PolicyRow>(POLICY_QUERY, [schema]),
     conn.query<ForeignKeyRow>(FOREIGN_KEY_QUERY, [schema]),
+    conn.query<CheckConstraintRow>(CHECK_CONSTRAINT_QUERY, [schema]),
   ]);
   return parseLiveSchema(
     schema,
@@ -372,5 +483,6 @@ export async function introspectSchema(
     indexes.rows,
     policies.rows,
     foreignKeys.rows,
+    checks.rows,
   );
 }

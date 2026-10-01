@@ -44,7 +44,13 @@ import { PruneScheduler } from "./prune-scheduler.js";
 import { DeliveryScheduler } from "./delivery-scheduler.js";
 import { PostgresDeliveryStore } from "./delivery-store.js";
 import { PostgresRecipientResolver } from "./recipient-resolver.js";
-import { defaultSenderRegistry } from "./delivery-senders.js";
+import { buildSenderRegistryFromEnv } from "./delivery-senders-env.js";
+import { buildBounceSecretResolverFromEnv } from "./bounce-webhook-env.js";
+import {
+  BOUNCE_WEBHOOK_PATH_PREFIX,
+  buildBounceWebhookInterceptor,
+} from "./bounce-webhook-routes.js";
+import { PostgresSuppressionStore } from "./suppression-store.js";
 import { PostgresDigestStore } from "./digest-store.js";
 import { PostgresTemplateStore } from "./template-store.js";
 import { PostgresAuditEmitter, auditActor, auditEntry } from "./audit-log-store.js";
@@ -88,6 +94,8 @@ import { DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH, buildAiDesignBudget } from "./ai-d
 import { PostgresDesignJobStore } from "./design-jobs.js";
 import { PostgresDesignReviewStore } from "./design-review-store.js";
 import { buildDesignReviewRoutes } from "./design-review-routes.js";
+import { buildIntegrityVerdictRoutes } from "./integrity-verdict-routes.js";
+import { PostgresIntegrityVerdictStore } from "./integrity-verdict-store.js";
 import { assessManifestRisk } from "./design-review.js";
 import { projectManifestView } from "./manifest-view.js";
 import { diffManifests } from "./manifest-diff.js";
@@ -546,6 +554,37 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // proposals across every tenant (with an automated risk report) before they can go live. The
   // cross-tenant reads run under the explicit, transaction-scoped `app.platform_review` grant.
   let reviewStore: PostgresDesignReviewStore | null = null;
+  // The readable projection of each audit-integrity pass (ADR-0287). The chain commitment stays the
+  // proof; this makes the verdict queryable, which it was not. Two grants, both fail-closed: no
+  // configured role means nobody reads anything, and a tenant role never reaches the platform
+  // chain's own verdicts — which `meta.audit_integrity_verdicts`' policy enforces independently of
+  // this wiring, verified live against a non-owner role.
+  if (options.integrityVerdictRoutes) {
+    if (conn === undefined) {
+      console.warn(
+        "[audit] --audit-verdict-routes requires a Postgres store (--store pg); skipping",
+      );
+    } else {
+      if (
+        options.integrityVerdictPlatformRoles.length === 0 &&
+        options.integrityVerdictTenantRoles.length === 0
+      ) {
+        console.warn(
+          "[audit] --audit-verdict-routes is on with no --audit-verdict-platform-role or " +
+            "--audit-verdict-tenant-role: every request will be refused",
+        );
+      }
+      extraRouteList.push(
+        ...buildIntegrityVerdictRoutes({
+          source: new PostgresIntegrityVerdictStore(conn, schemaOpt),
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          platformRoles: new Set(options.integrityVerdictPlatformRoles),
+          tenantRoles: new Set(options.integrityVerdictTenantRoles),
+        }),
+      );
+    }
+  }
+
   if (options.designReview && conn !== undefined) {
     reviewStore = new PostgresDesignReviewStore(conn, schemaOpt);
     extraRouteList.push(
@@ -658,9 +697,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   }
   // In-product AI Architect: /v1/ai routes let a tenant admin describe their business, get a
   // kernel-validated manifest proposal (meta.operate_tenant_manifests), and activate it as the
-  // tenant's live system. The designer resolves from env (Anthropic → OpenAI, OPENAI_BASE_URL
-  // for self-hosted OSS servers); with no provider the routes answer 503 but review/activate of
-  // existing proposals still works. Activation invalidates the per-tenant gateway cache below.
+  // tenant's live system. The designer resolves from env, local first: LOCAL_LLM_BASE_URL /
+  // OLLAMA_BASE_URL through the purpose-built local provider, then Anthropic, then OpenAI
+  // (OPENAI_BASE_URL still serves a proxy). Local is tried first on purpose — a local base URL has
+  // one meaning in this process, so honouring a stray cloud key instead would send the tenant's
+  // business description to a vendor the operator deliberately opted out of. With no provider the
+  // routes answer 503 but review/activate of existing proposals still works. Activation invalidates the per-tenant gateway cache below.
   if (options.aiDesign && manifestStore !== null) {
     const providerBuild = buildDesignProviderFromEnv(
       process.env,
@@ -677,7 +719,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         : null;
     if (providerBuild === null) {
       console.warn(
-        "[ai-design] no AI provider configured (set ANTHROPIC_API_KEY or OPENAI_API_KEY); POST /v1/ai/design will answer 503",
+        "[ai-design] no AI provider configured (set LOCAL_LLM_BASE_URL / OLLAMA_BASE_URL for a " +
+          "self-hosted model, or ANTHROPIC_API_KEY / OPENAI_API_KEY); POST /v1/ai/design will " +
+          "answer 503. A local base URL that is set but malformed also lands here, rather than " +
+          "falling through to a cloud vendor.",
       );
     }
     // With review required, a new proposal must enter the queue as `pending` — otherwise it
@@ -757,6 +802,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.region !== null && residencyDirectory !== undefined
       ? { region: options.region as Region, directory: residencyDirectory }
       : undefined;
+  // Channel senders come from the environment, not from flags: all but the sender identity are
+  // credentials and a process's argv is readable by anyone who can run `ps`. `in_app` is always
+  // registered, so a delivery for an unconfigured channel is refused as `no_sender_configured`,
+  // which the drain treats as retryable — configure the channel and re-drain and it goes out
+  // (ADR-0274).
+  const senderWiring = buildSenderRegistryFromEnv();
+  const deliveryEnabled = options.notificationDrainMs !== null && conn !== undefined;
+  console.info(`[notify] channels: ${senderWiring.report.channels.join(", ")}`);
+  for (const skipped of senderWiring.report.skipped) {
+    console.warn(`[notify] ${skipped}`);
+  }
+  if (!deliveryEnabled && senderWiring.report.channels.length > 1) {
+    // Otherwise the line above reads as "email works" to an operator who configured a provider but
+    // never started the drain, which is the same looks-healthy-sends-nothing failure the skip
+    // reasons exist to prevent.
+    console.warn(
+      "[notify] a real channel is configured but no drain is running; pass --notification-drain-ms " +
+        "(and a Postgres store) or nothing will be delivered",
+    );
+  }
+
   // Live SLO enforcement: availability/latency SLOs registered from a config file (--slo-config) or
   // derived from the manifest (--slo-defaults, one SLO per entity operation). The observer feeds every
   // dispatched request's outcome into the engines, and the scheduler evaluates burn/latency on an
@@ -1122,7 +1188,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ...schemaOpt,
           adminRoles: options.notificationAdminRoles,
         }),
-        senders: defaultSenderRegistry(),
+        senders: senderWiring.registry,
         digests: digestStore,
         // Quiet hours + digest cadence are live tenant settings, so an admin can change them
         // without a redeploy; an absent or malformed policy means "send now", never a stall.
@@ -1206,6 +1272,49 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }),
     };
   }
+  // The bounce webhook wraps the dispatch target rather than registering as a gateway route, because
+  // the HMAC covers the raw bytes and a gateway `Handler` only ever sees a parsed body — re-serializing
+  // it is not byte-identical, and a Twilio status callback is form-encoded and would not survive a JSON
+  // round-trip at all. Wrapping here rather than in the node listener keeps the route available to the
+  // Fetch/Workers adapter, which goes through the same target.
+  if (options.bounceWebhook && conn !== undefined) {
+    const secrets = buildBounceSecretResolverFromEnv();
+    if (secrets.resolver === null) {
+      console.warn(`[bounce-webhook] ${secrets.skipped ?? "not configured"}`);
+    } else {
+      const resolver = secrets.resolver;
+      const suppressions = new PostgresSuppressionStore(conn, schemaOpt);
+      const intercept = buildBounceWebhookInterceptor({
+        store: suppressions,
+        secretForTenant: resolver,
+        ...(options.bounceTransientHours !== null
+          ? { transientSuppressionHours: options.bounceTransientHours }
+          : {}),
+        onRecorded: (info) =>
+          console.info(
+            `[bounce-webhook] tenant=${info.tenantId} source=${info.source}` +
+              ` channel=${info.channel} inserted=${info.inserted.toString()}` +
+              ` duplicates=${info.duplicates.toString()}`,
+          ),
+        // The address never reaches the log: a suppression names a real person's mailbox, and the
+        // refusal code is what an operator needs anyway.
+        onRefusal: (info) =>
+          console.warn(
+            `[bounce-webhook] refused status=${info.status.toString()} reason=${info.reason}` +
+              ` source=${info.source ?? "?"}`,
+          ),
+        onError: (err, target) =>
+          console.error(`[bounce-webhook] store failure for tenant ${target.tenantId}`, err),
+      });
+      const inner = dispatchTarget;
+      dispatchTarget = {
+        dispatch: async (raw, body): Promise<RawHttpResponse> =>
+          (await intercept(raw, body)) ?? (await inner.dispatch(raw, body)),
+      };
+      console.info(`[bounce-webhook] serving ${BOUNCE_WEBHOOK_PATH_PREFIX}/{tenantId}/{ses|twilio}`);
+    }
+  }
+
   poller?.start();
   manifestPoller?.start();
   jobScheduler?.start();

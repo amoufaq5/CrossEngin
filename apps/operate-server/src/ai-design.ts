@@ -9,6 +9,10 @@ import {
   isAnthropicModel,
   type AnthropicModel,
 } from "@crossengin/ai-providers-anthropic";
+import {
+  DEFAULT_LOCAL_MODEL,
+  LocalLlmProvider,
+} from "@crossengin/ai-providers-local";
 import { OpenAiProvider, isOpenAiChatModel } from "@crossengin/ai-providers-openai";
 import {
   ManifestSchema,
@@ -531,10 +535,56 @@ export function buildDesignDesigner(opts: {
   };
 }
 
+export interface DesignProviderBuild {
+  readonly provider: DesignCompletionProvider;
+  readonly providerLabel: string;
+  readonly model: string;
+}
+
+/**
+ * The self-hosted endpoint, following the Architect CLI's convention: `LOCAL_LLM_BASE_URL`, or
+ * `OLLAMA_BASE_URL` for an Ollama box. Empty means unset, the same reading `OPENAI_BASE_URL` gets.
+ * Returning `"malformed"` keeps a typo from falling through to a cloud vendor.
+ */
+function resolveLocalBaseUrl(
+  env: NodeJS.ProcessEnv,
+): { readonly kind: "absent" } | { readonly kind: "malformed"; readonly raw: string } | { readonly kind: "present"; readonly baseUrl: string } {
+  const raw = env["LOCAL_LLM_BASE_URL"] ?? env["OLLAMA_BASE_URL"] ?? "";
+  if (raw.length === 0) return { kind: "absent" };
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return { kind: "malformed", raw };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { kind: "malformed", raw };
+  }
+  return { kind: "present", baseUrl: raw };
+}
+
 export function buildDesignProviderFromEnv(
   env: NodeJS.ProcessEnv,
   opts?: { model?: string },
-): { provider: DesignCompletionProvider; providerLabel: string; model: string } | null {
+): DesignProviderBuild | null {
+  // Self-hosted first, and refused outright when its base URL is unusable. Unlike an API key, a
+  // local base URL has exactly one meaning in this process — "run the model on our own hardware" —
+  // so honouring a stray ANTHROPIC_API_KEY instead would ship the tenant's business description to
+  // a vendor the operator deliberately opted out of.
+  const local = resolveLocalBaseUrl(env);
+  if (local.kind === "malformed") return null;
+  if (local.kind === "present") {
+    // No catalogue to gate against: a local server names its own models, and the provider's pricing
+    // is zero per token, so a per-tenant cost ceiling never trips on self-hosted inference.
+    const model: string = opts?.model !== undefined && opts.model.length > 0 ? opts.model : DEFAULT_LOCAL_MODEL;
+    const apiKey = env["LOCAL_LLM_API_KEY"];
+    const provider = new LocalLlmProvider({
+      defaultModel: model,
+      baseUrl: local.baseUrl,
+      ...(apiKey !== undefined && apiKey.length > 0 ? { apiKey } : {}),
+    });
+    return { provider, providerLabel: `local/${model}`, model };
+  }
   const anthropicKey = env["ANTHROPIC_API_KEY"];
   if (anthropicKey !== undefined && anthropicKey.length > 0) {
     const model: AnthropicModel =

@@ -54,6 +54,29 @@ services:
     environment:
       <<: *pg-env
       NODE_ENV: production
+      # Credentials reach the API through the environment, not through `command`, because argv is
+      # readable by anyone who can run `ps` (ADR-0301). `${VAR:-}` passes an empty value when the
+      # variable is unset, and every reader here treats empty as unset — so an absent provider is
+      # simply not registered rather than half-configured.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      SES_REGION: ${SES_REGION:-}
+      SES_FROM_ADDRESS: ${SES_FROM_ADDRESS:-}
+      SES_FROM_NAME: ${SES_FROM_NAME:-}
+      SES_CONFIGURATION_SET: ${SES_CONFIGURATION_SET:-}
+      SES_ENDPOINT_URL: ${SES_ENDPOINT_URL:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_API_KEY_SID: ${TWILIO_API_KEY_SID:-}
+      TWILIO_API_KEY_SECRET: ${TWILIO_API_KEY_SECRET:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      TWILIO_MESSAGING_SERVICE_SID: ${TWILIO_MESSAGING_SERVICE_SID:-}
+      TWILIO_STATUS_CALLBACK_URL: ${TWILIO_STATUS_CALLBACK_URL:-}
+      TWILIO_BASE_URL: ${TWILIO_BASE_URL:-}
+      NOTIFICATION_BOUNCE_SECRET: ${NOTIFICATION_BOUNCE_SECRET:-}
     # Args in list form so the api-key (token:role:tenant) is never shell-split.
     command:
       - node
