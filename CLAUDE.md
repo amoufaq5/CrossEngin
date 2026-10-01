@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 286 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 287 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**84 packages + 3 apps, 139 meta-schema tables, ~9,770 tests**, all green, no
+**84 packages + 3 apps, 139 meta-schema tables, ~9,817 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -119,6 +119,17 @@ packages exist at only one layer, noted below where that is true.
   **Foreign keys are reconciled** (ADR-0291), matched by column since the emitter writes them inline
   and unnamed: a declared one missing is added, a changed target or `ON DELETE` is replaced, an
   undeclared one is reported — unless it blocks a type change, where dropping it is a visible step.
+  **Index and policy definitions are compared too** (ADR-0292) — columns, order, uniqueness and
+  access method structurally; predicates and policy clauses by **asking Postgres to deparse the
+  declared text** (`expression-render.ts` attaches it as a `CHECK … NOT VALID` constraint inside a
+  savepoint, reads `pg_get_constraintdef`, and rolls it away). That sidesteps writing a SQL parser:
+  Postgres rewrites structure, not just spelling, so `status IN ('a','b')` comes back as
+  `(status = ANY (ARRAY['a'::text, 'b'::text]))`. `NOT VALID` keeps it free — ~112 probes cost 337 ms
+  against a 20k-row table. A changed definition is replaced in **one** statement
+  (`DROP …; CREATE …;`), so no query runs without the index and no table sits with RLS on and no
+  policy; a constraint-backed index routes through its constraint, since `DROP INDEX` on one is
+  refused. Omit the renderings and expressions are simply **not compared** — unknown must not read as
+  drift.
   `canonical.ts` is what makes the diff trustworthy: it rewrites a declared type into
   `format_type`'s spelling, strips the casts Postgres adds to a default, and treats an omitted
   `ON DELETE` as the RESTRICT the emitter writes — because comparing the raw text called 138 of 139
@@ -592,14 +603,16 @@ opened them.
 
 **Load-bearing**
 
-- **An index or policy changed *in place* is invisible to the diff** (ADR-0290). `diffSchema`
-  compares both by name only, so renaming nothing and editing an index predicate or a policy's
-  `using` clause reconciles to no change. Comparing definitions means normalizing Postgres's own
-  rendering of an expression, which is a much less mechanical problem than the type and default
-  spellings ADR-0290 fixed. Until then such a change needs a new name or a manual drop.
 - **A composite foreign key cannot be declared, only introspected** (ADR-0291). `TableDefinition`
   has no table-level constraint, so a multi-column foreign key in the database always reads as
   undeclared and is reported rather than reconciled. Nothing in the catalog wants one yet.
+- **Replacing an index rebuilds it** (ADR-0292), unavoidably — Postgres cannot alter a predicate, a
+  column list or an access method in place. The plan names the step before it runs but does not
+  estimate the cost. Relatedly, an expression is compared rather than understood, so two logically
+  equivalent predicates written differently deparse differently and trigger a rebuild that was not
+  needed: correct, not minimal.
+- **A policy's roles and command are neither declared nor compared** (ADR-0292) — `RlsPolicy` has no
+  field for `FOR SELECT` or `TO some_role`.
 - **Type changes on a populated table, and `NOT NULL` backfills, remain manual** (ADR-0291). The
   plan hands over the exact SQL for both; automating either means deciding what happens to existing
   rows, which is the one thing a migrator should not decide.
@@ -668,7 +681,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 286 records; 207
+hand-editing, so a title or status change cannot drift. 287 records; 208
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

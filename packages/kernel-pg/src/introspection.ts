@@ -12,6 +12,10 @@ export interface LiveIndex {
   readonly columns: readonly string[];
   readonly unique: boolean;
   readonly primary: boolean;
+  /** The access method — `btree`, `gin`, … Changing it under the same name was invisible before. */
+  readonly method: string;
+  /** The partial-index predicate as Postgres renders it, or null for a full index. */
+  readonly predicate: string | null;
 }
 
 /** Postgres's `confdeltype` codes, spelled the way DDL spells them. */
@@ -97,12 +101,15 @@ export const INDEX_QUERY = `
          i.relname AS index_name,
          x.indisunique AS is_unique,
          x.indisprimary AS is_primary,
+         am.amname AS method,
+         pg_get_expr(x.indpred, x.indrelid) AS predicate,
          ARRAY(
            SELECT pg_get_indexdef(x.indexrelid, k + 1, true)
              FROM generate_subscripts(x.indkey, 1) AS k
          ) AS columns
     FROM pg_index x
     JOIN pg_class i ON i.oid = x.indexrelid
+    JOIN pg_am am ON am.oid = i.relam
     JOIN pg_class c ON c.oid = x.indrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
    WHERE n.nspname = $1
@@ -178,6 +185,8 @@ export interface IndexRow {
   readonly index_name: string;
   readonly is_unique: boolean;
   readonly is_primary: boolean;
+  readonly method: string;
+  readonly predicate: string | null;
   readonly columns: readonly string[];
 }
 
@@ -230,6 +239,8 @@ export function parseLiveSchema(
       columns: row.columns,
       unique: row.is_unique,
       primary: row.is_primary,
+      method: row.method ?? "btree",
+      predicate: row.predicate ?? null,
     };
     if (existing === undefined) {
       indexesByTable.set(row.table_name, [index]);

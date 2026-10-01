@@ -8,6 +8,7 @@ import {
 } from "@crossengin/kernel/bootstrap";
 
 import { diffSchema } from "./diff.js";
+import { expressionKey } from "./expression-render.js";
 import type { LiveSchema, LiveTable } from "./introspection.js";
 import {
   RECONCILE_STEP_KINDS,
@@ -48,10 +49,10 @@ function liveWidgets(over: Partial<LiveTable> = {}): LiveTable {
       { name: "kind", dataType: "text", isNullable: false, defaultExpr: "'basic'::text" },
     ],
     indexes: [
-      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true },
-      { name: "idx_widgets_label", columns: ["label"], unique: false, primary: false },
-      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false },
-      { name: "widgets_tenant_code_key", columns: ["tenant_id", "code"], unique: true, primary: false },
+      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+      { name: "idx_widgets_label", columns: ["label"], unique: false, primary: false, method: "btree", predicate: null },
+      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null },
+      { name: "widgets_tenant_code_key", columns: ["tenant_id", "code"], unique: true, primary: false, method: "btree", predicate: null },
     ],
     policies: [{ name: "widgets_isolation", using: "(tenant_id = ...)", check: null }],
     foreignKeys: [],
@@ -83,6 +84,9 @@ describe("RECONCILE_STEP_KINDS", () => {
       "alter_column_type",
       "add_foreign_key",
       "drop_foreign_key",
+      "replace_index",
+      "replace_unique_constraint",
+      "replace_policy",
     ]);
   });
 
@@ -301,7 +305,7 @@ describe("planSchemaReconciliation — what it refuses", () => {
     const stale = liveWidgets({
       indexes: [
         ...liveWidgets().indexes,
-        { name: "idx_widgets_adhoc", columns: ["kind"], unique: false, primary: false },
+        { name: "idx_widgets_adhoc", columns: ["kind"], unique: false, primary: false, method: "btree", predicate: null },
       ],
     });
     const plan = planFor([WIDGETS], live([stale]));
@@ -445,7 +449,7 @@ function liveChild(over: Partial<LiveTable> = {}): LiveTable {
       { name: "owner_id", dataType: "uuid", isNullable: true, defaultExpr: null },
       { name: "label", dataType: "text", isNullable: true, defaultExpr: null },
     ],
-    indexes: [{ name: "children_pkey", columns: ["id"], unique: true, primary: true }],
+    indexes: [{ name: "children_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null }],
     policies: [],
     foreignKeys: [
       {
@@ -770,5 +774,80 @@ describe("refusals propagate to whatever depends on them", () => {
     const blocked = plan.unreconciled.find((u) => u.reason === "depends_on_unreconciled");
     expect(blocked?.target).toBe("parent_id");
     expect(blocked?.detail).toContain("foreign key");
+  });
+});
+
+describe("replacing a changed index, constraint or policy", () => {
+  const RENDERED = {
+    byRequest: new Map<string, string | null>([
+      // Must equal what the fixture's live policy reports, so the matching case matches.
+      [expressionKey("widgets", "tenant_id = current_setting('x', true)::UUID"), "(tenant_id = ...)"],
+    ]),
+  };
+
+  function planChanged(over: Partial<LiveTable>) {
+    const liveSchema = live([liveWidgets(over)]);
+    return planSchemaReconciliation(diffSchema([WIDGETS], liveSchema, RENDERED), [WIDGETS]);
+  }
+
+  it("replaces an index whose definition changed, in one statement", () => {
+    // One statement because the applier wraps each in its own transaction; two would leave a window
+    // with the index gone.
+    const plan = planChanged({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_label" ? { ...i, columns: ["code"] } : i,
+      ),
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_index");
+    expect(step?.target).toBe("idx_widgets_label");
+    expect(step?.sql).toContain("DROP INDEX");
+    expect(step?.sql).toContain("CREATE INDEX");
+    expect(step?.sql.split(";").filter((s) => s.trim().length > 0)).toHaveLength(2);
+  });
+
+  it("routes a constraint-backed index through the constraint, not DROP INDEX", () => {
+    // `DROP INDEX` on a constraint's index is refused outright by Postgres.
+    const plan = planChanged({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "widgets_tenant_code_key" ? { ...i, columns: ["code", "tenant_id"] } : i,
+      ),
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_unique_constraint");
+    expect(step?.target).toBe("widgets_tenant_code_key");
+    expect(step?.sql).toContain("DROP CONSTRAINT IF EXISTS");
+    expect(step?.sql).toContain("ADD CONSTRAINT");
+    expect(step?.sql).not.toContain("DROP INDEX");
+    expect(step?.guarded).toBe(true);
+  });
+
+  it("replaces a policy whose clause changed, in one statement", () => {
+    // A table with RLS on and no policy denies every row, so a window between the two would be an
+    // outage rather than a leak — and one statement means there is no window.
+    const plan = planChanged({
+      policies: [{ name: "widgets_isolation", using: "(something else)", check: null }],
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_policy");
+    expect(step?.target).toBe("widgets_isolation");
+    expect(step?.sql).toContain("DROP POLICY");
+    expect(step?.sql).toContain("CREATE POLICY");
+  });
+
+  it("plans nothing when the definitions match", () => {
+    expect(planChanged({}).steps).toEqual([]);
+  });
+
+  it("refuses to replace an index covering a column it is not adding", () => {
+    const grown: TableDefinition = {
+      ...WIDGETS,
+      columns: [...WIDGETS.columns, { name: "stamp", type: "INTEGER", notNull: true }],
+      indexes: [{ name: "idx_widgets_label", columns: ["stamp"] }],
+    };
+    const plan = planSchemaReconciliation(
+      diffSchema([grown], live([liveWidgets()]), RENDERED),
+      [grown],
+      { rowCounts: new Map([["widgets", 4]]) },
+    );
+    expect(plan.steps.some((s) => s.kind === "replace_index")).toBe(false);
+    expect(plan.unreconciled.some((u) => u.reason === "depends_on_unreconciled")).toBe(true);
   });
 });

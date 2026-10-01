@@ -7,6 +7,8 @@ import {
   emitDropColumnNotNull,
   emitDropConstraint,
   emitIndex,
+  emitReplaceIndex,
+  emitReplaceRlsPolicy,
   emitRlsEnable,
   emitRlsPolicy,
   emitSetColumnDefault,
@@ -17,7 +19,14 @@ import {
 
 import { canonicalPgType, declaredOnDelete, expectedIndexNames } from "./canonical.js";
 import type { PgConnection } from "./connection.js";
-import { diffSchema, type ColumnDelta, type SchemaDiff, type TableDiff } from "./diff.js";
+import {
+  diffSchema,
+  expressionRequestsFor,
+  type ColumnDelta,
+  type SchemaDiff,
+  type TableDiff,
+} from "./diff.js";
+import { renderExpressions } from "./expression-render.js";
 import { introspectSchema } from "./introspection.js";
 
 export const RECONCILE_STEP_KINDS = [
@@ -33,6 +42,9 @@ export const RECONCILE_STEP_KINDS = [
   "alter_column_type",
   "add_foreign_key",
   "drop_foreign_key",
+  "replace_index",
+  "replace_unique_constraint",
+  "replace_policy",
 ] as const;
 export type ReconcileStepKind = (typeof RECONCILE_STEP_KINDS)[number];
 
@@ -234,6 +246,7 @@ function planTable(
 
   const expected = expectedIndexNames(table);
   const declaredIndexes = new Map((table.indexes ?? []).map((i) => [i.name, i] as const));
+  const declaredPolicies = new Map((table.rls?.policies ?? []).map((p) => [p.name, p] as const));
   const constraintColumns = uniqueConstraintColumns(table);
   for (const name of tableDiff.addedIndexes) {
     const idx = declaredIndexes.get(name);
@@ -261,6 +274,54 @@ function planTable(
     }
   }
 
+  // A changed definition under an unchanged name. Replacing it is unambiguous — the catalog says
+  // what the object should be — but it is a rebuild, so it is its own step kind rather than hiding
+  // among the additions.
+  for (const delta of tableDiff.changedIndexes) {
+    if (delta.constraintBacked) {
+      const cols = constraintColumns.get(delta.name);
+      if (cols === undefined) continue;
+      if (refuseIfBlocked(table, "constraint", delta.name, cols, refusedColumns, unreconciled)) {
+        continue;
+      }
+      steps.push({
+        kind: "replace_unique_constraint",
+        table: table.name,
+        target: delta.name,
+        // DROP INDEX is refused on a constraint's index, so this has to go through the constraint.
+        sql:
+          `${emitDropConstraint(table, delta.name)} ` +
+          `${emitAddUniqueConstraint(table, delta.name, cols)}`,
+        guarded: true,
+      });
+      continue;
+    }
+    const idx = declaredIndexes.get(delta.name);
+    if (idx === undefined) continue;
+    if (refuseIfBlocked(table, "index", delta.name, idx.columns, refusedColumns, unreconciled)) {
+      continue;
+    }
+    steps.push({
+      kind: "replace_index",
+      table: table.name,
+      target: delta.name,
+      sql: emitReplaceIndex(table, idx),
+      guarded: false,
+    });
+  }
+
+  for (const delta of tableDiff.changedPolicies) {
+    const policy = declaredPolicies.get(delta.name);
+    if (policy === undefined) continue;
+    steps.push({
+      kind: "replace_policy",
+      table: table.name,
+      target: delta.name,
+      sql: emitReplaceRlsPolicy(table, policy),
+      guarded: false,
+    });
+  }
+
   // Enabling RLS closes a gap; disabling it would open one, so it is never planned.
   if (tableDiff.rlsTargetEnabled && !tableDiff.rlsLiveEnabled) {
     steps.push({
@@ -283,7 +344,6 @@ function planTable(
     });
   }
 
-  const declaredPolicies = new Map((table.rls?.policies ?? []).map((p) => [p.name, p] as const));
   for (const name of tableDiff.addedPolicies) {
     const policy = declaredPolicies.get(name);
     if (policy === undefined) continue;
@@ -619,7 +679,14 @@ export async function planLiveReconciliation(
   tables: readonly TableDefinition[],
 ): Promise<ReconciliationPlan> {
   const live = await introspectSchema(conn, schema);
-  const diff = diffSchema(tables, live);
+  // Only tables that already exist can carry a probe constraint; a table being created has nothing
+  // to compare against anyway.
+  const liveNames = new Set(live.tables.map((tb) => tb.name));
+  const requests = tables
+    .filter((tb) => liveNames.has(tb.name))
+    .flatMap((tb) => expressionRequestsFor(tb));
+  const rendered = await renderExpressions(conn, schema, requests);
+  const diff = diffSchema(tables, live, rendered);
   const probe = await probeRowCounts(conn, schema, diff);
   return planSchemaReconciliation(diff, tables, probe);
 }

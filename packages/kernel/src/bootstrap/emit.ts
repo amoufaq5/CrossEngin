@@ -191,6 +191,30 @@ export function emitIndex(table: TableDefinition, idx: IndexSpec): string {
   return `CREATE ${uniqueKw}INDEX ${quoteIdent(idx.name)} ON ${tableName}${using} (${cols})${where};`;
 }
 
+/**
+ * Replaces an index in one statement, so no query ever runs without it.
+ *
+ * Changing a predicate, a column list or an access method means rebuilding — Postgres cannot alter
+ * any of them in place. Both halves go in a single statement because the applier runs each statement
+ * in its own transaction, and splitting them would leave a window with the index gone. The rebuild
+ * cost is real on a large table and is the price of the declaration having changed.
+ */
+export function emitReplaceIndex(table: TableDefinition, idx: IndexSpec): string {
+  return `DROP INDEX ${qualifyTable(table.schema, idx.name)}; ${emitIndex(table, idx)}`;
+}
+
+/**
+ * Replaces a policy in one statement.
+ *
+ * The atomicity matters more here than for an index. A table with RLS enabled and no policy denies
+ * every row, so a window between the drop and the create would fail requests rather than leak them —
+ * but failing them is still an outage, and one statement means there is no window at all.
+ */
+export function emitReplaceRlsPolicy(table: TableDefinition, policy: RlsPolicy): string {
+  const fq = qualifyTable(table.schema, table.name);
+  return `DROP POLICY ${quoteIdent(policy.name)} ON ${fq}; ${emitRlsPolicy(table, policy)}`;
+}
+
 export function emitRlsEnable(table: TableDefinition): string {
   return `ALTER TABLE ${qualifyTable(table.schema, table.name)} ENABLE ROW LEVEL SECURITY;`;
 }

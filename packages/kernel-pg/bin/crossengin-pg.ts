@@ -13,7 +13,8 @@ import {
   looksLikeProductionDatabase,
   parsePgEnvConfig,
 } from "../src/connection.js";
-import { diffSchema, formatSchemaDiff } from "../src/diff.js";
+import { diffSchema, expressionRequestsFor, formatSchemaDiff } from "../src/diff.js";
+import { renderExpressions } from "../src/expression-render.js";
 import { formatReconciliationPlan, planLiveReconciliation } from "../src/reconcile.js";
 import {
   EncryptionApplier,
@@ -139,7 +140,15 @@ async function runDrift(flags: ReadonlySet<string>): Promise<number> {
   const conn = createNodePgConnection(config);
   try {
     const live = await introspectSchema(conn, META_SCHEMA_NAME);
-    const diff = diffSchema(META_TABLES, live);
+    // Index predicates and policy clauses are compared through Postgres's own rendering of the
+    // declared text; without it they are not compared at all.
+    const liveNames = new Set(live.tables.map((t) => t.name));
+    const rendered = await renderExpressions(
+      conn,
+      META_SCHEMA_NAME,
+      META_TABLES.filter((t) => liveNames.has(t.name)).flatMap((t) => expressionRequestsFor(t)),
+    );
+    const diff = diffSchema(META_TABLES, live, rendered);
     if (flags.has("--json")) {
       process.stdout.write(JSON.stringify(diff, null, 2) + "\n");
     } else {
