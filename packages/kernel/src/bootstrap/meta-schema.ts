@@ -8654,14 +8654,27 @@ export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
     },
     { name: "justification", type: "TEXT", notNull: true },
     { name: "armed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "armed_by_user_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      // UUID, because the contract types every actor on a kill switch as one — but *not* a
+      // `meta.users` foreign key. Measured: the SLO loop arms its own rollback as the configured
+      // `systemActorUserId`, which is a well-formed UUID that nothing creates a user row for, so the
+      // insert failed with a foreign-key violation and the table could not store the only kill
+      // switches anything produces. The ADR-0289 `declared_by` defect, with the type already right
+      // and only the reference wrong. Four-eyes between these ids is still enforced, by
+      // `KillSwitchSchema` — which is where a rule comparing two columns can live and a CHECK
+      // constraint cannot.
+      name: "armed_by_user_id",
+      type: "UUID",
+      notNull: true,
+    },
     { name: "triggered_at", type: "TIMESTAMPTZ" },
-    { name: "triggered_by_user_id", type: "UUID", references: USER_FK },
-    { name: "co_triggered_by_user_id", type: "UUID", references: USER_FK },
+    // The remaining actors lose their reference for the same reason.
+    { name: "triggered_by_user_id", type: "UUID" },
+    { name: "co_triggered_by_user_id", type: "UUID" },
     { name: "co_triggered_at", type: "TIMESTAMPTZ" },
     { name: "expires_at", type: "TIMESTAMPTZ" },
     { name: "released_at", type: "TIMESTAMPTZ" },
-    { name: "released_by_user_id", type: "UUID", references: USER_FK },
+    { name: "released_by_user_id", type: "UUID" },
     { name: "released_reason", type: "TEXT" },
     { name: "expired_at", type: "TIMESTAMPTZ" },
     { name: "related_incident_id", type: "TEXT" },

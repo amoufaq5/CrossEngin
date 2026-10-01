@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 289 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 293 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**84 packages + 3 apps, 139 meta-schema tables, ~9,926 tests**, all green, no
+**85 packages + 3 apps, 139 meta-schema tables, ~10,256 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -61,7 +61,7 @@ increment. See **What's actually left** at the bottom for the current open ends.
 
 ## Package map
 
-84 packages under `packages/`, 3 apps under `apps/`. Almost every package is
+85 packages under `packages/`, 3 apps under `apps/`. Almost every package is
 `packages/<name>` with `src/index.ts` re-exporting 3-30 sibling `src/*.ts` modules and a
 matching `*.test.ts` per module.
 
@@ -130,6 +130,13 @@ packages exist at only one layer, noted below where that is true.
   policy; a constraint-backed index routes through its constraint, since `DROP INDEX` on one is
   refused. Omit the renderings and expressions are simply **not compared** — unknown must not read as
   drift.
+  **The applier continues past a failed statement** (ADR-0295) and reports every outcome with an index,
+  rather than halting at the first; a failure is still logged `succeeded = false` so it re-runs next
+  time, and `stopOnFailure` remains for a caller whose statements build on each other. **A policy's
+  `command` and `roles` are declared and compared too** (ADR-0298), optional with the Postgres defaults
+  as the meaning of absent, so the existing 107 policies emit byte-identically; `polcmd`/`polroles`
+  canonicalise in `canonical.ts`, role lists compare as sets, and an unresolvable role reads as
+  undetermined rather than as drift.
   `canonical.ts` is what makes the diff trustworthy: it rewrites a declared type into
   `format_type`'s spelling, strips the casts Postgres adds to a default, and treats an omitted
   `ON DELETE` as the RESTRICT the emitter writes — because comparing the raw text called 138 of 139
@@ -337,7 +344,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   availability and latency engines (one action table with a `signal` column), plus a
   replayer that flags ongoing-without-open, duplicate-open and paged-without-channels. Both
   `buildPersistent*` engines default their declarer to the incident store on the same connection, so
-  a persisted evaluation cannot name an unpersisted incident.
+  a persisted evaluation cannot name an unpersisted incident, and both write the `KillSwitch` they
+  activated **before** the action row that names it, so a reader never sees a `kill_switch_id` with no
+  switch behind it (ADR-0296). A recovery's `closeOut` is stored on the action row, set iff the decision
+  is `recovered` and refused in both directions (ADR-0297).
 - **`incident-response`** — 5 SEV levels with SLA profiles, 7 incident roles, an 8-state
   incident lifecycle, runbook executions with per-step outcomes, blameless postmortems with
   prioritized action items, and customer comms carrying the GDPR 72h breach deadline. Also owns
@@ -364,7 +374,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   contract forbids but a CHECK constraint permits (ADR-0289). `insertAllocated` holds that lock
   across the allocation *and* the insert, so two declarations in flight cannot be handed one sequence
   (ADR-0293), and `PostgresIncidentDeclarer` is the store-backed declarer the SLO engines use.
-  `findOpenFor` answers hydration's question from `auto_declared_for` (ADR-0294).
+  `findOpenFor` answers hydration's question from `auto_declared_for` (ADR-0294). Also the three stores
+  that were dead since Phase 1 — `PostgresRunbookExecutionStore`, `PostgresPostmortemStore`,
+  `PostgresCustomerCommsStore` (ADR-0296) — each with its own revision guard, since a postmortem edited
+  by two people over days was last-writer-wins.
 - **`dr`** — 5 DR tiers with RPO/RTO targets, replication topology, backup kinds, failover
   records, drills with finding severities, runbooks.
 - **`dr-runtime`** — executes it: a `FailoverExecutor` state machine (plan → start →
@@ -375,6 +388,11 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`feature-flags`** — 7 flag kinds, 10 targeting rule kinds with FNV-1a sticky percentage
   bucketing, a 9-stage rollout ramp state machine, 8-trigger kill switches with strict
   separation of duties, 17 evaluation reasons, and a 23-kind append-only change audit.
+- **`feature-flags-pg`** — thin: the Postgres store for `KillSwitch` records, which the SLO loop writes
+  when it rolls a flag back and reads back when a restart adopts the incident (ADR-0296). Scoped
+  conditionally, because a kill switch may be platform-wide or tenant-scoped; `loadForIncident` throws
+  on two rows rather than picking one, and the active predicate uses the database clock so a drifted
+  worker cannot serve a lapsed override as live.
 - **`deploy`** — apps × 4 environments × 4 strategies, artifact kinds, migration records,
   release channels, on-prem/BYOC packaging (Helm/Terraform).
 - **`edge`** — region routing strategies, per-route latency budgets and percentiles,
@@ -480,7 +498,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   chain, and with an `escalation` block declares a `sev1` incident + pages once per
   compromised episode, recording it as an anchored `audit.integrity_compromised` row and
   persisting the `IncidentRecord` in `meta.incidents` — cancelled on recovery unless a human
-  has triaged it; ADR-0287, ADR-0288, ADR-0289).
+  has triaged it; ADR-0287, ADR-0288, ADR-0289). The escalator declares through the same
+  `IncidentDeclarer` the SLO loop uses (ADR-0297), with `CountingIncidentDeclarer` as both the offline
+  default and the fallback that keeps the page going out when the record cannot be stored.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -632,18 +652,24 @@ opened them.
   estimate the cost. Relatedly, an expression is compared rather than understood, so two logically
   equivalent predicates written differently deparse differently and trigger a rebuild that was not
   needed: correct, not minimal.
-- **A policy's roles and command are neither declared nor compared** (ADR-0292) — `RlsPolicy` has no
-  field for `FOR SELECT` or `TO some_role`.
+- **`RlsPolicy` still cannot express `AS PERMISSIVE` / `AS RESTRICTIVE`** (ADR-0298). Every catalog
+  policy is permissive so nothing drifts, but a restrictive policy added by hand reads as permissive
+  and would be silently replaced.
 - **Type changes on a populated table, and `NOT NULL` backfills, remain manual** (ADR-0291). The
   plan hands over the exact SQL for both; automating either means deciding what happens to existing
   rows, which is the one thing a migrator should not decide.
-- **The applier halts on the first failure.** Much less consequential now the plan is built to
-  succeed, but for a plan whose steps are largely independent, continuing and reporting every
-  outcome would be strictly more useful (ADR-0290, 0291).
-- **Nothing persists a `KillSwitch`** (ADR-0294). `meta.feature_flag_kill_switches` exists and the
-  SLO loop does not write it, so a flag rolled back before a restart stays rolled back with nothing
-  in the process knowing which flag it was — the reason `killSwitchId` is null on a recovery from an
-  adopted breach. Same reconcile-or-delete question ADR-0289 answered for `meta.incidents`.
+- **`meta.feature_flags` cannot store a `FeatureFlag`'s own id** (ADR-0296), which is why no foreign
+  key to it can be well-formed — the kill switch's `flag_id` had to drop its reference rather than
+  retarget it, costing the `ON DELETE RESTRICT` audit protection a test used to assert. Restoring it
+  needs a `flag_id TEXT` unique column there; nothing writes that table, so it is the next instance of
+  the reconcile-or-delete question.
+- **Removing a foreign key from the catalog does not remove it from an existing database** (ADR-0296).
+  ADR-0291 deliberately refuses to loosen integrity, so the four kill-switch `meta.users` references
+  are reported with manual SQL. A fresh install is correct; an existing one needs four
+  `DROP CONSTRAINT` statements before a kill switch can be written at all. Measured in both directions.
+- **Six indexes now have no reader** (ADR-0296) — they existed to make `ON DELETE RESTRICT` cheap on
+  the foreign keys that reconciliation removed. Left in place deliberately: removing them from the
+  catalog would leave them reported as undeclared on every drift check until someone drops them.
 - **Test files are not typechecked** anywhere in the repo (`tsconfig.json` excludes `**/*.test.ts`;
   vitest transpiles without checking), so a test double that no longer satisfies an interface fails at
   runtime rather than at build. ADR-0294 hit this: a stub missing a new method threw a `TypeError`
@@ -653,16 +679,12 @@ opened them.
   so the page is delayed rather than lost; a failed close-out is not retried at all and leaves the row
   open. The escalator's fallback — an unpersisted record so the page still goes out — would fit as a
   wrapping declarer and trades a possibly-colliding id for a timelier page.
-- **`IntegrityEscalator` still has its own declaration path** (ADR-0293) — a per-process counter plus
-  `planIncidentDeclaration` — now that a shared `IncidentDeclarer` exists. Its `disposition`
-  vocabulary and `IncidentCloseOut` overlap closely enough that the two should probably become one.
-- **A recovery's `closeOut` is logged, not stored** (ADR-0293). `slo_enforcement_actions` has no
-  column for it, so "was the recovery clean?" is answerable from `meta.incidents.status` and not from
-  the action row.
-- **Three incident tables are still dead** (ADR-0289): `incident_runbook_executions`,
-  `incident_postmortems`, `incident_communications`. `RunbookExecution`, `Postmortem` and
-  `CustomerComms` exist in contracts with nothing persisting them — the same
-  reconcile-or-delete question ADR-0289 answered for `incidents`.
+- **`planIntegrityEscalation` is now unused** (ADR-0297) — still exported and tested, nothing calls it.
+  Deleting public API is a separate decision.
+- **Cross-column rules have no home in the schema** (ADR-0296). `bouncesCount ≤ recipientCount` and
+  `publishedAt ≤ breachNotificationDeadlineAt` are two-column comparisons and `TableDefinition` has no
+  table-level CHECK — the same limit as composite foreign keys. Both are enforced only by the re-parse
+  on read, which is the argument for re-parsing.
 - **Verdicts are still not readable over HTTP.** ADR-0288 made a *compromised*
   finding leave a readable `audit.integrity_compromised` row, but routine verdicts
   live only as chain commitments, and the chain stores no payload — so "show me last
@@ -710,7 +732,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 289 records; 210
+hand-editing, so a title or status change cannot drift. 293 records; 214
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

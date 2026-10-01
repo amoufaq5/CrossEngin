@@ -27,7 +27,7 @@ import {
   declareEnforcementIncident,
   findAdoptedKillSwitch,
   findOpenEnforcementIncident,
-  formatKillSwitchId,
+  killSwitchIdForIncident,
   planKillSwitchActivation,
   planPageDirective,
   type DeclarationErrorSink,
@@ -118,7 +118,6 @@ export class LatencySloEngine {
    * back, so without this a second pass starting mid-declare would declare the same breach twice.
    */
   private readonly declaring: Set<string> = new Set();
-  private killSwitchSeq = 0;
 
   constructor(options: LatencySloEngineOptions) {
     this.alertPolicy = options.alertPolicy;
@@ -286,8 +285,7 @@ export class LatencySloEngine {
     let killSwitch: EnforcementPlan["killSwitch"] = null;
     let killSwitchId: string | null = null;
     if (reg.rollback !== undefined) {
-      this.killSwitchSeq += 1;
-      killSwitchId = formatKillSwitchId(this.killSwitchSeq);
+      killSwitchId = killSwitchIdForIncident(incidentId);
       killSwitch = planKillSwitchActivation({
         killSwitchId,
         flagId: reg.rollback.flagId,

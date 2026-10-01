@@ -22,6 +22,7 @@ import {
   findOpenEnforcementIncident,
   formatIncidentId,
   formatKillSwitchId,
+  killSwitchIdForIncident,
   planIncidentDeclaration,
   planKillSwitchActivation,
   planPageDirective,
@@ -457,5 +458,33 @@ describe("findAdoptedKillSwitch", () => {
         FAILURE,
       ),
     ).resolves.toBeNull();
+  });
+});
+
+describe("killSwitchIdForIncident", () => {
+  it("derives the id from the incident, so it inherits the incident's uniqueness", () => {
+    expect(killSwitchIdForIncident("INC-2026-0002")).toBe("fks_20260002");
+  });
+
+  it("gives two incidents two ids, which a per-process counter did not", () => {
+    // Measured live: a second engine instance reissued `fks_auto00000001`, the unique constraint
+    // refused the insert, and the failure landed after the incident had already been declared.
+    expect(killSwitchIdForIncident("INC-2026-0002")).not.toBe(
+      killSwitchIdForIncident("INC-2026-0003"),
+    );
+  });
+
+  it("is stable for the same incident, so a retry does not mint a second switch", () => {
+    expect(killSwitchIdForIncident("INC-2026-0002")).toBe(killSwitchIdForIncident("INC-2026-0002"));
+  });
+
+  it("satisfies the kill-switch id pattern the contract and the column both enforce", () => {
+    for (const id of ["INC-2026-0001", "INC-2026-9999", "INC-2030-12345678"]) {
+      expect(killSwitchIdForIncident(id)).toMatch(/^fks_[a-z0-9]{8,40}$/);
+    }
+  });
+
+  it("refuses an id that is not an incident id, rather than inventing a switch id", () => {
+    expect(() => killSwitchIdForIncident("not-an-incident")).toThrow();
   });
 });

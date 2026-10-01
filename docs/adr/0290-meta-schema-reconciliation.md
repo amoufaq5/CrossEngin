@@ -131,7 +131,8 @@ have "repaired" 138 tables that were already right. The diff had to be fixed fir
   the piece that would make column type changes safely automatable.
 - **A type change and a tightening to `NOT NULL` remain manual**, by design, and the plan hands over
   the exact SQL. Automating either means deciding what happens to existing rows.
-- The applier still halts on the first failure. That is now much less consequential — the plan is
+- ~~The applier halts on the first failure.~~ **Closed by ADR-0295**: it continues and reports
+  every outcome, and a failed statement is still never recorded as applied. Original wording: The applier still halts on the first failure. That is now much less consequential — the plan is
   built to succeed — but for a reconciliation plan whose steps are largely independent, continuing
   past a failure and reporting every outcome would be strictly more useful than stopping.
 - `crossengin-pg apply --plan` prints human output only; `crossengin apply --plan` honours

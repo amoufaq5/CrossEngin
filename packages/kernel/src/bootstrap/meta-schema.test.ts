@@ -1173,6 +1173,23 @@ describe("table column shapes", () => {
     }
   });
 
+  it("META_FEATURE_FLAG_KILL_SWITCHES does not require a user row for an automated actor", () => {
+    // Measured against a real Postgres: the SLO loop arms its rollback as the configured
+    // `systemActorUserId`, a well-formed UUID nothing creates a user row for, and the insert failed
+    // with a foreign-key violation. The type stays UUID because the contract demands one; only the
+    // reference goes.
+    for (const name of [
+      "armed_by_user_id",
+      "triggered_by_user_id",
+      "co_triggered_by_user_id",
+      "released_by_user_id",
+    ]) {
+      const col = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === name);
+      expect(col?.type, name).toBe("UUID");
+      expect(col?.references, name).toBeUndefined();
+    }
+  });
+
   it("META_FEATURE_FLAG_KILL_SWITCHES stores the contract's flag id, not a surrogate", () => {
     // A UUID FK to meta.feature_flags made the table unable to store the only kill switches
     // anything produces: `KillSwitch.flagId` is an `ff_…` contract id and meta.feature_flags has no

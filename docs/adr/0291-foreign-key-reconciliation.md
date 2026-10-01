@@ -101,6 +101,7 @@ is the more useful half.
 - **Type changes on a populated table, and NOT NULL backfills, remain manual** by design. The plan
   now hands over SQL for both; automating either means deciding what happens to existing rows,
   which is the one thing a migrator should not decide.
-- The applier still halts on the first failure. The plan is built to succeed and two more classes of
+- ~~The applier halts on the first failure.~~ **Closed by ADR-0295**: it continues and reports
+  every outcome, and a failed statement is still never recorded as applied. Original wording: The applier still halts on the first failure. The plan is built to succeed and two more classes of
   predictable failure are gone from it, but a plan whose steps are largely independent would be
   better served by continuing and reporting every outcome.

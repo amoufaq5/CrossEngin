@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   IncidentRecordSchema,
+  parseIncidentId,
   type IncidentRecord,
   type IncidentCategory,
   type Severity,
@@ -35,9 +36,30 @@ export function alertSeverityFor(severity: Severity): AlertSeverity {
 // lives in the contracts package alongside `IncidentRecordSchema`.
 export { formatIncidentId } from "@crossengin/incident-response";
 
+/**
+ * A counter-derived kill-switch id. Kept for a caller that mints its own, but **not** used by the
+ * engines: the counter restarts with the process, and now that a kill switch is stored that reissues
+ * an id the unique constraint already holds. See `killSwitchIdForIncident`.
+ */
 export function formatKillSwitchId(seq: number): string {
   if (!Number.isInteger(seq) || seq < 0) throw new Error("invalid sequence");
   return `fks_auto${String(seq).padStart(8, "0")}`;
+}
+
+/**
+ * The kill-switch id for the incident whose breach activated it.
+ *
+ * Derived from the incident id rather than counted, because the incident id is already unique and
+ * already allocated by whoever stores it (ADR-0293) — so this inherits that uniqueness instead of
+ * re-inventing it. Measured: a counter here reissued `fks_auto00000001` from a second engine
+ * instance, the insert was refused by `feature_flag_kill_switches_kill_switch_id_key`, and the
+ * failure arrived *after* the incident had been declared — leaving a declared incident with no
+ * enforcement action naming it. One episode rolls back one flag, so one id per incident is the right
+ * granularity as well as the safe one.
+ */
+export function killSwitchIdForIncident(incidentId: string): string {
+  const { year, sequence } = parseIncidentId(incidentId);
+  return `fks_${String(year)}${String(sequence).padStart(4, "0")}`;
 }
 
 export const FlagRollbackSchema = z

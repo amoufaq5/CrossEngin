@@ -1,9 +1,9 @@
 # ADR index
 
-289 records. Generated from the ADR files themselves — regenerate rather than
+293 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table.
 
-- **Accepted:** 210  **Proposed:** 79
+- **Accepted:** 214  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -300,3 +300,7 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0292](0292-expression-reconciliation.md) | Letting Postgres deparse both sides | Phase 4 | Accepted | 2026-10-01 |
 | [0293](0293-slo-incident-persistence.md) | Letting the store name the incident | Phase 4 | Accepted | 2026-10-01 |
 | [0294](0294-open-episode-hydration.md) | Asking the rows which incident is already open | Phase 4 | Accepted | 2026-10-01 |
+| [0295](0295-applier-continues-past-failure.md) | Reporting every failure, not the first | Phase 4 | Accepted | 2026-10-01 |
+| [0296](0296-dead-table-reconciliation.md) | Four dead tables, and what they could not store | Phase 4 | Accepted | 2026-10-01 |
+| [0297](0297-close-out-and-one-declarer.md) | Storing how a recovery ended, and one way to declare | Phase 4 | Accepted | 2026-10-01 |
+| [0298](0298-policy-roles-and-command.md) | What a policy applies to, and to whom | Phase 4 | Accepted | 2026-10-01 |
