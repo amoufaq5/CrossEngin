@@ -9341,6 +9341,15 @@ export const META_SLO_ENFORCEMENT_ACTIONS: TableDefinition = {
       check: "page_channel_count >= 0",
     },
     { name: "threshold_id", type: "TEXT" },
+    {
+      // What became of the declared incident when its signal recovered. Set only on a `recovered`
+      // row — the other two decisions have no close-out, and the record schema refuses a row that
+      // says otherwise. `failed` is the one worth a column: the incident stays open and nobody was
+      // told, which is invisible from the action row without it.
+      name: "close_out",
+      type: "TEXT",
+      check: "close_out IN ('unpersisted', 'cancelled', 'human_owned', 'failed')",
+    },
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
   ],
   primaryKey: ["id"],

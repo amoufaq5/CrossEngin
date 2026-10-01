@@ -100,7 +100,41 @@ export function planIncidentDeclaration(input: IncidentDeclarationInput): Incide
 export interface DeclarationFailure {
   readonly surface: string;
   readonly sloId: string;
-  readonly phase: "find_open" | "declare" | "close_out";
+  readonly phase: "find_open" | "declare" | "close_out" | "find_kill_switch";
+}
+
+/**
+ * Where an adopted breach's kill switch comes from.
+ *
+ * The engine activates a kill switch when it opens a breach, but it holds the id in memory, so a
+ * restart that adopts the incident has no idea which flag was rolled back — and the operator is left
+ * with a flag held at its safe value and nothing naming it. Structural on purpose: the Postgres
+ * implementation lives beside the store, and the engine must not depend on it.
+ */
+export interface KillSwitchLookup {
+  findForIncident(incidentId: string): Promise<string | null>;
+}
+
+/**
+ * The kill switch an adopted incident rolled a flag back with, or null.
+ *
+ * A failed lookup is reported and read as "none recorded". The alternative — refusing to adopt
+ * because the kill switch could not be read — would re-declare the incident over a detail that is
+ * reported rather than acted on, which trades a real problem for a cosmetic one.
+ */
+export async function findAdoptedKillSwitch(
+  lookup: KillSwitchLookup | undefined,
+  incidentId: string,
+  failure: Omit<DeclarationFailure, "phase">,
+  onError?: DeclarationErrorSink,
+): Promise<string | null> {
+  if (lookup === undefined) return null;
+  try {
+    return await lookup.findForIncident(incidentId);
+  } catch (err) {
+    onError?.(err, { ...failure, phase: "find_kill_switch" });
+    return null;
+  }
 }
 
 export type DeclarationErrorSink = (error: unknown, failure: DeclarationFailure) => void;

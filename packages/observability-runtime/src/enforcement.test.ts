@@ -18,6 +18,7 @@ import {
   closeOutEnforcementIncident,
   declareEnforcementIncident,
   enforcementDeclarationRequest,
+  findAdoptedKillSwitch,
   findOpenEnforcementIncident,
   formatIncidentId,
   formatKillSwitchId,
@@ -396,5 +397,65 @@ describe("the autoDeclaredFor key on a declaration", () => {
     expect(
       planIncidentDeclaration({ ...DECLARATION, incidentId: "INC-2026-0042" }).autoDeclaredFor,
     ).toBeNull();
+  });
+});
+
+describe("findAdoptedKillSwitch", () => {
+  it("returns what the lookup holds for that incident", async () => {
+    const asked: string[] = [];
+    const found = await findAdoptedKillSwitch(
+      {
+        findForIncident: async (id) => {
+          asked.push(id);
+          return "fks_auto00000007";
+        },
+      },
+      "INC-2026-0042",
+      FAILURE,
+    );
+    expect(found).toBe("fks_auto00000007");
+    expect(asked).toEqual(["INC-2026-0042"]);
+  });
+
+  it("returns null when the incident rolled nothing back", async () => {
+    expect(
+      await findAdoptedKillSwitch({ findForIncident: async () => null }, "INC-2026-0042", FAILURE),
+    ).toBeNull();
+  });
+
+  it("returns null when no lookup is wired, without asking anything", async () => {
+    expect(await findAdoptedKillSwitch(undefined, "INC-2026-0042", FAILURE)).toBeNull();
+  });
+
+  it("reports a failed lookup rather than letting it stop an adoption", async () => {
+    // Refusing to adopt over an unreadable kill switch would re-declare the incident — a real
+    // problem traded for a cosmetic one.
+    const seen: DeclarationFailure[] = [];
+    const found = await findAdoptedKillSwitch(
+      {
+        findForIncident: async () => {
+          throw new Error("kill switch store unreachable");
+        },
+      },
+      "INC-2026-0042",
+      FAILURE,
+      (_err, failure) => seen.push(failure),
+    );
+    expect(found).toBeNull();
+    expect(seen).toEqual([{ ...FAILURE, phase: "find_kill_switch" }]);
+  });
+
+  it("swallows a failed lookup silently when no sink is wired", async () => {
+    await expect(
+      findAdoptedKillSwitch(
+        {
+          findForIncident: async () => {
+            throw new Error("nope");
+          },
+        },
+        "INC-2026-0042",
+        FAILURE,
+      ),
+    ).resolves.toBeNull();
   });
 });

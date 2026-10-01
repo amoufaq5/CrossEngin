@@ -409,3 +409,66 @@ describe("SloEnforcementEngine — a restart adopts the incident it already open
     expect((await engine.evaluate())[0]?.kind).toBe("breach_opened");
   });
 });
+
+describe("SloEnforcementEngine — an adopted breach can recover its kill switch", () => {
+  async function adoptWith(
+    killSwitches: { findForIncident(id: string): Promise<string | null> } | undefined,
+  ): Promise<{ killSwitchId: string | null; lookedUp: string[] }> {
+    const declarer = new StubDeclarer(57);
+    const engine = engineWith(new FixedClock(BASE), declarer);
+    burst(engine, 25, BASE.getTime());
+    const opened = (await engine.evaluate())[0];
+    if (opened?.kind !== "breach_opened") throw new Error("expected breach");
+    declarer.open.set(`availability:${SURFACE}`, opened.plan.incident);
+
+    const lookedUp: string[] = [];
+    const lookup =
+      killSwitches === undefined
+        ? undefined
+        : {
+            findForIncident: async (id: string): Promise<string | null> => {
+              lookedUp.push(id);
+              return killSwitches.findForIncident(id);
+            },
+          };
+    const restarted = new SloEnforcementEngine({
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [registration],
+      clock: new FixedClock(BASE),
+      declarer,
+      ...(lookup !== undefined ? { killSwitches: lookup } : {}),
+    });
+    burst(restarted, 25, BASE.getTime());
+    await restarted.evaluate();
+    const breach = restarted.activeBreaches()[0];
+    return { killSwitchId: breach?.breach.killSwitchId ?? null, lookedUp };
+  }
+
+  it("recovers the kill switch the store holds for that incident", async () => {
+    const { killSwitchId, lookedUp } = await adoptWith({
+      findForIncident: async () => "fks_auto00000001",
+    });
+    expect(killSwitchId).toBe("fks_auto00000001");
+    expect(lookedUp).toEqual(["INC-2026-0057"]);
+  });
+
+  it("reports none when the store holds no kill switch for it", async () => {
+    const { killSwitchId } = await adoptWith({ findForIncident: async () => null });
+    expect(killSwitchId).toBeNull();
+  });
+
+  it("adopts anyway when the lookup fails, rather than re-declaring over a detail", async () => {
+    const { killSwitchId } = await adoptWith({
+      findForIncident: async () => {
+        throw new Error("kill switch store unreachable");
+      },
+    });
+    expect(killSwitchId).toBeNull();
+  });
+
+  it("reports none when no lookup is wired at all", async () => {
+    const { killSwitchId } = await adoptWith(undefined);
+    expect(killSwitchId).toBeNull();
+  });
+});

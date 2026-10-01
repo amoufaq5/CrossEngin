@@ -6,12 +6,16 @@ import {
 } from "@crossengin/kernel/bootstrap";
 import {
   MigrationApplier,
+  applyFailures,
   createNodePgConnection,
   formatApplyReport,
   formatReconciliationPlan,
   looksLikeProductionDatabase,
   parsePgEnvConfig,
   planLiveReconciliation,
+  type ApplyReport,
+  type ApplyStatementRecord,
+  type ReconciliationPlan,
 } from "@crossengin/kernel-pg";
 
 import type { ParsedCommand } from "./cli.js";
@@ -66,10 +70,13 @@ export async function runApply(
       // log records what ran, not what the database holds, and skipping on it here would leave a
       // dropped object missing.
       skipApplied: false,
+      // Continue past a failed statement. The plan is built to succeed and its steps are largely
+      // independent, so one refused ALTER must not hide the thirty additions behind it.
+      stopOnFailure: false,
     });
     const report = await applier.apply();
     if (command.format === "json") {
-      printJson(ctx.io, { report, plan });
+      printJson(ctx.io, applyJsonPayload(report, plan));
     } else {
       printSuccess(ctx.io, formatApplyReport(report));
       if (plan.unreconciled.length > 0) {
@@ -84,6 +91,23 @@ export async function runApply(
   } finally {
     await conn.close().catch(() => undefined);
   }
+}
+
+export interface ApplyJsonPayload {
+  readonly report: ApplyReport;
+  readonly plan: ReconciliationPlan;
+  /**
+   * The failed statements, lifted out of `report.statements` so a consumer sees each failure's SQL
+   * and error without walking 800 outcome entries to find them.
+   */
+  readonly failures: readonly ApplyStatementRecord[];
+}
+
+export function applyJsonPayload(
+  report: ApplyReport,
+  plan: ReconciliationPlan,
+): ApplyJsonPayload {
+  return { report, plan, failures: applyFailures(report) };
 }
 
 function emitDryRun(io: IoStreams, command: ParsedCommand): number {

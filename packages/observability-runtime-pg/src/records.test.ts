@@ -6,6 +6,10 @@ import type {
   LatencyVerdict,
 } from "@crossengin/observability-runtime";
 import {
+  INCIDENT_CLOSE_OUTS,
+  type IncidentCloseOut,
+} from "@crossengin/incident-response-runtime";
+import {
   SloEnforcementActionRecordSchema,
   SloEvaluationRecordSchema,
   SloLatencyEvaluationRecordSchema,
@@ -114,6 +118,19 @@ function breachOpened(): EnforcementDecision {
     severity: "sev2",
     verdict,
     plan,
+  };
+}
+
+function recovered(
+  overrides: { readonly closeOut?: IncidentCloseOut } = {},
+): EnforcementDecision {
+  return {
+    kind: "recovered",
+    surface: "POST /v1/orders",
+    sloId: "orders-availability",
+    incidentId: "INC-2026-0001",
+    killSwitchId: "fks_auto00000001",
+    closeOut: overrides.closeOut ?? "cancelled",
   };
 }
 
@@ -260,18 +277,180 @@ describe("enforcementActionFromDecision", () => {
 
   it("maps a recovered decision carrying the kill switch id", () => {
     const action = enforcementActionFromDecision({
-      decision: {
-        kind: "recovered",
-        surface: "POST /v1/orders",
-        sloId: "orders-availability",
-        incidentId: "INC-2026-0001",
-        killSwitchId: "fks_auto00000001",
-      },
+      decision: recovered(),
       tenantId: null,
       occurredAt: NOW,
     });
     expect(action.decision).toBe("recovered");
     expect(action.killSwitchId).toBe("fks_auto00000001");
     expect(action.flagId).toBeNull();
+  });
+
+  it("leaves a breach_opened action with no close-out", () => {
+    const action = enforcementActionFromDecision({
+      decision: breachOpened(),
+      tenantId: null,
+      occurredAt: NOW,
+    });
+    expect(action.closeOut).toBeNull();
+  });
+
+  it("leaves a breach_ongoing action with no close-out", () => {
+    const action = enforcementActionFromDecision({
+      decision: {
+        kind: "breach_ongoing",
+        surface: "POST /v1/orders",
+        sloId: "orders-availability",
+        incidentId: "INC-2026-0001",
+      },
+      tenantId: null,
+      occurredAt: NOW,
+    });
+    expect(action.closeOut).toBeNull();
+  });
+});
+
+describe("enforcementActionFromDecision close-out", () => {
+  it("carries a cancelled close-out onto the row", () => {
+    const action = enforcementActionFromDecision({
+      decision: recovered({ closeOut: "cancelled" }),
+      tenantId: TENANT,
+      occurredAt: NOW,
+    });
+    expect(action.closeOut).toBe("cancelled");
+    expect(SloEnforcementActionRecordSchema.safeParse(action).success).toBe(true);
+  });
+
+  it("carries every close-out the declarer can report", () => {
+    for (const closeOut of INCIDENT_CLOSE_OUTS) {
+      const action = enforcementActionFromDecision({
+        decision: recovered({ closeOut }),
+        tenantId: null,
+        occurredAt: NOW,
+      });
+      expect(action.closeOut).toBe(closeOut);
+    }
+  });
+
+  it("carries a failed close-out rather than reporting a clean recovery", () => {
+    // The distinction the column exists for: `failed` means the incident row is still open.
+    const action = enforcementActionFromDecision({
+      decision: recovered({ closeOut: "failed" }),
+      tenantId: null,
+      occurredAt: NOW,
+    });
+    expect(action.closeOut).toBe("failed");
+  });
+
+  it("carries the close-out through the latency signal too", () => {
+    const action = enforcementActionFromDecision({
+      decision: recovered({ closeOut: "human_owned" }),
+      tenantId: null,
+      occurredAt: NOW,
+      signal: "latency",
+    });
+    expect(action.signal).toBe("latency");
+    expect(action.closeOut).toBe("human_owned");
+  });
+});
+
+describe("SloEnforcementActionRecordSchema close-out invariant", () => {
+  const base = {
+    actionId: "sloa_auto00000001",
+    tenantId: null,
+    sloId: "orders-availability",
+    surface: "POST /v1/orders",
+    signal: "availability" as const,
+    severity: null,
+    incidentId: "INC-2026-0001",
+    killSwitchId: null,
+    flagId: null,
+    paged: false,
+    pageChannelCount: 0,
+    thresholdId: null,
+    occurredAt: NOW,
+  };
+
+  it("accepts a recovered row carrying a close-out", () => {
+    const parsed = SloEnforcementActionRecordSchema.safeParse({
+      ...base,
+      decision: "recovered",
+      closeOut: "cancelled",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("refuses a recovered row with no close-out", () => {
+    const parsed = SloEnforcementActionRecordSchema.safeParse({
+      ...base,
+      decision: "recovered",
+      closeOut: null,
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("refuses a recovered row that omits the close-out entirely", () => {
+    // Omission defaults to null, so the invariant catches it rather than the field being optional.
+    const parsed = SloEnforcementActionRecordSchema.safeParse({
+      ...base,
+      decision: "recovered",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("refuses a breach_opened row carrying a close-out", () => {
+    const parsed = SloEnforcementActionRecordSchema.safeParse({
+      ...base,
+      decision: "breach_opened",
+      severity: "sev2",
+      closeOut: "cancelled",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("refuses a breach_ongoing row carrying a close-out", () => {
+    const parsed = SloEnforcementActionRecordSchema.safeParse({
+      ...base,
+      decision: "breach_ongoing",
+      closeOut: "failed",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("accepts a breach_ongoing row with a null close-out", () => {
+    const parsed = SloEnforcementActionRecordSchema.safeParse({
+      ...base,
+      decision: "breach_ongoing",
+      closeOut: null,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("defaults an omitted close-out to null on a non-recovery", () => {
+    const parsed = SloEnforcementActionRecordSchema.parse({
+      ...base,
+      decision: "breach_ongoing",
+    });
+    expect(parsed.closeOut).toBeNull();
+  });
+
+  it("refuses a close-out outside the declarer's vocabulary", () => {
+    const parsed = SloEnforcementActionRecordSchema.safeParse({
+      ...base,
+      decision: "recovered",
+      closeOut: "resolved",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("reports the contradiction on the closeOut path", () => {
+    const parsed = SloEnforcementActionRecordSchema.safeParse({
+      ...base,
+      decision: "breach_ongoing",
+      closeOut: "cancelled",
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues[0]?.path).toEqual(["closeOut"]);
   });
 });

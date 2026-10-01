@@ -6,6 +6,7 @@ export const DRIFT_ISSUE_KINDS = [
   "paged_without_channels",
   "channels_without_paged",
   "kill_switch_without_flag",
+  "recovered_close_out_failed",
   "ongoing_without_open",
   "recovered_without_open",
   "duplicate_open",
@@ -38,6 +39,15 @@ export function verifyEnforcementActionShape(
   }
   if (action.killSwitchId !== null && action.flagId === null) {
     at("kill_switch_without_flag", "kill switch recorded without the flag it overrides");
+  }
+  // The signal cleared but the store refused the close-out, so the incident row is still open and
+  // nothing paged again to say so. Only the stored close-out can tell this apart from a clean
+  // recovery; before the column the two rows were identical.
+  if (action.closeOut === "failed") {
+    at(
+      "recovered_close_out_failed",
+      "recovery could not close the incident out; the row is still open",
+    );
   }
   return issues;
 }

@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
 
 import { autoDeclaredForKey, type IncidentRecord } from "@crossengin/incident-response";
-import type { PersistentIncidentEngine } from "@crossengin/incident-response-runtime-pg";
+import {
+  CountingIncidentDeclarer,
+  SystemClock,
+  type Clock,
+  type IncidentCloseOut,
+  type IncidentDeclarationRequest,
+  type IncidentDeclarer,
+} from "@crossengin/incident-response-runtime";
 import type { AlertChannelTarget, AlertPolicy } from "@crossengin/observability";
 import {
-  formatIncidentId,
   planIncidentDeclaration,
   planPageDirective,
   type PageDirective,
@@ -26,6 +32,16 @@ export {
 export const INTEGRITY_ESCALATIONS = ["opened", "ongoing", "recovered", "none"] as const;
 export type IntegrityEscalationKind = (typeof INTEGRITY_ESCALATIONS)[number];
 
+/**
+ * What state the escalation's incident record is in — the escalation's own reporting vocabulary,
+ * three quarters of which is `IncidentCloseOut` spelled the same way.
+ *
+ * The one value with no close-out counterpart is `declared`, and the reason is that the two
+ * vocabularies answer different questions. An `IncidentCloseOut` says what became of a *recovery*;
+ * `declared` is the disposition of an incident that is still **open** — reported on an `opened` or
+ * `ongoing` pass, where no recovery has been attempted and so there is no close-out to derive it
+ * from. See `dispositionFromCloseOut` for the derivation in the other direction.
+ */
 export const INCIDENT_DISPOSITIONS = [
   "unpersisted",
   "declared",
@@ -34,28 +50,42 @@ export const INCIDENT_DISPOSITIONS = [
 ] as const;
 export type IncidentDisposition = (typeof INCIDENT_DISPOSITIONS)[number];
 
+/**
+ * The escalation's disposition for a close-out the declarer reported.
+ *
+ * `failed` becomes `declared` rather than losing the distinction: the store refused the close-out,
+ * so the row is still open and still declared — which is exactly what a human needs to know, and
+ * what `listOpen` will keep showing them.
+ */
+export function dispositionFromCloseOut(closeOut: IncidentCloseOut): IncidentDisposition {
+  switch (closeOut) {
+    case "cancelled":
+      return "cancelled";
+    case "human_owned":
+      return "human_owned";
+    case "unpersisted":
+      return "unpersisted";
+    case "failed":
+      return "declared";
+  }
+}
+
 export interface IntegrityEscalation {
   readonly scope: string | null;
   readonly kind: IntegrityEscalationKind;
   readonly incidentId: string | null;
-  /** Only on `opened` — the declared record, persisted when a ledger is wired. */
+  /** Only on `opened` — the declared record, persisted when a store-backed declarer is wired. */
   readonly incident?: IncidentRecord;
   readonly page?: PageDirective | null;
   /** True when the escalation was written to `meta.audit_log` (and so anchored). */
   readonly audited: boolean;
   /**
-   * What became of the incident record. `unpersisted` when no ledger is wired; on recovery,
-   * `cancelled` when the record was closed out and `human_owned` when it had been triaged and was
-   * therefore left alone.
+   * What state the incident record is in. `unpersisted` when nothing stored it; `declared` while it
+   * is open; on recovery, `cancelled` when it was closed out and `human_owned` when it had been
+   * triaged and was therefore left alone.
    */
   readonly disposition: IncidentDisposition;
 }
-
-/** The subset of `PersistentIncidentEngine` an escalation needs. */
-export type IncidentLedger = Pick<
-  PersistentIncidentEngine,
-  "declare" | "cancelIfUntriaged" | "findOpenFor"
->;
 
 /** The signal an integrity escalation declares under. Scoped, and namespaced like every other. */
 export function integrityIncidentKey(scope: string | null): string {
@@ -112,14 +142,29 @@ export interface IntegrityEscalatorOptions {
    */
   readonly audit?: PostgresAuditEmitter;
   /**
-   * Persists the declared `IncidentRecord` and closes it out on recovery. Omitted ⇒ the incident
-   * exists only in the log line and the audit row, and its id comes from a per-process counter
-   * that restarts at 0001.
+   * Chooses the declared incident's id, answers which incident this scope already has open, and
+   * closes the record out on recovery — the same seam the SLO enforcement loop declares through,
+   * so an auto-declared integrity incident is allocated and closed by the same rules as an
+   * auto-declared availability one.
+   *
+   * Omitted ⇒ `CountingIncidentDeclarer`: ids from a per-process counter that restarts at `0001`,
+   * nothing to adopt after a restart, and nothing to close out. Safe only because nothing stores
+   * what it names.
    */
-  readonly incidents?: IncidentLedger;
+  readonly declarer?: IncidentDeclarer;
   readonly page?: PageSink;
+  /** Clock for the fallback declarer. Declarations are stamped with the proof's verification time. */
   readonly now?: () => Date;
   readonly onError?: (err: unknown) => void;
+}
+
+function escalatorClock(now: (() => Date) | undefined): Clock {
+  if (now === undefined) return new SystemClock();
+  return {
+    now: (): Date => now(),
+    nowMs: (): number => now().getTime(),
+    nowIso: (): string => now().toISOString(),
+  };
 }
 
 /**
@@ -132,15 +177,25 @@ export interface IntegrityEscalatorOptions {
  * subsequent findings are `ongoing` and silent, and a scope returning to
  * `verified`/`unproven` closes out and is eligible to declare again.
  *
- * Open state is per-process and in memory, like the SLO engine's incident sequence. A restart
- * re-declares a still-present tamper, which is the safe direction: it risks a duplicate
- * incident, never a missed one.
+ * Open state is per-process and in memory, so a restart asks the declarer which incident this
+ * scope already has open rather than declaring a second for one episode.
  */
 export class IntegrityEscalator {
   private readonly open = new Map<string, string>();
-  private incidentSeq = 0;
+  private readonly declarer: IncidentDeclarer;
+  /**
+   * The declarer used when the wired one cannot be reached. A page naming nothing is not a page, so
+   * a refused declaration still gets a record — one this process minted and nothing stored.
+   */
+  private readonly unpersisted: CountingIncidentDeclarer;
+  /** Whether the wired declarer is expected to outlive this process. */
+  private readonly persists: boolean;
 
-  constructor(private readonly opts: IntegrityEscalatorOptions) {}
+  constructor(private readonly opts: IntegrityEscalatorOptions) {
+    this.unpersisted = new CountingIncidentDeclarer({ clock: escalatorClock(opts.now) });
+    this.declarer = opts.declarer ?? this.unpersisted;
+    this.persists = opts.declarer !== undefined;
+  }
 
   /** Never rejects — an audit or page failure is routed to `onError`, not thrown at the pass. */
   async observe(report: IntegrityProofReport): Promise<IntegrityEscalation> {
@@ -175,7 +230,7 @@ export class IntegrityEscalator {
         kind: "ongoing",
         incidentId: openId,
         audited: false,
-        disposition: this.opts.incidents === undefined ? "unpersisted" : "declared",
+        disposition: this.persists ? "declared" : "unpersisted",
       };
     }
 
@@ -215,98 +270,96 @@ export class IntegrityEscalator {
   }
 
   /**
-   * The id of the incident this scope already has open, when the ledger remembers one this process
-   * does not.
+   * The id of the incident this scope already has open, when the declarer remembers one this
+   * process does not.
    *
    * A lookup that fails is read as "nothing open": that risks a duplicate incident, never a missed
-   * tamper, and `idx_incidents_auto_declared_open` refuses the duplicate anyway.
+   * tamper, and `idx_incidents_auto_declared_open` refuses the duplicate anyway. A declarer with no
+   * store answers null for the same reason — nothing it declared outlived the process.
    */
   private async adopt(report: IntegrityProofReport): Promise<string | null> {
-    const ledger = this.opts.incidents;
-    if (ledger === undefined) return null;
     try {
-      const stored = await ledger.findOpenFor(integrityIncidentKey(report.scope));
-      return stored === null ? null : stored.record.id;
+      const open = await this.declarer.findOpen(integrityIncidentKey(report.scope));
+      return open === null ? null : open.id;
     } catch (err) {
       this.opts.onError?.(err);
       return null;
     }
   }
 
+  /** The declaration this report warrants, minus the id, which is the declarer's to choose. */
+  private declarationRequest(report: IntegrityProofReport): IncidentDeclarationRequest {
+    const scope = report.scope ?? "platform";
+    return {
+      title: `Audit integrity compromised for ${scope}`,
+      autoDeclaredFor: integrityIncidentKey(report.scope),
+      severity: this.opts.config.severity,
+      category: this.opts.config.category,
+      declaredBy: this.opts.config.declaredBy,
+      detail: formatIntegrityProof(report),
+      declaredAt: report.verifiedAt,
+      // Empty for the platform chain: `affectedTenantIds` names tenants, and the platform
+      // scope is not one.
+      affectedTenantIds: report.scope === null ? [] : [report.scope],
+      metadata: { surface: `audit-integrity/${scope}`, autoDeclared: true },
+    };
+  }
+
   /**
-   * Declares the incident, from the ledger when one is wired.
+   * Declares through the wired declarer, falling back to an unpersisted record if it refuses.
    *
-   * With a ledger the id is allocated from the rows that exist, so a restart continues the year's
-   * sequence instead of reusing `INC-YYYY-0001`; without one it comes from a counter in this
-   * process, which is the behaviour that made a restart re-declare under a colliding id.
+   * With a store-backed declarer the id is allocated from the rows that exist, so a restart
+   * continues the year's sequence instead of reusing `INC-YYYY-0001`. A declarer that cannot be
+   * reached must not swallow the page, for the same reason an unwritable audit log must not —
+   * losing the alert is the worse failure — so the fallback mints a record this process can name
+   * and reports it as `unpersisted`.
    */
   private async declare(report: IntegrityProofReport): Promise<{
     readonly incident: IncidentRecord;
     readonly page: PageDirective | null;
     readonly persisted: boolean;
   }> {
-    const scope = report.scope ?? "platform";
-    const ledger = this.opts.incidents;
-    if (ledger !== undefined) {
+    const request = this.declarationRequest(report);
+    if (this.persists) {
       try {
-        const stored = await ledger.declare({
-          title: `Audit integrity compromised for ${scope}`,
-          autoDeclaredFor: integrityIncidentKey(report.scope),
-          severity: this.opts.config.severity,
-          category: this.opts.config.category,
-          declaredBy: this.opts.config.declaredBy,
-          detail: formatIntegrityProof(report),
-          declaredAt: report.verifiedAt,
-          affectedTenantIds: report.scope === null ? [] : [report.scope],
-          metadata: { surface: `audit-integrity/${scope}`, autoDeclared: true },
-        });
-        return {
-          incident: stored.record,
-          page: planPageDirective(
-            this.opts.config.alertPolicy,
-            this.opts.config.severity,
-            stored.record.id,
-          ),
-          persisted: true,
-        };
+        const record = await this.declarer.declare(request);
+        return { incident: record, page: this.pageFor(record), persisted: true };
       } catch (err) {
-        // An unwritable incident ledger must not swallow the page, for the same reason an
-        // unwritable audit log must not: losing the alert is the worse failure.
         this.opts.onError?.(err);
       }
     }
-    const now = (this.opts.now ?? ((): Date => new Date()))();
-    this.incidentSeq += 1;
-    const plan = planIntegrityEscalation(report, {
-      incidentId: formatIncidentId(now.getUTCFullYear(), this.incidentSeq),
-      severity: this.opts.config.severity,
-      category: this.opts.config.category,
-      declaredBy: this.opts.config.declaredBy,
-      alertPolicy: this.opts.config.alertPolicy,
-    });
-    return { incident: plan.incident, page: plan.page, persisted: false };
+    const record = await this.unpersisted.declare(request);
+    return { incident: record, page: this.pageFor(record), persisted: false };
+  }
+
+  private pageFor(incident: IncidentRecord): PageDirective | null {
+    return planPageDirective(
+      this.opts.config.alertPolicy,
+      this.opts.config.severity,
+      incident.id,
+    );
   }
 
   /**
-   * Cancels the persisted incident if nobody has taken it.
+   * Closes the record out and says what became of it.
    *
-   * Cancelling rather than resolving is not a shortcut: `triaged` requires the on-call roles to be
-   * assigned — five of them at sev1 — so no automated recovery can reach a resolved state, and
-   * recording one would claim a response that never happened. A triaged incident is left alone.
+   * Cancelling rather than resolving is the declarer's rule, not a shortcut here: `triaged`
+   * requires the on-call roles to be assigned — five of them at sev1 — so no automated recovery can
+   * reach a resolved state, and recording one would claim a response that never happened. A
+   * declarer that throws is reported as `failed`, which reads as `declared`: the row is still open.
    */
   private async closeOut(incidentId: string): Promise<IncidentDisposition> {
-    const ledger = this.opts.incidents;
-    if (ledger === undefined) return "unpersisted";
+    let closeOut: IncidentCloseOut;
     try {
-      const cancelled = await ledger.cancelIfUntriaged(incidentId, {
+      closeOut = await this.declarer.closeOut(incidentId, {
         reason: "audit-integrity proof no longer finds the trail altered",
         actorUserId: this.opts.config.declaredBy,
       });
-      return cancelled === null ? "human_owned" : "cancelled";
     } catch (err) {
       this.opts.onError?.(err);
-      return "declared";
+      closeOut = "failed";
     }
+    return dispositionFromCloseOut(closeOut);
   }
 
   /** Whether a scope currently has an open integrity incident (for tests / metrics). */

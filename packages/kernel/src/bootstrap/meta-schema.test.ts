@@ -1118,6 +1118,18 @@ describe("table column shapes", () => {
     expect(flag?.check).toContain("ff_");
   });
 
+  it("META_SLO_ENFORCEMENT_ACTIONS records what became of a recovered incident", () => {
+    // Nullable because only a `recovered` row has a close-out; the record schema is what enforces
+    // that pairing, since a CHECK constraint cannot see two columns' agreement.
+    const closeOut = META_SLO_ENFORCEMENT_ACTIONS.columns.find((c) => c.name === "close_out");
+    expect(closeOut?.type).toBe("TEXT");
+    expect(closeOut?.notNull).toBeUndefined();
+    expect(closeOut?.check).toContain("'cancelled'");
+    expect(closeOut?.check).toContain("'human_owned'");
+    expect(closeOut?.check).toContain("'unpersisted'");
+    expect(closeOut?.check).toContain("'failed'");
+  });
+
   it("META_SLO_ENFORCEMENT_ACTIONS discriminates availability vs latency signal", () => {
     const signal = META_SLO_ENFORCEMENT_ACTIONS.columns.find((c) => c.name === "signal");
     expect(signal?.notNull).toBe(true);
