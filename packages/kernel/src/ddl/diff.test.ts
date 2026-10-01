@@ -1,9 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Entity } from "@crossengin/types/meta-schema";
-import { computeEntityDiff, type EntityDiff } from "./diff.js";
+import { computeEntityDiff } from "./diff.js";
 import { EntityRenameNotSupportedError, UnsupportedDiffChangeError } from "./errors.js";
-
-const schema = "t_acme";
 
 describe("computeEntityDiff — identity", () => {
   it("returns empty diff for identical entities", () => {

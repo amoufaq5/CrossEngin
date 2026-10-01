@@ -1,3 +1,4 @@
+import { FileTypeDeclarationSchema } from "@crossengin/files";
 import { describe, expect, it } from "vitest";
 import { ExtendsCycleError, UnknownParentManifestError,
   UndeclaredEntityOverrideError,
@@ -405,12 +406,12 @@ describe("resolveManifest — sections", () => {
   });
 
   it("merges files record (additive at key level)", async () => {
-    const baseFile = {
+    const baseFile = FileTypeDeclarationSchema.parse({
       allowedMimeTypes: ["application/pdf"],
-      maxSize: "20MB" as const,
+      maxSize: "20MB",
       storage: { bucket: "crossengin-files-eu", prefix: "x/" },
-      dataClass: "internal" as const,
-    };
+      dataClass: "internal",
+    });
     const parent: Manifest = {
       manifestVersion: "1.0",
       meta: { name: "Base", slug: "base", version: v },

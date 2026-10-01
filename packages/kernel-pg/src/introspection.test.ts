@@ -71,6 +71,9 @@ describe("parseLiveSchema", () => {
         index_name: "tenants_pkey",
         is_unique: true,
         is_primary: true,
+        constraint_backed: true,
+        method: "btree",
+        predicate: null,
         columns: ["id"],
       },
     ];

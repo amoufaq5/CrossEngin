@@ -26,7 +26,6 @@ describe("computePayloadSha256", () => {
 
 describe("buildChainEntry", () => {
   it("produces a valid first entry chained from GENESIS_HASH", async () => {
-    const kp = generateEd25519Keypair();
     const sealed = await buildChainEntry({
       sequenceNumber: 0,
       priorEntryHash: GENESIS_HASH,

@@ -1,3 +1,4 @@
+import type { PackInstallation } from "@crossengin/marketplace";
 import { describe, expect, it } from "vitest";
 
 import { PostgresInstallationStore } from "./installation-store.js";
@@ -28,7 +29,7 @@ describe("PostgresInstallationStore — round-trips", () => {
   it("preserves config + permission_grants JSONB across a round-trip", async () => {
     const { conn } = fakePg();
     const store = new PostgresInstallationStore(conn);
-    const grants = [
+    const grants: PackInstallation["permissionGrants"] = [
       { scope: "records:read", status: "granted", grantedAt: "2026-05-16T12:00:00.000Z", grantedBy: USER, deniedAt: null, revokedAt: null, revokedBy: null, optional: false },
     ];
     await store.upsert(installation({ config: { region: "us-east" }, permissionGrants: grants }));

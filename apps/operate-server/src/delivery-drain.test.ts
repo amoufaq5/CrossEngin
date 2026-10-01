@@ -147,7 +147,6 @@ function suppression(address: string, channel: NotificationChannel = "in_app"): 
     appliedBy: null,
     expiresAt: null,
     sourceDeliveryId: null,
-    notes: null,
   };
 }
 

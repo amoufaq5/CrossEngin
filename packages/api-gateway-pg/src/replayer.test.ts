@@ -358,7 +358,7 @@ describe("GatewayReplayer.verifyExecution", () => {
 describe("GatewayReplayer.listRecentExecutions", () => {
   it("returns the request ids from the result set", async () => {
     const state = emptyState();
-    state.recentIds = ["req_a", "req_b", "req_c"];
+    state.recentIds.push("req_a", "req_b", "req_c");
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
     const ids = await replayer.listRecentExecutions();
     expect(ids).toEqual(["req_a", "req_b", "req_c"]);
@@ -378,7 +378,7 @@ describe("GatewayReplayer.bulkVerify", () => {
 
   it("verifies each execution returned by listRecentExecutions", async () => {
     const state = emptyState();
-    state.recentIds = ["req_test00000001"];
+    state.recentIds.push("req_test00000001");
     state.executions.set("req_test00000001", fixtureExecution());
     const replayer = new GatewayReplayer({ conn: buildMock(state) });
     const reports = await replayer.bulkVerify({ batchSize: 10, maxExecutions: 5 });
@@ -388,7 +388,7 @@ describe("GatewayReplayer.bulkVerify", () => {
 
   it("respects maxExecutions", async () => {
     const state = emptyState();
-    state.recentIds = ["req_a", "req_b", "req_c", "req_d"];
+    state.recentIds.push("req_a", "req_b", "req_c", "req_d");
     for (const id of state.recentIds) {
       state.executions.set(id, fixtureExecution({ requestId: id }));
     }

@@ -59,7 +59,7 @@ describe("PostgresAccessReviewCampaignStore.upsert", () => {
   });
 });
 
-const dbRow: RecordCampaignRow = {
+const dbRow = {
   campaign_id: "arc_00000001",
   tenant_id: UUIDS.tenant,
   label: "Q",
@@ -95,7 +95,7 @@ const dbRow: RecordCampaignRow = {
   decided_items: 0,
   auto_revoked_items: 0,
   exception_items: 0,
-};
+} satisfies RecordCampaignRow;
 
 describe("PostgresAccessReviewCampaignStore reads", () => {
   it("getByCampaignId returns the mapped record", async () => {

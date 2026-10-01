@@ -22,7 +22,7 @@ function manifest(overrides: Partial<PackManifest> = {}): PackManifest {
     author: {
       kind: "community",
       name: "Acme Corp",
-      contactEmail: "dev@acme.example",
+      email: "dev@acme.example",
     },
     license: "MIT",
     minPlatformVersion: "1.0.0",
@@ -65,7 +65,7 @@ describe("PackSubmissionEngine.submit", () => {
 
   it("exempts a trusted (official) author's non-PHI pack from review", () => {
     const official = manifest({
-      author: { kind: "crossengin_official", name: "CrossEngin", contactEmail: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
+      author: { kind: "crossengin_official", name: "CrossEngin", email: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
     });
     const draft = engine().submit(submitInput(official));
     expect(draft.securityReviewStatus).toBe("exempt");
@@ -73,7 +73,7 @@ describe("PackSubmissionEngine.submit", () => {
 
   it("requires review for a PHI pack even from a trusted author", () => {
     const phi = manifest({
-      author: { kind: "certified_partner", name: "Partner", contactEmail: "p@partner.example", verifiedAt: "2026-01-01T00:00:00.000Z" },
+      author: { kind: "certified_partner", name: "Partner", email: "p@partner.example", verifiedAt: "2026-01-01T00:00:00.000Z" },
       requiresPhiAccess: true,
       handlesUserData: true,
     });
@@ -113,7 +113,7 @@ describe("PackSubmissionEngine — review + publish", () => {
   it("publishes an exempt trusted author's pack straight through", () => {
     const e = engine();
     const official = manifest({
-      author: { kind: "crossengin_official", name: "CrossEngin", contactEmail: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
+      author: { kind: "crossengin_official", name: "CrossEngin", email: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
     });
     const inReview = e.submitForReview(e.submit(submitInput(official)));
     expect(inReview.securityReviewStatus).toBe("exempt");
@@ -137,7 +137,7 @@ describe("PackSubmissionEngine — retire", () => {
   it("deprecates + withdraws a published version with a reason", () => {
     const e = engine();
     const official = manifest({
-      author: { kind: "crossengin_official", name: "CrossEngin", contactEmail: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
+      author: { kind: "crossengin_official", name: "CrossEngin", email: "x@crossengin.io", verifiedAt: "2026-01-01T00:00:00.000Z" },
     });
     const published = e.publish(e.submitForReview(e.submit(submitInput(official))), { publishedBy: "bot" });
     const deprecated = e.deprecate(published, { reason: "superseded by 2.0" });

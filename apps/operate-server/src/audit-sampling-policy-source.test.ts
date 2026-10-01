@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { AuditSamplingSettings, SettingsStore, TenantSettings } from "@crossengin/operate-runtime";
 
+import type { ActiveTenantSource } from "./checkpoint-scheduler.js";
 import {
-  ActiveTenantSource,
   TenantAuditPolicyCache,
   TenantAuditPolicyRefresher,
   auditPolicyFromSettings,

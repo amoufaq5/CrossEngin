@@ -100,8 +100,12 @@ describe("InMemoryIdempotencyStore", () => {
   });
 
   it("scopes records by tenantId", async () => {
+    // The field is `idempotencyKey`; this said `key`, which the record does not have — so the record
+    // went in under the fixture's default key and the lookup for "shared" missed for that reason
+    // rather than for the tenant. The positive case is what makes the negative one mean anything.
     const s = new InMemoryIdempotencyStore();
-    await s.put({ tenantId: TENANT, record: fixtureIdemRecord({ key: "shared" }) });
+    await s.put({ tenantId: TENANT, record: fixtureIdemRecord({ idempotencyKey: "shared" }) });
+    expect(await s.get({ tenantId: TENANT, key: "shared" })).not.toBeNull();
     expect(await s.get({ tenantId: "00000000-0000-4000-8000-000000000002", key: "shared" })).toBeNull();
   });
 

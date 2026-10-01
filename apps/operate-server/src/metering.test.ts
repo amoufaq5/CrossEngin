@@ -5,7 +5,6 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
 import {
   MeteringFlushScheduler,
-  RequestMeteringObserver,
   buildRequestMetering,
   flushUsage,
   meteredEventFromExecution,

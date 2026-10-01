@@ -193,10 +193,15 @@ describe("formatCertificationReport", () => {
 describe("CertificationEngine", () => {
   it("certify + certifyAll produce distinct sealed reports", () => {
     const engine = new CertificationEngine({ ...fixtures(), tenantId: TENANT });
-    const [soc2, hipaa] = engine.certifyAll(
+    const reports = engine.certifyAll(
       ["soc2_type2", "hipaa_security_rule"],
       compliantEvidence(),
     );
+    expect(reports).toHaveLength(2);
+    const [soc2, hipaa] = reports;
+    if (soc2 === undefined || hipaa === undefined) {
+      throw new Error("certifyAll returned fewer reports than frameworks requested");
+    }
     expect(soc2.reportId).not.toBe(hipaa.reportId);
     expect(soc2.framework).toBe("soc2_type2");
     expect(hipaa.framework).toBe("hipaa_security_rule");

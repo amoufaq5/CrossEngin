@@ -25,7 +25,7 @@ import type {
 import {
   DESIGN_JOB_MAX_ATTEMPTS,
   type DesignJobCreateInput,
-  type DesignJobProgressInput,
+  type DesignJobProgressInputLike,
   type DesignJobRecordLike,
   type DesignJobStoreLike,
 } from "./design-runner.js";
@@ -155,7 +155,7 @@ class FakeJobStore implements DesignJobStoreLike {
   async updateProgress(
     tenantId: string,
     id: string,
-    input: DesignJobProgressInput,
+    input: DesignJobProgressInputLike,
   ): Promise<DesignJobRecordLike | null> {
     return this.patch(tenantId, id, {
       status: input.status,

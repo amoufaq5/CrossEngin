@@ -145,10 +145,10 @@ describe("createSignalBridgeHandler — success", () => {
   });
 
   it("threads Idempotency-Key into the bridge", async () => {
-    let captured: Parameters<SignalSubmitter["submitSignal"]>[0] | null = null;
+    const captured: Parameters<SignalSubmitter["submitSignal"]>[0][] = [];
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
-        captured = input;
+        captured.push(input);
         return { deduplicated: true, matchedInstanceIds: [], signalId: null };
       }),
     };
@@ -160,14 +160,15 @@ describe("createSignalBridgeHandler — success", () => {
         headers: { "idempotency-key": "evt-42" },
       }),
     );
-    expect(captured?.idempotencyKey).toBe("evt-42");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.idempotencyKey).toBe("evt-42");
   });
 
   it("uses sourceSystem option when provided", async () => {
-    let captured: Parameters<SignalSubmitter["submitSignal"]>[0] | null = null;
+    const captured: Parameters<SignalSubmitter["submitSignal"]>[0][] = [];
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
-        captured = input;
+        captured.push(input);
         return { deduplicated: false, matchedInstanceIds: ["wfi_x"], signalId: "wfs_y" };
       }),
     };
@@ -178,7 +179,8 @@ describe("createSignalBridgeHandler — success", () => {
       sourceSystem: "stripe",
     });
     await handler(handlerInput({ body: { order: { id: "po-1" } } }));
-    expect(captured?.sourceSystem).toBe("stripe");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.sourceSystem).toBe("stripe");
   });
 });
 

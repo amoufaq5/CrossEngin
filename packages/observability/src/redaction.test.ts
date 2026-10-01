@@ -86,7 +86,7 @@ describe("redact", () => {
       primary: { ssn: "[REDACTED]" },
       secondary: { ssn: "[REDACTED]" },
     });
-    expect(r.redactedPaths.sort()).toEqual(["primary.ssn", "secondary.ssn"]);
+    expect([...r.redactedPaths].sort()).toEqual(["primary.ssn", "secondary.ssn"]);
   });
 
   it("redacts array elements when their fields are sensitive", () => {

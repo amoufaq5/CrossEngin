@@ -51,7 +51,7 @@ async function invoke(
   const spec = server.routeSpecs.find((s) => s.operationId === opId);
   const route = spec !== undefined ? routeFromSpec(spec) : { method: "POST" as const };
   const handler = server.handlers.resolve(opId);
-  if (handler === undefined) throw new Error(`no handler for ${opId}`);
+  if (handler === undefined || handler === null) throw new Error(`no handler for ${opId}`);
   const request = buildIncomingRequest({
     id: "req_op000000001",
     receivedAt: "2026-06-03T12:00:00.000Z",

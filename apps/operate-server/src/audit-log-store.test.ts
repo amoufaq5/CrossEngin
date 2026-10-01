@@ -1,5 +1,7 @@
 import { canonicalAuditEntryPayload, type AuditLogEntry } from "@crossengin/auth";
+import type { ChainAppendInput, ChainedLogEntry } from "@crossengin/forensics-pg";
 import type { PgConnection } from "@crossengin/kernel-pg";
+import type { TenantId } from "@crossengin/types";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,7 +12,7 @@ import {
 } from "./audit-log-store.js";
 
 const TENANT_A = "00000000-0000-4000-8000-000000000001";
-const TENANT_B = "00000000-0000-4000-8000-000000000002";
+const TENANT_B = "00000000-0000-4000-8000-000000000002" as TenantId;
 const USER_A = "00000000-0000-4000-8000-00000000000a";
 const ENTRY_1 = "11111111-1111-4111-8111-000000000001";
 const ENTRY_2 = "11111111-1111-4111-8111-000000000002";
@@ -721,9 +723,30 @@ describe("audit-log-store — forensic chain anchoring", () => {
     return {
       appends,
       chain: {
-        appendWithin: async (tx: PgConnection, input: { tenantId: string | null; payload: string }) => {
-          appends.push({ tx, payload: input.payload, tenantId: input.tenantId });
-          return { sequenceNumber: seq, entryHash: `hash-${seq.toString()}` } as never;
+        appendWithin: async (
+          tx: PgConnection,
+          input: ChainAppendInput,
+        ): Promise<ChainedLogEntry> => {
+          appends.push({
+            tx,
+            payload:
+              typeof input.payload === "string"
+                ? input.payload
+                : new TextDecoder().decode(input.payload),
+            tenantId: input.tenantId,
+          });
+          return {
+            sequenceNumber: seq,
+            kind: "audit_event",
+            recordedAt: "2026-06-01T00:00:00.000Z",
+            actorReference: "system:test",
+            payloadSha256: "a".repeat(64),
+            payloadSizeBytes: input.payload.length,
+            priorEntryHash: "b".repeat(64),
+            entryHash: `hash-${seq.toString()}`,
+            signingKeyFingerprint: "c".repeat(64),
+            signature: "sig",
+          };
         },
       },
     };

@@ -14,7 +14,7 @@ const SESSION = "sess_abc";
 
 function fixtureCompletionRequest(overrides: Partial<CompletionRequest> = {}): CompletionRequest {
   return {
-    task: "architect_chat",
+    task: "executor",
     messages: [{ role: "user", content: "Hello" }],
     tenantId: TENANT,
     sessionId: SESSION,

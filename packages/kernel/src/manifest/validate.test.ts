@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Manifest } from "./types.js";
+import { ManifestSchema, type Manifest } from "./types.js";
 import { ManifestValidationError } from "./errors.js";
 import { manifestClassifiedFields, validateManifest } from "./validate.js";
 
@@ -864,7 +864,7 @@ describe("validateManifest — reports + dashboards", () => {
   };
 
   it("accepts a manifest with valid reports + dashboards", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -888,12 +888,12 @@ describe("validateManifest — reports + dashboards", () => {
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a report referencing an unknown entity", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -903,12 +903,12 @@ describe("validateManifest — reports + dashboards", () => {
           entity: "Missing",
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/'Missing' is not declared/);
   });
 
   it("rejects a dashboard widget pointing to an unknown report", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -928,7 +928,7 @@ describe("validateManifest — reports + dashboards", () => {
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown report 'phantom'/);
   });
 });
@@ -940,7 +940,7 @@ describe("validateManifest — views", () => {
   };
 
   it("accepts a list view referencing a record view + workflow transition", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -973,24 +973,24 @@ describe("validateManifest — views", () => {
           ],
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a view referencing an unknown entity", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
       views: {
         bad: { kind: "list", entity: "Missing", columns: [{ field: "x" }] },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/'Missing' is not declared/);
   });
 
   it("rejects a row-action targeting a missing view", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1002,12 +1002,12 @@ describe("validateManifest — views", () => {
           rowAction: { kind: "openRecord", view: "missingDetail" },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown view 'missingDetail'/);
   });
 
   it("rejects a dashboard-kind view referencing a missing dashboard", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1018,12 +1018,12 @@ describe("validateManifest — views", () => {
           dashboardRef: "phantomDashboard",
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/unknown dashboard 'phantomDashboard'/);
   });
 
   it("rejects a workflow transition not declared on the entity", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1035,7 +1035,7 @@ describe("validateManifest — views", () => {
           rowAction: { kind: "workflow", name: "verify" },
         },
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(
       /transition 'verify' not declared on entity 'Prescription'/,
     );
@@ -1237,7 +1237,7 @@ describe("validateManifest — view field references", () => {
   });
 
   it("checks no fields on a dashboard or pivot view, which declare none", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1247,7 +1247,7 @@ describe("validateManifest — view field references", () => {
       views: {
         v: { kind: "pivot", entity: "Prescription", reportRef: "r" },
       },
-    } as Manifest;
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 });
@@ -1276,7 +1276,7 @@ describe("validateManifest — view permissions and states", () => {
   };
 
   it("rejects a view granting a role that is not declared", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1289,14 +1289,14 @@ describe("validateManifest — view permissions and states", () => {
           permissions: { roles: ["auditor"] },
         },
       },
-    } as Manifest;
+    });
     expect(() => validateManifest(m)).toThrow(
       /views\.v\.permissions\.roles.*'auditor' which is not declared/s,
     );
   });
 
   it("accepts a view granting a declared role", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1309,12 +1309,12 @@ describe("validateManifest — view permissions and states", () => {
           permissions: { roles: ["pharmacist"] },
         },
       },
-    } as Manifest;
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a kanban column pinned to a state no workflow declares", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1331,14 +1331,14 @@ describe("validateManifest — view permissions and states", () => {
           ],
         },
       },
-    } as Manifest;
+    });
     expect(() => validateManifest(m)).toThrow(
       /state 'dispensed' not declared in any workflow for entity 'Prescription'/,
     );
   });
 
   it("accepts a kanban board whose columns are all declared states", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1355,7 +1355,7 @@ describe("validateManifest — view permissions and states", () => {
           ],
         },
       },
-    } as Manifest;
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 });
@@ -1370,7 +1370,7 @@ describe("validateManifest — search", () => {
   };
 
   it("accepts a search section that references declared fields", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1383,12 +1383,12 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a search entry for an unknown entity", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1398,12 +1398,12 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(/'Missing'/);
   });
 
   it("rejects an indexed field whose root is not declared on the entity", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1415,14 +1415,14 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(
       /indexed field 'patient.name' has no matching root field/,
     );
   });
 
   it("accepts indexing a trait-supplied field, which the entity resolves to", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [{ ...entityFixture, traits: ["auditable"] }],
@@ -1435,12 +1435,12 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).not.toThrow();
   });
 
   it("rejects a facet path whose root is not declared on the entity", () => {
-    const m: Manifest = {
+    const m = ManifestSchema.parse({
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [entityFixture],
@@ -1453,7 +1453,7 @@ describe("validateManifest — search", () => {
         },
         defaultDictionary: "simple",
       },
-    };
+    });
     expect(() => validateManifest(m)).toThrow(
       /facet 'unknown_facet' has no matching root field/,
     );

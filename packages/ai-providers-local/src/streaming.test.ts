@@ -73,7 +73,7 @@ describe("chunksFromSse", () => {
   it("ignores malformed JSON payloads", () => {
     const chunks = [...chunksFromSse("data: not json\n\ndata: [DONE]\n\n")];
     expect(chunks).toHaveLength(1);
-    expect(chunks[0].kind).toBe("usage_final");
+    expect(chunks[0]?.kind).toBe("usage_final");
   });
 });
 

@@ -1,6 +1,6 @@
-import type { Workflow } from "@crossengin/kernel/workflow";
+import type { EntityLifecycleWorkflow, Workflow } from "@crossengin/kernel/workflow";
 
-export const ENCOUNTER_LIFECYCLE_WORKFLOW: Workflow = {
+export const ENCOUNTER_LIFECYCLE_WORKFLOW: EntityLifecycleWorkflow = {
   kind: "entityLifecycle",
   entity: "Encounter",
   stateField: "state",

@@ -1,6 +1,6 @@
-import type { Workflow } from "@crossengin/kernel/workflow";
+import type { EntityLifecycleWorkflow, Workflow } from "@crossengin/kernel/workflow";
 
-export const INVOICE_LIFECYCLE_WORKFLOW: Workflow = {
+export const INVOICE_LIFECYCLE_WORKFLOW: EntityLifecycleWorkflow = {
   kind: "entityLifecycle",
   entity: "Invoice",
   stateField: "state",
@@ -55,7 +55,7 @@ export const INVOICE_LIFECYCLE_WORKFLOW: Workflow = {
   ],
 };
 
-export const PURCHASE_ORDER_LIFECYCLE_WORKFLOW: Workflow = {
+export const PURCHASE_ORDER_LIFECYCLE_WORKFLOW: EntityLifecycleWorkflow = {
   kind: "entityLifecycle",
   entity: "PurchaseOrder",
   stateField: "state",
@@ -117,7 +117,7 @@ export const PURCHASE_ORDER_LIFECYCLE_WORKFLOW: Workflow = {
   ],
 };
 
-export const BILL_LIFECYCLE_WORKFLOW: Workflow = {
+export const BILL_LIFECYCLE_WORKFLOW: EntityLifecycleWorkflow = {
   kind: "entityLifecycle",
   entity: "Bill",
   stateField: "state",
@@ -170,7 +170,7 @@ export const BILL_LIFECYCLE_WORKFLOW: Workflow = {
   ],
 };
 
-export const PAYMENT_LIFECYCLE_WORKFLOW: Workflow = {
+export const PAYMENT_LIFECYCLE_WORKFLOW: EntityLifecycleWorkflow = {
   kind: "entityLifecycle",
   entity: "Payment",
   stateField: "state",
@@ -213,7 +213,7 @@ export const PAYMENT_LIFECYCLE_WORKFLOW: Workflow = {
   ],
 };
 
-export const JOURNAL_ENTRY_LIFECYCLE_WORKFLOW: Workflow = {
+export const JOURNAL_ENTRY_LIFECYCLE_WORKFLOW: EntityLifecycleWorkflow = {
   kind: "entityLifecycle",
   entity: "JournalEntry",
   stateField: "state",
@@ -241,7 +241,7 @@ export const JOURNAL_ENTRY_LIFECYCLE_WORKFLOW: Workflow = {
   ],
 };
 
-export const EXPENSE_LIFECYCLE_WORKFLOW: Workflow = {
+export const EXPENSE_LIFECYCLE_WORKFLOW: EntityLifecycleWorkflow = {
   kind: "entityLifecycle",
   entity: "Expense",
   stateField: "state",
@@ -285,7 +285,7 @@ export const EXPENSE_LIFECYCLE_WORKFLOW: Workflow = {
   ],
 };
 
-export const LEAVE_REQUEST_LIFECYCLE_WORKFLOW: Workflow = {
+export const LEAVE_REQUEST_LIFECYCLE_WORKFLOW: EntityLifecycleWorkflow = {
   kind: "entityLifecycle",
   entity: "LeaveRequest",
   stateField: "state",

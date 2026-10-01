@@ -30,7 +30,7 @@ describe("manifestAssociationRoutes", () => {
     const routes = manifestAssociationRoutes(m2mManifest([{ left: "Tag", right: "Product" }]));
     expect(routes.map((r) => r.operationId).sort()).toEqual(["product.tag.list", "tag.product.list"]);
     const tagProduct = routes.find((r) => r.operationId === "tag.product.list")!;
-    expect(tagProduct.pathSegments.map((s) => (s.kind === "literal" ? s.value : `{${s.name}}`))).toEqual([
+    expect(tagProduct.pathSegments.map((s) => (s.kind === "literal" ? s.value : s.kind === "parameter" ? `{${s.name}}` : "*"))).toEqual([
       "v1",
       "tags",
       "{id}",
@@ -68,8 +68,14 @@ class FakeStore implements EntityStore {
   seed(entity: string, id: string, record: EntityRecord): void {
     this.records.set(`${entity}:${id}`, record);
   }
-  async listPage(): Promise<ListPage> {
-    return { data: [], page: { limit: 50, nextCursor: null } };
+  async list(_t: string, entity: string): Promise<readonly EntityRecord[]> {
+    const prefix = `${entity}:`;
+    return [...this.records.entries()]
+      .filter(([k]) => k.startsWith(prefix))
+      .map(([, v]) => v);
+  }
+  async listPage(_t: string, _entity: string, _query: ListQuery): Promise<ListPage> {
+    return { records: [], nextCursor: null };
   }
   async get(_t: string, entity: string, id: string): Promise<EntityRecord | null> {
     return this.records.get(`${entity}:${id}`) ?? null;
@@ -77,8 +83,8 @@ class FakeStore implements EntityStore {
   async create(_t: string, _e: string, r: EntityRecord): Promise<EntityRecord> {
     return r;
   }
-  async update(_t: string, _e: string, _id: string, patch: Partial<EntityRecord>): Promise<EntityRecord | null> {
-    return patch as EntityRecord;
+  async update(_t: string, _e: string, _id: string, patch: EntityRecord): Promise<EntityRecord | null> {
+    return patch;
   }
   async remove(): Promise<boolean> {
     return true;
@@ -244,7 +250,8 @@ describe("buildAssociationListHandler", () => {
 
   it("501s when the store has no association support", async () => {
     const bare: EntityStore = {
-      listPage: async () => ({ data: [], page: { limit: 50, nextCursor: null } }),
+      list: async () => [],
+      listPage: async () => ({ records: [], nextCursor: null }),
       get: async () => null,
       create: async (_t, _e, r) => r,
       update: async () => null,
@@ -267,7 +274,7 @@ describe("manifestAssociationWriteRoutes", () => {
     ]);
     const link = routes.find((r) => r.operationId === "tag.product.link")!;
     expect(link.method).toBe("PUT");
-    expect(link.pathSegments.map((s) => (s.kind === "literal" ? s.value : `{${s.name}}`))).toEqual([
+    expect(link.pathSegments.map((s) => (s.kind === "literal" ? s.value : s.kind === "parameter" ? `{${s.name}}` : "*"))).toEqual([
       "v1",
       "tags",
       "{id}",
@@ -328,7 +335,8 @@ describe("buildAssociationWriteHandler", () => {
 
   it("501s when the store can't write associations", async () => {
     const bare: EntityStore = {
-      listPage: async () => ({ data: [], page: { limit: 50, nextCursor: null } }),
+      list: async () => [],
+      listPage: async () => ({ records: [], nextCursor: null }),
       get: async () => null,
       create: async (_t, _e, r) => r,
       update: async () => null,
@@ -343,7 +351,7 @@ describe("manifestAssociationCountRoutes", () => {
     const routes = manifestAssociationCountRoutes(m2mManifest([{ left: "Tag", right: "Product" }]));
     expect(routes.map((r) => r.operationId).sort()).toEqual(["product.tag.count", "tag.product.count"]);
     const tagProduct = routes.find((r) => r.operationId === "tag.product.count")!;
-    expect(tagProduct.pathSegments.map((s) => (s.kind === "literal" ? s.value : `{${s.name}}`))).toEqual([
+    expect(tagProduct.pathSegments.map((s) => (s.kind === "literal" ? s.value : s.kind === "parameter" ? `{${s.name}}` : "*"))).toEqual([
       "v1",
       "tags",
       "{id}",
@@ -412,7 +420,8 @@ describe("buildAssociationCountHandler", () => {
 
   it("501s when the store has no association count support", async () => {
     const bare: EntityStore = {
-      listPage: async () => ({ data: [], page: { limit: 50, nextCursor: null } }),
+      list: async () => [],
+      listPage: async () => ({ records: [], nextCursor: null }),
       get: async () => null,
       create: async (_t, _e, r) => r,
       update: async () => null,

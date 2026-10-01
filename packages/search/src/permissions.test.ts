@@ -44,7 +44,7 @@ describe("deriveSessionTags", () => {
       secondaryRoles: ["auditor"],
       abacAttributes: { store: "branch-04", region: "dubai" },
     });
-    expect(tags.sort()).toEqual([
+    expect([...tags].sort()).toEqual([
       "region:dubai",
       "role:auditor",
       "role:pharmacist",

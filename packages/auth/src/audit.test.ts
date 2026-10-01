@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
+import type { TenantId, UserId } from "@crossengin/types";
+
 import { canonicalAuditEntryPayload, type AuditLogEntry } from "./audit.js";
 
-const base = (over: Partial<AuditLogEntry> = {}): AuditLogEntry =>
-  ({
+/** The branded ids are opaque by design, so a test has to say so once rather than cast the record. */
+const tenantId = "22222222-2222-4222-8222-222222222222" as TenantId;
+const userId = (raw: string): UserId => raw as UserId;
+
+const base = (over: Partial<AuditLogEntry> = {}): AuditLogEntry => ({
     id: "11111111-1111-4111-8111-111111111111",
-    tenantId: "22222222-2222-4222-8222-222222222222",
+    tenantId,
     occurredAt: "2026-09-28T08:00:00.000Z",
-    actor: { kind: "user", userId: "u1", sessionId: "s1", ip: "10.0.0.1", userAgent: "curl" },
+    actor: { kind: "user", userId: userId("u1"), sessionId: "s1", ip: "10.0.0.1", userAgent: "curl" },
     operation: "notifications.read_tenant_scope",
     entity: "notification_dispatches",
     entityId: null,
@@ -14,7 +19,7 @@ const base = (over: Partial<AuditLogEntry> = {}): AuditLogEntry =>
     after: { limit: 5, paged: false },
     diff: null,
     ...over,
-  }) as AuditLogEntry;
+  });
 
 describe("canonicalAuditEntryPayload", () => {
   it("is stable for the same entry", () => {
@@ -88,7 +93,7 @@ describe("canonicalAuditEntryPayload", () => {
 
   it("changes when the actor changes", () => {
     const other = base({
-      actor: { kind: "user", userId: "u2", sessionId: "s1", ip: "10.0.0.1", userAgent: "curl" },
+      actor: { kind: "user", userId: userId("u2"), sessionId: "s1", ip: "10.0.0.1", userAgent: "curl" },
     });
     expect(canonicalAuditEntryPayload(other)).not.toBe(canonicalAuditEntryPayload(base()));
   });

@@ -265,10 +265,10 @@ describe("WorkflowSignalBridge.handle — engine failure", () => {
 
 describe("WorkflowSignalBridge — passes idempotencyKey to engine", () => {
   it("threads idempotency key into submitSignal call", async () => {
-    let captured: Parameters<SignalSubmitter["submitSignal"]>[0] | null = null;
+    const captured: Parameters<SignalSubmitter["submitSignal"]>[0][] = [];
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
-        captured = input;
+        captured.push(input);
         return { deduplicated: false, matchedInstanceIds: ["wfi_x"], signalId: "wfs_y" };
       }),
     };
@@ -282,8 +282,9 @@ describe("WorkflowSignalBridge — passes idempotencyKey to engine", () => {
       idempotencyKey: "evt-99",
       sourceSystem: "stripe",
     });
-    expect(captured?.idempotencyKey).toBe("evt-99");
-    expect(captured?.sourceSystem).toBe("stripe");
-    expect(captured?.correlationKey).toBe("po-1");
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.idempotencyKey).toBe("evt-99");
+    expect(captured[0]?.sourceSystem).toBe("stripe");
+    expect(captured[0]?.correlationKey).toBe("po-1");
   });
 });

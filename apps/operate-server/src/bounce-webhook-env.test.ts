@@ -67,8 +67,9 @@ describe("buildBounceSecretResolverFromEnv", () => {
     }
   });
 
-  it("returns 32 bytes, which is what an HMAC-SHA256 key should be", () => {
+  it("returns 32 bytes, which is what an HMAC-SHA256 key should be", async () => {
     const { resolver } = buildBounceSecretResolverFromEnv({ [BOUNCE_SECRET_ENV_VAR]: SECRET });
-    expect(resolver?.(TENANT)?.byteLength).toBe(32);
+    const key = await resolver?.(TENANT);
+    expect(key?.byteLength).toBe(32);
   });
 });

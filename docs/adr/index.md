@@ -1,10 +1,10 @@
 # ADR index
 
-301 records. Generated from the ADR files themselves — regenerate rather than
+302 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 222  **Proposed:** 79
+- **Accepted:** 223  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -313,3 +313,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0304](0304-fallback-declarer.md) | A declarer that falls back, so a page is never lost to a database | Phase 4 | Accepted | 2026-10-01 |
 | [0305](0305-child-workflows.md) | Spawning child workflows — the last stub | Phase 4 | Accepted | 2026-10-01 |
 | [0306](0306-local-provider-in-product.md) | Routing the in-product Architect through the local provider | Phase 4 | Accepted | 2026-10-01 |
+| [0307](0307-typechecking-test-files.md) | Typechecking the test files | Phase 4 | Accepted | 2026-10-01 |

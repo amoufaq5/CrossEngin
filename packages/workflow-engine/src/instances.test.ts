@@ -81,6 +81,31 @@ describe("canTransitionInstance", () => {
   it("allows failed → compensating", () => {
     expect(canTransitionInstance("failed", "compensating")).toBe(true);
   });
+
+  it("agrees with INSTANCE_TRANSITIONS for every status pair", () => {
+    // Walking the map rather than naming paths: the three cases above pin the ones a reader cares
+    // about, but only an exhaustive pass catches a status added to the enum and forgotten in the map,
+    // or a transition added to the map that the helper cannot reach.
+    for (const from of INSTANCE_STATUSES) {
+      const allowed = INSTANCE_TRANSITIONS[from];
+      expect(allowed, `no transitions declared for ${from}`).toBeDefined();
+      for (const to of INSTANCE_STATUSES) {
+        expect(canTransitionInstance(from, to), `${from} → ${to}`).toBe(allowed.includes(to));
+      }
+    }
+  });
+
+  it("leaves every terminal status with no way out, except that a failure may be compensated", () => {
+    // `failed` is terminal *and* has an outgoing edge, which is deliberate for sagas — a failed
+    // instance is still compensatable — but it means `isInstanceTerminal` answers "done" for a status
+    // the map says you may still move. Pinned here rather than resolved: which side should change is a
+    // lifecycle decision, not a test's to make.
+    for (const status of TERMINAL_INSTANCE_STATUSES) {
+      expect(INSTANCE_TRANSITIONS[status], status).toEqual(
+        status === "failed" ? ["compensating"] : [],
+      );
+    }
+  });
 });
 
 describe("RelatedEntityRefSchema", () => {

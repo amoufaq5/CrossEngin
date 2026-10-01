@@ -40,7 +40,10 @@ function buildHandler(store: InMemoryEntityStore) {
   });
 }
 
-function invoke(handler: ReturnType<typeof buildHandler>, query?: Record<string, string>): Promise<HandlerOutput> {
+async function invoke(
+  handler: ReturnType<typeof buildHandler>,
+  query?: Record<string, string>,
+): Promise<HandlerOutput> {
   const request = buildIncomingRequest({
     id: "req_aging00000001",
     receivedAt: "2026-06-21T12:00:00.000Z",

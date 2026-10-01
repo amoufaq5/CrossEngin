@@ -26,6 +26,8 @@ function fixtureScope(overrides: Partial<DeletionScope> = {}): DeletionScope {
 }
 
 const FIXTURE_BASE = {
+  // `.default(null)` on the schema, so present-and-null on the record this helper is handed.
+  invalidationOfPriorTombstoneId: null,
   id: "tomb_abcdef123456",
   kind: "tenant_deletion" as const,
   tenantId: "00000000-0000-4000-8000-000000000001",

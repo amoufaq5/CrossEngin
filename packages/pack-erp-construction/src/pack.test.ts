@@ -74,7 +74,7 @@ describe("buildErpConstructionPack — resolved against core", () => {
     });
     const names = (resolved.entities ?? []).map((e) => e.name);
     for (const core of ["Account", "Invoice"]) expect(names).toContain(core);
-    const coreNames = new Set(buildErpCorePack().entities.map((e) => e.name));
+    const coreNames = new Set((buildErpCorePack().entities ?? []).map((e) => e.name));
     const constructionOwn = names.filter((n) => !coreNames.has(n)).sort();
     // Project + WorkOrder already exist in core, so Subcontractor is the only net-new name.
     expect(constructionOwn).toEqual(["Subcontractor"]);

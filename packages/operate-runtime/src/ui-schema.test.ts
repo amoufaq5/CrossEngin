@@ -14,7 +14,7 @@ function entity(name: string) {
 
 describe("buildUiSchema", () => {
   it("covers every manifest entity", () => {
-    expect(schema.entities.length).toBe(buildErpCorePack().entities.length);
+    expect(schema.entities.length).toBe((buildErpCorePack().entities ?? []).length);
   });
 
   it("surfaces m2m associations on the owning entity (both directions)", () => {

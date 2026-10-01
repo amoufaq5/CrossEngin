@@ -46,7 +46,7 @@ describe("buildLocalRequest", () => {
       { defaultModel: "m" },
     );
     expect(built.messages[0]).toEqual({ role: "system", content: "be brief" });
-    expect(built.messages[2].tool_calls?.[0]).toEqual({
+    expect(built.messages[2]?.tool_calls?.[0]).toEqual({
       id: "c1",
       type: "function",
       function: { name: "lookup", arguments: JSON.stringify({ q: 1 }) },
