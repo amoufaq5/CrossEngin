@@ -12,6 +12,7 @@ export const INCIDENT_DRIFT_KINDS = [
   "timeline_out_of_order",
   "terminal_without_timestamp",
   "sla_breached_while_open",
+  "duplicate_open_for_signal",
 ] as const;
 export type IncidentDriftKind = (typeof INCIDENT_DRIFT_KINDS)[number];
 
@@ -43,6 +44,11 @@ export interface ReplayIncidentsOptions {
  * that skipped the schema — is invalid in ways only a re-parse can find. A `sla_breached_while_open`
  * finding is not corruption at all but the operational signal this makes cheap to ask for: an
  * incident sitting past its severity's window with nobody on it.
+ *
+ * `duplicate_open_for_signal` is the one finding that is about the table rather than a row:
+ * `idx_incidents_auto_declared_open` makes two open incidents for one automated signal impossible
+ * on write, and `findOpenFor` refuses to prefer one if it ever sees two — but both of those need a
+ * declaration to happen first. This notices it without one.
  */
 export async function replayIncidents(
   conn: PgConnection,
@@ -60,6 +66,14 @@ export async function replayIncidents(
 
   const drift: IncidentDrift[] = [];
   let open = 0;
+  /**
+   * Open incidents by the signal they were auto-declared for, which is what
+   * `idx_incidents_auto_declared_open` constrains: keyed rows only (a human declaration has no key
+   * to collide on) and non-terminal statuses only (`isIncidentOpen` is exactly the index's
+   * `status NOT IN ('closed', 'cancelled')`, so two *closed* episodes of one signal are correct and
+   * not grouped).
+   */
+  const openBySignal = new Map<string, string[]>();
 
   for (const row of result.rows) {
     const id = String(row["incident_id"] ?? "<unknown>");
@@ -115,6 +129,11 @@ export async function replayIncidents(
 
     if (isIncidentOpen(record)) {
       open++;
+      if (record.autoDeclaredFor !== null) {
+        const ids = openBySignal.get(record.autoDeclaredFor);
+        if (ids === undefined) openBySignal.set(record.autoDeclaredFor, [record.id]);
+        else ids.push(record.id);
+      }
       const sla = assessIncidentSla(record, nowIso);
       if (sla.breachedTargets.length > 0) {
         drift.push({
@@ -124,6 +143,19 @@ export async function replayIncidents(
         });
       }
     }
+  }
+
+  // One finding per colliding signal rather than per extra row: the operator needs the key and
+  // every id open under it to decide which episode is the real one. Only what this scan read, so a
+  // collision whose other half fell outside `limit` is reported the next time the window covers it.
+  for (const [signal, ids] of openBySignal) {
+    const first = ids[0];
+    if (ids.length < 2 || first === undefined) continue;
+    drift.push({
+      incidentId: first,
+      kind: "duplicate_open_for_signal",
+      detail: `${ids.length} open incidents for signal '${signal}': ${ids.join(", ")}`,
+    });
   }
 
   return { scanned: result.rows.length, open, drift, checkedAt: nowIso };

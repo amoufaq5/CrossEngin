@@ -19,7 +19,8 @@ import {
   emitSchemaCreate,
   emitTable,
 } from "./emit.js";
-import type { TableDefinition } from "./types.js";
+import { META_TABLES } from "./meta-schema.js";
+import { PUBLIC_ROLE, RLS_POLICY_COMMANDS, type TableDefinition } from "./types.js";
 
 describe("emitSchemaCreate", () => {
   it("emits CREATE SCHEMA IF NOT EXISTS", () => {
@@ -259,6 +260,84 @@ describe("emitRlsPolicy", () => {
       }),
     ).toBe(`CREATE POLICY "x_isolation" ON "meta"."x" USING (x = y) WITH CHECK (x = y);`);
   });
+
+  it("writes neither FOR nor TO when the policy declares neither", () => {
+    // The whole reason both fields are optional: `CREATE POLICY` already means `FOR ALL TO PUBLIC`,
+    // so every policy in the catalog has to keep emitting the statement it emitted before.
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true" })).toBe(
+      `CREATE POLICY "p" ON "meta"."x" USING (true);`,
+    );
+  });
+
+  it("emits FOR <command> when a command is declared", () => {
+    expect(
+      emitRlsPolicy(minimalTable, { name: "p", using: "true", command: "SELECT" }),
+    ).toBe(`CREATE POLICY "p" ON "meta"."x" FOR SELECT USING (true);`);
+  });
+
+  it("emits every command spelling", () => {
+    for (const command of RLS_POLICY_COMMANDS) {
+      expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", command })).toBe(
+        `CREATE POLICY "p" ON "meta"."x" FOR ${command} USING (true);`,
+      );
+    }
+  });
+
+  it("emits TO with quoted role names", () => {
+    expect(
+      emitRlsPolicy(minimalTable, { name: "p", using: "true", roles: ["app_reader"] }),
+    ).toBe(`CREATE POLICY "p" ON "meta"."x" TO "app_reader" USING (true);`);
+  });
+
+  it("emits a multi-role TO list in declaration order", () => {
+    expect(
+      emitRlsPolicy(minimalTable, {
+        name: "p",
+        using: "true",
+        roles: ["app_reader", "app_writer"],
+      }),
+    ).toBe(`CREATE POLICY "p" ON "meta"."x" TO "app_reader", "app_writer" USING (true);`);
+  });
+
+  it("leaves PUBLIC unquoted, because it is a keyword and not a role", () => {
+    // `TO "PUBLIC"` names a role that does not exist, so quoting it would fail at apply time.
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", roles: ["PUBLIC"] })).toBe(
+      `CREATE POLICY "p" ON "meta"."x" TO PUBLIC USING (true);`,
+    );
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", roles: ["public"] })).toBe(
+      `CREATE POLICY "p" ON "meta"."x" TO PUBLIC USING (true);`,
+    );
+  });
+
+  it("orders FOR before TO before USING before WITH CHECK", () => {
+    expect(
+      emitRlsPolicy(minimalTable, {
+        name: "p",
+        using: "a",
+        check: "b",
+        command: "UPDATE",
+        roles: ["app_writer"],
+      }),
+    ).toBe(
+      `CREATE POLICY "p" ON "meta"."x" FOR UPDATE TO "app_writer" USING (a) WITH CHECK (b);`,
+    );
+  });
+
+  it("treats an empty role list as absent rather than as a grant to nobody", () => {
+    expect(emitRlsPolicy(minimalTable, { name: "p", using: "true", roles: [] })).toBe(
+      `CREATE POLICY "p" ON "meta"."x" USING (true);`,
+    );
+  });
+});
+
+describe("RLS_POLICY_COMMANDS", () => {
+  it("lists the commands a policy can be scoped to", () => {
+    expect([...RLS_POLICY_COMMANDS]).toEqual(["ALL", "SELECT", "INSERT", "UPDATE", "DELETE"]);
+  });
+
+  it("spells PUBLIC the way CREATE POLICY does", () => {
+    expect(PUBLIC_ROLE).toBe("PUBLIC");
+  });
 });
 
 describe("emitTable", () => {
@@ -472,6 +551,21 @@ describe("atomic replacement emitters", () => {
     expect(sql).toContain("WITH CHECK (b)");
   });
 
+  it("emitReplaceRlsPolicy carries the command and the roles through", () => {
+    // A command or role list that changed is repaired by the same replacement, so the re-created
+    // policy has to carry them or the repair would silently widen the grant to FOR ALL TO PUBLIC.
+    const sql = emitReplaceRlsPolicy(table, {
+      name: "widgets_isolation",
+      using: "a",
+      command: "SELECT",
+      roles: ["app_reader"],
+    });
+    expect(sql).toBe(
+      `DROP POLICY "widgets_isolation" ON "meta"."widgets"; ` +
+        `CREATE POLICY "widgets_isolation" ON "meta"."widgets" FOR SELECT TO "app_reader" USING (a);`,
+    );
+  });
+
   it("both refuse an unsafe identifier", () => {
     expect(() =>
       emitReplaceIndex(table, { name: "od'd", columns: ["status"] }),
@@ -479,5 +573,31 @@ describe("atomic replacement emitters", () => {
     expect(() =>
       emitReplaceRlsPolicy(table, { name: "od'd", using: "a" }),
     ).toThrow(/unsafe SQL identifier/);
+    expect(() =>
+      emitRlsPolicy(table, { name: "p", using: "a", roles: ["od'd"] }),
+    ).toThrow(/unsafe SQL identifier/);
+  });
+});
+
+describe("the catalog's own policies", () => {
+  /**
+   * The rule that let `command` and `roles` be added at all: a policy declaring neither emits the
+   * statement it emitted before they existed. Written against the live catalog rather than a fixture,
+   * so a policy added later cannot quietly change what the other hundred emit.
+   */
+  it("emit exactly the pre-scoping statement when they declare neither command nor roles", () => {
+    let checked = 0;
+    for (const table of META_TABLES) {
+      for (const policy of table.rls?.policies ?? []) {
+        if (policy.command !== undefined || policy.roles !== undefined) continue;
+        const check = policy.check !== undefined ? ` WITH CHECK (${policy.check})` : "";
+        expect(emitRlsPolicy(table, policy)).toBe(
+          `CREATE POLICY "${policy.name}" ON "${table.schema}"."${table.name}" ` +
+            `USING (${policy.using})${check};`,
+        );
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(100);
   });
 });

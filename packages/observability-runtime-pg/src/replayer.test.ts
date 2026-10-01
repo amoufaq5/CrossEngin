@@ -235,4 +235,18 @@ describe("SloEnforcementReplayer", () => {
     expect(await replayer.verifyIncident("INC-2026-0001")).toHaveLength(0);
     expect((await replayer.summarizeRecent()).opened).toBe(1);
   });
+
+  it("reports a failed close-out through verifyRecent", async () => {
+    const rows = [
+      action({ actionId: "sloa_d0000003", incidentId: "INC-2026-0002", decision: "breach_opened", occurredAt: iso(0), paged: true, pageChannelCount: 1 }),
+      action({ actionId: "sloa_d0000004", incidentId: "INC-2026-0002", decision: "recovered", occurredAt: iso(1_000), closeOut: "failed" }),
+    ];
+    const store = {
+      listForIncident: async () => rows,
+      listRecent: async () => rows,
+    } as unknown as PostgresSloEnforcementActionStore;
+    const replayer = new SloEnforcementReplayer(store);
+    const issues = await replayer.verifyRecent();
+    expect(issues.map((i) => i.kind)).toEqual(["recovered_close_out_failed"]);
+  });
 });

@@ -1,7 +1,7 @@
 import type { TableDefinition } from "@crossengin/kernel/bootstrap";
 import { describe, expect, it } from "vitest";
 
-import { diffSchema, formatSchemaDiff } from "./diff.js";
+import { POLICY_DELTA_REASONS, diffSchema, formatSchemaDiff } from "./diff.js";
 import { expressionKey } from "./expression-render.js";
 import type { LiveSchema, LiveTable } from "./introspection.js";
 
@@ -44,7 +44,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
           rlsEnabled: true,
         },
       ),
@@ -92,7 +92,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
           rlsEnabled: true,
         },
       ),
@@ -111,7 +111,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
           rlsEnabled: true,
         },
       ),
@@ -137,7 +137,7 @@ describe("diffSchema", () => {
             { name: "tenants_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
             { name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null },
           ],
-          policies: [{ name: "tenants_policy", using: "true", check: null }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
           rlsEnabled: true,
         },
       ),
@@ -159,7 +159,7 @@ describe("diffSchema", () => {
           indexes: [
             { name: "tenants_legacy_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null },
           ],
-          policies: [{ name: "tenants_policy", using: "true", check: null }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
           rlsEnabled: true,
         },
       ),
@@ -179,7 +179,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "old_policy", using: "true", check: null }],
+          policies: [{ name: "old_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
           rlsEnabled: true,
         },
       ),
@@ -199,7 +199,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
           rlsEnabled: false,
         },
       ),
@@ -219,7 +219,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
-          policies: [{ name: "tenants_policy", using: "true", check: null }],
+          policies: [{ name: "tenants_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] }],
           rlsEnabled: true,
         },
       ),
@@ -437,6 +437,12 @@ describe("diffSchema — no false drift on a correct schema", () => {
   });
 });
 
+describe("POLICY_DELTA_REASONS", () => {
+  it("lists every way a policy can differ under an unchanged name", () => {
+    expect([...POLICY_DELTA_REASONS]).toEqual(["using", "check", "command", "roles"]);
+  });
+});
+
 describe("diffSchema — in-place index and policy changes", () => {
   /**
    * The gap this closes. Indexes and policies were compared by *name* only, so renaming nothing and
@@ -509,7 +515,7 @@ describe("diffSchema — in-place index and policy changes", () => {
             predicate: null,
           },
         ],
-        policies: [{ name: "widgets_isolation", using: "(tenant_id IS NOT NULL)", check: null }],
+        policies: [{ name: "widgets_isolation", using: "(tenant_id IS NOT NULL)", check: null, command: "ALL", roles: ["PUBLIC"] }],
         rlsEnabled: true,
         ...over,
       },
@@ -614,7 +620,7 @@ describe("diffSchema — in-place index and policy changes", () => {
 
   it("sees a changed policy clause", () => {
     const changed = diffWith({
-      policies: [{ name: "widgets_isolation", using: "(tenant_id IS NULL)", check: null }],
+      policies: [{ name: "widgets_isolation", using: "(tenant_id IS NULL)", check: null, command: "ALL", roles: ["PUBLIC"] }],
     }).modifiedTables[0]?.changedPolicies;
     expect(changed?.[0]?.name).toBe("widgets_isolation");
     expect(changed?.[0]?.reasons).toEqual(["using"]);
@@ -632,12 +638,132 @@ describe("diffSchema — in-place index and policy changes", () => {
         schema: "meta",
         tables: [
           liveWidgets({
-            policies: [{ name: "widgets_isolation", using: "(something else)", check: null }],
+            policies: [{ name: "widgets_isolation", using: "(something else)", check: null, command: "ALL", roles: ["PUBLIC"] }],
           }),
         ],
       },
     );
     expect(drifted.hasDrift).toBe(false);
+  });
+
+  it("reports a changed command, with no renderer involved", () => {
+    const changed = diffWith({
+      policies: [
+        {
+          name: "widgets_isolation",
+          using: "(tenant_id IS NOT NULL)",
+          check: null,
+          command: "SELECT",
+          roles: ["PUBLIC"],
+        },
+      ],
+    }).modifiedTables[0]?.changedPolicies;
+    expect(changed?.[0]?.name).toBe("widgets_isolation");
+    expect(changed?.[0]?.reasons).toEqual(["command"]);
+    expect(changed?.[0]?.detail).toContain("FOR SELECT → FOR ALL");
+  });
+
+  it("reports a changed role list", () => {
+    const changed = diffWith({
+      policies: [
+        {
+          name: "widgets_isolation",
+          using: "(tenant_id IS NOT NULL)",
+          check: null,
+          command: "ALL",
+          roles: ["app_reader"],
+        },
+      ],
+    }).modifiedTables[0]?.changedPolicies;
+    expect(changed?.[0]?.reasons).toEqual(["roles"]);
+    expect(changed?.[0]?.detail).toContain("TO app_reader → TO PUBLIC");
+  });
+
+  it("reports a command and a role change together, in reason order", () => {
+    const changed = diffWith({
+      policies: [
+        {
+          name: "widgets_isolation",
+          using: "(tenant_id IS NULL)",
+          check: null,
+          command: "DELETE",
+          roles: ["app_reader", "app_writer"],
+        },
+      ],
+    }).modifiedTables[0]?.changedPolicies;
+    expect(changed?.[0]?.reasons).toEqual(["using", "command", "roles"]);
+  });
+
+  it("ignores the order Postgres happens to return the roles in", () => {
+    const scoped: TableDefinition = {
+      ...target,
+      rls: {
+        enabled: true,
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "tenant_id IS NOT NULL",
+            command: "SELECT",
+            roles: ["app_writer", "app_reader"],
+          },
+        ],
+      },
+    };
+    const live = {
+      schema: "meta",
+      tables: [
+        liveWidgets({
+          policies: [
+            {
+              name: "widgets_isolation",
+              using: "(tenant_id IS NOT NULL)",
+              check: null,
+              command: "SELECT",
+              roles: ["app_reader", "app_writer"],
+            },
+          ],
+        }),
+      ],
+    };
+    expect(diffSchema([scoped], live, RENDERED).hasDrift).toBe(false);
+  });
+
+  it("reports no drift when the declaration spells the defaults out explicitly", () => {
+    // `FOR ALL TO PUBLIC` is what an omitted command and role list already mean, so saying so must
+    // not change the answer.
+    const explicit: TableDefinition = {
+      ...target,
+      rls: {
+        enabled: true,
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "tenant_id IS NOT NULL",
+            command: "ALL",
+            roles: ["PUBLIC"],
+          },
+        ],
+      },
+    };
+    const live = { schema: "meta", tables: [liveWidgets()] };
+    expect(diffSchema([explicit], live, RENDERED).hasDrift).toBe(false);
+  });
+
+  it("treats an undetermined command or role list as unknown, not as drift", () => {
+    // A polcmd this version does not know, or a role oid that resolved to nothing. Reporting either
+    // as a difference would invent drift on a policy nobody touched.
+    const unknown = diffWith({
+      policies: [
+        {
+          name: "widgets_isolation",
+          using: "(tenant_id IS NOT NULL)",
+          check: null,
+          command: null,
+          roles: null,
+        },
+      ],
+    });
+    expect(unknown.hasDrift).toBe(false);
   });
 
   it("reports an expression the table cannot even carry", () => {

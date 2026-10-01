@@ -54,7 +54,7 @@ function liveWidgets(over: Partial<LiveTable> = {}): LiveTable {
       { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null },
       { name: "widgets_tenant_code_key", columns: ["tenant_id", "code"], unique: true, primary: false, method: "btree", predicate: null },
     ],
-    policies: [{ name: "widgets_isolation", using: "(tenant_id = ...)", check: null }],
+    policies: [{ name: "widgets_isolation", using: "(tenant_id = ...)", check: null, command: "ALL", roles: ["PUBLIC"] }],
     foreignKeys: [],
     rlsEnabled: true,
     ...over,
@@ -318,7 +318,7 @@ describe("planSchemaReconciliation — what it refuses", () => {
     const stale = liveWidgets({
       policies: [
         ...liveWidgets().policies,
-        { name: "widgets_extra", using: "true", check: null },
+        { name: "widgets_extra", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] },
       ],
     });
     const plan = planFor([WIDGETS], live([stale]));
@@ -824,7 +824,7 @@ describe("replacing a changed index, constraint or policy", () => {
     // A table with RLS on and no policy denies every row, so a window between the two would be an
     // outage rather than a leak — and one statement means there is no window.
     const plan = planChanged({
-      policies: [{ name: "widgets_isolation", using: "(something else)", check: null }],
+      policies: [{ name: "widgets_isolation", using: "(something else)", check: null, command: "ALL", roles: ["PUBLIC"] }],
     });
     const step = plan.steps.find((s) => s.kind === "replace_policy");
     expect(step?.target).toBe("widgets_isolation");
@@ -832,8 +832,142 @@ describe("replacing a changed index, constraint or policy", () => {
     expect(step?.sql).toContain("CREATE POLICY");
   });
 
+  it("replaces a policy whose command changed, through the same step kind", () => {
+    // A command change is unambiguous — the catalog says what the policy should govern — so it needs
+    // no new step kind, only the existing replacement carrying the clause.
+    const plan = planChanged({
+      policies: [
+        {
+          name: "widgets_isolation",
+          using: "(tenant_id = ...)",
+          check: null,
+          command: "SELECT",
+          roles: ["PUBLIC"],
+        },
+      ],
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_policy");
+    expect(step?.target).toBe("widgets_isolation");
+    expect(step?.sql).toContain("DROP POLICY");
+    expect(step?.sql).toContain("CREATE POLICY");
+    expect(plan.steps.map((s) => s.kind)).toEqual(["replace_policy"]);
+  });
+
+  it("replaces a policy whose role list changed, re-stating the declared grant", () => {
+    const plan = planChanged({
+      policies: [
+        {
+          name: "widgets_isolation",
+          using: "(tenant_id = ...)",
+          check: null,
+          command: "ALL",
+          roles: ["app_reader"],
+        },
+      ],
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_policy");
+    expect(step?.target).toBe("widgets_isolation");
+    // The catalog declares neither, so the replacement restores `FOR ALL TO PUBLIC` by writing
+    // neither clause — a narrowed grant nobody declared is widened back to the declaration.
+    expect(step?.sql).not.toContain(" TO ");
+    expect(step?.sql).not.toContain(" FOR ");
+  });
+
+  it("re-states a declared command and role list when it replaces a scoped policy", () => {
+    const scoped: TableDefinition = {
+      ...WIDGETS,
+      rls: {
+        enabled: true,
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "tenant_id = current_setting('x', true)::UUID",
+            command: "SELECT",
+            roles: ["app_reader"],
+          },
+        ],
+      },
+    };
+    const liveSchema = live([
+      liveWidgets({
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "(tenant_id = ...)",
+            check: null,
+            command: "ALL",
+            roles: ["PUBLIC"],
+          },
+        ],
+      }),
+    ]);
+    const plan = planSchemaReconciliation(diffSchema([scoped], liveSchema, RENDERED), [scoped]);
+    const step = plan.steps.find((s) => s.kind === "replace_policy");
+    expect(step?.sql).toContain("FOR SELECT");
+    expect(step?.sql).toContain(`TO "app_reader"`);
+    // One statement: a table with RLS on and no policy denies every row.
+    expect(step?.sql.split(";").filter((s) => s.trim().length > 0)).toHaveLength(2);
+  });
+
+  it("creates a scoped policy with its command and roles when the database has none", () => {
+    const scoped: TableDefinition = {
+      ...WIDGETS,
+      rls: {
+        enabled: true,
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "tenant_id = current_setting('x', true)::UUID",
+            command: "UPDATE",
+            roles: ["app_writer"],
+          },
+        ],
+      },
+    };
+    const plan = planSchemaReconciliation(
+      diffSchema([scoped], live([liveWidgets({ policies: [] })]), RENDERED),
+      [scoped],
+    );
+    const step = plan.steps.find((s) => s.kind === "create_policy");
+    expect(step?.sql).toContain("FOR UPDATE");
+    expect(step?.sql).toContain(`TO "app_writer"`);
+  });
+
   it("plans nothing when the definitions match", () => {
     expect(planChanged({}).steps).toEqual([]);
+  });
+
+  it("plans nothing when a scoped policy matches the database exactly", () => {
+    const scoped: TableDefinition = {
+      ...WIDGETS,
+      rls: {
+        enabled: true,
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "tenant_id = current_setting('x', true)::UUID",
+            command: "SELECT",
+            roles: ["app_reader"],
+          },
+        ],
+      },
+    };
+    const liveSchema = live([
+      liveWidgets({
+        policies: [
+          {
+            name: "widgets_isolation",
+            using: "(tenant_id = ...)",
+            check: null,
+            command: "SELECT",
+            roles: ["app_reader"],
+          },
+        ],
+      }),
+    ]);
+    expect(
+      planSchemaReconciliation(diffSchema([scoped], liveSchema, RENDERED), [scoped]).steps,
+    ).toEqual([]);
   });
 
   it("refuses to replace an index covering a column it is not adding", () => {

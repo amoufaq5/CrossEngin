@@ -3720,6 +3720,14 @@ export const META_INCIDENT_RUNBOOK_EXECUTIONS: TableDefinition = {
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
     {
+      // The contract's own id — no pattern, unlike `INC-`/`PM-`, because the contract puts none on
+      // it. Without this the table had only a surrogate key and no way to address a record.
+      name: "execution_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "incident_runbook_executions_execution_id_key" },
+    },
+    {
       name: "incident_id",
       type: "TEXT",
       notNull: true,
@@ -3733,7 +3741,15 @@ export const META_INCIDENT_RUNBOOK_EXECUTIONS: TableDefinition = {
     },
     { name: "runbook_version", type: "TEXT", notNull: true },
     { name: "invoked_at", type: "TIMESTAMPTZ", notNull: true },
-    { name: "invoked_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      // TEXT, not a `meta.users` foreign key. The contract types this as any non-empty
+      // string and an automated actor is a scheduler with no user row — the same defect
+      // ADR-0289 found in `incidents.declared_by`, which made that table unable to store
+      // the only records anything produces.
+      name: "invoked_by",
+      type: "TEXT",
+      notNull: true,
+    },
     {
       name: "status",
       type: "TEXT",
@@ -3757,11 +3773,28 @@ export const META_INCIDENT_RUNBOOK_EXECUTIONS: TableDefinition = {
       notNull: true,
       default: "false",
     },
-    { name: "incident_commander_approval_user_id", type: "UUID", references: USER_FK },
+    // TEXT for the same reason as `invoked_by`.
+    { name: "incident_commander_approval_user_id", type: "TEXT" },
     { name: "artifact_storage_uri", type: "TEXT" },
+    {
+      // Optimistic concurrency. A postmortem is edited by humans over days and a runbook execution
+      // by a scheduler while someone watches it, so two writers who both read the same version
+      // would silently drop one's work. Every write states the revision it read.
+      name: "revision",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "revision >= 1",
+    },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
   indexes: [
+    {
+      name: "idx_incident_runbook_executions_unfinished",
+      columns: ["invoked_at"],
+      where: "status IN ('queued', 'running', 'paused')",
+    },
     {
       name: "idx_incident_runbook_executions_incident",
       columns: ["incident_id", "invoked_at"],
@@ -3818,7 +3851,18 @@ export const META_INCIDENT_POSTMORTEMS: TableDefinition = {
     { name: "lessons_learned", type: "JSONB", notNull: true },
     { name: "action_items", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "timeline_summary", type: "TEXT", notNull: true },
-    { name: "author_user_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      // TEXT, not a `meta.users` foreign key. The contract types this as any non-empty
+      // string and an automated actor is a scheduler with no user row — the same defect
+      // ADR-0289 found in `incidents.declared_by`, which made that table unable to store
+      // the only records anything produces.
+      // The inconsistency this removes is visible in the next line: `reviewers` was already a
+      // JSONB array of free strings, so every reviewer was unconstrained while the author alone
+      // was pinned to a user row.
+      name: "author_user_id",
+      type: "TEXT",
+      notNull: true,
+    },
     { name: "reviewers", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "published_at", type: "TIMESTAMPTZ" },
@@ -3838,9 +3882,25 @@ export const META_INCIDENT_POSTMORTEMS: TableDefinition = {
       check:
         "storage_sha256 IS NULL OR storage_sha256 ~ '^[0-9a-f]{64}$'",
     },
+    {
+      // Optimistic concurrency. A postmortem is edited by humans over days and a runbook execution
+      // by a scheduler while someone watches it, so two writers who both read the same version
+      // would silently drop one's work. Every write states the revision it read.
+      name: "revision",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "revision >= 1",
+    },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
   indexes: [
+    {
+      name: "idx_incident_postmortems_unpublished",
+      columns: ["created_at"],
+      where: "status IN ('drafting', 'review')",
+    },
     { name: "idx_incident_postmortems_status", columns: ["status"] },
     { name: "idx_incident_postmortems_incident", columns: ["incident_id"] },
     { name: "idx_incident_postmortems_severity", columns: ["severity"] },
@@ -3853,6 +3913,14 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
   name: "incident_communications",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      // The contract's own id. Without it the table had only a surrogate key, so a record could be
+      // written but never looked up, updated or referred to by the id it carries.
+      name: "communication_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "incident_communications_communication_id_key" },
+    },
     {
       name: "incident_id",
       type: "TEXT",
@@ -3882,7 +3950,15 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
     { name: "title", type: "TEXT", notNull: true },
     { name: "body", type: "TEXT", notNull: true },
     { name: "published_at", type: "TIMESTAMPTZ", notNull: true },
-    { name: "published_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      // TEXT, not a `meta.users` foreign key. The contract types this as any non-empty
+      // string and an automated actor is a scheduler with no user row — the same defect
+      // ADR-0289 found in `incidents.declared_by`, which made that table unable to store
+      // the only records anything produces.
+      name: "published_by",
+      type: "TEXT",
+      notNull: true,
+    },
     { name: "languages", type: "JSONB", notNull: true, default: "'[\"en\"]'::jsonb" },
     {
       name: "requires_legal_review",
@@ -3890,7 +3966,8 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
       notNull: true,
       default: "false",
     },
-    { name: "legal_reviewed_by", type: "UUID", references: USER_FK },
+    // TEXT for the same reason as `published_by`.
+    { name: "legal_reviewed_by", type: "TEXT" },
     { name: "legal_reviewed_at", type: "TIMESTAMPTZ" },
     {
       name: "requires_executive_approval",
@@ -3898,7 +3975,8 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
       notNull: true,
       default: "false",
     },
-    { name: "executive_approved_by", type: "UUID", references: USER_FK },
+    // TEXT for the same reason as `published_by`.
+    { name: "executive_approved_by", type: "TEXT" },
     { name: "executive_approved_at", type: "TIMESTAMPTZ" },
     { name: "delivery_channels", type: "JSONB", notNull: true },
     {
@@ -3914,10 +3992,27 @@ export const META_INCIDENT_COMMUNICATIONS: TableDefinition = {
       default: "0",
       check: "bounces_count >= 0",
     },
-    { name: "supersedes_id", type: "UUID" },
+    {
+      // Names the communication this one replaces, by that record's *contract* id — which is the
+      // `communication_id` below, not the UUID surrogate. A UUID column could not hold it, so the
+      // supersede chain was unrepresentable.
+      name: "supersedes_id",
+      type: "TEXT",
+    },
     { name: "retracted_at", type: "TIMESTAMPTZ" },
     { name: "retracted_reason", type: "TEXT" },
     { name: "breach_notification_deadline_at", type: "TIMESTAMPTZ" },
+    {
+      // Optimistic concurrency. A postmortem is edited by humans over days and a runbook execution
+      // by a scheduler while someone watches it, so two writers who both read the same version
+      // would silently drop one's work. Every write states the revision it read.
+      name: "revision",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "revision >= 1",
+    },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
   ],
   primaryKey: ["id"],
   indexes: [
@@ -8532,15 +8627,16 @@ export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
     },
     { name: "tenant_id", type: "UUID", references: TENANT_FK },
     {
+      // TEXT, not a `meta.feature_flags` foreign key. `KillSwitch.flagId` is an `ff_…` contract id
+      // and `meta.feature_flags` has no column for one — only a UUID surrogate and a TEXT `key` —
+      // so a UUID FK here made the table unable to store the only kill switches anything produces,
+      // exactly as `declared_by` did for `meta.incidents` (ADR-0289). Matches
+      // `slo_enforcement_actions.flag_id` and `feature_flag_evaluations.flag_id`, so the row the
+      // SLO loop writes and the row it refers to finally name a flag the same way.
       name: "flag_id",
-      type: "UUID",
+      type: "TEXT",
       notNull: true,
-      references: {
-        schema: "meta",
-        table: "feature_flags",
-        column: "id",
-        onDelete: "RESTRICT",
-      },
+      check: "flag_id ~ '^ff_[a-z0-9]{8,32}$'",
     },
     {
       name: "status",

@@ -21,6 +21,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@crossengin/feature-flags-pg": "workspace:*",
     "@crossengin/incident-response": "workspace:*",
     "@crossengin/incident-response-runtime": "workspace:*",
     "@crossengin/incident-response-runtime-pg": "workspace:*",

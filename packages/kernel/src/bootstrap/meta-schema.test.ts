@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { TableDefinition } from "./types.js";
 import { emitMetaBootstrapSql } from "./index.js";
 import {
   META_AA_CONFLICTS,
@@ -1118,6 +1119,79 @@ describe("table column shapes", () => {
     expect(flag?.check).toContain("ff_");
   });
 
+  it("the three incident child tables carry the contract's own id, not only a surrogate", () => {
+    // Without a business key a record could be written but never looked up, updated, or referred to
+    // by the id it carries — which is most of what a store is for.
+    const exec = META_INCIDENT_RUNBOOK_EXECUTIONS.columns.find((c) => c.name === "execution_id");
+    const comms = META_INCIDENT_COMMUNICATIONS.columns.find((c) => c.name === "communication_id");
+    const pm = META_INCIDENT_POSTMORTEMS.columns.find((c) => c.name === "postmortem_id");
+    for (const col of [exec, comms, pm]) {
+      expect(col?.type).toBe("TEXT");
+      expect(col?.notNull).toBe(true);
+      expect(col?.unique?.constraintName).toBeDefined();
+    }
+  });
+
+  it("the three incident child tables type their actors as the contract does, not as user rows", () => {
+    // The ADR-0289 `declared_by` defect, in five more columns: the contract types each of these as
+    // any non-empty string and an automated actor is a scheduler with no `meta.users` row, so a
+    // UUID FK made the tables unable to store the records anything would produce.
+    const actors: ReadonlyArray<readonly [TableDefinition, string]> = [
+      [META_INCIDENT_RUNBOOK_EXECUTIONS, "invoked_by"],
+      [META_INCIDENT_RUNBOOK_EXECUTIONS, "incident_commander_approval_user_id"],
+      [META_INCIDENT_POSTMORTEMS, "author_user_id"],
+      [META_INCIDENT_COMMUNICATIONS, "published_by"],
+      [META_INCIDENT_COMMUNICATIONS, "legal_reviewed_by"],
+      [META_INCIDENT_COMMUNICATIONS, "executive_approved_by"],
+    ];
+    for (const [table, name] of actors) {
+      const col = table.columns.find((c) => c.name === name);
+      expect(col, `${table.name}.${name}`).toBeDefined();
+      expect(col?.type, `${table.name}.${name}`).toBe("TEXT");
+      expect(col?.references, `${table.name}.${name}`).toBeUndefined();
+    }
+  });
+
+  it("incident_communications can name the communication it supersedes", () => {
+    // By the superseded record's contract id, which is what `communication_id` holds — a UUID
+    // column left the supersede chain unrepresentable.
+    const col = META_INCIDENT_COMMUNICATIONS.columns.find((c) => c.name === "supersedes_id");
+    expect(col?.type).toBe("TEXT");
+  });
+
+  it("the three incident child tables carry a revision for optimistic concurrency", () => {
+    for (const table of [
+      META_INCIDENT_RUNBOOK_EXECUTIONS,
+      META_INCIDENT_POSTMORTEMS,
+      META_INCIDENT_COMMUNICATIONS,
+    ]) {
+      const rev = table.columns.find((c) => c.name === "revision");
+      expect(rev?.type, table.name).toBe("INTEGER");
+      expect(rev?.notNull, table.name).toBe(true);
+      expect(rev?.default, table.name).toBe("1");
+      expect(table.columns.some((c) => c.name === "updated_at"), table.name).toBe(true);
+    }
+  });
+
+  it("META_FEATURE_FLAG_KILL_SWITCHES stores the contract's flag id, not a surrogate", () => {
+    // A UUID FK to meta.feature_flags made the table unable to store the only kill switches
+    // anything produces: `KillSwitch.flagId` is an `ff_…` contract id and meta.feature_flags has no
+    // column for one. The same shape of defect ADR-0289 found in `incidents.declared_by`.
+    const flag = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "flag_id");
+    expect(flag?.type).toBe("TEXT");
+    expect(flag?.notNull).toBe(true);
+    expect(flag?.references).toBeUndefined();
+    expect(flag?.check).toContain("ff_");
+  });
+
+  it("META_FEATURE_FLAG_KILL_SWITCHES names a flag the way the action row that refers to it does", () => {
+    const onSwitch = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "flag_id");
+    const onAction = META_SLO_ENFORCEMENT_ACTIONS.columns.find((c) => c.name === "flag_id");
+    expect(onSwitch?.type).toBe(onAction?.type);
+    expect(onSwitch?.check).toContain("^ff_[a-z0-9]{8,32}$");
+    expect(onAction?.check).toContain("^ff_[a-z0-9]{8,32}$");
+  });
+
   it("META_SLO_ENFORCEMENT_ACTIONS records what became of a recovered incident", () => {
     // Nullable because only a `recovered` row has a close-out; the record schema is what enforces
     // that pairing, since a CHECK constraint cannot see two columns' agreement.
@@ -1989,11 +2063,18 @@ describe("table column shapes", () => {
     ).toContain("IS NULL OR");
   });
 
-  it("META_FEATURE_FLAG_KILL_SWITCHES restricts on flag deletion (preserve audit)", () => {
-    const fk = META_FEATURE_FLAG_KILL_SWITCHES.columns.find(
-      (c) => c.name === "flag_id",
-    );
-    expect(fk?.references?.onDelete).toBe("RESTRICT");
+  it("META_FEATURE_FLAG_KILL_SWITCHES no longer restricts on flag deletion, and this is a loss", () => {
+    // This assertion used to read `references.onDelete === 'RESTRICT'`, protecting the audit trail
+    // by refusing to delete a flag a kill switch still names. That protection is gone, because the
+    // FK it rested on pointed at a UUID surrogate and so made the table unable to store a
+    // `KillSwitch` at all. It cannot be restored until `meta.feature_flags` carries the `ff_…`
+    // contract id as a unique column; nothing writes that table today, so nothing is relying on the
+    // guarantee in the meantime. Asserting the absence deliberately, so restoring the FK is a
+    // decision someone makes rather than a diff nobody notices.
+    const flag = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "flag_id");
+    expect(flag?.references).toBeUndefined();
+    const flags = META_FEATURE_FLAGS.columns.find((c) => c.name === "flag_id");
+    expect(flags).toBeUndefined();
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES status enum has 4 lifecycle states", () => {

@@ -33,6 +33,8 @@ export const RUNBOOK_EXECUTION_COLUMN_NAMES: readonly string[] = Object.freeze([
   "page_oncall_triggered",
   "incident_commander_approval_user_id",
   "artifact_storage_uri",
+  "revision",
+  "updated_at",
 ]);
 
 export const RUNBOOK_EXECUTION_JSONB_COLUMNS: ReadonlySet<string> = new Set(["steps"]);
@@ -56,9 +58,18 @@ export function runbookExecutionUpdateAssignments(): string {
     .join(", ");
 }
 
+export interface StoredRunbookExecution {
+  readonly record: RunbookExecution;
+  /** The revision that was read; pass it back to write, or the update is refused. */
+  readonly revision: number;
+  readonly updatedAt: string;
+}
+
 /** The row values for a `RunbookExecution`, positionally matching the column array. */
 export function runbookExecutionRowValues(
   record: RunbookExecution,
+  revision: number,
+  updatedAt: string,
 ): readonly unknown[] {
   const valid = RunbookExecutionSchema.parse(record);
   return [
@@ -78,6 +89,8 @@ export function runbookExecutionRowValues(
     valid.pageOncallTriggered,
     valid.incidentCommanderApprovalUserId,
     valid.artifactStorageUri ?? null,
+    revision,
+    updatedAt,
   ];
 }
 
@@ -124,8 +137,10 @@ function maybe(key: string, value: string | null): Record<string, string> {
  * database. A row edited by hand into a state the contract forbids is therefore only detectable by
  * parsing it back, and this is where that happens.
  */
-export function rowToRunbookExecution(row: Record<string, unknown>): RunbookExecution {
-  return RunbookExecutionSchema.parse({
+export function rowToRunbookExecution(
+  row: Record<string, unknown>,
+): StoredRunbookExecution {
+  const record = RunbookExecutionSchema.parse({
     id: asString(row["execution_id"]),
     incidentId: asString(row["incident_id"]),
     runbookId: asString(row["runbook_id"]),
@@ -145,32 +160,43 @@ export function rowToRunbookExecution(row: Record<string, unknown>): RunbookExec
     ),
     ...maybe("artifactStorageUri", asNullableString(row["artifact_storage_uri"])),
   });
+  return {
+    record,
+    revision: Number(row["revision"] ?? 1),
+    updatedAt: asIso(row["updated_at"]),
+  };
 }
 
-export class RunbookExecutionNotFoundError extends Error {
-  constructor(readonly executionId: string) {
-    super(`runbook execution '${executionId}' not found`);
-    this.name = "RunbookExecutionNotFoundError";
+export class RunbookExecutionRevisionConflictError extends Error {
+  constructor(
+    readonly executionId: string,
+    readonly expectedRevision: number,
+  ) {
+    super(
+      `runbook execution '${executionId}' was not at revision ${expectedRevision} — ` +
+        "another writer changed it first",
+    );
+    this.name = "RunbookExecutionRevisionConflictError";
   }
 }
 
 const PLACEHOLDERS = runbookExecutionPlaceholders();
 const UPDATE_ASSIGNMENTS = runbookExecutionUpdateAssignments();
+/** The revision guard binds after every column value, so it is always the next placeholder. */
+const REVISION_GUARD_PARAM = RUNBOOK_EXECUTION_COLUMN_NAMES.length + 1;
 
 /**
  * Persists runbook executions in `meta.incident_runbook_executions`.
  *
- * Platform-wide, like `meta.incidents` it hangs off: an execution belongs to an incident, which may
- * name many tenants or none, so there is no `withTenantContext` wrapper and no RLS.
+ * Platform-wide, like the `meta.incidents` row it hangs off: an execution belongs to an incident,
+ * which may name many tenants or none, so there is no `withTenantContext` wrapper and no RLS.
  *
- * **The table carries no `revision` column, so writes are last-writer-wins.** Two processes that
- * each read a `running` execution and then write — one aborting it, one marking it succeeded — both
- * succeed, and the second simply overwrites the first with no error anywhere. Unlike
- * `PostgresIncidentStore`, this store cannot offer `IncidentRevisionConflictError`: there is nothing
- * in the row to guard on. In practice one worker drives one execution, so the window is narrow
- * rather than absent, and `update` at least refuses a write to a row that is not there. Closing it
- * properly means a `revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1)` column, the same one
- * ADR-0289 added to `meta.incidents` for the same reason.
+ * **Optimistic concurrency, failing closed.** A scheduler drives an execution while an operator
+ * watches it, so two writers can hold one row: one aborting a `running` execution, one marking it
+ * succeeded from the same read. Without a guard both would succeed and the second would overwrite
+ * the first with nothing raised anywhere. Every write states the revision it read, and a zero-row
+ * update raises `RunbookExecutionRevisionConflictError` rather than silently discarding the other
+ * writer's transition.
  */
 export class PostgresRunbookExecutionStore {
   private readonly conn: PgConnection;
@@ -179,30 +205,38 @@ export class PostgresRunbookExecutionStore {
     this.conn = conn;
   }
 
-  async insert(record: RunbookExecution): Promise<RunbookExecution> {
+  async insert(record: RunbookExecution, at: string): Promise<StoredRunbookExecution> {
     await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (${RUNBOOK_EXECUTION_COLUMNS}) VALUES (${PLACEHOLDERS})`,
-      runbookExecutionRowValues(record),
+      runbookExecutionRowValues(record, 1, at),
     );
-    return record;
+    return { record, revision: 1, updatedAt: at };
   }
 
   /**
-   * Writes a new version of an execution. A zero-row update means the row is gone, not that the
-   * write was a no-op — every column is assigned, so a matching row always reports one affected row.
+   * Writes a new version of an execution, but only if it is still at the revision the caller read.
+   * A zero-row update is a conflict, not a success — the alternative is silently discarding
+   * whatever the other writer did.
    */
-  async update(record: RunbookExecution): Promise<RunbookExecution> {
+  async update(
+    record: RunbookExecution,
+    expectedRevision: number,
+    at: string,
+  ): Promise<StoredRunbookExecution> {
+    const nextRevision = expectedRevision + 1;
+    const values = runbookExecutionRowValues(record, nextRevision, at);
     const result = await this.conn.query(
-      `UPDATE ${SCHEMA}.${TABLE} SET ${UPDATE_ASSIGNMENTS} WHERE execution_id = $1`,
-      runbookExecutionRowValues(record),
+      `UPDATE ${SCHEMA}.${TABLE} SET ${UPDATE_ASSIGNMENTS}
+       WHERE execution_id = $1 AND revision = $${REVISION_GUARD_PARAM}`,
+      [...values, expectedRevision],
     );
     if ((result.rowCount ?? 0) === 0) {
-      throw new RunbookExecutionNotFoundError(record.id);
+      throw new RunbookExecutionRevisionConflictError(record.id, expectedRevision);
     }
-    return record;
+    return { record, revision: nextRevision, updatedAt: at };
   }
 
-  async load(executionId: string): Promise<RunbookExecution | null> {
+  async load(executionId: string): Promise<StoredRunbookExecution | null> {
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${RUNBOOK_EXECUTION_COLUMNS} FROM ${SCHEMA}.${TABLE} WHERE execution_id = $1`,
       [executionId],
@@ -215,7 +249,7 @@ export class PostgresRunbookExecutionStore {
   async listForIncident(
     incidentId: string,
     limit = 100,
-  ): Promise<readonly RunbookExecution[]> {
+  ): Promise<readonly StoredRunbookExecution[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${RUNBOOK_EXECUTION_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -227,8 +261,15 @@ export class PostgresRunbookExecutionStore {
     return result.rows.map((row) => rowToRunbookExecution(row));
   }
 
-  /** Executions that have not reached a terminal status — what a restarting worker must resume. */
-  async listUnfinished(limit = 100): Promise<readonly RunbookExecution[]> {
+  /**
+   * Executions that have not reached a terminal status — what a restarting worker must resume.
+   *
+   * The predicate is written to match `idx_incident_runbook_executions_unfinished` exactly, which is
+   * partial on the same three statuses and ordered by `invoked_at`. Spelling it any other way (a
+   * `NOT IN` over the terminal three, say) leaves the index unusable for this query, which is the
+   * one query it exists for.
+   */
+  async listUnfinished(limit = 100): Promise<readonly StoredRunbookExecution[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${RUNBOOK_EXECUTION_COLUMNS} FROM ${SCHEMA}.${TABLE}

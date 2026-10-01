@@ -80,6 +80,7 @@ function breachOpened(): EnforcementDecision {
       securityIncident: false,
       breachDataClasses: [],
       postmortemId: null,
+      autoDeclaredFor: null,
     },
     pages: [
       {

@@ -36,6 +36,8 @@ export const POSTMORTEM_COLUMN_NAMES: readonly string[] = Object.freeze([
   "confidentiality_class",
   "storage_uri",
   "storage_sha256",
+  "revision",
+  "updated_at",
 ]);
 
 export const POSTMORTEM_JSONB_COLUMNS: ReadonlySet<string> = new Set([
@@ -65,8 +67,19 @@ export function postmortemUpdateAssignments(): string {
     .join(", ");
 }
 
+export interface StoredPostmortem {
+  readonly record: Postmortem;
+  /** The revision that was read; pass it back to write, or the update is refused. */
+  readonly revision: number;
+  readonly updatedAt: string;
+}
+
 /** The row values for a `Postmortem`, positionally matching the column array. */
-export function postmortemRowValues(record: Postmortem): readonly unknown[] {
+export function postmortemRowValues(
+  record: Postmortem,
+  revision: number,
+  updatedAt: string,
+): readonly unknown[] {
   const valid = PostmortemSchema.parse(record);
   return [
     valid.id,
@@ -94,6 +107,8 @@ export function postmortemRowValues(record: Postmortem): readonly unknown[] {
     valid.confidentialityClass,
     valid.storageUri ?? null,
     valid.storageSha256 ?? null,
+    revision,
+    updatedAt,
   ];
 }
 
@@ -136,8 +151,8 @@ function maybe(key: string, value: string | null): Record<string, string> {
  * Those live in `superRefine`, so a row edited by hand into a state the contract forbids is only
  * detectable here.
  */
-export function rowToPostmortem(row: Record<string, unknown>): Postmortem {
-  return PostmortemSchema.parse({
+export function rowToPostmortem(row: Record<string, unknown>): StoredPostmortem {
+  const record = PostmortemSchema.parse({
     id: asString(row["postmortem_id"]),
     incidentId: asString(row["incident_id"]),
     title: asString(row["title"]),
@@ -164,17 +179,30 @@ export function rowToPostmortem(row: Record<string, unknown>): Postmortem {
     ...maybe("storageUri", asNullableString(row["storage_uri"])),
     ...maybe("storageSha256", asNullableString(row["storage_sha256"])),
   });
+  return {
+    record,
+    revision: Number(row["revision"] ?? 1),
+    updatedAt: asIso(row["updated_at"]),
+  };
 }
 
-export class PostmortemNotFoundError extends Error {
-  constructor(readonly postmortemId: string) {
-    super(`postmortem '${postmortemId}' not found`);
-    this.name = "PostmortemNotFoundError";
+export class PostmortemRevisionConflictError extends Error {
+  constructor(
+    readonly postmortemId: string,
+    readonly expectedRevision: number,
+  ) {
+    super(
+      `postmortem '${postmortemId}' was not at revision ${expectedRevision} — ` +
+        "another writer changed it first",
+    );
+    this.name = "PostmortemRevisionConflictError";
   }
 }
 
 const PLACEHOLDERS = postmortemPlaceholders();
 const UPDATE_ASSIGNMENTS = postmortemUpdateAssignments();
+/** The revision guard binds after every column value, so it is always the next placeholder. */
+const REVISION_GUARD_PARAM = POSTMORTEM_COLUMN_NAMES.length + 1;
 
 /**
  * Persists postmortems in `meta.incident_postmortems`.
@@ -182,13 +210,11 @@ const UPDATE_ASSIGNMENTS = postmortemUpdateAssignments();
  * Platform-wide, like the incident it belongs to: no `withTenantContext` wrapper and no RLS, since
  * an incident may name many tenants or none.
  *
- * **The table carries no `revision` column, so writes are last-writer-wins.** Two editors who both
- * read a `drafting` postmortem and then save will each succeed, and the second silently discards
- * the first's lessons and action items — no `PostmortemRevisionConflictError` is possible because
- * there is nothing in the row to guard on. A postmortem is edited by humans over days, which makes
- * this the most likely of the three tables to lose a write rather than the least. Closing it means
- * the `revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1)` column ADR-0289 added to
- * `meta.incidents`, and the same expected-revision argument on `update`.
+ * **Optimistic concurrency, failing closed.** A postmortem is edited by humans over days, which
+ * makes it the likeliest of these three records to be held by two writers at once: both open a
+ * `drafting` postmortem, both save, and without a guard the second's write silently discards the
+ * first's lessons and action items. Every write states the revision it read, and a zero-row update
+ * raises `PostmortemRevisionConflictError` so the losing editor is told rather than ignored.
  */
 export class PostgresPostmortemStore {
   private readonly conn: PgConnection;
@@ -197,30 +223,38 @@ export class PostgresPostmortemStore {
     this.conn = conn;
   }
 
-  async insert(record: Postmortem): Promise<Postmortem> {
+  async insert(record: Postmortem, at: string): Promise<StoredPostmortem> {
     await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (${POSTMORTEM_COLUMNS}) VALUES (${PLACEHOLDERS})`,
-      postmortemRowValues(record),
+      postmortemRowValues(record, 1, at),
     );
-    return record;
+    return { record, revision: 1, updatedAt: at };
   }
 
   /**
-   * Writes a new version of a postmortem. A zero-row update means the row is gone, not that the
-   * write was a no-op: every column is assigned, so a matching row always reports one affected row.
+   * Writes a new version of a postmortem, but only if it is still at the revision the caller read.
+   * A zero-row update is a conflict, not a success — the alternative is silently discarding
+   * whatever the other editor did.
    */
-  async update(record: Postmortem): Promise<Postmortem> {
+  async update(
+    record: Postmortem,
+    expectedRevision: number,
+    at: string,
+  ): Promise<StoredPostmortem> {
+    const nextRevision = expectedRevision + 1;
+    const values = postmortemRowValues(record, nextRevision, at);
     const result = await this.conn.query(
-      `UPDATE ${SCHEMA}.${TABLE} SET ${UPDATE_ASSIGNMENTS} WHERE postmortem_id = $1`,
-      postmortemRowValues(record),
+      `UPDATE ${SCHEMA}.${TABLE} SET ${UPDATE_ASSIGNMENTS}
+       WHERE postmortem_id = $1 AND revision = $${REVISION_GUARD_PARAM}`,
+      [...values, expectedRevision],
     );
     if ((result.rowCount ?? 0) === 0) {
-      throw new PostmortemNotFoundError(record.id);
+      throw new PostmortemRevisionConflictError(record.id, expectedRevision);
     }
-    return record;
+    return { record, revision: nextRevision, updatedAt: at };
   }
 
-  async load(postmortemId: string): Promise<Postmortem | null> {
+  async load(postmortemId: string): Promise<StoredPostmortem | null> {
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${POSTMORTEM_COLUMNS} FROM ${SCHEMA}.${TABLE} WHERE postmortem_id = $1`,
       [postmortemId],
@@ -234,7 +268,10 @@ export class PostgresPostmortemStore {
    * unique constraint, and an amended postmortem may be superseded by a fresh one rather than
    * edited, so the caller sees every one rather than whichever the database happened to return.
    */
-  async listForIncident(incidentId: string, limit = 100): Promise<readonly Postmortem[]> {
+  async listForIncident(
+    incidentId: string,
+    limit = 100,
+  ): Promise<readonly StoredPostmortem[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${POSTMORTEM_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -246,8 +283,14 @@ export class PostgresPostmortemStore {
     return result.rows.map((row) => rowToPostmortem(row));
   }
 
-  /** Postmortems not yet published — the review queue, oldest first so the stalest surfaces. */
-  async listUnpublished(limit = 100): Promise<readonly Postmortem[]> {
+  /**
+   * Postmortems not yet published — the review queue, oldest first so the stalest surfaces.
+   *
+   * The predicate matches `idx_incident_postmortems_unpublished` exactly, which is partial on these
+   * two statuses and ordered by `created_at`. Spelling it any other way leaves the index unusable
+   * for the one query it exists for.
+   */
+  async listUnpublished(limit = 100): Promise<readonly StoredPostmortem[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${POSTMORTEM_COLUMNS} FROM ${SCHEMA}.${TABLE}

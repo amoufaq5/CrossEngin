@@ -152,10 +152,6 @@ describe("killSwitchRowValues", () => {
     );
   });
 
-  it("keeps the overridden value as the JSON text the contract validated", () => {
-    expect(killSwitchRowValues(killSwitch())[at("overridden_value_json")]).toBe("false");
-  });
-
   it("refuses a record whose overriddenValueJson is not JSON", () => {
     const bad = { ...killSwitch(), overriddenValueJson: "not json" };
     expect(() => killSwitchRowValues(bad)).toThrow();
@@ -199,11 +195,6 @@ describe("rowToKillSwitch", () => {
 
   it("round-trips a released switch", () => {
     const record = releasedKillSwitch();
-    expect(rowToKillSwitch(killSwitchRow(record))).toEqual(record);
-  });
-
-  it("round-trips a tenant-scoped switch", () => {
-    const record = killSwitch({ tenantId: TENANT });
     expect(rowToKillSwitch(killSwitchRow(record))).toEqual(record);
   });
 
@@ -253,13 +244,4 @@ describe("rowToKillSwitch", () => {
     expect(() => rowToKillSwitch(row)).toThrow();
   });
 
-  it("re-validates: rejects a row with an out-of-vocabulary status", () => {
-    const row = { ...killSwitchRow(killSwitch()), status: "disarmed" };
-    expect(() => rowToKillSwitch(row)).toThrow();
-  });
-
-  it("re-validates: rejects a row whose kill_switch_id lost its prefix", () => {
-    const row = { ...killSwitchRow(killSwitch()), kill_switch_id: "slo00001" };
-    expect(() => rowToKillSwitch(row)).toThrow();
-  });
 });

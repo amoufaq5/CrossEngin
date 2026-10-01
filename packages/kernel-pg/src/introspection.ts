@@ -1,3 +1,6 @@
+import type { RlsPolicyCommand } from "@crossengin/kernel/bootstrap";
+
+import { canonicalPolicyCommand } from "./canonical.js";
 import type { PgConnection } from "./connection.js";
 
 export interface LiveColumn {
@@ -49,6 +52,17 @@ export interface LivePolicy {
   readonly name: string;
   readonly using: string | null;
   readonly check: string | null;
+  /**
+   * The command the policy governs, or null when `polcmd` held a character this version does not
+   * know. Null means *undetermined*, never `ALL`: a Postgres release adding a command must not make
+   * every policy read as drifted.
+   */
+  readonly command: RlsPolicyCommand | null;
+  /**
+   * The roles the policy applies to, `PUBLIC` for the default grantee, or null when at least one
+   * oid in `polroles` did not resolve to a role. Null is undetermined for the same reason.
+   */
+  readonly roles: readonly string[] | null;
 }
 
 export interface LiveTable {
@@ -116,9 +130,30 @@ export const INDEX_QUERY = `
    ORDER BY c.relname, i.relname
 `;
 
+/**
+ * Policies, with the command and the role list `pg_policy` stores as a char and an oid array.
+ *
+ * `polcmd::text` and `rolname::text` are both deliberate. `polcmd` is Postgres's internal `"char"`
+ * type and `rolname` is `name`; node-postgres has an array parser for neither, which is how ADR-0291
+ * broke — a `name[]` arrives as the raw literal `{tenant_id}` and every value reads as changed.
+ *
+ * Oid 0 is `PUBLIC`, which has no `pg_roles` row, so it is mapped before the join rather than
+ * through it. `role_count` comes back alongside so the caller can tell a fully resolved list from
+ * one where an oid matched nothing: the resolved array silently drops those, and a short list that
+ * looked complete would read as a narrowed grant that nobody made.
+ */
 export const POLICY_QUERY = `
   SELECT c.relname AS table_name,
          p.polname AS policy_name,
+         p.polcmd::text AS command,
+         ARRAY(
+           SELECT CASE WHEN t.rid = 0 THEN 'PUBLIC' ELSE r.rolname::text END
+             FROM unnest(p.polroles) AS t(rid)
+             LEFT JOIN pg_roles r ON r.oid = t.rid
+            WHERE t.rid = 0 OR r.oid IS NOT NULL
+            ORDER BY 1
+         ) AS roles,
+         cardinality(p.polroles) AS role_count,
          pg_get_expr(p.polqual, p.polrelid) AS using_expr,
          pg_get_expr(p.polwithcheck, p.polrelid) AS check_expr
     FROM pg_policy p
@@ -205,6 +240,26 @@ export interface PolicyRow {
   readonly policy_name: string;
   readonly using_expr: string | null;
   readonly check_expr: string | null;
+  /** `pg_policy.polcmd` as a single character: `*`, `r`, `a`, `w` or `d`. */
+  readonly command?: string;
+  /** `polroles` resolved to names, with oid 0 already mapped to `PUBLIC`. */
+  readonly roles?: readonly string[];
+  /** `cardinality(polroles)` — how many oids there were before resolution. */
+  readonly role_count?: number;
+}
+
+/**
+ * The policy's role list, or null when it cannot be known.
+ *
+ * Two ways it is unknown: the query did not ask for it, and at least one oid in `polroles` resolved
+ * to nothing. The second should be impossible — Postgres refuses to drop a role a policy depends on —
+ * but if it happens the resolved list is a strict subset of the real grant, and comparing a subset
+ * would report a narrowing nobody declared. Null makes it unknown instead, and unknown is not drift.
+ */
+function resolvedPolicyRoles(row: PolicyRow): readonly string[] | null {
+  if (row.roles === undefined) return null;
+  if (row.role_count !== undefined && row.roles.length !== row.role_count) return null;
+  return row.roles;
 }
 
 export function parseLiveSchema(
@@ -256,6 +311,8 @@ export function parseLiveSchema(
       name: row.policy_name,
       using: row.using_expr,
       check: row.check_expr,
+      command: row.command === undefined ? null : canonicalPolicyCommand(row.command),
+      roles: resolvedPolicyRoles(row),
     };
     if (existing === undefined) {
       policiesByTable.set(row.table_name, [policy]);

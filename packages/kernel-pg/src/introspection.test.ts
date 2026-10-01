@@ -10,6 +10,7 @@ import {
   parseLiveSchema,
   type ColumnRow,
   type IndexRow,
+  type LivePolicy,
   type PolicyRow,
   type TableRow,
 } from "./introspection.js";
@@ -73,6 +74,9 @@ describe("parseLiveSchema", () => {
         policy_name: "tenant_isolation",
         using_expr: "id = current_setting('app.current_tenant_id', true)::uuid",
         check_expr: null,
+        command: "*",
+        roles: ["PUBLIC"],
+        role_count: 1,
       },
     ];
     const live = parseLiveSchema("meta", tables, columns, indexes, policies);
@@ -85,6 +89,8 @@ describe("parseLiveSchema", () => {
     expect(table.columns[1]?.defaultExpr).toBeNull();
     expect(table.indexes[0]?.primary).toBe(true);
     expect(table.policies[0]?.name).toBe("tenant_isolation");
+    expect(table.policies[0]?.command).toBe("ALL");
+    expect(table.policies[0]?.roles).toEqual(["PUBLIC"]);
   });
 
   it("distributes columns to their owning tables", () => {
@@ -126,6 +132,88 @@ describe("parseLiveSchema", () => {
     );
     expect(live.tables[0]?.columns[0]?.isNullable).toBe(true);
     expect(live.tables[0]?.columns[1]?.isNullable).toBe(false);
+  });
+});
+
+describe("parseLiveSchema — a policy's command and roles", () => {
+  function onePolicy(over: Partial<PolicyRow>): LivePolicy {
+    const live = parseLiveSchema(
+      "meta",
+      [{ schema: "meta", name: "t", rls_enabled: true }],
+      [],
+      [],
+      [
+        {
+          table_name: "t",
+          policy_name: "p",
+          using_expr: "(true)",
+          check_expr: null,
+          command: "*",
+          roles: ["PUBLIC"],
+          role_count: 1,
+          ...over,
+        },
+      ],
+    );
+    return live.tables[0]?.policies[0] as LivePolicy;
+  }
+
+  it("canonicalizes each polcmd character", () => {
+    expect(onePolicy({ command: "*" }).command).toBe("ALL");
+    expect(onePolicy({ command: "r" }).command).toBe("SELECT");
+    expect(onePolicy({ command: "a" }).command).toBe("INSERT");
+    expect(onePolicy({ command: "w" }).command).toBe("UPDATE");
+    expect(onePolicy({ command: "d" }).command).toBe("DELETE");
+  });
+
+  it("reports an unknown polcmd as undetermined rather than as ALL", () => {
+    expect(onePolicy({ command: "z" }).command).toBeNull();
+  });
+
+  it("reports a resolved role list as given", () => {
+    expect(onePolicy({ roles: ["app_reader", "app_writer"], role_count: 2 }).roles).toEqual([
+      "app_reader",
+      "app_writer",
+    ]);
+  });
+
+  it("reports roles as undetermined when an oid resolved to nothing", () => {
+    // The resolved list is then a strict subset of the real grant, and comparing a subset would
+    // report a narrowing nobody declared.
+    expect(onePolicy({ roles: ["app_reader"], role_count: 2 }).roles).toBeNull();
+  });
+
+  it("reports both as undetermined when the row does not carry them at all", () => {
+    const policy = onePolicy({ command: undefined, roles: undefined, role_count: undefined });
+    expect(policy.command).toBeNull();
+    expect(policy.roles).toBeNull();
+  });
+
+  it("accepts a role list without a count, since there is nothing to contradict it", () => {
+    expect(onePolicy({ roles: ["app_reader"], role_count: undefined }).roles).toEqual([
+      "app_reader",
+    ]);
+  });
+});
+
+describe("POLICY_QUERY", () => {
+  it("casts polcmd and rolname to text, because node-postgres parses neither", () => {
+    // ADR-0291 broke on exactly this: a `name[]` arrives as the raw literal `{tenant_id}`.
+    expect(POLICY_QUERY).toContain("p.polcmd::text");
+    expect(POLICY_QUERY).toContain("r.rolname::text");
+  });
+
+  it("maps oid 0 to PUBLIC, which has no pg_roles row to join against", () => {
+    expect(POLICY_QUERY).toContain("t.rid = 0 THEN 'PUBLIC'");
+    expect(POLICY_QUERY).toContain("LEFT JOIN pg_roles");
+  });
+
+  it("asks for the unresolved count alongside the resolved list", () => {
+    expect(POLICY_QUERY).toContain("cardinality(p.polroles) AS role_count");
+  });
+
+  it("orders the role list, so oid order cannot read as a difference", () => {
+    expect(POLICY_QUERY).toContain("ORDER BY 1");
   });
 });
 
