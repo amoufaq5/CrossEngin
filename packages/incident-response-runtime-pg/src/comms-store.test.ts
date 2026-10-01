@@ -7,7 +7,7 @@ import {
 import {
   COMMS_COLUMN_NAMES,
   COMMS_JSONB_COLUMNS,
-  CommsNotFoundError,
+  CommsRevisionConflictError,
   PostgresCustomerCommsStore,
   commsPlaceholders,
   commsRowValues,
@@ -51,8 +51,12 @@ function breachNotification(over: Record<string, unknown> = {}): IncidentCommuni
 }
 
 /** The row a stored communication comes back as, built through the store's own projection. */
-function commsRow(record: IncidentCommunication): Record<string, unknown> {
-  const values = commsRowValues(record);
+function commsRow(
+  record: IncidentCommunication,
+  revision = 1,
+  updatedAt = T0,
+): Record<string, unknown> {
+  const values = commsRowValues(record, revision, updatedAt);
   const row: Record<string, unknown> = {};
   COMMS_COLUMN_NAMES.forEach((col, i) => {
     row[col] = values[i];
@@ -63,7 +67,7 @@ function commsRow(record: IncidentCommunication): Record<string, unknown> {
 describe("column projection", () => {
   it("supplies exactly one value per column, business key first", () => {
     expect(COMMS_COLUMN_NAMES[0]).toBe("communication_id");
-    expect(commsRowValues(breachNotification())).toHaveLength(COMMS_COLUMN_NAMES.length);
+    expect(commsRowValues(breachNotification(), 1, T0)).toHaveLength(COMMS_COLUMN_NAMES.length);
   });
 
   it("casts only the JSONB columns", () => {
@@ -85,7 +89,7 @@ describe("column projection", () => {
   });
 
   it("binds absent optional fields as NULL", () => {
-    const values = commsRowValues(comms());
+    const values = commsRowValues(comms(), 1, T0);
     expect(values[COMMS_COLUMN_NAMES.indexOf("status_page_level")]).toBeNull();
     expect(values[COMMS_COLUMN_NAMES.indexOf("retracted_reason")]).toBeNull();
     expect(values[COMMS_COLUMN_NAMES.indexOf("breach_notification_deadline_at")]).toBeNull();
@@ -93,7 +97,7 @@ describe("column projection", () => {
 
   it("refuses to project a record the contract rejects", () => {
     const bad = { ...comms(), bouncesCount: 99 } as IncidentCommunication;
-    expect(() => commsRowValues(bad)).toThrow(/bouncesCount cannot exceed recipientCount/);
+    expect(() => commsRowValues(bad, 1, T0)).toThrow(/bouncesCount cannot exceed recipientCount/);
   });
 });
 
@@ -102,7 +106,7 @@ describe("insert", () => {
     const capture: Captured[] = [];
     const store = new PostgresCustomerCommsStore(mockConnection(capture));
     const record = breachNotification();
-    expect(await store.insert(record)).toBe(record);
+    expect(await store.insert(record, T0)).toEqual({ record, revision: 1, updatedAt: T0 });
     expect(capture[0]?.sql).toContain("INSERT INTO meta.incident_communications");
     expect(capture[0]?.sql).toContain(COMMS_COLUMN_NAMES.join(", "));
     expect(capture[0]?.params).toHaveLength(COMMS_COLUMN_NAMES.length);
@@ -110,7 +114,7 @@ describe("insert", () => {
 
   it("binds the contract id into communication_id, not the surrogate uuid", async () => {
     const capture: Captured[] = [];
-    await new PostgresCustomerCommsStore(mockConnection(capture)).insert(comms());
+    await new PostgresCustomerCommsStore(mockConnection(capture)).insert(comms(), T0);
     expect(capture[0]?.params?.[0]).toBe("comm-0001");
   });
 
@@ -121,38 +125,53 @@ describe("insert", () => {
       ...breachNotification(),
       publishedAt: AFTER_DEADLINE,
     } as IncidentCommunication;
-    await expect(store.insert(bad)).rejects.toThrow(/notification was late/);
+    await expect(store.insert(bad, T0)).rejects.toThrow(/notification was late/);
     expect(capture).toHaveLength(0);
   });
 });
 
 describe("update", () => {
-  it("matches on communication_id and assigns the remaining columns", async () => {
+  it("matches on communication_id and guards on the revision it was given", async () => {
     const capture: Captured[] = [];
-    await new PostgresCustomerCommsStore(mockConnection(capture)).update(comms());
+    await new PostgresCustomerCommsStore(mockConnection(capture)).update(comms(), 2, DEADLINE);
     expect(capture[0]?.sql).toContain("UPDATE meta.incident_communications SET");
-    expect(capture[0]?.sql).toContain("WHERE communication_id = $1");
+    expect(capture[0]?.sql).toContain(
+      `WHERE communication_id = $1 AND revision = $${String(COMMS_COLUMN_NAMES.length + 1)}`,
+    );
   });
 
-  it("binds the same value list as an insert, with no extra guard parameter", async () => {
+  it("binds every column value and then the expected revision as the last parameter", async () => {
     const capture: Captured[] = [];
     const record = comms();
-    await new PostgresCustomerCommsStore(mockConnection(capture)).update(record);
-    expect(capture[0]?.params).toEqual(commsRowValues(record));
+    await new PostgresCustomerCommsStore(mockConnection(capture)).update(record, 2, DEADLINE);
+    expect(capture[0]?.params).toEqual([...commsRowValues(record, 3, DEADLINE), 2]);
   });
 
-  it("treats a zero-row update as a missing row, named in the error", async () => {
+  it("writes the next revision and returns it", async () => {
+    const record = comms({ retractedAt: DEADLINE, retractedReason: "wrong tenant list" });
+    const stored = await new PostgresCustomerCommsStore(mockConnection()).update(
+      record,
+      2,
+      DEADLINE,
+    );
+    expect(stored).toEqual({ record, revision: 3, updatedAt: DEADLINE });
+  });
+
+  it("raises a conflict rather than letting a bounce update erase a retraction", async () => {
     const conn = mockConnection(undefined, respondTo([["UPDATE", EMPTY]]));
     const store = new PostgresCustomerCommsStore(conn);
-    await expect(store.update(comms())).rejects.toThrow(CommsNotFoundError);
-    await expect(store.update(comms())).rejects.toThrow(/'comm-0001'/);
+    const stale = comms({ bouncesCount: 3 });
+    await expect(store.update(stale, 1, DEADLINE)).rejects.toThrow(CommsRevisionConflictError);
+    await expect(store.update(stale, 1, DEADLINE)).rejects.toThrow(
+      /'comm-0001' was not at revision 1/,
+    );
   });
 
   it("refuses a retraction with no reason, before any SQL runs", async () => {
     const capture: Captured[] = [];
     const store = new PostgresCustomerCommsStore(mockConnection(capture));
     const bad = { ...comms(), retractedAt: DEADLINE } as IncidentCommunication;
-    await expect(store.update(bad)).rejects.toThrow(/retractedAt requires retractedReason/);
+    await expect(store.update(bad, 1, T0)).rejects.toThrow(/retractedAt requires retractedReason/);
     expect(capture).toHaveLength(0);
   });
 });
@@ -166,7 +185,7 @@ describe("load", () => {
       respondTo([["SELECT", { rows: [commsRow(record)], rowCount: 1 }]]),
     );
     const loaded = await new PostgresCustomerCommsStore(conn).load("comm-0001");
-    expect(loaded).toEqual(record);
+    expect(loaded?.record).toEqual(record);
     expect(capture[0]?.params).toEqual(["comm-0001"]);
   });
 
@@ -204,7 +223,7 @@ describe("listForIncident", () => {
     const rows = [commsRow(comms()), commsRow(breachNotification({ id: "comm-0002" }))];
     const conn = mockConnection(undefined, respondTo([["SELECT", { rows, rowCount: 2 }]]));
     const loaded = await new PostgresCustomerCommsStore(conn).listForIncident("INC-2026-0007");
-    expect(loaded.map((c) => c.kind)).toEqual(["investigating", "breach_notification"]);
+    expect(loaded.map((c) => c.record.kind)).toEqual(["investigating", "breach_notification"]);
   });
 });
 
@@ -229,13 +248,17 @@ describe("listBreachNotifications", () => {
 });
 
 describe("rowToComms re-validation", () => {
-  it("accepts a row the store itself wrote", () => {
+  it("accepts a row the store itself wrote, with its revision and updatedAt", () => {
     const record = breachNotification();
-    expect(rowToComms(commsRow(record))).toEqual(record);
+    expect(rowToComms(commsRow(record, 2, DEADLINE))).toEqual({
+      record,
+      revision: 2,
+      updatedAt: DEADLINE,
+    });
   });
 
   it("omits absent optional fields rather than reading them back as null", () => {
-    const loaded = rowToComms(commsRow(comms()));
+    const loaded = rowToComms(commsRow(comms())).record;
     expect("statusPageLevel" in loaded).toBe(false);
     expect("retractedReason" in loaded).toBe(false);
     expect("breachNotificationDeadlineAt" in loaded).toBe(false);
@@ -243,12 +266,12 @@ describe("rowToComms re-validation", () => {
 
   it("reads TIMESTAMPTZ columns handed back as Date objects", () => {
     const row = { ...commsRow(comms()), published_at: new Date(T0) };
-    expect(rowToComms(row).publishedAt).toBe(T0);
+    expect(rowToComms(row).record.publishedAt).toBe(T0);
   });
 
   it("reads INTEGER counts handed back as text", () => {
     const row = { ...commsRow(comms()), recipient_count: "40", bounces_count: "2" };
-    const loaded = rowToComms(row);
+    const loaded = rowToComms(row).record;
     expect(loaded.recipientCount).toBe(40);
     expect(loaded.bouncesCount).toBe(2);
   });
@@ -307,14 +330,11 @@ describe("rowToComms re-validation", () => {
     expect(() => rowToComms(row)).toThrow(/retractedAt requires retractedReason/);
   });
 
-  it("refuses a status page post with no level", () => {
-    const record = comms({ audience: "status_page_public", statusPageLevel: "degraded" });
-    const row = { ...commsRow(record), status_page_level: null };
-    expect(() => rowToComms(row)).toThrow(/requires statusPageLevel/);
-  });
-
-  it("refuses a level on an audience that is not the status page", () => {
-    const row = { ...commsRow(comms()), status_page_level: "degraded" };
-    expect(() => rowToComms(row)).toThrow(/only valid for status_page_public/);
+  it("refuses a status page level that does not match the audience, either way round", () => {
+    const onStatusPage = comms({ audience: "status_page_public", statusPageLevel: "degraded" });
+    const stripped = { ...commsRow(onStatusPage), status_page_level: null };
+    expect(() => rowToComms(stripped)).toThrow(/requires statusPageLevel/);
+    const misplaced = { ...commsRow(comms()), status_page_level: "degraded" };
+    expect(() => rowToComms(misplaced)).toThrow(/only valid for status_page_public/);
   });
 });

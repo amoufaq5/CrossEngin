@@ -37,6 +37,8 @@ export const COMMS_COLUMN_NAMES: readonly string[] = Object.freeze([
   "retracted_at",
   "retracted_reason",
   "breach_notification_deadline_at",
+  "revision",
+  "updated_at",
 ]);
 
 export const COMMS_JSONB_COLUMNS: ReadonlySet<string> = new Set([
@@ -60,8 +62,19 @@ export function commsUpdateAssignments(): string {
     .join(", ");
 }
 
+export interface StoredComms {
+  readonly record: IncidentCommunication;
+  /** The revision that was read; pass it back to write, or the update is refused. */
+  readonly revision: number;
+  readonly updatedAt: string;
+}
+
 /** The row values for an `IncidentCommunication`, positionally matching the column array. */
-export function commsRowValues(record: IncidentCommunication): readonly unknown[] {
+export function commsRowValues(
+  record: IncidentCommunication,
+  revision: number,
+  updatedAt: string,
+): readonly unknown[] {
   const valid = IncidentCommunicationSchema.parse(record);
   return [
     valid.id,
@@ -87,6 +100,8 @@ export function commsRowValues(record: IncidentCommunication): readonly unknown[
     valid.retractedAt,
     valid.retractedReason ?? null,
     valid.breachNotificationDeadlineAt ?? null,
+    revision,
+    updatedAt,
   ];
 }
 
@@ -135,8 +150,8 @@ function maybe(key: string, value: string | null): Record<string, string> {
  * exceed `recipientCount`, and a retraction must state a reason. A row edited by hand into a state
  * that claims a late breach notification was timely is only detectable by parsing it back.
  */
-export function rowToComms(row: Record<string, unknown>): IncidentCommunication {
-  return IncidentCommunicationSchema.parse({
+export function rowToComms(row: Record<string, unknown>): StoredComms {
+  const record = IncidentCommunicationSchema.parse({
     id: asString(row["communication_id"]),
     incidentId: asString(row["incident_id"]),
     audience: asString(row["audience"]),
@@ -164,17 +179,30 @@ export function rowToComms(row: Record<string, unknown>): IncidentCommunication 
       asNullableIso(row["breach_notification_deadline_at"]),
     ),
   });
+  return {
+    record,
+    revision: Number(row["revision"] ?? 1),
+    updatedAt: asIso(row["updated_at"]),
+  };
 }
 
-export class CommsNotFoundError extends Error {
-  constructor(readonly communicationId: string) {
-    super(`incident communication '${communicationId}' not found`);
-    this.name = "CommsNotFoundError";
+export class CommsRevisionConflictError extends Error {
+  constructor(
+    readonly communicationId: string,
+    readonly expectedRevision: number,
+  ) {
+    super(
+      `incident communication '${communicationId}' was not at revision ${expectedRevision} — ` +
+        "another writer changed it first",
+    );
+    this.name = "CommsRevisionConflictError";
   }
 }
 
 const PLACEHOLDERS = commsPlaceholders();
 const UPDATE_ASSIGNMENTS = commsUpdateAssignments();
+/** The revision guard binds after every column value, so it is always the next placeholder. */
+const REVISION_GUARD_PARAM = COMMS_COLUMN_NAMES.length + 1;
 
 /**
  * Persists incident communications in `meta.incident_communications`.
@@ -183,13 +211,11 @@ const UPDATE_ASSIGNMENTS = commsUpdateAssignments();
  * is also why nothing tenant-facing is wired to this store even though `affected_tenants` is one of
  * the audiences — a tenant-visible feed would need its own tenant-scoped read path.
  *
- * **The table carries no `revision` column, so writes are last-writer-wins.** Two writers who both
- * read a published comms row and then save — one retracting it, one recording a fresh bounce count
- * — will both succeed, and the retraction can be erased by the bounce update with nothing raised.
- * There is no `CommsRevisionConflictError` to offer because there is nothing in the row to guard on.
- * A published communication is close to append-only in practice, which narrows the window without
- * closing it; closing it means the `revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1)`
- * column ADR-0289 added to `meta.incidents`.
+ * **Optimistic concurrency, failing closed.** Two writers can hold one published communication: one
+ * retracting it, one recording a fresh bounce count from the same read. Without a guard both would
+ * succeed and the bounce update would erase the retraction — a notice the world had been told was
+ * withdrawn, silently standing again. Every write states the revision it read, and a zero-row update
+ * raises `CommsRevisionConflictError`.
  */
 export class PostgresCustomerCommsStore {
   private readonly conn: PgConnection;
@@ -198,31 +224,38 @@ export class PostgresCustomerCommsStore {
     this.conn = conn;
   }
 
-  async insert(record: IncidentCommunication): Promise<IncidentCommunication> {
+  async insert(record: IncidentCommunication, at: string): Promise<StoredComms> {
     await this.conn.query(
       `INSERT INTO ${SCHEMA}.${TABLE} (${COMMS_COLUMNS}) VALUES (${PLACEHOLDERS})`,
-      commsRowValues(record),
+      commsRowValues(record, 1, at),
     );
-    return record;
+    return { record, revision: 1, updatedAt: at };
   }
 
   /**
    * Writes a new version of a communication — a retraction, a revised bounce count, a late legal
-   * review. A zero-row update means the row is gone, not that the write was a no-op: every column
-   * is assigned, so a matching row always reports one affected row.
+   * review — but only if it is still at the revision the caller read. A zero-row update is a
+   * conflict, not a success.
    */
-  async update(record: IncidentCommunication): Promise<IncidentCommunication> {
+  async update(
+    record: IncidentCommunication,
+    expectedRevision: number,
+    at: string,
+  ): Promise<StoredComms> {
+    const nextRevision = expectedRevision + 1;
+    const values = commsRowValues(record, nextRevision, at);
     const result = await this.conn.query(
-      `UPDATE ${SCHEMA}.${TABLE} SET ${UPDATE_ASSIGNMENTS} WHERE communication_id = $1`,
-      commsRowValues(record),
+      `UPDATE ${SCHEMA}.${TABLE} SET ${UPDATE_ASSIGNMENTS}
+       WHERE communication_id = $1 AND revision = $${REVISION_GUARD_PARAM}`,
+      [...values, expectedRevision],
     );
     if ((result.rowCount ?? 0) === 0) {
-      throw new CommsNotFoundError(record.id);
+      throw new CommsRevisionConflictError(record.id, expectedRevision);
     }
-    return record;
+    return { record, revision: nextRevision, updatedAt: at };
   }
 
-  async load(communicationId: string): Promise<IncidentCommunication | null> {
+  async load(communicationId: string): Promise<StoredComms | null> {
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${COMMS_COLUMNS} FROM ${SCHEMA}.${TABLE} WHERE communication_id = $1`,
       [communicationId],
@@ -235,7 +268,7 @@ export class PostgresCustomerCommsStore {
   async listForIncident(
     incidentId: string,
     limit = 100,
-  ): Promise<readonly IncidentCommunication[]> {
+  ): Promise<readonly StoredComms[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${COMMS_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -255,7 +288,7 @@ export class PostgresCustomerCommsStore {
   async listPublishedForIncident(
     incidentId: string,
     limit = 100,
-  ): Promise<readonly IncidentCommunication[]> {
+  ): Promise<readonly StoredComms[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${COMMS_COLUMNS} FROM ${SCHEMA}.${TABLE}
@@ -274,7 +307,7 @@ export class PostgresCustomerCommsStore {
   async listBreachNotifications(
     incidentId: string,
     limit = 100,
-  ): Promise<readonly IncidentCommunication[]> {
+  ): Promise<readonly StoredComms[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${COMMS_COLUMNS} FROM ${SCHEMA}.${TABLE}

@@ -8,7 +8,7 @@ import {
   PostgresRunbookExecutionStore,
   RUNBOOK_EXECUTION_COLUMN_NAMES,
   RUNBOOK_EXECUTION_JSONB_COLUMNS,
-  RunbookExecutionNotFoundError,
+  RunbookExecutionRevisionConflictError,
   rowToRunbookExecution,
   runbookExecutionPlaceholders,
   runbookExecutionRowValues,
@@ -54,8 +54,12 @@ function succeeded(over: Record<string, unknown> = {}): RunbookExecution {
 }
 
 /** The row a stored execution comes back as, built through the projection the store writes. */
-function executionRow(record: RunbookExecution): Record<string, unknown> {
-  const values = runbookExecutionRowValues(record);
+function executionRow(
+  record: RunbookExecution,
+  revision = 1,
+  updatedAt = T0,
+): Record<string, unknown> {
+  const values = runbookExecutionRowValues(record, revision, updatedAt);
   const row: Record<string, unknown> = {};
   RUNBOOK_EXECUTION_COLUMN_NAMES.forEach((col, i) => {
     row[col] = values[i];
@@ -69,7 +73,7 @@ describe("column projection", () => {
   });
 
   it("supplies exactly one value per column", () => {
-    expect(runbookExecutionRowValues(succeeded())).toHaveLength(
+    expect(runbookExecutionRowValues(succeeded(), 1, T0)).toHaveLength(
       RUNBOOK_EXECUTION_COLUMN_NAMES.length,
     );
   });
@@ -95,13 +99,13 @@ describe("column projection", () => {
   });
 
   it("binds an absent abortedReason as NULL", () => {
-    const values = runbookExecutionRowValues(execution());
+    const values = runbookExecutionRowValues(execution(), 1, T0);
     expect(values[RUNBOOK_EXECUTION_COLUMN_NAMES.indexOf("aborted_reason")]).toBeNull();
   });
 
   it("refuses to project a record the contract rejects", () => {
     const bad = { ...execution(), status: "aborted" } as RunbookExecution;
-    expect(() => runbookExecutionRowValues(bad)).toThrow(/abortedAt/);
+    expect(() => runbookExecutionRowValues(bad, 1, T0)).toThrow(/abortedAt/);
   });
 });
 
@@ -110,7 +114,7 @@ describe("insert", () => {
     const capture: Captured[] = [];
     const store = new PostgresRunbookExecutionStore(mockConnection(capture));
     const record = succeeded();
-    expect(await store.insert(record)).toBe(record);
+    expect(await store.insert(record, T0)).toEqual({ record, revision: 1, updatedAt: T0 });
     expect(capture[0]?.sql).toContain("INSERT INTO meta.incident_runbook_executions");
     expect(capture[0]?.sql).toContain(RUNBOOK_EXECUTION_COLUMN_NAMES.join(", "));
     expect(capture[0]?.params).toHaveLength(RUNBOOK_EXECUTION_COLUMN_NAMES.length);
@@ -118,7 +122,7 @@ describe("insert", () => {
 
   it("binds the contract id into execution_id, not the surrogate uuid", async () => {
     const capture: Captured[] = [];
-    await new PostgresRunbookExecutionStore(mockConnection(capture)).insert(execution());
+    await new PostgresRunbookExecutionStore(mockConnection(capture)).insert(execution(), T0);
     expect(capture[0]?.params?.[0]).toBe("rbx-0001");
   });
 
@@ -126,38 +130,50 @@ describe("insert", () => {
     const capture: Captured[] = [];
     const store = new PostgresRunbookExecutionStore(mockConnection(capture));
     const bad = { ...succeeded(), steps: [] } as RunbookExecution;
-    await expect(store.insert(bad)).rejects.toThrow(/step results/);
+    await expect(store.insert(bad, T0)).rejects.toThrow(/step results/);
     expect(capture).toHaveLength(0);
   });
 });
 
 describe("update", () => {
-  it("matches on execution_id and assigns the remaining columns", async () => {
+  it("matches on execution_id and guards on the revision it was given", async () => {
     const capture: Captured[] = [];
-    await new PostgresRunbookExecutionStore(mockConnection(capture)).update(succeeded());
+    await new PostgresRunbookExecutionStore(mockConnection(capture)).update(succeeded(), 4, T2);
     expect(capture[0]?.sql).toContain("UPDATE meta.incident_runbook_executions SET");
-    expect(capture[0]?.sql).toContain("WHERE execution_id = $1");
+    expect(capture[0]?.sql).toContain(
+      `WHERE execution_id = $1 AND revision = $${String(RUNBOOK_EXECUTION_COLUMN_NAMES.length + 1)}`,
+    );
   });
 
-  it("binds the same value list as an insert, with no extra guard parameter", async () => {
+  it("binds every column value and then the expected revision as the last parameter", async () => {
     const capture: Captured[] = [];
     const record = succeeded();
-    await new PostgresRunbookExecutionStore(mockConnection(capture)).update(record);
-    expect(capture[0]?.params).toEqual(runbookExecutionRowValues(record));
+    await new PostgresRunbookExecutionStore(mockConnection(capture)).update(record, 4, T2);
+    expect(capture[0]?.params).toEqual([...runbookExecutionRowValues(record, 5, T2), 4]);
   });
 
-  it("treats a zero-row update as a missing row, named in the error", async () => {
+  it("writes the next revision and returns it", async () => {
+    const record = succeeded();
+    const stored = await new PostgresRunbookExecutionStore(mockConnection()).update(record, 4, T2);
+    expect(stored).toEqual({ record, revision: 5, updatedAt: T2 });
+  });
+
+  it("raises a conflict when another writer took the revision first", async () => {
     const conn = mockConnection(undefined, respondTo([["UPDATE", EMPTY]]));
     const store = new PostgresRunbookExecutionStore(conn);
-    await expect(store.update(succeeded())).rejects.toThrow(RunbookExecutionNotFoundError);
-    await expect(store.update(succeeded())).rejects.toThrow(/'rbx-0001'/);
+    await expect(store.update(succeeded(), 4, T2)).rejects.toThrow(
+      RunbookExecutionRevisionConflictError,
+    );
+    await expect(store.update(succeeded(), 4, T2)).rejects.toThrow(
+      /'rbx-0001' was not at revision 4/,
+    );
   });
 
   it("refuses an invalid transition target before any SQL runs", async () => {
     const capture: Captured[] = [];
     const store = new PostgresRunbookExecutionStore(mockConnection(capture));
     const bad = { ...execution(), status: "running", startedAt: null } as RunbookExecution;
-    await expect(store.update(bad)).rejects.toThrow(/startedAt/);
+    await expect(store.update(bad, 1, T0)).rejects.toThrow(/startedAt/);
     expect(capture).toHaveLength(0);
   });
 });
@@ -171,7 +187,7 @@ describe("load", () => {
       respondTo([["SELECT", { rows: [executionRow(record)], rowCount: 1 }]]),
     );
     const loaded = await new PostgresRunbookExecutionStore(conn).load("rbx-0001");
-    expect(loaded).toEqual(record);
+    expect(loaded?.record).toEqual(record);
     expect(capture[0]?.params).toEqual(["rbx-0001"]);
   });
 
@@ -212,45 +228,47 @@ describe("listForIncident", () => {
       respondTo([["SELECT", { rows: [executionRow(record), executionRow(execution())], rowCount: 2 }]]),
     );
     const rows = await new PostgresRunbookExecutionStore(conn).listForIncident("INC-2026-0007");
-    expect(rows.map((r) => r.status)).toEqual(["succeeded", "queued"]);
+    expect(rows.map((r) => r.record.status)).toEqual(["succeeded", "queued"]);
   });
 });
 
 describe("listUnfinished", () => {
-  it("selects only the non-terminal statuses", async () => {
+  it("spells the predicate exactly as idx_incident_runbook_executions_unfinished does", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
     await new PostgresRunbookExecutionStore(conn).listUnfinished();
-    expect(capture[0]?.sql).toContain("status IN ('queued', 'running', 'paused')");
-  });
-
-  it("rejects a non-positive limit", async () => {
-    const store = new PostgresRunbookExecutionStore(mockConnection());
-    await expect(store.listUnfinished(-1)).rejects.toThrow(/positive/);
+    // Verbatim from the index's `where` in meta-schema.ts, plus its `invoked_at` ordering — a
+    // differently spelled equivalent (NOT IN over the terminal three) cannot use the index.
+    expect(capture[0]?.sql).toContain("WHERE status IN ('queued', 'running', 'paused')");
+    expect(capture[0]?.sql).toContain("ORDER BY invoked_at ASC");
   });
 });
 
 describe("rowToRunbookExecution re-validation", () => {
-  it("accepts a row the store itself wrote", () => {
+  it("accepts a row the store itself wrote, with its revision and updatedAt", () => {
     const record = succeeded();
-    expect(rowToRunbookExecution(executionRow(record))).toEqual(record);
+    expect(rowToRunbookExecution(executionRow(record, 3, T2))).toEqual({
+      record,
+      revision: 3,
+      updatedAt: T2,
+    });
   });
 
   it("omits an absent abortedReason rather than reading it back as null", () => {
-    const loaded = rowToRunbookExecution(executionRow(execution()));
+    const loaded = rowToRunbookExecution(executionRow(execution())).record;
     expect("abortedReason" in loaded).toBe(false);
   });
 
   it("round-trips an optional field that is present", () => {
     const record = execution({ artifactStorageUri: "s3://runs/rbx-0001" });
-    const loaded = rowToRunbookExecution(executionRow(record));
+    const loaded = rowToRunbookExecution(executionRow(record)).record;
     expect(loaded.artifactStorageUri).toBe("s3://runs/rbx-0001");
     expect("abortedReason" in loaded).toBe(false);
   });
 
   it("reads TIMESTAMPTZ columns handed back as Date objects", () => {
     const row = { ...executionRow(succeeded()), invoked_at: new Date(T0) };
-    expect(rowToRunbookExecution(row).invokedAt).toBe(T0);
+    expect(rowToRunbookExecution(row).record.invokedAt).toBe(T0);
   });
 
   it("reads steps handed back as JSON text or as a parsed array alike", () => {

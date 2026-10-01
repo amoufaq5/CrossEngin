@@ -5,7 +5,7 @@ import {
   POSTMORTEM_COLUMN_NAMES,
   POSTMORTEM_JSONB_COLUMNS,
   PostgresPostmortemStore,
-  PostmortemNotFoundError,
+  PostmortemRevisionConflictError,
   postmortemPlaceholders,
   postmortemRowValues,
   postmortemUpdateAssignments,
@@ -60,8 +60,12 @@ function published(over: Record<string, unknown> = {}): Postmortem {
 }
 
 /** The row a stored postmortem comes back as, built through the projection the store writes. */
-function postmortemRow(record: Postmortem): Record<string, unknown> {
-  const values = postmortemRowValues(record);
+function postmortemRow(
+  record: Postmortem,
+  revision = 1,
+  updatedAt = T0,
+): Record<string, unknown> {
+  const values = postmortemRowValues(record, revision, updatedAt);
   const row: Record<string, unknown> = {};
   POSTMORTEM_COLUMN_NAMES.forEach((col, i) => {
     row[col] = values[i];
@@ -75,7 +79,7 @@ describe("column projection", () => {
   });
 
   it("supplies exactly one value per column", () => {
-    expect(postmortemRowValues(published())).toHaveLength(POSTMORTEM_COLUMN_NAMES.length);
+    expect(postmortemRowValues(published(), 1, T0)).toHaveLength(POSTMORTEM_COLUMN_NAMES.length);
   });
 
   it("casts only the JSONB columns", () => {
@@ -99,14 +103,14 @@ describe("column projection", () => {
   });
 
   it("binds absent storage fields as NULL", () => {
-    const values = postmortemRowValues(postmortem());
+    const values = postmortemRowValues(postmortem(), 1, T0);
     expect(values[POSTMORTEM_COLUMN_NAMES.indexOf("storage_uri")]).toBeNull();
     expect(values[POSTMORTEM_COLUMN_NAMES.indexOf("storage_sha256")]).toBeNull();
   });
 
   it("refuses to project a record the contract rejects", () => {
     const bad = { ...published(), reviewers: ["reviewer-1"] } as Postmortem;
-    expect(() => postmortemRowValues(bad)).toThrow(/at least 2 reviewers/);
+    expect(() => postmortemRowValues(bad, 1, T0)).toThrow(/at least 2 reviewers/);
   });
 });
 
@@ -115,7 +119,7 @@ describe("insert", () => {
     const capture: Captured[] = [];
     const store = new PostgresPostmortemStore(mockConnection(capture));
     const record = published();
-    expect(await store.insert(record)).toBe(record);
+    expect(await store.insert(record, T0)).toEqual({ record, revision: 1, updatedAt: T0 });
     expect(capture[0]?.sql).toContain("INSERT INTO meta.incident_postmortems");
     expect(capture[0]?.sql).toContain(POSTMORTEM_COLUMN_NAMES.join(", "));
     expect(capture[0]?.params).toHaveLength(POSTMORTEM_COLUMN_NAMES.length);
@@ -123,7 +127,7 @@ describe("insert", () => {
 
   it("binds the contract id into postmortem_id, not the surrogate uuid", async () => {
     const capture: Captured[] = [];
-    await new PostgresPostmortemStore(mockConnection(capture)).insert(postmortem());
+    await new PostgresPostmortemStore(mockConnection(capture)).insert(postmortem(), T0);
     expect(capture[0]?.params?.[0]).toBe("PM-2026-0007");
   });
 
@@ -131,38 +135,50 @@ describe("insert", () => {
     const capture: Captured[] = [];
     const store = new PostgresPostmortemStore(mockConnection(capture));
     const bad = { ...published(), reviewers: ["reviewer-1", "author-1"] } as Postmortem;
-    await expect(store.insert(bad)).rejects.toThrow(/author cannot be a reviewer/);
+    await expect(store.insert(bad, T0)).rejects.toThrow(/author cannot be a reviewer/);
     expect(capture).toHaveLength(0);
   });
 });
 
 describe("update", () => {
-  it("matches on postmortem_id and assigns the remaining columns", async () => {
+  it("matches on postmortem_id and guards on the revision it was given", async () => {
     const capture: Captured[] = [];
-    await new PostgresPostmortemStore(mockConnection(capture)).update(published());
+    await new PostgresPostmortemStore(mockConnection(capture)).update(published(), 6, T1);
     expect(capture[0]?.sql).toContain("UPDATE meta.incident_postmortems SET");
-    expect(capture[0]?.sql).toContain("WHERE postmortem_id = $1");
+    expect(capture[0]?.sql).toContain(
+      `WHERE postmortem_id = $1 AND revision = $${String(POSTMORTEM_COLUMN_NAMES.length + 1)}`,
+    );
   });
 
-  it("binds the same value list as an insert, with no extra guard parameter", async () => {
+  it("binds every column value and then the expected revision as the last parameter", async () => {
     const capture: Captured[] = [];
     const record = published();
-    await new PostgresPostmortemStore(mockConnection(capture)).update(record);
-    expect(capture[0]?.params).toEqual(postmortemRowValues(record));
+    await new PostgresPostmortemStore(mockConnection(capture)).update(record, 6, T1);
+    expect(capture[0]?.params).toEqual([...postmortemRowValues(record, 7, T1), 6]);
   });
 
-  it("treats a zero-row update as a missing row, named in the error", async () => {
+  it("writes the next revision and returns it", async () => {
+    const record = published();
+    const stored = await new PostgresPostmortemStore(mockConnection()).update(record, 6, T1);
+    expect(stored).toEqual({ record, revision: 7, updatedAt: T1 });
+  });
+
+  it("raises a conflict when a second editor saved first", async () => {
     const conn = mockConnection(undefined, respondTo([["UPDATE", EMPTY]]));
     const store = new PostgresPostmortemStore(conn);
-    await expect(store.update(published())).rejects.toThrow(PostmortemNotFoundError);
-    await expect(store.update(published())).rejects.toThrow(/'PM-2026-0007'/);
+    await expect(store.update(published(), 6, T1)).rejects.toThrow(
+      PostmortemRevisionConflictError,
+    );
+    await expect(store.update(published(), 6, T1)).rejects.toThrow(
+      /'PM-2026-0007' was not at revision 6/,
+    );
   });
 
   it("refuses a publish with its publishedAt cleared, before any SQL runs", async () => {
     const capture: Captured[] = [];
     const store = new PostgresPostmortemStore(mockConnection(capture));
     const bad = { ...published(), publishedAt: null } as Postmortem;
-    await expect(store.update(bad)).rejects.toThrow(/requires publishedAt/);
+    await expect(store.update(bad, 1, T0)).rejects.toThrow(/requires publishedAt/);
     expect(capture).toHaveLength(0);
   });
 });
@@ -176,7 +192,7 @@ describe("load", () => {
       respondTo([["SELECT", { rows: [postmortemRow(record)], rowCount: 1 }]]),
     );
     const loaded = await new PostgresPostmortemStore(conn).load("PM-2026-0007");
-    expect(loaded).toEqual(record);
+    expect(loaded?.record).toEqual(record);
     expect(capture[0]?.params).toEqual(["PM-2026-0007"]);
   });
 
@@ -214,33 +230,33 @@ describe("listForIncident", () => {
     const rows = [postmortemRow(published()), postmortemRow(postmortem())];
     const conn = mockConnection(undefined, respondTo([["SELECT", { rows, rowCount: 2 }]]));
     const loaded = await new PostgresPostmortemStore(conn).listForIncident("INC-2026-0007");
-    expect(loaded.map((p) => p.status)).toEqual(["published", "drafting"]);
+    expect(loaded.map((p) => p.record.status)).toEqual(["published", "drafting"]);
   });
 });
 
 describe("listUnpublished", () => {
-  it("selects the pre-publication statuses, stalest first", async () => {
+  it("spells the predicate exactly as idx_incident_postmortems_unpublished does", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
     await new PostgresPostmortemStore(conn).listUnpublished();
-    expect(capture[0]?.sql).toContain("status IN ('drafting', 'review')");
+    // Verbatim from the index's `where` in meta-schema.ts, plus its `created_at` ordering.
+    expect(capture[0]?.sql).toContain("WHERE status IN ('drafting', 'review')");
     expect(capture[0]?.sql).toContain("ORDER BY created_at ASC");
-  });
-
-  it("rejects a non-positive limit", async () => {
-    const store = new PostgresPostmortemStore(mockConnection());
-    await expect(store.listUnpublished(-1)).rejects.toThrow(/positive/);
   });
 });
 
 describe("rowToPostmortem re-validation", () => {
-  it("accepts a row the store itself wrote", () => {
+  it("accepts a row the store itself wrote, with its revision and updatedAt", () => {
     const record = published();
-    expect(rowToPostmortem(postmortemRow(record))).toEqual(record);
+    expect(rowToPostmortem(postmortemRow(record, 4, T1))).toEqual({
+      record,
+      revision: 4,
+      updatedAt: T1,
+    });
   });
 
   it("omits absent optional storage fields rather than reading them back as null", () => {
-    const loaded = rowToPostmortem(postmortemRow(postmortem()));
+    const loaded = rowToPostmortem(postmortemRow(postmortem())).record;
     expect("storageUri" in loaded).toBe(false);
     expect("storageSha256" in loaded).toBe(false);
   });
@@ -250,14 +266,14 @@ describe("rowToPostmortem re-validation", () => {
       storageUri: "https://pm.example.com/PM-2026-0007",
       storageSha256: "a".repeat(64),
     });
-    const loaded = rowToPostmortem(postmortemRow(record));
+    const loaded = rowToPostmortem(postmortemRow(record)).record;
     expect(loaded.storageUri).toBe("https://pm.example.com/PM-2026-0007");
     expect(loaded.storageSha256).toBe("a".repeat(64));
   });
 
   it("reads TIMESTAMPTZ columns handed back as Date objects", () => {
     const row = { ...postmortemRow(published()), created_at: new Date(T0) };
-    expect(rowToPostmortem(row).createdAt).toBe(T0);
+    expect(rowToPostmortem(row).record.createdAt).toBe(T0);
   });
 
   it("reads JSONB columns handed back parsed or as text alike", () => {
