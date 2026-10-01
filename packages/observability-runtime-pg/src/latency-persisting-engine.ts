@@ -1,4 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
+import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-pg";
 import {
   LatencySloEngine,
   type LatencyEnforcementDecision,
@@ -37,7 +38,12 @@ export function buildPersistentLatencySloEngine(
   conn: PgConnection,
   options: PersistentLatencySloEngineOptions,
 ): PersistentLatencySloEngine {
-  const engine = new LatencySloEngine(options);
+  // Same reason as the availability engine: a persisted evaluation must not name an unpersisted
+  // incident. A shared declarer is passed in when both engines declare against one store.
+  const engine = new LatencySloEngine({
+    ...options,
+    declarer: options.declarer ?? new PostgresIncidentDeclarer({ conn }),
+  });
   const latencyEvaluationStore = new PostgresSloLatencyEvaluationStore(conn);
   const enforcementStore = new PostgresSloEnforcementActionStore(conn);
   const tenantBySurface = buildTenantMap(options);
@@ -53,7 +59,7 @@ export function buildPersistentLatencySloEngine(
   async function evaluate(now?: Date): Promise<readonly LatencyEnforcementDecision[]> {
     const at = now ?? clock?.now() ?? new Date();
     const occurredAt = at.toISOString();
-    const decisions = engine.evaluate(at);
+    const decisions = await engine.evaluate(at);
 
     for (const decision of decisions) {
       const killSwitchTenant =

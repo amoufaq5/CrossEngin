@@ -1,15 +1,24 @@
 import { readFile } from "node:fs/promises";
 
 import { z } from "zod";
+import type { PgConnection } from "@crossengin/kernel-pg";
+import type { IncidentDeclarer } from "@crossengin/incident-response-runtime";
+import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-pg";
 import { AlertPolicySchema, SloSchema } from "@crossengin/observability";
 import {
   FlagRollbackSchema,
   LatencySloEngine,
   SloEnforcementEngine,
   type Clock,
+  type EnforcementDecision,
+  type LatencyEnforcementDecision,
   type LatencyRegistration,
   type SloRegistration,
 } from "@crossengin/observability-runtime";
+import {
+  buildPersistentLatencySloEngine,
+  buildPersistentSloEnforcementEngine,
+} from "@crossengin/observability-runtime-pg";
 
 import type { IntervalScheduler } from "./jwks.js";
 import {
@@ -18,6 +27,7 @@ import {
   availabilityEvaluator,
   latencyEvaluator,
   type DecisionEvaluator,
+  type DecisionSource,
   type ObservedEnforcementDecision,
   type OutcomeRecorder,
 } from "./slo.js";
@@ -105,6 +115,14 @@ export interface BuildSloEnforcementOptions {
   readonly scheduler?: IntervalScheduler;
   readonly onDecision?: (decision: ObservedEnforcementDecision) => void;
   readonly onError?: (err: unknown) => void;
+  /**
+   * With a connection the engines persist: each evaluation, each enforcement action, and the
+   * declared `IncidentRecord` itself, whose id is allocated from the stored rows. Without one they
+   * run in memory and mint ids from a per-process counter, which restarts at `INC-YYYY-0001`.
+   */
+  readonly conn?: PgConnection;
+  /** Overrides where ids come from — one declarer shared with anything else that declares. */
+  readonly declarer?: IncidentDeclarer;
 }
 
 export interface SloEnforcement {
@@ -114,6 +132,8 @@ export interface SloEnforcement {
     readonly availability: SloEnforcementEngine | null;
     readonly latency: LatencySloEngine | null;
   };
+  /** True when the engines write their evaluations, actions and incidents to Postgres. */
+  readonly persisted: boolean;
 }
 
 /**
@@ -124,6 +144,11 @@ export interface SloEnforcement {
  * on an interval. The observer's execution sink plugs into
  * `OperateHttpServerOptions.onExecution`; the scheduler is `start()`ed by the
  * caller.
+ *
+ * With `opts.conn` the engines are wrapped in their persisting builders, so a breach leaves three
+ * rows — the evaluation, the enforcement action, and the declared incident — and both engines
+ * allocate ids from one store, so a burn breach and a latency breach can never be handed the same
+ * `INC-YYYY-NNNN`.
  */
 export function buildSloEnforcement(
   config: SloConfig,
@@ -135,32 +160,61 @@ export function buildSloEnforcement(
     (r): LatencyRegistration => toRegistration(r),
   );
 
-  const availability =
-    availabilityRegs.length > 0
-      ? new SloEnforcementEngine({
-          alertPolicy: config.alertPolicy,
-          systemActorUserId: config.systemActorUserId,
-          registrations: availabilityRegs,
-          ...clockOpt,
-        })
-      : null;
-  const latency =
-    latencyRegs.length > 0
-      ? new LatencySloEngine({
-          alertPolicy: config.alertPolicy,
-          systemActorUserId: config.systemActorUserId,
-          registrations: latencyRegs,
-          ...clockOpt,
-        })
-      : null;
+  // One declarer for both engines: ids come from a single sequence in the database, so the two
+  // signals cannot name the same incident.
+  const declarer =
+    opts.declarer ??
+    (opts.conn !== undefined ? new PostgresIncidentDeclarer({ conn: opts.conn }) : undefined);
+  const declarerOpt = declarer !== undefined ? { declarer } : {};
+
+  const availabilityOptions = {
+    alertPolicy: config.alertPolicy,
+    systemActorUserId: config.systemActorUserId,
+    registrations: availabilityRegs,
+    ...clockOpt,
+    ...declarerOpt,
+  };
+  const latencyOptions = {
+    alertPolicy: config.alertPolicy,
+    systemActorUserId: config.systemActorUserId,
+    registrations: latencyRegs,
+    ...clockOpt,
+    ...declarerOpt,
+  };
+
+  let availability: SloEnforcementEngine | null = null;
+  let availabilitySource: DecisionSource<EnforcementDecision> | null = null;
+  if (availabilityRegs.length > 0) {
+    if (opts.conn !== undefined) {
+      const persistent = buildPersistentSloEnforcementEngine(opts.conn, availabilityOptions);
+      availability = persistent.engine;
+      availabilitySource = persistent;
+    } else {
+      availability = new SloEnforcementEngine(availabilityOptions);
+      availabilitySource = availability;
+    }
+  }
+
+  let latency: LatencySloEngine | null = null;
+  let latencySource: DecisionSource<LatencyEnforcementDecision> | null = null;
+  if (latencyRegs.length > 0) {
+    if (opts.conn !== undefined) {
+      const persistent = buildPersistentLatencySloEngine(opts.conn, latencyOptions);
+      latency = persistent.engine;
+      latencySource = persistent;
+    } else {
+      latency = new LatencySloEngine(latencyOptions);
+      latencySource = latency;
+    }
+  }
 
   const recorders: OutcomeRecorder[] = [];
   if (availability !== null) recorders.push(availability);
   if (latency !== null) recorders.push(latency);
 
   const evaluators: DecisionEvaluator[] = [];
-  if (availability !== null) evaluators.push(availabilityEvaluator(availability));
-  if (latency !== null) evaluators.push(latencyEvaluator(latency));
+  if (availabilitySource !== null) evaluators.push(availabilityEvaluator(availabilitySource));
+  if (latencySource !== null) evaluators.push(latencyEvaluator(latencySource));
 
   const observer = new SloRequestObserver({ recorders });
   const scheduler = new SloEvaluationScheduler({
@@ -171,5 +225,10 @@ export function buildSloEnforcement(
     ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
   });
 
-  return { observer, scheduler, engines: { availability, latency } };
+  return {
+    observer,
+    scheduler,
+    engines: { availability, latency },
+    persisted: opts.conn !== undefined,
+  };
 }

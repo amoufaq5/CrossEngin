@@ -53,6 +53,82 @@ describe("allocateIncidentId", () => {
   });
 });
 
+describe("insertAllocated", () => {
+  function allocating(next: string, capture?: Captured[]) {
+    return mockConnection(
+      capture,
+      respondTo([["MAX(sequence_number)", { rows: [{ next }], rowCount: 1 }]]),
+    );
+  }
+
+  it("builds the record with the id it allocated", async () => {
+    const conn = allocating("12");
+    const stored = await new PostgresIncidentStore(conn).insertAllocated(
+      2026,
+      (id) => declaredIncident({ id }),
+      T0,
+    );
+    expect(stored.record.id).toBe("INC-2026-0012");
+    expect(stored.revision).toBe(1);
+  });
+
+  it("inserts without releasing the lock, so two declarers cannot share a sequence", async () => {
+    const capture: Captured[] = [];
+    const conn = allocating("1", capture);
+    await new PostgresIncidentStore(conn).insertAllocated(
+      2026,
+      (id) => declaredIncident({ id }),
+      T0,
+    );
+    // One lock acquisition covering both statements — the window this closes is a second
+    // allocation landing between the SELECT and the INSERT.
+    expect(conn.withAdvisoryLock).toHaveBeenCalledTimes(1);
+    expect(capture[0]?.sql).toContain("MAX(sequence_number)");
+    expect(capture[1]?.sql).toContain("INSERT INTO meta.incidents");
+  });
+
+  it("refuses a builder that ignored the allocated id", async () => {
+    // The row's year/sequence columns are derived from the id, so storing a record under a
+    // different one writes columns that contradict it.
+    const conn = allocating("3");
+    await expect(
+      new PostgresIncidentStore(conn).insertAllocated(2026, () => declaredIncident(), T0),
+    ).rejects.toThrow(/returned id 'INC-2026-0007' for allocated id 'INC-2026-0003'/);
+  });
+
+  it("writes nothing when the builder is refused", async () => {
+    const capture: Captured[] = [];
+    const conn = allocating("3", capture);
+    await expect(
+      new PostgresIncidentStore(conn).insertAllocated(2026, () => declaredIncident(), T0),
+    ).rejects.toThrow();
+    expect(capture.some((c) => c.sql.includes("INSERT"))).toBe(false);
+  });
+
+  it("starts a fresh year at 0001", async () => {
+    const conn = mockConnection(undefined, respondTo([["MAX(sequence_number)", EMPTY]]));
+    const stored = await new PostgresIncidentStore(conn).insertAllocated(
+      2031,
+      (id) => declaredIncident({ id }),
+      T0,
+    );
+    expect(stored.record.id).toBe("INC-2031-0001");
+  });
+
+  it("lets the builder's own refusal through unwrapped", async () => {
+    const conn = allocating("1");
+    await expect(
+      new PostgresIncidentStore(conn).insertAllocated(
+        2026,
+        () => {
+          throw new Error("contract refused the declaration");
+        },
+        T0,
+      ),
+    ).rejects.toThrow(/contract refused the declaration/);
+  });
+});
+
 describe("insert", () => {
   it("writes every column once at revision 1", async () => {
     const capture: Captured[] = [];

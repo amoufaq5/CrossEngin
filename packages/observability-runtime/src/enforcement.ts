@@ -5,6 +5,11 @@ import {
   type IncidentCategory,
   type Severity,
 } from "@crossengin/incident-response";
+import type {
+  IncidentCloseOut,
+  IncidentDeclarationRequest,
+  IncidentDeclarer,
+} from "@crossengin/incident-response-runtime";
 import {
   resolveRoute,
   type AlertPolicy,
@@ -86,6 +91,86 @@ export function planIncidentDeclaration(input: IncidentDeclarationInput): Incide
       },
     ],
   });
+}
+
+/** Which surface's declaration failed, and at which end of the incident's life. */
+export interface DeclarationFailure {
+  readonly surface: string;
+  readonly sloId: string;
+  readonly phase: "declare" | "close_out";
+}
+
+export type DeclarationErrorSink = (error: unknown, failure: DeclarationFailure) => void;
+
+/**
+ * The same declaration `planIncidentDeclaration` builds, handed to a declarer that chooses the id.
+ *
+ * Pinned by a test to produce the record `planIncidentDeclaration` produces for the same inputs:
+ * an auto-declared incident must not look different depending on whether its id came from a
+ * counter or from the rows that exist.
+ */
+export function enforcementDeclarationRequest(
+  input: Omit<IncidentDeclarationInput, "incidentId">,
+): IncidentDeclarationRequest {
+  return {
+    title: input.title,
+    severity: input.severity,
+    category: input.category ?? "availability",
+    declaredBy: input.declaredBy,
+    detail: input.detail,
+    declaredAt: input.nowIso,
+    affectedTenantIds: input.affectedTenantIds ?? [],
+    metadata: { surface: input.surface, autoDeclared: true },
+  };
+}
+
+/**
+ * Declares through the injected declarer, reporting a failure instead of throwing.
+ *
+ * A declaration that could not be recorded leaves the breach unopened, so the next evaluation tick
+ * retries it. Throwing instead would abandon every surface after this one in the same pass — one
+ * unreachable store would hide every other breach, which is worse than a page delayed by a tick.
+ */
+export async function declareEnforcementIncident(
+  declarer: IncidentDeclarer,
+  input: Omit<IncidentDeclarationInput, "incidentId">,
+  failure: Omit<DeclarationFailure, "phase">,
+  onError?: DeclarationErrorSink,
+): Promise<IncidentRecord | null> {
+  try {
+    return await declarer.declare(enforcementDeclarationRequest(input));
+  } catch (err) {
+    onError?.(err, { ...failure, phase: "declare" });
+    return null;
+  }
+}
+
+export interface EnforcementCloseOutInput {
+  readonly reason: string;
+  readonly actorUserId: string;
+  readonly at: string;
+}
+
+/**
+ * Closes out a recovered breach's incident, reporting `failed` rather than throwing.
+ *
+ * The breach is no longer active either way — refusing to forget it would leave the engine
+ * reporting `breach_ongoing` for a surface that recovered. A `failed` close-out means the row stays
+ * open, where `listOpen` surfaces it for a human.
+ */
+export async function closeOutEnforcementIncident(
+  declarer: IncidentDeclarer,
+  incidentId: string,
+  input: EnforcementCloseOutInput,
+  failure: Omit<DeclarationFailure, "phase">,
+  onError?: DeclarationErrorSink,
+): Promise<IncidentCloseOut> {
+  try {
+    return await declarer.closeOut(incidentId, input);
+  } catch (err) {
+    onError?.(err, { ...failure, phase: "close_out" });
+    return "failed";
+  }
 }
 
 export interface PageDirective {

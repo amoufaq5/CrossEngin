@@ -1,16 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { IncidentRecordSchema } from "@crossengin/incident-response";
+import { IncidentRecordSchema, type IncidentRecord } from "@crossengin/incident-response";
+import {
+  CountingIncidentDeclarer,
+  FixedClock,
+  IncidentExecutor,
+  type IncidentCloseOut,
+  type IncidentCloseOutInput,
+  type IncidentDeclarationRequest,
+  type IncidentDeclarer,
+} from "@crossengin/incident-response-runtime";
 import { KillSwitchSchema } from "@crossengin/feature-flags";
 import type { AlertPolicy } from "@crossengin/observability";
 import {
   FlagRollbackSchema,
   SEVERITY_TO_ALERT_SEVERITY,
   alertSeverityFor,
+  closeOutEnforcementIncident,
+  declareEnforcementIncident,
+  enforcementDeclarationRequest,
   formatIncidentId,
   formatKillSwitchId,
   planIncidentDeclaration,
   planKillSwitchActivation,
   planPageDirective,
+  type DeclarationFailure,
 } from "./enforcement.js";
 
 const NOW = "2026-06-02T12:00:00.000Z";
@@ -148,5 +161,167 @@ describe("planKillSwitchActivation", () => {
       justification: "Automated rollback with no human co-signer required here.",
     });
     expect(ks.coTriggeredByUserId).toBeNull();
+  });
+});
+
+const DECLARATION = {
+  title: "SLO burn alert: orders-availability on POST /v1/orders",
+  severity: "sev2",
+  category: "availability",
+  surface: "POST /v1/orders",
+  nowIso: NOW,
+  declaredBy: "system-slo-enforcer",
+  detail: "Auto-declared by SLO enforcement (page): burn 20.0x over 1h / 20.0x over 5m.",
+} as const;
+
+class RefusingDeclarer implements IncidentDeclarer {
+  constructor(private readonly error = new Error("store unreachable")) {}
+  async declare(): Promise<IncidentRecord> {
+    throw this.error;
+  }
+  async closeOut(): Promise<IncidentCloseOut> {
+    throw this.error;
+  }
+}
+
+class RecordingDeclarer implements IncidentDeclarer {
+  readonly closeOuts: { id: string; input: IncidentCloseOutInput }[] = [];
+  readonly declared: IncidentDeclarationRequest[] = [];
+  constructor(private readonly outcome: IncidentCloseOut = "cancelled") {}
+  async declare(request: IncidentDeclarationRequest): Promise<IncidentRecord> {
+    this.declared.push(request);
+    return new IncidentExecutor({ clock: new FixedClock(new Date(NOW)) }).declare({
+      ...request,
+      id: "INC-2026-0042",
+    });
+  }
+  async closeOut(id: string, input: IncidentCloseOutInput): Promise<IncidentCloseOut> {
+    this.closeOuts.push({ id, input });
+    return this.outcome;
+  }
+}
+
+const FAILURE: Omit<DeclarationFailure, "phase"> = {
+  surface: "POST /v1/orders",
+  sloId: "orders-availability",
+};
+
+describe("enforcementDeclarationRequest", () => {
+  it("builds the record planIncidentDeclaration builds, for the same inputs", async () => {
+    // Pins the equivalence the declarer seam depends on: an auto-declared incident must not look
+    // different depending on whether its id came from a counter or from the rows that exist.
+    const planned = planIncidentDeclaration({ ...DECLARATION, incidentId: "INC-2026-0042" });
+    const viaDeclarer = await new RecordingDeclarer().declare(
+      enforcementDeclarationRequest(DECLARATION),
+    );
+    expect(viaDeclarer).toEqual(planned);
+  });
+
+  it("defaults the category to availability, as the planner does", () => {
+    const { category: _omitted, ...withoutCategory } = DECLARATION;
+    expect(enforcementDeclarationRequest(withoutCategory).category).toBe("availability");
+  });
+
+  it("carries the surface into the declaration entry's metadata", () => {
+    expect(enforcementDeclarationRequest(DECLARATION).metadata).toEqual({
+      surface: "POST /v1/orders",
+      autoDeclared: true,
+    });
+  });
+
+  it("declares at the evaluation time, not at some later now", () => {
+    expect(enforcementDeclarationRequest(DECLARATION).declaredAt).toBe(NOW);
+  });
+
+  it("passes affected tenants through, empty by default", () => {
+    expect(enforcementDeclarationRequest(DECLARATION).affectedTenantIds).toEqual([]);
+    expect(
+      enforcementDeclarationRequest({ ...DECLARATION, affectedTenantIds: ["t1"] })
+        .affectedTenantIds,
+    ).toEqual(["t1"]);
+  });
+});
+
+describe("declareEnforcementIncident", () => {
+  it("returns the record the declarer chose an id for", async () => {
+    const record = await declareEnforcementIncident(
+      new CountingIncidentDeclarer({ clock: new FixedClock(new Date(NOW)) }),
+      DECLARATION,
+      FAILURE,
+    );
+    expect(record?.id).toBe("INC-2026-0001");
+  });
+
+  it("reports a refusal instead of throwing, so the pass survives it", async () => {
+    const seen: DeclarationFailure[] = [];
+    const record = await declareEnforcementIncident(
+      new RefusingDeclarer(),
+      DECLARATION,
+      FAILURE,
+      (_err, failure) => seen.push(failure),
+    );
+    expect(record).toBeNull();
+    expect(seen).toEqual([{ ...FAILURE, phase: "declare" }]);
+  });
+
+  it("hands the error itself to the sink", async () => {
+    const boom = new Error("store unreachable");
+    const errors: unknown[] = [];
+    await declareEnforcementIncident(
+      new RefusingDeclarer(boom),
+      DECLARATION,
+      FAILURE,
+      (err) => errors.push(err),
+    );
+    expect(errors).toEqual([boom]);
+  });
+
+  it("swallows a refusal silently when no sink is wired", async () => {
+    await expect(
+      declareEnforcementIncident(new RefusingDeclarer(), DECLARATION, FAILURE),
+    ).resolves.toBeNull();
+  });
+});
+
+describe("closeOutEnforcementIncident", () => {
+  it("passes the incident id, reason and time to the declarer", async () => {
+    const declarer = new RecordingDeclarer();
+    const outcome = await closeOutEnforcementIncident(
+      declarer,
+      "INC-2026-0042",
+      { reason: "burn recovered", actorUserId: "system-slo-enforcer", at: NOW },
+      FAILURE,
+    );
+    expect(outcome).toBe("cancelled");
+    expect(declarer.closeOuts).toEqual([
+      {
+        id: "INC-2026-0042",
+        input: { reason: "burn recovered", actorUserId: "system-slo-enforcer", at: NOW },
+      },
+    ]);
+  });
+
+  it("reports what the declarer reports, including a human-owned incident", async () => {
+    expect(
+      await closeOutEnforcementIncident(
+        new RecordingDeclarer("human_owned"),
+        "INC-2026-0042",
+        { reason: "r", actorUserId: "a", at: NOW },
+        FAILURE,
+      ),
+    ).toBe("human_owned");
+  });
+
+  it("reports failed rather than throwing, leaving the row open for a human", async () => {
+    const seen: DeclarationFailure[] = [];
+    const outcome = await closeOutEnforcementIncident(
+      new RefusingDeclarer(),
+      "INC-2026-0042",
+      { reason: "r", actorUserId: "a", at: NOW },
+      FAILURE,
+      (_err, failure) => seen.push(failure),
+    );
+    expect(outcome).toBe("failed");
+    expect(seen).toEqual([{ ...FAILURE, phase: "close_out" }]);
   });
 });

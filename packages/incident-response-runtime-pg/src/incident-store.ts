@@ -63,17 +63,49 @@ export class PostgresIncidentStore {
    * is what makes a collision impossible even if two processes bypassed the lock.
    */
   async allocateIncidentId(year: number): Promise<string> {
+    return this.conn.withAdvisoryLock(INCIDENT_SEQUENCE_LOCK, async () =>
+      this.nextIncidentId(year),
+    );
+  }
+
+  /**
+   * Allocates an id and writes the record it names without releasing the lock in between.
+   *
+   * Allocating and inserting as two locked steps leaves a window: two declarers that both read
+   * `MAX(sequence_number)` before either wrote compute the same next sequence, and the second
+   * insert is refused by `incidents_year_sequence_key`. One declaration per pass hid that; a loop
+   * that can open several breaches in one pass does not. The constraint stays the backstop for
+   * anything that bypasses the lock.
+   */
+  async insertAllocated(
+    year: number,
+    build: (incidentId: string) => IncidentRecord,
+    at: string,
+  ): Promise<StoredIncident> {
     return this.conn.withAdvisoryLock(INCIDENT_SEQUENCE_LOCK, async () => {
-      const result = await this.conn.query<{ next: string }>(
-        `SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next
-         FROM ${SCHEMA}.${TABLE}
-         WHERE year = $1`,
-        [year],
-      );
-      const row = result.rows[0];
-      const next = row === undefined ? 1 : Number.parseInt(row.next, 10);
-      return formatIncidentId(year, next);
+      const incidentId = await this.nextIncidentId(year);
+      const record = build(incidentId);
+      if (record.id !== incidentId) {
+        // The row's `year` / `sequence_number` are derived from the id, so a record built under a
+        // different id would store columns that contradict it — the mismatch the replayer reports.
+        throw new Error(
+          `incident builder returned id '${record.id}' for allocated id '${incidentId}'`,
+        );
+      }
+      return this.insert(record, at);
     });
+  }
+
+  private async nextIncidentId(year: number): Promise<string> {
+    const result = await this.conn.query<{ next: string }>(
+      `SELECT COALESCE(MAX(sequence_number), 0) + 1 AS next
+       FROM ${SCHEMA}.${TABLE}
+       WHERE year = $1`,
+      [year],
+    );
+    const row = result.rows[0];
+    const next = row === undefined ? 1 : Number.parseInt(row.next, 10);
+    return formatIncidentId(year, next);
   }
 
   async insert(record: IncidentRecord, at: string): Promise<StoredIncident> {
