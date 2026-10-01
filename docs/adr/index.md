@@ -1,9 +1,9 @@
 # ADR index
 
-288 records. Generated from the ADR files themselves — regenerate rather than
+289 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table.
 
-- **Accepted:** 209  **Proposed:** 79
+- **Accepted:** 210  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -299,3 +299,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0291](0291-foreign-key-reconciliation.md) | Foreign keys the migrator can see, and the steps that were never safe | Phase 4 | Accepted | 2026-09-30 |
 | [0292](0292-expression-reconciliation.md) | Letting Postgres deparse both sides | Phase 4 | Accepted | 2026-10-01 |
 | [0293](0293-slo-incident-persistence.md) | Letting the store name the incident | Phase 4 | Accepted | 2026-10-01 |
+| [0294](0294-open-episode-hydration.md) | Asking the rows which incident is already open | Phase 4 | Accepted | 2026-10-01 |

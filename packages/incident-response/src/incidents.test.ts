@@ -4,6 +4,7 @@ import {
   INCIDENT_STATUSES,
   IncidentRecordSchema,
   canTransitionIncident,
+  autoDeclaredForKey,
   formatIncidentId,
   parseIncidentId,
   metAckSla,
@@ -326,5 +327,64 @@ describe("incident id vocabulary", () => {
       ],
     });
     expect(parseIncidentId(record.id).sequence).toBe(3);
+  });
+});
+
+describe("autoDeclaredForKey", () => {
+  it("namespaces the subject by signal", () => {
+    expect(autoDeclaredForKey("availability", "product.list")).toBe("availability:product.list");
+  });
+
+  it("keeps two signals on one subject apart", () => {
+    // Two signals can breach one surface at once; one key for both would let the latency engine
+    // adopt the availability incident and leave the latency breach silently unreported.
+    expect(autoDeclaredForKey("availability", "product.list")).not.toBe(
+      autoDeclaredForKey("latency", "product.list"),
+    );
+  });
+
+  it("refuses a signal containing the separator, which would make the key ambiguous", () => {
+    expect(() => autoDeclaredForKey("a:b", "x")).toThrow(/must not contain/);
+  });
+
+  it("refuses an empty signal or subject", () => {
+    expect(() => autoDeclaredForKey("", "x")).toThrow(/non-empty/);
+    expect(() => autoDeclaredForKey("availability", "")).toThrow(/non-empty/);
+  });
+
+  it("leaves a separator in the subject alone, since the signal is unambiguous", () => {
+    expect(autoDeclaredForKey("audit-integrity", "tenant:a")).toBe("audit-integrity:tenant:a");
+  });
+});
+
+describe("IncidentRecordSchema.autoDeclaredFor", () => {
+  const declared = (): Record<string, unknown> => ({
+    id: "INC-2026-0042",
+    title: "Checkout failing",
+    severity: "sev3",
+    category: "availability",
+    status: "declared",
+    declaredAt: "2026-05-14T10:00:00Z",
+    declaredBy: "system-slo-enforcer",
+    timeline: baseTimeline,
+  });
+
+  it("defaults to null, so a human-declared incident carries no signal", () => {
+    const record = IncidentRecordSchema.parse(declared());
+    expect(record.autoDeclaredFor).toBeNull();
+  });
+
+  it("accepts the signal an automated declarer names", () => {
+    const record = IncidentRecordSchema.parse({
+      ...declared(),
+      autoDeclaredFor: "availability:product.list",
+    });
+    expect(record.autoDeclaredFor).toBe("availability:product.list");
+  });
+
+  it("rejects an empty signal, which would key every incident the same", () => {
+    expect(
+      IncidentRecordSchema.safeParse({ ...declared(), autoDeclaredFor: "" }).success,
+    ).toBe(false);
   });
 });

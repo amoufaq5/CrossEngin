@@ -3,7 +3,12 @@ import {
   type SloLatencyTarget,
 } from "@crossengin/observability";
 import type { AlertPolicy } from "@crossengin/observability";
-import type { IncidentCategory, IncidentRecord, Severity } from "@crossengin/incident-response";
+import {
+  autoDeclaredForKey,
+  type IncidentCategory,
+  type IncidentRecord,
+  type Severity,
+} from "@crossengin/incident-response";
 import {
   CountingIncidentDeclarer,
   type IncidentCloseOut,
@@ -20,6 +25,7 @@ import {
 import {
   closeOutEnforcementIncident,
   declareEnforcementIncident,
+  findOpenEnforcementIncident,
   formatKillSwitchId,
   planKillSwitchActivation,
   planPageDirective,
@@ -151,6 +157,11 @@ export class LatencySloEngine {
 
       if (verdict.breached && existing === undefined) {
         if (this.declaring.has(surface)) continue;
+        const adopted = await this.adopt(reg, surface);
+        if (adopted !== null) {
+          decisions.push(adopted);
+          continue;
+        }
         const opened = await this.openBreach(reg, surface, verdict, nowIso);
         // A declaration that could not be recorded leaves the surface unopened, so the next tick
         // declares it instead of this pass abandoning every surface after it.
@@ -189,6 +200,35 @@ export class LatencySloEngine {
     return decisions;
   }
 
+  /** Namespaced by signal, so the latency breach on a surface is not the availability one. */
+  private keyFor(surface: string): string {
+    return autoDeclaredForKey("latency", surface);
+  }
+
+  /**
+   * Adopts the incident this surface already has open — see the availability engine's `adopt`. A
+   * restart mid-breach would otherwise declare a second incident for one episode.
+   */
+  private async adopt(
+    reg: LatencyRegistration,
+    surface: string,
+  ): Promise<LatencyEnforcementDecision | null> {
+    const open = await findOpenEnforcementIncident(
+      this.declarer,
+      this.keyFor(surface),
+      { surface, sloId: reg.slo.id },
+      this.onDeclarationError,
+    );
+    if (open === null) return null;
+    this.active.set(surface, {
+      incidentId: open.id,
+      // Nothing persists the kill switch, so a restart cannot recover which flag was rolled back.
+      killSwitchId: null,
+      severity: open.severity,
+    });
+    return { kind: "breach_ongoing", surface, sloId: reg.slo.id, incidentId: open.id };
+  }
+
   private async openBreach(
     reg: LatencyRegistration,
     surface: string,
@@ -213,6 +253,7 @@ export class LatencySloEngine {
         this.declarer,
         {
           title: `Latency SLO breach: ${reg.slo.id} on ${surface}`,
+          autoDeclaredFor: this.keyFor(surface),
           severity,
           category: reg.category ?? "performance",
           surface,

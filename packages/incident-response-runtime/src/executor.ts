@@ -43,6 +43,8 @@ export interface DeclareIncidentInput {
   readonly publiclyVisible?: boolean;
   readonly securityIncident?: boolean;
   readonly breachDataClasses?: readonly string[];
+  /** The automated signal this declaration is for; null for a human declaration. */
+  readonly autoDeclaredFor?: string | null;
   readonly metadata?: Record<string, unknown>;
 }
 
@@ -117,6 +119,7 @@ export class IncidentExecutor {
       publiclyVisible: input.publiclyVisible ?? false,
       securityIncident: input.securityIncident ?? false,
       breachDataClasses: [...(input.breachDataClasses ?? [])],
+      autoDeclaredFor: input.autoDeclaredFor ?? null,
       declaredAt: at,
       declaredBy: input.declaredBy,
       timeline: [

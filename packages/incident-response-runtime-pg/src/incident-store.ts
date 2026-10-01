@@ -139,6 +139,34 @@ export class PostgresIncidentStore {
     return { record, revision: nextRevision, updatedAt: at };
   }
 
+  /**
+   * The open incident already declared for an automated signal, if any.
+   *
+   * This is what lets a declarer whose open-episode state is in memory survive a restart: it asks
+   * the rows rather than its own map, and adopts the incident it already declared instead of
+   * declaring a second for the same still-present breach. `idx_incidents_auto_declared_open` is
+   * what makes "at most one" true rather than merely intended, so a second row can be read as a
+   * database fault rather than quietly preferred.
+   */
+  async findOpenFor(autoDeclaredFor: string): Promise<StoredIncident | null> {
+    const result = await this.conn.query<Record<string, unknown>>(
+      `SELECT ${INCIDENT_COLUMNS} FROM ${SCHEMA}.${TABLE}
+       WHERE auto_declared_for = $1
+         AND status NOT IN ('closed', 'cancelled')
+       ORDER BY declared_at DESC
+       LIMIT 2`,
+      [autoDeclaredFor],
+    );
+    if (result.rows.length > 1) {
+      throw new Error(
+        `more than one open incident for signal '${autoDeclaredFor}' — ` +
+          "idx_incidents_auto_declared_open should have made that impossible",
+      );
+    }
+    const row = result.rows[0];
+    return row === undefined ? null : rowToIncident(row);
+  }
+
   async load(incidentId: string): Promise<StoredIncident | null> {
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${INCIDENT_COLUMNS} FROM ${SCHEMA}.${TABLE} WHERE incident_id = $1`,

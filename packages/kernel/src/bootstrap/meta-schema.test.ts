@@ -1057,6 +1057,26 @@ describe("table column shapes", () => {
     expect(tenants?.kind).toBe("gin");
   });
 
+  it("META_INCIDENTS carries the signal an incident was auto-declared for", () => {
+    const key = META_INCIDENTS.columns.find((c) => c.name === "auto_declared_for");
+    expect(key?.type).toBe("TEXT");
+    // Nullable: a human-declared incident has no signal, and requiring one would exclude it.
+    expect(key?.notNull).toBeUndefined();
+  });
+
+  it("META_INCIDENTS makes two open incidents for one signal impossible", () => {
+    // The duplicate hydration prevents, refused by the database rather than left to the declarer.
+    const idx = META_INCIDENTS.indexes?.find(
+      (i) => i.name === "idx_incidents_auto_declared_open",
+    );
+    expect(idx?.unique).toBe(true);
+    expect(idx?.columns).toEqual(["auto_declared_for"]);
+    // Partial, so a closed episode can be declared again and a keyless incident is not covered.
+    expect(idx?.where).toContain("auto_declared_for IS NOT NULL");
+    expect(idx?.where).toContain("closed");
+    expect(idx?.where).toContain("cancelled");
+  });
+
   it("META_INCIDENTS has no RLS, being a platform-wide record", () => {
     // An incident may name many tenants or none, so there is no single tenant_id to confine by.
     expect(META_INCIDENTS.columns.some((c) => c.name === "tenant_id")).toBe(false);

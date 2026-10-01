@@ -110,6 +110,19 @@ describe("CountingIncidentDeclarer", () => {
     ).toBe("unpersisted");
   });
 
+  it("finds nothing open, because nothing it declared outlived the process", async () => {
+    // Claiming otherwise would have an engine adopt an incident that does not exist anywhere.
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    const record = await declarer.declare(request({ autoDeclaredFor: "availability:x" }));
+    expect(record.autoDeclaredFor).toBe("availability:x");
+    expect(await declarer.findOpen("availability:x")).toBeNull();
+  });
+
+  it("declares with no signal key when none was given", async () => {
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    expect((await declarer.declare(request())).autoDeclaredFor).toBeNull();
+  });
+
   it("defaults its clock, so an engine can be built without one", async () => {
     const before = Date.now();
     const record = await new CountingIncidentDeclarer().declare(request());

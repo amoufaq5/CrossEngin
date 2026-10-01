@@ -37,6 +37,7 @@ export const INCIDENT_COLUMN_NAMES: readonly string[] = Object.freeze([
   "security_incident",
   "breach_data_classes",
   "postmortem_id",
+  "auto_declared_for",
   "revision",
   "updated_at",
 ]);
@@ -116,6 +117,7 @@ export function incidentRowValues(
     valid.securityIncident,
     JSON.stringify(valid.breachDataClasses),
     valid.postmortemId,
+    valid.autoDeclaredFor,
     revision,
     updatedAt,
   ];
@@ -177,6 +179,7 @@ export function rowToIncident(row: Record<string, unknown>): StoredIncident {
     securityIncident: row["security_incident"] === true,
     breachDataClasses: asJson(row["breach_data_classes"]),
     postmortemId: asNullableString(row["postmortem_id"]),
+    autoDeclaredFor: asNullableString(row["auto_declared_for"]),
   });
   return {
     record,
