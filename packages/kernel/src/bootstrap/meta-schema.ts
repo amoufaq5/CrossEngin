@@ -3667,6 +3667,13 @@ export const META_INCIDENTS: TableDefinition = {
     { name: "breach_data_classes", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "postmortem_id", type: "TEXT" },
     {
+      // The automated signal this incident was declared for, namespaced `signal:subject`. A
+      // declarer whose open-incident state is in memory asks this column, not its own map, so a
+      // restart adopts the incident it already declared instead of declaring a second.
+      name: "auto_declared_for",
+      type: "TEXT",
+    },
+    {
       // Optimistic concurrency. Two schedulers can hold the same incident — the SLO loop and the
       // audit-integrity escalator both declare and both close out — and a lost update would
       // silently drop a transition. Every write states the revision it read.
@@ -3694,6 +3701,16 @@ export const META_INCIDENTS: TableDefinition = {
       where: "status NOT IN ('closed', 'cancelled')",
     },
     { name: "idx_incidents_tenants", columns: ["affected_tenant_ids"], kind: "gin" },
+    {
+      // Two open incidents for one signal is the duplicate this column exists to prevent, so the
+      // database refuses it rather than leaving it to the declarer's care. Partial, and therefore
+      // an index and not a constraint: a closed episode must be able to be declared again, and a
+      // human-declared incident has no key at all.
+      name: "idx_incidents_auto_declared_open",
+      columns: ["auto_declared_for"],
+      unique: true,
+      where: "auto_declared_for IS NOT NULL AND status NOT IN ('closed', 'cancelled')",
+    },
   ],
 };
 

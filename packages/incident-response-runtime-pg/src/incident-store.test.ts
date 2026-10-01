@@ -129,6 +129,52 @@ describe("insertAllocated", () => {
   });
 });
 
+describe("findOpenFor", () => {
+  it("looks up by signal and excludes the statuses that are not open", async () => {
+    const capture: Captured[] = [];
+    const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
+    await new PostgresIncidentStore(conn).findOpenFor("availability:product.list");
+    expect(capture[0]?.sql).toContain("WHERE auto_declared_for = $1");
+    expect(capture[0]?.sql).toContain("status NOT IN ('closed', 'cancelled')");
+    expect(capture[0]?.params).toEqual(["availability:product.list"]);
+  });
+
+  it("returns the record a restart should adopt", async () => {
+    const record = declaredIncident({ autoDeclaredFor: "availability:product.list" });
+    const conn = mockConnection(
+      undefined,
+      respondTo([["SELECT", { rows: [incidentRow(record)], rowCount: 1 }]]),
+    );
+    const found = await new PostgresIncidentStore(conn).findOpenFor("availability:product.list");
+    expect(found?.record.id).toBe(record.id);
+    expect(found?.record.autoDeclaredFor).toBe("availability:product.list");
+  });
+
+  it("returns null when the signal has nothing open", async () => {
+    const conn = mockConnection(undefined, respondTo([["SELECT", EMPTY]]));
+    expect(await new PostgresIncidentStore(conn).findOpenFor("availability:x")).toBeNull();
+  });
+
+  it("asks for two rows, so a duplicate is visible rather than silently preferred", async () => {
+    const capture: Captured[] = [];
+    const conn = mockConnection(capture, respondTo([["SELECT", EMPTY]]));
+    await new PostgresIncidentStore(conn).findOpenFor("availability:x");
+    expect(capture[0]?.sql).toContain("LIMIT 2");
+  });
+
+  it("refuses two open incidents for one signal, which the index should have prevented", async () => {
+    const record = declaredIncident({ autoDeclaredFor: "availability:x" });
+    const row = incidentRow(record);
+    const conn = mockConnection(
+      undefined,
+      respondTo([["SELECT", { rows: [row, row], rowCount: 2 }]]),
+    );
+    await expect(
+      new PostgresIncidentStore(conn).findOpenFor("availability:x"),
+    ).rejects.toThrow(/more than one open incident for signal 'availability:x'/);
+  });
+});
+
 describe("insert", () => {
   it("writes every column once at revision 1", async () => {
     const capture: Captured[] = [];
@@ -163,7 +209,11 @@ describe("update", () => {
     const capture: Captured[] = [];
     const store = new PostgresIncidentStore(mockConnection(capture));
     const stored = await store.update(declaredIncident(), 3, T0);
-    expect(capture[0]?.sql).toContain("WHERE incident_id = $1 AND revision = $30");
+    // Derived from the column array rather than hardcoded: the guard binds after every column
+    // value, so a column added anywhere moves it, and a literal here would only ever be stale.
+    expect(capture[0]?.sql).toContain(
+      `WHERE incident_id = $1 AND revision = $${INCIDENT_COLUMN_NAMES.length + 1}`,
+    );
     expect(capture[0]?.params?.[INCIDENT_COLUMN_NAMES.length]).toBe(3);
     expect(capture[0]?.params?.[INCIDENT_COLUMN_NAMES.indexOf("revision")]).toBe(4);
     expect(stored.revision).toBe(4);

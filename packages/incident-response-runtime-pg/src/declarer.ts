@@ -40,6 +40,11 @@ export class PostgresIncidentDeclarer implements IncidentDeclarer {
     return stored.record;
   }
 
+  async findOpen(autoDeclaredFor: string): Promise<IncidentRecord | null> {
+    const stored = await this.engine.findOpenFor(autoDeclaredFor);
+    return stored === null ? null : stored.record;
+  }
+
   /**
    * Cancels the stored incident when nobody has taken it, and reports `human_owned` when somebody
    * has. Cancelling rather than resolving is not a shortcut: `triaged` requires the on-call roles to

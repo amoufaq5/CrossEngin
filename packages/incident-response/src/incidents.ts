@@ -28,6 +28,23 @@ export interface ParsedIncidentId {
   readonly sequence: number;
 }
 
+/**
+ * Composes an `autoDeclaredFor` key.
+ *
+ * Namespaced by signal, because two signals can watch one subject: an availability SLO and a
+ * latency SLO on the same surface are different breaches and must be able to be open at once. An
+ * unnamespaced key would let one adopt the other's incident.
+ */
+export function autoDeclaredForKey(signal: string, subject: string): string {
+  if (signal.length === 0 || subject.length === 0) {
+    throw new Error("autoDeclaredForKey needs a non-empty signal and subject");
+  }
+  if (signal.includes(":")) {
+    throw new Error(`autoDeclaredFor signal must not contain ':': ${signal}`);
+  }
+  return `${signal}:${subject}`;
+}
+
 export function parseIncidentId(id: string): ParsedIncidentId {
   if (!INCIDENT_ID_REGEX.test(id)) {
     throw new Error(`invalid incident id '${id}' (expected 'INC-YYYY-NNNN')`);
@@ -139,6 +156,17 @@ export const IncidentRecordSchema = z
       .array(z.enum(["pii", "phi", "regulated", "commercial_sensitive"]))
       .default([]),
     postmortemId: z.string().min(1).nullable().default(null),
+    /**
+     * The automated signal this incident was declared for, and the idempotency key for declaring
+     * it. An SLO burn loop or an integrity proof holds its open incidents in memory, so a restart
+     * would re-declare a still-present breach under a new id — one episode, two incidents. With
+     * this on the record, a declarer can ask the store "which open incident did this signal open?"
+     * before declaring a second (ADR-0294).
+     *
+     * On the record rather than beside it, because the row *is* the record: a column outside the
+     * schema would break the property the replayer depends on. Null for anything a human declared.
+     */
+    autoDeclaredFor: z.string().min(1).max(200).nullable().default(null),
   })
   .superRefine((v, ctx) => {
     const declaredMs = new Date(v.declaredAt).getTime();

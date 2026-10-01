@@ -410,17 +410,33 @@ describe("INTEGRITY_ESCALATIONS", () => {
  * A fake incident ledger with the two methods an escalation uses. Ids are allocated from what has
  * already been "stored", which is the property that matters: it continues rather than restarts.
  */
-function fakeLedger(opts: { readonly failDeclare?: boolean; readonly triaged?: boolean } = {}) {
+function fakeLedger(
+  opts: {
+    readonly failDeclare?: boolean;
+    readonly triaged?: boolean;
+    readonly failFindOpen?: boolean;
+    /** Rows a restart would still find, keyed by `autoDeclaredFor`. */
+    readonly open?: ReadonlyMap<string, IncidentRecord>;
+  } = {},
+) {
   const declared: IncidentRecord[] = [];
   const cancelled: string[] = [];
+  const lookups: string[] = [];
   let seq = 0;
   const ledger = {
+    findOpenFor: async (key: string): Promise<{ record: IncidentRecord } | null> => {
+      lookups.push(key);
+      if (opts.failFindOpen === true) throw new Error("ledger unavailable");
+      const record = opts.open?.get(key);
+      return record === undefined ? null : { record };
+    },
     declare: async (input: {
       readonly title: string;
       readonly severity: string;
       readonly declaredBy: string;
       readonly declaredAt?: string;
       readonly detail: string;
+      readonly autoDeclaredFor?: string | null;
       readonly affectedTenantIds?: readonly string[];
       readonly metadata?: Record<string, unknown>;
     }): Promise<{ record: IncidentRecord }> => {
@@ -435,6 +451,7 @@ function fakeLedger(opts: { readonly failDeclare?: boolean; readonly triaged?: b
         status: "declared",
         declaredAt: at,
         declaredBy: input.declaredBy,
+        autoDeclaredFor: input.autoDeclaredFor ?? null,
         affectedTenantIds: [...(input.affectedTenantIds ?? [])],
         timeline: [
           {
@@ -459,7 +476,7 @@ function fakeLedger(opts: { readonly failDeclare?: boolean; readonly triaged?: b
       return { record };
     },
   };
-  return { declared, cancelled, ledger: ledger as never };
+  return { declared, cancelled, lookups, ledger: ledger as never };
 }
 
 describe("IntegrityEscalator — persisting the incident record", () => {
@@ -584,6 +601,142 @@ describe("IntegrityEscalator — persisting the incident record", () => {
       now: () => new Date(AT),
     }).observe(report());
     expect(escalation.incidentId).toBe("INC-2026-0001");
+  });
+
+  it("declares under a namespaced audit-integrity key", async () => {
+    const { declared, ledger } = fakeLedger();
+    await new IntegrityEscalator({ config: config(), incidents: ledger }).observe(report());
+    expect(declared[0]?.autoDeclaredFor).toBe(`audit-integrity:${TENANT_A}`);
+  });
+
+  it("keys the platform chain by scope, not by an empty string", async () => {
+    const { declared, ledger } = fakeLedger();
+    await new IntegrityEscalator({ config: config(), incidents: ledger }).observe(
+      report({ scope: null }),
+    );
+    expect(declared[0]?.autoDeclaredFor).toBe("audit-integrity:platform");
+  });
+
+  it("asks the ledger what is open before declaring", async () => {
+    const { lookups, ledger } = fakeLedger();
+    await new IntegrityEscalator({ config: config(), incidents: ledger }).observe(report());
+    expect(lookups).toEqual([`audit-integrity:${TENANT_A}`]);
+  });
+
+  it("adopts the open incident after a restart instead of declaring a second", async () => {
+    // A tamper stays tampered, and the escalator's open map does not survive the process. Without
+    // adoption, every restart turns one episode into another incident.
+    const first = fakeLedger();
+    const beforeRestart = new IntegrityEscalator({ config: config(), incidents: first.ledger });
+    const opened = await beforeRestart.observe(report());
+    const existing = first.declared[0];
+    if (existing === undefined) throw new Error("expected a declared incident");
+
+    const after = fakeLedger({
+      open: new Map([[`audit-integrity:${TENANT_A}`, existing]]),
+    });
+    const restarted = new IntegrityEscalator({ config: config(), incidents: after.ledger });
+    const escalation = await restarted.observe(report());
+    expect(escalation.kind).toBe("ongoing");
+    expect(escalation.incidentId).toBe(opened.incidentId);
+    expect(after.declared).toHaveLength(0);
+    expect(restarted.openIncidentFor(TENANT_A)).toBe(opened.incidentId);
+  });
+
+  it("does not page again for an adopted incident", async () => {
+    // The page went out when it was declared; paging on every restart would train people to ignore
+    // it, which is the same reason an ongoing episode is silent.
+    const existing = IncidentRecordSchema.parse({
+      id: "INC-2026-0007",
+      title: `Audit integrity compromised for ${TENANT_A}`,
+      severity: "sev1",
+      category: "security",
+      status: "declared",
+      declaredAt: AT,
+      declaredBy: "operate-server",
+      autoDeclaredFor: `audit-integrity:${TENANT_A}`,
+      timeline: [{ occurredAt: AT, actorUserId: "operate-server", kind: "declared", message: "x" }],
+    });
+    const paged: string[] = [];
+    const { declared, ledger } = fakeLedger({
+      open: new Map([[`audit-integrity:${TENANT_A}`, existing]]),
+    });
+    const escalation = await new IntegrityEscalator({
+      config: config(),
+      incidents: ledger,
+      page: (p) => paged.push(p.incidentId),
+    }).observe(report());
+    expect(escalation.kind).toBe("ongoing");
+    expect(paged).toEqual([]);
+    expect(declared).toHaveLength(0);
+  });
+
+  it("recovers an adopted incident, so the restart can still close it out", async () => {
+    const existing = IncidentRecordSchema.parse({
+      id: "INC-2026-0007",
+      title: `Audit integrity compromised for ${TENANT_A}`,
+      severity: "sev1",
+      category: "security",
+      status: "declared",
+      declaredAt: AT,
+      declaredBy: "operate-server",
+      autoDeclaredFor: `audit-integrity:${TENANT_A}`,
+      timeline: [{ occurredAt: AT, actorUserId: "operate-server", kind: "declared", message: "x" }],
+    });
+    const { cancelled, ledger } = fakeLedger({
+      open: new Map([[`audit-integrity:${TENANT_A}`, existing]]),
+    });
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    expect(recovered.kind).toBe("recovered");
+    expect(recovered.incidentId).toBe("INC-2026-0007");
+    expect(cancelled).toEqual(["INC-2026-0007"]);
+  });
+
+  it("looks up only once per episode, not on every ongoing pass", async () => {
+    const { lookups, ledger } = fakeLedger();
+    const esc = new IntegrityEscalator({ config: config(), incidents: ledger });
+    await esc.observe(report());
+    await esc.observe(report());
+    await esc.observe(report());
+    expect(lookups).toHaveLength(1);
+  });
+
+  it("declares anyway when the lookup fails, rather than leaving the tamper unescalated", async () => {
+    const errors: unknown[] = [];
+    const { declared, ledger } = fakeLedger({ failFindOpen: true });
+    const escalation = await new IntegrityEscalator({
+      config: config(),
+      incidents: ledger,
+      onError: (err) => errors.push(err),
+    }).observe(report());
+    expect(escalation.kind).toBe("opened");
+    expect(declared).toHaveLength(1);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("keeps separate scopes separate when adopting", async () => {
+    const existing = IncidentRecordSchema.parse({
+      id: "INC-2026-0007",
+      title: "Audit integrity compromised for another tenant",
+      severity: "sev1",
+      category: "security",
+      status: "declared",
+      declaredAt: AT,
+      declaredBy: "operate-server",
+      autoDeclaredFor: `audit-integrity:${TENANT_B}`,
+      timeline: [{ occurredAt: AT, actorUserId: "operate-server", kind: "declared", message: "x" }],
+    });
+    const { declared, ledger } = fakeLedger({
+      open: new Map([[`audit-integrity:${TENANT_B}`, existing]]),
+    });
+    const escalation = await new IntegrityEscalator({
+      config: config(),
+      incidents: ledger,
+    }).observe(report());
+    expect(escalation.kind).toBe("opened");
+    expect(declared).toHaveLength(1);
   });
 
   it("reports unpersisted when no ledger is wired", async () => {

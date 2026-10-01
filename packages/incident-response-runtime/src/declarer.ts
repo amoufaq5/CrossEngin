@@ -40,6 +40,15 @@ export interface IncidentCloseOutInput {
 export interface IncidentDeclarer {
   declare(request: IncidentDeclarationRequest): Promise<IncidentRecord>;
   /**
+   * The open incident already declared for this signal, if any.
+   *
+   * A declarer holds its open episodes in memory, so a restart has forgotten them while the breach
+   * is still present. Asking here before declaring is what turns "one episode, two incidents" into
+   * adopting the one that already exists. A declarer with no store answers null: nothing it
+   * declared outlived the process, so there is nothing to adopt.
+   */
+  findOpen(autoDeclaredFor: string): Promise<IncidentRecord | null>;
+  /**
    * Closes out an incident whose signal recovered, returning what became of it. An incident nobody
    * took is cancelled; one a human has triaged is left alone (`human_owned`), because `triaged`
    * requires the on-call roles to be assigned and no automated recovery can claim a response that
@@ -82,6 +91,12 @@ export class CountingIncidentDeclarer implements IncidentDeclarer {
       id: formatIncidentId(year, next),
       declaredAt: at,
     });
+  }
+
+  async findOpen(): Promise<IncidentRecord | null> {
+    // Nothing stored what this declared, so a restart has genuinely lost it; claiming otherwise
+    // would have the engine adopt an incident that does not exist.
+    return null;
   }
 
   async closeOut(): Promise<IncidentCloseOut> {

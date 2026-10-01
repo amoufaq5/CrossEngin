@@ -70,6 +70,38 @@ describe("PostgresIncidentDeclarer", () => {
     );
   });
 
+  it("reports the open incident a restart should adopt", async () => {
+    const record = declaredIncident({ autoDeclaredFor: "availability:product.list" });
+    const conn = mockConnection(
+      [],
+      respondTo([["auto_declared_for", { rows: [incidentRow(record)], rowCount: 1 }]]),
+    );
+    const found = await new PostgresIncidentDeclarer({ conn }).findOpen(
+      "availability:product.list",
+    );
+    expect(found?.id).toBe(record.id);
+  });
+
+  it("reports nothing open when the signal has no incident", async () => {
+    const conn = mockConnection([], respondTo([["auto_declared_for", EMPTY]]));
+    expect(await new PostgresIncidentDeclarer({ conn }).findOpen("availability:x")).toBeNull();
+  });
+
+  it("declares with the signal key it was given", async () => {
+    const capture: Captured[] = [];
+    const conn = mockConnection(
+      capture,
+      respondTo([["COALESCE(MAX(sequence_number)", { rows: [{ next: "1" }], rowCount: 1 }]]),
+    );
+    const record = await new PostgresIncidentDeclarer({ conn }).declare({
+      ...REQUEST,
+      autoDeclaredFor: "availability:product.list",
+    });
+    expect(record.autoDeclaredFor).toBe("availability:product.list");
+    const insert = capture.find((c) => c.sql.includes("INSERT INTO meta.incidents"));
+    expect(insert?.params).toContain("availability:product.list");
+  });
+
   it("cancels an untaken incident on close-out", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(

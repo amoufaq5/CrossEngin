@@ -18,6 +18,7 @@ import {
   closeOutEnforcementIncident,
   declareEnforcementIncident,
   enforcementDeclarationRequest,
+  findOpenEnforcementIncident,
   formatIncidentId,
   formatKillSwitchId,
   planIncidentDeclaration,
@@ -179,6 +180,9 @@ class RefusingDeclarer implements IncidentDeclarer {
   async declare(): Promise<IncidentRecord> {
     throw this.error;
   }
+  async findOpen(): Promise<IncidentRecord | null> {
+    throw this.error;
+  }
   async closeOut(): Promise<IncidentCloseOut> {
     throw this.error;
   }
@@ -187,7 +191,15 @@ class RefusingDeclarer implements IncidentDeclarer {
 class RecordingDeclarer implements IncidentDeclarer {
   readonly closeOuts: { id: string; input: IncidentCloseOutInput }[] = [];
   readonly declared: IncidentDeclarationRequest[] = [];
-  constructor(private readonly outcome: IncidentCloseOut = "cancelled") {}
+  readonly lookups: string[] = [];
+  constructor(
+    private readonly outcome: IncidentCloseOut = "cancelled",
+    private readonly open: IncidentRecord | null = null,
+  ) {}
+  async findOpen(key: string): Promise<IncidentRecord | null> {
+    this.lookups.push(key);
+    return this.open;
+  }
   async declare(request: IncidentDeclarationRequest): Promise<IncidentRecord> {
     this.declared.push(request);
     return new IncidentExecutor({ clock: new FixedClock(new Date(NOW)) }).declare({
@@ -323,5 +335,66 @@ describe("closeOutEnforcementIncident", () => {
     );
     expect(outcome).toBe("failed");
     expect(seen).toEqual([{ ...FAILURE, phase: "close_out" }]);
+  });
+});
+
+describe("findOpenEnforcementIncident", () => {
+  it("returns the incident the signal already has open", async () => {
+    const existing = await new RecordingDeclarer().declare(
+      enforcementDeclarationRequest(DECLARATION),
+    );
+    const declarer = new RecordingDeclarer("cancelled", existing);
+    const found = await findOpenEnforcementIncident(declarer, "availability:x", FAILURE);
+    expect(found?.id).toBe(existing.id);
+    expect(declarer.lookups).toEqual(["availability:x"]);
+  });
+
+  it("reads nothing open when the signal has no incident", async () => {
+    expect(
+      await findOpenEnforcementIncident(new RecordingDeclarer(), "availability:x", FAILURE),
+    ).toBeNull();
+  });
+
+  it("reads a failed lookup as nothing open, and reports it", async () => {
+    // Risking a duplicate incident is the safe direction, and the partial unique index refuses the
+    // duplicate anyway — a lookup that throws must not stop the breach being handled.
+    const seen: DeclarationFailure[] = [];
+    const found = await findOpenEnforcementIncident(
+      new RefusingDeclarer(),
+      "availability:x",
+      FAILURE,
+      (_err, failure) => seen.push(failure),
+    );
+    expect(found).toBeNull();
+    expect(seen).toEqual([{ ...FAILURE, phase: "find_open" }]);
+  });
+});
+
+describe("the autoDeclaredFor key on a declaration", () => {
+  it("is carried into the request when supplied", () => {
+    expect(
+      enforcementDeclarationRequest({ ...DECLARATION, autoDeclaredFor: "availability:x" })
+        .autoDeclaredFor,
+    ).toBe("availability:x");
+  });
+
+  it("is absent when no signal was named, so a human declaration has no key", () => {
+    expect(enforcementDeclarationRequest(DECLARATION).autoDeclaredFor).toBeUndefined();
+  });
+
+  it("reaches the record the planner builds", () => {
+    expect(
+      planIncidentDeclaration({
+        ...DECLARATION,
+        incidentId: "INC-2026-0042",
+        autoDeclaredFor: "availability:x",
+      }).autoDeclaredFor,
+    ).toBe("availability:x");
+  });
+
+  it("is null on a planned record with no signal", () => {
+    expect(
+      planIncidentDeclaration({ ...DECLARATION, incidentId: "INC-2026-0042" }).autoDeclaredFor,
+    ).toBeNull();
   });
 });

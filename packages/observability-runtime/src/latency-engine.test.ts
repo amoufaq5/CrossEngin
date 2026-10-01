@@ -139,6 +139,9 @@ describe("LatencySloEngine", () => {
 /** A declarer standing in for a store: ids from a fixed high-water mark, close-outs recorded. */
 class StubDeclarer implements IncidentDeclarer {
   readonly closeOuts: { id: string; input: IncidentCloseOutInput }[] = [];
+  readonly declared: IncidentDeclarationRequest[] = [];
+  readonly lookups: string[] = [];
+  readonly open = new Map<string, IncidentRecord>();
   private next = 71;
   constructor(
     private readonly outcome: IncidentCloseOut = "cancelled",
@@ -146,9 +149,14 @@ class StubDeclarer implements IncidentDeclarer {
   ) {}
   async declare(request: IncidentDeclarationRequest): Promise<IncidentRecord> {
     if (this.refuse) throw new Error("incident store unreachable");
+    this.declared.push(request);
     const id = `INC-2026-${String(this.next).padStart(4, "0")}`;
     this.next += 1;
     return new IncidentExecutor().declare({ ...request, id });
+  }
+  async findOpen(key: string): Promise<IncidentRecord | null> {
+    this.lookups.push(key);
+    return this.open.get(key) ?? null;
   }
   async closeOut(id: string, input: IncidentCloseOutInput): Promise<IncidentCloseOut> {
     this.closeOuts.push({ id, input });
@@ -209,5 +217,50 @@ describe("LatencySloEngine — incident ids come from the declarer", () => {
     recordLatencies(engine, 700, 30, BASE.getTime());
     expect(await engine.evaluate()).toHaveLength(0);
     expect(engine.activeBreaches()).toHaveLength(0);
+  });
+});
+
+describe("LatencySloEngine — a restart adopts the incident it already opened", () => {
+  it("declares under a latency-namespaced key", async () => {
+    const declarer = new StubDeclarer();
+    const engine = engineWith(new FixedClock(BASE), declarer);
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    await engine.evaluate();
+    expect(declarer.declared[0]?.autoDeclaredFor).toBe(`latency:${SURFACE}`);
+  });
+
+  it("does not adopt an availability incident on the same surface", async () => {
+    // Two signals can breach one surface at once; an unnamespaced key would let one swallow the
+    // other's incident and leave the second breach silently unreported.
+    const declarer = new StubDeclarer();
+    declarer.open.set(`availability:${SURFACE}`, await declarer.declare({
+      title: "availability breach elsewhere in the stack",
+      severity: "sev2",
+      category: "availability",
+      declaredBy: "system-slo-enforcer",
+      detail: "burn",
+      declaredAt: BASE.toISOString(),
+    }));
+    const engine = engineWith(new FixedClock(BASE), declarer);
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    expect((await engine.evaluate())[0]?.kind).toBe("breach_opened");
+  });
+
+  it("adopts its own open incident instead of declaring a second", async () => {
+    const declarer = new StubDeclarer();
+    const first = engineWith(new FixedClock(BASE), declarer);
+    recordLatencies(first, 700, 30, BASE.getTime());
+    const opened = (await first.evaluate())[0];
+    if (opened?.kind !== "breach_opened") throw new Error("expected breach");
+    declarer.open.set(`latency:${SURFACE}`, opened.plan.incident);
+
+    const restarted = engineWith(new FixedClock(BASE), declarer);
+    recordLatencies(restarted, 700, 30, BASE.getTime());
+    const decisions = await restarted.evaluate();
+    expect(decisions[0]?.kind).toBe("breach_ongoing");
+    expect(decisions[0]?.kind === "breach_ongoing" && decisions[0].incidentId).toBe(
+      opened.plan.incident.id,
+    );
+    expect(declarer.declared).toHaveLength(1);
   });
 });

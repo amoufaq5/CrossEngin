@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { IncidentRecord } from "@crossengin/incident-response";
+import { autoDeclaredForKey, type IncidentRecord } from "@crossengin/incident-response";
 import type { PersistentIncidentEngine } from "@crossengin/incident-response-runtime-pg";
 import type { AlertChannelTarget, AlertPolicy } from "@crossengin/observability";
 import {
@@ -54,8 +54,13 @@ export interface IntegrityEscalation {
 /** The subset of `PersistentIncidentEngine` an escalation needs. */
 export type IncidentLedger = Pick<
   PersistentIncidentEngine,
-  "declare" | "cancelIfUntriaged"
+  "declare" | "cancelIfUntriaged" | "findOpenFor"
 >;
+
+/** The signal an integrity escalation declares under. Scoped, and namespaced like every other. */
+export function integrityIncidentKey(scope: string | null): string {
+  return autoDeclaredForKey("audit-integrity", scope ?? "platform");
+}
 
 export interface IntegrityEscalationPlan {
   readonly incident: IncidentRecord;
@@ -80,6 +85,7 @@ export function planIntegrityEscalation(
   const scope = report.scope ?? "platform";
   const incident = planIncidentDeclaration({
     incidentId: opts.incidentId,
+    autoDeclaredFor: integrityIncidentKey(report.scope),
     title: `Audit integrity compromised for ${scope}`,
     severity: opts.severity,
     category: opts.category,
@@ -173,6 +179,21 @@ export class IntegrityEscalator {
       };
     }
 
+    // A restart has an empty `open` map and a tamper that is still present, so without this the
+    // next pass declares a second incident for one episode. An adopted incident is `ongoing`, and
+    // deliberately does not page again: the page went out when it was declared.
+    const adopted = await this.adopt(report);
+    if (adopted !== null) {
+      this.open.set(key, adopted);
+      return {
+        scope: report.scope,
+        kind: "ongoing",
+        incidentId: adopted,
+        audited: false,
+        disposition: "declared",
+      };
+    }
+
     const declared = await this.declare(report);
     // Marked open before paging, so a failing pager cannot cause a re-declare next pass.
     this.open.set(key, declared.incident.id);
@@ -194,6 +215,25 @@ export class IntegrityEscalator {
   }
 
   /**
+   * The id of the incident this scope already has open, when the ledger remembers one this process
+   * does not.
+   *
+   * A lookup that fails is read as "nothing open": that risks a duplicate incident, never a missed
+   * tamper, and `idx_incidents_auto_declared_open` refuses the duplicate anyway.
+   */
+  private async adopt(report: IntegrityProofReport): Promise<string | null> {
+    const ledger = this.opts.incidents;
+    if (ledger === undefined) return null;
+    try {
+      const stored = await ledger.findOpenFor(integrityIncidentKey(report.scope));
+      return stored === null ? null : stored.record.id;
+    } catch (err) {
+      this.opts.onError?.(err);
+      return null;
+    }
+  }
+
+  /**
    * Declares the incident, from the ledger when one is wired.
    *
    * With a ledger the id is allocated from the rows that exist, so a restart continues the year's
@@ -211,6 +251,7 @@ export class IntegrityEscalator {
       try {
         const stored = await ledger.declare({
           title: `Audit integrity compromised for ${scope}`,
+          autoDeclaredFor: integrityIncidentKey(report.scope),
           severity: this.opts.config.severity,
           category: this.opts.config.category,
           declaredBy: this.opts.config.declaredBy,

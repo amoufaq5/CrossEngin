@@ -3,7 +3,12 @@ import {
   type SloAvailabilityTarget,
 } from "@crossengin/observability";
 import type { AlertPolicy } from "@crossengin/observability";
-import type { IncidentCategory, IncidentRecord, Severity } from "@crossengin/incident-response";
+import {
+  autoDeclaredForKey,
+  type IncidentCategory,
+  type IncidentRecord,
+  type Severity,
+} from "@crossengin/incident-response";
 import {
   CountingIncidentDeclarer,
   type IncidentCloseOut,
@@ -20,6 +25,7 @@ import {
 import {
   closeOutEnforcementIncident,
   declareEnforcementIncident,
+  findOpenEnforcementIncident,
   formatKillSwitchId,
   planKillSwitchActivation,
   planPageDirective,
@@ -154,6 +160,11 @@ export class SloEnforcementEngine {
 
       if (verdict.breached && existing === undefined) {
         if (this.declaring.has(surface)) continue;
+        const adopted = await this.adopt(reg, surface, verdict);
+        if (adopted !== null) {
+          decisions.push(adopted);
+          continue;
+        }
         const opened = await this.openBreach(reg, surface, verdict, nowIso);
         // A declaration that could not be recorded leaves the surface unopened, so the next tick
         // declares it instead of this pass abandoning every surface after it.
@@ -192,6 +203,42 @@ export class SloEnforcementEngine {
     return decisions;
   }
 
+  /** The key this engine's incidents are declared under: namespaced, so latency cannot adopt one. */
+  private keyFor(surface: string): string {
+    return autoDeclaredForKey("availability", surface);
+  }
+
+  /**
+   * Adopts the incident this surface already has open, when the store remembers one this process
+   * does not.
+   *
+   * A restart mid-breach has an empty `active` map and a breach that is still burning, so without
+   * this the next pass declares a second incident for one episode. The breach is reported as
+   * `breach_ongoing`, which is what it is: it was opened, and it was opened before this process
+   * started. Nothing is paged again — the page went out when the incident was declared.
+   */
+  private async adopt(
+    reg: SloRegistration,
+    surface: string,
+    verdict: BurnRateVerdict,
+  ): Promise<EnforcementDecision | null> {
+    const open = await findOpenEnforcementIncident(
+      this.declarer,
+      this.keyFor(surface),
+      { surface, sloId: reg.slo.id },
+      this.onDeclarationError,
+    );
+    if (open === null) return null;
+    this.active.set(surface, {
+      incidentId: open.id,
+      // Nothing persists the kill switch, so a restart cannot recover which flag was rolled back.
+      killSwitchId: null,
+      severity: open.severity,
+      thresholdId: verdict.worstThresholdId ?? "unknown",
+    });
+    return { kind: "breach_ongoing", surface, sloId: reg.slo.id, incidentId: open.id };
+  }
+
   private async openBreach(
     reg: SloRegistration,
     surface: string,
@@ -215,6 +262,7 @@ export class SloEnforcementEngine {
         this.declarer,
         {
           title: `SLO burn alert: ${reg.slo.id} on ${surface}`,
+          autoDeclaredFor: this.keyFor(surface),
           severity,
           ...(reg.category !== undefined ? { category: reg.category } : {}),
           surface,

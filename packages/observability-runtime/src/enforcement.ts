@@ -61,6 +61,8 @@ export type FlagRollback = z.infer<typeof FlagRollbackSchema>;
 
 export interface IncidentDeclarationInput {
   readonly incidentId: string;
+  /** The signal this declaration is the incident for; see `autoDeclaredForKey`. */
+  readonly autoDeclaredFor?: string;
   readonly title: string;
   readonly severity: Severity;
   readonly category?: IncidentCategory;
@@ -74,6 +76,7 @@ export interface IncidentDeclarationInput {
 export function planIncidentDeclaration(input: IncidentDeclarationInput): IncidentRecord {
   return IncidentRecordSchema.parse({
     id: input.incidentId,
+    autoDeclaredFor: input.autoDeclaredFor ?? null,
     title: input.title,
     severity: input.severity,
     category: input.category ?? "availability",
@@ -97,7 +100,7 @@ export function planIncidentDeclaration(input: IncidentDeclarationInput): Incide
 export interface DeclarationFailure {
   readonly surface: string;
   readonly sloId: string;
-  readonly phase: "declare" | "close_out";
+  readonly phase: "find_open" | "declare" | "close_out";
 }
 
 export type DeclarationErrorSink = (error: unknown, failure: DeclarationFailure) => void;
@@ -121,7 +124,30 @@ export function enforcementDeclarationRequest(
     declaredAt: input.nowIso,
     affectedTenantIds: input.affectedTenantIds ?? [],
     metadata: { surface: input.surface, autoDeclared: true },
+    ...(input.autoDeclaredFor !== undefined ? { autoDeclaredFor: input.autoDeclaredFor } : {}),
   };
+}
+
+/**
+ * The open incident this signal already declared, if any.
+ *
+ * Called before declaring, so a process that restarted mid-breach adopts the incident it opened
+ * before rather than declaring a second for the same still-present breach. A lookup that fails is
+ * reported and read as "nothing open": that risks a duplicate incident, never a missed one, and
+ * `idx_incidents_auto_declared_open` refuses the duplicate anyway.
+ */
+export async function findOpenEnforcementIncident(
+  declarer: IncidentDeclarer,
+  autoDeclaredFor: string,
+  failure: Omit<DeclarationFailure, "phase">,
+  onError?: DeclarationErrorSink,
+): Promise<IncidentRecord | null> {
+  try {
+    return await declarer.findOpen(autoDeclaredFor);
+  } catch (err) {
+    onError?.(err, { ...failure, phase: "find_open" });
+    return null;
+  }
 }
 
 /**

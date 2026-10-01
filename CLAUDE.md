@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 288 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 289 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**84 packages + 3 apps, 139 meta-schema tables, ~9,879 tests**, all green, no
+**84 packages + 3 apps, 139 meta-schema tables, ~9,926 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -329,7 +329,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   in the enforcement action is one string by construction. A declaration that fails leaves the
   surface unopened for the next tick rather than aborting the pass, a surface with a declaration in
   flight is skipped, and a `recovered` decision carries `closeOut` — `cancelled` / `human_owned` /
-  `unpersisted` / `failed`.
+  `unpersisted` / `failed`. Before declaring it asks the declarer which incident this signal already
+  has open (ADR-0294), so a restart mid-breach adopts it as `breach_ongoing` instead of declaring a
+  second for one episode; the key is `autoDeclaredForKey(signal, surface)`, namespaced so the latency
+  breach on a surface is not the availability one.
 - **`observability-runtime-pg`** — persists evaluations and enforcement actions for both the
   availability and latency engines (one action table with a `signal` column), plus a
   replayer that flags ongoing-without-open, duplicate-open and paged-without-channels. Both
@@ -339,7 +342,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   incident lifecycle, runbook executions with per-step outcomes, blameless postmortems with
   prioritized action items, and customer comms carrying the GDPR 72h breach deadline. Also owns
   the `INC-YYYY-NNNN` vocabulary (`formatIncidentId` / `parseIncidentId`), which
-  `observability-runtime` re-exports.
+  `observability-runtime` re-exports, and `IncidentRecord.autoDeclaredFor` + `autoDeclaredForKey` —
+  the `signal:subject` key an automated declarer declares under, which a restart looks an open
+  incident up by (ADR-0294).
 - **`incident-response-runtime`** — the pure `IncidentExecutor` over one incident's record:
   declare, assign/hand off roles, change severity, note, attach a postmortem, transition. Two
   rules carry the weight. `incidentTransitionBlockers` answers "may this move?" by building the
@@ -349,8 +354,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `triaged` needs the on-call roles assigned, so no scheduler can resolve an incident. Plus
   `assessIncidentSla`, which scores an *open* incident against the wall clock (the contracts
   helpers only answer for targets already reached). Also the `IncidentDeclarer` seam (ADR-0293) —
-  "who chooses an auto-declared incident's id and whether the record outlives the process" — with
-  `CountingIncidentDeclarer` as the offline implementation.
+  "who chooses an auto-declared incident's id and whether the record outlives the process", and
+  answers "which open incident did this signal already open?" — with `CountingIncidentDeclarer` as the
+  offline implementation, which finds nothing because nothing it declared survived.
 - **`incident-response-runtime-pg`** — `meta.incidents` as the store, with ids allocated from
   `MAX(sequence_number) + 1` under an advisory lock (so a restart continues the year's sequence),
   a `revision` guard on every write, an append-only timeline the engine enforces before any SQL,
@@ -358,6 +364,7 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   contract forbids but a CHECK constraint permits (ADR-0289). `insertAllocated` holds that lock
   across the allocation *and* the insert, so two declarations in flight cannot be handed one sequence
   (ADR-0293), and `PostgresIncidentDeclarer` is the store-backed declarer the SLO engines use.
+  `findOpenFor` answers hydration's question from `auto_declared_for` (ADR-0294).
 - **`dr`** — 5 DR tiers with RPO/RTO targets, replication topology, backup kinds, failover
   records, drills with finding severities, runbooks.
 - **`dr-runtime`** — executes it: a `FailoverExecutor` state machine (plan → start →
@@ -633,12 +640,14 @@ opened them.
 - **The applier halts on the first failure.** Much less consequential now the plan is built to
   succeed, but for a plan whose steps are largely independent, continuing and reporting every
   outcome would be strictly more useful (ADR-0290, 0291).
-- **Open-episode state is per-process** (ADR-0289, 0293). Ids no longer collide across a restart,
-  but both `IntegrityEscalator.open` and each SLO engine's active-breach map are in memory, so a
-  restart re-declares a still-present tamper or breach under a new id — one episode, two incidents.
-  Hydrating it needs a way to ask "which open incident did this surface open?", and
-  `IncidentRecord` has no `surface` field — a column outside the record would break the property
-  the replayer depends on (the row *is* the record).
+- **Nothing persists a `KillSwitch`** (ADR-0294). `meta.feature_flag_kill_switches` exists and the
+  SLO loop does not write it, so a flag rolled back before a restart stays rolled back with nothing
+  in the process knowing which flag it was — the reason `killSwitchId` is null on a recovery from an
+  adopted breach. Same reconcile-or-delete question ADR-0289 answered for `meta.incidents`.
+- **Test files are not typechecked** anywhere in the repo (`tsconfig.json` excludes `**/*.test.ts`;
+  vitest transpiles without checking), so a test double that no longer satisfies an interface fails at
+  runtime rather than at build. ADR-0294 hit this: a stub missing a new method threw a `TypeError`
+  that a deliberate catch swallowed, and the suite stayed green while the new path went unexercised.
 - **Declaring an SLO incident requires the database** (ADR-0293), which is itself the kind of outage
   an SLO breach describes. A failed declaration leaves the surface unopened and the next tick retries,
   so the page is delayed rather than lost; a failed close-out is not retried at all and leaves the row
@@ -701,7 +710,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 288 records; 209
+hand-editing, so a title or status change cannot drift. 289 records; 210
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

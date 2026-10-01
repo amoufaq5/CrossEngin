@@ -156,6 +156,10 @@ describe("SloEnforcementEngine — quiet paths", () => {
 /** A declarer standing in for a store: ids from a fixed high-water mark, close-outs recorded. */
 class StubDeclarer implements IncidentDeclarer {
   readonly closeOuts: { id: string; input: IncidentCloseOutInput }[] = [];
+  readonly declared: IncidentDeclarationRequest[] = [];
+  readonly lookups: string[] = [];
+  /** Keyed by `autoDeclaredFor`, standing in for the rows a restart would still find. */
+  readonly open = new Map<string, IncidentRecord>();
   private next: number;
   constructor(
     firstSequence = 57,
@@ -166,9 +170,14 @@ class StubDeclarer implements IncidentDeclarer {
   }
   async declare(request: IncidentDeclarationRequest): Promise<IncidentRecord> {
     if (this.refuse) throw new Error("incident store unreachable");
+    this.declared.push(request);
     const id = `INC-2026-${String(this.next).padStart(4, "0")}`;
     this.next += 1;
     return new IncidentExecutor().declare({ ...request, id });
+  }
+  async findOpen(key: string): Promise<IncidentRecord | null> {
+    this.lookups.push(key);
+    return this.open.get(key) ?? null;
   }
   async closeOut(id: string, input: IncidentCloseOutInput): Promise<IncidentCloseOut> {
     this.closeOuts.push({ id, input });
@@ -297,5 +306,106 @@ describe("SloEnforcementEngine — incident ids come from the declarer", () => {
       .filter((d) => d.kind === "breach_opened")
       .map((d) => (d.kind === "breach_opened" ? d.plan.incident.id : ""));
     expect(ids).toEqual(["INC-2026-0057", "INC-2026-0058"]);
+  });
+});
+
+describe("SloEnforcementEngine — a restart adopts the incident it already opened", () => {
+  async function declaredOnce(): Promise<{ declarer: StubDeclarer; incidentId: string }> {
+    const declarer = new StubDeclarer(57);
+    const engine = engineWith(new FixedClock(BASE), declarer);
+    burst(engine, 25, BASE.getTime());
+    const opened = (await engine.evaluate())[0];
+    if (opened?.kind !== "breach_opened") throw new Error("expected breach");
+    // What a store would still hold after the process that declared it went away.
+    declarer.open.set("availability:" + SURFACE, opened.plan.incident);
+    return { declarer, incidentId: opened.plan.incident.id };
+  }
+
+  it("declares under a namespaced key, so latency cannot adopt an availability incident", async () => {
+    const declarer = new StubDeclarer(57);
+    const engine = engineWith(new FixedClock(BASE), declarer);
+    burst(engine, 25, BASE.getTime());
+    await engine.evaluate();
+    expect(declarer.declared[0]?.autoDeclaredFor).toBe(`availability:${SURFACE}`);
+  });
+
+  it("asks the store before declaring", async () => {
+    const declarer = new StubDeclarer(57);
+    const engine = engineWith(new FixedClock(BASE), declarer);
+    burst(engine, 25, BASE.getTime());
+    await engine.evaluate();
+    expect(declarer.lookups).toEqual([`availability:${SURFACE}`]);
+  });
+
+  it("adopts the open incident instead of declaring a second one", async () => {
+    const { declarer, incidentId } = await declaredOnce();
+    // A fresh engine on the same declarer: the restart case, with an empty active map.
+    const restarted = engineWith(new FixedClock(BASE), declarer);
+    burst(restarted, 25, BASE.getTime());
+    const decisions = await restarted.evaluate();
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.kind).toBe("breach_ongoing");
+    expect(decisions[0]?.kind === "breach_ongoing" && decisions[0].incidentId).toBe(incidentId);
+    expect(declarer.declared).toHaveLength(1);
+  });
+
+  it("then treats the adopted breach as its own, reporting ongoing and recovering it", async () => {
+    const { declarer, incidentId } = await declaredOnce();
+    const clock = new FixedClock(BASE);
+    const restarted = engineWith(clock, declarer);
+    burst(restarted, 25, BASE.getTime());
+    await restarted.evaluate();
+    expect(restarted.activeBreaches()).toHaveLength(1);
+
+    clock.advance(2 * 3_600_000);
+    const recovered = (await restarted.evaluate(clock.now()))[0];
+    if (recovered?.kind !== "recovered") throw new Error("expected recovery");
+    expect(recovered.incidentId).toBe(incidentId);
+    expect(declarer.closeOuts[0]?.id).toBe(incidentId);
+  });
+
+  it("reports no kill switch on an adopted breach, because nothing stored one", async () => {
+    const { declarer } = await declaredOnce();
+    const clock = new FixedClock(BASE);
+    const restarted = engineWith(clock, declarer);
+    burst(restarted, 25, BASE.getTime());
+    await restarted.evaluate();
+    clock.advance(2 * 3_600_000);
+    const recovered = (await restarted.evaluate(clock.now()))[0];
+    expect(recovered?.kind === "recovered" && recovered.killSwitchId).toBeNull();
+  });
+
+  it("declares normally when the store holds nothing for this surface", async () => {
+    const declarer = new StubDeclarer(57);
+    declarer.open.set("availability:some.other.surface", await declarer.declare({
+      title: "elsewhere",
+      severity: "sev3",
+      category: "availability",
+      declaredBy: "x",
+      detail: "d",
+      declaredAt: BASE.toISOString(),
+    }));
+    const engine = engineWith(new FixedClock(BASE), declarer);
+    burst(engine, 25, BASE.getTime());
+    expect((await engine.evaluate())[0]?.kind).toBe("breach_opened");
+  });
+
+  it("declares anyway when the lookup fails, rather than leaving the breach unhandled", async () => {
+    // Fail toward a duplicate, which the database refuses, not toward a missed breach.
+    class FailingLookup extends StubDeclarer {
+      override async findOpen(): Promise<IncidentRecord | null> {
+        throw new Error("store unreachable");
+      }
+    }
+    const engine = engineWith(new FixedClock(BASE), new FailingLookup(57));
+    burst(engine, 25, BASE.getTime());
+    expect((await engine.evaluate())[0]?.kind).toBe("breach_opened");
+  });
+
+  it("does not adopt anything when nothing persists, since nothing survived", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = makeEngine(clock);
+    burst(engine, 25, BASE.getTime());
+    expect((await engine.evaluate())[0]?.kind).toBe("breach_opened");
   });
 });

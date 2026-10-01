@@ -86,6 +86,11 @@ export class PersistentIncidentEngine {
     return this.store.load(incidentId);
   }
 
+  /** The open incident already declared for an automated signal — see `findOpenFor` on the store. */
+  async findOpenFor(autoDeclaredFor: string): Promise<StoredIncident | null> {
+    return this.store.findOpenFor(autoDeclaredFor);
+  }
+
   /**
    * The single write path. `mutate` must return a record whose timeline extends the loaded one;
    * rewriting or dropping an already-recorded entry is refused rather than persisted, because the
