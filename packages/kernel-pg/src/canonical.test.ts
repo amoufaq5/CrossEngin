@@ -5,19 +5,31 @@ import {
   APPLIER_OWNED_TABLES,
   COMMAND_TO_POLCMD,
   DEFAULT_ON_DELETE,
+  DEFAULT_ON_UPDATE,
   DEFAULT_POLICY_COMMAND,
+  DEFAULT_POLICY_PERMISSIVE,
   DEFAULT_POLICY_ROLES,
+  PG_NAME_MAX_LENGTH,
   PG_TYPE_ALIASES,
   POLCMD_TO_COMMAND,
   canonicalPgDefault,
   canonicalPgType,
   canonicalPolicyCommand,
   canonicalPolicyRoles,
+  declaredCheckConstraints,
+  declaredConstraintOnDelete,
+  declaredConstraintOnUpdate,
+  declaredConstraintTarget,
+  declaredForeignKeyConstraints,
   declaredForeignKeys,
   declaredOnDelete,
   declaredPolicyCommand,
+  declaredPolicyPermissive,
   declaredPolicyRoles,
+  declaredUniqueConstraints,
+  expectedCheckConstraintNames,
   expectedIndexNames,
+  makeObjectName,
   policyCommandToPolcmd,
   samePolicyRoles,
 } from "./canonical.js";
@@ -369,6 +381,231 @@ describe("policy role canonicalization", () => {
       for (const policy of t.rls?.policies ?? []) {
         expect(declaredPolicyCommand(policy)).toBe("ALL");
         expect([...declaredPolicyRoles(policy)]).toEqual(["PUBLIC"]);
+      }
+    }
+  });
+});
+
+describe("makeObjectName", () => {
+  it("joins the parts with underscores when everything fits", () => {
+    expect(makeObjectName("widgets", "status", "check")).toBe("widgets_status_check");
+    expect(makeObjectName("widgets", null, "check")).toBe("widgets_check");
+  });
+
+  it("leaves the label intact and shortens the longer name, not the whole string", () => {
+    // The real catalog case: naive truncation at 63 characters drops `_check` altogether, which would
+    // report a correct constraint as undeclared.
+    expect(
+      makeObjectName("access_review_templates", "default_remediation_days_from_completion", "check"),
+    ).toBe("access_review_templates_default_remediation_days_from_com_check");
+    expect(
+      makeObjectName("access_review_decisions", "attestation_signing_key_fingerprint", "check"),
+    ).toBe("access_review_decisions_attestation_signing_key_fingerpri_check");
+  });
+
+  it("never exceeds the identifier limit", () => {
+    const long = "x".repeat(80);
+    expect(makeObjectName(long, long, "check").length).toBe(PG_NAME_MAX_LENGTH);
+    expect(makeObjectName(long, null, "fkey").length).toBe(PG_NAME_MAX_LENGTH);
+    expect(PG_NAME_MAX_LENGTH).toBe(63);
+  });
+
+  it("shortens whichever name is longer, one character at a time", () => {
+    const out = makeObjectName("a".repeat(10), "b".repeat(60), "check");
+    expect(out.startsWith("aaaaaaaaaa_")).toBe(true);
+    expect(out.endsWith("_check")).toBe(true);
+    expect(out.length).toBe(PG_NAME_MAX_LENGTH);
+  });
+
+  it("agrees with every name the existing index and foreign-key guesses already use", () => {
+    // `expectedIndexNames` and `declaredForeignKeys` build `<table>_<column>_key` and `_fkey` by
+    // concatenation. That happens to be right for the whole catalog today; this says so, so a longer
+    // table or column name later fails here rather than reading as drift.
+    for (const t of META_TABLES) {
+      for (const col of t.columns) {
+        if (col.unique === true) {
+          expect(`${t.name}_${col.name}_key`).toBe(makeObjectName(t.name, col.name, "key"));
+        }
+        if (col.references !== undefined) {
+          expect(`${t.name}_${col.name}_fkey`).toBe(makeObjectName(t.name, col.name, "fkey"));
+        }
+      }
+    }
+  });
+});
+
+describe("expectedCheckConstraintNames", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "status", type: "TEXT", notNull: true, check: "status IN ('a','b')" },
+      { name: "label", type: "TEXT" },
+    ],
+  };
+
+  it("is empty for a table with no checks at all", () => {
+    expect([...expectedCheckConstraintNames({ ...table, columns: [table.columns[0]!] })]).toEqual([]);
+  });
+
+  it("derives the name Postgres gives a single-column check", () => {
+    expect(expectedCheckConstraintNames(table).has("comms_status_check")).toBe(true);
+  });
+
+  it("also expects the unqualified name, because a cross-column check gets that one", () => {
+    // Which name Postgres picks depends on how many columns the *expression* references, and knowing
+    // that means parsing it. `tenant_credits.remaining_cents` in the real catalog declares
+    // `remaining_cents <= amount_cents` on a column and so carries `tenant_credits_check`.
+    expect(expectedCheckConstraintNames(table).has("comms_check")).toBe(true);
+  });
+
+  it("includes a declared table-level check under the name it declares", () => {
+    const withTableCheck: TableDefinition = {
+      ...table,
+      constraints: [
+        { kind: "check", name: "comms_window_check", expression: "a <= b" },
+        { kind: "unique", name: "comms_pair_key", columns: ["id", "label"] },
+      ],
+    };
+    const names = expectedCheckConstraintNames(withTableCheck);
+    expect(names.has("comms_window_check")).toBe(true);
+    // A unique constraint is not a CHECK and is accounted for through its backing index instead.
+    expect(names.has("comms_pair_key")).toBe(false);
+  });
+
+  it("accounts for every check name in the real catalog within the identifier limit", () => {
+    // The acceptance test for "a correct schema reports no drift": each generated name has to be one
+    // Postgres could actually have stored, which means 63 characters or fewer.
+    let checked = 0;
+    for (const t of META_TABLES) {
+      for (const name of expectedCheckConstraintNames(t)) {
+        expect(name.length).toBeLessThanOrEqual(PG_NAME_MAX_LENGTH);
+        checked++;
+      }
+    }
+    expect(checked).toBeGreaterThan(700);
+  });
+
+  it("expects the unqualified name for every catalog table that has any column check", () => {
+    for (const t of META_TABLES) {
+      if (!t.columns.some((c) => c.check !== undefined)) continue;
+      expect(expectedCheckConstraintNames(t).has(makeObjectName(t.name, null, "check"))).toBe(true);
+    }
+  });
+});
+
+describe("table constraints — splitters and defaults", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "tenant_id", type: "UUID", notNull: true },
+    ],
+    uniqueConstraints: [{ name: "comms_legacy_key", columns: ["id"] }],
+    constraints: [
+      { kind: "check", name: "comms_window_check", expression: "a <= b" },
+      {
+        kind: "foreign_key",
+        name: "comms_incident_fkey",
+        columns: ["tenant_id", "id"],
+        references: { table: "incidents", columns: ["tenant_id", "id"] },
+      },
+      { kind: "unique", name: "comms_pair_key", columns: ["tenant_id", "id"] },
+    ],
+  };
+
+  it("splits the union by kind", () => {
+    expect(declaredCheckConstraints(table).map((c) => c.name)).toEqual(["comms_window_check"]);
+    expect(declaredForeignKeyConstraints(table).map((c) => c.name)).toEqual([
+      "comms_incident_fkey",
+    ]);
+  });
+
+  it("returns nothing for a table declaring none", () => {
+    const bare: TableDefinition = { schema: "meta", name: "x", columns: [] };
+    expect(declaredCheckConstraints(bare)).toEqual([]);
+    expect(declaredForeignKeyConstraints(bare)).toEqual([]);
+    expect(declaredUniqueConstraints(bare)).toEqual([]);
+  });
+
+  it("merges both spellings of a unique constraint", () => {
+    expect(declaredUniqueConstraints(table).map((c) => c.name)).toEqual([
+      "comms_legacy_key",
+      "comms_pair_key",
+    ]);
+  });
+
+  it("expects a kind:unique constraint's index, so it is never reported as missing twice", () => {
+    const expected = expectedIndexNames(table);
+    expect(expected.constraints.has("comms_pair_key")).toBe(true);
+    expect(expected.constraints.has("comms_legacy_key")).toBe(true);
+    expect(expected.indexes.has("comms_pair_key")).toBe(false);
+  });
+
+  it("reads an omitted ON DELETE as RESTRICT and an omitted ON UPDATE as NO ACTION", () => {
+    const fk = declaredForeignKeyConstraints(table)[0]!;
+    expect(declaredConstraintOnDelete(fk)).toBe("RESTRICT");
+    expect(declaredConstraintOnUpdate(fk)).toBe("NO ACTION");
+    expect(DEFAULT_ON_DELETE).toBe("RESTRICT");
+    expect(DEFAULT_ON_UPDATE).toBe("NO ACTION");
+  });
+
+  it("reads a declared action as itself", () => {
+    expect(
+      declaredConstraintOnDelete({
+        kind: "foreign_key",
+        name: "f",
+        columns: ["a"],
+        references: { table: "t", columns: ["id"] },
+        onDelete: "CASCADE",
+      }),
+    ).toBe("CASCADE");
+    expect(
+      declaredConstraintOnUpdate({
+        kind: "foreign_key",
+        name: "f",
+        columns: ["a"],
+        references: { table: "t", columns: ["id"] },
+        onUpdate: "SET NULL",
+      }),
+    ).toBe("SET NULL");
+  });
+
+  it("resolves an unqualified target through the table's own schema", () => {
+    expect(declaredConstraintTarget(table, declaredForeignKeyConstraints(table)[0]!)).toBe(
+      "meta.incidents",
+    );
+  });
+
+  it("keeps an explicit target schema", () => {
+    expect(
+      declaredConstraintTarget(table, {
+        kind: "foreign_key",
+        name: "f",
+        columns: ["a"],
+        references: { schema: "other", table: "t", columns: ["id"] },
+      }),
+    ).toBe("other.t");
+  });
+});
+
+describe("declaredPolicyPermissive", () => {
+  it("reads an omitted field as permissive, which is the CREATE POLICY default", () => {
+    expect(declaredPolicyPermissive({ name: "p", using: "true" })).toBe(true);
+    expect(DEFAULT_POLICY_PERMISSIVE).toBe(true);
+  });
+
+  it("reads a declared value as itself", () => {
+    expect(declaredPolicyPermissive({ name: "p", using: "true", permissive: true })).toBe(true);
+    expect(declaredPolicyPermissive({ name: "p", using: "true", permissive: false })).toBe(false);
+  });
+
+  it("leaves every policy in the real catalog permissive", () => {
+    for (const t of META_TABLES) {
+      for (const policy of t.rls?.policies ?? []) {
+        expect(declaredPolicyPermissive(policy)).toBe(true);
       }
     }
   });

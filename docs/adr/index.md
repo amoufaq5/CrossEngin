@@ -1,9 +1,10 @@
 # ADR index
 
-293 records. Generated from the ADR files themselves — regenerate rather than
-hand-edit, so a title or status change in an ADR cannot silently drift from this table.
+301 records. Generated from the ADR files themselves — regenerate rather than
+hand-edit, so a title or status change in an ADR cannot silently drift from this table:
+`python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 214  **Proposed:** 79
+- **Accepted:** 222  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -304,3 +305,11 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0296](0296-dead-table-reconciliation.md) | Four dead tables, and what they could not store | Phase 4 | Accepted | 2026-10-01 |
 | [0297](0297-close-out-and-one-declarer.md) | Storing how a recovery ended, and one way to declare | Phase 4 | Accepted | 2026-10-01 |
 | [0298](0298-policy-roles-and-command.md) | What a policy applies to, and to whom | Phase 4 | Accepted | 2026-10-01 |
+| [0299](0299-table-constraints-and-policy-permissiveness.md) | Table-level constraints and policy permissiveness in the DDL vocabulary | Phase 4 | Accepted | 2026-10-01 |
+| [0300](0300-feature-flags-reconciled.md) | Reconciling `meta.feature_flags` instead of deleting it | Phase 4 | Accepted | 2026-10-01 |
+| [0301](0301-real-channel-senders.md) | Real email and SMS senders, configured from the environment | Phase 4 | Accepted | 2026-10-01 |
+| [0302](0302-bounces-feed-suppressions.md) | Bounces feed suppressions, and three reasons they did not | Phase 4 | Accepted | 2026-10-01 |
+| [0303](0303-integrity-verdicts-readable.md) | Audit-integrity verdicts readable over HTTP | Phase 4 | Accepted | 2026-10-01 |
+| [0304](0304-fallback-declarer.md) | A declarer that falls back, so a page is never lost to a database | Phase 4 | Accepted | 2026-10-01 |
+| [0305](0305-child-workflows.md) | Spawning child workflows — the last stub | Phase 4 | Accepted | 2026-10-01 |
+| [0306](0306-local-provider-in-product.md) | Routing the in-product Architect through the local provider | Phase 4 | Accepted | 2026-10-01 |

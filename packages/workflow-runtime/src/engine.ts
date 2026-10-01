@@ -1,6 +1,7 @@
 import { sha256 } from "@crossengin/crypto";
 import {
   TERMINAL_STATE_KINDS,
+  type ActionKind,
   type StateAction,
   type TransitionDefinition,
   type WorkflowDefinition,
@@ -28,6 +29,82 @@ import {
 } from "./transitions.js";
 
 const MAX_STEP_ITERATIONS = 1000;
+
+/**
+ * How many parents a spawned instance may already have above it. A definition whose child spawns
+ * back into its own lineage would otherwise recurse until the stack died; bounding the chain turns
+ * that authoring mistake into a named refusal.
+ */
+export const MAX_CHILD_WORKFLOW_DEPTH = 8;
+
+/** How deep a `send_signal` chain may nest before it is refused (A signals B, B signals A, …). */
+export const MAX_SIGNAL_DISPATCH_DEPTH = 8;
+
+export const WORKFLOW_ACTION_FAILURES = [
+  "missing_parameter",
+  "unknown_child_definition",
+  "unresolved_correlation_key",
+  "child_depth_exceeded",
+  "signal_depth_exceeded",
+] as const;
+export type WorkflowActionFailure = (typeof WORKFLOW_ACTION_FAILURES)[number];
+
+/**
+ * A state action the engine understands but cannot carry out for *this* definition — a required
+ * parameter the `StateActionSchema` does not itself demand, a child definition key that resolves to
+ * nothing registered, or a dispatch chain deep enough to be a cycle. It names the action, the
+ * instance and what the caller has to change, which an `Error` carrying a milestone label did not.
+ */
+export class WorkflowActionError extends Error {
+  readonly actionKind: ActionKind;
+  readonly failure: WorkflowActionFailure;
+  readonly instanceId: string;
+
+  constructor(input: {
+    readonly actionKind: ActionKind;
+    readonly failure: WorkflowActionFailure;
+    readonly instanceId: string;
+    readonly detail: string;
+  }) {
+    super(`${input.actionKind} action on instance ${input.instanceId} cannot run: ${input.detail}`);
+    this.name = "WorkflowActionError";
+    this.actionKind = input.actionKind;
+    this.failure = input.failure;
+    this.instanceId = input.instanceId;
+  }
+}
+
+/** A non-empty string action parameter, or `null` when absent or of another type. */
+function stringParam(action: StateAction, key: string): string | null {
+  const value = action.parameters[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function recordParam(action: StateAction, key: string): Record<string, unknown> {
+  const value = action.parameters[key];
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+/** Orders `a.b.c` versions numerically so the newest published definition of a key is pickable. */
+function compareDefinitionVersions(left: string, right: string): number {
+  const l = left.split(".").map((p) => Number.parseInt(p, 10));
+  const r = right.split(".").map((p) => Number.parseInt(p, 10));
+  for (let i = 0; i < Math.max(l.length, r.length); i++) {
+    const a = Number.isFinite(l[i]) ? (l[i] as number) : 0;
+    const b = Number.isFinite(r[i]) ? (r[i] as number) : 0;
+    if (a !== b) return a - b;
+  }
+  return 0;
+}
+
+interface ScheduledTimer {
+  readonly id: string;
+  readonly name: string;
+  readonly fireAt: number;
+}
 
 /**
  * A retry backoff for a scheduled activity, in milliseconds (durations stay ms here to avoid an ISO
@@ -136,6 +213,8 @@ export class WorkflowEngine {
   private readonly seenSignalIdempotency: Set<string> = new Set();
   private readonly instanceTenant: Map<string, string> = new Map();
   private readonly instanceCorrelation: Map<string, string> = new Map();
+  /** Nesting of in-flight `send_signal` dispatches, so a signal cycle is refused, not recursed. */
+  private signalDispatchDepth = 0;
 
   constructor(opts: EngineOptions) {
     this.eventLog = opts.eventLog;
@@ -230,7 +309,10 @@ export class WorkflowEngine {
 
     const signalId = this.ids.generate("wfs");
     const matched: string[] = [];
-    for (const [instanceId, tenantId] of this.instanceTenant) {
+    // Snapshot the registry: delivering a signal can run a `spawn_child_workflow` action, which
+    // registers the child mid-loop — a live Map iteration would then deliver this same signal to an
+    // instance that did not exist when it was submitted.
+    for (const [instanceId, tenantId] of [...this.instanceTenant]) {
       if (tenantId !== input.tenantId) continue;
       const corr = this.instanceCorrelation.get(instanceId);
       if (corr !== input.correlationKey) continue;
@@ -307,7 +389,8 @@ export class WorkflowEngine {
   async tickTimers(nowMs: number): Promise<TickTimersResult> {
     const firedTimerIds: string[] = [];
     const affected = new Set<string>();
-    for (const [instanceId] of this.instanceTenant) {
+    // Snapshot for the same reason as submitSignal: a fired timer's transition may spawn a child.
+    for (const [instanceId] of [...this.instanceTenant]) {
       const result = await this.fireDueTimersForInstance(instanceId, nowMs);
       firedTimerIds.push(...result.firedTimerIds);
       if (result.affectedInstanceIds.length > 0) affected.add(instanceId);
@@ -331,19 +414,9 @@ export class WorkflowEngine {
     }
     const definition = this.definitions.get(state.definitionId);
     if (definition === undefined) return { firedTimerIds: [], affectedInstanceIds: [] };
-    const events = await this.eventLog.listByInstance(instanceId);
-    const scheduled = new Map<string, { id: string; name: string; fireAt: number }>();
-    for (const e of events) {
-      if (e.kind === "timer_scheduled" && e.timerId !== null) {
-        const name = typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
-        const fireAt = typeof e.payload["fireAt"] === "string" ? Date.parse(e.payload["fireAt"] as string) : Number.MAX_SAFE_INTEGER;
-        scheduled.set(e.timerId, { id: e.timerId, name, fireAt });
-      } else if ((e.kind === "timer_fired" || e.kind === "timer_cancelled") && e.timerId !== null) {
-        scheduled.delete(e.timerId);
-      }
-    }
+    const scheduled = await this.outstandingTimers(instanceId);
     const firedTimerIds: string[] = [];
-    for (const timer of scheduled.values()) {
+    for (const timer of scheduled) {
       if (timer.fireAt > nowMs) continue;
       const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
       await this.appendEvent({
@@ -381,6 +454,27 @@ export class WorkflowEngine {
       await this.runStepLoop(instanceId, definition);
     }
     return { firedTimerIds, affectedInstanceIds: firedTimerIds.length > 0 ? [instanceId] : [] };
+  }
+
+  /**
+   * The instance's timers that are still outstanding, derived from the log alone: scheduled and not
+   * yet fired or cancelled. Both the firing path and `cancel_timer` read from here, so an already
+   * fired or cancelled timer is invisible to both and a re-delivered claim or a repeated cancel is a
+   * no-op rather than a second terminal event for one timer.
+   */
+  private async outstandingTimers(instanceId: string): Promise<readonly ScheduledTimer[]> {
+    const events = await this.eventLog.listByInstance(instanceId);
+    const scheduled = new Map<string, ScheduledTimer>();
+    for (const e of events) {
+      if (e.kind === "timer_scheduled" && e.timerId !== null) {
+        const name = typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
+        const fireAt = typeof e.payload["fireAt"] === "string" ? Date.parse(e.payload["fireAt"] as string) : Number.MAX_SAFE_INTEGER;
+        scheduled.set(e.timerId, { id: e.timerId, name, fireAt });
+      } else if ((e.kind === "timer_fired" || e.kind === "timer_cancelled") && e.timerId !== null) {
+        scheduled.delete(e.timerId);
+      }
+    }
+    return [...scheduled.values()];
   }
 
   async cancelInstance(input: {
@@ -537,12 +631,18 @@ export class WorkflowEngine {
     signalId: string | null,
     timerId: string | null,
   ): Promise<void> {
+    // The triggering signal/timer is not threaded into any action: an action's effect is a function
+    // of the instance's projected state, so it replays from the log without knowing what woke it.
+    void signalId;
+    void timerId;
     switch (action.kind) {
       case "set_variable":
         await this.applySetVariable(instanceId, tenantId, action);
         return;
       case "audit_log":
       case "emit_event":
+        // Observational only: the append-only history *is* the audit trail, and an emitted domain
+        // event leaves the workflow boundary, so neither changes this instance's projected state.
         return;
       case "schedule_activity":
         await this.applyScheduleActivity(instanceId, definition, action, tenantId);
@@ -551,12 +651,307 @@ export class WorkflowEngine {
         await this.applyScheduleTimer(instanceId, tenantId, action);
         return;
       case "cancel_timer":
+        await this.applyCancelTimer(instanceId, tenantId, action);
+        return;
       case "spawn_child_workflow":
+        await this.applySpawnChildWorkflow(instanceId, tenantId, action);
+        return;
       case "send_signal":
-        throw new Error(`action kind ${action.kind} is not implemented in M3`);
+        await this.applySendSignal(instanceId, tenantId, action);
+        return;
     }
-    void signalId;
-    void timerId;
+  }
+
+  /**
+   * Cancels every outstanding timer of the named timer, as `timer_cancelled` events. The projection
+   * keys `awaitingTimerNames` by *name*, so a name scheduled twice has to lose both timers before the
+   * instance stops waiting — cancelling only the first would leave it parked forever.
+   */
+  private async applyCancelTimer(
+    instanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const timerName = stringParam(action, "timerName");
+    if (timerName === null) {
+      throw new WorkflowActionError({
+        actionKind: "cancel_timer",
+        failure: "missing_parameter",
+        instanceId,
+        detail: "parameters.timerName must be a non-empty string naming the timer to cancel",
+      });
+    }
+    for (const timer of await this.outstandingTimers(instanceId)) {
+      if (timer.name !== timerName) continue;
+      const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+      await this.appendEvent({
+        instanceId,
+        tenantId,
+        sequenceNumber: nextSeq + 1,
+        kind: "timer_cancelled",
+        occurredAt: this.clock.nowIso(),
+        actorPrincipalId: null,
+        actorSystemId: this.systemActorId,
+        previousState: null,
+        newState: null,
+        activityId: null,
+        signalId: null,
+        timerId: timer.id,
+        childInstanceId: null,
+        variableName: null,
+        payload: { timerName },
+        correlationId: null,
+        causationEventId: null,
+      });
+    }
+  }
+
+  /**
+   * Starts a child instance from this engine's own definition registry and anchors it to the parent
+   * with a `child_workflow_spawned`. The child is a first-class instance in the same log, so its
+   * state is re-derived from its own events and the parent's log records only the link — replaying
+   * the parent never re-spawns anything.
+   *
+   * A child that reaches a terminal status during its own start (the common case for a short
+   * in-process child) is reported back immediately: nothing else would, since an in-process child has
+   * no callback to fire later.
+   */
+  private async applySpawnChildWorkflow(
+    instanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const childDefinition = this.resolveChildDefinition(instanceId, action);
+    const depth = await this.lineageDepth(instanceId);
+    if (depth >= MAX_CHILD_WORKFLOW_DEPTH) {
+      throw new WorkflowActionError({
+        actionKind: "spawn_child_workflow",
+        failure: "child_depth_exceeded",
+        instanceId,
+        detail: `child workflow lineage is already ${depth.toString()} deep (limit ${MAX_CHILD_WORKFLOW_DEPTH.toString()}); definition ${childDefinition.definitionKey} spawns back into its own lineage`,
+      });
+    }
+    const correlationKey = stringParam(action, "correlationKey");
+    const child = await this.startInstance({
+      definitionId: childDefinition.id,
+      tenantId,
+      variables: recordParam(action, "variables"),
+      parentInstanceId: instanceId,
+      ...(correlationKey !== null ? { correlationKey } : {}),
+    });
+
+    const spawnSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId,
+      sequenceNumber: spawnSeq + 1,
+      kind: "child_workflow_spawned",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: child.instanceId,
+      variableName: null,
+      payload: {
+        childDefinitionId: childDefinition.id,
+        childDefinitionKey: childDefinition.definitionKey,
+        childDefinitionVersion: childDefinition.version,
+        childStatus: child.status,
+      },
+      correlationId: correlationKey,
+      causationEventId: null,
+    });
+
+    if (
+      child.status !== "completed" &&
+      child.status !== "failed" &&
+      child.status !== "cancelled" &&
+      child.status !== "compensated"
+    ) {
+      return;
+    }
+    const doneSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId,
+      sequenceNumber: doneSeq + 1,
+      kind: "child_workflow_completed",
+      occurredAt: this.clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: child.instanceId,
+      variableName: null,
+      payload: {
+        childDefinitionKey: childDefinition.definitionKey,
+        childStatus: child.status,
+        childState: child.currentState,
+      },
+      correlationId: correlationKey,
+      causationEventId: null,
+    });
+    const liveState = await this.getInstanceState(instanceId);
+    const parentDefinition = this.definitions.get(liveState?.definitionId ?? "");
+    if (liveState === null || parentDefinition === undefined) return;
+    const transition = evaluateNextTransition({
+      definition: parentDefinition,
+      fromState: liveState.currentState,
+      trigger: {
+        kind: "child_workflow_completed",
+        childDefinitionKey: childDefinition.definitionKey,
+      },
+      variables: liveState.variables,
+      evaluator: this.guardEvaluator,
+    });
+    if (transition !== null) {
+      await this.applyTransition(instanceId, parentDefinition, transition, liveState, null, null);
+    }
+  }
+
+  /**
+   * Resolves the child definition from `definitionId` (exact) or `definitionKey` — the vocabulary the
+   * `child_workflow_completed` trigger matches on. Several published versions of one key resolve to
+   * the highest, so a key names one definition deterministically rather than whichever the registry
+   * happened to hold first.
+   */
+  private resolveChildDefinition(instanceId: string, action: StateAction): WorkflowDefinition {
+    const definitionId = stringParam(action, "definitionId");
+    if (definitionId !== null) {
+      const byId = this.definitions.get(definitionId);
+      if (byId === undefined) {
+        throw new WorkflowActionError({
+          actionKind: "spawn_child_workflow",
+          failure: "unknown_child_definition",
+          instanceId,
+          detail: `no workflow definition with id ${definitionId} is registered with this engine`,
+        });
+      }
+      return byId;
+    }
+    const definitionKey = stringParam(action, "definitionKey");
+    if (definitionKey === null) {
+      throw new WorkflowActionError({
+        actionKind: "spawn_child_workflow",
+        failure: "missing_parameter",
+        instanceId,
+        detail: "parameters must carry definitionKey or definitionId naming the child workflow",
+      });
+    }
+    const published = [...this.definitions.values()].filter(
+      (d) => d.definitionKey === definitionKey && d.status === "published",
+    );
+    published.sort((a, b) => compareDefinitionVersions(b.version, a.version));
+    const chosen = published[0];
+    if (chosen === undefined) {
+      throw new WorkflowActionError({
+        actionKind: "spawn_child_workflow",
+        failure: "unknown_child_definition",
+        instanceId,
+        detail: `no published workflow definition with key ${definitionKey} is registered with this engine`,
+      });
+    }
+    return chosen;
+  }
+
+  /** How many parents this instance already has above it, following `parentInstanceId` in the log. */
+  private async lineageDepth(instanceId: string): Promise<number> {
+    const seen = new Set<string>([instanceId]);
+    let cursor: string | null = instanceId;
+    let depth = 0;
+    while (cursor !== null && depth <= MAX_CHILD_WORKFLOW_DEPTH) {
+      const state: ProjectedInstance | null = await this.getInstanceState(cursor);
+      if (state === null) break;
+      cursor = state.parentInstanceId;
+      if (cursor === null || seen.has(cursor)) break;
+      seen.add(cursor);
+      depth += 1;
+    }
+    return depth;
+  }
+
+  /**
+   * Delivers a signal from inside a workflow through the engine's own `submitSignal`, so an
+   * instance-to-instance signal takes exactly the path an inbound one does — correlation matching,
+   * `signal_received` / `signal_consumed`, the receiver's step loop. Delivery reaches the instances
+   * this engine knows, which is the same reach `tickTimers` has; crossing a process boundary is the
+   * `-runtime-pg` layer's job, not this one's.
+   */
+  private async applySendSignal(
+    instanceId: string,
+    tenantId: string,
+    action: StateAction,
+  ): Promise<void> {
+    const signalName = stringParam(action, "signalName");
+    if (signalName === null) {
+      throw new WorkflowActionError({
+        actionKind: "send_signal",
+        failure: "missing_parameter",
+        instanceId,
+        detail: "parameters.signalName must be a non-empty string",
+      });
+    }
+    const correlationKey = await this.resolveSignalCorrelationKey(instanceId, action);
+    if (this.signalDispatchDepth >= MAX_SIGNAL_DISPATCH_DEPTH) {
+      throw new WorkflowActionError({
+        actionKind: "send_signal",
+        failure: "signal_depth_exceeded",
+        instanceId,
+        detail: `signal dispatch is already ${this.signalDispatchDepth.toString()} deep (limit ${MAX_SIGNAL_DISPATCH_DEPTH.toString()}); signal ${signalName} is part of a cycle`,
+      });
+    }
+    this.signalDispatchDepth += 1;
+    try {
+      await this.submitSignal({
+        signalName,
+        correlationKey,
+        tenantId,
+        payload: recordParam(action, "payload"),
+        sourceSystem: this.systemActorId,
+      });
+    } finally {
+      this.signalDispatchDepth -= 1;
+    }
+  }
+
+  /**
+   * The correlation key a `send_signal` addresses: a literal `correlationKey`, or the value of the
+   * instance variable named by `correlationVariable` — which is how one workflow addresses a sibling
+   * it learned about at runtime. An absent or non-scalar variable is refused rather than stringified,
+   * since `"undefined"` would correlate to nothing and the send would look delivered.
+   */
+  private async resolveSignalCorrelationKey(
+    instanceId: string,
+    action: StateAction,
+  ): Promise<string> {
+    const literal = stringParam(action, "correlationKey");
+    if (literal !== null) return literal;
+    const variableName = stringParam(action, "correlationVariable");
+    if (variableName === null) {
+      throw new WorkflowActionError({
+        actionKind: "send_signal",
+        failure: "missing_parameter",
+        instanceId,
+        detail: "parameters must carry correlationKey or correlationVariable",
+      });
+    }
+    const state = await this.getInstanceState(instanceId);
+    const value = state?.variables[variableName];
+    if (typeof value === "string" && value.length > 0) return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value.toString();
+    throw new WorkflowActionError({
+      actionKind: "send_signal",
+      failure: "unresolved_correlation_key",
+      instanceId,
+      detail: `variable ${variableName} holds no usable correlation key (expected a non-empty string or a finite number)`,
+    });
   }
 
   private async applySetVariable(

@@ -49,13 +49,14 @@ function liveWidgets(over: Partial<LiveTable> = {}): LiveTable {
       { name: "kind", dataType: "text", isNullable: false, defaultExpr: "'basic'::text" },
     ],
     indexes: [
-      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
-      { name: "idx_widgets_label", columns: ["label"], unique: false, primary: false, method: "btree", predicate: null },
-      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null },
-      { name: "widgets_tenant_code_key", columns: ["tenant_id", "code"], unique: true, primary: false, method: "btree", predicate: null },
+      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+      { name: "idx_widgets_label", columns: ["label"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
+      { name: "widgets_tenant_code_key", columns: ["tenant_id", "code"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
     ],
-    policies: [{ name: "widgets_isolation", using: "(tenant_id = ...)", check: null, command: "ALL", roles: ["PUBLIC"] }],
+    policies: [{ name: "widgets_isolation", using: "(tenant_id = ...)", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
     foreignKeys: [],
+    checkConstraints: [],
     rlsEnabled: true,
     ...over,
   };
@@ -87,6 +88,8 @@ describe("RECONCILE_STEP_KINDS", () => {
       "replace_index",
       "replace_unique_constraint",
       "replace_policy",
+      "add_table_constraint",
+      "replace_table_constraint",
     ]);
   });
 
@@ -111,6 +114,8 @@ describe("UNRECONCILED_REASONS", () => {
       "index_removed",
       "policy_removed",
       "foreign_key_removed",
+      "constraint_needs_validation",
+      "constraint_removed",
       "rls_unexpectedly_enabled",
     ]);
   });
@@ -318,7 +323,7 @@ describe("planSchemaReconciliation — what it refuses", () => {
     const stale = liveWidgets({
       policies: [
         ...liveWidgets().policies,
-        { name: "widgets_extra", using: "true", check: null, command: "ALL", roles: ["PUBLIC"] },
+        { name: "widgets_extra", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true },
       ],
     });
     const plan = planFor([WIDGETS], live([stale]));
@@ -459,6 +464,7 @@ function liveChild(over: Partial<LiveTable> = {}): LiveTable {
         targetTable: "tenants",
         targetColumns: ["id"],
         onDelete: "CASCADE",
+        onUpdate: "NO ACTION",
       },
       {
         name: "children_owner_id_fkey",
@@ -467,8 +473,10 @@ function liveChild(over: Partial<LiveTable> = {}): LiveTable {
         targetTable: "users",
         targetColumns: ["id"],
         onDelete: "RESTRICT",
+        onUpdate: "NO ACTION",
       },
     ],
+    checkConstraints: [],
     rlsEnabled: false,
     ...over,
   };
@@ -568,6 +576,7 @@ describe("foreign keys — undeclared", () => {
           targetTable: "tenants",
           targetColumns: ["slug"],
           onDelete: "NO ACTION",
+          onUpdate: "NO ACTION",
         },
       ],
     });
@@ -590,6 +599,7 @@ describe("foreign keys — undeclared", () => {
           targetTable: "tenants",
           targetColumns: ["id", "slug"],
           onDelete: "NO ACTION",
+          onUpdate: "NO ACTION",
         },
       ],
     });
@@ -820,11 +830,53 @@ describe("replacing a changed index, constraint or policy", () => {
     expect(step?.guarded).toBe(true);
   });
 
+  it("drops the constraint when a declared index is constraint-backed in the database", () => {
+    // A unique constraint promoted to a predicated unique index — the only way to express a
+    // predicate, since a UNIQUE constraint cannot carry one. The catalog now declares an *index*, so
+    // the old branch read `constraintBacked` from the declaration and emitted a plain DROP INDEX,
+    // which Postgres refuses: "cannot drop index … because constraint … requires it". That put a step
+    // in the plan that could not succeed, which the plan's one invariant forbids. Measured live.
+    const PROMOTED: TableDefinition = {
+      ...WIDGETS,
+      uniqueConstraints: [],
+      indexes: [
+        ...(WIDGETS.indexes ?? []),
+        {
+          name: "widgets_tenant_code_key",
+          columns: ["tenant_id", "code"],
+          unique: true,
+          where: "code IS NOT NULL",
+        },
+      ],
+    };
+    // The declared predicate needs a rendering, or it is not compared at all and the promotion reads
+    // as no change — which is correct caution, not a bug (ADR-0292), but it means this case only
+    // surfaces where the renderings are supplied, as the CLI supplies them.
+    const rendered = {
+      byRequest: new Map<string, string | null>([
+        ...RENDERED.byRequest,
+        [expressionKey("widgets", "code IS NOT NULL"), "(code IS NOT NULL)"],
+      ]),
+    };
+    const plan = planSchemaReconciliation(
+      diffSchema([PROMOTED], live([liveWidgets()]), rendered),
+      [PROMOTED],
+    );
+    const step = plan.steps.find((s) => s.target === "widgets_tenant_code_key");
+    expect(step?.kind).toBe("replace_index");
+    expect(step?.sql).toContain("DROP CONSTRAINT");
+    expect(step?.sql).toContain("CREATE UNIQUE INDEX");
+    expect(step?.sql).toContain("WHERE code IS NOT NULL");
+    // The refused spelling: dropping the index directly leaves the constraint owning it.
+    expect(step?.sql).not.toContain("DROP INDEX");
+    expect(plan.unreconciled).toHaveLength(0);
+  });
+
   it("replaces a policy whose clause changed, in one statement", () => {
     // A table with RLS on and no policy denies every row, so a window between the two would be an
     // outage rather than a leak — and one statement means there is no window.
     const plan = planChanged({
-      policies: [{ name: "widgets_isolation", using: "(something else)", check: null, command: "ALL", roles: ["PUBLIC"] }],
+      policies: [{ name: "widgets_isolation", using: "(something else)", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
     });
     const step = plan.steps.find((s) => s.kind === "replace_policy");
     expect(step?.target).toBe("widgets_isolation");
@@ -843,6 +895,7 @@ describe("replacing a changed index, constraint or policy", () => {
           check: null,
           command: "SELECT",
           roles: ["PUBLIC"],
+          permissive: true,
         },
       ],
     });
@@ -862,6 +915,7 @@ describe("replacing a changed index, constraint or policy", () => {
           check: null,
           command: "ALL",
           roles: ["app_reader"],
+          permissive: true,
         },
       ],
     });
@@ -897,6 +951,7 @@ describe("replacing a changed index, constraint or policy", () => {
             check: null,
             command: "ALL",
             roles: ["PUBLIC"],
+            permissive: true,
           },
         ],
       }),
@@ -961,6 +1016,7 @@ describe("replacing a changed index, constraint or policy", () => {
             check: null,
             command: "SELECT",
             roles: ["app_reader"],
+            permissive: true,
           },
         ],
       }),
@@ -983,5 +1039,381 @@ describe("replacing a changed index, constraint or policy", () => {
     );
     expect(plan.steps.some((s) => s.kind === "replace_index")).toBe(false);
     expect(plan.unreconciled.some((u) => u.reason === "depends_on_unreconciled")).toBe(true);
+  });
+});
+
+describe("a column arriving with the constraints ADD COLUMN carries", () => {
+  /**
+   * The defect this pins, measured against a real Postgres: a column declared with an inline
+   * `REFERENCES` and missing from the live schema was planned twice — once as `add_column`, which
+   * carries the reference, and again as `add_foreign_key`, which then failed with
+   * `constraint "…_fkey" for relation "…" already exists`. The diff is computed against the schema as
+   * it was *before* the plan runs, where the column does not exist at all, so the reference reads as
+   * declared-but-missing. One guaranteed failure per added reference is the plan's central invariant
+   * being false, not a reporting wrinkle.
+   */
+  const CARRIER: TableDefinition = {
+    schema: "meta",
+    name: "flags",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      {
+        name: "tenant_id",
+        type: "UUID",
+        references: { schema: "meta", table: "tenants", column: "id", onDelete: "CASCADE" },
+      },
+      { name: "slug", type: "TEXT", unique: true },
+      { name: "named", type: "TEXT", unique: { constraintName: "flags_named_key" } },
+      { name: "status", type: "TEXT", check: "status IN ('on','off')" },
+    ],
+    primaryKey: ["id"],
+  };
+
+  /** The live table before any of the five columns but `id` exist. */
+  function bareFlags(): LiveTable {
+    return {
+      schema: "meta",
+      name: "flags",
+      columns: [{ name: "id", dataType: "uuid", isNullable: false, defaultExpr: null }],
+      indexes: [
+        { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+      ],
+      policies: [],
+      foreignKeys: [],
+      checkConstraints: [],
+      rlsEnabled: false,
+    };
+  }
+
+  const plan = planSchemaReconciliation(
+    diffSchema([CARRIER], live([bareFlags()])),
+    [CARRIER],
+    { rowCounts: new Map([["flags", 0]]) },
+  );
+
+  it("plans one step for a column that carries its own reference, not two", () => {
+    const touching = plan.steps.filter((s) => s.target === "tenant_id");
+    expect(touching.map((s) => s.kind)).toEqual(["add_column"]);
+    expect(plan.steps.some((s) => s.kind === "add_foreign_key")).toBe(false);
+  });
+
+  it("still writes the reference into the ADD COLUMN, so the constraint is really created", () => {
+    const step = plan.steps.find((s) => s.target === "tenant_id");
+    expect(step?.sql).toContain(`REFERENCES "meta"."tenants"("id") ON DELETE CASCADE`);
+  });
+
+  it("does not plan the unnamed column UNIQUE either, since ADD COLUMN writes it", () => {
+    expect(plan.steps.some((s) => s.target === "flags_slug_key")).toBe(false);
+    expect(plan.steps.find((s) => s.target === "slug")?.sql).toContain("UNIQUE");
+  });
+
+  it("does plan a named column UNIQUE, because emitColumn does not write that one", () => {
+    // The asymmetry is in the emitter: `unique: true` becomes an inline `UNIQUE`, while
+    // `unique: { constraintName }` is a table-level line only `emitCreateTable` emits.
+    const step = plan.steps.find((s) => s.target === "flags_named_key");
+    expect(step?.kind).toBe("add_unique_constraint");
+    expect(plan.steps.find((s) => s.target === "named")?.sql).not.toContain("UNIQUE");
+  });
+
+  it("plans no separate step for a column-level CHECK, which ADD COLUMN also carries", () => {
+    expect(plan.steps.find((s) => s.target === "status")?.sql).toContain("CHECK");
+    expect(plan.steps.filter((s) => s.target === "status")).toHaveLength(1);
+    expect(plan.steps.some((s) => s.kind === "add_table_constraint")).toBe(false);
+  });
+
+  it("plans every column exactly once", () => {
+    const added = plan.steps.filter((s) => s.kind === "add_column").map((s) => s.target);
+    expect(added).toEqual(["tenant_id", "slug", "named", "status"]);
+  });
+
+  it("still adds a reference on a column that already exists", () => {
+    // The suppression is scoped to columns *this plan* adds; an existing column whose reference the
+    // database lacks still needs the constraint.
+    const withColumns: LiveTable = {
+      ...bareFlags(),
+      columns: [
+        ...bareFlags().columns,
+        { name: "tenant_id", dataType: "uuid", isNullable: true, defaultExpr: null },
+      ],
+    };
+    const p = planSchemaReconciliation(diffSchema([CARRIER], live([withColumns])), [CARRIER], {
+      rowCounts: new Map([["flags", 0]]),
+    });
+    expect(p.steps.some((s) => s.kind === "add_foreign_key" && s.target === "tenant_id")).toBe(true);
+  });
+});
+
+describe("table-level constraints — planning", () => {
+  const COMMS: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "tenant_id", type: "UUID", notNull: true },
+      { name: "recipient_count", type: "INTEGER", notNull: true },
+      { name: "bounces_count", type: "INTEGER", notNull: true },
+    ],
+    primaryKey: ["id"],
+    constraints: [
+      {
+        kind: "check",
+        name: "comms_bounces_check",
+        expression: "bounces_count <= recipient_count",
+      },
+      {
+        kind: "foreign_key",
+        name: "comms_incident_fkey",
+        columns: ["tenant_id", "id"],
+        references: { schema: "meta", table: "incidents", columns: ["tenant_id", "id"] },
+        onDelete: "CASCADE",
+      },
+      { kind: "unique", name: "comms_pair_key", columns: ["tenant_id", "id"] },
+    ],
+  };
+
+  const RENDERED = {
+    byRequest: new Map<string, string | null>([
+      [
+        expressionKey("comms", "bounces_count <= recipient_count"),
+        "(bounces_count <= recipient_count)",
+      ],
+    ]),
+  };
+
+  function liveComms(over: Partial<LiveTable> = {}): LiveTable {
+    return {
+      schema: "meta",
+      name: "comms",
+      columns: [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "tenant_id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "recipient_count", dataType: "integer", isNullable: false, defaultExpr: null },
+        { name: "bounces_count", dataType: "integer", isNullable: false, defaultExpr: null },
+      ],
+      indexes: [
+        { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+        { name: "comms_pair_key", columns: ["tenant_id", "id"], unique: true, primary: false, method: "btree", predicate: null },
+      ],
+      policies: [],
+      foreignKeys: [
+        {
+          name: "comms_incident_fkey",
+          columns: ["tenant_id", "id"],
+          targetSchema: "meta",
+          targetTable: "incidents",
+          targetColumns: ["tenant_id", "id"],
+          onDelete: "CASCADE",
+          onUpdate: "NO ACTION",
+        },
+      ],
+      checkConstraints: [
+        {
+          name: "comms_bounces_check",
+          expression: "(bounces_count <= recipient_count)",
+          columns: ["recipient_count", "bounces_count"],
+        },
+      ],
+      rlsEnabled: false,
+      ...over,
+    };
+  }
+
+  /** `rows: null` means no probe at all, which is what a caller that did not count looks like. */
+  function planWith(over: Partial<LiveTable>, rows: number | null = 0) {
+    return planSchemaReconciliation(
+      diffSchema([COMMS], live([liveComms(over)]), RENDERED),
+      [COMMS],
+      rows === null ? undefined : { rowCounts: new Map([["comms", rows]]) },
+    );
+  }
+
+  it("plans nothing when every constraint matches", () => {
+    expect(planWith({}).steps).toEqual([]);
+    expect(planWith({}).unreconciled).toEqual([]);
+  });
+
+  it("emits the constraints inside CREATE TABLE on a fresh install, with no separate step", () => {
+    const fresh = planSchemaReconciliation(diffSchema([COMMS], live([]), RENDERED), [COMMS]);
+    expect(fresh.steps.every((s) => s.kind === "create_table")).toBe(true);
+    expect(fresh.statements[0]).toContain(
+      `CONSTRAINT "comms_bounces_check" CHECK (bounces_count <= recipient_count)`,
+    );
+    expect(fresh.statements[0]).toContain(`CONSTRAINT "comms_incident_fkey" FOREIGN KEY`);
+    expect(fresh.unreconciled).toEqual([]);
+  });
+
+  it("adds a missing CHECK on an empty table, guarded", () => {
+    const plan = planWith({ checkConstraints: [] });
+    const step = plan.steps.find((s) => s.kind === "add_table_constraint");
+    expect(step?.target).toBe("comms_bounces_check");
+    expect(step?.guarded).toBe(true);
+    expect(step?.sql).toContain("SELECT count(*) INTO existing");
+    expect(step?.sql).toContain(
+      `ADD CONSTRAINT "comms_bounces_check" CHECK (bounces_count <= recipient_count);`,
+    );
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("refuses a missing CHECK on a populated table, with the SQL and the violating rows", () => {
+    const plan = planWith({ checkConstraints: [] }, 4);
+    expect(plan.steps).toEqual([]);
+    const item = plan.unreconciled.find((u) => u.reason === "constraint_needs_validation");
+    expect(item?.target).toBe("comms_bounces_check");
+    expect(item?.detail).toContain("holds 4 row(s)");
+    expect(item?.manualSql).toContain("WHERE NOT (bounces_count <= recipient_count)");
+    expect(item?.manualSql).toContain(`ADD CONSTRAINT "comms_bounces_check" CHECK`);
+  });
+
+  it("never plans a NOT VALID constraint, which would record an unchecked rule", () => {
+    for (const plan of [planWith({ checkConstraints: [] }), planWith({ checkConstraints: [] }, 4)]) {
+      for (const step of plan.steps) expect(step.sql).not.toContain("NOT VALID");
+      for (const item of plan.unreconciled) expect(item.manualSql).not.toContain("NOT VALID");
+    }
+  });
+
+  it("refuses when the row count is unknown, rather than assuming the table is empty", () => {
+    const plan = planWith({ checkConstraints: [] }, null);
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled[0]?.detail).toContain("an unknown number of row(s)");
+  });
+
+  it("adds a missing composite foreign key on an empty table", () => {
+    const step = planWith({ foreignKeys: [] }).steps.find(
+      (s) => s.kind === "add_table_constraint",
+    );
+    expect(step?.target).toBe("comms_incident_fkey");
+    expect(step?.sql).toContain(
+      `ADD CONSTRAINT "comms_incident_fkey" FOREIGN KEY ("tenant_id", "id") ` +
+        `REFERENCES "meta"."incidents"("tenant_id", "id") ON DELETE CASCADE;`,
+    );
+  });
+
+  it("refuses a missing composite foreign key on a populated table", () => {
+    const item = planWith({ foreignKeys: [] }, 1).unreconciled[0];
+    expect(item?.reason).toBe("constraint_needs_validation");
+    expect(item?.manualSql).toContain("has no match in");
+  });
+
+  it("replaces a changed CHECK in one guarded statement, dropping before adding", () => {
+    const plan = planWith({
+      checkConstraints: [
+        {
+          name: "comms_bounces_check",
+          expression: "(bounces_count < recipient_count)",
+          columns: ["recipient_count", "bounces_count"],
+        },
+      ],
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_table_constraint");
+    expect(step?.target).toBe("comms_bounces_check");
+    expect(step?.guarded).toBe(true);
+    expect(step?.sql.indexOf("DROP CONSTRAINT")).toBeLessThan(
+      step?.sql.indexOf("ADD CONSTRAINT") ?? -1,
+    );
+    expect(plan.statements).toHaveLength(1);
+  });
+
+  it("refuses a changed CHECK on a populated table and hands over both halves", () => {
+    const item = planWith(
+      {
+        checkConstraints: [
+          {
+            name: "comms_bounces_check",
+            expression: "(bounces_count < recipient_count)",
+            columns: ["recipient_count", "bounces_count"],
+          },
+        ],
+      },
+      9,
+    ).unreconciled[0];
+    expect(item?.reason).toBe("constraint_needs_validation");
+    expect(item?.manualSql).toContain("DROP CONSTRAINT");
+    expect(item?.manualSql).toContain("ADD CONSTRAINT");
+  });
+
+  it("reports an undeclared CHECK rather than dropping it", () => {
+    const plan = planWith({
+      checkConstraints: [
+        ...liveComms().checkConstraints,
+        { name: "comms_adhoc_check", expression: "(recipient_count > 0)", columns: ["recipient_count"] },
+      ],
+    });
+    expect(plan.steps).toEqual([]);
+    const item = plan.unreconciled.find((u) => u.reason === "constraint_removed");
+    expect(item?.target).toBe("comms_adhoc_check");
+    expect(item?.detail).toContain("over (recipient_count)");
+    expect(item?.detail).toContain("(recipient_count > 0)");
+    expect(item?.manualSql).toContain(`DROP CONSTRAINT "comms_adhoc_check"`);
+  });
+
+  it("repairs a missing kind:unique constraint with ADD CONSTRAINT, not the guarded path", () => {
+    // ADR-0291 settled this: a unique constraint over duplicate rows is the database contradicting
+    // the catalog, not an ambiguous decision, so it keeps the existing unguarded-by-emptiness step.
+    const plan = planWith({
+      indexes: liveComms().indexes.filter((i) => i.name !== "comms_pair_key"),
+    });
+    const step = plan.steps.find((s) => s.target === "comms_pair_key");
+    expect(step?.kind).toBe("add_unique_constraint");
+    expect(step?.sql).toContain(`ADD CONSTRAINT "comms_pair_key" UNIQUE ("tenant_id", "id")`);
+  });
+
+  it("replaces a changed kind:unique constraint through its constraint", () => {
+    const plan = planWith({
+      indexes: liveComms().indexes.map((i) =>
+        i.name === "comms_pair_key" ? { ...i, columns: ["id", "tenant_id"] } : i,
+      ),
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_unique_constraint");
+    expect(step?.target).toBe("comms_pair_key");
+    expect(step?.sql).not.toContain("DROP INDEX");
+  });
+
+  it("drops a declared table-level foreign key that blocks a column type change, then re-adds it", () => {
+    const retyped: TableDefinition = {
+      ...COMMS,
+      columns: COMMS.columns.map((c) =>
+        c.name === "tenant_id" ? { ...c, type: "TEXT" } : c,
+      ),
+    };
+    const plan = planSchemaReconciliation(
+      diffSchema([retyped], live([liveComms()]), RENDERED),
+      [retyped],
+      { rowCounts: new Map([["comms", 0]]) },
+    );
+    const kinds = plan.steps.map((s) => s.kind);
+    expect(kinds.indexOf("drop_foreign_key")).toBeGreaterThanOrEqual(0);
+    expect(kinds.indexOf("drop_foreign_key")).toBeLessThan(kinds.indexOf("alter_column_type"));
+    expect(kinds.indexOf("alter_column_type")).toBeLessThan(kinds.indexOf("add_table_constraint"));
+    expect(plan.steps.find((s) => s.kind === "add_table_constraint")?.target).toBe(
+      "comms_incident_fkey",
+    );
+  });
+
+  it("plans a table constraint after the columns it covers are added", () => {
+    const stale: LiveTable = {
+      ...liveComms({ checkConstraints: [] }),
+      columns: liveComms().columns.filter((c) => c.name !== "bounces_count"),
+    };
+    const plan = planSchemaReconciliation(
+      diffSchema([COMMS], live([stale]), RENDERED),
+      [COMMS],
+      { rowCounts: new Map([["comms", 0]]) },
+    );
+    const kinds = plan.steps.map((s) => s.kind);
+    expect(kinds.indexOf("add_column")).toBeLessThan(kinds.indexOf("add_table_constraint"));
+  });
+
+  it("names the constraint in the guard's error message", () => {
+    expect(planWith({ checkConstraints: [] }).steps[0]?.sql).toContain(
+      "refusing to add constraint comms_bounces_check to meta.comms",
+    );
+  });
+
+  it("prints the new step kinds and reasons in the plan report", () => {
+    const added = formatReconciliationPlan(planWith({ checkConstraints: [] }));
+    expect(added).toContain("add_table_constraint comms.comms_bounces_check");
+    expect(added).toContain("[guarded]");
+    const refused = formatReconciliationPlan(planWith({ checkConstraints: [] }, 2));
+    expect(refused).toContain("[constraint_needs_validation] comms.comms_bounces_check");
   });
 });

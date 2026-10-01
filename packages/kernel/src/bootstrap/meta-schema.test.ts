@@ -14,6 +14,7 @@ import {
   META_AI_CONVERSATIONS,
   META_AI_PROVIDER_CALLS,
   META_API_KEYS,
+  META_AUDIT_INTEGRITY_VERDICTS,
   META_AUDIT_LOG,
   META_AUTOSCALING_EVENTS,
   META_BACKFILL_JOBS,
@@ -124,7 +125,7 @@ import {
 
 describe("META_TABLES", () => {
   it("contains 136 tables", () => {
-    expect(META_TABLES).toHaveLength(139);
+    expect(META_TABLES).toHaveLength(140);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -155,6 +156,7 @@ describe("META_TABLES", () => {
       "architect_sessions",
       "architect_tenant_cost",
       "architect_tool_invocations",
+      "audit_integrity_verdicts",
       "audit_log",
       "autoscaling_events",
       "backfill_jobs",
@@ -1173,6 +1175,75 @@ describe("table column shapes", () => {
     }
   });
 
+  it("META_AUDIT_INTEGRITY_VERDICTS can answer the questions it exists for", () => {
+    // Queryability is the whole point (ADR-0287), so each of these must be a column rather than
+    // something only recoverable by parsing the JSONB report.
+    const names = META_AUDIT_INTEGRITY_VERDICTS.columns.map((c) => c.name);
+    for (const n of [
+      "verdict",
+      "verified_at",
+      "anchors_checked",
+      "anchors_verified",
+      "anchors_tampered",
+      "anchors_unanchored",
+      "truncated",
+    ]) {
+      expect(names, n).toContain(n);
+    }
+  });
+
+  it("META_AUDIT_INTEGRITY_VERDICTS ties a row to the chain entry that attests to it", () => {
+    // A row with no matching chain entry proves nothing on its own; the hash names the entry, the
+    // sequence lets a reader seek to it, and the digest proves the content is the committed content.
+    const hash = META_AUDIT_INTEGRITY_VERDICTS.columns.find((c) => c.name === "chain_entry_hash");
+    const seq = META_AUDIT_INTEGRITY_VERDICTS.columns.find(
+      (c) => c.name === "chain_sequence_number",
+    );
+    const digest = META_AUDIT_INTEGRITY_VERDICTS.columns.find((c) => c.name === "payload_sha256");
+    expect(hash?.type).toBe("TEXT");
+    expect(seq?.type).toBe("INTEGER");
+    expect(digest?.check).toContain("[0-9a-f]{64}");
+    // All three nullable: a pass configured not to record a verdict writes none of them.
+    for (const col of [hash, seq, digest]) expect(col?.notNull).toBeUndefined();
+  });
+
+  it("META_AUDIT_INTEGRITY_VERDICTS confines a tenant and gates the platform read", () => {
+    // Not the `feature_flag_kill_switches` `IS NULL OR …` shape: that would show a platform-chain
+    // tamper finding to every tenant session. Plain isolation is false for a NULL tenant, so a
+    // platform verdict is invisible without the explicit opt-in — and the flag is its own, because
+    // reading every tenant's verdicts is not the same privilege as reviewing design proposals.
+    const policy = META_AUDIT_INTEGRITY_VERDICTS.rls?.policies?.[0];
+    expect(META_AUDIT_INTEGRITY_VERDICTS.rls?.enabled).toBe(true);
+    expect(policy?.using).not.toContain("tenant_id IS NULL");
+    expect(policy?.using).toContain("app.platform_audit");
+    expect(policy?.using).not.toContain("app.platform_review");
+  });
+
+  it("META_INCIDENT_COMMUNICATIONS holds its two cross-column rules in the database", () => {
+    // ADR-0296 recorded both as having nowhere to live, enforced only by the re-parse on read.
+    const names = (META_INCIDENT_COMMUNICATIONS.constraints ?? []).map((c) => c.name);
+    expect(names).toContain("incident_communications_bounces_check");
+    expect(names).toContain("incident_communications_breach_window_check");
+    const window = (META_INCIDENT_COMMUNICATIONS.constraints ?? []).find(
+      (c) => c.name === "incident_communications_breach_window_check",
+    );
+    // A CHECK that evaluates to NULL is passed by Postgres, so the null guard is what makes the
+    // deadline rule mean anything for a non-breach communication.
+    expect(window?.kind === "check" && window.expression).toContain("IS NULL OR");
+    for (const c of META_INCIDENT_COMMUNICATIONS.constraints ?? []) {
+      expect(c.name.length, c.name).toBeLessThanOrEqual(63);
+    }
+  });
+
+  it("META_FEATURE_FLAGS stores the contract's own flag id", () => {
+    // What a `flag_id UUID` reference elsewhere in the catalog had nothing to point at (ADR-0296).
+    const col = META_FEATURE_FLAGS.columns.find((c) => c.name === "flag_id");
+    expect(col?.type).toBe("TEXT");
+    expect(col?.notNull).toBe(true);
+    expect(col?.unique?.constraintName).toBe("feature_flags_flag_id_key");
+    expect(col?.check).toContain("^ff_[a-z0-9]{8,32}$");
+  });
+
   it("META_FEATURE_FLAG_KILL_SWITCHES does not require a user row for an automated actor", () => {
     // Measured against a real Postgres: the SLO loop arms its rollback as the configured
     // `systemActorUserId`, a well-formed UUID nothing creates a user row for, and the insert failed
@@ -1552,10 +1623,19 @@ describe("table column shapes", () => {
     ).toEqual(["tenant_id", "user_id", "category", "channel"]);
   });
 
-  it("META_NOTIFICATION_SUPPRESSIONS enforces (tenant, channel, address) uniqueness", () => {
-    expect(
-      META_NOTIFICATION_SUPPRESSIONS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "channel", "recipient_address"]);
+  it("META_NOTIFICATION_SUPPRESSIONS enforces (tenant, channel, address) uniqueness per permanent row", () => {
+    // A predicated unique index, not a unique constraint: as a constraint it was total despite being
+    // named `_active`, so a lapsed suppression held its address forever and an address that had
+    // soft-bounced could never be hard-bounce-suppressed.
+    const idx = META_NOTIFICATION_SUPPRESSIONS.indexes?.find(
+      (i) => i.name === "notification_suppressions_tenant_channel_address_active",
+    );
+    expect(idx?.columns).toEqual(["tenant_id", "channel", "recipient_address"]);
+    expect(idx?.unique).toBe(true);
+    expect(idx?.where).toBe("expires_at IS NULL");
+    // An index predicate must be IMMUTABLE, so it cannot ask whether the row is active *now*.
+    expect(idx?.where).not.toContain("now()");
+    expect(META_NOTIFICATION_SUPPRESSIONS.uniqueConstraints ?? []).toHaveLength(0);
   });
 
   it("META_NOTIFICATION_SUPPRESSIONS check-constrains reason to the 7 suppression reasons", () => {
@@ -2080,18 +2160,19 @@ describe("table column shapes", () => {
     ).toContain("IS NULL OR");
   });
 
-  it("META_FEATURE_FLAG_KILL_SWITCHES no longer restricts on flag deletion, and this is a loss", () => {
-    // This assertion used to read `references.onDelete === 'RESTRICT'`, protecting the audit trail
-    // by refusing to delete a flag a kill switch still names. That protection is gone, because the
-    // FK it rested on pointed at a UUID surrogate and so made the table unable to store a
-    // `KillSwitch` at all. It cannot be restored until `meta.feature_flags` carries the `ff_…`
-    // contract id as a unique column; nothing writes that table today, so nothing is relying on the
-    // guarantee in the meantime. Asserting the absence deliberately, so restoring the FK is a
-    // decision someone makes rather than a diff nobody notices.
-    const flag = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "flag_id");
-    expect(flag?.references).toBeUndefined();
-    const flags = META_FEATURE_FLAGS.columns.find((c) => c.name === "flag_id");
-    expect(flags).toBeUndefined();
+  it("META_FEATURE_FLAG_KILL_SWITCHES still does not restrict on flag deletion, and now only one thing blocks it", () => {
+    // This assertion once read `references.onDelete === 'RESTRICT'`, protecting the audit trail by
+    // refusing to delete a flag a kill switch still names. ADR-0296 had to drop that FK because it
+    // pointed at a UUID surrogate no contract record carries. `meta.feature_flags` now holds the
+    // contract's `flag_id`, so the *target* finally exists — but the FK stays off, deliberately:
+    // nothing populates that table, and a reference to it would make every kill-switch write depend
+    // on a row no deployment creates. That is precisely the defect ADR-0296 removed, and measured
+    // live in the same session on `armed_by_user_id`. Restoring it needs the flag registry actually
+    // populated, not merely addressable. Asserted so that is a decision someone makes.
+    const onSwitch = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "flag_id");
+    expect(onSwitch?.references).toBeUndefined();
+    const target = META_FEATURE_FLAGS.columns.find((c) => c.name === "flag_id");
+    expect(target?.unique?.constraintName).toBe("feature_flags_flag_id_key");
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES status enum has 4 lifecycle states", () => {

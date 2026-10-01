@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 293 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 301 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**85 packages + 3 apps, 139 meta-schema tables, ~10,256 tests**, all green, no
+**86 packages + 3 apps, 140 meta-schema tables, ~10,812 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -61,7 +61,7 @@ increment. See **What's actually left** at the bottom for the current open ends.
 
 ## Package map
 
-85 packages under `packages/`, 3 apps under `apps/`. Almost every package is
+86 packages under `packages/`, 3 apps under `apps/`. Almost every package is
 `packages/<name>` with `src/index.ts` re-exporting 3-30 sibling `src/*.ts` modules and a
 matching `*.test.ts` per module.
 
@@ -90,7 +90,7 @@ packages exist at only one layer, noted below where that is true.
 ### Substrate (the kernel itself)
 
 - **`kernel`** — the meta-schema and manifest compiler. Four areas: `bootstrap/`
-  (`META_TABLES`, the catalog of **139** platform Postgres tables, plus deterministic DDL
+  (`META_TABLES`, the catalog of **140** platform Postgres tables, plus deterministic DDL
   emit), `ddl/` (the DDL *vocabulary* — `resolvedFields`, field→Postgres types, built-in
   traits, column naming, default rendering, identifier quoting, structural entity diff;
   it does **not** emit entity tables, `operate-runtime-pg` does — ADR-0284),
@@ -388,8 +388,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`feature-flags`** — 7 flag kinds, 10 targeting rule kinds with FNV-1a sticky percentage
   bucketing, a 9-stage rollout ramp state machine, 8-trigger kill switches with strict
   separation of duties, 17 evaluation reasons, and a 23-kind append-only change audit.
-- **`feature-flags-pg`** — thin: the Postgres store for `KillSwitch` records, which the SLO loop writes
-  when it rolls a flag back and reads back when a restart adopts the incident (ADR-0296). Scoped
+- **`feature-flags-pg`** — Postgres stores for `KillSwitch` records, which the SLO loop writes
+  when it rolls a flag back and reads back when a restart adopts the incident (ADR-0296), and for
+  `FeatureFlag` itself — the table was declared in Phase 1, never written, and had drifted 18 columns
+  and 3 flag kinds behind its contract before anything tried (ADR-0300). Scoped
   conditionally, because a kill switch may be platform-wide or tenant-scoped; `loadForIncident` throws
   on two rows rather than picking one, and the active predicate uses the database clock so a drifted
   worker cannot serve a lapsed override as live.
@@ -451,7 +453,13 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   audit sink, CDC pipeline health.
 - **`notifications`** — 6 channels × 18 providers (email/SMS/push/voice), templates with
   typed variables, audiences and on-call rotations, preferences and suppression reasons,
-  and dispatch/delivery audit with retry, throttle, digest and quiet-hours decisions.
+  and dispatch/delivery audit with retry, throttle, digest and quiet-hours decisions. Also the
+  consent-vs-deliverability split: `UNCONDITIONAL_SUPPRESSION_REASONS` are the reasons a
+  non-suppressible category does *not* override, because a hard bounce is not a preference (ADR-0302).
+- **`notification-providers`** — the impure senders behind `ChannelSender`: `SesEmailSender` (SES v2,
+  real SigV4 from `@crossengin/crypto`), `TwilioSmsSender` (form-encoded, Basic auth), and the bounce
+  parser that turns an SES or Twilio event into planned `SuppressionRecord`s — it plans, and writes
+  nothing. Zero runtime deps, injectable `fetch`, endpoint overrides for VPC endpoints and proxies.
 - **`pwa`** — PWA manifest, service-worker cache strategies, IndexedDB outbox with
   conflict strategies, background sync, push (PHI-safe), Capacitor native wrapper config.
 - **`integrations`** — thin: 12 integration kinds (outbound/inbound HTTP, GraphQL, HL7,
@@ -480,13 +488,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   human-in-the-loop write approval and optional Postgres transcript), `license`, `version`,
   `help`. Every subcommand takes `--format human|json`; exit 0 / 1 / 2.
 - **`apps/operate-server`** — **long-running process**, the deployed serving binary and the
-  largest app (63 modules). A Node `http` listener over `buildOperateGateway` plus a
+  largest app (73 modules). A Node `http` listener over `buildOperateGateway` plus a
   framework-neutral `dispatch` core with a Fetch/Workers edge adapter. Loads a builtin pack
   or a manifest file (optionally per-tenant manifests with an activation poller), serves
   from the in-memory / JSONB / column-mapped store, and wires in: API-key and JWT auth with
   local or remote JWKS and a background refresh poller; the hash-chained audit log with
   checkpointing and chain verification; notification delivery (planning, throttling,
-  digests, senders, drain loop); the in-production AI Architect (`--ai-design`) with a
+  digests, drain loop) over senders built **from the environment** — `in_app` always, plus SES and
+  Twilio when fully configured, since all but the sender identity are credentials and argv is readable
+  via `ps` (ADR-0301) — with `--bounce-webhook` closing the loop by recording provider bounces as
+  suppressions, verified against the platform's own HMAC on the raw bytes in front of the gateway,
+  under a per-tenant key derived from `NOTIFICATION_BOUNCE_SECRET` (ADR-0302); the four read-only
+  audit-integrity verdict routes (`--audit-verdict-routes`, ADR-0303); the in-production AI Architect
+  (`--ai-design`, local provider first — ADR-0306) with a
   budget guard, design jobs, and a design-review approval gate; access-review campaign
   lifecycle; certification reports; DR readiness; SLO evaluation; usage metering and Stripe
   usage sync; marketplace admin/authoring; platform-tenant administration; residency
@@ -536,7 +550,7 @@ Recurring patterns enforced by zod `superRefine`:
 
 ## Meta-schema
 
-`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **139**
+`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **140**
 platform-level Postgres tables. Each new package adds tables there and updates
 `meta-schema.test.ts` (count, sorted expected-names list, column assertions).
 
@@ -644,25 +658,24 @@ opened them.
 
 **Load-bearing**
 
-- **A composite foreign key cannot be declared, only introspected** (ADR-0291). `TableDefinition`
-  has no table-level constraint, so a multi-column foreign key in the database always reads as
-  undeclared and is reported rather than reconciled. Nothing in the catalog wants one yet.
+- **A composite foreign key is declarable but not reconciled** (ADR-0291, ADR-0299).
+  `TableConstraint` has a `foreign_key` member now, but the emitter writes column-level foreign keys
+  inline and unnamed, which is why ADR-0291 matches them *by column* — so a multi-column one in the
+  database still reads as undeclared and is reported. Nothing in the catalog wants one yet.
 - **Replacing an index rebuilds it** (ADR-0292), unavoidably — Postgres cannot alter a predicate, a
   column list or an access method in place. The plan names the step before it runs but does not
   estimate the cost. Relatedly, an expression is compared rather than understood, so two logically
   equivalent predicates written differently deparse differently and trigger a rebuild that was not
   needed: correct, not minimal.
-- **`RlsPolicy` still cannot express `AS PERMISSIVE` / `AS RESTRICTIVE`** (ADR-0298). Every catalog
-  policy is permissive so nothing drifts, but a restrictive policy added by hand reads as permissive
-  and would be silently replaced.
 - **Type changes on a populated table, and `NOT NULL` backfills, remain manual** (ADR-0291). The
   plan hands over the exact SQL for both; automating either means deciding what happens to existing
   rows, which is the one thing a migrator should not decide.
-- **`meta.feature_flags` cannot store a `FeatureFlag`'s own id** (ADR-0296), which is why no foreign
-  key to it can be well-formed — the kill switch's `flag_id` had to drop its reference rather than
-  retarget it, costing the `ON DELETE RESTRICT` audit protection a test used to assert. Restoring it
-  needs a `flag_id TEXT` unique column there; nothing writes that table, so it is the next instance of
-  the reconcile-or-delete question.
+- **The kill switch's `flag_id` foreign key is addable but not added** (ADR-0300). `meta.feature_flags`
+  now has the `flag_id TEXT` unique column ADR-0296 said was needed, and a store that writes it. The
+  reference still stays off for a different reason: ADR-0291 will not add a foreign key it cannot prove
+  every row satisfies, and the table is empty in every deployment — so declaring it would be correct on
+  a fresh install and reported as drift on every existing one, forever. It becomes available once a
+  deployment has flags.
 - **Removing a foreign key from the catalog does not remove it from an existing database** (ADR-0296).
   ADR-0291 deliberately refuses to loosen integrity, so the four kill-switch `meta.users` references
   are reported with manual SQL. A fresh install is correct; an existing one needs four
@@ -670,6 +683,14 @@ opened them.
 - **Six indexes now have no reader** (ADR-0296) — they existed to make `ON DELETE RESTRICT` cheap on
   the foreign keys that reconciliation removed. Left in place deliberately: removing them from the
   catalog would leave them reported as undeclared on every drift check until someone drops them.
+- **The reconciler has no concept of a rename** (ADR-0300). Declaring a new name adds a column and
+  reports the old one as undeclared without dropping it, stranding a `NOT NULL` column that every insert
+  then fails on — which is why `meta.feature_flags.default_value` kept a name describing its old type.
+- **A unique constraint cannot carry a predicate** (ADR-0302). `UniqueConstraint` is `{name, columns}`,
+  so a partial uniqueness rule has to be declared in `indexes` with `unique: true` instead — and the
+  predicate cannot mention `now()`, since Postgres requires an IMMUTABLE index predicate. Promoting one
+  to the other is reconcilable (the plan drops the constraint and creates the index in one statement) but
+  it is a rebuild.
 - **Test files are not typechecked** anywhere in the repo (`tsconfig.json` excludes `**/*.test.ts`;
   vitest transpiles without checking), so a test double that no longer satisfies an interface fails at
   runtime rather than at build. ADR-0294 hit this: a stub missing a new method threw a `TypeError`
@@ -677,34 +698,33 @@ opened them.
 - **Declaring an SLO incident requires the database** (ADR-0293), which is itself the kind of outage
   an SLO breach describes. A failed declaration leaves the surface unopened and the next tick retries,
   so the page is delayed rather than lost; a failed close-out is not retried at all and leaves the row
-  open. The escalator's fallback — an unpersisted record so the page still goes out — would fit as a
-  wrapping declarer and trades a possibly-colliding id for a timelier page.
+  open. `FallbackIncidentDeclarer` (ADR-0304) now exists for the trade — an unpersisted record so the
+  page still goes out — but only the integrity escalator uses it: an SLO breach has a working retry and
+  does not need a possibly-colliding id, while a compromise finding is one-shot.
 - **`planIntegrityEscalation` is now unused** (ADR-0297) — still exported and tested, nothing calls it.
   Deleting public API is a separate decision.
-- **Cross-column rules have no home in the schema** (ADR-0296). `bouncesCount ≤ recipientCount` and
-  `publishedAt ≤ breachNotificationDeadlineAt` are two-column comparisons and `TableDefinition` has no
-  table-level CHECK — the same limit as composite foreign keys. Both are enforced only by the re-parse
-  on read, which is the argument for re-parsing.
-- **Verdicts are still not readable over HTTP.** ADR-0288 made a *compromised*
-  finding leave a readable `audit.integrity_compromised` row, but routine verdicts
-  live only as chain commitments, and the chain stores no payload — so "show me last
-  month's verifications" needs a route or an anchored report table (ADR-0287).
+- **Adding a table constraint to a populated table is manual** (ADR-0299). `TableDefinition.constraints`
+  can now declare a cross-column CHECK and the reconciler adds and replaces one, but only under the
+  emptiness guard a type change uses — validating against existing rows means deciding what happens to
+  the rows that fail. On a populated table the SQL is reported instead.
 - **Truncation detection depends on checkpoint cadence** (ADR-0287). Tail removal is
   invisible to hash links, so `--integrity-proof-config` must run alongside
   `--checkpoint-config` or its truncation check has no witness — and entries written
   *and* deleted between two checkpoints leave no trace at all.
-- **No real email/SMS senders** (ADR-0274). The `ChannelSender` seam, retry
-  ladder and suppression handling all work; only `in_app` has an implementation.
-- **No provider webhooks feeding bounces into suppressions** (ADR-0274) — the
-  suppression table exists for exactly this and nothing populates it.
-- **`ai-providers-local` is unused by `operate-server`.** A purpose-built provider
-  for Ollama/vLLM endpoints exists, with zero-cost pricing already built in, but
-  only `architect-cli` depends on it. The in-product Architect
-  (`buildDesignProviderFromEnv`) knows Anthropic and OpenAI only, so the
-  self-hosted path runs through `ai-providers-openai` pointed at a custom base
-  URL (ADR-0280). That works and the custom-base-URL fix was needed anyway for
-  proxies, but routing the in-product designer through the local provider is the
-  cleaner arrangement and is still open.
+- **Two of 18 notification providers are implemented** (ADR-0301) — SES and Twilio, plus `in_app`. No
+  push or voice sender, and one platform-wide set of credentials, so every tenant sends from one domain.
+- **A suppression cannot name the provider that caused it** (ADR-0302). `applied_by` is a nullable UUID
+  foreign key to `meta.users`, so a bounce-driven row writes NULL — the fifth instance of ADR-0289's
+  column-narrower-than-its-contract finding. `source_delivery_id` carries the real provenance, so the
+  fact is not lost, only unreadable as "who".
+- **`PostgresRecipientResolver.activeSuppressions` fails open on an unparseable row** (ADR-0302): it
+  skips it, so the next drain mails the address the row existed to protect. The new store refuses
+  instead. Reconciling them is a deliberate choice, because refusing turns one bad row into an outage
+  of that tenant's notifications.
+- **Suppression addresses match exactly and case-sensitively** (ADR-0302). A bounce reporting
+  `Bounced@Example.test` against a stored `bounced@example.test` writes a row that never matches.
+  Normalising in the store would make the id — which commits to the exact address — a lie, so it belongs
+  upstream in `planSuppression`.
 
 **Contained**
 
@@ -716,8 +736,6 @@ opened them.
   AI cost ceilings (ADR-0267). Request bodies cap at 10 MiB → 413, a
   platform-wide gap since P1.7 (ADR-0267). A weak model that drifts out of JSON
   fails indistinguishably from any other design failure (ADR-0280).
-- `packages/workflow-runtime/src/engine.ts` still throws on one unimplemented
-  action kind — the only genuine stub in the TypeScript.
 - Column-store migration is **additive only** (ADR-0283): a removed field's column
   is never dropped and a changed type is never altered, since both need a decision
   about existing data. Per-tenant activated manifests still get no DDL at all — the
@@ -731,10 +749,11 @@ compose file or guide.
 
 ## ADRs
 
-`docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 293 records; 214
-Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
-were never re-statused).
+`docs/adr/index.md` is generated from the ADR files by
+`python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
+title or status change cannot drift. 301 records; 222 Accepted, 79 Proposed (the
+Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
+include `0000-template.md`, which the count has always included).
 
 ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never
 written; those milestones landed under other numbers. The gap is permanent.

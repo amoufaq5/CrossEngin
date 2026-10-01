@@ -5,6 +5,7 @@ import type {
   ColumnReference,
   IndexSpec,
   RlsPolicy,
+  TableConstraint,
   TableDefinition,
 } from "./types.js";
 
@@ -32,6 +33,39 @@ export function emitColumn(col: ColumnDefinition): string {
   return parts.join(" ");
 }
 
+/**
+ * One table-level constraint, as the body of a `CONSTRAINT … ` clause.
+ *
+ * `ON DELETE` is always written, with RESTRICT when omitted, because that is what `emitColumn`
+ * already does for an inline reference — and `declaredOnDelete` on the reconciling side reads an
+ * omitted action as RESTRICT for exactly that reason. `ON UPDATE` is written only when declared,
+ * since omitting the clause and writing `ON UPDATE NO ACTION` are the same constraint and the
+ * shorter form is what the 139 existing tables would emit if they had one.
+ */
+export function emitTableConstraint(constraint: TableConstraint): string {
+  const name = quoteIdent(constraint.name);
+  switch (constraint.kind) {
+    case "check":
+      return `CONSTRAINT ${name} CHECK (${constraint.expression})`;
+    case "unique":
+      return `CONSTRAINT ${name} UNIQUE (${constraint.columns.map(quoteIdent).join(", ")})`;
+    case "foreign_key": {
+      const ref = constraint.references;
+      const target =
+        ref.schema !== undefined
+          ? qualifyTable(ref.schema, ref.table)
+          : quoteIdent(ref.table);
+      const onUpdate =
+        constraint.onUpdate !== undefined ? ` ON UPDATE ${constraint.onUpdate}` : "";
+      return (
+        `CONSTRAINT ${name} FOREIGN KEY (${constraint.columns.map(quoteIdent).join(", ")}) ` +
+        `REFERENCES ${target}(${ref.columns.map(quoteIdent).join(", ")}) ` +
+        `ON DELETE ${constraint.onDelete ?? "RESTRICT"}${onUpdate}`
+      );
+    }
+  }
+}
+
 export function emitCreateTable(def: TableDefinition): string {
   const tableName = qualifyTable(def.schema, def.name);
   const lines: string[] = def.columns.map((c) => "  " + emitColumn(c));
@@ -54,6 +88,13 @@ export function emitCreateTable(def: TableDefinition): string {
         `  CONSTRAINT ${quoteIdent(col.unique.constraintName)} UNIQUE (${quoteIdent(col.name)})`,
       );
     }
+  }
+
+  // Last, so a table declaring no `constraints` emits exactly the statement it emitted before the
+  // field existed. A constraint *added* to a table that already exists is the reconciler's job, not
+  // this emitter's — a fresh install stays one statement per table.
+  for (const constraint of def.constraints ?? []) {
+    lines.push("  " + emitTableConstraint(constraint));
   }
 
   return `CREATE TABLE ${tableName} (\n${lines.join(",\n")}\n);`;
@@ -163,6 +204,66 @@ export function emitAlterColumnTypeIfEmpty(
   ].join("\n");
 }
 
+/**
+ * Adds a table-level constraint, but only to an empty table, re-checking that in the same
+ * transaction.
+ *
+ * A CHECK or a foreign key can fail against rows that are already there, and the plan holds one
+ * invariant: every step in it is expected to succeed. `NOT VALID` would make the statement succeed
+ * and is deliberately not used — it records a constraint the data may violate, which is worse than
+ * not recording it, because every later reader believes the rule holds. So the only case that is
+ * planned is the one where there is nothing to violate it, and the count is taken here rather than
+ * when the plan was built so a row inserted in between aborts the step instead of slipping under a
+ * rule that was never checked against it.
+ *
+ * `statements` is more than one only for a replacement, where the drop has to precede the add in the
+ * same guarded block.
+ */
+export function emitAddTableConstraintIfEmpty(
+  table: TableDefinition,
+  constraint: TableConstraint,
+): string {
+  return emitGuardedConstraintStatements(table, constraint.name, [
+    `ALTER TABLE ${qualifyTable(table.schema, table.name)} ADD ${emitTableConstraint(constraint)};`,
+  ]);
+}
+
+/**
+ * Replaces a table-level constraint on an empty table. Postgres can alter neither a CHECK expression
+ * nor a foreign key's target or actions in place, so a changed declaration means drop then add —
+ * inside one guarded block, so the table is never left without the rule in a committed state.
+ */
+export function emitReplaceTableConstraintIfEmpty(
+  table: TableDefinition,
+  constraint: TableConstraint,
+): string {
+  const fq = qualifyTable(table.schema, table.name);
+  return emitGuardedConstraintStatements(table, constraint.name, [
+    `ALTER TABLE ${fq} DROP CONSTRAINT IF EXISTS ${quoteIdent(constraint.name)};`,
+    `ALTER TABLE ${fq} ADD ${emitTableConstraint(constraint)};`,
+  ]);
+}
+
+function emitGuardedConstraintStatements(
+  table: TableDefinition,
+  constraintName: string,
+  statements: readonly string[],
+): string {
+  const fq = qualifyTable(table.schema, table.name);
+  const label = `${table.schema}.${table.name}`;
+  return [
+    "DO $$",
+    "DECLARE existing bigint;",
+    "BEGIN",
+    `  SELECT count(*) INTO existing FROM ${fq};`,
+    "  IF existing > 0 THEN",
+    `    RAISE EXCEPTION 'refusing to add constraint ${constraintName} to ${label}: table holds % row(s) — check the data against the rule explicitly', existing;`,
+    "  END IF;",
+    ...statements.map((s) => `  ${s}`),
+    "END $$;",
+  ].join("\n");
+}
+
 export function emitSetColumnDefault(
   table: TableDefinition,
   column: string,
@@ -234,9 +335,13 @@ function emitPolicyRole(role: string): string {
 export function emitRlsPolicy(table: TableDefinition, policy: RlsPolicy): string {
   const tableName = qualifyTable(table.schema, table.name);
   let stmt = `CREATE POLICY ${quoteIdent(policy.name)} ON ${tableName}`;
-  // Both clauses are written only when declared. Omitting them is not a weaker statement than
-  // writing the default: `CREATE POLICY` means `FOR ALL TO PUBLIC` either way, which is what keeps
-  // every policy already in the catalog emitting byte-identical SQL.
+  // Every clause is written only when declared. Omitting one is not a weaker statement than writing
+  // the default: `CREATE POLICY` means `AS PERMISSIVE FOR ALL TO PUBLIC` either way, which is what
+  // keeps every policy already in the catalog emitting byte-identical SQL. `AS` comes first because
+  // that is the order `CREATE POLICY` accepts the clauses in.
+  if (policy.permissive !== undefined) {
+    stmt += policy.permissive ? " AS PERMISSIVE" : " AS RESTRICTIVE";
+  }
   if (policy.command !== undefined) {
     stmt += ` FOR ${policy.command}`;
   }

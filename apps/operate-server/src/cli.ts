@@ -40,6 +40,8 @@ export interface ServeOptions {
   readonly pruneLinksMs: number | null;
   /** Notification delivery drain interval (ms) — sends every active tenant's queued dispatches (needs a pg store). */
   readonly notificationDrainMs: number | null;
+  readonly bounceWebhook: boolean;
+  readonly bounceTransientHours: number | null;
   /** Roles treated as a tenant's admins when resolving a `tenant_admins` notification audience. */
   readonly notificationAdminRoles: readonly string[];
   /** Roles permitted to read the whole tenant's notifications via `?scope=tenant`. */
@@ -104,6 +106,9 @@ export interface ServeOptions {
   readonly aiMaxUsdPerMonth: number | null;
   /** Expose the platform design-review queue under /v1/platform/design-reviews (needs --store pg|pg-columns). */
   readonly designReview: boolean;
+  readonly integrityVerdictRoutes: boolean;
+  readonly integrityVerdictPlatformRoles: readonly string[];
+  readonly integrityVerdictTenantRoles: readonly string[];
   /** Roles permitted to decide design reviews (default platform_admin). */
   readonly designReviewRoles: readonly string[];
   /** Require platform approval before a tenant can activate an AI proposal. */
@@ -162,6 +167,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let scheduleAllTenants = false;
   let pruneLinksMs: number | null = null;
   let notificationDrainMs: number | null = null;
+  let bounceWebhook = false;
+  let bounceTransientHours: number | null = null;
   const notificationAdminRoles: string[] = [];
   const notificationAuditRoles: string[] = [];
   let emitEntityEvents = false;
@@ -194,6 +201,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let manifestRefreshMs: number | null = null;
   let aiMaxUsdPerMonth: number | null = null;
   let designReview = false;
+  let integrityVerdictRoutes = false;
+  const integrityVerdictPlatformRoles: string[] = [];
+  const integrityVerdictTenantRoles: string[] = [];
   const designReviewRoles: string[] = [];
   let requireDesignReview = false;
   let meteringConfig: string | null = null;
@@ -304,6 +314,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       if (!Number.isInteger(n) || n < 1000) throw new CliUsageError(`invalid --notification-drain-ms: ${raw} (>= 1000)`);
       notificationDrainMs = n;
       i += consumed();
+    } else if (arg === "--bounce-webhook") {
+      bounceWebhook = true;
+    } else if (arg === "--bounce-transient-hours" || arg.startsWith("--bounce-transient-hours=")) {
+      const raw = takeValue(arg, next, "--bounce-transient-hours");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) throw new CliUsageError(`invalid --bounce-transient-hours: ${raw} (>= 1)`);
+      bounceTransientHours = n;
+      i += consumed();
     } else if (arg === "--notification-admin-role" || arg.startsWith("--notification-admin-role=")) {
       notificationAdminRoles.push(takeValue(arg, next, "--notification-admin-role"));
       i += consumed();
@@ -391,6 +409,22 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--ai-model" || arg.startsWith("--ai-model=")) {
       aiModel = takeValue(arg, next, "--ai-model");
       i += consumed();
+    } else if (arg === "--audit-verdict-routes") {
+      integrityVerdictRoutes = true;
+    } else if (
+      arg === "--audit-verdict-platform-role" ||
+      arg.startsWith("--audit-verdict-platform-role=")
+    ) {
+      integrityVerdictPlatformRoles.push(takeValue(arg, next, "--audit-verdict-platform-role"));
+      i += consumed();
+      integrityVerdictRoutes = true;
+    } else if (
+      arg === "--audit-verdict-tenant-role" ||
+      arg.startsWith("--audit-verdict-tenant-role=")
+    ) {
+      integrityVerdictTenantRoles.push(takeValue(arg, next, "--audit-verdict-tenant-role"));
+      i += consumed();
+      integrityVerdictRoutes = true;
     } else if (arg === "--design-review") {
       designReview = true;
     } else if (arg === "--design-review-role" || arg.startsWith("--design-review-role=")) {
@@ -467,6 +501,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (notificationDrainMs !== null && store === "memory") {
     throw new CliUsageError("--notification-drain-ms requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (bounceWebhook && store === "memory") {
+    throw new CliUsageError("--bounce-webhook requires a Postgres store (--store pg or pg-columns)");
+  }
+  if (bounceTransientHours !== null && !bounceWebhook) {
+    throw new CliUsageError("--bounce-transient-hours requires --bounce-webhook");
   }
   if (notificationAdminRoles.length > 0 && notificationDrainMs === null) {
     throw new CliUsageError("--notification-admin-role requires --notification-drain-ms (the drain interval)");
@@ -560,6 +600,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     scheduleAllTenants,
     pruneLinksMs,
     notificationDrainMs,
+    bounceWebhook,
+    bounceTransientHours,
     notificationAdminRoles:
       notificationAdminRoles.length > 0 ? notificationAdminRoles : DEFAULT_ADMIN_ROLES,
     notificationAuditRoles,
@@ -593,6 +635,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     manifestRefreshMs,
     aiMaxUsdPerMonth,
     designReview,
+    integrityVerdictRoutes,
+    integrityVerdictPlatformRoles,
+    integrityVerdictTenantRoles,
     designReviewRoles: designReviewRoles.length > 0 ? designReviewRoles : ["platform_admin"],
     requireDesignReview,
     meteringConfig,
@@ -848,6 +893,15 @@ Options:
                        active tenant's queued dispatches, applying per-recipient preferences
                        and suppressions, and records an attempt per recipient
                        (needs --store pg|pg-columns)
+  --bounce-webhook     Serve POST /v1/notifications/bounces/{tenantId}/{ses|twilio}, which
+                       records provider bounces and complaints as suppressions. Needs
+                       NOTIFICATION_BOUNCE_SECRET in the environment (>=32 chars); the
+                       per-tenant key is HMAC-SHA256(secret, "bounce-webhook:"+tenantId),
+                       which the signing edge must derive the same way
+                       (needs --store pg|pg-columns)
+  --bounce-transient-hours <n>  How long a soft/transient bounce suppresses an address.
+                       Omitted, a transient bounce suppresses nothing
+                       (needs --bounce-webhook)
   --notification-admin-role <r>  Role treated as a tenant admin when resolving a
                        tenant_admins audience (repeatable; default erp_admin +
                        tenant_admin + platform_admin)
@@ -878,7 +932,14 @@ Options:
                        OPENAI_BASE_URL for a self-hosted OSS model). Implies --per-tenant-manifests
   --ai-design-role <role>  Role allowed to call the /v1/ai routes (repeatable; default erp_admin +
                        platform_admin). Fail-closed
-  --ai-model <id>      Model override for the AI designer (defaults per provider)
+  --ai-model <id>      Model override for the AI designer (defaults per provider; passed through
+                       verbatim to a self-hosted endpoint)
+  --audit-verdict-routes  Enable GET /v1/audit-integrity/verdicts — the readable projection of each
+                       audit-integrity pass (needs --store pg|pg-columns)
+  --audit-verdict-platform-role <role>  Role granted the cross-tenant view, which includes the
+                       platform chain's own verdicts (repeatable). Fail-closed: none ⇒ nobody
+  --audit-verdict-tenant-role <role>  Role granted its OWN tenant's verdicts (repeatable).
+                       Fail-closed: none ⇒ nobody
   --manifest-refresh-ms <n>  Poll interval (ms, >=1000) invalidating the per-tenant gateway
                        cache when another replica activates a manifest (default: TTL only)
   --ai-max-usd-per-month <n>  Per-tenant monthly USD ceiling on AI design spend

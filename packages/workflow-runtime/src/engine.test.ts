@@ -1,4 +1,5 @@
-import type { WorkflowDefinition } from "@crossengin/workflow-engine";
+import type { WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
+import { WorkflowEventSchema, isHistoryDense } from "@crossengin/workflow-engine";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -8,8 +9,16 @@ import {
 } from "./activity-handlers.js";
 import { CountingIdGenerator, FixedClock } from "./clock.js";
 import { InMemoryEventLog } from "./event-log.js";
-import { WorkflowEngine, activityRetryDelayMs, parseActivityBackoff } from "./engine.js";
-import { projectActivities } from "./projection.js";
+import {
+  MAX_CHILD_WORKFLOW_DEPTH,
+  MAX_SIGNAL_DISPATCH_DEPTH,
+  WORKFLOW_ACTION_FAILURES,
+  WorkflowActionError,
+  WorkflowEngine,
+  activityRetryDelayMs,
+  parseActivityBackoff,
+} from "./engine.js";
+import { projectActivities, projectInstance, projectTimers } from "./projection.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000099";
@@ -1230,5 +1239,642 @@ describe("activity retry backoff", () => {
     const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
     const first = (await engine.listEvents(state.instanceId)).filter((e) => e.kind === "activity_scheduled")[0]!;
     expect(first.payload["availableAt"]).toBeUndefined();
+  });
+});
+
+type DefState = WorkflowDefinition["states"][number];
+type DefTransition = WorkflowDefinition["transitions"][number];
+type DefAction = DefState["onEntryActions"][number];
+
+function st(name: string, kind: DefState["kind"], onEntryActions: readonly DefAction[] = []): DefState {
+  return { name, kind, label: name, onEntryActions: [...onEntryActions], onExitActions: [], slaSeconds: null };
+}
+
+function tr(input: {
+  name: string;
+  from: string;
+  to: string;
+  trigger: DefTransition["trigger"];
+  pre?: readonly DefAction[];
+  post?: readonly DefAction[];
+}): DefTransition {
+  return {
+    name: input.name,
+    fromState: input.from,
+    toState: input.to,
+    trigger: input.trigger,
+    guards: [],
+    preTransitionActions: [...(input.pre ?? [])],
+    postTransitionActions: [...(input.post ?? [])],
+  };
+}
+
+function makeMultiEngine(
+  definitions: readonly WorkflowDefinition[],
+  opts: { readonly clock?: FixedClock } = {},
+): { engine: WorkflowEngine; log: InMemoryEventLog; clock: FixedClock } {
+  const log = new InMemoryEventLog();
+  const clock = opts.clock ?? new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+  const engine = new WorkflowEngine({
+    eventLog: log,
+    definitions: new Map(definitions.map((d) => [d.id, d])),
+    activityRegistry: createDefaultRegistry(),
+    clock,
+    idGenerator: new CountingIdGenerator(),
+  });
+  return { engine, log, clock };
+}
+
+/** Re-derives an instance from the log in a *second* engine that executed nothing. */
+async function replayIn(
+  definitions: readonly WorkflowDefinition[],
+  log: InMemoryEventLog,
+  instanceId: string,
+) {
+  const replayEngine = new WorkflowEngine({
+    eventLog: log,
+    definitions: new Map(definitions.map((d) => [d.id, d])),
+    activityRegistry: createDefaultRegistry(),
+    clock: new FixedClock(new Date("2030-01-01T00:00:00.000Z")),
+    idGenerator: new CountingIdGenerator(),
+  });
+  return replayEngine.getInstanceState(instanceId);
+}
+
+function expectSchemaValid(events: readonly WorkflowEvent[]): void {
+  for (const event of events) {
+    const parsed = WorkflowEventSchema.safeParse(event);
+    expect(parsed.success, `${event.kind}@${event.sequenceNumber.toString()}: ${JSON.stringify(parsed.error?.issues)}`).toBe(true);
+  }
+  expect(isHistoryDense(events)).toBe(true);
+}
+
+// ── cancel_timer ───────────────────────────────────────────────────────────────
+
+/**
+ * Two timers are armed on entry; the short one firing cancels the long one. Cancelling from a
+ * timer_fired transition is the only reachable shape, because an instance holding a scheduled timer
+ * projects as waiting_for_timer and submitSignal declines to deliver into that status.
+ */
+function cancelTimerDef(cancelParams: Record<string, unknown> = { timerName: "long_deadline" }): WorkflowDefinition {
+  return definitionFixture({
+    id: "wfd_cancel01",
+    definitionKey: "cancel.timer",
+    initialState: "armed",
+    states: [
+      st("armed", "initial", [
+        { kind: "schedule_timer", parameters: { timerName: "short_deadline", relativeSeconds: 60 } },
+        { kind: "schedule_timer", parameters: { timerName: "long_deadline", relativeSeconds: 3600 } },
+      ]),
+      st("settled", "terminal_success"),
+    ],
+    transitions: [
+      tr({
+        name: "settle",
+        from: "armed",
+        to: "settled",
+        trigger: { kind: "timer_fired", timerName: "short_deadline" },
+        pre: [{ kind: "cancel_timer", parameters: cancelParams }],
+      }),
+    ],
+  });
+}
+
+describe("cancel_timer action", () => {
+  it("cancels the still-outstanding timer and lets the instance leave waiting_for_timer", async () => {
+    const def = cancelTimerDef();
+    const { engine } = makeMultiEngine([def]);
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    expect(started.status).toBe("waiting_for_timer");
+    expect([...started.awaitingTimerNames].sort()).toEqual(["long_deadline", "short_deadline"]);
+
+    await engine.tickTimers(Date.parse("2026-05-16T12:01:00.000Z"));
+    const events = await engine.listEvents(started.instanceId);
+    expect(events.map((e) => e.kind)).toEqual([
+      "instance_started",
+      "timer_scheduled",
+      "timer_scheduled",
+      "timer_fired",
+      "timer_cancelled",
+      "state_transitioned",
+      "instance_completed",
+    ]);
+    const state = await engine.getInstanceState(started.instanceId);
+    expect(state?.status).toBe("completed");
+    expect(state?.awaitingTimerNames).toEqual([]);
+  });
+
+  it("names the cancelled timer and carries its timerId", async () => {
+    const def = cancelTimerDef();
+    const { engine } = makeMultiEngine([def]);
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    await engine.tickTimers(Date.parse("2026-05-16T12:01:00.000Z"));
+    const events = await engine.listEvents(started.instanceId);
+    const longTimer = events.find(
+      (e) => e.kind === "timer_scheduled" && e.payload["timerName"] === "long_deadline",
+    )!;
+    const cancelled = events.find((e) => e.kind === "timer_cancelled")!;
+    expect(cancelled.timerId).toBe(longTimer.timerId);
+    expect(cancelled.payload["timerName"]).toBe("long_deadline");
+    expect(projectTimers(events).find((t) => t.timerName === "long_deadline")?.status).toBe("cancelled");
+  });
+
+  it("is a no-op for a timer name nothing scheduled", async () => {
+    const def = cancelTimerDef({ timerName: "never_armed" });
+    const { engine } = makeMultiEngine([def]);
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    await engine.tickTimers(Date.parse("2026-05-16T12:01:00.000Z"));
+    const events = await engine.listEvents(started.instanceId);
+    expect(events.filter((e) => e.kind === "timer_cancelled")).toHaveLength(0);
+    // long_deadline is still outstanding, so the instance stays parked on it.
+    const state = await engine.getInstanceState(started.instanceId);
+    expect(state?.awaitingTimerNames).toEqual(["long_deadline"]);
+  });
+
+  it("does not re-cancel the timer that just fired", async () => {
+    const def = cancelTimerDef({ timerName: "short_deadline" });
+    const { engine } = makeMultiEngine([def]);
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    await engine.tickTimers(Date.parse("2026-05-16T12:01:00.000Z"));
+    const events = await engine.listEvents(started.instanceId);
+    expect(events.filter((e) => e.kind === "timer_cancelled")).toHaveLength(0);
+  });
+
+  it("refuses an action with no timerName as a typed WorkflowActionError", async () => {
+    const def = cancelTimerDef({});
+    const { engine } = makeMultiEngine([def]);
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const err = await engine
+      .tickTimers(Date.parse("2026-05-16T12:01:00.000Z"))
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowActionError);
+    expect((err as WorkflowActionError).failure).toBe("missing_parameter");
+    expect((err as WorkflowActionError).actionKind).toBe("cancel_timer");
+    expect((err as WorkflowActionError).instanceId).toBe(started.instanceId);
+    expect((err as WorkflowActionError).message).not.toMatch(/M3/);
+  });
+
+  it("replays identically in a second engine over the same log", async () => {
+    const def = cancelTimerDef();
+    const { engine, log } = makeMultiEngine([def]);
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    await engine.tickTimers(Date.parse("2026-05-16T12:01:00.000Z"));
+    const live = await engine.getInstanceState(started.instanceId);
+    const events = await engine.listEvents(started.instanceId);
+    expectSchemaValid(events);
+    expect(await replayIn([def], log, started.instanceId)).toEqual(live);
+    expect(projectInstance(events, def)).toEqual(live);
+  });
+});
+
+// ── spawn_child_workflow ───────────────────────────────────────────────────────
+
+const CHILD_KEY = "child.flow";
+
+function childDef(overrides: Partial<WorkflowDefinition> = {}): WorkflowDefinition {
+  return definitionFixture({
+    id: "wfd_child001",
+    definitionKey: CHILD_KEY,
+    version: "1.0.0",
+    initialState: "begin",
+    states: [st("begin", "initial"), st("end", "terminal_success")],
+    transitions: [tr({ name: "finish", from: "begin", to: "end", trigger: { kind: "automatic" } })],
+    ...overrides,
+  });
+}
+
+function parentDef(spawnParams: Record<string, unknown> = { definitionKey: CHILD_KEY }): WorkflowDefinition {
+  return definitionFixture({
+    id: "wfd_parent01",
+    definitionKey: "parent.flow",
+    initialState: "start",
+    states: [st("start", "initial"), st("running_child", "intermediate"), st("finished", "terminal_success")],
+    transitions: [
+      tr({
+        name: "spawn",
+        from: "start",
+        to: "running_child",
+        trigger: { kind: "automatic" },
+        post: [{ kind: "spawn_child_workflow", parameters: spawnParams }],
+      }),
+      tr({
+        name: "child_done",
+        from: "running_child",
+        to: "finished",
+        trigger: { kind: "child_workflow_completed", childDefinitionKey: CHILD_KEY },
+      }),
+    ],
+  });
+}
+
+describe("spawn_child_workflow action", () => {
+  it("starts the child, links it on the parent, and fires the child_workflow_completed trigger", async () => {
+    const parent = parentDef();
+    const child = childDef();
+    const { engine } = makeMultiEngine([parent, child]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    expect(state.status).toBe("completed");
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.map((e) => e.kind)).toEqual([
+      "instance_started",
+      "state_transitioned",
+      "child_workflow_spawned",
+      "child_workflow_completed",
+      "state_transitioned",
+      "instance_completed",
+    ]);
+  });
+
+  it("records the child definition's key, id and version on the spawn event", async () => {
+    const parent = parentDef();
+    const child = childDef();
+    const { engine } = makeMultiEngine([parent, child]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    const spawned = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "child_workflow_spawned")!;
+    expect(spawned.payload["childDefinitionKey"]).toBe(CHILD_KEY);
+    expect(spawned.payload["childDefinitionId"]).toBe(child.id);
+    expect(spawned.payload["childDefinitionVersion"]).toBe("1.0.0");
+    expect(spawned.childInstanceId).toMatch(/^wfi_/);
+  });
+
+  it("the child is a real instance in the same log, pointing back at its parent", async () => {
+    const parent = parentDef();
+    const child = childDef();
+    const { engine } = makeMultiEngine([parent, child]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    const spawned = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "child_workflow_spawned")!;
+    const childState = await engine.getInstanceState(spawned.childInstanceId!);
+    expect(childState?.parentInstanceId).toBe(state.instanceId);
+    expect(childState?.tenantId).toBe(TENANT);
+    expect(childState?.status).toBe("completed");
+    expect((await engine.listEvents(spawned.childInstanceId!)).map((e) => e.kind)).toEqual([
+      "instance_started",
+      "state_transitioned",
+      "instance_completed",
+    ]);
+  });
+
+  it("resolves the child by definitionId as well as by key", async () => {
+    const parent = parentDef({ definitionId: "wfd_child001" });
+    const child = childDef();
+    const { engine } = makeMultiEngine([parent, child]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    expect(state.status).toBe("completed");
+  });
+
+  it("threads variables and a correlation key into the child", async () => {
+    const parent = parentDef({
+      definitionKey: CHILD_KEY,
+      variables: { order_id: "SO-7" },
+      correlationKey: "corr-7",
+    });
+    const child = childDef();
+    const { engine } = makeMultiEngine([parent, child]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    const spawned = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "child_workflow_spawned")!;
+    const childState = await engine.getInstanceState(spawned.childInstanceId!);
+    expect(childState?.variables).toEqual({ order_id: "SO-7" });
+    expect(childState?.correlationKey).toBe("corr-7");
+    expect(spawned.correlationId).toBe("corr-7");
+  });
+
+  it("records only the spawn when the child parks instead of completing", async () => {
+    const parent = parentDef();
+    const waitingChild = childDef({
+      states: [st("begin", "waiting"), st("end", "terminal_success")],
+      transitions: [
+        tr({ name: "finish", from: "begin", to: "end", trigger: { kind: "signal_received", signalName: "go" } }),
+      ],
+    });
+    const { engine } = makeMultiEngine([parent, waitingChild]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.map((e) => e.kind)).toEqual(["instance_started", "state_transitioned", "child_workflow_spawned"]);
+    expect(state.currentState).toBe("running_child");
+    expect(events.find((e) => e.kind === "child_workflow_spawned")!.payload["childStatus"]).toBe(
+      "waiting_for_signal",
+    );
+  });
+
+  it("picks the highest published version when a key has several", async () => {
+    const parent = parentDef();
+    const v1 = childDef({ id: "wfd_child001", version: "1.0.0" });
+    const v2 = childDef({ id: "wfd_child002", version: "2.1.0" });
+    // Registered lowest-first, so insertion order alone would pick the wrong one.
+    const { engine } = makeMultiEngine([parent, v1, v2]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    const spawned = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "child_workflow_spawned")!;
+    expect(spawned.payload["childDefinitionVersion"]).toBe("2.1.0");
+    expect(spawned.payload["childDefinitionId"]).toBe("wfd_child002");
+  });
+
+  it("ignores an unpublished version when resolving a key", async () => {
+    const parent = parentDef();
+    const published = childDef({ id: "wfd_child001", version: "1.0.0" });
+    const draft = childDef({ id: "wfd_child002", version: "9.0.0", status: "draft" });
+    const { engine } = makeMultiEngine([parent, published, draft]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    const spawned = (await engine.listEvents(state.instanceId)).find((e) => e.kind === "child_workflow_spawned")!;
+    expect(spawned.payload["childDefinitionVersion"]).toBe("1.0.0");
+  });
+
+  it("refuses an unknown definitionKey with unknown_child_definition", async () => {
+    const parent = parentDef({ definitionKey: "nope.flow" });
+    const { engine } = makeMultiEngine([parent, childDef()]);
+    const err = await engine
+      .startInstance({ definitionId: parent.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowActionError);
+    expect((err as WorkflowActionError).failure).toBe("unknown_child_definition");
+    expect((err as WorkflowActionError).message).toMatch(/nope\.flow/);
+  });
+
+  it("refuses an unknown definitionId with unknown_child_definition", async () => {
+    const parent = parentDef({ definitionId: "wfd_missing1" });
+    const { engine } = makeMultiEngine([parent, childDef()]);
+    await expect(engine.startInstance({ definitionId: parent.id, tenantId: TENANT })).rejects.toThrow(
+      /no workflow definition with id wfd_missing1/,
+    );
+  });
+
+  it("refuses an action naming neither definitionKey nor definitionId", async () => {
+    const parent = parentDef({});
+    const { engine } = makeMultiEngine([parent, childDef()]);
+    const err = await engine
+      .startInstance({ definitionId: parent.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as WorkflowActionError).failure).toBe("missing_parameter");
+    expect((err as WorkflowActionError).actionKind).toBe("spawn_child_workflow");
+  });
+
+  it("refuses a lineage deeper than MAX_CHILD_WORKFLOW_DEPTH instead of recursing forever", async () => {
+    const selfSpawning = definitionFixture({
+      id: "wfd_selfspa1",
+      definitionKey: "self.flow",
+      initialState: "start",
+      states: [st("start", "initial"), st("looping", "intermediate")],
+      transitions: [
+        tr({
+          name: "recurse",
+          from: "start",
+          to: "looping",
+          trigger: { kind: "automatic" },
+          post: [{ kind: "spawn_child_workflow", parameters: { definitionKey: "self.flow" } }],
+        }),
+      ],
+    });
+    const { engine } = makeMultiEngine([selfSpawning]);
+    const err = await engine
+      .startInstance({ definitionId: selfSpawning.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowActionError);
+    expect((err as WorkflowActionError).failure).toBe("child_depth_exceeded");
+    expect(MAX_CHILD_WORKFLOW_DEPTH).toBeGreaterThan(0);
+  });
+
+  it("replays parent and child identically in a second engine", async () => {
+    const parent = parentDef();
+    const child = childDef();
+    const { engine, log } = makeMultiEngine([parent, child]);
+    const state = await engine.startInstance({ definitionId: parent.id, tenantId: TENANT });
+    const parentEvents = await engine.listEvents(state.instanceId);
+    expectSchemaValid(parentEvents);
+    const childId = parentEvents.find((e) => e.kind === "child_workflow_spawned")!.childInstanceId!;
+    expectSchemaValid(await engine.listEvents(childId));
+    expect(await replayIn([parent, child], log, state.instanceId)).toEqual(state);
+    expect(await replayIn([parent, child], log, childId)).toEqual(await engine.getInstanceState(childId));
+  });
+});
+
+// ── send_signal ────────────────────────────────────────────────────────────────
+
+function senderDef(sendParams: Record<string, unknown>, variables: Record<string, unknown> = {}): WorkflowDefinition {
+  return definitionFixture({
+    id: "wfd_sender01",
+    definitionKey: "sender.flow",
+    initialState: "start",
+    states: [
+      st("start", "initial", Object.entries(variables).map(
+        ([name, value]): DefAction => ({ kind: "set_variable", parameters: { variableName: name, value } }),
+      )),
+      st("sent", "terminal_success"),
+    ],
+    transitions: [
+      tr({
+        name: "send",
+        from: "start",
+        to: "sent",
+        trigger: { kind: "automatic" },
+        pre: [{ kind: "send_signal", parameters: sendParams }],
+      }),
+    ],
+  });
+}
+
+async function startReceiver(engine: WorkflowEngine, receiver: WorkflowDefinition, correlationKey: string) {
+  return engine.startInstance({ definitionId: receiver.id, tenantId: TENANT, correlationKey });
+}
+
+describe("send_signal action", () => {
+  it("delivers to a correlated sibling, which advances and completes", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({ signalName: "approve", correlationKey: "po-1" });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    expect(waiting.status).toBe("waiting_for_signal");
+
+    const sent = await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expect(sent.status).toBe("completed");
+    const received = await engine.listEvents(waiting.instanceId);
+    expect(received.map((e) => e.kind)).toEqual([
+      "instance_started",
+      "state_transitioned",
+      "signal_received",
+      "state_transitioned",
+      "signal_consumed",
+      "instance_completed",
+    ]);
+    expect((await engine.getInstanceState(waiting.instanceId))?.currentState).toBe("approved");
+  });
+
+  it("threads the action payload into the delivered signal", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({ signalName: "approve", correlationKey: "po-1", payload: { approver: "ops" } });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    const signal = (await engine.listEvents(waiting.instanceId)).find((e) => e.kind === "signal_received")!;
+    expect(signal.payload["payload"]).toEqual({ approver: "ops" });
+    expect(signal.payload["signalName"]).toBe("approve");
+  });
+
+  it("reads the correlation key from an instance variable", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({ signalName: "approve", correlationVariable: "target_key" }, { target_key: "po-2" });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-2");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expect((await engine.getInstanceState(waiting.instanceId))?.status).toBe("completed");
+  });
+
+  it("stringifies a numeric correlation variable", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({ signalName: "approve", correlationVariable: "target_key" }, { target_key: 42 });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "42");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expect((await engine.getInstanceState(waiting.instanceId))?.status).toBe("completed");
+  });
+
+  it("prefers an explicit correlationKey over a correlationVariable", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef(
+      { signalName: "approve", correlationKey: "po-1", correlationVariable: "target_key" },
+      { target_key: "po-other" },
+    );
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const addressed = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expect((await engine.getInstanceState(addressed.instanceId))?.status).toBe("completed");
+  });
+
+  it("completes the sender even when nothing correlates", async () => {
+    const sender = senderDef({ signalName: "approve", correlationKey: "nobody" });
+    const { engine } = makeMultiEngine([sender]);
+    const sent = await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expect(sent.status).toBe("completed");
+  });
+
+  it("does not deliver across tenants", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({ signalName: "approve", correlationKey: "po-1" });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({
+      definitionId: sender.id,
+      tenantId: "00000000-0000-4000-8000-000000000002",
+    });
+    expect((await engine.getInstanceState(waiting.instanceId))?.status).toBe("waiting_for_signal");
+  });
+
+  it("refuses an action with no signalName", async () => {
+    const sender = senderDef({ correlationKey: "po-1" });
+    const { engine } = makeMultiEngine([sender]);
+    const err = await engine
+      .startInstance({ definitionId: sender.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowActionError);
+    expect((err as WorkflowActionError).failure).toBe("missing_parameter");
+    expect((err as WorkflowActionError).actionKind).toBe("send_signal");
+  });
+
+  it("refuses an action with no correlation key at all", async () => {
+    const sender = senderDef({ signalName: "approve" });
+    const { engine } = makeMultiEngine([sender]);
+    const err = await engine
+      .startInstance({ definitionId: sender.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as WorkflowActionError).failure).toBe("missing_parameter");
+    expect((err as WorkflowActionError).message).toMatch(/correlationKey or correlationVariable/);
+  });
+
+  it("refuses a correlationVariable holding no usable key rather than correlating to nothing", async () => {
+    const sender = senderDef({ signalName: "approve", correlationVariable: "target_key" }, { target_key: null });
+    const { engine } = makeMultiEngine([sender]);
+    const err = await engine
+      .startInstance({ definitionId: sender.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowActionError);
+    expect((err as WorkflowActionError).failure).toBe("unresolved_correlation_key");
+    expect((err as WorkflowActionError).message).toMatch(/target_key/);
+  });
+
+  it("refuses a signal cycle at MAX_SIGNAL_DISPATCH_DEPTH", async () => {
+    const echo = definitionFixture({
+      id: "wfd_echo0001",
+      definitionKey: "echo.flow",
+      initialState: "a",
+      states: [st("a", "initial"), st("b", "intermediate")],
+      transitions: [
+        tr({
+          name: "a_to_b",
+          from: "a",
+          to: "b",
+          trigger: { kind: "signal_received", signalName: "ping" },
+          pre: [{ kind: "send_signal", parameters: { signalName: "ping", correlationKey: "echo" } }],
+        }),
+      ],
+    });
+    const { engine } = makeMultiEngine([echo]);
+    await engine.startInstance({ definitionId: echo.id, tenantId: TENANT, correlationKey: "echo" });
+    const err = await engine
+      .submitSignal({ signalName: "ping", correlationKey: "echo", tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowActionError);
+    expect((err as WorkflowActionError).failure).toBe("signal_depth_exceeded");
+    expect(MAX_SIGNAL_DISPATCH_DEPTH).toBeGreaterThan(0);
+  });
+
+  it("releases the dispatch depth so a later send still works", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({ signalName: "approve", correlationKey: "po-1" });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const first = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    const second = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expect((await engine.getInstanceState(first.instanceId))?.status).toBe("completed");
+    expect((await engine.getInstanceState(second.instanceId))?.status).toBe("completed");
+  });
+
+  it("replays sender and receiver identically in a second engine", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({ signalName: "approve", correlationKey: "po-1" });
+    const { engine, log } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    const sent = await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expectSchemaValid(await engine.listEvents(waiting.instanceId));
+    expectSchemaValid(await engine.listEvents(sent.instanceId));
+    expect(await replayIn([receiver, sender], log, waiting.instanceId)).toEqual(
+      await engine.getInstanceState(waiting.instanceId),
+    );
+    expect(await replayIn([receiver, sender], log, sent.instanceId)).toEqual(sent);
+  });
+});
+
+describe("WorkflowActionError", () => {
+  it("carries the action kind, failure and instance id, and names what to change", () => {
+    const err = new WorkflowActionError({
+      actionKind: "send_signal",
+      failure: "missing_parameter",
+      instanceId: "wfi_00000001",
+      detail: "parameters.signalName must be a non-empty string",
+    });
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("WorkflowActionError");
+    expect(err.actionKind).toBe("send_signal");
+    expect(err.failure).toBe("missing_parameter");
+    expect(err.instanceId).toBe("wfi_00000001");
+    expect(err.message).toBe(
+      "send_signal action on instance wfi_00000001 cannot run: parameters.signalName must be a non-empty string",
+    );
+  });
+
+  it("enumerates every failure kind it can report", () => {
+    expect([...WORKFLOW_ACTION_FAILURES]).toEqual([
+      "missing_parameter",
+      "unknown_child_definition",
+      "unresolved_correlation_key",
+      "child_depth_exceeded",
+      "signal_depth_exceeded",
+    ]);
   });
 });

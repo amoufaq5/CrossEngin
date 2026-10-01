@@ -78,6 +78,40 @@ checkpoints, billing, marketplace, etc.) — add the flags you want to the `api`
 - **Scale the API:** the API is stateless — run several `api` replicas behind Caddy
   and they share Postgres safely (idempotency, advisory locks, RLS all hold).
 
+## Sending email and SMS
+
+Out of the box only **in-app** notices are delivered: an email or SMS dispatch is refused as
+`no_sender_configured`, which the drain treats as retryable — so configuring a channel later
+delivers the backlog rather than losing it.
+
+To turn them on, fill the SES and/or Twilio block in `.env` (see
+[`.env.example`](./.env.example)) and add `--notification-drain-ms 15000` to the `api` command in
+`docker-compose.yml`. Without the drain flag nothing is sent at all, and the API says so at boot.
+
+These are credentials, so they live in the environment rather than in `command` — a process's argv
+is readable by anyone who can run `ps`. After the first `up`, check what was registered:
+
+```sh
+docker compose logs api | grep '\[notify\]'
+# [notify] channels: in_app, email, sms
+```
+
+A channel you configured but that is missing from that line is reported on the next line with what
+it still needs. A half-configured channel is never guessed at.
+
+**Bounces.** Add `--bounce-webhook` and set `NOTIFICATION_BOUNCE_SECRET` (32+ characters) to serve
+`POST /v1/notifications/bounces/{tenantId}/{ses|twilio}`, which records a hard bounce or a
+complaint as a suppression so the address stops receiving mail. This matters beyond tidiness:
+providers throttle or pause a whole sending domain on bounce and complaint rates, so one dead
+mailbox degrades every tenant's mail.
+
+The route verifies **the platform's own HMAC**, not the provider's — whatever terminates the SNS or
+Twilio callback must re-sign the byte-identical body with `signWebhookPayload` under the per-tenant
+key `HMAC-SHA256(NOTIFICATION_BOUNCE_SECRET, "bounce-webhook:" + tenantId)`, so a signature captured
+for one tenant cannot be replayed against another. Point `SES_CONFIGURATION_SET`'s event destination
+and `TWILIO_STATUS_CALLBACK_URL` at it; without those, no bounce ever arrives and a dead address is
+retried forever.
+
 ## Notes
 
 - **`pg_uuidv7`:** the DB image (`deploy/postgres/Dockerfile`) compiles the extension in.

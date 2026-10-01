@@ -437,6 +437,8 @@ function fakeDeclarer(
   const cancelled: string[] = [];
   const lookups: string[] = [];
   const closedOut: { readonly incidentId: string; readonly reason: string }[] = [];
+  /** Every `declare` the primary was *asked* for, including the ones it refused. */
+  const attempts: IncidentDeclarationRequest[] = [];
   let seq = 0;
   const declarer: IncidentDeclarer = {
     findOpen: async (autoDeclaredFor: string): Promise<IncidentRecord | null> => {
@@ -445,6 +447,7 @@ function fakeDeclarer(
       return opts.open?.get(autoDeclaredFor) ?? null;
     },
     declare: async (request: IncidentDeclarationRequest): Promise<IncidentRecord> => {
+      attempts.push(request);
       if (opts.failDeclare === true) throw new Error("store unavailable");
       seq += 1;
       const at = request.declaredAt ?? AT;
@@ -482,7 +485,7 @@ function fakeDeclarer(
       return "cancelled";
     },
   };
-  return { declared, cancelled, lookups, closedOut, declarer };
+  return { declared, cancelled, lookups, closedOut, attempts, declarer };
 }
 
 describe("IntegrityEscalator — persisting the incident record", () => {
@@ -819,6 +822,157 @@ describe("IntegrityEscalator — persisting the incident record", () => {
       INTEGRITY_INCIDENT_OPERATION,
       INTEGRITY_RECOVERY_OPERATION,
     ]);
+  });
+});
+
+describe("IntegrityEscalator — the wrapping declarer", () => {
+  it("tries the wired declarer before the fallback, not instead of it", async () => {
+    // The fallback is a last resort. If the primary were skipped the record would never be stored
+    // and nothing would say so, so this asserts the store was actually asked.
+    const { attempts, declarer } = fakeDeclarer({ failDeclare: true });
+    await new IntegrityEscalator({
+      config: config(),
+      declarer,
+      onError: () => undefined,
+      now: () => new Date(AT),
+    }).observe(report());
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.autoDeclaredFor).toBe(`audit-integrity:${TENANT_A}`);
+  });
+
+  it("does not ask the store to close an id the store never issued", async () => {
+    // The inline fallback did: a refused declaration left the escalator holding a counter-minted
+    // id, and the recovery sent that id to the store — which, since the counter restarts at 0001,
+    // could cancel a different incident entirely. The wrapper routes it back to the fallback.
+    const { closedOut, cancelled, declarer } = fakeDeclarer({ failDeclare: true });
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      onError: () => undefined,
+      now: () => new Date(AT),
+    });
+    const opened = await esc.observe(report());
+    expect(opened.incidentId).toBe("INC-2026-0001");
+    const recovered = await esc.observe(report({ verdict: "verified" }));
+    expect(recovered.kind).toBe("recovered");
+    expect(recovered.disposition).toBe("unpersisted");
+    expect(closedOut).toEqual([]);
+    expect(cancelled).toEqual([]);
+  });
+
+  it("keeps reporting an unpersisted episode as unpersisted on every ongoing pass", async () => {
+    // The old code reported `declared` here because a declarer was wired, regardless of whether it
+    // had served — which read as "the row is open" for a record no row exists for.
+    const { declarer } = fakeDeclarer({ failDeclare: true });
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      onError: () => undefined,
+      now: () => new Date(AT),
+    });
+    expect((await esc.observe(report())).disposition).toBe("unpersisted");
+    expect((await esc.observe(report())).disposition).toBe("unpersisted");
+  });
+
+  it("reports the store's error exactly once per failed declaration", async () => {
+    const errors: unknown[] = [];
+    const { declarer } = fakeDeclarer({ failDeclare: true });
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      onError: (err) => errors.push(err),
+      now: () => new Date(AT),
+    });
+    await esc.observe(report());
+    await esc.observe(report());
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).message).toBe("store unavailable");
+  });
+
+  it("declares a second scope through the store after the first fell back", async () => {
+    // One refused declaration must not latch the escalator onto the fallback for everything after.
+    let failing = true;
+    const inner = fakeDeclarer();
+    const declarer: IncidentDeclarer = {
+      declare: async (request) => {
+        if (failing) throw new Error("store unavailable");
+        return await inner.declarer.declare(request);
+      },
+      findOpen: async (key) => await inner.declarer.findOpen(key),
+      closeOut: async (id, input) => await inner.declarer.closeOut(id, input),
+    };
+    const esc = new IntegrityEscalator({
+      config: config(),
+      declarer,
+      onError: () => undefined,
+      now: () => new Date(AT),
+    });
+    const first = await esc.observe(report({ scope: TENANT_A }));
+    failing = false;
+    const second = await esc.observe(report({ scope: TENANT_B }));
+    expect(first.disposition).toBe("unpersisted");
+    expect(second.disposition).toBe("declared");
+    expect(inner.declared.map((d) => d.id)).toEqual([second.incidentId]);
+  });
+
+  it("reports an adopted incident as declared, because findOpen only reads stored rows", async () => {
+    const existing = IncidentRecordSchema.parse({
+      id: "INC-2026-0007",
+      title: `Audit integrity compromised for ${TENANT_A}`,
+      severity: "sev1",
+      category: "security",
+      status: "declared",
+      declaredAt: AT,
+      declaredBy: "operate-server",
+      autoDeclaredFor: `audit-integrity:${TENANT_A}`,
+      timeline: [{ occurredAt: AT, actorUserId: "operate-server", kind: "declared", message: "x" }],
+    });
+    const { declarer } = fakeDeclarer({
+      open: new Map([[`audit-integrity:${TENANT_A}`, existing]]),
+    });
+    const escalation = await new IntegrityEscalator({ config: config(), declarer }).observe(
+      report(),
+    );
+    expect(escalation.kind).toBe("ongoing");
+    expect(escalation.disposition).toBe("declared");
+  });
+
+  it("closes an adopted incident through the store, not the fallback", async () => {
+    const existing = IncidentRecordSchema.parse({
+      id: "INC-2026-0007",
+      title: `Audit integrity compromised for ${TENANT_A}`,
+      severity: "sev1",
+      category: "security",
+      status: "declared",
+      declaredAt: AT,
+      declaredBy: "operate-server",
+      autoDeclaredFor: `audit-integrity:${TENANT_A}`,
+      timeline: [{ occurredAt: AT, actorUserId: "operate-server", kind: "declared", message: "x" }],
+    });
+    const { closedOut, declarer } = fakeDeclarer({
+      open: new Map([[`audit-integrity:${TENANT_A}`, existing]]),
+    });
+    const esc = new IntegrityEscalator({ config: config(), declarer });
+    await esc.observe(report());
+    expect((await esc.observe(report({ verdict: "verified" }))).disposition).toBe("cancelled");
+    expect(closedOut.map((c) => c.incidentId)).toEqual(["INC-2026-0007"]);
+  });
+
+  it("formats a fallback declaration exactly as a stored one — the strings are quoted in ADRs", async () => {
+    const { declarer } = fakeDeclarer({ failDeclare: true });
+    const text = formatIntegrityEscalation(
+      await new IntegrityEscalator({
+        config: config(),
+        declarer,
+        onError: () => undefined,
+        now: () => new Date(AT),
+      }).observe(report()),
+    );
+    expect(text).toBe(
+      "audit integrity for " +
+        TENANT_A +
+        ": DECLARED INC-2026-0001 severity=sev1 paged=pagerduty_phone audited=false",
+    );
   });
 });
 

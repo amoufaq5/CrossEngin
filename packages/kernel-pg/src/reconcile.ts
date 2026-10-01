@@ -1,6 +1,7 @@
 import {
   emitAddColumn,
   emitAddForeignKey,
+  emitAddTableConstraintIfEmpty,
   emitAddUniqueConstraint,
   emitAlterColumnTypeIfEmpty,
   emitDropColumnDefault,
@@ -9,15 +10,26 @@ import {
   emitIndex,
   emitReplaceIndex,
   emitReplaceRlsPolicy,
+  emitReplaceTableConstraintIfEmpty,
   emitRlsEnable,
   emitRlsPolicy,
   emitSetColumnDefault,
   emitTable,
+  emitTableConstraint,
+  foreignKeyConstraintName,
   type ColumnDefinition,
+  type TableConstraint,
   type TableDefinition,
 } from "@crossengin/kernel/bootstrap";
 
-import { canonicalPgType, declaredOnDelete, expectedIndexNames } from "./canonical.js";
+import {
+  canonicalPgType,
+  declaredForeignKeyConstraints,
+  declaredOnDelete,
+  declaredUniqueConstraints,
+  expectedIndexNames,
+  makeObjectName,
+} from "./canonical.js";
 import type { PgConnection } from "./connection.js";
 import {
   diffSchema,
@@ -45,6 +57,8 @@ export const RECONCILE_STEP_KINDS = [
   "replace_index",
   "replace_unique_constraint",
   "replace_policy",
+  "add_table_constraint",
+  "replace_table_constraint",
 ] as const;
 export type ReconcileStepKind = (typeof RECONCILE_STEP_KINDS)[number];
 
@@ -68,6 +82,8 @@ export const UNRECONCILED_REASONS = [
   "index_removed",
   "policy_removed",
   "foreign_key_removed",
+  "constraint_needs_validation",
+  "constraint_removed",
   "rls_unexpectedly_enabled",
 ] as const;
 export type UnreconciledReason = (typeof UNRECONCILED_REASONS)[number];
@@ -194,6 +210,8 @@ function planTable(
   // the refusal has to propagate — a unique constraint over a column that was never added fails
   // with `column "…" named in key does not exist`, which is how this was found live.
   const refusedColumns = new Set<string>();
+  /** Columns this plan really does add — `addedColumns` on the diff includes the refused ones. */
+  const addedColumns = new Set<string>();
   for (const name of tableDiff.addedColumns) {
     const col = columns.get(name);
     if (col === undefined) continue;
@@ -218,6 +236,7 @@ function planTable(
       refusedColumns.add(name);
       continue;
     }
+    addedColumns.add(name);
     steps.push({
       kind: "add_column",
       table: table.name,
@@ -226,6 +245,14 @@ function planTable(
       guarded: false,
     });
   }
+
+  // Constraints that the `ADD COLUMN` statements above already create, so nothing may plan them a
+  // second time. This is the mirror of `refuseIfBlocked`: there a refusal *propagates* to anything
+  // covering a column the plan is not adding; here an addition *subsumes* the constraints that ride
+  // along with the column. Measured live — a column arriving with an inline reference planned both
+  // `add_column` and `add_foreign_key`, and the second failed with `already exists`, which is the
+  // plan's "every step is expected to succeed" invariant being false rather than a reporting wrinkle.
+  const carriedByAddedColumns = constraintsCarriedByAddedColumns(table, addedColumns);
 
   // Which columns are about to have their type rewritten. A constraint on such a column has to go
   // first — `ALTER COLUMN TYPE` cannot run while a foreign key depends on the old type, which is
@@ -236,13 +263,42 @@ function planTable(
       .map((d) => d.column),
   );
 
+  // A declared table-level foreign key over a column being retyped blocks the rewrite exactly as an
+  // undeclared one does, and matching by name means it is never in `removedForeignKeys` — so it has
+  // to be found from the declaration and dropped here, then re-added with the others below.
+  const droppedForRetype = new Set<string>();
+  for (const fk of declaredForeignKeyConstraints(table)) {
+    if (tableDiff.addedConstraints.some((a) => a.name === fk.name)) continue;
+    if (!fk.columns.some((c) => retypedColumns.has(c))) continue;
+    droppedForRetype.add(fk.name);
+    steps.push({
+      kind: "drop_foreign_key",
+      table: table.name,
+      target: fk.name,
+      sql: emitDropConstraint(table, fk.name),
+      guarded: false,
+    });
+  }
+
   planForeignKeyDrops(table, tableDiff, retypedColumns, steps, unreconciled);
 
   for (const delta of tableDiff.changedColumns) {
     planChangedColumn(table, delta, columns.get(delta.column), steps, unreconciled, rowCount);
   }
 
-  planForeignKeyAdds(table, tableDiff, columns, refusedColumns, steps, unreconciled);
+  planForeignKeyAdds(
+    table,
+    tableDiff,
+    columns,
+    refusedColumns,
+    addedColumns,
+    steps,
+    unreconciled,
+  );
+  // After the column additions, so a table-level constraint over a column this plan is adding is
+  // created once the column exists. Nothing `ADD COLUMN` writes can be a table-level constraint —
+  // `emitColumn` has no spelling for one — so there is nothing to subsume here.
+  planTableConstraints(table, tableDiff, droppedForRetype, rowCount, steps, unreconciled);
 
   const expected = expectedIndexNames(table);
   const declaredIndexes = new Map((table.indexes ?? []).map((i) => [i.name, i] as const));
@@ -263,6 +319,11 @@ function planTable(
     }
     const cols = constraintColumns.get(name);
     if (cols !== undefined && expected.constraints.has(name)) {
+      // An unnamed column-level UNIQUE arrives with its column; a *named* one does not, because
+      // `emitColumn` writes `UNIQUE` only for `unique: true` and the named form is a table-level
+      // line that `emitAddColumn` never emits. So the named one is still planned here and the
+      // unnamed one is not — an asymmetry in the emitter, not in this planner.
+      if (carriedByAddedColumns.has(name)) continue;
       if (refuseIfBlocked(table, "constraint", name, cols, refusedColumns, unreconciled)) continue;
       steps.push({
         kind: "add_unique_constraint",
@@ -280,19 +341,38 @@ function planTable(
   for (const delta of tableDiff.changedIndexes) {
     if (delta.constraintBacked) {
       const cols = constraintColumns.get(delta.name);
-      if (cols === undefined) continue;
-      if (refuseIfBlocked(table, "constraint", delta.name, cols, refusedColumns, unreconciled)) {
+      if (cols !== undefined) {
+        if (refuseIfBlocked(table, "constraint", delta.name, cols, refusedColumns, unreconciled)) {
+          continue;
+        }
+        steps.push({
+          kind: "replace_unique_constraint",
+          table: table.name,
+          target: delta.name,
+          // DROP INDEX is refused on a constraint's index, so this has to go through the constraint.
+          sql:
+            `${emitDropConstraint(table, delta.name)} ` +
+            `${emitAddUniqueConstraint(table, delta.name, cols)}`,
+          guarded: true,
+        });
+        continue;
+      }
+      // The database holds a constraint under this name, but the catalog now declares a plain index
+      // — which is the only way to express a predicate, since a UNIQUE constraint cannot carry one.
+      // Dropping it is still a constraint operation, so emitting `emitReplaceIndex` here would put a
+      // step in the plan that cannot succeed ("cannot drop index … because constraint … requires
+      // it"), breaking the plan's one invariant. Measured against a live cluster.
+      const declared = declaredIndexes.get(delta.name);
+      if (declared === undefined) continue;
+      if (refuseIfBlocked(table, "index", delta.name, declared.columns, refusedColumns, unreconciled)) {
         continue;
       }
       steps.push({
-        kind: "replace_unique_constraint",
+        kind: "replace_index",
         table: table.name,
         target: delta.name,
-        // DROP INDEX is refused on a constraint's index, so this has to go through the constraint.
-        sql:
-          `${emitDropConstraint(table, delta.name)} ` +
-          `${emitAddUniqueConstraint(table, delta.name, cols)}`,
-        guarded: true,
+        sql: `${emitDropConstraint(table, delta.name)} ${emitIndex(table, declared)}`,
+        guarded: false,
       });
       continue;
     }
@@ -383,6 +463,118 @@ function planTable(
       manualSql: `DROP POLICY "${name}" ON ${quoted(table.schema, table.name)};`,
     });
   }
+  for (const removed of tableDiff.removedConstraints) {
+    const over =
+      removed.columns.length > 0 ? ` over (${removed.columns.join(", ")})` : "";
+    unreconciled.push({
+      reason: "constraint_removed",
+      table: table.name,
+      target: removed.name,
+      detail:
+        `CHECK constraint '${removed.name}'${over} is not declared; it may enforce a rule the ` +
+        "catalog does not know about, and dropping it loosens the data's guarantees" +
+        (removed.expression === null ? "" : ` — currently ${removed.expression}`),
+      manualSql: `ALTER TABLE ${quoted(table.schema, table.name)} DROP CONSTRAINT "${removed.name}";`,
+    });
+  }
+}
+
+/**
+ * Plans the table-level constraints the catalog declares and the database does not hold as declared.
+ *
+ * **Only on an empty table.** A CHECK and a foreign key can both fail against rows that are already
+ * there, and ADR-0290's invariant is that every step in a plan is expected to succeed — a step that
+ * might fail is worse than no step. `NOT VALID` would make it succeed and is deliberately refused:
+ * it records a rule the data may violate, so every later reader believes a guarantee that does not
+ * hold. On a populated table the SQL is handed over instead, with the query that finds the rows which
+ * would break it.
+ *
+ * This is stricter than ADR-0291's rule for a *column-level* foreign key, which is added unguarded on
+ * the grounds that its failure means the database already contradicts the catalog. That path is
+ * unchanged; the difference is that a CHECK shares this code path and has no such argument — an
+ * expression the catalog just started declaring says nothing about whether old rows satisfy it.
+ *
+ * `refusedColumns` is not consulted: a column is only refused on a populated table, and on a
+ * populated table every constraint here is already refused.
+ */
+function planTableConstraints(
+  table: TableDefinition,
+  tableDiff: TableDiff,
+  droppedForRetype: ReadonlySet<string>,
+  rowCount: number | undefined,
+  steps: ReconcileStep[],
+  unreconciled: UnreconciledItem[],
+): void {
+  const declared = new Map(
+    (table.constraints ?? []).map((c) => [c.name, c] as const),
+  );
+  const changed = new Map(tableDiff.changedConstraints.map((c) => [c.name, c] as const));
+
+  type Pending = { readonly constraint: TableConstraint; readonly replacing: boolean };
+  const pending: Pending[] = [];
+  for (const added of tableDiff.addedConstraints) {
+    const constraint = declared.get(added.name);
+    if (constraint !== undefined) pending.push({ constraint, replacing: false });
+  }
+  for (const delta of tableDiff.changedConstraints) {
+    const constraint = declared.get(delta.name);
+    if (constraint !== undefined) pending.push({ constraint, replacing: true });
+  }
+  // One this plan dropped to let a column type change through. It was correct before and is correct
+  // again, so it is re-added rather than replaced — the drop is already its own step above.
+  for (const name of droppedForRetype) {
+    if (changed.has(name)) continue;
+    const constraint = declared.get(name);
+    if (constraint !== undefined) pending.push({ constraint, replacing: false });
+  }
+
+  for (const { constraint, replacing } of pending) {
+    if (rowCount !== 0) {
+      unreconciled.push({
+        reason: "constraint_needs_validation",
+        table: table.name,
+        target: constraint.name,
+        detail:
+          `${constraint.kind} constraint '${constraint.name}' is declared and the table holds ` +
+          `${rowCount === undefined ? "an unknown number of" : String(rowCount)} row(s); ` +
+          "whether every one of them already satisfies it is not something a plan may assume",
+        manualSql: manualConstraintSql(table, constraint, replacing),
+      });
+      continue;
+    }
+    steps.push({
+      kind: replacing ? "replace_table_constraint" : "add_table_constraint",
+      table: table.name,
+      target: constraint.name,
+      sql: replacing
+        ? emitReplaceTableConstraintIfEmpty(table, constraint)
+        : emitAddTableConstraintIfEmpty(table, constraint),
+      guarded: true,
+    });
+  }
+}
+
+/**
+ * The SQL an operator runs to add a constraint by hand, with the query that finds the rows which
+ * would refuse it — that query is the decision the plan declines to make for them.
+ */
+function manualConstraintSql(
+  table: TableDefinition,
+  constraint: TableConstraint,
+  replacing: boolean,
+): string {
+  const fq = quoted(table.schema, table.name);
+  const drop = replacing
+    ? `ALTER TABLE ${fq} DROP CONSTRAINT "${constraint.name}";\n`
+    : "";
+  const violators =
+    constraint.kind === "check"
+      ? `-- rows that would refuse it:\n-- SELECT * FROM ${fq} WHERE NOT (${constraint.expression});\n`
+      : constraint.kind === "foreign_key"
+        ? `-- rows that would refuse it: the ones whose (${constraint.columns.join(", ")}) has no match in ` +
+          `"${constraint.references.schema ?? table.schema}"."${constraint.references.table}".\n`
+        : `-- rows that would refuse it: duplicates over (${constraint.columns.join(", ")}).\n`;
+  return `${violators}${drop}ALTER TABLE ${fq} ADD ${emitTableConstraint(constraint)};`;
 }
 
 /**
@@ -463,12 +655,18 @@ function planForeignKeyDrops(
  * whose reference does not resolve, which means the database already contradicts a constraint the
  * catalog declares. That is an integrity problem the operator needs to see, not an ambiguous
  * decision to route around — so the step is planned and the failure, if it comes, is the answer.
+ *
+ * Except for a column this plan is adding. The diff is computed against the schema as it was *before*
+ * the plan runs, where the column does not exist, so its reference reads as declared-but-missing —
+ * while `emitAddColumn` carries the `REFERENCES` along and has already created the constraint by the
+ * time this step would run. Planning both guarantees one failure, which is the invariant broken.
  */
 function planForeignKeyAdds(
   table: TableDefinition,
   tableDiff: TableDiff,
   columns: ReadonlyMap<string, ColumnDefinition>,
   refusedColumns: ReadonlySet<string>,
+  addedColumns: ReadonlySet<string>,
   steps: ReconcileStep[],
   unreconciled: UnreconciledItem[],
 ): void {
@@ -479,6 +677,7 @@ function planForeignKeyAdds(
   for (const column of toAdd) {
     const ref = columns.get(column)?.references;
     if (ref === undefined) continue;
+    if (addedColumns.has(column)) continue;
     if (refuseIfBlocked(table, "foreign key", column, [column], refusedColumns, unreconciled)) {
       continue;
     }
@@ -579,6 +778,36 @@ function planChangedColumn(
 }
 
 /**
+ * The constraint names an `ADD COLUMN` already creates for the columns this plan is adding.
+ *
+ * `emitColumn` carries a column's `NOT NULL`, `DEFAULT`, `CHECK`, inline `UNIQUE` and `REFERENCES`
+ * along, which is what makes an added column faithful to its declaration — and means every one of
+ * those constraints exists the moment the column does. The two that anything else would otherwise
+ * plan are the inline UNIQUE and the reference, so those are the two named here.
+ *
+ * A column-level `CHECK` is included for completeness even though nothing plans one today: a missing
+ * column check is never reported, since only an *undeclared* check is (`removedConstraints`), and the
+ * name is a guess at what Postgres will pick. A **named** column UNIQUE
+ * (`unique: { constraintName }`) is deliberately absent — `emitColumn` does not write it, so the
+ * separate `add_unique_constraint` step is the only thing that creates it.
+ */
+function constraintsCarriedByAddedColumns(
+  table: TableDefinition,
+  addedColumns: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const col of table.columns) {
+    if (!addedColumns.has(col.name)) continue;
+    if (col.references !== undefined) {
+      names.add(foreignKeyConstraintName(table.name, col.name));
+    }
+    if (col.unique === true) names.add(makeObjectName(table.name, col.name, "key"));
+    if (col.check !== undefined) names.add(makeObjectName(table.name, col.name, "check"));
+  }
+  return names;
+}
+
+/**
  * Refuses an object that covers a column the plan is not adding, and says so. Returns true when the
  * caller should skip planning it.
  */
@@ -608,7 +837,11 @@ function uniqueConstraintColumns(
   table: TableDefinition,
 ): ReadonlyMap<string, readonly string[]> {
   const out = new Map<string, readonly string[]>();
-  for (const uc of table.uniqueConstraints ?? []) out.set(uc.name, uc.columns);
+  // Both spellings of the same object — see `declaredUniqueConstraints`. A `kind: "unique"` table
+  // constraint is repaired through `ADD CONSTRAINT … UNIQUE` like any other, not through the guarded
+  // table-constraint path: ADR-0291 already settled that a unique constraint over duplicate rows is
+  // the database contradicting the catalog rather than an ambiguous decision.
+  for (const uc of declaredUniqueConstraints(table)) out.set(uc.name, uc.columns);
   for (const col of table.columns) {
     if (typeof col.unique === "object" && col.unique !== null) {
       out.set(col.unique.constraintName, [col.name]);
@@ -696,13 +929,16 @@ async function probeRowCounts(
   schema: string,
   diff: SchemaDiff,
 ): Promise<ReconciliationProbe> {
-  // Both cases that hinge on whether the table holds anything: rewriting a column's type, and
-  // adding a NOT NULL column with no default.
+  // Every case that hinges on whether the table holds anything: rewriting a column's type, adding a
+  // NOT NULL column with no default, and adding or replacing a table-level constraint the existing
+  // rows might not satisfy.
   const needed = diff.modifiedTables
     .filter(
       (m) =>
         m.addedColumns.length > 0 ||
-        m.changedColumns.some((c) => c.reasons.includes("type")),
+        m.changedColumns.some((c) => c.reasons.includes("type")) ||
+        m.addedConstraints.length > 0 ||
+        m.changedConstraints.length > 0,
     )
     .map((m) => m.table);
   const rowCounts = new Map<string, number>();

@@ -383,6 +383,40 @@ describe("parseServeArgs", () => {
     expect(opts.eventPrefix).toBe("retail");
   });
 
+  it("parses --bounce-webhook + --bounce-transient-hours with a pg store", () => {
+    // A boolean flag must not advance the index itself: `consumed()` is an *extra* increment on top
+    // of the loop's own, so an `i += 1` here swallowed the following flag and left its value bare.
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--store",
+      "pg",
+      "--bounce-webhook",
+      "--bounce-transient-hours",
+      "24",
+    ]);
+    expect(opts.bounceWebhook).toBe(true);
+    expect(opts.bounceTransientHours).toBe(24);
+  });
+
+  it("defaults the bounce webhook to off", () => {
+    const opts = parseServeArgs(["--pack", "erp-core"]);
+    expect(opts.bounceWebhook).toBe(false);
+    expect(opts.bounceTransientHours).toBeNull();
+  });
+
+  it("rejects --bounce-webhook with the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--bounce-webhook"])).toThrow(
+      /requires a Postgres store/,
+    );
+  });
+
+  it("rejects --bounce-transient-hours without --bounce-webhook", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--bounce-transient-hours", "24"]),
+    ).toThrow(/requires --bounce-webhook/);
+  });
+
   it("defaults entity-event emission to off", () => {
     const opts = parseServeArgs(["--pack", "erp-core"]);
     expect(opts.emitEntityEvents).toBe(false);

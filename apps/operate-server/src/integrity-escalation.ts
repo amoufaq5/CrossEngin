@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { autoDeclaredForKey, type IncidentRecord } from "@crossengin/incident-response";
 import {
   CountingIncidentDeclarer,
+  FallbackIncidentDeclarer,
   SystemClock,
   type Clock,
   type IncidentCloseOut,
@@ -182,19 +183,31 @@ function escalatorClock(now: (() => Date) | undefined): Clock {
  */
 export class IntegrityEscalator {
   private readonly open = new Map<string, string>();
-  private readonly declarer: IncidentDeclarer;
   /**
-   * The declarer used when the wired one cannot be reached. A page naming nothing is not a page, so
-   * a refused declaration still gets a record — one this process minted and nothing stored.
+   * Every declaration, lookup and close-out goes through this one wrapper.
+   *
+   * "A page naming nothing is not a page, so a refused declaration still gets a record" used to be
+   * an inline try/catch here plus a second declarer held alongside the wired one.
+   * `FallbackIncidentDeclarer` is that rule with one implementation, shared with anything else that
+   * declares, and it fixes what the inline copy got wrong: a close-out for a fallback-minted id now
+   * goes back to the fallback instead of asking the store to cancel an id it never issued — which,
+   * since the counter can collide, could have cancelled a different incident.
+   *
+   * With nothing wired, the primary *is* the fallback: there is no store to fail over from, and one
+   * instance keeps the counter single so ids stay in declaration order.
    */
-  private readonly unpersisted: CountingIncidentDeclarer;
+  private readonly declarer: FallbackIncidentDeclarer;
   /** Whether the wired declarer is expected to outlive this process. */
   private readonly persists: boolean;
 
   constructor(private readonly opts: IntegrityEscalatorOptions) {
-    this.unpersisted = new CountingIncidentDeclarer({ clock: escalatorClock(opts.now) });
-    this.declarer = opts.declarer ?? this.unpersisted;
+    const fallback = new CountingIncidentDeclarer({ clock: escalatorClock(opts.now) });
     this.persists = opts.declarer !== undefined;
+    this.declarer = new FallbackIncidentDeclarer({
+      primary: opts.declarer ?? fallback,
+      fallback,
+      ...(opts.onError !== undefined ? { onPrimaryFailure: opts.onError } : {}),
+    });
   }
 
   /** Never rejects — an audit or page failure is routed to `onError`, not thrown at the pass. */
@@ -230,7 +243,7 @@ export class IntegrityEscalator {
         kind: "ongoing",
         incidentId: openId,
         audited: false,
-        disposition: this.persists ? "declared" : "unpersisted",
+        disposition: this.dispositionFor(openId),
       };
     }
 
@@ -245,7 +258,7 @@ export class IntegrityEscalator {
         kind: "ongoing",
         incidentId: adopted,
         audited: false,
-        disposition: "declared",
+        disposition: this.dispositionFor(adopted),
       };
     }
 
@@ -265,8 +278,22 @@ export class IntegrityEscalator {
       incident: declared.incident,
       page: declared.page,
       audited,
-      disposition: declared.persisted ? "declared" : "unpersisted",
+      disposition: this.dispositionFor(declared.incident.id),
     };
+  }
+
+  /**
+   * Whether the record behind an id is durable, which is what `disposition` reports.
+   *
+   * Two things must hold: a store-backed declarer was wired at all, and it is the one that actually
+   * served this id — the wrapper's `servedBy` answers the second, where the inline fallback used to
+   * return a boolean alongside the record. `unknown` reads as durable: the only ids this escalator
+   * holds that the wrapper did not issue are ones `findOpen` returned, and `findOpen` only ever
+   * reads stored rows.
+   */
+  private dispositionFor(incidentId: string): IncidentDisposition {
+    if (!this.persists) return "unpersisted";
+    return this.declarer.servedBy(incidentId) === "fallback" ? "unpersisted" : "declared";
   }
 
   /**
@@ -306,30 +333,18 @@ export class IntegrityEscalator {
   }
 
   /**
-   * Declares through the wired declarer, falling back to an unpersisted record if it refuses.
+   * Declares, and builds the page from whatever id came back.
    *
    * With a store-backed declarer the id is allocated from the rows that exist, so a restart
    * continues the year's sequence instead of reusing `INC-YYYY-0001`. A declarer that cannot be
    * reached must not swallow the page, for the same reason an unwritable audit log must not —
-   * losing the alert is the worse failure — so the fallback mints a record this process can name
-   * and reports it as `unpersisted`.
+   * losing the alert is the worse failure. That fail-over is no longer written out here: the
+   * wrapper does it, reports the store's error through `onError`, and `dispositionFor` reads back
+   * which declarer served.
    */
-  private async declare(report: IntegrityProofReport): Promise<{
-    readonly incident: IncidentRecord;
-    readonly page: PageDirective | null;
-    readonly persisted: boolean;
-  }> {
-    const request = this.declarationRequest(report);
-    if (this.persists) {
-      try {
-        const record = await this.declarer.declare(request);
-        return { incident: record, page: this.pageFor(record), persisted: true };
-      } catch (err) {
-        this.opts.onError?.(err);
-      }
-    }
-    const record = await this.unpersisted.declare(request);
-    return { incident: record, page: this.pageFor(record), persisted: false };
+  private async declare(report: IntegrityProofReport): Promise<IntegrityEscalationPlan> {
+    const record = await this.declarer.declare(this.declarationRequest(report));
+    return { incident: record, page: this.pageFor(record) };
   }
 
   private pageFor(incident: IncidentRecord): PageDirective | null {
@@ -347,6 +362,10 @@ export class IntegrityEscalator {
    * requires the on-call roles to be assigned — five of them at sev1 — so no automated recovery can
    * reach a resolved state, and recording one would claim a response that never happened. A
    * declarer that throws is reported as `failed`, which reads as `declared`: the row is still open.
+   *
+   * An episode whose record only ever existed in this process closes out as `unpersisted` — the
+   * wrapper routes it back to the declarer that minted it rather than asking the store to cancel an
+   * id it never issued.
    */
   private async closeOut(incidentId: string): Promise<IncidentDisposition> {
     let closeOut: IncidentCloseOut;

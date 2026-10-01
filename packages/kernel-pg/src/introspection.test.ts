@@ -2,14 +2,20 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PgConnection, PgQueryResult } from "./connection.js";
 import {
+  CHECK_CONSTRAINT_QUERY,
   COLUMN_QUERY,
+  CONFUPDTYPE_TO_ACTION,
+  FOREIGN_KEY_QUERY,
   INDEX_QUERY,
   POLICY_QUERY,
   TABLE_QUERY,
   introspectSchema,
   parseLiveSchema,
+  type CheckConstraintRow,
   type ColumnRow,
+  type ForeignKeyRow,
   type IndexRow,
+  type LiveForeignKey,
   type LivePolicy,
   type PolicyRow,
   type TableRow,
@@ -151,12 +157,24 @@ describe("parseLiveSchema — a policy's command and roles", () => {
           command: "*",
           roles: ["PUBLIC"],
           role_count: 1,
+          permissive: true,
           ...over,
         },
       ],
     );
     return live.tables[0]?.policies[0] as LivePolicy;
   }
+
+  it("reads polpermissive as given", () => {
+    expect(onePolicy({ permissive: true }).permissive).toBe(true);
+    expect(onePolicy({ permissive: false }).permissive).toBe(false);
+  });
+
+  it("reports an absent polpermissive as undetermined rather than as permissive", () => {
+    // Reading an absent value as the default is exactly how a restrictive policy came to look
+    // permissive and get silently replaced.
+    expect(onePolicy({ permissive: undefined }).permissive).toBeNull();
+  });
 
   it("canonicalizes each polcmd character", () => {
     expect(onePolicy({ command: "*" }).command).toBe("ALL");
@@ -218,7 +236,7 @@ describe("POLICY_QUERY", () => {
 });
 
 describe("introspectSchema", () => {
-  it("issues the five catalog queries in parallel and feeds them into parseLiveSchema", async () => {
+  it("issues the six catalog queries in parallel and feeds them into parseLiveSchema", async () => {
     const observedSqls: string[] = [];
     const conn: PgConnection = {
       query: vi.fn(async <T,>(sql: string): Promise<PgQueryResult<T>> => {
@@ -246,9 +264,165 @@ describe("introspectSchema", () => {
       close: vi.fn() as PgConnection["close"],
     };
     const live = await introspectSchema(conn, "meta");
-    expect(observedSqls).toHaveLength(5);
+    expect(observedSqls).toHaveLength(6);
     expect(observedSqls.some((s) => s.includes("contype = 'f'"))).toBe(true);
+    expect(observedSqls.some((s) => s.includes("contype = 'c'"))).toBe(true);
     expect(live.tables.map((t) => t.name)).toEqual(["x"]);
     expect(live.tables[0]?.foreignKeys).toEqual([]);
+    expect(live.tables[0]?.checkConstraints).toEqual([]);
+  });
+});
+
+describe("POLICY_QUERY — permissiveness", () => {
+  it("asks for polpermissive", () => {
+    expect(POLICY_QUERY).toContain("p.polpermissive AS permissive");
+  });
+});
+
+describe("parseLiveSchema — a foreign key's ON UPDATE", () => {
+  function oneFk(over: Partial<ForeignKeyRow>): LiveForeignKey {
+    const live = parseLiveSchema(
+      "meta",
+      [{ schema: "meta", name: "t", rls_enabled: false }],
+      [],
+      [],
+      [],
+      [
+        {
+          table_name: "t",
+          constraint_name: "t_parent_fkey",
+          columns: ["tenant_id", "parent_id"],
+          target_schema: "meta",
+          target_table: "parents",
+          target_columns: ["tenant_id", "id"],
+          on_delete: "c",
+          on_update: "a",
+          ...over,
+        },
+      ],
+    );
+    return live.tables[0]?.foreignKeys[0] as LiveForeignKey;
+  }
+
+  it("keeps a composite key's columns in key order on both sides", () => {
+    const fk = oneFk({});
+    expect([...fk.columns]).toEqual(["tenant_id", "parent_id"]);
+    expect([...fk.targetColumns]).toEqual(["tenant_id", "id"]);
+  });
+
+  it("canonicalizes confupdtype with the same codes as confdeltype", () => {
+    expect(oneFk({ on_update: "a" }).onUpdate).toBe("NO ACTION");
+    expect(oneFk({ on_update: "r" }).onUpdate).toBe("RESTRICT");
+    expect(oneFk({ on_update: "c" }).onUpdate).toBe("CASCADE");
+    expect(oneFk({ on_update: "n" }).onUpdate).toBe("SET NULL");
+    expect(oneFk({ on_update: "d" }).onUpdate).toBe("SET DEFAULT");
+    expect(CONFUPDTYPE_TO_ACTION["c"]).toBe("CASCADE");
+  });
+
+  it("reads an absent or unknown code as NO ACTION, which under-reports rather than invents", () => {
+    expect(oneFk({ on_update: undefined }).onUpdate).toBe("NO ACTION");
+    expect(oneFk({ on_update: "z" }).onUpdate).toBe("NO ACTION");
+  });
+
+  it("still reads ON DELETE independently", () => {
+    expect(oneFk({ on_delete: "n", on_update: "c" }).onDelete).toBe("SET NULL");
+    expect(oneFk({ on_delete: "n", on_update: "c" }).onUpdate).toBe("CASCADE");
+  });
+});
+
+describe("FOREIGN_KEY_QUERY — ON UPDATE", () => {
+  it("asks for confupdtype alongside confdeltype", () => {
+    expect(FOREIGN_KEY_QUERY).toContain("con.confdeltype AS on_delete");
+    expect(FOREIGN_KEY_QUERY).toContain("con.confupdtype AS on_update");
+  });
+});
+
+describe("CHECK_CONSTRAINT_QUERY", () => {
+  it("selects only CHECK constraints in the requested schema", () => {
+    expect(CHECK_CONSTRAINT_QUERY).toContain("con.contype = 'c'");
+    expect(CHECK_CONSTRAINT_QUERY).toContain("nspname = $1");
+  });
+
+  it("deparses the expression through pg_get_expr, as the index and policy queries do", () => {
+    // That rendering is character-identical to what the ADR-0292 probe produces for the declared
+    // side, which is the whole reason the comparison can be an exact string match.
+    expect(CHECK_CONSTRAINT_QUERY).toContain("pg_get_expr(con.conbin, con.conrelid)");
+  });
+
+  it("casts attname to text, because node-postgres has no name[] parser", () => {
+    expect(CHECK_CONSTRAINT_QUERY).toContain("a.attname::text");
+  });
+
+  it("keeps conkey in order, so a two-column rule reports both columns as declared", () => {
+    expect(CHECK_CONSTRAINT_QUERY).toContain("WITH ORDINALITY");
+  });
+
+  it("interpolates no database name", () => {
+    expect(CHECK_CONSTRAINT_QUERY).not.toMatch(/postgres|crossengin|tenant/i);
+  });
+});
+
+describe("parseLiveSchema — check constraints", () => {
+  const tables: TableRow[] = [
+    { schema: "meta", name: "comms", rls_enabled: false },
+    { schema: "meta", name: "other", rls_enabled: false },
+  ];
+
+  it("attaches each check to its own table", () => {
+    const checks: CheckConstraintRow[] = [
+      {
+        table_name: "comms",
+        constraint_name: "comms_bounces_check",
+        expression: "(bounces_count <= recipient_count)",
+        columns: ["recipient_count", "bounces_count"],
+      },
+      {
+        table_name: "other",
+        constraint_name: "other_status_check",
+        expression: "(status = ANY (ARRAY['a'::text]))",
+        columns: ["status"],
+      },
+    ];
+    const live = parseLiveSchema("meta", tables, [], [], [], [], checks);
+    const comms = live.tables.find((t) => t.name === "comms");
+    const other = live.tables.find((t) => t.name === "other");
+    expect(comms?.checkConstraints.map((c) => c.name)).toEqual(["comms_bounces_check"]);
+    expect([...(comms?.checkConstraints[0]?.columns ?? [])]).toEqual([
+      "recipient_count",
+      "bounces_count",
+    ]);
+    expect(other?.checkConstraints[0]?.expression).toBe("(status = ANY (ARRAY['a'::text]))");
+  });
+
+  it("defaults to an empty list for a table with none", () => {
+    const live = parseLiveSchema("meta", tables, [], [], [], [], []);
+    expect(live.tables[0]?.checkConstraints).toEqual([]);
+  });
+
+  it("carries a null expression through as undetermined rather than as absent", () => {
+    const live = parseLiveSchema("meta", tables, [], [], [], [], [
+      { table_name: "comms", constraint_name: "c", expression: null, columns: [] },
+    ]);
+    expect(live.tables[0]?.checkConstraints[0]?.expression).toBeNull();
+  });
+
+  it("accepts a check that references no column at all", () => {
+    const live = parseLiveSchema("meta", tables, [], [], [], [], [
+      { table_name: "comms", constraint_name: "c", expression: "(true)", columns: [] },
+    ]);
+    expect(live.tables[0]?.checkConstraints[0]?.columns).toEqual([]);
+  });
+
+  it("groups several checks on one table in the order they arrive", () => {
+    const live = parseLiveSchema("meta", tables, [], [], [], [], [
+      { table_name: "comms", constraint_name: "a", expression: "(1)", columns: [] },
+      { table_name: "comms", constraint_name: "b", expression: "(2)", columns: [] },
+    ]);
+    expect(live.tables[0]?.checkConstraints.map((c) => c.name)).toEqual(["a", "b"]);
+  });
+
+  it("defaults to no checks when the caller does not pass them, so older callers still parse", () => {
+    const live = parseLiveSchema("meta", tables, [], [], []);
+    expect(live.tables[0]?.checkConstraints).toEqual([]);
   });
 });
