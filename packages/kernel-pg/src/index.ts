@@ -2,6 +2,7 @@ export * from "./applier.js";
 export * from "./connection.js";
 export * from "./canonical.js";
 export * from "./diff.js";
+export * from "./expression-render.js";
 export * from "./reconcile.js";
 export * from "./encryption.js";
 export * from "./encryption-migration.js";

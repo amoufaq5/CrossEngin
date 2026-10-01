@@ -11,6 +11,8 @@ import {
   emitDropColumnDefault,
   emitDropColumnNotNull,
   emitIndex,
+  emitReplaceIndex,
+  emitReplaceRlsPolicy,
   emitSetColumnDefault,
   emitRlsEnable,
   emitRlsPolicy,
@@ -413,6 +415,69 @@ describe("foreign-key and type-change emitters", () => {
     );
     expect(() =>
       emitAddForeignKey(table, "od'd", { table: "users", column: "id" }, "RESTRICT"),
+    ).toThrow(/unsafe SQL identifier/);
+  });
+});
+
+describe("atomic replacement emitters", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "widgets",
+    columns: [{ name: "id", type: "UUID", notNull: true }, { name: "status", type: "TEXT" }],
+    primaryKey: ["id"],
+  };
+
+  it("emitReplaceIndex drops and creates in one statement", () => {
+    // The applier wraps each statement in its own transaction, so two statements would leave a
+    // window with the index gone.
+    const sql = emitReplaceIndex(table, {
+      name: "idx_widgets_status",
+      columns: ["status"],
+      where: "status = 'open'",
+    });
+    expect(sql).toContain('DROP INDEX "meta"."idx_widgets_status";');
+    expect(sql).toContain('CREATE INDEX "idx_widgets_status"');
+    expect(sql).toContain("WHERE status = 'open'");
+  });
+
+  it("emitReplaceIndex preserves uniqueness and the access method", () => {
+    const sql = emitReplaceIndex(table, {
+      name: "idx_widgets_status",
+      columns: ["status"],
+      unique: true,
+      kind: "gin",
+    });
+    expect(sql).toContain("CREATE UNIQUE INDEX");
+    expect(sql).toContain("USING GIN");
+  });
+
+  it("emitReplaceRlsPolicy drops and creates in one statement", () => {
+    // RLS on with no policy denies every row, so a window here is an outage, not a leak — and one
+    // statement means there is no window.
+    const sql = emitReplaceRlsPolicy(table, {
+      name: "widgets_isolation",
+      using: "tenant_id IS NOT NULL",
+    });
+    expect(sql).toContain('DROP POLICY "widgets_isolation" ON "meta"."widgets";');
+    expect(sql).toContain('CREATE POLICY "widgets_isolation"');
+    expect(sql).toContain("USING (tenant_id IS NOT NULL)");
+  });
+
+  it("emitReplaceRlsPolicy carries a WITH CHECK clause through", () => {
+    const sql = emitReplaceRlsPolicy(table, {
+      name: "widgets_isolation",
+      using: "a",
+      check: "b",
+    });
+    expect(sql).toContain("WITH CHECK (b)");
+  });
+
+  it("both refuse an unsafe identifier", () => {
+    expect(() =>
+      emitReplaceIndex(table, { name: "od'd", columns: ["status"] }),
+    ).toThrow(/unsafe SQL identifier/);
+    expect(() =>
+      emitReplaceRlsPolicy(table, { name: "od'd", using: "a" }),
     ).toThrow(/unsafe SQL identifier/);
   });
 });

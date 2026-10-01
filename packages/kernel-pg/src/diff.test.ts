@@ -2,6 +2,7 @@ import type { TableDefinition } from "@crossengin/kernel/bootstrap";
 import { describe, expect, it } from "vitest";
 
 import { diffSchema, formatSchemaDiff } from "./diff.js";
+import { expressionKey } from "./expression-render.js";
 import type { LiveSchema, LiveTable } from "./introspection.js";
 
 function liveTable(name: string, columns: LiveTable["columns"], extras: Partial<LiveTable> = {}): LiveTable {
@@ -42,7 +43,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "text", isNullable: false, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
           policies: [{ name: "tenants_policy", using: "true", check: null }],
           rlsEnabled: true,
         },
@@ -90,7 +91,7 @@ describe("diffSchema", () => {
           { name: "legacy", dataType: "text", isNullable: true, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
           policies: [{ name: "tenants_policy", using: "true", check: null }],
           rlsEnabled: true,
         },
@@ -109,7 +110,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "varchar(255)", isNullable: true, defaultExpr: "'anon'::text" },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
           policies: [{ name: "tenants_policy", using: "true", check: null }],
           rlsEnabled: true,
         },
@@ -133,8 +134,8 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [
-            { name: "tenants_pkey", columns: ["id"], unique: true, primary: true },
-            { name: "tenants_name_idx", columns: ["name"], unique: false, primary: false },
+            { name: "tenants_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+            { name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null },
           ],
           policies: [{ name: "tenants_policy", using: "true", check: null }],
           rlsEnabled: true,
@@ -156,7 +157,7 @@ describe("diffSchema", () => {
         ],
         {
           indexes: [
-            { name: "tenants_legacy_idx", columns: ["name"], unique: false, primary: false },
+            { name: "tenants_legacy_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null },
           ],
           policies: [{ name: "tenants_policy", using: "true", check: null }],
           rlsEnabled: true,
@@ -177,7 +178,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "text", isNullable: false, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
           policies: [{ name: "old_policy", using: "true", check: null }],
           rlsEnabled: true,
         },
@@ -197,7 +198,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "text", isNullable: false, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
           policies: [{ name: "tenants_policy", using: "true", check: null }],
           rlsEnabled: false,
         },
@@ -217,7 +218,7 @@ describe("diffSchema", () => {
           { name: "name", dataType: "TEXT", isNullable: false, defaultExpr: null },
         ],
         {
-          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false }],
+          indexes: [{ name: "tenants_name_idx", columns: ["name"], unique: false, primary: false, method: "btree", predicate: null }],
           policies: [{ name: "tenants_policy", using: "true", check: null }],
           rlsEnabled: true,
         },
@@ -264,6 +265,17 @@ describe("formatSchemaDiff", () => {
           removedIndexes: ["i_old"],
           addedPolicies: ["p_new"],
           removedPolicies: ["p_old"],
+          changedIndexes: [
+            {
+              name: "i_changed",
+              reasons: ["predicate"],
+              detail: "(a = 1) → (a = 2)",
+              constraintBacked: false,
+            },
+          ],
+          changedPolicies: [
+            { name: "p_changed", reasons: ["using"], detail: "USING (a) → (b)" },
+          ],
           addedForeignKeys: ["owner_id"],
           removedForeignKeys: [
             { name: "tenants_old_fkey", columns: ["old_id"], target: "meta.old(id)" },
@@ -294,6 +306,8 @@ describe("formatSchemaDiff", () => {
     expect(out).toContain("- index i_old");
     expect(out).toContain("+ policy p_new");
     expect(out).toContain("- policy p_old");
+    expect(out).toContain("~ index i_changed [predicate]");
+    expect(out).toContain("~ policy p_changed [using]");
     expect(out).toContain("+ foreign key on owner_id");
     expect(out).toContain("- foreign key tenants_old_fkey");
     expect(out).toContain("~ foreign key on tenant_id [on_delete]");
@@ -344,10 +358,10 @@ describe("diffSchema — no false drift on a correct schema", () => {
       { name: "code", dataType: "text", isNullable: false, defaultExpr: null },
     ],
     indexes: [
-      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true },
-      { name: "idx_widgets_status", columns: ["status"], unique: false, primary: false },
-      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false },
-      { name: "widgets_id_code_key", columns: ["id", "code"], unique: true, primary: false },
+      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+      { name: "idx_widgets_status", columns: ["status"], unique: false, primary: false, method: "btree", predicate: null },
+      { name: "widgets_code_key", columns: ["code"], unique: true, primary: false, method: "btree", predicate: null },
+      { name: "widgets_id_code_key", columns: ["id", "code"], unique: true, primary: false, method: "btree", predicate: null },
     ],
     policies: [],
     foreignKeys: [],
@@ -415,10 +429,224 @@ describe("diffSchema — no false drift on a correct schema", () => {
       ...liveTable,
       indexes: [
         ...liveTable.indexes,
-        { name: "idx_widgets_adhoc", columns: ["hash"], unique: false, primary: false },
+        { name: "idx_widgets_adhoc", columns: ["hash"], unique: false, primary: false, method: "btree", predicate: null },
       ],
     };
     const diff = diffSchema([target], { schema: "meta", tables: [drifted] });
     expect(diff.modifiedTables[0]?.removedIndexes).toEqual(["idx_widgets_adhoc"]);
+  });
+});
+
+describe("diffSchema — in-place index and policy changes", () => {
+  /**
+   * The gap this closes. Indexes and policies were compared by *name* only, so renaming nothing and
+   * editing a predicate, a column list, an access method or a policy clause reconciled to no change.
+   */
+  const target: TableDefinition = {
+    schema: "meta",
+    name: "widgets",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "tenant_id", type: "UUID", notNull: true },
+      { name: "status", type: "TEXT", notNull: true },
+      { name: "tags", type: "JSONB", notNull: true },
+    ],
+    primaryKey: ["id"],
+    uniqueConstraints: [{ name: "widgets_tenant_status_key", columns: ["tenant_id", "status"] }],
+    indexes: [
+      { name: "idx_widgets_open", columns: ["status"], where: "status = 'open'" },
+      { name: "idx_widgets_tags", columns: ["tags"], kind: "gin" },
+      { name: "idx_widgets_pair", columns: ["tenant_id", "status"] },
+    ],
+    rls: {
+      enabled: true,
+      policies: [{ name: "widgets_isolation", using: "tenant_id IS NOT NULL" }],
+    },
+  };
+
+  const RENDERED = {
+    byRequest: new Map<string, string | null>([
+      [expressionKey("widgets", "status = 'open'"), "(status = 'open'::text)"],
+      [expressionKey("widgets", "tenant_id IS NOT NULL"), "(tenant_id IS NOT NULL)"],
+    ]),
+  };
+
+  function liveWidgets(over: Partial<LiveTable> = {}): LiveTable {
+    return liveTable(
+      "widgets",
+      [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "tenant_id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "status", dataType: "text", isNullable: false, defaultExpr: null },
+        { name: "tags", dataType: "jsonb", isNullable: false, defaultExpr: null },
+      ],
+      {
+        indexes: [
+          { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+          {
+            name: "idx_widgets_open",
+            columns: ["status"],
+            unique: false,
+            primary: false,
+            method: "btree",
+            predicate: "(status = 'open'::text)",
+          },
+          { name: "idx_widgets_tags", columns: ["tags"], unique: false, primary: false, method: "gin", predicate: null },
+          {
+            name: "idx_widgets_pair",
+            columns: ["tenant_id", "status"],
+            unique: false,
+            primary: false,
+            method: "btree",
+            predicate: null,
+          },
+          {
+            name: "widgets_tenant_status_key",
+            columns: ["tenant_id", "status"],
+            unique: true,
+            primary: false,
+            method: "btree",
+            predicate: null,
+          },
+        ],
+        policies: [{ name: "widgets_isolation", using: "(tenant_id IS NOT NULL)", check: null }],
+        rlsEnabled: true,
+        ...over,
+      },
+    );
+  }
+
+  function diffWith(over: Partial<LiveTable> = {}) {
+    return diffSchema([target], { schema: "meta", tables: [liveWidgets(over)] }, RENDERED);
+  }
+
+  it("reports no drift when every definition matches", () => {
+    expect(diffWith().hasDrift).toBe(false);
+  });
+
+  it("sees a predicate changed under the same name", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_open" ? { ...i, predicate: "(status = 'closed'::text)" } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.name).toBe("idx_widgets_open");
+    expect(changed?.[0]?.reasons).toEqual(["predicate"]);
+    expect(changed?.[0]?.detail).toContain("(status = 'closed'::text) → (status = 'open'::text)");
+  });
+
+  it("sees a predicate that was dropped entirely", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_open" ? { ...i, predicate: null } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.detail).toContain("absent from the database");
+  });
+
+  it("sees a predicate the database has but the catalog does not declare", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_pair" ? { ...i, predicate: "(status = 'x'::text)" } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.name).toBe("idx_widgets_pair");
+    expect(changed?.[0]?.detail).toContain("not declared");
+  });
+
+  it("sees a changed access method", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_tags" ? { ...i, method: "btree" } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.reasons).toEqual(["method"]);
+    expect(changed?.[0]?.detail).toContain("method btree → gin");
+  });
+
+  it("sees a reordered column list", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_pair" ? { ...i, columns: ["status", "tenant_id"] } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.reasons).toEqual(["columns"]);
+  });
+
+  it("sees uniqueness gained or lost", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_pair" ? { ...i, unique: true } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.reasons).toEqual(["unique"]);
+  });
+
+  it("reports several reasons at once", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "idx_widgets_open"
+          ? { ...i, columns: ["id"], method: "hash", predicate: null }
+          : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.reasons).toEqual(["columns", "method", "predicate"]);
+  });
+
+  it("sees a changed unique constraint and marks it constraint-backed", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "widgets_tenant_status_key" ? { ...i, columns: ["status", "tenant_id"] } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.name).toBe("widgets_tenant_status_key");
+    expect(changed?.[0]?.constraintBacked).toBe(true);
+  });
+
+  it("sees a unique constraint that lost its uniqueness", () => {
+    const changed = diffWith({
+      indexes: liveWidgets().indexes.map((i) =>
+        i.name === "widgets_tenant_status_key" ? { ...i, unique: false } : i,
+      ),
+    }).modifiedTables[0]?.changedIndexes;
+    expect(changed?.[0]?.reasons).toEqual(["columns", "unique"]);
+  });
+
+  it("sees a changed policy clause", () => {
+    const changed = diffWith({
+      policies: [{ name: "widgets_isolation", using: "(tenant_id IS NULL)", check: null }],
+    }).modifiedTables[0]?.changedPolicies;
+    expect(changed?.[0]?.name).toBe("widgets_isolation");
+    expect(changed?.[0]?.reasons).toEqual(["using"]);
+    expect(changed?.[0]?.detail).toContain("USING (tenant_id IS NULL) → (tenant_id IS NOT NULL)");
+  });
+
+  it("compares nothing at all without renderings, rather than inventing drift", () => {
+    // Unknown must not read as changed: a caller that did not probe would otherwise see every
+    // correct index and policy as drifted.
+    const noRenderings = diffSchema([target], { schema: "meta", tables: [liveWidgets()] });
+    expect(noRenderings.hasDrift).toBe(false);
+    const drifted = diffSchema(
+      [target],
+      {
+        schema: "meta",
+        tables: [
+          liveWidgets({
+            policies: [{ name: "widgets_isolation", using: "(something else)", check: null }],
+          }),
+        ],
+      },
+    );
+    expect(drifted.hasDrift).toBe(false);
+  });
+
+  it("reports an expression the table cannot even carry", () => {
+    const rendered = {
+      byRequest: new Map<string, string | null>([
+        [expressionKey("widgets", "tenant_id IS NOT NULL"), null],
+      ]),
+    };
+    const diff = diffSchema([target], { schema: "meta", tables: [liveWidgets()] }, rendered);
+    expect(diff.modifiedTables[0]?.changedPolicies[0]?.detail).toContain("cannot be applied");
   });
 });

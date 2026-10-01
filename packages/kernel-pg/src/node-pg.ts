@@ -20,10 +20,24 @@ interface PgPool {
   end(): Promise<void>;
 }
 
-function rowsResult<T>(result: { rows: unknown[]; rowCount: number | null }): PgQueryResult<T> {
+/**
+ * Normalizes what node-postgres hands back, including the case it hands back an **array**.
+ *
+ * A simple query holding more than one statement — `DROP INDEX …; CREATE INDEX …;`, which is how an
+ * object is replaced without a window where it is missing — returns one result per statement. Reading
+ * `.rows` off the array yields undefined and the caller died with
+ * `Cannot read properties of undefined (reading 'length')`, a JS TypeError wearing the costume of a
+ * database error. The last result is the one a caller means: for a DDL batch it is the final
+ * statement's, and for a batch ending in a SELECT it is the rows.
+ */
+export function rowsResult<T>(result: unknown): PgQueryResult<T> {
+  const last = Array.isArray(result) ? result[result.length - 1] : result;
+  if (last === undefined || last === null) return { rows: [], rowCount: 0 };
+  const shaped = last as { rows?: unknown[]; rowCount?: number | null };
+  const rows = shaped.rows ?? [];
   return {
-    rows: result.rows as readonly T[],
-    rowCount: result.rowCount ?? result.rows.length,
+    rows: rows as readonly T[],
+    rowCount: shaped.rowCount ?? rows.length,
   };
 }
 
