@@ -1,4 +1,10 @@
-import type { ColumnReference, TableDefinition } from "@crossengin/kernel/bootstrap";
+import {
+  PUBLIC_ROLE,
+  type ColumnReference,
+  type RlsPolicy,
+  type RlsPolicyCommand,
+  type TableDefinition,
+} from "@crossengin/kernel/bootstrap";
 
 import type { ForeignKeyAction } from "./introspection.js";
 
@@ -166,6 +172,87 @@ export const DEFAULT_ON_DELETE: ForeignKeyAction = "RESTRICT";
 
 export function declaredOnDelete(ref: ColumnReference): ForeignKeyAction {
   return (ref.onDelete ?? DEFAULT_ON_DELETE) as ForeignKeyAction;
+}
+
+/**
+ * `pg_policy.polcmd` and the command it stands for.
+ *
+ * The letters are the same ones `pg_trigger` uses for its event mask, which is why `SELECT` is `r`
+ * (read) and `INSERT` is `a` (append) rather than the initials anyone would guess. `*` is a policy
+ * that was created without `FOR`, so an unscoped policy and one written `FOR ALL` are the same row.
+ */
+export const POLCMD_TO_COMMAND: Readonly<Record<string, RlsPolicyCommand>> = Object.freeze({
+  "*": "ALL",
+  r: "SELECT",
+  a: "INSERT",
+  w: "UPDATE",
+  d: "DELETE",
+});
+
+export const COMMAND_TO_POLCMD: Readonly<Record<RlsPolicyCommand, string>> = Object.freeze({
+  ALL: "*",
+  SELECT: "r",
+  INSERT: "a",
+  UPDATE: "w",
+  DELETE: "d",
+});
+
+/** What `CREATE POLICY` means when `FOR` is omitted, and so what an omitted `command` means. */
+export const DEFAULT_POLICY_COMMAND: RlsPolicyCommand = "ALL";
+
+/** What `CREATE POLICY` means when `TO` is omitted, and so what omitted `roles` means. */
+export const DEFAULT_POLICY_ROLES: readonly string[] = Object.freeze([PUBLIC_ROLE]);
+
+/**
+ * `polcmd` → the declared spelling, or null for a character this version does not recognize.
+ *
+ * Null is *undetermined*, not `ALL`. A Postgres release adding a command would otherwise make every
+ * policy using it read as drifted back to `FOR ALL` — inventing drift on a schema nobody touched,
+ * which is the failure ADR-0290 exists to prevent.
+ */
+export function canonicalPolicyCommand(polcmd: string): RlsPolicyCommand | null {
+  return POLCMD_TO_COMMAND[polcmd.trim()] ?? null;
+}
+
+/** The declared spelling → the `polcmd` character Postgres would store for it. */
+export function policyCommandToPolcmd(command: RlsPolicyCommand): string {
+  return COMMAND_TO_POLCMD[command];
+}
+
+/**
+ * The command a declared policy actually produces. An omitted `command` is not "unspecified" in the
+ * database — it is `ALL`, by the same reasoning as `declaredOnDelete`.
+ */
+export function declaredPolicyCommand(policy: RlsPolicy): RlsPolicyCommand {
+  return policy.command ?? DEFAULT_POLICY_COMMAND;
+}
+
+/**
+ * The roles a declared policy actually applies to, in a form comparable with an introspected list.
+ *
+ * `PUBLIC` is folded to its canonical spelling because it is a keyword rather than a role name and
+ * introspects from oid 0; everything else is a role name and is compared verbatim, since Postgres
+ * stores a quoted identifier exactly as written. The list is **sorted**: `polroles` comes back in
+ * oid order, which has nothing to do with the order anyone wrote, so order cannot be a difference.
+ */
+export function declaredPolicyRoles(policy: RlsPolicy): readonly string[] {
+  const roles = policy.roles;
+  if (roles === undefined || roles.length === 0) return DEFAULT_POLICY_ROLES;
+  return canonicalPolicyRoles(roles);
+}
+
+export function canonicalPolicyRoles(roles: readonly string[]): readonly string[] {
+  return [...roles]
+    .map((r) => (r.toUpperCase() === PUBLIC_ROLE ? PUBLIC_ROLE : r))
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** Whether two canonicalized role lists name the same grantees. */
+export function samePolicyRoles(a: readonly string[], b: readonly string[]): boolean {
+  const left = canonicalPolicyRoles(a);
+  const right = canonicalPolicyRoles(b);
+  if (left.length !== right.length) return false;
+  return left.every((role, i) => role === right[i]);
 }
 
 export interface DeclaredForeignKey {

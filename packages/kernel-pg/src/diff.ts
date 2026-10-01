@@ -4,8 +4,12 @@ import {
   APPLIER_OWNED_TABLES,
   canonicalPgDefault,
   canonicalPgType,
+  canonicalPolicyRoles,
   declaredForeignKeys,
+  declaredPolicyCommand,
+  declaredPolicyRoles,
   expectedIndexNames,
+  samePolicyRoles,
 } from "./canonical.js";
 import {
   NO_RENDERED_EXPRESSIONS,
@@ -64,7 +68,7 @@ export interface IndexDelta {
   readonly constraintBacked: boolean;
 }
 
-export const POLICY_DELTA_REASONS = ["using", "check"] as const;
+export const POLICY_DELTA_REASONS = ["using", "check", "command", "roles"] as const;
 export type PolicyDeltaReason = (typeof POLICY_DELTA_REASONS)[number];
 
 export interface PolicyDelta {
@@ -305,6 +309,26 @@ function diffOneTable(
     if (checkDelta !== null) {
       reasons.push("check");
       details.push(`WITH CHECK ${checkDelta}`);
+    }
+    // The command and the role list need no renderer: both sides are a closed vocabulary, so they
+    // are canonicalized (`polcmd`'s character, `polroles`'s oid 0) and compared exactly. A null on
+    // the live side means introspection could not determine it, and unknown is not drift — the same
+    // rule `comparePredicate` applies to an expression nobody rendered.
+    // `?? null` so a row that carries no value at all is undetermined too, rather than reading as
+    // the default and drifting every policy that scopes itself.
+    const liveCommand = livePolicy.command ?? null;
+    const declaredCommand = declaredPolicyCommand(policy);
+    if (liveCommand !== null && liveCommand !== declaredCommand) {
+      reasons.push("command");
+      details.push(`FOR ${liveCommand} → FOR ${declaredCommand}`);
+    }
+    const liveRoles = livePolicy.roles ?? null;
+    const declaredRoles = declaredPolicyRoles(policy);
+    if (liveRoles !== null && !samePolicyRoles(liveRoles, declaredRoles)) {
+      reasons.push("roles");
+      details.push(
+        `TO ${canonicalPolicyRoles(liveRoles).join(", ")} → TO ${declaredRoles.join(", ")}`,
+      );
     }
     if (reasons.length > 0) {
       changedPolicies.push({ name, reasons, detail: details.join("; ") });

@@ -2,6 +2,18 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { FixedClock } from "@crossengin/observability-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { buildPersistentSloEnforcementEngine } from "./persisting-engine.js";
+import { SLO_ENFORCEMENT_ACTION_COLUMNS } from "./enforcement-action-store.js";
+
+/** Derived from the stored column order so a new column cannot shift a literal index out from under. */
+function bound(
+  capture: { params: readonly unknown[] | undefined } | undefined,
+  column: string,
+): unknown {
+  if (capture === undefined) throw new Error("no statement recorded");
+  const index = SLO_ENFORCEMENT_ACTION_COLUMNS.indexOf(column);
+  expect(index).toBeGreaterThanOrEqual(0);
+  return capture.params?.[index];
+}
 
 const SURFACE = "POST /v1/orders";
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -107,7 +119,20 @@ describe("buildPersistentSloEnforcementEngine", () => {
     const actionInsert = capture.find((c) =>
       c.sql.includes("INSERT INTO meta.slo_enforcement_actions"),
     );
-    expect(actionInsert?.params?.[1]).toBe(TENANT);
+    expect(bound(actionInsert, "tenant_id")).toBe(TENANT);
+  });
+
+  it("writes no close-out on the opening action", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+
+    const actionInsert = capture.find((c) =>
+      c.sql.includes("INSERT INTO meta.slo_enforcement_actions"),
+    );
+    expect(bound(actionInsert, "decision")).toBe("breach_opened");
+    expect(bound(actionInsert, "close_out")).toBeNull();
   });
 
   it("records an enforcement action but no evaluation snapshot while ongoing", async () => {
@@ -198,6 +223,133 @@ describe("buildPersistentSloEnforcementEngine", () => {
     expect(capture.some((c) => c.sql.includes("SELECT") && c.sql.includes("meta.incidents"))).toBe(
       true,
     );
+  });
+
+  it("stores the recovery's close-out on the action row", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent, clock } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    capture.length = 0;
+
+    clock.advance(2 * 3_600_000);
+    const recovered = await persistent.evaluate(clock.now());
+    if (recovered[0]?.kind !== "recovered") throw new Error("expected recovery");
+
+    const actionInsert = capture.find((c) =>
+      c.sql.includes("INSERT INTO meta.slo_enforcement_actions"),
+    );
+    expect(bound(actionInsert, "decision")).toBe("recovered");
+    // The decision's close-out and the stored one are the same value by construction, so "was the
+    // recovery clean?" is answerable from the action row and not only from meta.incidents.
+    expect(bound(actionInsert, "close_out")).toBe(recovered[0].closeOut);
+    expect(bound(actionInsert, "close_out")).toBe("failed");
+  });
+
+  it("records a recovery action but no evaluation snapshot", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent, clock } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    capture.length = 0;
+
+    clock.advance(2 * 3_600_000);
+    await persistent.evaluate(clock.now());
+    const inserts = capture.filter((c) => c.sql.includes("INSERT INTO"));
+    expect(inserts.some((c) => c.sql.includes("slo_enforcement_actions"))).toBe(true);
+    expect(inserts.some((c) => c.sql.includes("slo_evaluations"))).toBe(false);
+  });
+
+  it("names the opened incident on the recovery action too", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent, clock } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    const opened = await persistent.evaluate(BASE);
+    const incidentId = opened[0]?.kind === "breach_opened" ? opened[0].plan.incident.id : null;
+    capture.length = 0;
+
+    clock.advance(2 * 3_600_000);
+    await persistent.evaluate(clock.now());
+    const actionInsert = capture.find((c) =>
+      c.sql.includes("INSERT INTO meta.slo_enforcement_actions"),
+    );
+    expect(bound(actionInsert, "incident_id")).toBe(incidentId);
+  });
+
+  it("keeps recordOutcome off the database", async () => {
+    // The hot path is an in-memory window append; only evaluate() talks to the store.
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    expect(capture).toHaveLength(0);
+  });
+
+  it("stamps the evaluation time on the action row", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    const actionInsert = capture.find((c) =>
+      c.sql.includes("INSERT INTO meta.slo_enforcement_actions"),
+    );
+    expect(bound(actionInsert, "occurred_at")).toBe(BASE.toISOString());
+  });
+
+  it("records the threshold that fired", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    const actionInsert = capture.find((c) =>
+      c.sql.includes("INSERT INTO meta.slo_enforcement_actions"),
+    );
+    expect(bound(actionInsert, "threshold_id")).toBe("fast-burn");
+    expect(bound(actionInsert, "severity")).toBe("sev2");
+  });
+
+  it("writes the kill switch it activated, so a restart can learn which flag it rolled back", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    const decisions = await persistent.evaluate(BASE);
+    if (decisions[0]?.kind !== "breach_opened") throw new Error("expected breach");
+    const switchId = decisions[0].plan.killSwitch?.id;
+    expect(switchId).toBeDefined();
+    const insert = capture.find((c) =>
+      c.sql.includes("INSERT INTO meta.feature_flag_kill_switches"),
+    );
+    expect(insert?.params).toContain(switchId);
+  });
+
+  it("writes the kill switch before the action row that names it", async () => {
+    // Otherwise a reader can see a kill_switch_id with no switch behind it.
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const { persistent } = build(capture);
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    const switchAt = capture.findIndex((c) => c.sql.includes("feature_flag_kill_switches"));
+    const actionAt = capture.findIndex((c) => c.sql.includes("slo_enforcement_actions"));
+    expect(switchAt).toBeGreaterThanOrEqual(0);
+    expect(switchAt).toBeLessThan(actionAt);
+  });
+
+  it("writes no kill switch for a registration with no rollback configured", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const clock = new FixedClock(BASE);
+    const persistent = buildPersistentSloEnforcementEngine(mockConnection(capture), {
+      alertPolicy: policy,
+      systemActorUserId: SYSTEM_ACTOR,
+      registrations: [{ slo, category: "availability", tenantId: TENANT }],
+      clock,
+    });
+    burst(persistent, 25, BASE.getTime());
+    await persistent.evaluate(BASE);
+    expect(capture.some((c) => c.sql.includes("feature_flag_kill_switches"))).toBe(false);
+  });
+
+  it("exposes the kill-switch store it writes through", () => {
+    const { persistent } = build([]);
+    expect(persistent.killSwitchStore).toBeDefined();
   });
 
   it("persists nothing when traffic is healthy", async () => {

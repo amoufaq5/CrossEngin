@@ -113,4 +113,5 @@ inventing drift on a schema that is exactly correct.
   change, so the plan would rebuild an index that did not need rebuilding. Correct but not minimal.
 - A policy's roles and command (`FOR SELECT`, `TO some_role`) are still neither declared nor
   compared; `RlsPolicy` has no field for either.
-- The applier still halts on the first failure (ADR-0290, 0291).
+- ~~The applier halts on the first failure.~~ **Closed by ADR-0295**: it continues and reports
+  every outcome, and a failed statement is still never recorded as applied. Original wording: The applier still halts on the first failure (ADR-0290, 0291).

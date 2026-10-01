@@ -7,6 +7,42 @@ import {
 const SCHEMA = "meta";
 const TABLE = "slo_enforcement_actions";
 
+interface ColumnBinding {
+  readonly column: string;
+  readonly bind: (record: SloEnforcementActionRecord) => unknown;
+}
+
+/**
+ * One list drives the column order, the placeholder count and the bound values. They used to be two
+ * lists held in agreement by hand, so a column added to one and not the other bound the wrong value
+ * to every column after it.
+ */
+const COLUMN_BINDINGS: readonly ColumnBinding[] = [
+  { column: "action_id", bind: (r) => r.actionId },
+  { column: "tenant_id", bind: (r) => r.tenantId },
+  { column: "slo_id", bind: (r) => r.sloId },
+  { column: "surface", bind: (r) => r.surface },
+  { column: "signal", bind: (r) => r.signal },
+  { column: "decision", bind: (r) => r.decision },
+  { column: "severity", bind: (r) => r.severity },
+  { column: "incident_id", bind: (r) => r.incidentId },
+  { column: "kill_switch_id", bind: (r) => r.killSwitchId },
+  { column: "flag_id", bind: (r) => r.flagId },
+  { column: "paged", bind: (r) => r.paged },
+  { column: "page_channel_count", bind: (r) => r.pageChannelCount },
+  { column: "threshold_id", bind: (r) => r.thresholdId },
+  { column: "close_out", bind: (r) => r.closeOut },
+  { column: "occurred_at", bind: (r) => r.occurredAt },
+];
+
+/** The stored column order, exported so a caller never has to count placeholders itself. */
+export const SLO_ENFORCEMENT_ACTION_COLUMNS: readonly string[] = COLUMN_BINDINGS.map(
+  (binding) => binding.column,
+);
+
+const COLUMN_LIST = SLO_ENFORCEMENT_ACTION_COLUMNS.join(", ");
+const PLACEHOLDER_LIST = COLUMN_BINDINGS.map((_, index) => `$${index + 1}`).join(", ");
+
 export class PostgresSloEnforcementActionStore {
   private readonly conn: PgConnection;
 
@@ -17,29 +53,10 @@ export class PostgresSloEnforcementActionStore {
   async record(record: SloEnforcementActionRecord): Promise<void> {
     const valid = SloEnforcementActionRecordSchema.parse(record);
     await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (
-         action_id, tenant_id, slo_id, surface, signal, decision, severity,
-         incident_id, kill_switch_id, flag_id, paged, page_channel_count,
-         threshold_id, occurred_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMN_LIST})
+       VALUES (${PLACEHOLDER_LIST})
        ON CONFLICT (action_id) DO NOTHING`,
-      [
-        valid.actionId,
-        valid.tenantId,
-        valid.sloId,
-        valid.surface,
-        valid.signal,
-        valid.decision,
-        valid.severity,
-        valid.incidentId,
-        valid.killSwitchId,
-        valid.flagId,
-        valid.paged,
-        valid.pageChannelCount,
-        valid.thresholdId,
-        valid.occurredAt,
-      ],
+      COLUMN_BINDINGS.map((binding) => binding.bind(valid)),
     );
   }
 
@@ -47,9 +64,7 @@ export class PostgresSloEnforcementActionStore {
     incidentId: string,
   ): Promise<readonly SloEnforcementActionRecord[]> {
     const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT action_id, tenant_id, slo_id, surface, signal, decision, severity,
-              incident_id, kill_switch_id, flag_id, paged, page_channel_count,
-              threshold_id, occurred_at
+      `SELECT ${COLUMN_LIST}
        FROM ${SCHEMA}.${TABLE}
        WHERE incident_id = $1
        ORDER BY occurred_at ASC`,
@@ -61,9 +76,7 @@ export class PostgresSloEnforcementActionStore {
   async listRecent(limit = 100): Promise<readonly SloEnforcementActionRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
     const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT action_id, tenant_id, slo_id, surface, signal, decision, severity,
-              incident_id, kill_switch_id, flag_id, paged, page_channel_count,
-              threshold_id, occurred_at
+      `SELECT ${COLUMN_LIST}
        FROM ${SCHEMA}.${TABLE}
        ORDER BY occurred_at DESC
        LIMIT $1`,
@@ -107,6 +120,7 @@ function rowToRecord(row: Record<string, unknown>): SloEnforcementActionRecord {
     paged: row["paged"] === true,
     pageChannelCount: Number(row["page_channel_count"] ?? 0),
     thresholdId: asNullableString(row["threshold_id"]),
+    closeOut: asNullableString(row["close_out"]),
     occurredAt:
       occurredAt instanceof Date ? occurredAt.toISOString() : asString(occurredAt),
   });

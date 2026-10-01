@@ -1,17 +1,12 @@
 {
-  "name": "@crossengin/observability-runtime-pg",
+  "name": "@crossengin/feature-flags-pg",
   "version": "0.0.0",
   "private": true,
   "license": "SEE LICENSE IN ../../LICENSE",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
-  },
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
   "files": ["dist", "src"],
   "scripts": {
     "build": "tsc",
@@ -21,12 +16,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@crossengin/feature-flags-pg": "workspace:*",
-    "@crossengin/incident-response": "workspace:*",
-    "@crossengin/incident-response-runtime": "workspace:*",
-    "@crossengin/incident-response-runtime-pg": "workspace:*",
+    "@crossengin/feature-flags": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
-    "@crossengin/observability-runtime": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

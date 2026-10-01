@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { SeveritySchema } from "@crossengin/incident-response";
+import { INCIDENT_CLOSE_OUTS } from "@crossengin/incident-response-runtime";
 import type {
   BurnRateVerdict,
   EnforcementDecision,
@@ -83,9 +84,32 @@ export const SloEnforcementActionRecordSchema = z
     paged: z.boolean(),
     pageChannelCount: z.number().int().nonnegative(),
     thresholdId: z.string().min(1).nullable(),
+    // The close-out vocabulary belongs to the declarer that produces it; a second copy here would
+    // drift from it. Omitted reads as null, which is the shape every non-recovery row has.
+    closeOut: z.enum(INCIDENT_CLOSE_OUTS).nullable().default(null),
     occurredAt: Iso8601,
   })
-  .strict();
+  .strict()
+  // Null means "this row is not a recovery", never "the recovery's outcome is unknown". Only a
+  // `recovered` decision has something to close out, so either side of that is a contradiction and
+  // refused — otherwise the column answers "was the recovery clean?" with a shrug.
+  .superRefine((value, ctx) => {
+    if (value.decision === "recovered" && value.closeOut === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["closeOut"],
+        message: "a recovered action must record what became of the incident",
+      });
+      return;
+    }
+    if (value.decision !== "recovered" && value.closeOut !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["closeOut"],
+        message: `closeOut belongs only to a recovered action, not ${value.decision}`,
+      });
+    }
+  });
 export type SloEnforcementActionRecord = z.infer<
   typeof SloEnforcementActionRecordSchema
 >;
@@ -139,6 +163,7 @@ export function enforcementActionFromDecision(
     decision: decision.kind,
     occurredAt: input.occurredAt,
     thresholdId: input.thresholdId ?? null,
+    closeOut: null,
   };
 
   if (decision.kind === "breach_opened") {
@@ -167,6 +192,7 @@ export function enforcementActionFromDecision(
       flagId: null,
       paged: false,
       pageChannelCount: 0,
+      closeOut: decision.closeOut,
     });
   }
 

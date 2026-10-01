@@ -29,10 +29,31 @@ export interface UniqueConstraint {
   readonly columns: readonly string[];
 }
 
+/** The commands a policy can be scoped to, spelled the way `CREATE POLICY … FOR …` spells them. */
+export const RLS_POLICY_COMMANDS = ["ALL", "SELECT", "INSERT", "UPDATE", "DELETE"] as const;
+export type RlsPolicyCommand = (typeof RLS_POLICY_COMMANDS)[number];
+
+/**
+ * The grantee `CREATE POLICY` applies a policy to when `TO` is omitted. It is a keyword, not a role
+ * name, so it is never quoted and it has no row in `pg_authid` — Postgres records it as oid 0.
+ */
+export const PUBLIC_ROLE = "PUBLIC";
+
 export interface RlsPolicy {
   readonly name: string;
   readonly using: string;
   readonly check?: string;
+  /**
+   * Which command the policy governs. Omitted means `ALL` — exactly what `CREATE POLICY` defaults
+   * to — so a policy that does not declare it emits and compares the same as one that never could.
+   */
+  readonly command?: RlsPolicyCommand;
+  /**
+   * The roles the policy applies to. Omitted means `PUBLIC`, which is again the `CREATE POLICY`
+   * default; an empty list is not a narrower grant but a meaningless one, so it is not allowed to
+   * mean anything and is treated as absent.
+   */
+  readonly roles?: readonly string[];
 }
 
 export interface TableRls {

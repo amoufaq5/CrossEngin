@@ -25,13 +25,15 @@ import {
 import {
   closeOutEnforcementIncident,
   declareEnforcementIncident,
+  findAdoptedKillSwitch,
   findOpenEnforcementIncident,
-  formatKillSwitchId,
+  killSwitchIdForIncident,
   planKillSwitchActivation,
   planPageDirective,
   type DeclarationErrorSink,
   type EnforcementPlan,
   type FlagRollback,
+  type KillSwitchLookup,
 } from "./enforcement.js";
 
 export interface LatencyRegistration {
@@ -56,6 +58,8 @@ export interface LatencySloEngineOptions {
    * `CountingIncidentDeclarer`.
    */
   readonly declarer?: IncidentDeclarer;
+  /** Recovers which flag an adopted incident rolled back — see the availability engine's option. */
+  readonly killSwitches?: KillSwitchLookup;
   readonly onDeclarationError?: DeclarationErrorSink;
 }
 
@@ -106,6 +110,7 @@ export class LatencySloEngine {
   private readonly declaredBy: string;
   private readonly latencyWindowMs: number;
   private readonly declarer: IncidentDeclarer;
+  private readonly killSwitches: KillSwitchLookup | undefined;
   private readonly onDeclarationError: DeclarationErrorSink | undefined;
   private readonly active: Map<string, ActiveBreach> = new Map();
   /**
@@ -113,7 +118,6 @@ export class LatencySloEngine {
    * back, so without this a second pass starting mid-declare would declare the same breach twice.
    */
   private readonly declaring: Set<string> = new Set();
-  private killSwitchSeq = 0;
 
   constructor(options: LatencySloEngineOptions) {
     this.alertPolicy = options.alertPolicy;
@@ -125,6 +129,7 @@ export class LatencySloEngine {
     this.window = options.window ?? new RollingWindow();
     this.latencyWindowMs = parseDurationMs(options.latencyWindow ?? "5m");
     this.declarer = options.declarer ?? new CountingIncidentDeclarer({ clock: this.clock });
+    this.killSwitches = options.killSwitches;
     this.onDeclarationError = options.onDeclarationError;
   }
 
@@ -222,8 +227,12 @@ export class LatencySloEngine {
     if (open === null) return null;
     this.active.set(surface, {
       incidentId: open.id,
-      // Nothing persists the kill switch, so a restart cannot recover which flag was rolled back.
-      killSwitchId: null,
+      killSwitchId: await findAdoptedKillSwitch(
+        this.killSwitches,
+        open.id,
+        { surface, sloId: reg.slo.id },
+        this.onDeclarationError,
+      ),
       severity: open.severity,
     });
     return { kind: "breach_ongoing", surface, sloId: reg.slo.id, incidentId: open.id };
@@ -276,8 +285,7 @@ export class LatencySloEngine {
     let killSwitch: EnforcementPlan["killSwitch"] = null;
     let killSwitchId: string | null = null;
     if (reg.rollback !== undefined) {
-      this.killSwitchSeq += 1;
-      killSwitchId = formatKillSwitchId(this.killSwitchSeq);
+      killSwitchId = killSwitchIdForIncident(incidentId);
       killSwitch = planKillSwitchActivation({
         killSwitchId,
         flagId: reg.rollback.flagId,

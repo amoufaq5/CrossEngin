@@ -18,9 +18,11 @@ import {
   closeOutEnforcementIncident,
   declareEnforcementIncident,
   enforcementDeclarationRequest,
+  findAdoptedKillSwitch,
   findOpenEnforcementIncident,
   formatIncidentId,
   formatKillSwitchId,
+  killSwitchIdForIncident,
   planIncidentDeclaration,
   planKillSwitchActivation,
   planPageDirective,
@@ -396,5 +398,93 @@ describe("the autoDeclaredFor key on a declaration", () => {
     expect(
       planIncidentDeclaration({ ...DECLARATION, incidentId: "INC-2026-0042" }).autoDeclaredFor,
     ).toBeNull();
+  });
+});
+
+describe("findAdoptedKillSwitch", () => {
+  it("returns what the lookup holds for that incident", async () => {
+    const asked: string[] = [];
+    const found = await findAdoptedKillSwitch(
+      {
+        findForIncident: async (id) => {
+          asked.push(id);
+          return "fks_auto00000007";
+        },
+      },
+      "INC-2026-0042",
+      FAILURE,
+    );
+    expect(found).toBe("fks_auto00000007");
+    expect(asked).toEqual(["INC-2026-0042"]);
+  });
+
+  it("returns null when the incident rolled nothing back", async () => {
+    expect(
+      await findAdoptedKillSwitch({ findForIncident: async () => null }, "INC-2026-0042", FAILURE),
+    ).toBeNull();
+  });
+
+  it("returns null when no lookup is wired, without asking anything", async () => {
+    expect(await findAdoptedKillSwitch(undefined, "INC-2026-0042", FAILURE)).toBeNull();
+  });
+
+  it("reports a failed lookup rather than letting it stop an adoption", async () => {
+    // Refusing to adopt over an unreadable kill switch would re-declare the incident — a real
+    // problem traded for a cosmetic one.
+    const seen: DeclarationFailure[] = [];
+    const found = await findAdoptedKillSwitch(
+      {
+        findForIncident: async () => {
+          throw new Error("kill switch store unreachable");
+        },
+      },
+      "INC-2026-0042",
+      FAILURE,
+      (_err, failure) => seen.push(failure),
+    );
+    expect(found).toBeNull();
+    expect(seen).toEqual([{ ...FAILURE, phase: "find_kill_switch" }]);
+  });
+
+  it("swallows a failed lookup silently when no sink is wired", async () => {
+    await expect(
+      findAdoptedKillSwitch(
+        {
+          findForIncident: async () => {
+            throw new Error("nope");
+          },
+        },
+        "INC-2026-0042",
+        FAILURE,
+      ),
+    ).resolves.toBeNull();
+  });
+});
+
+describe("killSwitchIdForIncident", () => {
+  it("derives the id from the incident, so it inherits the incident's uniqueness", () => {
+    expect(killSwitchIdForIncident("INC-2026-0002")).toBe("fks_20260002");
+  });
+
+  it("gives two incidents two ids, which a per-process counter did not", () => {
+    // Measured live: a second engine instance reissued `fks_auto00000001`, the unique constraint
+    // refused the insert, and the failure landed after the incident had already been declared.
+    expect(killSwitchIdForIncident("INC-2026-0002")).not.toBe(
+      killSwitchIdForIncident("INC-2026-0003"),
+    );
+  });
+
+  it("is stable for the same incident, so a retry does not mint a second switch", () => {
+    expect(killSwitchIdForIncident("INC-2026-0002")).toBe(killSwitchIdForIncident("INC-2026-0002"));
+  });
+
+  it("satisfies the kill-switch id pattern the contract and the column both enforce", () => {
+    for (const id of ["INC-2026-0001", "INC-2026-9999", "INC-2030-12345678"]) {
+      expect(killSwitchIdForIncident(id)).toMatch(/^fks_[a-z0-9]{8,40}$/);
+    }
+  });
+
+  it("refuses an id that is not an incident id, rather than inventing a switch id", () => {
+    expect(() => killSwitchIdForIncident("not-an-incident")).toThrow();
   });
 });

@@ -3,13 +3,23 @@ import { META_TABLES, type TableDefinition } from "@crossengin/kernel/bootstrap"
 
 import {
   APPLIER_OWNED_TABLES,
+  COMMAND_TO_POLCMD,
   DEFAULT_ON_DELETE,
+  DEFAULT_POLICY_COMMAND,
+  DEFAULT_POLICY_ROLES,
   PG_TYPE_ALIASES,
+  POLCMD_TO_COMMAND,
   canonicalPgDefault,
   canonicalPgType,
+  canonicalPolicyCommand,
+  canonicalPolicyRoles,
   declaredForeignKeys,
   declaredOnDelete,
+  declaredPolicyCommand,
+  declaredPolicyRoles,
   expectedIndexNames,
+  policyCommandToPolcmd,
+  samePolicyRoles,
 } from "./canonical.js";
 
 describe("APPLIER_OWNED_TABLES", () => {
@@ -261,5 +271,105 @@ describe("declaredForeignKeys", () => {
       expect(new Set(fks.map((f) => f.expectedConstraintName)).size).toBe(fks.length);
     }
     expect(total).toBeGreaterThan(100);
+  });
+});
+
+describe("policy command canonicalization", () => {
+  it("maps every polcmd character to its command", () => {
+    expect(canonicalPolicyCommand("*")).toBe("ALL");
+    expect(canonicalPolicyCommand("r")).toBe("SELECT");
+    expect(canonicalPolicyCommand("a")).toBe("INSERT");
+    expect(canonicalPolicyCommand("w")).toBe("UPDATE");
+    expect(canonicalPolicyCommand("d")).toBe("DELETE");
+  });
+
+  it("maps every command back to its polcmd character", () => {
+    expect(policyCommandToPolcmd("ALL")).toBe("*");
+    expect(policyCommandToPolcmd("SELECT")).toBe("r");
+    expect(policyCommandToPolcmd("INSERT")).toBe("a");
+    expect(policyCommandToPolcmd("UPDATE")).toBe("w");
+    expect(policyCommandToPolcmd("DELETE")).toBe("d");
+  });
+
+  it("round-trips both ways for every command", () => {
+    for (const [char, command] of Object.entries(POLCMD_TO_COMMAND)) {
+      expect(policyCommandToPolcmd(command)).toBe(char);
+      expect(canonicalPolicyCommand(policyCommandToPolcmd(command))).toBe(command);
+    }
+    expect(Object.keys(POLCMD_TO_COMMAND)).toHaveLength(5);
+    expect(Object.keys(COMMAND_TO_POLCMD)).toHaveLength(5);
+  });
+
+  it("tolerates the padding a char column can carry", () => {
+    expect(canonicalPolicyCommand(" r ")).toBe("SELECT");
+  });
+
+  it("returns null for a character it does not know, rather than guessing ALL", () => {
+    // A future Postgres command must not make every policy using it read as drifted back to ALL.
+    expect(canonicalPolicyCommand("m")).toBeNull();
+    expect(canonicalPolicyCommand("")).toBeNull();
+  });
+
+  it("treats an omitted command as ALL, which is what CREATE POLICY does", () => {
+    expect(DEFAULT_POLICY_COMMAND).toBe("ALL");
+    expect(declaredPolicyCommand({ name: "p", using: "true" })).toBe("ALL");
+    expect(declaredPolicyCommand({ name: "p", using: "true", command: "ALL" })).toBe("ALL");
+    expect(declaredPolicyCommand({ name: "p", using: "true", command: "DELETE" })).toBe("DELETE");
+  });
+});
+
+describe("policy role canonicalization", () => {
+  it("treats an omitted role list as PUBLIC, which is what CREATE POLICY does", () => {
+    expect([...DEFAULT_POLICY_ROLES]).toEqual(["PUBLIC"]);
+    expect([...declaredPolicyRoles({ name: "p", using: "true" })]).toEqual(["PUBLIC"]);
+  });
+
+  it("treats an empty role list as absent, not as a grant to nobody", () => {
+    expect([...declaredPolicyRoles({ name: "p", using: "true", roles: [] })]).toEqual(["PUBLIC"]);
+  });
+
+  it("matches an explicitly declared PUBLIC against the default", () => {
+    expect(
+      samePolicyRoles(declaredPolicyRoles({ name: "p", using: "true", roles: ["PUBLIC"] }), [
+        "PUBLIC",
+      ]),
+    ).toBe(true);
+    expect(
+      samePolicyRoles(declaredPolicyRoles({ name: "p", using: "true", roles: ["public"] }), [
+        "PUBLIC",
+      ]),
+    ).toBe(true);
+  });
+
+  it("sorts, because polroles comes back in oid order and not declaration order", () => {
+    expect([...canonicalPolicyRoles(["b", "a", "c"])]).toEqual(["a", "b", "c"]);
+    expect(samePolicyRoles(["app_writer", "app_reader"], ["app_reader", "app_writer"])).toBe(true);
+  });
+
+  it("leaves a role name's case alone, since Postgres stores a quoted identifier as written", () => {
+    expect([...canonicalPolicyRoles(["App_Reader"])]).toEqual(["App_Reader"]);
+    expect(samePolicyRoles(["App_Reader"], ["app_reader"])).toBe(false);
+  });
+
+  it("sees a narrowed and a widened grant as different", () => {
+    expect(samePolicyRoles(["PUBLIC"], ["app_reader"])).toBe(false);
+    expect(samePolicyRoles(["app_reader"], ["app_reader", "app_writer"])).toBe(false);
+  });
+
+  it("does not mutate the list it was given", () => {
+    const roles = ["b", "a"];
+    canonicalPolicyRoles(roles);
+    expect(roles).toEqual(["b", "a"]);
+  });
+
+  it("leaves every policy in the real catalog on the two defaults", () => {
+    // The precondition for the 139 tables reading as matching against a database built from this
+    // catalog: nothing declares either field yet, so nothing changes meaning.
+    for (const t of META_TABLES) {
+      for (const policy of t.rls?.policies ?? []) {
+        expect(declaredPolicyCommand(policy)).toBe("ALL");
+        expect([...declaredPolicyRoles(policy)]).toEqual(["PUBLIC"]);
+      }
+    }
   });
 });

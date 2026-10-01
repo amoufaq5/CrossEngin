@@ -1,10 +1,12 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-pg";
+import { PostgresKillSwitchStore } from "@crossengin/feature-flags-pg";
 import {
   LatencySloEngine,
   type LatencyEnforcementDecision,
   type LatencySloEngineOptions,
 } from "@crossengin/observability-runtime";
+import { killSwitchLookup } from "./persisting-engine.js";
 import { PostgresSloEnforcementActionStore } from "./enforcement-action-store.js";
 import { PostgresSloLatencyEvaluationStore } from "./latency-evaluation-store.js";
 import {
@@ -20,6 +22,7 @@ export interface PersistentLatencySloEngine {
   readonly engine: LatencySloEngine;
   readonly latencyEvaluationStore: PostgresSloLatencyEvaluationStore;
   readonly enforcementStore: PostgresSloEnforcementActionStore;
+  readonly killSwitchStore: PostgresKillSwitchStore;
   recordOutcome: LatencySloEngine["recordOutcome"];
   evaluate(now?: Date): Promise<readonly LatencyEnforcementDecision[]>;
 }
@@ -40,9 +43,11 @@ export function buildPersistentLatencySloEngine(
 ): PersistentLatencySloEngine {
   // Same reason as the availability engine: a persisted evaluation must not name an unpersisted
   // incident. A shared declarer is passed in when both engines declare against one store.
+  const killSwitchStore = new PostgresKillSwitchStore(conn);
   const engine = new LatencySloEngine({
     ...options,
     declarer: options.declarer ?? new PostgresIncidentDeclarer({ conn }),
+    killSwitches: options.killSwitches ?? killSwitchLookup(killSwitchStore),
   });
   const latencyEvaluationStore = new PostgresSloLatencyEvaluationStore(conn);
   const enforcementStore = new PostgresSloEnforcementActionStore(conn);
@@ -67,6 +72,11 @@ export function buildPersistentLatencySloEngine(
           ? decision.plan.killSwitch?.tenantId ?? null
           : null;
       const tenantId = tenantFor(decision.surface, killSwitchTenant);
+
+      if (decision.kind === "breach_opened" && decision.plan.killSwitch !== null) {
+        // Before the action row that names it — see the availability engine.
+        await killSwitchStore.record(decision.plan.killSwitch);
+      }
 
       await enforcementStore.record(
         enforcementActionFromDecision({
@@ -97,6 +107,7 @@ export function buildPersistentLatencySloEngine(
     engine,
     latencyEvaluationStore,
     enforcementStore,
+    killSwitchStore,
     recordOutcome: (outcome) => engine.recordOutcome(outcome),
     evaluate,
   };

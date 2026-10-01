@@ -1,4 +1,5 @@
 import { qualifyTable, quoteIdent } from "../ddl/identifiers.js";
+import { PUBLIC_ROLE } from "./types.js";
 import type {
   ColumnDefinition,
   ColumnReference,
@@ -219,9 +220,30 @@ export function emitRlsEnable(table: TableDefinition): string {
   return `ALTER TABLE ${qualifyTable(table.schema, table.name)} ENABLE ROW LEVEL SECURITY;`;
 }
 
+/**
+ * Renders one entry of a policy's `TO` list.
+ *
+ * `PUBLIC` is a keyword and must not be quoted — `TO "PUBLIC"` names a role that does not exist.
+ * Every other entry is a role name and is quoted, so a role whose name needs quoting still works and
+ * a declaration cannot smuggle SQL in through the role list.
+ */
+function emitPolicyRole(role: string): string {
+  return role.toUpperCase() === PUBLIC_ROLE ? PUBLIC_ROLE : quoteIdent(role);
+}
+
 export function emitRlsPolicy(table: TableDefinition, policy: RlsPolicy): string {
   const tableName = qualifyTable(table.schema, table.name);
-  let stmt = `CREATE POLICY ${quoteIdent(policy.name)} ON ${tableName} USING (${policy.using})`;
+  let stmt = `CREATE POLICY ${quoteIdent(policy.name)} ON ${tableName}`;
+  // Both clauses are written only when declared. Omitting them is not a weaker statement than
+  // writing the default: `CREATE POLICY` means `FOR ALL TO PUBLIC` either way, which is what keeps
+  // every policy already in the catalog emitting byte-identical SQL.
+  if (policy.command !== undefined) {
+    stmt += ` FOR ${policy.command}`;
+  }
+  if (policy.roles !== undefined && policy.roles.length > 0) {
+    stmt += ` TO ${policy.roles.map(emitPolicyRole).join(", ")}`;
+  }
+  stmt += ` USING (${policy.using})`;
   if (policy.check !== undefined) {
     stmt += ` WITH CHECK (${policy.check})`;
   }

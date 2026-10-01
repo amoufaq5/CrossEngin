@@ -25,13 +25,15 @@ import {
 import {
   closeOutEnforcementIncident,
   declareEnforcementIncident,
+  findAdoptedKillSwitch,
   findOpenEnforcementIncident,
-  formatKillSwitchId,
+  killSwitchIdForIncident,
   planKillSwitchActivation,
   planPageDirective,
   type DeclarationErrorSink,
   type EnforcementPlan,
   type FlagRollback,
+  type KillSwitchLookup,
 } from "./enforcement.js";
 
 export interface SloRegistration {
@@ -55,6 +57,11 @@ export interface SloEnforcementEngineOptions {
    * `CountingIncidentDeclarer`.
    */
   readonly declarer?: IncidentDeclarer;
+  /**
+   * Recovers which flag an adopted incident rolled back. Without it an adopted breach reports no
+   * kill switch, because the id was only ever in the memory of the process that activated it.
+   */
+  readonly killSwitches?: KillSwitchLookup;
   readonly onDeclarationError?: DeclarationErrorSink;
 }
 
@@ -107,6 +114,7 @@ export class SloEnforcementEngine {
   private readonly systemActorUserId: string;
   private readonly declaredBy: string;
   private readonly declarer: IncidentDeclarer;
+  private readonly killSwitches: KillSwitchLookup | undefined;
   private readonly onDeclarationError: DeclarationErrorSink | undefined;
   private readonly active: Map<string, ActiveBreach> = new Map();
   /**
@@ -114,7 +122,6 @@ export class SloEnforcementEngine {
    * back, so without this a second pass starting mid-declare would declare the same breach twice.
    */
   private readonly declaring: Set<string> = new Set();
-  private killSwitchSeq = 0;
 
   constructor(options: SloEnforcementEngineOptions) {
     this.alertPolicy = options.alertPolicy;
@@ -125,6 +132,7 @@ export class SloEnforcementEngine {
     this.declaredBy = options.declaredBy ?? "system-slo-enforcer";
     this.window = options.window ?? new RollingWindow();
     this.declarer = options.declarer ?? new CountingIncidentDeclarer({ clock: this.clock });
+    this.killSwitches = options.killSwitches;
     this.onDeclarationError = options.onDeclarationError;
   }
 
@@ -231,8 +239,14 @@ export class SloEnforcementEngine {
     if (open === null) return null;
     this.active.set(surface, {
       incidentId: open.id,
-      // Nothing persists the kill switch, so a restart cannot recover which flag was rolled back.
-      killSwitchId: null,
+      // Recovered from the store when one is wired; null otherwise, because the id was only ever in
+      // the memory of the process that activated it.
+      killSwitchId: await findAdoptedKillSwitch(
+        this.killSwitches,
+        open.id,
+        { surface, sloId: reg.slo.id },
+        this.onDeclarationError,
+      ),
       severity: open.severity,
       thresholdId: verdict.worstThresholdId ?? "unknown",
     });
@@ -285,8 +299,7 @@ export class SloEnforcementEngine {
     let killSwitch: EnforcementPlan["killSwitch"] = null;
     let killSwitchId: string | null = null;
     if (reg.rollback !== undefined) {
-      this.killSwitchSeq += 1;
-      killSwitchId = formatKillSwitchId(this.killSwitchSeq);
+      killSwitchId = killSwitchIdForIncident(incidentId);
       killSwitch = planKillSwitchActivation({
         killSwitchId,
         flagId: reg.rollback.flagId,

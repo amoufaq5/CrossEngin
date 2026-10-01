@@ -49,6 +49,7 @@ describe("INCIDENT_DRIFT_KINDS", () => {
       "timeline_out_of_order",
       "terminal_without_timestamp",
       "sla_breached_while_open",
+      "duplicate_open_for_signal",
     ]);
   });
 });
@@ -224,6 +225,170 @@ describe("replayIncidents", () => {
       "id_sequence_mismatch",
       "sla_breached_while_open",
     ]);
+  });
+});
+
+describe("replayIncidents — one open incident per signal", () => {
+  const AUTO_KEY = "availability:product.list";
+
+  function autoDeclared(
+    id: string,
+    over: Record<string, unknown> = {},
+  ): IncidentRecord {
+    return IncidentRecordSchema.parse({
+      ...declaredIncident(),
+      id,
+      autoDeclaredFor: AUTO_KEY,
+      ...over,
+    });
+  }
+
+  it("flags two open incidents sharing an autoDeclaredFor", async () => {
+    // `idx_incidents_auto_declared_open` makes this impossible on write, so a row pair like this
+    // means the index is gone or was never applied — which is what a drift report is for.
+    const report = await replayIncidents(
+      rowsConn([
+        incidentRow(autoDeclared("INC-2026-0008")),
+        incidentRow(autoDeclared("INC-2026-0007")),
+      ]),
+      { nowIso: LATER },
+    );
+    const finding = report.drift.find((d) => d.kind === "duplicate_open_for_signal");
+    expect(finding?.incidentId).toBe("INC-2026-0008");
+    expect(finding?.detail).toContain(AUTO_KEY);
+    expect(finding?.detail).toContain("INC-2026-0008");
+    expect(finding?.detail).toContain("INC-2026-0007");
+  });
+
+  it("reports the collision once for the signal, not once per row", async () => {
+    const report = await replayIncidents(
+      rowsConn([
+        incidentRow(autoDeclared("INC-2026-0009")),
+        incidentRow(autoDeclared("INC-2026-0008")),
+        incidentRow(autoDeclared("INC-2026-0007")),
+      ]),
+      { nowIso: LATER },
+    );
+    const findings = report.drift.filter((d) => d.kind === "duplicate_open_for_signal");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.detail).toContain("3 open incidents");
+  });
+
+  it("accepts one open incident per signal", async () => {
+    const report = await replayIncidents(
+      rowsConn([
+        incidentRow(autoDeclared("INC-2026-0008", { autoDeclaredFor: "latency:product.list" })),
+        incidentRow(autoDeclared("INC-2026-0007")),
+      ]),
+      { nowIso: LATER },
+    );
+    expect(report.drift).toEqual([]);
+  });
+
+  it("does not group two closed episodes of one signal, which are correct", async () => {
+    // The index is partial for exactly this reason: a signal that recovered must be able to be
+    // declared again, so its history is several rows under one key.
+    const report = await replayIncidents(
+      rowsConn([
+        incidentRow(
+          autoDeclared("INC-2026-0008", {
+            roleAssignments: SEV3_ROLES,
+            status: "cancelled",
+            cancelledAt: LATER,
+            cancelledReason: "signal recovered before triage",
+          }),
+        ),
+        incidentRow(
+          autoDeclared("INC-2026-0007", {
+            roleAssignments: SEV3_ROLES,
+            status: "closed",
+            ackedAt: "2026-09-30T10:01:00.000Z",
+            mitigatedAt: "2026-09-30T10:02:00.000Z",
+            resolvedAt: "2026-09-30T10:03:00.000Z",
+            closedAt: "2026-09-30T10:04:00.000Z",
+            rootCause: "bad deploy",
+          }),
+        ),
+      ]),
+      { nowIso: MUCH_LATER },
+    );
+    expect(report.drift).toEqual([]);
+    expect(report.open).toBe(0);
+  });
+
+  it("flags a signal still open alongside a closed episode of itself", async () => {
+    // One closed and one open is the normal shape; two open under one key is not.
+    const report = await replayIncidents(
+      rowsConn([
+        incidentRow(autoDeclared("INC-2026-0009")),
+        incidentRow(autoDeclared("INC-2026-0008")),
+        incidentRow(
+          autoDeclared("INC-2026-0007", {
+            roleAssignments: SEV3_ROLES,
+            status: "cancelled",
+            cancelledAt: LATER,
+            cancelledReason: "signal recovered before triage",
+          }),
+        ),
+      ]),
+      { nowIso: LATER },
+    );
+    const finding = report.drift.find((d) => d.kind === "duplicate_open_for_signal");
+    expect(finding?.detail).toContain("2 open incidents");
+    expect(finding?.detail).not.toContain("INC-2026-0007");
+  });
+
+  it("does not group human-declared incidents, which carry no key", async () => {
+    // `autoDeclaredFor` is null for a human declaration, so two of them are two incidents and
+    // nothing more. Grouping on null would report every manual incident as a collision.
+    const report = await replayIncidents(
+      rowsConn([
+        incidentRow(IncidentRecordSchema.parse({ ...declaredIncident(), id: "INC-2026-0008" })),
+        incidentRow(declaredIncident()),
+      ]),
+      { nowIso: LATER },
+    );
+    expect(report.drift).toEqual([]);
+    expect(report.open).toBe(2);
+  });
+
+  it("reports each colliding signal separately", async () => {
+    const report = await replayIncidents(
+      rowsConn([
+        incidentRow(autoDeclared("INC-2026-0010", { autoDeclaredFor: "latency:product.list" })),
+        incidentRow(autoDeclared("INC-2026-0009", { autoDeclaredFor: "latency:product.list" })),
+        incidentRow(autoDeclared("INC-2026-0008")),
+        incidentRow(autoDeclared("INC-2026-0007")),
+      ]),
+      { nowIso: LATER },
+    );
+    const findings = report.drift.filter((d) => d.kind === "duplicate_open_for_signal");
+    expect(findings).toHaveLength(2);
+    expect(findings.map((f) => f.incidentId)).toEqual(["INC-2026-0010", "INC-2026-0008"]);
+  });
+
+  it("does not count an unparseable row towards a collision", async () => {
+    // A row that failed to re-parse is already reported; guessing at its key would double-report it.
+    const bad = incidentRow(autoDeclared("INC-2026-0008"));
+    bad["status"] = "closed";
+    const report = await replayIncidents(
+      rowsConn([bad, incidentRow(autoDeclared("INC-2026-0007"))]),
+      { nowIso: LATER },
+    );
+    expect(report.drift.map((d) => d.kind)).toEqual(["unparseable_record"]);
+  });
+
+  it("lists the collision in the formatted report", async () => {
+    const report = await replayIncidents(
+      rowsConn([
+        incidentRow(autoDeclared("INC-2026-0008")),
+        incidentRow(autoDeclared("INC-2026-0007")),
+      ]),
+      { nowIso: LATER },
+    );
+    expect(formatIncidentReplayReport(report)).toContain(
+      "[duplicate_open_for_signal] INC-2026-0008",
+    );
   });
 });
 
