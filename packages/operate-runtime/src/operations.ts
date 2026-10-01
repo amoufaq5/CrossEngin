@@ -24,6 +24,13 @@ export interface RouteSpec {
   readonly authOperation: Operation;
   readonly transition?: TransitionSpec;
   readonly listConfig?: ListConfig;
+  /**
+   * Set on the generic `update` route of an entity declaring
+   * `concurrency: "optimistic"`: a `PATCH` without `expectedUpdatedAt` is refused
+   * rather than applied unconditionally. Derived from the manifest, so a
+   * deployment cannot turn the fence off.
+   */
+  readonly requireVersion?: boolean;
 }
 
 function lit(value: string): PathSegment {
@@ -63,7 +70,7 @@ export function entityRouteSpecs(
     { entity: entity.name, action: "list", operationId: operationId(entity.name, "list"), method: "GET", pathSegments: collection, authOperation: "list", ...(listConfig !== undefined ? { listConfig } : {}) },
     { entity: entity.name, action: "create", operationId: operationId(entity.name, "create"), method: "POST", pathSegments: collection, authOperation: "create" },
     { entity: entity.name, action: "read", operationId: operationId(entity.name, "read"), method: "GET", pathSegments: item, authOperation: "read" },
-    { entity: entity.name, action: "update", operationId: operationId(entity.name, "update"), method: "PATCH", pathSegments: item, authOperation: "update" },
+    { entity: entity.name, action: "update", operationId: operationId(entity.name, "update"), method: "PATCH", pathSegments: item, authOperation: "update", ...(entity.concurrency === "optimistic" ? { requireVersion: true } : {}) },
     { entity: entity.name, action: "delete", operationId: operationId(entity.name, "delete"), method: "DELETE", pathSegments: item, authOperation: "delete" },
   ];
   for (const t of transitions) {

@@ -232,3 +232,53 @@ describe("columnPlanForEntity — trait fields", () => {
     expect(cols[0]).toMatchObject({ field: "version", sqlType: "TEXT" });
   });
 });
+
+describe("columnPlanForEntity — textSearchable", () => {
+  const entity: Entity = {
+    name: "Thing",
+    fields: [
+      { name: "label", type: { kind: "text" } },
+      { name: "code", type: { kind: "text", maxLength: 20 } },
+      { name: "blurb", type: { kind: "long_text" } },
+      { name: "contact", type: { kind: "email" } },
+      { name: "line", type: { kind: "phone" } },
+      { name: "site", type: { kind: "url" } },
+      { name: "state", type: { kind: "enum", values: ["a", "b"] } },
+      { name: "owner", type: { kind: "reference", target: "Thing" } },
+      { name: "qty", type: { kind: "integer" } },
+      { name: "at", type: { kind: "datetime" } },
+      { name: "country", type: { kind: "country_code" } },
+      { name: "tags", type: { kind: "array", element: { kind: "text" } } },
+    ],
+  };
+  const flag = new Map(
+    columnPlanForEntity(entity, { schema: "app" }).columns.map((c) => [c.field, c.textSearchable]),
+  );
+
+  it("marks the free-text kinds searchable", () => {
+    for (const f of ["label", "code", "blurb", "contact", "line", "site"]) {
+      expect(flag.get(f)).toBe(true);
+    }
+  });
+
+  it("does NOT mark enum or reference searchable, though both emit TEXT", () => {
+    // The whole point of carrying the declared kind: the SQL type cannot tell a
+    // token set or an opaque id apart from prose.
+    expect(flag.get("state")).toBe(false);
+    expect(flag.get("owner")).toBe(false);
+  });
+
+  it("does not mark non-text kinds searchable", () => {
+    for (const f of ["qty", "at", "country", "tags"]) expect(flag.get(f)).toBe(false);
+  });
+
+  it("marks the auditable trait's columns unsearchable", () => {
+    const audited = columnPlanForEntity(
+      { name: "Audited", traits: ["auditable"], fields: [{ name: "label", type: { kind: "text" } }] },
+      { schema: "app" },
+    );
+    const trait = audited.columns.filter((c) => c.field !== "label");
+    expect(trait.length).toBeGreaterThan(0);
+    for (const c of trait) expect(c.textSearchable).toBe(false);
+  });
+});

@@ -1,4 +1,9 @@
-import { columnNameForField, emitDefault, fieldTypeToPostgresType } from "@crossengin/kernel/ddl";
+import {
+  columnNameForField,
+  emitDefault,
+  fieldTypeToPostgresType,
+  isTextSearchableFieldType,
+} from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { resolvedFields, toTableName } from "@crossengin/kernel/ddl";
 import {
@@ -20,6 +25,13 @@ export interface ColumnMapping {
   readonly encryptAtRest: boolean;
   /** For a reference field: the target entity name (so a FK can be emitted), else null. */
   readonly referenceTarget: string | null;
+  /**
+   * Whether the *declared field kind* holds free text, per the kernel's
+   * `TEXT_SEARCHABLE_FIELD_KINDS`. Not the same question as "is this a text
+   * column": `enum` and `reference` are both `TEXT` and neither is prose, so the
+   * SQL type alone cannot decide which columns deserve a trigram index.
+   */
+  readonly textSearchable: boolean;
   /**
    * SQL to follow `DEFAULT`, or null for none. Load-bearing for trait-supplied columns: the
    * `auditable` trait's `created_at` is NOT NULL with `now()`, and an insert that omits it
@@ -53,6 +65,7 @@ function mappingForField(field: Field): ColumnMapping {
     encryptAtRest: classification !== null && requiresEncryptionAtRest(classification),
     referenceTarget: field.type.kind === "reference" ? field.type.target : null,
     defaultSql: field.default !== undefined ? emitDefault(field.default) : null,
+    textSearchable: isTextSearchableFieldType(field.type),
   };
 }
 

@@ -5,6 +5,8 @@ import {
   type ListSort,
 } from "@crossengin/operate-runtime";
 
+import { searchFoldExpr } from "./search-fold.js";
+
 /**
  * Adapts a field name to the SQL needed to read + compare it, so one query
  * builder serves both the JSONB store (`document ->> 'field'`, text compares)
@@ -18,9 +20,26 @@ export interface ListSqlAdapter {
   castSuffix(field: string): string;
   /** SQL expression for the stable id tiebreaker column. */
   readonly idExpr: string;
+  /**
+   * The accent-folding SQL function substring search compares through, qualified
+   * as the store provisions it. Required, not optional: a store that forgot it
+   * would emit an unfolded predicate that silently answers *narrower* than the
+   * one its index was built for, so the omission has to be a compile error.
+   */
+  readonly foldFn: string;
 }
 
 const SQL_OP: Record<string, string> = { eq: "=", ne: "<>", gt: ">", gte: ">=", lt: "<", lte: "<=" };
+
+/**
+ * The folded left-hand side of a substring comparison, built by the one function
+ * the DDL emitter also builds its index expression with — so the `contains`
+ * filter, the `?q` search and the index are three uses of a single definition
+ * rather than three strings that have to agree.
+ */
+function searchFold(adapter: ListSqlAdapter, expr: string): string {
+  return searchFoldExpr(adapter.foldFn, expr);
+}
 
 export interface ListSqlParts {
   readonly where: string;
@@ -46,10 +65,15 @@ function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: un
   const value = Array.isArray(filter.value) ? (filter.value[0] ?? "") : (filter.value as string);
   if (op === "contains") {
     // case- and accent-insensitive substring (typeahead). Both sides are folded
-    // with unaccent() so "jose" matches "José"; ILIKE handles case. The value is
-    // bound (never interpolated); its LIKE metacharacters act as wildcards (fine
-    // for search). A plain-column pg_trgm GIN index still accelerates this.
-    return `unaccent(${expr}::text) ILIKE ('%' || unaccent(${bind(params, value)}) || '%')`;
+    // so "jose" matches "José"; ILIKE handles case. The value is bound (never
+    // interpolated); its LIKE metacharacters act as wildcards (fine for search).
+    //
+    // A plain-column pg_trgm GIN index does NOT accelerate this — that claim
+    // stood here and was measured false (ADR-0285): the planner matches an
+    // index's expression against the clause's left operand, and `col` is not
+    // `fold(col)`, so the predicate seq-scans even with `enable_seqscan = off`.
+    // It is `adapter.foldFn` that an index can be built over.
+    return `${searchFold(adapter, expr)} ILIKE ('%' || ${adapter.foldFn}(${bind(params, value)}) || '%')`;
   }
   return `${expr} ${SQL_OP[op]} ${bind(params, value)}${adapter.castSuffix(filter.field)}`;
 }
@@ -114,7 +138,9 @@ export function buildListSql(
       .filter((e): e is string => e !== null);
     if (exprs.length > 0) {
       const p = bind(params, query.search.term);
-      const ors = exprs.map((expr) => `unaccent(${expr}::text) ILIKE ('%' || unaccent(${p}) || '%')`);
+      const ors = exprs.map(
+        (expr) => `${searchFold(adapter, expr)} ILIKE ('%' || ${adapter.foldFn}(${p}) || '%')`,
+      );
       where.push(`(${ors.join(" OR ")})`);
     }
   }

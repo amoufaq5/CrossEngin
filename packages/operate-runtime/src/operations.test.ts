@@ -40,6 +40,39 @@ describe("entityRouteSpecs", () => {
   });
 });
 
+describe("entityRouteSpecs — requireVersion", () => {
+  it("is absent for an entity that declares no concurrency mode", () => {
+    const specs = entityRouteSpecs(invoice, []);
+    expect(specs.find((s) => s.action === "update")!.requireVersion).toBeUndefined();
+  });
+
+  it("is set on the update route of an entity declaring concurrency: optimistic", () => {
+    const specs = entityRouteSpecs({ ...invoice, concurrency: "optimistic" }, []);
+    expect(specs.find((s) => s.action === "update")!.requireVersion).toBe(true);
+  });
+
+  it("is set ONLY on update — create has no prior version and a transition fences its own state", () => {
+    const specs = entityRouteSpecs({ ...invoice, concurrency: "optimistic" }, [
+      { name: "send", stateField: "state", toState: "sent", fromStates: ["draft"] },
+    ]);
+    for (const s of specs) {
+      expect(s.requireVersion ?? false).toBe(s.action === "update");
+    }
+  });
+
+  it("rides the manifest through manifestRouteSpecs, not a deployment option", () => {
+    const manifest = {
+      ...core,
+      entities: (core.entities ?? []).map((e) =>
+        e.name === "Invoice" ? { ...e, concurrency: "optimistic" as const } : e,
+      ),
+    };
+    const specs = manifestRouteSpecs(manifest);
+    const strict = specs.filter((s) => s.requireVersion === true);
+    expect(strict.map((s) => s.operationId)).toEqual(["invoice.update"]);
+  });
+});
+
 describe("manifestRouteSpecs + routeFromSpec", () => {
   it("includes the Invoice lifecycle transitions from the core workflow", () => {
     const specs = manifestRouteSpecs(core);

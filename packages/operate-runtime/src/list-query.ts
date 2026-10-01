@@ -1,12 +1,10 @@
+import { isTextSearchableFieldKind } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
 import type { FilterOp, ListFilter, ListQuery, ListSearch, ListSort } from "./store.js";
 
 export const DEFAULT_PAGE_SIZE = 50;
 export const MAX_PAGE_SIZE = 500;
-
-/** Manifest field-type kinds whose values are free-text-searchable. */
-const SEARCHABLE_KINDS = new Set(["text", "long_text", "email", "slug", "phone", "url", "string"]);
 
 /** The per-entity list behavior derived from its manifest `ListView`. */
 export interface ListConfig {
@@ -58,11 +56,16 @@ interface EntityLike {
   readonly fields?: readonly FieldLike[];
 }
 
-/** The entity's text-like field names (searchable), in declaration order. */
+/**
+ * The entity's text-like field names (searchable), in declaration order. The kind
+ * set is the kernel's `TEXT_SEARCHABLE_FIELD_KINDS` — the same fact that decides
+ * which columns the column store trigram-indexes, so `?q` can never reach a
+ * column the store declined to index for being tokens rather than prose.
+ */
 function textFieldsOf(manifest: Manifest, entity: string): readonly string[] {
   const ent = ((manifest.entities ?? []) as ReadonlyArray<EntityLike>).find((e) => e.name === entity);
   if (ent === undefined) return [];
-  return (ent.fields ?? []).filter((f) => SEARCHABLE_KINDS.has(f.type?.kind ?? "")).map((f) => f.name);
+  return (ent.fields ?? []).filter((f) => isTextSearchableFieldKind(f.type?.kind)).map((f) => f.name);
 }
 
 /**

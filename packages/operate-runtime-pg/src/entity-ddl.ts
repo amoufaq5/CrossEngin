@@ -2,32 +2,61 @@ import { qualifyTable, quoteIdent, toTableName } from "@crossengin/kernel/ddl";
 import type { OnDelete } from "@crossengin/types/meta-schema";
 
 import type { ColumnMapping, EntityTablePlan, JoinTablePlan } from "./column-plan.js";
+import { searchFoldExpr, searchFoldRef } from "./search-fold.js";
 
 const TENANT_ISOLATION = "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
 
 const MAX_IDENTIFIER_LEN = 63;
 
 /**
- * A plaintext (non-encrypted) text or varchar column — the kind a `contains`
- * (substring) filter can search, and which a trigram GIN index accelerates.
- * BYTEA (encrypted-at-rest) and non-text types (numeric/uuid/date/bool/json/…)
- * are excluded.
+ * Whether a column's SQL type can carry a trigram index at all.
  *
- * `CHAR(n)` is excluded too, even though it holds text: `gin_trgm_ops` accepts
- * `text` and `varchar` (binary-coercible to text) but **not** `bpchar`, so
- * indexing one fails with `operator class "gin_trgm_ops" does not accept data
- * type character`. A `country_code` field emits `CHAR(2)`, which is why
- * `pack-erp-core` could not boot on this store at all.
+ * BYTEA (encrypted-at-rest) and non-text types (numeric/uuid/date/bool/json/…)
+ * are excluded. `CHAR(n)` is excluded too, even though it holds text:
+ * `gin_trgm_ops` accepts `text` and `varchar` (binary-coercible to text) but
+ * **not** `bpchar`, so indexing one fails with `operator class "gin_trgm_ops"
+ * does not accept data type character`. A `country_code` field emits `CHAR(2)`,
+ * which is why `pack-erp-core` could not boot on this store at all.
  */
-function isTrigramIndexable(col: { sqlType: string; encryptAtRest: boolean }): boolean {
+function isTextColumn(col: { sqlType: string; encryptAtRest: boolean }): boolean {
   if (col.encryptAtRest) return false;
   const t = col.sqlType.toUpperCase();
   return t === "TEXT" || t.startsWith("VARCHAR");
 }
 
-/** Deterministic trigram index name, capped at Postgres's 63-char identifier limit. */
-function trigramIndexName(table: string, column: string): string {
-  const name = `${table}_${column}_trgm`;
+/**
+ * Whether a column gets a trigram index: a text column whose *declared field
+ * kind* holds free text.
+ *
+ * The second half is the narrowing. `enum` and `reference` both emit `TEXT`, so
+ * a type-only test indexed them — measured on a composed pack, 67 of 291
+ * trigram indexes were over enums and 82 over reference ids, 51% of them, and a
+ * trigram index over a five-value enum measured larger than the table's own
+ * primary key. Nothing substring-searches a closed token set or an opaque id:
+ * both are matched by equality, which the tenant index and the primary key
+ * already serve. `textSearchable` comes from the kernel's
+ * `TEXT_SEARCHABLE_FIELD_KINDS` — the same fact that decides which fields `?q`
+ * reaches, so the index set and the search surface cannot drift apart.
+ */
+function isTrigramIndexable(col: ColumnMapping): boolean {
+  return isTextColumn(col) && col.textSearchable;
+}
+
+/**
+ * The index name this emitter used before the fold (ADR-0285), kept only so the
+ * now-provably-unusable index can be dropped by name. It indexed the bare
+ * column, which no folded predicate can match.
+ */
+function legacyTrigramIndexName(table: string, column: string): string {
+  return capIdentifier(`${table}_${column}_trgm`);
+}
+
+/** Deterministic fold-index name, capped at Postgres's 63-char identifier limit. */
+function foldIndexName(table: string, column: string): string {
+  return capIdentifier(`${table}_${column}_fold_trgm`);
+}
+
+function capIdentifier(name: string): string {
   return name.length <= MAX_IDENTIFIER_LEN ? name : name.slice(0, MAX_IDENTIFIER_LEN);
 }
 
@@ -62,6 +91,18 @@ const SYSTEM_TIMESTAMPS: readonly { readonly name: string; readonly sql: string 
   { name: "created_at", sql: "TIMESTAMPTZ NOT NULL DEFAULT now()" },
   { name: "updated_at", sql: "TIMESTAMPTZ NOT NULL DEFAULT now()" },
 ];
+
+/**
+ * The system timestamps this table carries that the plan does not: `created_at`
+ * and `updated_at` unless the entity declares them (the `auditable` trait does,
+ * and then they are ordinary planned columns). One definition, read by the DDL
+ * that creates them and by the store that selects them — a read that omitted
+ * them published no version for a conditional write to echo.
+ */
+export function unplannedSystemTimestamps(plan: EntityTablePlan): readonly string[] {
+  const planned = new Set(plan.columns.map((c) => c.column));
+  return SYSTEM_TIMESTAMPS.filter((t) => !planned.has(t.name)).map((t) => t.name);
+}
 
 /** `<type>[ NOT NULL][ DEFAULT <sql>]` for one planned column. */
 function columnType(c: ColumnMapping): string {
@@ -120,16 +161,32 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     stmts.push(`COMMENT ON COLUMN ${qualified}.${quoteIdent(col.column)} IS '${directives.join("; ")}';`);
   }
 
-  // Trigram GIN index per plaintext text column, accelerating the `contains`
-  // (ILIKE '%…%') substring filter. A *plain* column index (`gin (<col>
-  // gin_trgm_ops)`), NOT a functional `unaccent(<col>)` index — unaccent() is
-  // not IMMUTABLE and can't back an index. Requires the pg_trgm extension
-  // (provisioned by the store's ensureSchema).
+  // Drop the pre-fold plain-column trigram index wherever one could have been
+  // emitted — including on columns that get no index at all now. It is emitted
+  // by NAME rather than skipped, because `CREATE INDEX IF NOT EXISTS` on an
+  // existing name keeps the OLD definition and creates nothing (verified: the
+  // notice reads "relation already exists, skipping"), so reusing the name would
+  // have left every deployment with the unusable index it already had. Dropping
+  // an index is not the kind of data decision ADR-0283 holds migrations back
+  // from: no row changes, and the index provably cannot serve any predicate this
+  // store emits.
+  const foldRef = searchFoldRef(plan.schema);
+  for (const col of plan.columns) {
+    if (!isTextColumn(col)) continue;
+    stmts.push(
+      `DROP INDEX IF EXISTS ${qualifyTable(plan.schema, legacyTrigramIndexName(plan.table, col.column))};`,
+    );
+  }
+
+  // Trigram GIN index per free-text column, over the SAME folded expression the
+  // `contains` filter and `?q` search compare through — a functional index, which
+  // is the only kind a function-call predicate can match. Requires pg_trgm and
+  // the fold function (both provisioned by the store's ensureSchema).
   for (const col of plan.columns) {
     if (!isTrigramIndexable(col)) continue;
-    const idxName = trigramIndexName(plan.table, col.column);
     stmts.push(
-      `CREATE INDEX IF NOT EXISTS ${quoteIdent(idxName)} ON ${qualified} USING gin (${quoteIdent(col.column)} gin_trgm_ops);`,
+      `CREATE INDEX IF NOT EXISTS ${quoteIdent(foldIndexName(plan.table, col.column))} ON ${qualified} `
+      + `USING gin (${searchFoldExpr(foldRef, quoteIdent(col.column))} gin_trgm_ops);`,
     );
   }
 

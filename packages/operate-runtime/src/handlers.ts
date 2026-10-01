@@ -16,7 +16,13 @@ import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from ".
 import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { validateBody, type EntityValidationPlan } from "./validation.js";
-import { isConditional, isTransactional, projectRecord, type EntityStore } from "./store.js";
+import {
+  isConditional,
+  isTransactional,
+  projectRecord,
+  publishedVersion,
+  type EntityStore,
+} from "./store.js";
 import type { RouteSpec } from "./operations.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
@@ -156,12 +162,35 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         });
       }
       case "update": {
-        // Optimistic concurrency: a client MAY send the `updated_at` it last read as a reserved
+        // Optimistic concurrency: a client sends the `updated_at` it last read as a reserved
         // `expectedUpdatedAt`; it's stripped from the stored patch and, on mismatch, the write is
-        // rejected 409 (a lost-update guard for the generic editor). Absent → unconditional.
+        // rejected 409 (a lost-update guard for the generic editor). Absent → unconditional,
+        // unless the entity declares `concurrency: "optimistic"`, which makes it 428.
         const raw = { ...(parsedBody ?? {}) };
-        const expectedUpdatedAt = typeof raw["expectedUpdatedAt"] === "string" ? (raw["expectedUpdatedAt"] as string) : null;
+        const precondition = readUpdatePrecondition(raw);
         delete raw["expectedUpdatedAt"];
+        if (precondition.kind === "malformed") {
+          // A value that is present but unusable used to be stripped like any unknown key, so
+          // `{"expectedUpdatedAt": 0}` wrote unconditionally while the caller believed it held a
+          // precondition. A fence that cannot be evaluated is refused, never ignored.
+          return json(400, {
+            error: "invalid_precondition",
+            detail:
+              "'expectedUpdatedAt' must be the ISO-8601 'updated_at' a read of this record returned",
+            field: "expectedUpdatedAt",
+          });
+        }
+        if (precondition.kind === "absent" && spec.requireVersion === true) {
+          // 428, not 409. Every neighbouring refusal on this route means "no role may do this",
+          // and that is false here: any role may, once the request is conditional.
+          return json(428, {
+            error: "precondition_required",
+            detail:
+              "this entity requires a conditional update: send the 'updated_at' a read returned as 'expectedUpdatedAt'",
+            field: "expectedUpdatedAt",
+          });
+        }
+        const expectedUpdatedAt = precondition.kind === "present" ? precondition.value : null;
         const updateErrors = validateEntity(ctx, spec.entity, raw, "update");
         if (updateErrors !== null) return updateErrors;
         const patch = { ...raw, updated_at: nowIso(ctx) };
@@ -170,8 +199,17 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           const before = needsBefore ? await store.get(tenantId, spec.entity, id) : null;
           if (needsBefore && before === null) return json(404, { error: "not_found" });
           if (expectedUpdatedAt !== null && before !== null) {
-            const current = typeof before["updated_at"] === "string" ? (before["updated_at"] as string) : null;
-            if (current !== null && current !== expectedUpdatedAt) {
+            const current = publishedVersion(before);
+            // Fail closed on an indeterminate version. Skipping the comparison would write
+            // unconditionally while the caller believes its fence held — the same defect as a
+            // silently stripped value, one layer down.
+            if (current === null) {
+              return json(409, {
+                error: "conflict",
+                detail: "the record publishes no version to compare against; reload and retry",
+              });
+            }
+            if (current !== expectedUpdatedAt) {
               return json(409, {
                 error: "conflict",
                 detail: "the record was modified since you loaded it",
@@ -351,6 +389,31 @@ async function applyTransition(
 /** Current time as an ISO string, honoring an injected clock for deterministic tests. */
 function nowIso(ctx: HandlerContext): string {
   return (ctx.clock?.now() ?? new Date()).toISOString();
+}
+
+/** The three things the reserved `expectedUpdatedAt` key can be, all of which need a different answer. */
+type UpdatePrecondition =
+  | { readonly kind: "absent" }
+  | { readonly kind: "present"; readonly value: string }
+  | { readonly kind: "malformed" };
+
+/**
+ * Reads the reserved `expectedUpdatedAt` off a PATCH body.
+ *
+ * "Present but unusable" is its own outcome, deliberately. The key used to be
+ * narrowed with `typeof === "string"` and then deleted either way, so a number, a
+ * null, an object or an empty string all produced an UNCONDITIONAL write that the
+ * caller believed was conditional. A non-parsable string is malformed for the same
+ * reason: it can never equal a version a read published, so admitting it would
+ * turn every such request into a permanent 409 instead of telling the caller what
+ * it sent was not a version.
+ */
+function readUpdatePrecondition(body: Record<string, unknown>): UpdatePrecondition {
+  if (!Object.prototype.hasOwnProperty.call(body, "expectedUpdatedAt")) return { kind: "absent" };
+  const raw = body["expectedUpdatedAt"];
+  if (typeof raw !== "string" || raw.trim() === "") return { kind: "malformed" };
+  if (!Number.isFinite(Date.parse(raw))) return { kind: "malformed" };
+  return { kind: "present", value: raw };
 }
 
 /** Runs the entity's validation plan, returning a 422 output on any error (else null). */

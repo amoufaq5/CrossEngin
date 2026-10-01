@@ -35,6 +35,10 @@ function capturePg(initialRows: Record<string, unknown>[] = []): Captured {
   const query = (async (sql: string, params?: readonly unknown[]) => {
     if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
     calls.push({ sql, params: params ?? [] });
+    // The fold function's body names the unaccent dictionary by the schema the
+    // extension really sits in, which ensureSchema reads from the catalog rather
+    // than assuming. The fake answers that probe the way a stock install would.
+    if (sql.includes("pg_extension")) return { rows: [{ nspname: "public" }], rowCount: 1 };
     if (sql.includes("SELECT") || sql.includes("RETURNING")) return { rows, rowCount: rows.length };
     if (sql.trimStart().startsWith("DELETE")) return { rows: [], rowCount: 1 };
     return { rows: [], rowCount: 1 };
@@ -243,6 +247,130 @@ describe("ColumnMappedEntityStore.listPage — typed sort + safe filter", () => 
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
     expect(sel.sql).toContain('"status"');
     expect(sel.sql).toContain('"owner_id"');
+  });
+});
+
+describe("ColumnMappedEntityStore — the accent fold", () => {
+  it("ensureSchema provisions unaccent, pg_trgm and the fold function", async () => {
+    const cap = capturePg();
+    await store(cap).ensureSchema();
+    const all = cap.calls.map((c) => c.sql);
+    expect(all.some((s) => /CREATE EXTENSION IF NOT EXISTS unaccent/i.test(s))).toBe(true);
+    expect(all.some((s) => /CREATE EXTENSION IF NOT EXISTS pg_trgm/i.test(s))).toBe(true);
+    expect(
+      all.some((s) => s.includes('CREATE OR REPLACE FUNCTION "tenant_app"."crossengin_fold_text"')),
+    ).toBe(true);
+  });
+
+  it("creates the fold function BEFORE any index that is built over it", async () => {
+    const cap = capturePg();
+    await store(cap).ensureSchema();
+    const sqls = cap.calls.map((c) => c.sql);
+    const fn = sqls.findIndex((s) => s.includes('CREATE OR REPLACE FUNCTION "tenant_app"."crossengin_fold_text"'));
+    const idx = sqls.findIndex((s) => s.includes("_fold_trgm"));
+    expect(fn).toBeGreaterThanOrEqual(0);
+    expect(idx).toBeGreaterThan(fn);
+  });
+
+  it("reads the unaccent extension's real schema from the catalog", async () => {
+    const cap = capturePg();
+    await store(cap).ensureSchema();
+    const probe = cap.calls.find((c) => c.sql.includes("pg_extension"));
+    expect(probe?.sql).toContain("extname = 'unaccent'");
+  });
+
+  it("refuses to boot when unaccent is absent, rather than emitting an index it cannot build", async () => {
+    const cap = capturePg();
+    const noUnaccent: PgConnection = {
+      ...cap.conn,
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        if (sql.includes("pg_extension")) return { rows: [], rowCount: 0 };
+        return cap.conn.query(sql, params);
+      }) as PgConnection["query"],
+    };
+    await expect(
+      new ColumnMappedEntityStore(noUnaccent, MANIFEST, { schema: "tenant_app" }).ensureSchema(),
+    ).rejects.toThrow(/unaccent extension is not installed/);
+  });
+
+  it("a contains filter compares through the schema-qualified fold on BOTH sides", async () => {
+    const cap = capturePg([]);
+    await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "sku", op: "contains", value: "acme" }],
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    // identical to the index expression emitEntityTableDdl builds, which is the
+    // only reason the planner can match one to the other
+    expect(sel.sql).toContain(
+      `"tenant_app"."crossengin_fold_text"("sku"::text) ILIKE ('%' || "tenant_app"."crossengin_fold_text"($2) || '%')`,
+    );
+    expect(sel.params).toEqual([TENANT, "acme", 6]);
+  });
+
+  it("a ?q search folds every searchable column the same way, binding the term once", async () => {
+    const cap = capturePg([]);
+    await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [],
+      search: { term: "acme", fields: ["sku", "status"] },
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"tenant_app"."crossengin_fold_text"("sku"::text) ILIKE');
+    expect(sel.sql).toContain('"tenant_app"."crossengin_fold_text"("status"::text) ILIKE');
+    expect(sel.params).toEqual([TENANT, "acme", 6]);
+  });
+});
+
+describe("ColumnMappedEntityStore — reads publish a version", () => {
+  const PLAIN = {
+    entities: [{ name: "Note", fields: [{ name: "title", type: { kind: "text" } }] }],
+  } as unknown as Manifest;
+
+  function plainStore(cap: Captured): ColumnMappedEntityStore {
+    return new ColumnMappedEntityStore(cap.conn, PLAIN, { schema: "tenant_app" });
+  }
+
+  it("selects the system timestamps a non-auditable entity does not declare", async () => {
+    const cap = capturePg([{ id: "n1", title: "t" }]);
+    await plainStore(cap).get(TENANT, "Note", "n1");
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"created_at"');
+    expect(sel.sql).toContain('"updated_at"');
+  });
+
+  it("maps them onto the record, so a conditional update has a version to echo", async () => {
+    const at = new Date("2026-10-01T12:00:00.000Z");
+    const cap = capturePg([{ id: "n1", title: "t", created_at: at, updated_at: at }]);
+    const rec = await plainStore(cap).get(TENANT, "Note", "n1");
+    expect(rec).toEqual({ id: "n1", title: "t", created_at: at, updated_at: at });
+  });
+
+  it("does not select them twice for an auditable entity, which declares them as columns", async () => {
+    const AUDITED = {
+      entities: [{ name: "Note", traits: ["auditable"], fields: [{ name: "title", type: { kind: "text" } }] }],
+    } as unknown as Manifest;
+    const cap = capturePg([{ id: "n1" }]);
+    await new ColumnMappedEntityStore(cap.conn, AUDITED, { schema: "tenant_app" }).get(TENANT, "Note", "n1");
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect([...sel.sql.matchAll(/"updated_at"/g)]).toHaveLength(1);
+  });
+
+  it("selects them under a ?fields projection too — the handler re-projects", async () => {
+    const cap = capturePg([]);
+    await plainStore(cap).listPage(TENANT, "Note", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [],
+      fields: ["title"],
+    });
+    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"updated_at"');
   });
 });
 

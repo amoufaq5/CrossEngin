@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { fieldTypeToPostgresType } from "./field-type.js";
+import {
+  TEXT_SEARCHABLE_FIELD_KINDS,
+  fieldTypeToPostgresType,
+  isTextSearchableFieldKind,
+  isTextSearchableFieldType,
+} from "./field-type.js";
 
 describe("fieldTypeToPostgresType", () => {
   it("maps text without maxLength to TEXT", () => {
@@ -81,5 +86,61 @@ describe("fieldTypeToPostgresType", () => {
   it("maps geo types to PostGIS geography", () => {
     expect(fieldTypeToPostgresType({ kind: "geo_point" })).toBe("geography(POINT)");
     expect(fieldTypeToPostgresType({ kind: "geo_polygon" })).toBe("geography(POLYGON)");
+  });
+});
+
+describe("TEXT_SEARCHABLE_FIELD_KINDS", () => {
+  it("names exactly the six free-text kinds", () => {
+    expect([...TEXT_SEARCHABLE_FIELD_KINDS].sort()).toEqual([
+      "email",
+      "long_text",
+      "phone",
+      "slug",
+      "text",
+      "url",
+    ]);
+  });
+
+  it("excludes enum and reference, which also map to TEXT", () => {
+    // Both emit a TEXT column, and neither holds prose: an enum is matched by
+    // equality against a closed set and a reference against an id. The two facts
+    // are separate on purpose — a trigram index derived from the SQL type alone
+    // indexed 149 columns no query could use (ADR-0285).
+    expect(fieldTypeToPostgresType({ kind: "enum", values: ["a"] })).toBe("TEXT");
+    expect(TEXT_SEARCHABLE_FIELD_KINDS.has("enum")).toBe(false);
+    expect(TEXT_SEARCHABLE_FIELD_KINDS.has("reference")).toBe(false);
+  });
+
+  it("excludes the fixed-width and structured kinds", () => {
+    for (const k of ["country_code", "language_code", "timezone", "json", "uuid", "integer", "datetime"]) {
+      expect(TEXT_SEARCHABLE_FIELD_KINDS.has(k)).toBe(false);
+    }
+  });
+});
+
+describe("isTextSearchableFieldKind", () => {
+  it("accepts a free-text kind", () => {
+    expect(isTextSearchableFieldKind("long_text")).toBe(true);
+  });
+
+  it("rejects an unknown kind and undefined, rather than throwing", () => {
+    expect(isTextSearchableFieldKind("not_a_kind")).toBe(false);
+    expect(isTextSearchableFieldKind(undefined)).toBe(false);
+  });
+});
+
+describe("isTextSearchableFieldType", () => {
+  it("accepts a text field type", () => {
+    expect(isTextSearchableFieldType({ kind: "text", maxLength: 80 })).toBe(true);
+  });
+
+  it("rejects an array of text: its column is TEXT[], which no text predicate accepts", () => {
+    expect(isTextSearchableFieldType({ kind: "array", element: { kind: "text" } })).toBe(false);
+    expect(fieldTypeToPostgresType({ kind: "array", element: { kind: "text" } })).toBe("TEXT[]");
+  });
+
+  it("rejects enum and reference", () => {
+    expect(isTextSearchableFieldType({ kind: "enum", values: ["a", "b"] })).toBe(false);
+    expect(isTextSearchableFieldType({ kind: "reference", target: "X" })).toBe(false);
   });
 });

@@ -36,8 +36,10 @@ function principal(role: string | null): ResolvedPrincipal | null {
 }
 
 let server: CompiledOperateServer;
+let store: InMemoryEntityStore;
 beforeEach(() => {
-  server = compileOperateServer(resolved, { store: new InMemoryEntityStore(), principalRoles });
+  store = new InMemoryEntityStore();
+  server = compileOperateServer(resolved, { store, principalRoles });
 });
 
 async function invoke(
@@ -156,6 +158,65 @@ describe("operate handlers — CRUD", () => {
     const out = await invoke("product.update", { role: "retail_admin", params: { id }, body: { name: "B" } });
     expect(out.status).toBe(200);
     expect(bodyOf(out)["name"]).toBe("B");
+  });
+
+  it("409s a conditional update whose record publishes a Date version, not a string", async () => {
+    // What the column store does: node-postgres returns TIMESTAMPTZ as a JS Date,
+    // so the old `typeof === "string"` test made `current` null and the guard
+    // skipped. Measured live against real Postgres: a deliberately stale
+    // precondition was answered 200 and the write landed (ADR-0285).
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "DT", name: "A", unit_price: 1, unit_cost: 1 } }));
+    const id = created["id"] as string;
+    const version = created["updated_at"] as string;
+    // the store now holds a Date where the document store would hold a string
+    await store.update(TENANT, "Product", id, { updated_at: new Date(version) });
+
+    const stale = await invoke("product.update", {
+      role: "retail_admin",
+      params: { id },
+      body: { name: "B", expectedUpdatedAt: "1999-01-01T00:00:00.000Z" },
+    });
+    expect(stale.status).toBe(409);
+    expect((bodyOf(await invoke("product.read", { role: "retail_admin", params: { id } })))["name"]).toBe("A");
+
+    // and the matching one still applies, because both sides normalise identically
+    const ok = await invoke("product.update", {
+      role: "retail_admin",
+      params: { id },
+      body: { name: "B", expectedUpdatedAt: version },
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it("400s a non-string expectedUpdatedAt instead of stripping it and writing", async () => {
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "NS", name: "A", unit_price: 1, unit_cost: 1 } }));
+    const id = created["id"] as string;
+    for (const bad of [0, null, true, { at: 1 }, ["x"], "", "   ", "not-a-date"]) {
+      const out = await invoke("product.update", {
+        role: "retail_admin",
+        params: { id },
+        body: { name: "FORGED", expectedUpdatedAt: bad },
+      });
+      expect(out.status).toBe(400);
+      expect(bodyOf(out)["error"]).toBe("invalid_precondition");
+    }
+    // nothing was written by any of them
+    expect((bodyOf(await invoke("product.read", { role: "retail_admin", params: { id } })))["name"]).toBe("A");
+  });
+
+  it("409s when the record publishes no version at all, rather than writing unconditionally", async () => {
+    const created = bodyOf(await invoke("product.create", { role: "retail_admin", body: { sku: "NV", name: "A", unit_price: 1, unit_cost: 1 } }));
+    const id = created["id"] as string;
+    await store.remove(TENANT, "Product", id);
+    await store.create(TENANT, "Product", { id, sku: "NV", name: "A", unit_price: 1, unit_cost: 1 });
+
+    const out = await invoke("product.update", {
+      role: "retail_admin",
+      params: { id },
+      body: { name: "B", expectedUpdatedAt: "2026-01-01T00:00:00.000Z" },
+    });
+    expect(out.status).toBe(409);
+    expect(bodyOf(out)["detail"]).toContain("publishes no version");
   });
 
   it("a conditional update on a missing record 404s", async () => {
@@ -370,5 +431,104 @@ describe("operate handlers — the transition write is compare-and-set", () => {
     });
     expect(out.status).toBe(200);
     expect(bodyOf(out)["state"]).toBe("placed");
+  });
+});
+
+describe("operate handlers — concurrency: optimistic makes the precondition mandatory", () => {
+  const strictManifest: Manifest = {
+    ...resolved,
+    entities: (resolved.entities ?? []).map((e) =>
+      e.name === "Product" ? { ...e, concurrency: "optimistic" as const } : e,
+    ),
+  };
+  let strictStore: InMemoryEntityStore;
+  let strict: CompiledOperateServer;
+  beforeEach(() => {
+    strictStore = new InMemoryEntityStore();
+    strict = compileOperateServer(strictManifest, { store: strictStore, principalRoles });
+  });
+
+  async function call(
+    opId: string,
+    opts: { params?: Record<string, string>; body?: Record<string, unknown> },
+  ): Promise<HandlerOutput> {
+    const spec = strict.routeSpecs.find((s) => s.operationId === opId)!;
+    const handler = strict.handlers.resolve(opId)!;
+    return handler({
+      request: buildIncomingRequest({
+        id: "req_op000000001",
+        receivedAt: "2026-06-03T12:00:00.000Z",
+        method: spec.method,
+        path: "/v1/x",
+        headers: {},
+        host: "api.example.com",
+        scheme: "https",
+        bodyBytes: null,
+        clientIp: "203.0.113.1",
+      }),
+      route: routeFromSpec(spec),
+      principal: principal("retail_admin"),
+      params: opts.params ?? {},
+      parsedBody: opts.body ?? null,
+    });
+  }
+
+  async function makeProduct(sku: string): Promise<Record<string, unknown>> {
+    return bodyOf(await call("product.create", { body: { sku, name: "A", unit_price: 1, unit_cost: 1 } }));
+  }
+
+  it("428s an unconditional PATCH, naming the field it wants", async () => {
+    const id = (await makeProduct("RQ1"))["id"] as string;
+    const out = await call("product.update", { params: { id }, body: { name: "B" } });
+    expect(out.status).toBe(428);
+    expect(bodyOf(out)["error"]).toBe("precondition_required");
+    expect(bodyOf(out)["field"]).toBe("expectedUpdatedAt");
+  });
+
+  it("428, not 409 — every neighbouring refusal means 'no role may do this', which is false here", async () => {
+    const id = (await makeProduct("RQ2"))["id"] as string;
+    const refused = await call("product.update", { params: { id }, body: { name: "B" } });
+    expect(refused.status).toBe(428);
+    // the same role, the same body, plus a version → allowed
+    const version = bodyOf(await call("product.read", { params: { id } }))["updated_at"] as string;
+    const allowed = await call("product.update", { params: { id }, body: { name: "B", expectedUpdatedAt: version } });
+    expect(allowed.status).toBe(200);
+  });
+
+  it("writes nothing when it refuses", async () => {
+    const id = (await makeProduct("RQ3"))["id"] as string;
+    await call("product.update", { params: { id }, body: { name: "OVERWRITTEN" } });
+    expect(bodyOf(await call("product.read", { params: { id } }))["name"]).toBe("A");
+  });
+
+  it("still 400s a malformed precondition rather than treating it as absent", async () => {
+    const id = (await makeProduct("RQ4"))["id"] as string;
+    const out = await call("product.update", { params: { id }, body: { name: "B", expectedUpdatedAt: 0 } });
+    expect(out.status).toBe(400);
+    expect(bodyOf(out)["error"]).toBe("invalid_precondition");
+  });
+
+  it("still 409s a stale precondition", async () => {
+    const id = (await makeProduct("RQ5"))["id"] as string;
+    const out = await call("product.update", {
+      params: { id },
+      body: { name: "B", expectedUpdatedAt: "1999-01-01T00:00:00.000Z" },
+    });
+    expect(out.status).toBe(409);
+  });
+
+  it("leaves create, delete and transitions unconditional", async () => {
+    const id = (await makeProduct("RQ6"))["id"] as string;
+    expect((await call("product.delete", { params: { id } })).status).toBe(204);
+  });
+
+  it("does not require a version on an entity that did not declare the mode", async () => {
+    // Store is a different entity in the same manifest: the fence is per-entity.
+    const created = bodyOf(
+      await call("store.create", { body: { account_id: "acct-1", code: "S1", name: "Main" } }),
+    );
+    expect(created["id"]).toBeTypeOf("string");
+    const out = await call("store.update", { params: { id: created["id"] as string }, body: { name: "Other" } });
+    expect(out.status).toBe(200);
   });
 });

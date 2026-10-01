@@ -202,6 +202,32 @@ export function expectUnchanged(field: string, read: unknown): FieldPrecondition
   );
 }
 
+/**
+ * The version string a read of this record PUBLISHED — the value a client holding
+ * the response can echo back as a precondition — or null when the record carries
+ * no version at all.
+ *
+ * It exists because the stores do not agree on the type. The document store keeps
+ * whatever the handler wrote, a string; the column store returns what the driver
+ * gives for `TIMESTAMPTZ`, which is a JS `Date`. The guard tested
+ * `typeof === "string"` and so, on the column store, never compared anything: a
+ * deliberately stale precondition was answered **200**, measured live (ADR-0285).
+ *
+ * The normalisation is deliberately the SAME lossy step the response body goes
+ * through — `JSON.stringify` of a `Date` is its `toISOString()` — so the loss
+ * cancels. A row whose `updated_at` carries microseconds (a column default
+ * `now()`, never a handler-written ISO string) publishes a millisecond version,
+ * and re-reading it publishes that same millisecond version, so an echoed value
+ * still compares equal. Comparing in SQL instead would NOT have this property:
+ * `timestamptz::text` renders microseconds the published value never had.
+ */
+export function publishedVersion(record: EntityRecord): string | null {
+  const raw = record["updated_at"];
+  if (typeof raw === "string") return raw;
+  if (raw instanceof Date) return Number.isNaN(raw.getTime()) ? null : raw.toISOString();
+  return null;
+}
+
 /** A keyset position: the previous page's last row — its sort-field values (aligned to `ListQuery.sort`) + id. */
 export interface KeysetCursor {
   readonly k: readonly string[];

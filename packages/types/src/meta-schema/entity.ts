@@ -22,6 +22,18 @@ export const EntitySchema = z
      * destroy a parent's entity — and everything the parent hung off the replaced fields.
      */
     overrides: z.boolean().optional(),
+    /**
+     * Requires every generic `PATCH` of this entity to carry the `updated_at` it
+     * last read, as a reserved `expectedUpdatedAt`. Absent, a write without one
+     * is unconditional — which is how the guard shipped, and why it fenced
+     * nothing in practice: a lost-update guard a client can decline is a guard
+     * the client that forgets it does not have.
+     *
+     * Declared on the ENTITY, not configured per deployment, so a manifest cannot
+     * serve the same records with the fence on in one environment and off in
+     * another.
+     */
+    concurrency: z.enum(["optimistic"]).optional(),
   })
   .refine(
     (v) => {

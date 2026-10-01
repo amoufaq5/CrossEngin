@@ -9,6 +9,7 @@ import {
   emitForeignKeyDdl,
   emitJoinTableDdl,
   onDeleteClause,
+  unplannedSystemTimestamps,
 } from "./entity-ddl.js";
 
 const WIDGET: Entity = {
@@ -57,23 +58,37 @@ describe("emitEntityTableDdl", () => {
     expect(sql).not.toContain(`"sku" IS 'crossengin`);
   });
 
-  it("emits a plain-column trigram GIN index for each plaintext text/varchar column", () => {
+  it("emits a trigram GIN index over the FOLDED expression for each free-text column", () => {
     expect(sql).toContain(
-      'CREATE INDEX IF NOT EXISTS "widget_sku_trgm" ON "tenant_app"."widget" USING gin ("sku" gin_trgm_ops);',
+      'CREATE INDEX IF NOT EXISTS "widget_sku_fold_trgm" ON "tenant_app"."widget" '
+      + 'USING gin ("tenant_app"."crossengin_fold_text"("sku"::text) gin_trgm_ops);',
     );
   });
 
-  it("uses a plain column trigram index, not a functional unaccent() index", () => {
-    expect(sql).not.toContain("unaccent(");
+  it("indexes the expression the predicate compares through, NOT the bare column", () => {
+    // The inverse of what this file asserted before ADR-0285. A plain-column index
+    // cannot match a function-call predicate at any volatility — measured as a
+    // `Seq Scan` even with `enable_seqscan = off` — so the bare-column form was an
+    // index that existed and could never be used.
+    expect(sql).toContain('gin ("tenant_app"."crossengin_fold_text"("sku"::text) gin_trgm_ops)');
+    expect(sql).not.toContain('gin ("sku" gin_trgm_ops)');
+  });
+
+  it("drops the pre-fold plain-column index by name", () => {
+    // CREATE INDEX IF NOT EXISTS on an existing name keeps the OLD definition, so
+    // the unusable index has to be dropped rather than redefined.
+    expect(sql).toContain('DROP INDEX IF EXISTS "tenant_app"."widget_sku_trgm";');
   });
 
   it("does not trigram-index numeric columns", () => {
-    expect(sql).not.toContain('"price_trgm"');
-    expect(sql).not.toContain('"cost_trgm"');
+    expect(sql).not.toContain('"price_fold_trgm"');
+    expect(sql).not.toContain('"cost_fold_trgm"');
   });
 
   it("does not trigram-index an encrypted (BYTEA) column", () => {
     // ssn is phi → stored BYTEA, so no trigram index despite its text field type.
+    expect(sql).not.toContain('"widget_ssn_fold_trgm"');
+    // …and no DROP either: a BYTEA column never had one to drop.
     expect(sql).not.toContain('"widget_ssn_trgm"');
   });
 });
@@ -229,26 +244,98 @@ describe("emitEntityTableDdl — trigram indexes", () => {
     fields: [
       { name: "label", type: { kind: "text" } },
       { name: "code", type: { kind: "text", maxLength: 20 } },
+      { name: "blurb", type: { kind: "long_text" } },
+      { name: "contact", type: { kind: "email" } },
       { name: "country", type: { kind: "country_code" } },
       { name: "secret", type: { kind: "text" }, classification: "phi" },
       { name: "count", type: { kind: "integer" } },
+      { name: "state", type: { kind: "enum", values: ["open", "shut", "gone"] } },
+      { name: "owner", type: { kind: "reference", target: "Place" } },
+      { name: "tags", type: { kind: "array", element: { kind: "text" } } },
     ],
   };
-  const sql = emitEntityTableDdl(columnPlanForEntity(TEXTY, { schema: "app" })).join("\n");
+  const stmts = emitEntityTableDdl(columnPlanForEntity(TEXTY, { schema: "app" }));
+  const sql = stmts.join("\n");
+  const indexed = (column: string): boolean => sql.includes(`("${column}"::text) gin_trgm_ops`);
 
-  it("indexes TEXT and VARCHAR columns", () => {
-    expect(sql).toContain('"label" gin_trgm_ops');
-    expect(sql).toContain('"code" gin_trgm_ops');
+  it("indexes TEXT, VARCHAR, long_text and email columns", () => {
+    expect(indexed("label")).toBe(true);
+    expect(indexed("code")).toBe(true);
+    expect(indexed("blurb")).toBe(true);
+    expect(indexed("contact")).toBe(true);
+  });
+
+  it("skips an enum column — a closed token set is matched by equality, not substring", () => {
+    // `enum` emits TEXT, so the pre-ADR-0285 type-only test indexed it. Measured on
+    // a composed pack: 67 of 291 trigram indexes were over enums, and one over a
+    // five-value enum was larger than the table's own primary key.
+    expect(indexed("state")).toBe(false);
+    // the useless one it used to have is dropped
+    expect(sql).toContain('DROP INDEX IF EXISTS "app"."place_state_trgm";');
+  });
+
+  it("skips a reference column — an opaque id is matched by equality too", () => {
+    expect(indexed("owner_id")).toBe(false);
+    expect(sql).toContain('DROP INDEX IF EXISTS "app"."place_owner_id_trgm";');
   });
 
   it("skips CHAR(n), which gin_trgm_ops does not accept", () => {
     // bpchar is not binary-coercible to text; indexing it fails outright, and a
     // country_code field made pack-erp-core unbootable on this store.
-    expect(sql).not.toContain('"country" gin_trgm_ops');
+    expect(indexed("country")).toBe(false);
+  });
+
+  it("skips an array column: no text operator class accepts <element>[]", () => {
+    expect(indexed("tags")).toBe(false);
   });
 
   it("skips encrypted and non-text columns", () => {
-    expect(sql).not.toContain('"secret" gin_trgm_ops');
-    expect(sql).not.toContain('"count" gin_trgm_ops');
+    expect(indexed("secret")).toBe(false);
+    expect(indexed("count")).toBe(false);
+  });
+
+  it("drops every legacy index before creating any fold index", () => {
+    const lastDrop = stmts.reduce((acc, s, i) => (s.startsWith("DROP INDEX") ? i : acc), -1);
+    const firstFold = stmts.findIndex((s) => s.includes("_fold_trgm"));
+    expect(lastDrop).toBeGreaterThanOrEqual(0);
+    expect(firstFold).toBeGreaterThan(lastDrop);
+  });
+
+  it("caps both index names at Postgres's 63-char identifier limit", () => {
+    const long = "x".repeat(70);
+    const wide: Entity = { name: "Place", fields: [{ name: long, type: { kind: "text" } }] };
+    const names = emitEntityTableDdl(columnPlanForEntity(wide, { schema: "app" }))
+      .flatMap((s) => [...s.matchAll(/"(place_x+[a-z_]*)"/g)].map((m) => m[1]!));
+    expect(names.length).toBeGreaterThan(0);
+    for (const n of names) expect(n.length).toBeLessThanOrEqual(63);
+  });
+});
+
+describe("unplannedSystemTimestamps", () => {
+  it("names both timestamps for an entity that declares neither", () => {
+    const plan = columnPlanForEntity(
+      { name: "Plain", fields: [{ name: "title", type: { kind: "text" } }] },
+      { schema: "app" },
+    );
+    expect(unplannedSystemTimestamps(plan)).toEqual(["created_at", "updated_at"]);
+  });
+
+  it("names neither for an auditable entity, whose trait declares both as real columns", () => {
+    const plan = columnPlanForEntity(
+      { name: "Audited", traits: ["auditable"], fields: [{ name: "title", type: { kind: "text" } }] },
+      { schema: "app", traits: [] },
+    );
+    expect(unplannedSystemTimestamps(plan)).toEqual([]);
+  });
+
+  it("agrees with the CREATE TABLE: a named timestamp is one the emitter supplies", () => {
+    const plan = columnPlanForEntity(
+      { name: "Plain", fields: [{ name: "title", type: { kind: "text" } }] },
+      { schema: "app" },
+    );
+    const create = emitEntityTableDdl(plan)[0]!;
+    for (const name of unplannedSystemTimestamps(plan)) {
+      expect(create).toContain(`"${name}" TIMESTAMPTZ NOT NULL DEFAULT now()`);
+    }
   });
 });

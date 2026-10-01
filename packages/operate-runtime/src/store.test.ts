@@ -11,6 +11,7 @@ import {
   isTransactional,
   matchesFilter,
   matchesPreconditions,
+  publishedVersion,
   projectRecord,
   type EntityStore,
   type ListQuery,
@@ -345,3 +346,42 @@ describe("InMemoryEntityStore.updateIf", () => {
     expect(await store.get(TENANT, "Claim", "c1")).toMatchObject({ state: "in_review" });
   });
 });
+
+describe("publishedVersion", () => {
+  it("returns an ISO string unchanged (what the document store holds)", () => {
+    expect(publishedVersion({ id: "a", updated_at: "2026-10-01T12:00:00.000Z" })).toBe(
+      "2026-10-01T12:00:00.000Z",
+    );
+  });
+
+  it("normalises a Date to the SAME string the response body carries", () => {
+    // The column store returns the driver's value for TIMESTAMPTZ, which is a
+    // Date. `typeof === "string"` was false, so the precondition compared nothing
+    // and a stale one was answered 200 (ADR-0285, measured live).
+    const at = new Date("2026-10-01T12:00:00.123Z");
+    expect(publishedVersion({ id: "a", updated_at: at })).toBe(at.toISOString());
+    expect(publishedVersion({ id: "a", updated_at: at })).toBe(
+      JSON.parse(JSON.stringify({ at }))["at"],
+    );
+  });
+
+  it("truncates to milliseconds, which is why an echoed version still matches", () => {
+    // A column default now() stores microseconds; the driver publishes a
+    // millisecond Date. Both sides of the comparison go through this same step,
+    // so the loss cancels — a property a SQL-side comparison would not have.
+    const micro = new Date("2026-10-01T12:00:00.123Z");
+    expect(publishedVersion({ id: "a", updated_at: micro })).toBe("2026-10-01T12:00:00.123Z");
+  });
+
+  it("returns null when the record carries no version", () => {
+    expect(publishedVersion({ id: "a" })).toBeNull();
+    expect(publishedVersion({ id: "a", updated_at: null })).toBeNull();
+  });
+
+  it("returns null for a non-version value rather than stringifying it", () => {
+    expect(publishedVersion({ id: "a", updated_at: 0 })).toBeNull();
+    expect(publishedVersion({ id: "a", updated_at: { then: 1 } })).toBeNull();
+    expect(publishedVersion({ id: "a", updated_at: new Date("nope") })).toBeNull();
+  });
+});
+

@@ -1,5 +1,6 @@
 export * from "./records.js";
 export * from "./tenant-context.js";
+export * from "./search-fold.js";
 export * from "./list-sql.js";
 export * from "./entity-store.js";
 export * from "./column-plan.js";

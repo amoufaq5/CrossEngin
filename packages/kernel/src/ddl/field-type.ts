@@ -1,5 +1,38 @@
 import type { FieldType, PrimitiveFieldType } from "@crossengin/types/meta-schema";
 
+/**
+ * The field-type kinds whose values are free text a human would substring-search.
+ *
+ * Several other kinds also land in a text column — `enum` and `reference` are
+ * both `TEXT` — but their values are tokens, not prose: an enum is matched by
+ * equality against a closed set and a reference by equality against an id. The
+ * distinction is load-bearing because it decides which columns get a trigram
+ * index, and a trigram index over a three-value enum costs more than the
+ * table's primary key while serving no query the platform emits.
+ */
+export const TEXT_SEARCHABLE_FIELD_KINDS: ReadonlySet<string> = new Set([
+  "text",
+  "long_text",
+  "email",
+  "slug",
+  "phone",
+  "url",
+]);
+
+/** Whether a field's declared type holds free text (see `TEXT_SEARCHABLE_FIELD_KINDS`). */
+export function isTextSearchableFieldKind(kind: string | undefined): boolean {
+  return kind !== undefined && TEXT_SEARCHABLE_FIELD_KINDS.has(kind);
+}
+
+/**
+ * Whether a field type holds free text. An `array` is never searchable: its
+ * column is `<element>[]`, which no text predicate or trigram operator class
+ * accepts.
+ */
+export function isTextSearchableFieldType(type: FieldType): boolean {
+  return type.kind !== "array" && isTextSearchableFieldKind(type.kind);
+}
+
 export function fieldTypeToPostgresType(type: FieldType): string {
   if (type.kind === "array") {
     return primitiveFieldTypeToPostgresType(type.element) + "[]";

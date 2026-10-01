@@ -32,8 +32,14 @@ import {
   type EntityTablePlan,
   type JoinTablePlan,
 } from "./column-plan.js";
-import { emitEntityTableDdl, emitForeignKeyDdl, emitJoinTableDdl } from "./entity-ddl.js";
+import {
+  emitEntityTableDdl,
+  emitForeignKeyDdl,
+  emitJoinTableDdl,
+  unplannedSystemTimestamps,
+} from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
+import { emitSearchFoldFunctionDdl, searchFoldRef } from "./search-fold.js";
 import { withTenantContext } from "./tenant-context.js";
 
 /**
@@ -93,6 +99,28 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore, Condit
     return false;
   }
 
+  /**
+   * The schema the `unaccent` extension is installed in. Fails closed on a
+   * missing row rather than guessing: the fold function's body is baked into an
+   * index expression, and a wrong name there would either refuse to create or —
+   * worse — resolve to something else later.
+   */
+  private async unaccentSchema(): Promise<string> {
+    const res = await this.conn.query<{ nspname: string }>(
+      `SELECT n.nspname FROM pg_extension e
+         JOIN pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'unaccent'`,
+      [],
+    );
+    const nspname = res.rows[0]?.nspname;
+    if (nspname === undefined || nspname.length === 0) {
+      throw new Error(
+        "the unaccent extension is not installed; substring search cannot be folded or indexed without it",
+      );
+    }
+    return nspname;
+  }
+
   private planFor(entity: string): EntityTablePlan {
     const plan = this.plans.get(entity);
     if (plan === undefined) throw new Error(`no column plan for entity '${entity}'`);
@@ -122,11 +150,16 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore, Condit
     if (this.hasEncryptedColumns()) {
       await ensurePgcryptoExtension(this.conn);
     }
-    // Substring search (the `contains` filter) folds accents via unaccent() and
-    // is accelerated by per-text-column pg_trgm GIN indexes (emitted in the
-    // entity-table DDL). Both extensions are provisioned idempotently.
+    // Substring search (the `contains` filter and `?q`) folds accents, and the
+    // trigram GIN indexes emitted in the entity-table DDL are built over that
+    // same fold — so the fold function must exist BEFORE any of them. Its body
+    // names the unaccent dictionary by the schema the extension actually landed
+    // in, read from the catalog rather than assumed to be `public`.
     await this.conn.query("CREATE EXTENSION IF NOT EXISTS unaccent;");
     await this.conn.query("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
+    if (schema !== undefined) {
+      await this.conn.query(emitSearchFoldFunctionDdl(schema, await this.unaccentSchema()));
+    }
     const order = topologicalEntityOrder(this.plans);
     for (const name of order) {
       const plan = this.plans.get(name);
@@ -179,6 +212,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore, Condit
         return m === undefined ? "" : `::${m.sqlType}`;
       },
       idExpr: quoteIdent("id"),
+      foldFn: searchFoldRef(plan.schema),
     };
     const { where, orderBy } = buildListSql(query, adapter, [`${quoteIdent("tenant_id")} = $1`], params);
     const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
@@ -640,6 +674,14 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore, Condit
           : quoteIdent(c.column),
       );
     }
+    // The system timestamps the table always has but a non-`auditable` entity
+    // does not declare. Selected unconditionally, including under a `?fields`
+    // projection (the handler re-projects, so clients see no difference), because
+    // a record with no `updated_at` publishes no version — and a conditional
+    // update whose precondition cannot be obtained is a fence nobody can satisfy.
+    // The document store has always returned them, so this is also the two stores
+    // answering the same question the same way.
+    cols.push(...unplannedSystemTimestamps(plan).map((name) => quoteIdent(name)));
     return cols.join(", ");
   }
 
@@ -664,6 +706,10 @@ function rowToRecord(plan: EntityTablePlan, row: Record<string, unknown>): Entit
   for (const mapping of plan.columns) {
     const v = row[mapping.column];
     if (v !== undefined && v !== null) out[mapping.field] = v;
+  }
+  for (const name of unplannedSystemTimestamps(plan)) {
+    const v = row[name];
+    if (v !== undefined && v !== null) out[name] = v;
   }
   return out;
 }

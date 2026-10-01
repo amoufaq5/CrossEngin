@@ -122,3 +122,42 @@ describe("EntitySchema", () => {
     expect(EntitySchema.parse(input)).toEqual(input);
   });
 });
+
+describe("EntitySchema — concurrency", () => {
+  it("accepts concurrency: optimistic", () => {
+    const input = {
+      name: "Claim",
+      fields: [{ name: "x", type: { kind: "uuid" } }],
+      concurrency: "optimistic",
+    };
+    expect(EntitySchema.parse(input)).toEqual(input);
+  });
+
+  it("is optional — an entity without it keeps the unconditional update", () => {
+    const parsed = EntitySchema.parse({ name: "Claim", fields: [{ name: "x", type: { kind: "uuid" } }] });
+    expect(parsed.concurrency).toBeUndefined();
+  });
+
+  it("rejects an unknown concurrency mode rather than ignoring it", () => {
+    // A mode the handler does not implement must not parse: silently accepting
+    // "last_write_wins" would declare a fence nothing arms.
+    expect(() =>
+      EntitySchema.parse({
+        name: "Claim",
+        fields: [{ name: "x", type: { kind: "uuid" } }],
+        concurrency: "last_write_wins",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a boolean in place of the mode", () => {
+    expect(() =>
+      EntitySchema.parse({
+        name: "Claim",
+        fields: [{ name: "x", type: { kind: "uuid" } }],
+        concurrency: true,
+      }),
+    ).toThrow();
+  });
+});
+

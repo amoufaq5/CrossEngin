@@ -47,6 +47,11 @@ export async function listPageOp(
     columnExpr: (field) => (FIELD_RE.test(field) ? `document ->> '${field}'` : null),
     castSuffix: () => "",
     idExpr: "record_id",
+    // The document store's own fold: bare `unaccent`, exactly as before, because
+    // there is no per-entity table here and therefore no index for a folded
+    // expression to match. It is NOT the column store's IMMUTABLE wrapper — that
+    // one exists only to be indexable, and this store has nothing to index.
+    foldFn: "unaccent",
   };
   const { where, orderBy } = buildListSql(query, adapter, [`tenant_id = $1`, `entity = $2`], params);
   const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
