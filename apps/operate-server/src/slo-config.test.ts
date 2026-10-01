@@ -1,8 +1,9 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PipelineExecutionSchema, type PipelineExecution } from "@crossengin/api-gateway";
+import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
 import { FixedClock } from "@crossengin/observability-runtime";
 import { buildSloEnforcement, loadSloConfig, parseSloConfig, type SloConfig } from "./slo-config.js";
@@ -31,6 +32,32 @@ function latencySlo(surface: string): Slo {
     targets: [{ kind: "latency", p95: "10ms", window: "30d" }],
     id: "product-list-latency",
   };
+}
+
+/**
+ * A connection that answers the incident allocator with a high-water mark and records every
+ * statement, so a test can assert the id on a decision is the id of the row it wrote.
+ */
+function allocatingConnection(capture: { sql: string }[], firstSequence: number): PgConnection {
+  const affected: PgQueryResult = { rows: [], rowCount: 1 };
+  let next = firstSequence;
+  const conn: PgConnection = {
+    query: vi.fn(async (sql: string) => {
+      capture.push({ sql });
+      if (sql.includes("MAX(sequence_number)")) {
+        const row = { next: String(next) };
+        next += 1;
+        return { rows: [row], rowCount: 1 };
+      }
+      return affected;
+    }) as PgConnection["query"],
+    transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as
+      PgConnection["transaction"],
+    withAdvisoryLock: vi.fn(async <T>(_key: bigint, fn: () => Promise<T>) => fn()) as
+      PgConnection["withAdvisoryLock"],
+    close: vi.fn() as PgConnection["close"],
+  };
+  return conn;
 }
 
 function validConfig(overrides: Partial<SloConfig> = {}): unknown {
@@ -176,14 +203,14 @@ describe("buildSloEnforcement", () => {
     expect(latOnly.engines.latency).not.toBeNull();
   });
 
-  it("drives a breach_opened decision from a failure burst fed through the observer sink", () => {
+  it("drives a breach_opened decision from a failure burst fed through the observer sink", async () => {
     const clock = new FixedClock(new Date(END));
     const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), { clock });
     const sink = enforcement.observer.asExecutionSink();
     for (let i = 0; i < 25; i += 1) {
       sink(makeExecution(503, "error", new Date(Date.parse(END) - i * 1_000).toISOString()));
     }
-    const decisions = enforcement.scheduler.evaluateOnce();
+    const decisions = await enforcement.scheduler.evaluateOnce();
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.signal).toBe("availability");
     expect(decisions[0]?.kind).toBe("breach_opened");
@@ -191,7 +218,7 @@ describe("buildSloEnforcement", () => {
     expect(decisions[0]?.incidentId).toMatch(/^INC-/);
   });
 
-  it("routes decisions to onDecision when the scheduler evaluates", () => {
+  it("routes decisions to onDecision when the scheduler evaluates", async () => {
     const clock = new FixedClock(new Date(END));
     const seen: string[] = [];
     const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
@@ -202,7 +229,63 @@ describe("buildSloEnforcement", () => {
     for (let i = 0; i < 25; i += 1) {
       sink(makeExecution(503, "error", new Date(Date.parse(END) - i * 1_000).toISOString()));
     }
-    enforcement.scheduler.evaluateOnce();
+    await enforcement.scheduler.evaluateOnce();
     expect(seen).toEqual(["availability:breach_opened"]);
+  });
+
+  it("reports itself unpersisted without a connection", () => {
+    expect(buildSloEnforcement(parseSloConfig(validConfig())).persisted).toBe(false);
+  });
+
+  it("persists evaluations, actions and the incident itself over a connection", async () => {
+    const capture: { sql: string }[] = [];
+    const clock = new FixedClock(new Date(END));
+    const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      clock,
+      conn: allocatingConnection(capture, 88),
+    });
+    expect(enforcement.persisted).toBe(true);
+    const sink = enforcement.observer.asExecutionSink();
+    for (let i = 0; i < 25; i += 1) {
+      sink(makeExecution(503, "error", new Date(Date.parse(END) - i * 1_000).toISOString()));
+    }
+    const decisions = await enforcement.scheduler.evaluateOnce();
+    // The id on the decision is the id of the row — not a counter's INC-YYYY-0001.
+    expect(decisions[0]?.incidentId).toBe("INC-2026-0088");
+    expect(capture.some((c) => c.sql.includes("INSERT INTO meta.incidents"))).toBe(true);
+    expect(capture.some((c) => c.sql.includes("INSERT INTO meta.slo_enforcement_actions"))).toBe(
+      true,
+    );
+    expect(capture.some((c) => c.sql.includes("INSERT INTO meta.slo_evaluations"))).toBe(true);
+  });
+
+  it("gives both signals ids from one sequence, so they cannot collide", async () => {
+    const capture: { sql: string }[] = [];
+    const clock = new FixedClock(new Date(END));
+    const enforcement = buildSloEnforcement(
+      parseSloConfig(
+        validConfig({
+          latency: [{ slo: latencySlo("GET /v1/items") }],
+        }),
+      ),
+      { clock, conn: allocatingConnection(capture, 88) },
+    );
+    expect(enforcement.engines.availability).not.toBeNull();
+    expect(enforcement.engines.latency).not.toBeNull();
+    const sink = enforcement.observer.asExecutionSink();
+    for (let i = 0; i < 25; i += 1) {
+      sink(makeExecution(503, "error", new Date(Date.parse(END) - i * 1_000).toISOString()));
+    }
+    for (let i = 0; i < 30; i += 1) {
+      enforcement.engines.latency?.recordOutcome({
+        surface: "GET /v1/items",
+        outcome: "ok",
+        at: new Date(Date.parse(END) - i * 1_000).toISOString(),
+        latencyMs: 4_000,
+      });
+    }
+    const ids = (await enforcement.scheduler.evaluateOnce()).map((d) => d.incidentId);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids).toEqual(["INC-2026-0088", "INC-2026-0089"]);
   });
 });

@@ -3,7 +3,12 @@ import {
   type SloAvailabilityTarget,
 } from "@crossengin/observability";
 import type { AlertPolicy } from "@crossengin/observability";
-import type { IncidentCategory, Severity } from "@crossengin/incident-response";
+import type { IncidentCategory, IncidentRecord, Severity } from "@crossengin/incident-response";
+import {
+  CountingIncidentDeclarer,
+  type IncidentCloseOut,
+  type IncidentDeclarer,
+} from "@crossengin/incident-response-runtime";
 import { SystemClock, type Clock } from "./clock.js";
 import { RollingWindow, type RequestOutcome } from "./window.js";
 import {
@@ -13,11 +18,12 @@ import {
   type BurnRateVerdict,
 } from "./burn-rate.js";
 import {
-  formatIncidentId,
+  closeOutEnforcementIncident,
+  declareEnforcementIncident,
   formatKillSwitchId,
-  planIncidentDeclaration,
   planKillSwitchActivation,
   planPageDirective,
+  type DeclarationErrorSink,
   type EnforcementPlan,
   type FlagRollback,
 } from "./enforcement.js";
@@ -37,6 +43,13 @@ export interface SloEnforcementEngineOptions {
   readonly clock?: Clock;
   readonly declaredBy?: string;
   readonly window?: RollingWindow;
+  /**
+   * Chooses each declared incident's id and decides whether the record outlives the process.
+   * Defaults to a per-process counter, which is only safe while nothing stores the record — see
+   * `CountingIncidentDeclarer`.
+   */
+  readonly declarer?: IncidentDeclarer;
+  readonly onDeclarationError?: DeclarationErrorSink;
 }
 
 interface ActiveBreach {
@@ -67,6 +80,8 @@ export type EnforcementDecision =
       readonly sloId: string;
       readonly incidentId: string;
       readonly killSwitchId: string | null;
+      /** What became of the declared incident: cancelled, left to a human, or never stored. */
+      readonly closeOut: IncidentCloseOut;
     };
 
 function availabilityTarget(slo: Slo): SloAvailabilityTarget | null {
@@ -85,8 +100,14 @@ export class SloEnforcementEngine {
   private readonly alertPolicy: AlertPolicy;
   private readonly systemActorUserId: string;
   private readonly declaredBy: string;
+  private readonly declarer: IncidentDeclarer;
+  private readonly onDeclarationError: DeclarationErrorSink | undefined;
   private readonly active: Map<string, ActiveBreach> = new Map();
-  private incidentSeq = 0;
+  /**
+   * Surfaces with a declaration in flight. A breach is only recorded as active once its id comes
+   * back, so without this a second pass starting mid-declare would declare the same breach twice.
+   */
+  private readonly declaring: Set<string> = new Set();
   private killSwitchSeq = 0;
 
   constructor(options: SloEnforcementEngineOptions) {
@@ -97,6 +118,8 @@ export class SloEnforcementEngine {
     this.clock = options.clock ?? new SystemClock();
     this.declaredBy = options.declaredBy ?? "system-slo-enforcer";
     this.window = options.window ?? new RollingWindow();
+    this.declarer = options.declarer ?? new CountingIncidentDeclarer({ clock: this.clock });
+    this.onDeclarationError = options.onDeclarationError;
   }
 
   recordOutcome(outcome: RequestOutcome): void {
@@ -107,7 +130,12 @@ export class SloEnforcementEngine {
     return [...this.active.entries()].map(([surface, breach]) => ({ surface, breach }));
   }
 
-  evaluate(now: Date = this.clock.now()): readonly EnforcementDecision[] {
+  /**
+   * Async because declaring is: the incident's id comes from whoever will store the record, so the
+   * engine cannot know it without asking. Recording outcomes stays synchronous — only this pass,
+   * which runs on a timer, waits on anything.
+   */
+  async evaluate(now: Date = this.clock.now()): Promise<readonly EnforcementDecision[]> {
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
     const decisions: EnforcementDecision[] = [];
@@ -125,7 +153,11 @@ export class SloEnforcementEngine {
       const existing = this.active.get(surface);
 
       if (verdict.breached && existing === undefined) {
-        decisions.push(this.openBreach(reg, surface, verdict, nowIso));
+        if (this.declaring.has(surface)) continue;
+        const opened = await this.openBreach(reg, surface, verdict, nowIso);
+        // A declaration that could not be recorded leaves the surface unopened, so the next tick
+        // declares it instead of this pass abandoning every surface after it.
+        if (opened !== null) decisions.push(opened);
       } else if (verdict.breached && existing !== undefined) {
         decisions.push({
           kind: "breach_ongoing",
@@ -135,12 +167,24 @@ export class SloEnforcementEngine {
         });
       } else if (!verdict.breached && existing !== undefined) {
         this.active.delete(surface);
+        const closeOut = await closeOutEnforcementIncident(
+          this.declarer,
+          existing.incidentId,
+          {
+            reason: `error-budget burn on ${surface} is back within its ${existing.thresholdId} threshold`,
+            actorUserId: this.declaredBy,
+            at: nowIso,
+          },
+          { surface, sloId: slo.id },
+          this.onDeclarationError,
+        );
         decisions.push({
           kind: "recovered",
           surface,
           sloId: slo.id,
           incidentId: existing.incidentId,
           killSwitchId: existing.killSwitchId,
+          closeOut,
         });
       }
     }
@@ -148,17 +192,14 @@ export class SloEnforcementEngine {
     return decisions;
   }
 
-  private openBreach(
+  private async openBreach(
     reg: SloRegistration,
     surface: string,
     verdict: BurnRateVerdict,
     nowIso: string,
-  ): EnforcementDecision {
+  ): Promise<EnforcementDecision | null> {
     const severity = verdict.worstSeverity as Severity;
     const thresholdId = verdict.worstThresholdId as string;
-    const year = new Date(nowIso).getUTCFullYear();
-    this.incidentSeq += 1;
-    const incidentId = formatIncidentId(year, this.incidentSeq);
 
     const worst = verdict.evaluations.find((e) => e.threshold.id === thresholdId);
     const burnDetail =
@@ -166,16 +207,29 @@ export class SloEnforcementEngine {
         ? `burn ${worst.longBurn.toFixed(1)}x over ${worst.threshold.longWindow} / ${worst.shortBurn.toFixed(1)}x over ${worst.threshold.shortWindow}`
         : "burn threshold breached";
 
-    const incident = planIncidentDeclaration({
-      incidentId,
-      title: `SLO burn alert: ${reg.slo.id} on ${surface}`,
-      severity,
-      category: reg.category,
-      surface,
-      nowIso,
-      declaredBy: this.declaredBy,
-      detail: `Auto-declared by SLO enforcement (${thresholdId}): ${burnDetail}.`,
-    });
+    // The id is the declarer's to choose, so the record comes back before anything that embeds it.
+    this.declaring.add(surface);
+    let incident: IncidentRecord | null;
+    try {
+      incident = await declareEnforcementIncident(
+        this.declarer,
+        {
+          title: `SLO burn alert: ${reg.slo.id} on ${surface}`,
+          severity,
+          ...(reg.category !== undefined ? { category: reg.category } : {}),
+          surface,
+          nowIso,
+          declaredBy: this.declaredBy,
+          detail: `Auto-declared by SLO enforcement (${thresholdId}): ${burnDetail}.`,
+        },
+        { surface, sloId: reg.slo.id },
+        this.onDeclarationError,
+      );
+    } finally {
+      this.declaring.delete(surface);
+    }
+    if (incident === null) return null;
+    const incidentId = incident.id;
 
     const page = planPageDirective(this.alertPolicy, severity, incidentId);
     const pages = page === null ? [] : [page];

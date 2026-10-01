@@ -63,13 +63,18 @@ export class PersistentIncidentEngine {
   /**
    * Declares an incident with an id allocated from the rows that exist. A restart therefore
    * continues the year's sequence instead of resetting it to 0001 and colliding.
+   *
+   * Allocation and insert happen inside one locked step, so two declarations in flight at once
+   * cannot both be handed the same sequence.
    */
   async declare(input: PersistentDeclareInput): Promise<StoredIncident> {
     const at = input.declaredAt ?? this.clock.nowIso();
     const year = new Date(at).getUTCFullYear();
-    const id = await this.store.allocateIncidentId(year);
-    const record = this.executor.declare({ ...input, id, declaredAt: at });
-    return this.store.insert(record, at);
+    return this.store.insertAllocated(
+      year,
+      (id) => this.executor.declare({ ...input, id, declaredAt: at }),
+      at,
+    );
   }
 
   /** Declares an incident whose id is already chosen — for callers that planned the record. */

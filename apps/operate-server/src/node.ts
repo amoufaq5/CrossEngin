@@ -772,17 +772,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               : {},
           )
         : null;
+  // With a Postgres store the engines persist: every evaluation, every enforcement action, and the
+  // declared `IncidentRecord` itself, whose id is allocated from `meta.incidents` rather than from a
+  // counter that restarts at 0001 (ADR-0289, ADR-0293).
   const sloEnforcement =
     sloConfig !== null
       ? buildSloEnforcement(sloConfig, {
+          ...(conn !== undefined ? { conn } : {}),
           onDecision: (d) =>
             console.info(
               `[slo] ${d.signal} ${d.kind} surface=${d.surface} slo=${d.sloId}` +
-                (d.incidentId !== null ? ` incident=${d.incidentId}` : ""),
+                (d.incidentId !== null ? ` incident=${d.incidentId}` : "") +
+                (d.closeOut !== null ? ` closeOut=${d.closeOut}` : ""),
             ),
           onError: (err) => console.error("[slo] evaluation error", err),
         })
       : null;
+  if (sloEnforcement !== null && !sloEnforcement.persisted) {
+    console.warn(
+      "[slo] no Postgres store (--store pg): incidents are declared in memory only and their ids restart at 0001",
+    );
+  }
   // Periodic DR-readiness assessment: fold the failover/drill executions recorded through the API into
   // the config's declared infra, assess readiness, and persist a snapshot. Enabled by
   // --dr-readiness-config over a pg store (needs the conn for the execution stores).

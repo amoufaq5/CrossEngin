@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { IncidentRecordSchema } from "@crossengin/incident-response";
+import { IncidentRecordSchema, type IncidentRecord } from "@crossengin/incident-response";
+import {
+  IncidentExecutor,
+  type IncidentCloseOut,
+  type IncidentCloseOutInput,
+  type IncidentDeclarationRequest,
+  type IncidentDeclarer,
+} from "@crossengin/incident-response-runtime";
 import { KillSwitchSchema } from "@crossengin/feature-flags";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
 import { FixedClock } from "./clock.js";
@@ -52,12 +59,12 @@ function recordLatencies(engine: LatencySloEngine, ms: number, count: number, at
 }
 
 describe("LatencySloEngine", () => {
-  it("declares a performance incident + pages when p95 blows the budget", () => {
+  it("declares a performance incident + pages when p95 blows the budget", async () => {
     const clock = new FixedClock(BASE);
     const engine = makeEngine(clock);
     recordLatencies(engine, 700, 30, BASE.getTime());
 
-    const decisions = engine.evaluate();
+    const decisions = await engine.evaluate();
     expect(decisions).toHaveLength(1);
     const decision = decisions[0];
     if (decision?.kind !== "breach_opened") throw new Error("expected breach");
@@ -71,11 +78,11 @@ describe("LatencySloEngine", () => {
     expect(decision.plan.killSwitch?.flagId).toBe("ff_catalogv2");
   });
 
-  it("opens a sev3 ticket when the budget is exceeded by less than 2x", () => {
+  it("opens a sev3 ticket when the budget is exceeded by less than 2x", async () => {
     const clock = new FixedClock(BASE);
     const engine = makeEngine(clock);
     recordLatencies(engine, 400, 30, BASE.getTime());
-    const decisions = engine.evaluate();
+    const decisions = await engine.evaluate();
     expect(decisions[0]?.kind).toBe("breach_opened");
     if (decisions[0]?.kind === "breach_opened") {
       expect(decisions[0].severity).toBe("sev3");
@@ -83,31 +90,31 @@ describe("LatencySloEngine", () => {
     }
   });
 
-  it("does not re-declare while the breach is ongoing, then recovers", () => {
+  it("does not re-declare while the breach is ongoing, then recovers", async () => {
     const clock = new FixedClock(BASE);
     const engine = makeEngine(clock);
     recordLatencies(engine, 700, 30, BASE.getTime());
-    expect(engine.evaluate()[0]?.kind).toBe("breach_opened");
+    expect((await engine.evaluate())[0]?.kind).toBe("breach_opened");
 
     clock.advance(60_000);
     recordLatencies(engine, 700, 30, clock.nowMs());
-    expect(engine.evaluate(clock.now())[0]?.kind).toBe("breach_ongoing");
+    expect((await engine.evaluate(clock.now()))[0]?.kind).toBe("breach_ongoing");
 
     clock.advance(10 * 60_000);
     recordLatencies(engine, 80, 30, clock.nowMs());
-    const recovered = engine.evaluate(clock.now());
+    const recovered = await engine.evaluate(clock.now());
     expect(recovered[0]?.kind).toBe("recovered");
     expect(engine.activeBreaches()).toHaveLength(0);
   });
 
-  it("stays quiet when latency is within budget", () => {
+  it("stays quiet when latency is within budget", async () => {
     const clock = new FixedClock(BASE);
     const engine = makeEngine(clock);
     recordLatencies(engine, 120, 40, BASE.getTime());
-    expect(engine.evaluate()).toHaveLength(0);
+    expect(await engine.evaluate()).toHaveLength(0);
   });
 
-  it("skips SLOs that declare no latency target", () => {
+  it("skips SLOs that declare no latency target", async () => {
     const clock = new FixedClock(BASE);
     const availabilityOnly: Slo = {
       surface: "POST /v1/orders",
@@ -115,16 +122,92 @@ describe("LatencySloEngine", () => {
       targets: [{ kind: "availability", target: 0.99, window: "30d" }],
     };
     const engine = makeEngine(clock, [{ slo: availabilityOnly }]);
-    expect(engine.evaluate()).toHaveLength(0);
+    expect(await engine.evaluate()).toHaveLength(0);
   });
 
-  it("opens a breach without a kill switch when no rollback is configured", () => {
+  it("opens a breach without a kill switch when no rollback is configured", async () => {
     const clock = new FixedClock(BASE);
     const engine = makeEngine(clock, [{ slo }]);
     recordLatencies(engine, 700, 30, BASE.getTime());
-    const decisions = engine.evaluate();
+    const decisions = await engine.evaluate();
     if (decisions[0]?.kind === "breach_opened") {
       expect(decisions[0].plan.killSwitch).toBeNull();
     }
+  });
+});
+
+/** A declarer standing in for a store: ids from a fixed high-water mark, close-outs recorded. */
+class StubDeclarer implements IncidentDeclarer {
+  readonly closeOuts: { id: string; input: IncidentCloseOutInput }[] = [];
+  private next = 71;
+  constructor(
+    private readonly outcome: IncidentCloseOut = "cancelled",
+    private readonly refuse = false,
+  ) {}
+  async declare(request: IncidentDeclarationRequest): Promise<IncidentRecord> {
+    if (this.refuse) throw new Error("incident store unreachable");
+    const id = `INC-2026-${String(this.next).padStart(4, "0")}`;
+    this.next += 1;
+    return new IncidentExecutor().declare({ ...request, id });
+  }
+  async closeOut(id: string, input: IncidentCloseOutInput): Promise<IncidentCloseOut> {
+    this.closeOuts.push({ id, input });
+    return this.outcome;
+  }
+}
+
+function engineWith(clock: FixedClock, declarer: IncidentDeclarer): LatencySloEngine {
+  return new LatencySloEngine({
+    alertPolicy: policy,
+    systemActorUserId: SYSTEM_ACTOR,
+    registrations: [registration],
+    clock,
+    declarer,
+  });
+}
+
+describe("LatencySloEngine — incident ids come from the declarer", () => {
+  it("declares under the declarer's id, across record, page and kill switch", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = engineWith(clock, new StubDeclarer());
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    if (decision?.kind !== "breach_opened") throw new Error("expected breach");
+    expect(decision.plan.incident.id).toBe("INC-2026-0071");
+    expect(decision.plan.pages[0]?.incidentId).toBe("INC-2026-0071");
+    expect(decision.plan.killSwitch?.relatedIncidentId).toBe("INC-2026-0071");
+  });
+
+  it("keeps the performance category the latency engine declares with", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = engineWith(clock, new StubDeclarer());
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    const decision = (await engine.evaluate())[0];
+    expect(decision?.kind === "breach_opened" && decision.plan.incident.category).toBe(
+      "performance",
+    );
+  });
+
+  it("closes the incident out once latency is back within budget", async () => {
+    const clock = new FixedClock(BASE);
+    const declarer = new StubDeclarer();
+    const engine = engineWith(clock, declarer);
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    await engine.evaluate();
+
+    clock.advance(600_000);
+    recordLatencies(engine, 120, 30, clock.nowMs());
+    const recovered = (await engine.evaluate(clock.now()))[0];
+    if (recovered?.kind !== "recovered") throw new Error("expected recovery");
+    expect(recovered.closeOut).toBe("cancelled");
+    expect(declarer.closeOuts[0]?.id).toBe("INC-2026-0071");
+  });
+
+  it("emits no decision, and stays unopened, when the declaration fails", async () => {
+    const clock = new FixedClock(BASE);
+    const engine = engineWith(clock, new StubDeclarer("cancelled", true));
+    recordLatencies(engine, 700, 30, BASE.getTime());
+    expect(await engine.evaluate()).toHaveLength(0);
+    expect(engine.activeBreaches()).toHaveLength(0);
   });
 });

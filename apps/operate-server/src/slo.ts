@@ -1,10 +1,9 @@
 import type { PipelineExecution } from "@crossengin/api-gateway";
+import type { IncidentCloseOut } from "@crossengin/incident-response-runtime";
 import type {
   EnforcementDecision,
   LatencyEnforcementDecision,
-  LatencySloEngine,
   RequestOutcome,
-  SloEnforcementEngine,
 } from "@crossengin/observability-runtime";
 
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
@@ -79,6 +78,11 @@ export interface ObservedEnforcementDecision {
   readonly severity: string | null;
   readonly incidentId: string | null;
   readonly killSwitchId: string | null;
+  /**
+   * On a recovery, what became of the declared incident — cancelled, left to the human who triaged
+   * it, never stored, or a close-out that failed and left the row open. Null otherwise.
+   */
+  readonly closeOut: IncidentCloseOut | null;
 }
 
 export function summarizeAvailabilityDecision(
@@ -97,7 +101,7 @@ function summarize(
   signal: "availability" | "latency",
   decision: EnforcementDecision | LatencyEnforcementDecision,
 ): ObservedEnforcementDecision {
-  const base = { signal, surface: decision.surface, sloId: decision.sloId };
+  const base = { signal, surface: decision.surface, sloId: decision.sloId, closeOut: null };
   if (decision.kind === "breach_opened") {
     return {
       ...base,
@@ -122,17 +126,30 @@ function summarize(
     severity: null,
     incidentId: decision.incidentId,
     killSwitchId: decision.killSwitchId,
+    closeOut: decision.closeOut,
   };
 }
 
-export type DecisionEvaluator = () => readonly ObservedEnforcementDecision[];
+export type DecisionEvaluator = () => Promise<readonly ObservedEnforcementDecision[]>;
 
-export function availabilityEvaluator(engine: SloEnforcementEngine): DecisionEvaluator {
-  return () => engine.evaluate().map(summarizeAvailabilityDecision);
+/**
+ * Whatever can be driven for decisions, structurally: the pure engines and the Postgres-persisting
+ * wrappers around them both satisfy this, so the scheduler does not care which it was handed.
+ */
+export interface DecisionSource<D> {
+  evaluate(now?: Date): Promise<readonly D[]>;
 }
 
-export function latencyEvaluator(engine: LatencySloEngine): DecisionEvaluator {
-  return () => engine.evaluate().map(summarizeLatencyDecision);
+export function availabilityEvaluator(
+  engine: DecisionSource<EnforcementDecision>,
+): DecisionEvaluator {
+  return async () => (await engine.evaluate()).map(summarizeAvailabilityDecision);
+}
+
+export function latencyEvaluator(
+  engine: DecisionSource<LatencyEnforcementDecision>,
+): DecisionEvaluator {
+  return async () => (await engine.evaluate()).map(summarizeLatencyDecision);
 }
 
 const DEFAULT_SCHEDULER: IntervalScheduler = {
@@ -161,15 +178,23 @@ export interface SloEvaluationSchedulerOptions {
  * throws is routed to `onError` rather than out of the timer. Evaluation is
  * deliberately decoupled from recording — the observer records on every request,
  * this ticks on an interval so burn windows are computed at most once per tick.
+ *
+ * A pass is async because declaring an incident asks the store for its id, so a tick can outlive its
+ * interval. A tick that arrives while a pass is still running is skipped rather than queued — piling
+ * passes up behind a slow store would multiply the work it is already struggling with.
  */
 export class SloEvaluationScheduler {
   private handle: IntervalHandle | null = null;
+  private running = false;
 
   constructor(private readonly opts: SloEvaluationSchedulerOptions) {}
 
   start(): void {
     if (this.handle !== null) return;
-    this.handle = this.scheduler().setInterval(() => this.evaluateOnce(), this.opts.intervalMs);
+    this.handle = this.scheduler().setInterval(() => {
+      // `evaluateOnce` routes its own failures to `onError`, so nothing escapes into the timer.
+      void this.evaluateOnce();
+    }, this.opts.intervalMs);
   }
 
   stop(): void {
@@ -178,17 +203,21 @@ export class SloEvaluationScheduler {
     this.handle = null;
   }
 
-  evaluateOnce(): readonly ObservedEnforcementDecision[] {
+  async evaluateOnce(): Promise<readonly ObservedEnforcementDecision[]> {
+    if (this.running) return [];
+    this.running = true;
     const emitted: ObservedEnforcementDecision[] = [];
     try {
       for (const evaluator of this.opts.evaluators) {
-        for (const decision of evaluator()) {
+        for (const decision of await evaluator()) {
           emitted.push(decision);
           this.opts.onDecision?.(decision);
         }
       }
     } catch (err) {
       this.opts.onError?.(err);
+    } finally {
+      this.running = false;
     }
     return emitted;
   }

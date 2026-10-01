@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 287 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 288 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**84 packages + 3 apps, 139 meta-schema tables, ~9,817 tests**, all green, no
+**84 packages + 3 apps, 139 meta-schema tables, ~9,879 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -324,9 +324,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   budget, synthetic consecutive-failure detection, and pure planners that turn a breach into
   a declared incident + an on-call page + a kill-switch flag rollback. Plus a
   `TraceCollector` that stitches gateway → workflow → notification spans into a tree.
+  **`evaluate()` is async and declares through an injected `IncidentDeclarer`** (ADR-0293): the
+  engine never constructs an `INC-YYYY-NNNN`, so the id on the row, in the log line, on the page and
+  in the enforcement action is one string by construction. A declaration that fails leaves the
+  surface unopened for the next tick rather than aborting the pass, a surface with a declaration in
+  flight is skipped, and a `recovered` decision carries `closeOut` — `cancelled` / `human_owned` /
+  `unpersisted` / `failed`.
 - **`observability-runtime-pg`** — persists evaluations and enforcement actions for both the
   availability and latency engines (one action table with a `signal` column), plus a
-  replayer that flags ongoing-without-open, duplicate-open and paged-without-channels.
+  replayer that flags ongoing-without-open, duplicate-open and paged-without-channels. Both
+  `buildPersistent*` engines default their declarer to the incident store on the same connection, so
+  a persisted evaluation cannot name an unpersisted incident.
 - **`incident-response`** — 5 SEV levels with SLA profiles, 7 incident roles, an 8-state
   incident lifecycle, runbook executions with per-step outcomes, blameless postmortems with
   prioritized action items, and customer comms carrying the GDPR 72h breach deadline. Also owns
@@ -340,12 +348,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   skips where `mitigatedAt` is normally stamped. `cancelIfUntriaged` is the only automatic exit —
   `triaged` needs the on-call roles assigned, so no scheduler can resolve an incident. Plus
   `assessIncidentSla`, which scores an *open* incident against the wall clock (the contracts
-  helpers only answer for targets already reached).
+  helpers only answer for targets already reached). Also the `IncidentDeclarer` seam (ADR-0293) —
+  "who chooses an auto-declared incident's id and whether the record outlives the process" — with
+  `CountingIncidentDeclarer` as the offline implementation.
 - **`incident-response-runtime-pg`** — `meta.incidents` as the store, with ids allocated from
   `MAX(sequence_number) + 1` under an advisory lock (so a restart continues the year's sequence),
   a `revision` guard on every write, an append-only timeline the engine enforces before any SQL,
   and a replayer that **re-parses** each row — the only way to catch a row edited into a state the
-  contract forbids but a CHECK constraint permits (ADR-0289).
+  contract forbids but a CHECK constraint permits (ADR-0289). `insertAllocated` holds that lock
+  across the allocation *and* the insert, so two declarations in flight cannot be handed one sequence
+  (ADR-0293), and `PostgresIncidentDeclarer` is the store-backed declarer the SLO engines use.
 - **`dr`** — 5 DR tiers with RPO/RTO targets, replication topology, backup kinds, failover
   records, drills with finding severities, runbooks.
 - **`dr-runtime`** — executes it: a `FailoverExecutor` state machine (plan → start →
@@ -453,8 +465,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   budget guard, design jobs, and a design-review approval gate; access-review campaign
   lifecycle; certification reports; DR readiness; SLO evaluation; usage metering and Stripe
   usage sync; marketplace admin/authoring; platform-tenant administration; residency
-  routing; and background schedulers for jobs, pruning, checkpoints and the **audit-integrity
-  proof** (`--integrity-proof-config` — runs row↔anchor *and* chain link/signature verification
+  routing; **live SLO enforcement** (`--slo-config` / `--slo-defaults`) which over a Postgres store
+  persists every evaluation, every enforcement action and the declared `IncidentRecord` itself, one
+  declarer shared by both signals, and warns at boot when it has no store (ADR-0293); and background
+  schedulers for jobs, pruning, checkpoints and the **audit-integrity proof** (`--integrity-proof-config` — runs row↔anchor *and* chain link/signature verification
   per tenant, plus a checkpoint-witnessed truncation check, and records the verdict in the
   chain, and with an `escalation` block declares a `sev1` incident + pages once per
   compromised episode, recording it as an anchored `audit.integrity_compromised` row and
@@ -619,17 +633,23 @@ opened them.
 - **The applier halts on the first failure.** Much less consequential now the plan is built to
   succeed, but for a plan whose steps are largely independent, continuing and reporting every
   outcome would be strictly more useful (ADR-0290, 0291).
-- **The SLO enforcement loop still does not persist its incidents** (ADR-0289). The
-  audit-integrity escalation does, but `SloEnforcementEngine.evaluate()` is synchronous and
-  mints ids from a per-process counter, so its `INC-2026-0001` collides with a
-  database-allocated one — and persisting under a second id would make the log line and the
-  stored row name different incidents. Allocating from the database means making evaluation
-  async, across both engines, `observability-runtime-pg` and `slo_enforcement_actions`.
-- **Open-episode state is per-process** (ADR-0289). Ids no longer collide across a restart,
-  but `IntegrityEscalator.open` is in memory, so a restart re-declares a still-present tamper
-  under a new id. Hydrating it needs a way to ask "which open incident did this signal open?",
-  and `IncidentRecord` has no `surface` field — a column outside the record would break the
-  property the replayer depends on (the row *is* the record).
+- **Open-episode state is per-process** (ADR-0289, 0293). Ids no longer collide across a restart,
+  but both `IntegrityEscalator.open` and each SLO engine's active-breach map are in memory, so a
+  restart re-declares a still-present tamper or breach under a new id — one episode, two incidents.
+  Hydrating it needs a way to ask "which open incident did this surface open?", and
+  `IncidentRecord` has no `surface` field — a column outside the record would break the property
+  the replayer depends on (the row *is* the record).
+- **Declaring an SLO incident requires the database** (ADR-0293), which is itself the kind of outage
+  an SLO breach describes. A failed declaration leaves the surface unopened and the next tick retries,
+  so the page is delayed rather than lost; a failed close-out is not retried at all and leaves the row
+  open. The escalator's fallback — an unpersisted record so the page still goes out — would fit as a
+  wrapping declarer and trades a possibly-colliding id for a timelier page.
+- **`IntegrityEscalator` still has its own declaration path** (ADR-0293) — a per-process counter plus
+  `planIncidentDeclaration` — now that a shared `IncidentDeclarer` exists. Its `disposition`
+  vocabulary and `IncidentCloseOut` overlap closely enough that the two should probably become one.
+- **A recovery's `closeOut` is logged, not stored** (ADR-0293). `slo_enforcement_actions` has no
+  column for it, so "was the recovery clean?" is answerable from `meta.incidents.status` and not from
+  the action row.
 - **Three incident tables are still dead** (ADR-0289): `incident_runbook_executions`,
   `incident_postmortems`, `incident_communications`. `RunbookExecution`, `Postmortem` and
   `CustomerComms` exist in contracts with nothing persisting them — the same
@@ -681,7 +701,7 @@ compose file or guide.
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files — regenerate it rather than
-hand-editing, so a title or status change cannot drift. 287 records; 208
+hand-editing, so a title or status change cannot drift. 288 records; 209
 Accepted, 79 Proposed (the Proposed ones are largely Phase-1 design ADRs that
 were never re-statused).
 

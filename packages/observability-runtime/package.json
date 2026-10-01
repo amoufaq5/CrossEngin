@@ -23,6 +23,7 @@
   "dependencies": {
     "@crossengin/feature-flags": "workspace:*",
     "@crossengin/incident-response": "workspace:*",
+    "@crossengin/incident-response-runtime": "workspace:*",
     "@crossengin/observability": "workspace:*",
     "zod": "^3.23.0"
   },

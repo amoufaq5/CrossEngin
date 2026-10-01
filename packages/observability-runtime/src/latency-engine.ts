@@ -3,7 +3,12 @@ import {
   type SloLatencyTarget,
 } from "@crossengin/observability";
 import type { AlertPolicy } from "@crossengin/observability";
-import type { IncidentCategory, Severity } from "@crossengin/incident-response";
+import type { IncidentCategory, IncidentRecord, Severity } from "@crossengin/incident-response";
+import {
+  CountingIncidentDeclarer,
+  type IncidentCloseOut,
+  type IncidentDeclarer,
+} from "@crossengin/incident-response-runtime";
 import { SystemClock, parseDurationMs, type Clock } from "./clock.js";
 import { RollingWindow, type RequestOutcome } from "./window.js";
 import {
@@ -13,11 +18,12 @@ import {
   type LatencyVerdict,
 } from "./latency.js";
 import {
-  formatIncidentId,
+  closeOutEnforcementIncident,
+  declareEnforcementIncident,
   formatKillSwitchId,
-  planIncidentDeclaration,
   planKillSwitchActivation,
   planPageDirective,
+  type DeclarationErrorSink,
   type EnforcementPlan,
   type FlagRollback,
 } from "./enforcement.js";
@@ -38,6 +44,13 @@ export interface LatencySloEngineOptions {
   readonly declaredBy?: string;
   readonly window?: RollingWindow;
   readonly latencyWindow?: string;
+  /**
+   * Chooses each declared incident's id and decides whether the record outlives the process.
+   * Defaults to a per-process counter, which is only safe while nothing stores the record — see
+   * `CountingIncidentDeclarer`.
+   */
+  readonly declarer?: IncidentDeclarer;
+  readonly onDeclarationError?: DeclarationErrorSink;
 }
 
 interface ActiveBreach {
@@ -67,6 +80,8 @@ export type LatencyEnforcementDecision =
       readonly sloId: string;
       readonly incidentId: string;
       readonly killSwitchId: string | null;
+      /** What became of the declared incident: cancelled, left to a human, or never stored. */
+      readonly closeOut: IncidentCloseOut;
     };
 
 function latencyTarget(slo: Slo): SloLatencyTarget | null {
@@ -84,8 +99,14 @@ export class LatencySloEngine {
   private readonly systemActorUserId: string;
   private readonly declaredBy: string;
   private readonly latencyWindowMs: number;
+  private readonly declarer: IncidentDeclarer;
+  private readonly onDeclarationError: DeclarationErrorSink | undefined;
   private readonly active: Map<string, ActiveBreach> = new Map();
-  private incidentSeq = 0;
+  /**
+   * Surfaces with a declaration in flight. A breach is only recorded as active once its id comes
+   * back, so without this a second pass starting mid-declare would declare the same breach twice.
+   */
+  private readonly declaring: Set<string> = new Set();
   private killSwitchSeq = 0;
 
   constructor(options: LatencySloEngineOptions) {
@@ -97,6 +118,8 @@ export class LatencySloEngine {
     this.declaredBy = options.declaredBy ?? "system-slo-enforcer";
     this.window = options.window ?? new RollingWindow();
     this.latencyWindowMs = parseDurationMs(options.latencyWindow ?? "5m");
+    this.declarer = options.declarer ?? new CountingIncidentDeclarer({ clock: this.clock });
+    this.onDeclarationError = options.onDeclarationError;
   }
 
   recordOutcome(outcome: RequestOutcome): void {
@@ -107,7 +130,13 @@ export class LatencySloEngine {
     return [...this.active.entries()].map(([surface, breach]) => ({ surface, breach }));
   }
 
-  evaluate(now: Date = this.clock.now()): readonly LatencyEnforcementDecision[] {
+  /**
+   * Async for the same reason the availability engine's pass is: declaring means asking whoever
+   * stores the record for the incident's id.
+   */
+  async evaluate(
+    now: Date = this.clock.now(),
+  ): Promise<readonly LatencyEnforcementDecision[]> {
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
     const decisions: LatencyEnforcementDecision[] = [];
@@ -121,7 +150,11 @@ export class LatencySloEngine {
       const existing = this.active.get(surface);
 
       if (verdict.breached && existing === undefined) {
-        decisions.push(this.openBreach(reg, surface, verdict, nowIso));
+        if (this.declaring.has(surface)) continue;
+        const opened = await this.openBreach(reg, surface, verdict, nowIso);
+        // A declaration that could not be recorded leaves the surface unopened, so the next tick
+        // declares it instead of this pass abandoning every surface after it.
+        if (opened !== null) decisions.push(opened);
       } else if (verdict.breached && existing !== undefined) {
         decisions.push({
           kind: "breach_ongoing",
@@ -131,12 +164,24 @@ export class LatencySloEngine {
         });
       } else if (!verdict.breached && existing !== undefined) {
         this.active.delete(surface);
+        const closeOut = await closeOutEnforcementIncident(
+          this.declarer,
+          existing.incidentId,
+          {
+            reason: `latency on ${surface} is back within its budget`,
+            actorUserId: this.declaredBy,
+            at: nowIso,
+          },
+          { surface, sloId: reg.slo.id },
+          this.onDeclarationError,
+        );
         decisions.push({
           kind: "recovered",
           surface,
           sloId: reg.slo.id,
           incidentId: existing.incidentId,
           killSwitchId: existing.killSwitchId,
+          closeOut,
         });
       }
     }
@@ -144,16 +189,13 @@ export class LatencySloEngine {
     return decisions;
   }
 
-  private openBreach(
+  private async openBreach(
     reg: LatencyRegistration,
     surface: string,
     verdict: LatencyVerdict,
     nowIso: string,
-  ): LatencyEnforcementDecision {
+  ): Promise<LatencyEnforcementDecision | null> {
     const severity = verdict.worstSeverity as Severity;
-    const year = new Date(nowIso).getUTCFullYear();
-    this.incidentSeq += 1;
-    const incidentId = formatIncidentId(year, this.incidentSeq);
 
     const worst = verdict.breaches.find(
       (b) => b.severity === severity && b.percentile === verdict.worstPercentile,
@@ -163,16 +205,29 @@ export class LatencySloEngine {
         ? `${worst.percentile} ${Math.round(worst.observedMs)}ms exceeds budget ${Math.round(worst.budgetMs)}ms (x${worst.multiplier} → ${Math.round(worst.thresholdMs)}ms)`
         : "latency budget breached";
 
-    const incident = planIncidentDeclaration({
-      incidentId,
-      title: `Latency SLO breach: ${reg.slo.id} on ${surface}`,
-      severity,
-      category: reg.category ?? "performance",
-      surface,
-      nowIso,
-      declaredBy: this.declaredBy,
-      detail: `Auto-declared by latency enforcement (${verdict.worstThresholdId}): ${detail}.`,
-    });
+    // The id is the declarer's to choose, so the record comes back before anything that embeds it.
+    this.declaring.add(surface);
+    let incident: IncidentRecord | null;
+    try {
+      incident = await declareEnforcementIncident(
+        this.declarer,
+        {
+          title: `Latency SLO breach: ${reg.slo.id} on ${surface}`,
+          severity,
+          category: reg.category ?? "performance",
+          surface,
+          nowIso,
+          declaredBy: this.declaredBy,
+          detail: `Auto-declared by latency enforcement (${verdict.worstThresholdId}): ${detail}.`,
+        },
+        { surface, sloId: reg.slo.id },
+        this.onDeclarationError,
+      );
+    } finally {
+      this.declaring.delete(surface);
+    }
+    if (incident === null) return null;
+    const incidentId = incident.id;
 
     const page = planPageDirective(this.alertPolicy, severity, incidentId);
     const pages = page === null ? [] : [page];

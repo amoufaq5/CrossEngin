@@ -1,4 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
+import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-pg";
 import {
   SloEnforcementEngine,
   type EnforcementDecision,
@@ -48,7 +49,13 @@ export function buildPersistentSloEnforcementEngine(
   conn: PgConnection,
   options: PersistentSloEnforcementEngineOptions,
 ): PersistentSloEnforcementEngine {
-  const engine = new SloEnforcementEngine(options);
+  // The declarer defaults to the incident store on this connection: an engine whose evaluations and
+  // actions are written must not name incidents that are not. A caller may pass its own to share one
+  // store with the latency engine and anything else that declares.
+  const engine = new SloEnforcementEngine({
+    ...options,
+    declarer: options.declarer ?? new PostgresIncidentDeclarer({ conn }),
+  });
   const evaluationStore = new PostgresSloEvaluationStore(conn);
   const enforcementStore = new PostgresSloEnforcementActionStore(conn);
   const surfaceMeta = buildSurfaceMeta(options);
@@ -64,7 +71,7 @@ export function buildPersistentSloEnforcementEngine(
   async function evaluate(now?: Date): Promise<readonly EnforcementDecision[]> {
     const at = now ?? clock?.now() ?? new Date();
     const occurredAt = at.toISOString();
-    const decisions = engine.evaluate(at);
+    const decisions = await engine.evaluate(at);
 
     for (const decision of decisions) {
       const killSwitchTenant =

@@ -114,7 +114,7 @@ function sloFor(surface: string): Slo {
 }
 
 describe("SloRequestObserver", () => {
-  it("records each execution's outcome into every registered engine", () => {
+  it("records each execution's outcome into every registered engine", async () => {
     const clock = new FixedClock(new Date(END));
     const engine = new SloEnforcementEngine({
       alertPolicy: policy,
@@ -127,7 +127,7 @@ describe("SloRequestObserver", () => {
     for (let i = 0; i < 25; i += 1) {
       sink(makeExecution({ status: 503, outcome: "error", at: new Date(Date.parse(END) - i * 1_000).toISOString() }));
     }
-    const decisions = engine.evaluate();
+    const decisions = await engine.evaluate();
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.kind).toBe("breach_opened");
   });
@@ -142,8 +142,10 @@ class ManualScheduler implements IntervalScheduler {
   clearInterval(): void {
     this.handler = null;
   }
-  tick(): void {
+  /** A pass is async, so a tick is only observable once the microtask queue has drained. */
+  async tick(): Promise<void> {
     this.handler?.();
+    await new Promise((resolve) => setImmediate(resolve));
   }
 }
 
@@ -161,7 +163,7 @@ describe("SloEvaluationScheduler", () => {
     return engine;
   }
 
-  it("evaluates on a tick and routes normalized decisions to onDecision", () => {
+  it("evaluates on a tick and routes normalized decisions to onDecision", async () => {
     const engine = breachingEngine();
     const seen: string[] = [];
     const sched = new ManualScheduler();
@@ -173,26 +175,28 @@ describe("SloEvaluationScheduler", () => {
     });
     scheduler.start();
     expect(seen).toHaveLength(0);
-    sched.tick();
+    await sched.tick();
     expect(seen).toEqual([`availability:breach_opened:${SURFACE}`]);
     scheduler.stop();
     expect(sched.handler).toBeNull();
   });
 
-  it("evaluateOnce returns the emitted decisions with incident ids", () => {
+  it("evaluateOnce returns the emitted decisions with incident ids", async () => {
     const engine = breachingEngine();
     const scheduler = new SloEvaluationScheduler({
       evaluators: [availabilityEvaluator(engine)],
       intervalMs: 1_000,
     });
-    const decisions = scheduler.evaluateOnce();
+    const decisions = await scheduler.evaluateOnce();
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.kind).toBe("breach_opened");
     expect(decisions[0]?.severity).toBe("sev2");
     expect(decisions[0]?.incidentId).toMatch(/^INC-/);
+    // Nothing persists these, and the summary says so rather than implying a stored record.
+    expect(decisions[0]?.closeOut).toBeNull();
   });
 
-  it("routes an evaluator error to onError instead of throwing", () => {
+  it("routes an evaluator error to onError instead of throwing", async () => {
     let captured: unknown = null;
     const scheduler = new SloEvaluationScheduler({
       evaluators: [
@@ -205,8 +209,41 @@ describe("SloEvaluationScheduler", () => {
         captured = err;
       },
     });
-    expect(() => scheduler.evaluateOnce()).not.toThrow();
+    await expect(scheduler.evaluateOnce()).resolves.toEqual([]);
     expect((captured as Error).message).toBe("boom");
+  });
+
+  it("skips a tick that arrives while a pass is still running", async () => {
+    // Piling passes up behind a slow store would multiply the work it is already struggling with.
+    const flush = (): Promise<void> =>
+      new Promise((resolve) => setImmediate(() => resolve(undefined)));
+    const gates: (() => void)[] = [];
+    let started = 0;
+    const scheduler = new SloEvaluationScheduler({
+      evaluators: [
+        async () => {
+          started += 1;
+          await new Promise<void>((resolve) => gates.push(resolve));
+          return [];
+        },
+      ],
+      intervalMs: 1_000,
+    });
+
+    const first = scheduler.evaluateOnce();
+    await flush();
+    expect(await scheduler.evaluateOnce()).toEqual([]);
+    expect(started).toBe(1);
+
+    gates[0]?.();
+    await first;
+
+    // Once the pass finished, the next one runs normally.
+    const second = scheduler.evaluateOnce();
+    await flush();
+    expect(started).toBe(2);
+    gates[1]?.();
+    await second;
   });
 });
 
@@ -254,7 +291,7 @@ describe("SLO enforcement on the live request stream", () => {
       evaluators: [availabilityEvaluator(engine)],
       intervalMs: 60_000,
     });
-    const decisions = scheduler.evaluateOnce();
+    const decisions = await scheduler.evaluateOnce();
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.kind).toBe("breach_opened");
     expect(decisions[0]?.surface).toBe("gateway");
