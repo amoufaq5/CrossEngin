@@ -38,6 +38,28 @@ export const DIGEST_STATUSES = [
 ] as const;
 export type DigestStatus = (typeof DIGEST_STATUSES)[number];
 
+export const DIGEST_TRANSITIONS: Readonly<
+  Record<DigestStatus, readonly DigestStatus[]>
+> = {
+  // `open → assembled` is real, not a shortcut: the assembler closes a pool straight from open, and
+  // an empty one is closed without ever being queued.
+  open: ["queued_for_assembly", "assembled", "expired"],
+  queued_for_assembly: ["assembled", "expired"],
+  assembled: ["dispatched", "expired"],
+  dispatched: [],
+  expired: [],
+};
+
+export const canTransitionDigest = (
+  from: DigestStatus,
+  to: DigestStatus,
+): boolean => DIGEST_TRANSITIONS[from].includes(to);
+
+export const TERMINAL_DIGEST_STATUSES: ReadonlySet<DigestStatus> = new Set([
+  "dispatched",
+  "expired",
+]);
+
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 export const QuietHoursConfigSchema = z
@@ -242,11 +264,64 @@ export const DigestBatchSchema = z
         message: "scheduledDispatchAt must be after openedAt",
       });
     }
+    // `dispatchedAt` is the instant the pool's summary message was handed off — distinct from
+    // `assembledAt`, when its body was built, and from the summary dispatch's own `completedAt`,
+    // which a provider decides. The three can be seconds or hours apart; nothing else records the
+    // middle one. It was declared, required on `dispatched`, and unconstrained everywhere else, so a
+    // pool could claim to have been sent while still open (ADR-0276).
     if (d.status === "dispatched" && d.dispatchedAt === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["dispatchedAt"],
         message: "dispatched digest requires dispatchedAt",
+      });
+    }
+    if (d.status !== "dispatched" && d.dispatchedAt !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["dispatchedAt"],
+        message: `digest in status ${d.status} must not have dispatchedAt`,
+      });
+    }
+    if (
+      (d.status === "assembled" || d.status === "dispatched") &&
+      d.assembledAt === null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["assembledAt"],
+        message: `digest in status ${d.status} requires assembledAt`,
+      });
+    }
+    if (
+      (d.status === "open" || d.status === "queued_for_assembly") &&
+      d.assembledAt !== null
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["assembledAt"],
+        message: `digest in status ${d.status} must not have assembledAt`,
+      });
+    }
+    if (
+      d.assembledAt !== null &&
+      Date.parse(d.assembledAt) < Date.parse(d.openedAt)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["assembledAt"],
+        message: "assembledAt cannot precede openedAt",
+      });
+    }
+    if (
+      d.assembledAt !== null &&
+      d.dispatchedAt !== null &&
+      Date.parse(d.dispatchedAt) < Date.parse(d.assembledAt)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["dispatchedAt"],
+        message: "dispatchedAt cannot precede assembledAt",
       });
     }
   });

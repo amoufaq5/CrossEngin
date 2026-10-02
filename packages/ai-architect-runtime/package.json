@@ -24,7 +24,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@crossengin/ai-architect": "workspace:*"
+    "@crossengin/ai-architect": "workspace:*",
+    "@crossengin/ai-providers": "workspace:*"
   },
   "devDependencies": {
     "@crossengin/config": "workspace:*",

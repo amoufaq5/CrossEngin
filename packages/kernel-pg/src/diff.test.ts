@@ -260,6 +260,10 @@ describe("formatSchemaDiff", () => {
           table: "tenants",
           addedColumns: ["new_col"],
           removedColumns: ["old_col"],
+          renamedColumns: [
+            { column: "label", from: "name_text", ambiguous: false },
+            { column: "code", from: "slug", ambiguous: true },
+          ],
           changedColumns: [
             {
               column: "name",
@@ -337,6 +341,8 @@ describe("formatSchemaDiff", () => {
     expect(out).toContain("+ foreign_key constraint widgets_pair_fkey");
     expect(out).toContain("- check constraint widgets_adhoc_check");
     expect(out).toContain("~ check constraint widgets_bounds_check [expression] (a < b) → (a <= b)");
+    expect(out).toContain("> column name_text → label");
+    expect(out).toContain("> column slug → code [ambiguous: both names exist]");
     expect(out).toContain("RLS target=true live=false");
   });
 });
@@ -1268,6 +1274,7 @@ describe("CONSTRAINT_DELTA_REASONS", () => {
   it("lists every way a table-level constraint can differ under an unchanged name", () => {
     expect([...CONSTRAINT_DELTA_REASONS]).toEqual([
       "kind",
+      "name",
       "columns",
       "expression",
       "target",

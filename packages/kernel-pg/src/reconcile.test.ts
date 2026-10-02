@@ -74,6 +74,7 @@ describe("RECONCILE_STEP_KINDS", () => {
   it("lists the operations a plan may contain", () => {
     expect([...RECONCILE_STEP_KINDS]).toEqual([
       "create_table",
+      "rename_column",
       "add_column",
       "create_index",
       "add_unique_constraint",
