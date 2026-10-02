@@ -325,6 +325,34 @@ describe("META_TABLES", () => {
   });
 });
 
+describe("tenant isolation predicates", () => {
+  it("never casts the tenant GUC without NULLIF", () => {
+    // `current_setting(x, true)` answers NULL only until the setting has been used once on a
+    // connection; after a transaction-local `set_config` ends, its reset value is the empty string,
+    // and `''::UUID` raises rather than returning no rows. Measured on a real cluster — a fresh psql
+    // session does not reproduce it, a pooled connection that has served one tenant does. So the
+    // guard is an invariant, not a preference, and a policy that loses it must fail here.
+    const offenders = META_TABLES.flatMap((table) =>
+      (table.rls?.policies ?? []).flatMap((policy) =>
+        [policy.using, policy.check]
+          .filter((clause): clause is string => typeof clause === "string")
+          .filter((clause) => clause.includes("current_setting") && clause.includes("::UUID"))
+          .filter((clause) => !clause.includes("NULLIF("))
+          .map((clause) => `${table.name}.${policy.name}: ${clause}`),
+      ),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it("guards every tenant-scoped table, so the rule covers the whole catalog", () => {
+    // Guards against the invariant above passing because nothing matched it any more.
+    const guarded = META_TABLES.filter((table) =>
+      (table.rls?.policies ?? []).some((policy) => (policy.using ?? "").includes("NULLIF(")),
+    );
+    expect(guarded.length).toBeGreaterThan(90);
+  });
+});
+
 describe("table column shapes", () => {
   it("META_TENANTS has slug, status, tier, region, schema_name", () => {
     const cols = META_TENANTS.columns.map((c) => c.name);
@@ -1335,7 +1363,7 @@ describe("table column shapes", () => {
       "record_id",
     ]);
     expect(META_OPERATE_ENTITY_RECORDS.rls?.policies?.[0]?.using).toBe(
-      "tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
     );
   });
 
@@ -1392,7 +1420,9 @@ describe("table column shapes", () => {
     expect(policy?.name).toBe("operate_tenant_manifests_tenant_or_platform_review");
     // Tenant isolation still holds by default; the cross-tenant read requires a
     // transaction-scoped flag the platform review store sets and nothing else does.
-    expect(policy?.using).toContain("tenant_id = current_setting('app.current_tenant_id', true)::UUID");
+    expect(policy?.using).toContain(
+      "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+    );
     expect(policy?.using).toContain("current_setting('app.platform_review', true) = 'on'");
     const statements = emitMetaBootstrapSql();
     expect(

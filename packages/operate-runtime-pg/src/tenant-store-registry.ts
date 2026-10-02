@@ -49,6 +49,12 @@ export interface TenantColumnStoreRegistryOptions {
    */
   readonly refusalRetryMs?: number;
   readonly now?: () => number;
+  /**
+   * Overrides the schema derived from the tenant id — pass the tenant's recorded
+   * `meta.tenants.schema_name` here so a tenant does not end up owning two schema
+   * names. Resolved once per application, so it may hit the database.
+   */
+  readonly resolveSchema?: (tenantId: string) => string | Promise<string>;
 }
 
 interface RegistryEntry {
@@ -84,6 +90,7 @@ export class TenantColumnStoreRegistry {
   private readonly onApplication: ((application: TenantSchemaApplication) => void) | null;
   private readonly refusalRetryMs: number;
   private readonly now: () => number;
+  private readonly resolveSchema: ((tenantId: string) => string | Promise<string>) | null;
   private readonly entries = new Map<string, RegistryEntry>();
   /** In-flight applications, so concurrent first requests for one tenant do one apply. */
   private readonly inFlight = new Map<string, Promise<TenantSchemaApplication>>();
@@ -95,9 +102,15 @@ export class TenantColumnStoreRegistry {
     this.onApplication = opts.onApplication ?? null;
     this.refusalRetryMs = opts.refusalRetryMs ?? DEFAULT_REFUSAL_RETRY_MS;
     this.now = opts.now ?? Date.now;
+    this.resolveSchema = opts.resolveSchema ?? null;
   }
 
-  /** The schema this tenant's own tables live in. Throws on a non-UUID tenant id. */
+  /**
+   * The schema this tenant's own tables live in, as derived from the tenant id.
+   * Throws on a non-UUID tenant id. With a `resolveSchema` override configured the
+   * authoritative answer is `applicationFor(tenantId)?.schema` — this one is the
+   * default the override replaces.
+   */
   schemaFor(tenantId: string): string {
     return tenantSchemaName(tenantId, this.prefix);
   }
@@ -130,8 +143,10 @@ export class TenantColumnStoreRegistry {
   }
 
   private async apply(tenantId: string, manifest: Manifest, hash: string): Promise<TenantSchemaApplication> {
+    const schema = this.resolveSchema === null ? undefined : await this.resolveSchema(tenantId);
     const application = await applyTenantManifestSchema(this.conn, tenantId, manifest, {
       prefix: this.prefix,
+      ...(schema !== undefined ? { schema } : {}),
     });
     const store = application.applied
       ? new ColumnMappedEntityStore(this.conn, manifest, {
@@ -234,23 +249,23 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     return this.registry.storeFor(tenantId) !== null;
   }
 
-  list(tenantId: string, entity: string): Promise<readonly EntityRecord[]> {
+  async list(tenantId: string, entity: string): Promise<readonly EntityRecord[]> {
     return this.storeFor(tenantId).list(tenantId, entity);
   }
 
-  listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
+  async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
     return this.storeFor(tenantId).listPage(tenantId, entity, query);
   }
 
-  get(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
+  async get(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
     return this.storeFor(tenantId).get(tenantId, entity, id);
   }
 
-  create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
+  async create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
     return this.storeFor(tenantId).create(tenantId, entity, record);
   }
 
-  update(
+  async update(
     tenantId: string,
     entity: string,
     id: string,
@@ -259,7 +274,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     return this.storeFor(tenantId).update(tenantId, entity, id, patch);
   }
 
-  remove(tenantId: string, entity: string, id: string): Promise<boolean> {
+  async remove(tenantId: string, entity: string, id: string): Promise<boolean> {
     return this.storeFor(tenantId).remove(tenantId, entity, id);
   }
 
@@ -269,7 +284,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
    * would have given on its own — rather than failing the request; the repo's only
    * fallback (`PostgresEntityStore`) is transactional, so this is a floor, not a path.
    */
-  withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
+  async withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
     const store = this.storeFor(tenantId);
     return isTransactional(store) ? store.withTransaction(tenantId, fn) : fn(store);
   }
@@ -280,7 +295,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
   // router declares them so a tenant's own join tables are reachable, and reports
   // a store that cannot serve one instead of answering wrongly.
 
-  link(
+  async link(
     tenantId: string,
     leftEntity: string,
     rightEntity: string,
@@ -294,7 +309,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     return store.link(tenantId, leftEntity, rightEntity, leftId, rightId);
   }
 
-  unlink(
+  async unlink(
     tenantId: string,
     leftEntity: string,
     rightEntity: string,
@@ -308,7 +323,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     return store.unlink(tenantId, leftEntity, rightEntity, leftId, rightId);
   }
 
-  listLinks(
+  async listLinks(
     tenantId: string,
     leftEntity: string,
     rightEntity: string,
@@ -326,7 +341,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
    * leaving it off the router would make the facade narrower than either thing it
    * routes to, which is the way a facade quietly loses a capability.
    */
-  isLinked(
+  async isLinked(
     tenantId: string,
     leftEntity: string,
     rightEntity: string,
@@ -340,7 +355,7 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     return store.isLinked(tenantId, leftEntity, rightEntity, leftId, rightId);
   }
 
-  countLinks(
+  async countLinks(
     tenantId: string,
     leftEntity: string,
     rightEntity: string,

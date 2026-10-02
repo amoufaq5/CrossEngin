@@ -1,4 +1,4 @@
-import type { ResolvedPrincipal } from "@crossengin/api-gateway";
+import type { PathSegment, ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput, HandlerOutput } from "@crossengin/api-gateway-runtime";
 import {
   canTransitionTemplate,
@@ -222,6 +222,12 @@ async function call(
   return (await findHandler(ctx, op)(input(p, opts))) as JsonOut;
 }
 
+function pathOf(segments: readonly PathSegment[]): string {
+  return segments
+    .map((s) => (s.kind === "literal" ? s.value : s.kind === "parameter" ? `:${s.name}` : "*"))
+    .join("/");
+}
+
 function refusalCodes(out: JsonOut): readonly string[] {
   return (out.body["refusals"] as readonly ContentRefusal[] | undefined)?.map((r) => r.code) ?? [];
 }
@@ -240,9 +246,7 @@ describe("buildNotificationTemplateRoutes", () => {
     expect(routes.map((r) => r.route.operationId).sort()).toEqual([...ALL_OPS].sort());
     for (const r of routes) {
       expect(["GET", "POST"]).toContain(r.route.method);
-      expect(
-        r.route.pathSegments.map((s) => (s.kind === "literal" ? s.value : `:${s.name}`)).join("/"),
-      ).toMatch(/^v1\/notification-templates/);
+      expect(pathOf(r.route.pathSegments)).toMatch(/^v1\/notification-templates/);
     }
   });
 
@@ -641,10 +645,9 @@ describe("the template lifecycle over HTTP", () => {
   });
 
   it("reports a row that moved underneath as a conflict, not a success", async () => {
-    const { ctx, store } = makeCtx();
+    const { store } = makeCtx();
     store.seed({ status: "in_review" });
     const stale: NotificationTemplateStoreLike = {
-      ...store,
       createDraft: (t, template) => store.createDraft(t, template),
       get: (t, id) => store.get(t, id),
       list: (t, q) => store.list(t, q),

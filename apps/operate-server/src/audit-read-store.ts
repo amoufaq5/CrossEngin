@@ -22,10 +22,21 @@ import { withPlatformAudit } from "./integrity-verdict-store.js";
  * **Cross-tenant reads go through an explicit grant.** A platform read elevates
  * `app.platform_audit` for the transaction, the same flag `meta.audit_integrity_verdicts` already
  * recognises, rather than relying on the API happening to connect as the table owner — which
- * bypasses RLS silently. NOTE: `meta.audit_log`'s policy is plain tenant isolation today, so until
- * it carries a matching SELECT policy a non-owner cross-tenant read returns nothing. Setting the
- * flag anyway is the point: the elevation is declared and auditable now, and becomes effective the
- * moment the policy lands, instead of the read quietly depending on connection privilege.
+ * bypasses RLS silently.
+ *
+ * NOTE — the `all` scope needs a policy `meta.audit_log` does not have yet, and it does not merely
+ * come back empty without it: measured against a real cluster as a non-owner role, a platform-
+ * elevated read of a plain tenant-isolation policy raises `invalid input syntax for type uuid: ""`.
+ * `current_setting('app.current_tenant_id', true)` returns NULL only until that setting has been
+ * used once on the connection; afterwards its reset value is the empty string, and `''::UUID`
+ * throws — so the failure appears on every pooled connection that has served a tenant, i.e. in
+ * production and not in a fresh psql session. Two policies fix it, both verified live: tenant
+ * isolation guarded as `tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID`
+ * for ALL commands, plus a SELECT-only `current_setting('app.platform_audit', true) = 'on'`. The
+ * SELECT-only half matters — with one combined policy the elevation would also pass the INSERT's
+ * WITH CHECK, and a read grant must not become a write grant. Until both land, leave the platform
+ * role unconfigured: no grant means no `all` scope is ever attempted, which is the fail-closed
+ * direction. A tenant-scoped read needs none of this and is verified working today.
  */
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;

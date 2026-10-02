@@ -16,6 +16,14 @@ function job(id: string): ClaimedJob {
 
 const noopProcessor: JobProcessor = { process: async () => undefined };
 
+function deferred(): { readonly promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 describe("WorkflowJobWorker.runOnce", () => {
   it("claims with the worker id / now / limit / lease and processes the batch", async () => {
     let seen: JobClaimOptions | null = null;
@@ -159,9 +167,10 @@ describe("WorkflowJobWorker and cancellation", () => {
   it("stop() releases the rest of the in-flight batch instead of draining it", async () => {
     const processed: string[] = [];
     const released: string[] = [];
-    let worker: WorkflowJobWorker | undefined;
+    const aStarted = deferred();
+    const aMayFinish = deferred();
     let claims = 0;
-    worker = new WorkflowJobWorker({
+    const worker = new WorkflowJobWorker({
       workerId: "worker-A",
       claimer: {
         claim: async () => {
@@ -173,16 +182,24 @@ describe("WorkflowJobWorker and cancellation", () => {
       processor: {
         process: async (j) => {
           processed.push(j.jobId);
-          // Shutdown lands while the first run's handler is still in flight.
-          if (j.jobId === "a") await worker?.stop();
+          if (j.jobId === "a") {
+            aStarted.resolve();
+            await aMayFinish.promise;
+          }
         },
       },
       idlePollMs: 0,
       activePollMs: 0,
       sleep: async () => undefined,
     });
+
     worker.start();
-    await worker.stop();
+    await aStarted.promise; // the first run's handler is in flight
+    const stopping = worker.stop(); // shutdown requested mid-batch
+    aMayFinish.resolve();
+    await stopping;
+
+    // 'a' ran to completion — a running handler is never preempted — but 'b' and 'c' never started.
     expect(processed).toEqual(["a"]);
     expect(released).toEqual(["b", "c"]);
   });

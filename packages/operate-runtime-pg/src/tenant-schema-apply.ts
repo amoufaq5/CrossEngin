@@ -33,6 +33,34 @@ export const TENANT_SCHEMA_LOCK_SQL =
 export interface TenantSchemaOptions {
   /** Prefix for the tenant's schema name (default `t_`). */
   readonly prefix?: string;
+  /**
+   * The tenant's schema, overriding the name derived from their id. The platform
+   * already records one per tenant — `meta.tenants.schema_name`, unique, derived
+   * as `t_<slug>` at provisioning and never used for anything until now — so a
+   * caller that has that row should pass it and keep the two in agreement rather
+   * than letting a tenant own two schema names. Validated as an identifier,
+   * because it reaches DDL.
+   */
+  readonly schema?: string;
+}
+
+const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
+const MAX_IDENTIFIER_LEN = 63;
+
+/**
+ * The schema one tenant's tables live in: the explicit override if given,
+ * otherwise derived from the tenant id.
+ */
+export function resolveTenantSchema(tenantId: string, opts: TenantSchemaOptions = {}): string {
+  // Checked even when the name is supplied: every table in this schema is
+  // confined by an RLS predicate that casts the tenant id to UUID, so a tenant id
+  // that is not one would provision a schema no query could ever read a row from.
+  const derived = tenantSchemaName(tenantId, opts.prefix ?? DEFAULT_TENANT_SCHEMA_PREFIX);
+  if (opts.schema === undefined) return derived;
+  if (!SCHEMA_RE.test(opts.schema) || opts.schema.length > MAX_IDENTIFIER_LEN) {
+    throw new Error(`invalid tenant schema name: ${JSON.stringify(opts.schema)}`);
+  }
+  return opts.schema;
 }
 
 /** What one application of a tenant's manifest to their own schema did, and did not, do. */
@@ -92,7 +120,7 @@ export async function applyTenantManifestSchema(
   manifest: Manifest,
   opts: TenantSchemaOptions = {},
 ): Promise<TenantSchemaApplication> {
-  const schema = tenantSchemaName(tenantId, opts.prefix ?? DEFAULT_TENANT_SCHEMA_PREFIX);
+  const schema = resolveTenantSchema(tenantId, opts);
   const plans = columnPlansForManifest(manifest, { schema });
   const joinPlans = joinTablePlansForManifest(manifest, { schema });
   const deletePolicies = relationDeleteIndex(manifest);

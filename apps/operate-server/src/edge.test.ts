@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { asModuleWorker, buildEdgeFetchHandler, createFetchHandler, fetchToRaw } from "./edge.js";
+import { asModuleWorker, buildEdgeFetchHandler, fetchToRaw } from "./edge.js";
 import { RequestBodyTooLargeError } from "./request-body-limit.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";

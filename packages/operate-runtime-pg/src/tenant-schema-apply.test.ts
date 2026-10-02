@@ -3,7 +3,11 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Entity, Relation } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import { applyTenantManifestSchema, TENANT_SCHEMA_LOCK_SQL } from "./tenant-schema-apply.js";
+import {
+  applyTenantManifestSchema,
+  resolveTenantSchema,
+  TENANT_SCHEMA_LOCK_SQL,
+} from "./tenant-schema-apply.js";
 import { tenantSchemaName } from "./tenant-schema.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -84,7 +88,39 @@ const TICKET_LIVE: readonly Record<string, unknown>[] = [
   row("ticket", "mrn", "bytea"),
 ];
 
+describe("resolveTenantSchema", () => {
+  it("derives from the tenant id by default", () => {
+    expect(resolveTenantSchema(TENANT)).toBe(SCHEMA);
+  });
+
+  it("honours an explicit schema — e.g. the tenant's recorded meta.tenants.schema_name", () => {
+    expect(resolveTenantSchema(TENANT, { schema: "t_acme" })).toBe("t_acme");
+  });
+
+  it("validates an explicit schema, because it reaches DDL unparameterised", () => {
+    expect(() => resolveTenantSchema(TENANT, { schema: 'x"; DROP SCHEMA public; --' })).toThrow(
+      /invalid tenant schema name/,
+    );
+    expect(() => resolveTenantSchema(TENANT, { schema: "a".repeat(64) })).toThrow(
+      /invalid tenant schema name/,
+    );
+  });
+
+  it("still requires a UUID tenant id with an explicit schema — the RLS predicate casts to UUID", () => {
+    expect(() => resolveTenantSchema("acme", { schema: "t_acme" })).toThrow(/canonical UUID/);
+  });
+});
+
 describe("applyTenantManifestSchema", () => {
+  it("applies into an explicitly supplied schema", async () => {
+    const cap = capturePg();
+    const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([ACCOUNT]), {
+      schema: "t_acme",
+    });
+    expect(result.schema).toBe("t_acme");
+    expect(result.statements.join("\n")).toContain('CREATE TABLE IF NOT EXISTS "t_acme"."account"');
+  });
+
   it("applies into the tenant's own schema, derived from the tenant id", async () => {
     const cap = capturePg();
     const result = await applyTenantManifestSchema(cap.conn, TENANT, manifestOf([TICKET, ACCOUNT], [RELATION]));
@@ -171,7 +207,7 @@ describe("applyTenantManifestSchema", () => {
     expect(all).toContain('PRIMARY KEY ("tenant_id", "id")');
     expect(all).toContain(`ALTER TABLE "${SCHEMA}"."account" ENABLE ROW LEVEL SECURITY;`);
     expect(all).toContain(
-      "USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID)",
+      "USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID)",
     );
   });
 

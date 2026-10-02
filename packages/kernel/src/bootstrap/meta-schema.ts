@@ -14,8 +14,21 @@ const USER_FK: ColumnReference = {
   onDelete: "RESTRICT",
 };
 
+/**
+ * The tenant-isolation predicate every tenant-scoped table uses.
+ *
+ * The `NULLIF` is load-bearing and was measured, not reasoned about.
+ * `current_setting('app.current_tenant_id', true)` answers NULL only until the setting has been used
+ * once on a connection; after a transaction-local `set_config` ends, its reset value is the empty
+ * string. `NULL::UUID` is NULL, so the comparison is false and the row is invisible — the fail-closed
+ * answer we want. `''::UUID` **raises** `invalid input syntax for type uuid: ""`. So on any pooled
+ * connection that has already served one tenant, a query against a tenant-scoped table without a
+ * tenant context turned into an error instead of an empty result — which is the opposite of the
+ * platform invariant that an unresolvable identity yields an empty result set, and it failed in
+ * production while passing in a fresh psql session.
+ */
 const TENANT_ISOLATION_USING =
-  "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
+  "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
 
 export const META_TENANTS: TableDefinition = {
   schema: "meta",
@@ -1307,11 +1320,14 @@ export const META_FEATURE_FLAGS: TableDefinition = {
       // round trip would not return what was stored. Its sibling
       // `feature_flag_kill_switches.overridden_value_json` is TEXT for the same reason.
       //
-      // The *name* stays `default_value` deliberately, though `default_value_json` would read
-      // better: the reconciler has no concept of a rename, so renaming would add the new column and
-      // report the old one as undeclared without dropping it — leaving a `NOT NULL` column with no
-      // default that every insert would then fail on (ADR-0291 refuses to drop or loosen).
-      name: "default_value",
+      // Named for what it holds, matching the contract's `defaultValueJson` and its sibling
+      // `killed_value_json`. It was `default_value` only because the reconciler had no concept of a
+      // rename — declaring the better name would have added a second column and reported the old one
+      // as undeclared without dropping it, leaving a `NOT NULL` column with no default that every
+      // insert then failed on. `renamedFrom` is the mechanism that makes it safe: a guarded
+      // `RENAME COLUMN` on an existing database, and nothing at all on a fresh one.
+      name: "default_value_json",
+      renamedFrom: "default_value",
       type: "TEXT",
       notNull: true,
     },
@@ -1394,7 +1410,7 @@ export const META_FEATURE_FLAGS: TableDefinition = {
         // intent, so opposite policy.
         name: "feature_flags_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -3138,7 +3154,7 @@ export const META_COST_ATTRIBUTION: TableDefinition = {
     policies: [
       {
         name: "cost_attribution_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+        using: "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -3206,7 +3222,7 @@ export const META_COST_BUDGETS: TableDefinition = {
     policies: [
       {
         name: "cost_budgets_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+        using: "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -4869,7 +4885,7 @@ export const META_SSO_PROVIDERS: TableDefinition = {
       {
         name: "sso_providers_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -5235,7 +5251,7 @@ export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
       {
         name: "notification_templates_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -5838,7 +5854,7 @@ export const META_ACCESS_REVIEW_TEMPLATES: TableDefinition = {
       {
         name: "access_review_templates_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -6571,7 +6587,7 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
       {
         name: "workflow_definitions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7248,7 +7264,7 @@ export const META_LINEAGE_NODES: TableDefinition = {
       {
         name: "lineage_nodes_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7368,7 +7384,7 @@ export const META_LINEAGE_EDGES: TableDefinition = {
       {
         name: "lineage_edges_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7479,7 +7495,7 @@ export const META_PROVENANCE_RECORDS: TableDefinition = {
       {
         name: "provenance_records_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7888,7 +7904,7 @@ export const META_RATE_LIMIT_POLICIES: TableDefinition = {
       {
         name: "rate_limit_policies_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7964,7 +7980,7 @@ export const META_QUOTA_DEFINITIONS: TableDefinition = {
       {
         name: "quota_definitions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8170,7 +8186,7 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
       {
         name: "rate_limit_decisions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8280,7 +8296,7 @@ export const META_RATE_LIMIT_EXCEPTIONS: TableDefinition = {
       {
         name: "rate_limit_exceptions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8355,7 +8371,7 @@ export const META_THROTTLE_EVENTS: TableDefinition = {
       {
         name: "throttle_events_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8659,7 +8675,7 @@ export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
       {
         name: "gateway_pipeline_executions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8732,7 +8748,7 @@ export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
       {
         name: "feature_flag_targeting_rules_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8845,7 +8861,7 @@ export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
       {
         name: "feature_flag_kill_switches_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8944,7 +8960,7 @@ export const META_FEATURE_FLAG_EVALUATIONS: TableDefinition = {
       {
         name: "feature_flag_evaluations_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9049,7 +9065,7 @@ export const META_FEATURE_FLAG_CHANGES: TableDefinition = {
       {
         name: "feature_flag_changes_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9135,7 +9151,7 @@ export const META_CRYPTO_KEYS: TableDefinition = {
       {
         name: "crypto_keys_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9201,7 +9217,7 @@ export const META_CRYPTO_AUDIT: TableDefinition = {
       {
         name: "crypto_audit_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9512,7 +9528,7 @@ export const META_SLO_EVALUATIONS: TableDefinition = {
       {
         name: "slo_evaluations_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9602,7 +9618,7 @@ export const META_SLO_ENFORCEMENT_ACTIONS: TableDefinition = {
       {
         name: "slo_enforcement_actions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9658,7 +9674,7 @@ export const META_SLO_LATENCY_EVALUATIONS: TableDefinition = {
       {
         name: "slo_latency_evaluations_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9856,7 +9872,7 @@ export const META_DR_FAILOVER_EXECUTIONS: TableDefinition = {
       {
         name: "dr_failover_executions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9898,7 +9914,7 @@ export const META_DR_DRILL_EXECUTIONS: TableDefinition = {
       {
         name: "dr_drill_executions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9940,7 +9956,7 @@ export const META_DR_READINESS_SNAPSHOTS: TableDefinition = {
       {
         name: "dr_readiness_snapshots_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -10041,7 +10057,7 @@ export const META_CERTIFICATION_REPORTS: TableDefinition = {
       {
         name: "certification_reports_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -10093,7 +10109,7 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
       {
         name: "forensic_chain_entries_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -10135,7 +10151,7 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
       {
         name: "forensic_chain_checkpoints_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },

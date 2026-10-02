@@ -210,6 +210,19 @@ describe("TenantColumnStoreRegistry", () => {
     expect(cap.sqls.join("\n")).toContain("SELECT");
   });
 
+  it("uses a resolveSchema override, so a tenant does not own two schema names", async () => {
+    const cap = capturePg();
+    const registry = new TenantColumnStoreRegistry(cap.conn, {
+      resolveSchema: async (tenantId) => `t_slug_${tenantId.slice(0, 4)}`,
+    });
+    const application = await registry.ensure(TENANT, V1);
+    expect(application.schema).toBe("t_slug_3f2a");
+    expect(cap.sqls.join("\n")).toContain('CREATE TABLE IF NOT EXISTS "t_slug_3f2a"."widget"');
+    // schemaFor() still reports the id-derived default it replaced.
+    expect(registry.schemaFor(TENANT)).toBe(tenantSchemaName(TENANT));
+    expect(registry.applicationFor(TENANT)?.schema).toBe("t_slug_3f2a");
+  });
+
   it("refuses a non-uuid tenant id", async () => {
     const registry = new TenantColumnStoreRegistry(capturePg().conn);
     await expect(registry.ensure("acme", V1)).rejects.toThrow(/canonical UUID/);

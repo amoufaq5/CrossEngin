@@ -53,9 +53,10 @@ function auditRow(overrides: Record<string, unknown> = {}): Record<string, unkno
 
 /**
  * A scripted fake over `meta.audit_log`. Visibility models tenant isolation plus the cross-tenant
- * audit grant — the `app.platform_audit` arm this store elevates for. NOTE the catalog's policy is
- * plain tenant isolation today, so the elevation only becomes effective once that SELECT policy
- * lands; what the fake pins is that the store asks for it rather than relying on owner privilege.
+ * audit grant — the `app.platform_audit` arm this store elevates for. The catalog's policy is plain
+ * tenant isolation today, where a real cluster does not return nothing but *errors* (see the store's
+ * own note); what the fake pins is that the store asks for the grant rather than relying on owner
+ * privilege, which is the half that is this module's to get right.
  */
 function fakeAuditDb(): FakeDb {
   const captured: Captured[] = [];

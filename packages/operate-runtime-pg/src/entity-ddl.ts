@@ -8,7 +8,17 @@ import {
   type JoinTablePlan,
 } from "./column-plan.js";
 
-const TENANT_ISOLATION = "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
+/**
+ * The isolation predicate every served entity table carries.
+ *
+ * `NULLIF` is load-bearing: `current_setting(x, true)` answers NULL only until the setting has been
+ * used once on a connection, after which its reset value is the empty string — and `''::UUID` raises
+ * `invalid input syntax for type uuid: ""` rather than returning no rows. So on a pooled connection
+ * that has already served one tenant, a query without a tenant context became an error instead of an
+ * empty result. Both are fail-closed, but only one matches the platform rule that an unresolvable
+ * identity yields an empty result set, and only one is debuggable.
+ */
+const TENANT_ISOLATION = "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
 
 const MAX_IDENTIFIER_LEN = 63;
 
@@ -225,7 +235,7 @@ export function emitJoinTableDdl(plan: JoinTablePlan, knownEntities: ReadonlySet
     `CREATE TABLE IF NOT EXISTS ${qualified} (\n  ${columnLines.join(",\n  ")}\n);`,
     `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
     `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};`,
-    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);`,
+    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (${TENANT_ISOLATION});`,
   ];
   if (knownEntities.has(plan.leftEntity)) {
     stmts.push(
