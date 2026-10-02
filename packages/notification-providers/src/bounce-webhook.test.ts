@@ -77,7 +77,8 @@ describe("the signature gate", () => {
     expect(suppression?.channel).toBe("email");
     expect(suppression?.recipientAddress).toBe("gone@example.test");
     expect(suppression?.appliedAt).toBe(NOW.toISOString());
-    expect(suppression?.appliedBy).toBeNull();
+    // The provider that reported the bounce, not NULL: `applied_by` is no longer a `meta.users` id.
+    expect(suppression?.appliedBy).toBe("provider:ses");
     expect(suppression?.expiresAt).toBeNull();
     expect(suppression?.sourceDeliveryId).toBeNull();
     expect(suppression?.id).toMatch(/^supp_[0-9a-f]{32}$/);
@@ -305,6 +306,9 @@ describe("Twilio status callbacks", () => {
     expect(result.suppressions[0]?.recipientAddress).toBe("+15551234567");
     expect(result.suppressions[0]?.notes).toContain("code=21610");
     expect(result.suppressions[0]?.notes).toContain("provider_message=SM123");
+    // Attributed to the source that reported it, so the two providers are distinguishable in the
+    // stored row rather than both reading NULL.
+    expect(result.suppressions[0]?.appliedBy).toBe("provider:twilio");
   });
 
   it("maps an invalid number to a hard bounce, under either status spelling", () => {

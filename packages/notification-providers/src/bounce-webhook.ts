@@ -1,6 +1,7 @@
 import { sha256, verifyWebhookSignature } from "@crossengin/crypto";
 import {
   PERMANENT_SUPPRESSION_REASONS,
+  suppressionActorRef,
   SuppressionRecordSchema,
   type NotificationChannel,
   type SuppressionReason,
@@ -309,6 +310,12 @@ export function planSuppression(input: {
   readonly appliedAt: Date;
   readonly expiresAt: Date | null;
   readonly notes?: string;
+  /**
+   * The actor ref to attribute the row to. Omitted means NULL, which is what every bounce row
+   * written before `applied_by` widened past a `meta.users` id holds; the webhook path passes
+   * `provider:<source>` so a new row says which provider reported it.
+   */
+  readonly appliedBy?: string | null;
 }): SuppressionRecord | null {
   const appliedAt = input.appliedAt.toISOString();
   // Normalised here, once, before anything else reads it — so the id, the stored address and the
@@ -329,8 +336,7 @@ export function planSuppression(input: {
     recipientAddress,
     reason: input.reason,
     appliedAt,
-    // No human applied this one, and the provider is not a `meta.users` row.
-    appliedBy: null,
+    appliedBy: input.appliedBy ?? null,
     expiresAt: PERMANENT_SUPPRESSION_REASONS.has(input.reason)
       ? null
       : (input.expiresAt?.toISOString() ?? null),
@@ -703,6 +709,10 @@ function planAll(
       reason,
       appliedAt: request.now,
       expiresAt,
+      // No human applied this one, so the row names the provider that reported it instead of
+      // writing NULL. The reason is observed, never decided, so the schema requires this not be a
+      // `user:` actor — which is exactly what `provider:<source>` is not.
+      appliedBy: suppressionActorRef("provider", request.source),
       ...(notes !== undefined ? { notes } : {}),
     });
     if (planned === null) {

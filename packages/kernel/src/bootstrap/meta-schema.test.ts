@@ -135,8 +135,8 @@ function uniqueConstraintName(column: ColumnDefinition | undefined): string | un
 
 
 describe("META_TABLES", () => {
-  it("contains 136 tables", () => {
-    expect(META_TABLES).toHaveLength(140);
+  it("contains 143 tables", () => {
+    expect(META_TABLES).toHaveLength(143);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -235,8 +235,11 @@ describe("META_TABLES", () => {
       "notification_digests",
       "notification_dispatches",
       "notification_preferences",
+      "notification_read_states",
+      "notification_read_watermarks",
       "notification_suppressions",
       "notification_templates",
+      "notification_user_quiet_hours",
       "onboarding_runs",
       "operate_design_jobs",
       "operate_entity_links",
@@ -1256,6 +1259,24 @@ describe("table column shapes", () => {
     expect(policy?.using).not.toContain("tenant_id IS NULL");
     expect(policy?.using).toContain("app.platform_audit");
     expect(policy?.using).not.toContain("app.platform_review");
+  });
+
+  it("META_AUDIT_LOG splits the platform read off as SELECT rather than widening isolation", () => {
+    const policies = META_AUDIT_LOG.rls?.policies ?? [];
+    expect(policies).toHaveLength(2);
+    const isolation = policies.find((p) => p.name === "audit_log_tenant_isolation");
+    const platform = policies.find((p) => p.name === "audit_log_platform_audit_read");
+    // The isolation half stays at the `ALL` default and never mentions the flag: an elevated
+    // session must not be able to satisfy an INSERT's WITH CHECK and forge an entry into another
+    // tenant's chain. That is the whole reason this is two policies and not one `OR`.
+    expect(isolation?.command).toBeUndefined();
+    expect(isolation?.using).not.toContain("app.platform_audit");
+    expect(platform?.command).toBe("SELECT");
+    expect(platform?.using).toBe("current_setting('app.platform_audit', true) = 'on'");
+    // And the isolation predicate is NULLIF-guarded, without which the platform read fails on any
+    // pooled connection that previously served a tenant — adding the SELECT policy alone does not
+    // help, because the other policy's cast still evaluates.
+    expect(isolation?.using).toContain("NULLIF(");
   });
 
   it("META_INCIDENT_COMMUNICATIONS holds its two cross-column rules in the database", () => {

@@ -747,20 +747,31 @@ describe("the catalog's own emission is unchanged", () => {
 
   it("writes a table-level CHECK line only for the table that declares one", () => {
     // A column's own CHECK and inline REFERENCES are written on the column, so a `CONSTRAINT … `
-    // line appears only where `constraints` is used — today exactly one table, for the two
-    // cross-column rules ADR-0296 had nowhere to put. This test exists to catch a table gaining one
-    // by accident, so it is scoped by table rather than deleted.
-    const withCheckLine = statements.filter((sql) => /CONSTRAINT "[^"]+" CHECK \(/.test(sql));
-    expect(withCheckLine).toHaveLength(1);
-    expect(withCheckLine[0]).toContain('CREATE TABLE "meta"."incident_communications"');
+    // line appears only where `constraints` is used — the tables with a genuinely cross-column rule.
+    // Named rather than counted, so a table gaining one by accident still fails here.
+    const withCheckLine = statements
+      .filter((sql) => /CONSTRAINT "[^"]+" CHECK \(/.test(sql))
+      .map((sql) => /CREATE TABLE "meta"\."([^"]+)"/.exec(sql)?.[1] ?? "?")
+      .sort();
+    expect(withCheckLine).toEqual([
+      "incident_communications",
+      "notification_read_watermarks",
+      "notification_user_quiet_hours",
+    ]);
     for (const sql of statements) {
       expect(sql).not.toMatch(/CONSTRAINT "[^"]+" FOREIGN KEY \(/);
     }
   });
 
   it("declares a table-level constraint only where intended, and no permissiveness anywhere", () => {
-    const declaring = META_TABLES.filter((t) => t.constraints !== undefined).map((t) => t.name);
-    expect(declaring).toEqual(["incident_communications"]);
+    const declaring = META_TABLES.filter((t) => t.constraints !== undefined)
+      .map((t) => t.name)
+      .sort();
+    expect(declaring).toEqual([
+      "incident_communications",
+      "notification_read_watermarks",
+      "notification_user_quiet_hours",
+    ]);
     for (const table of META_TABLES) {
       for (const policy of table.rls?.policies ?? []) {
         // Nothing declares permissiveness yet; a restrictive policy added by hand would still be

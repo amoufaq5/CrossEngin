@@ -253,6 +253,19 @@ describe("suppression-store — shape", () => {
     ]);
   });
 
+  it("does not cast applied_by, which is TEXT and holds a structured actor ref", async () => {
+    const { conn, captured } = fakeSuppressionDb();
+    await new PostgresSuppressionStore(conn).write(TENANT_A, {
+      ...record(),
+      appliedBy: "provider:ses",
+    });
+    const insert = captured.find((c) => c.sql.startsWith("INSERT INTO"));
+    // `$7` is `applied_by`. A `::uuid` on it — what the column used to be — would reject every
+    // `provider:` and `system:` actor a bounce writes.
+    expect(insert?.sql).toContain("$6::timestamptz, $7, $8::timestamptz");
+    expect(insert?.params[6]).toBe("provider:ses");
+  });
+
   it("casts the non-text columns, because INSERT … SELECT infers a bare parameter as text", async () => {
     const { conn, captured } = fakeSuppressionDb();
     await new PostgresSuppressionStore(conn).write(TENANT_A, record());
