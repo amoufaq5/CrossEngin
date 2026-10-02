@@ -88,6 +88,18 @@ export const META_USERS: TableDefinition = {
     },
     { name: "display_name", type: "TEXT" },
     {
+      // Where a voice call or an SMS actually goes. Nullable, because most users have no number on
+      // file and a channel with no address must be refused, not guessed at — before this column the
+      // drain handed the voice sender an *email*, which Twilio answers with a 21211 that reads as a
+      // hard bounce and would have written a permanent suppression against our own misconfiguration.
+      //
+      // E.164 is enforced here rather than left to the sender: a number that cannot be dialled is
+      // worth rejecting at the write, and the check is the same shape the senders apply.
+      name: "phone_e164",
+      type: "TEXT",
+      check: "phone_e164 IS NULL OR phone_e164 ~ '^\\+[1-9][0-9]{6,14}$'",
+    },
+    {
       name: "status",
       type: "TEXT",
       notNull: true,
