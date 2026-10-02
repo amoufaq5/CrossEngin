@@ -91,3 +91,11 @@ describe("renewJobClaim", () => {
     ).toBe(false);
   });
 });
+
+describe("claimDueJobs and cancellation", () => {
+  it("never hands out a run with a recorded cancellation, so a cancelled job is not re-claimed", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await claimDueJobs(mockConnection([], capture), { workerId: "worker-B", now: NOW });
+    expect(capture[0]!.sql).toContain("cancel_requested_at IS NULL");
+  });
+});

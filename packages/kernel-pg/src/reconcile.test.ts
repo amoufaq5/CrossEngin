@@ -111,6 +111,7 @@ describe("UNRECONCILED_REASONS", () => {
       "column_type_changed",
       "column_now_not_null",
       "column_needs_backfill",
+      "column_rename_ambiguous",
       "depends_on_unreconciled",
       "index_removed",
       "policy_removed",
@@ -587,6 +588,56 @@ describe("foreign keys — undeclared", () => {
     expect(item?.target).toBe("children_label_fkey");
     expect(item?.detail).toContain("meta.tenants(slug)");
     expect(item?.manualSql).toContain("DROP CONSTRAINT");
+  });
+
+  it("drops it under allowLoosening, which is the only thing that flag does", () => {
+    const extra = liveChild({
+      foreignKeys: [
+        ...liveChild().foreignKeys,
+        {
+          name: "children_label_fkey",
+          columns: ["label"],
+          targetSchema: "meta",
+          targetTable: "tenants",
+          targetColumns: ["slug"],
+          onDelete: "NO ACTION",
+          onUpdate: "NO ACTION",
+        },
+      ],
+    });
+    const plan = planSchemaReconciliation(
+      diffSchema([CHILD], live([extra])),
+      [CHILD],
+      undefined,
+      { allowLoosening: true },
+    );
+    expect(plan.steps.map((s) => s.kind)).toEqual(["drop_foreign_key"]);
+    expect(plan.steps[0]?.target).toBe("children_label_fkey");
+    expect(plan.steps[0]?.sql).toBe(
+      `ALTER TABLE "meta"."children" DROP CONSTRAINT IF EXISTS "children_label_fkey";`,
+    );
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("is byte-identical to the default when the flag is false", () => {
+    const extra = liveChild({
+      foreignKeys: [
+        ...liveChild().foreignKeys,
+        {
+          name: "children_label_fkey",
+          columns: ["label"],
+          targetSchema: "meta",
+          targetTable: "tenants",
+          targetColumns: ["slug"],
+          onDelete: "NO ACTION",
+          onUpdate: "NO ACTION",
+        },
+      ],
+    });
+    const diff = diffSchema([CHILD], live([extra]));
+    expect(
+      planSchemaReconciliation(diff, [CHILD], undefined, { allowLoosening: false }),
+    ).toEqual(planSchemaReconciliation(diff, [CHILD]));
   });
 
   it("names the columns the undeclared constraint sits on", () => {
@@ -1278,21 +1329,86 @@ describe("table-level constraints — planning", () => {
     expect(plan.unreconciled[0]?.detail).toContain("an unknown number of row(s)");
   });
 
-  it("adds a missing composite foreign key on an empty table", () => {
+  it("adds a missing composite foreign key, unguarded", () => {
     const step = planWith({ foreignKeys: [] }).steps.find(
       (s) => s.kind === "add_table_constraint",
     );
     expect(step?.target).toBe("comms_incident_fkey");
-    expect(step?.sql).toContain(
-      `ADD CONSTRAINT "comms_incident_fkey" FOREIGN KEY ("tenant_id", "id") ` +
+    expect(step?.guarded).toBe(false);
+    expect(step?.sql).toBe(
+      `ALTER TABLE "meta"."comms" ` +
+        `ADD CONSTRAINT "comms_incident_fkey" FOREIGN KEY ("tenant_id", "id") ` +
         `REFERENCES "meta"."incidents"("tenant_id", "id") ON DELETE CASCADE;`,
     );
   });
 
-  it("refuses a missing composite foreign key on a populated table", () => {
-    const item = planWith({ foreignKeys: [] }, 1).unreconciled[0];
-    expect(item?.reason).toBe("constraint_needs_validation");
-    expect(item?.manualSql).toContain("has no match in");
+  it("adds a missing composite foreign key on a populated table too", () => {
+    // ADR-0291's rule, not ADR-0299's: the add fails only when the rows already contradict a
+    // constraint the catalog declares, which is an integrity problem to surface rather than a
+    // decision about data. Gating it on emptiness is what left a composite key never reconciled.
+    const plan = planWith({ foreignKeys: [] }, 1);
+    expect(plan.steps.map((s) => s.kind)).toEqual(["add_table_constraint"]);
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("matches a composite key by its columns and target when the name differs", () => {
+    // The emitter names a table-level key, but the database may hold the same key under Postgres's
+    // own name. Matching only by name read that as declared-but-missing *and* undeclared, and planned
+    // a second, duplicate constraint.
+    const plan = planWith({
+      foreignKeys: [
+        { ...liveComms().foreignKeys[0] as NonNullable<LiveTable["foreignKeys"][number]>, name: "comms_tenant_id_id_fkey" },
+      ],
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_table_constraint");
+    expect(step?.target).toBe("comms_incident_fkey");
+    // Dropped under the name the database holds, or the drop is a no-op and both survive.
+    expect(step?.sql).toContain(`DROP CONSTRAINT IF EXISTS "comms_tenant_id_id_fkey";`);
+    expect(step?.sql).toContain(`ADD CONSTRAINT "comms_incident_fkey" FOREIGN KEY`);
+    expect(step?.sql.indexOf("DROP CONSTRAINT")).toBeLessThan(
+      step?.sql.indexOf("ADD CONSTRAINT") ?? -1,
+    );
+    // One statement, so the table is never committed without the key.
+    expect(plan.statements).toHaveLength(1);
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("replaces a composite key whose ON DELETE changed, under its own name", () => {
+    const plan = planWith({
+      foreignKeys: liveComms().foreignKeys.map((f) => ({ ...f, onDelete: "RESTRICT" as const })),
+    });
+    const step = plan.steps.find((s) => s.kind === "replace_table_constraint");
+    expect(step?.guarded).toBe(false);
+    expect(step?.sql).toContain(`DROP CONSTRAINT IF EXISTS "comms_incident_fkey";`);
+    expect(step?.sql).toContain("ON DELETE CASCADE;");
+  });
+
+  it("replaces a composite key whose target changed", () => {
+    const plan = planWith({
+      foreignKeys: liveComms().foreignKeys.map((f) => ({ ...f, targetTable: "tenants" })),
+    });
+    expect(plan.steps.map((s) => s.kind)).toEqual(["replace_table_constraint"]);
+    expect(plan.steps[0]?.sql).toContain(`REFERENCES "meta"."incidents"("tenant_id", "id")`);
+  });
+
+  it("reports an undeclared composite key rather than dropping it", () => {
+    const plan = planWith({
+      foreignKeys: [
+        ...liveComms().foreignKeys,
+        {
+          name: "comms_adhoc_fkey",
+          columns: ["id", "tenant_id"],
+          targetSchema: "meta",
+          targetTable: "tenants",
+          targetColumns: ["id", "tenant_id"],
+          onDelete: "CASCADE",
+          onUpdate: "NO ACTION",
+        },
+      ],
+    });
+    expect(plan.steps).toEqual([]);
+    const item = plan.unreconciled.find((u) => u.reason === "foreign_key_removed");
+    expect(item?.target).toBe("comms_adhoc_fkey");
   });
 
   it("replaces a changed CHECK in one guarded statement, dropping before adding", () => {
@@ -1416,5 +1532,261 @@ describe("table-level constraints — planning", () => {
     expect(added).toContain("[guarded]");
     const refused = formatReconciliationPlan(planWith({ checkConstraints: [] }, 2));
     expect(refused).toContain("[constraint_needs_validation] comms.comms_bounces_check");
+  });
+});
+
+describe("allowLoosening — what it does not reach", () => {
+  /**
+   * The flag's whole point is that it is narrow. Everything here is a refusal it must leave alone:
+   * each is either a decision about existing data or an object someone may have created on purpose,
+   * and neither becomes safe because a flag was passed.
+   */
+  const target: TableDefinition = {
+    schema: "meta",
+    name: "widgets",
+    columns: [{ name: "id", type: "UUID", notNull: true, primaryKey: true }],
+  };
+  const drifted: LiveTable = {
+    schema: "meta",
+    name: "widgets",
+    columns: [
+      { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+      { name: "legacy", dataType: "text", isNullable: true, defaultExpr: null },
+    ],
+    indexes: [
+      { name: "widgets_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+      { name: "idx_adhoc", columns: ["legacy"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+    ],
+    policies: [{ name: "adhoc_policy", using: "true", check: null, command: "ALL", roles: ["PUBLIC"], permissive: true }],
+    foreignKeys: [],
+    checkConstraints: [
+      { name: "widgets_adhoc_check", expression: "(legacy <> ''::text)", columns: ["legacy"] },
+    ],
+    rlsEnabled: true,
+  };
+  const loose = planSchemaReconciliation(
+    diffSchema([target, { ...target, name: "gone" }].slice(0, 1), live([drifted, {
+      ...drifted,
+      name: "orphan",
+    }])),
+    [target],
+    { rowCounts: new Map([["widgets", 3]]) },
+    { allowLoosening: true },
+  );
+
+  it("drops nothing but a foreign key", () => {
+    for (const step of loose.steps) {
+      expect(step.kind).not.toMatch(/^(create_table|add_column)$/);
+      if (step.kind.startsWith("drop_")) {
+        expect(["drop_foreign_key", "drop_column_default", "drop_column_not_null"]).toContain(
+          step.kind,
+        );
+      }
+    }
+  });
+
+  it("still refuses the column, the index, the policy, the CHECK, the table and the RLS", () => {
+    const reasons = new Set(loose.unreconciled.map((u) => u.reason));
+    expect(reasons).toContain("column_removed");
+    expect(reasons).toContain("index_removed");
+    expect(reasons).toContain("policy_removed");
+    expect(reasons).toContain("constraint_removed");
+    expect(reasons).toContain("table_removed");
+    expect(reasons).toContain("rls_unexpectedly_enabled");
+  });
+});
+
+describe("renaming a column", () => {
+  /** `default_value` becomes `default_json` — ADR-0300's stranded NOT NULL column exactly. */
+  const RENAMED: TableDefinition = {
+    schema: "meta",
+    name: "flags",
+    columns: [
+      { name: "id", type: "UUID", notNull: true, primaryKey: true },
+      { name: "tenant_id", type: "UUID", notNull: true, references: { schema: "meta", table: "tenants", column: "id" } },
+      { name: "default_json", type: "JSONB", notNull: true, renamedFrom: "default_value" },
+    ],
+    indexes: [{ name: "idx_flags_default", columns: ["default_json"] }],
+  };
+
+  function liveFlags(columnName: string, extra: Partial<LiveTable> = {}): LiveTable {
+    return {
+      schema: "meta",
+      name: "flags",
+      columns: [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "tenant_id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: columnName, dataType: "jsonb", isNullable: false, defaultExpr: null },
+      ],
+      indexes: [
+        { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+        { name: "idx_flags_default", columns: [columnName], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+      ],
+      policies: [],
+      foreignKeys: [
+        {
+          name: "flags_tenant_id_fkey",
+          columns: ["tenant_id"],
+          targetSchema: "meta",
+          targetTable: "tenants",
+          targetColumns: ["id"],
+          onDelete: "RESTRICT",
+          onUpdate: "NO ACTION",
+        },
+      ],
+      checkConstraints: [],
+      rlsEnabled: false,
+      ...extra,
+    };
+  }
+
+  it("plans a rename when only the old name exists", () => {
+    const plan = planFor([RENAMED], live([liveFlags("default_value")]));
+    expect(plan.steps.map((s) => s.kind)).toEqual(["rename_column"]);
+    expect(plan.steps[0]?.target).toBe("default_json");
+    expect(plan.steps[0]?.guarded).toBe(true);
+    expect(plan.steps[0]?.sql).toContain(
+      `ALTER TABLE "meta"."flags" RENAME COLUMN "default_value" TO "default_json";`,
+    );
+  });
+
+  it("does not also report the old name as undeclared", () => {
+    // The ADR-0300 failure: the column was added under the new name and the old NOT NULL one left
+    // standing, so every insert failed on a column nothing could fill.
+    const plan = planFor([RENAMED], live([liveFlags("default_value")]));
+    expect(plan.unreconciled).toEqual([]);
+    expect(plan.steps.some((s) => s.kind === "add_column")).toBe(false);
+  });
+
+  it("reports the rename in the drift report, as neither an addition nor a removal", () => {
+    const diff = diffSchema([RENAMED], live([liveFlags("default_value")]));
+    const table = diff.modifiedTables[0];
+    expect(table?.renamedColumns).toEqual([
+      { column: "default_json", from: "default_value", ambiguous: false },
+    ]);
+    expect(table?.addedColumns).toEqual([]);
+    expect(table?.removedColumns).toEqual([]);
+  });
+
+  it("plans nothing once the rename has happened", () => {
+    const plan = planFor([RENAMED], live([liveFlags("default_json")]));
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("refuses when both names exist, and hands over both resolutions", () => {
+    const both = liveFlags("default_value");
+    const plan = planFor([RENAMED], live([{
+      ...both,
+      columns: [
+        ...both.columns,
+        { name: "default_json", dataType: "jsonb", isNullable: false, defaultExpr: null },
+      ],
+    }]));
+    expect(plan.steps.some((s) => s.kind === "rename_column")).toBe(false);
+    const item = plan.unreconciled.find((u) => u.reason === "column_rename_ambiguous");
+    expect(item?.target).toBe("default_json");
+    expect(item?.detail).toContain("the database holds both");
+    expect(item?.manualSql).toContain(`DROP COLUMN "default_value";`);
+    expect(item?.manualSql).toContain(`DROP COLUMN "default_json";`);
+  });
+
+  it("treats a renamedFrom nobody holds as an ordinary addition", () => {
+    const neither = liveFlags("default_value");
+    const plan = planSchemaReconciliation(
+      diffSchema([RENAMED], live([{
+        ...neither,
+        columns: neither.columns.filter((c) => c.name !== "default_value"),
+        indexes: neither.indexes.filter((i) => i.name !== "idx_flags_default"),
+      }])),
+      [RENAMED],
+      { rowCounts: new Map([["flags", 0]]) },
+    );
+    expect(plan.steps.some((s) => s.kind === "rename_column")).toBe(false);
+    expect(plan.steps.find((s) => s.kind === "add_column")?.target).toBe("default_json");
+  });
+
+  it("never renames onto a column the catalog still declares", () => {
+    // Declaring both names means both columns are wanted; renaming one onto the other would destroy
+    // a declared column.
+    const keepsBoth: TableDefinition = {
+      ...RENAMED,
+      columns: [
+        ...RENAMED.columns,
+        { name: "default_value", type: "TEXT" },
+      ],
+    };
+    const plan = planSchemaReconciliation(
+      diffSchema([keepsBoth], live([liveFlags("default_value")])),
+      [keepsBoth],
+      { rowCounts: new Map([["flags", 0]]) },
+    );
+    expect(plan.steps.some((s) => s.kind === "rename_column")).toBe(false);
+    expect(plan.steps.find((s) => s.kind === "add_column")?.target).toBe("default_json");
+  });
+
+  it("renames before changing the column, because the later statement names the new column", () => {
+    const retyped: TableDefinition = {
+      ...RENAMED,
+      columns: RENAMED.columns.map((c) =>
+        c.name === "default_json" ? { ...c, type: "TEXT", default: "'{}'" } : c,
+      ),
+    };
+    const plan = planSchemaReconciliation(
+      diffSchema([retyped], live([liveFlags("default_value")])),
+      [retyped],
+      { rowCounts: new Map([["flags", 0]]) },
+    );
+    const kinds = plan.steps.map((s) => s.kind);
+    expect(kinds[0]).toBe("rename_column");
+    expect(kinds).toContain("alter_column_type");
+    expect(kinds).toContain("set_column_default");
+    expect(kinds.indexOf("rename_column")).toBeLessThan(kinds.indexOf("alter_column_type"));
+    expect(kinds.indexOf("rename_column")).toBeLessThan(kinds.indexOf("set_column_default"));
+    for (const step of plan.steps.slice(1)) expect(step.sql).toContain("default_json");
+  });
+
+  it("does not re-add the foreign key on a column that was renamed", () => {
+    // A foreign key survives a rename pointing at the same column, so the database still reports the
+    // old name for it. Matching on that read the declared reference as missing and planned a second,
+    // duplicate constraint.
+    const renamedRef: TableDefinition = {
+      ...RENAMED,
+      columns: [
+        { name: "id", type: "UUID", notNull: true, primaryKey: true },
+        { name: "owner_tenant_id", type: "UUID", notNull: true, renamedFrom: "tenant_id", references: { schema: "meta", table: "tenants", column: "id" } },
+        { name: "default_json", type: "JSONB", notNull: true },
+      ],
+      indexes: [],
+    };
+    const plan = planSchemaReconciliation(
+      diffSchema([renamedRef], live([{
+        ...liveFlags("default_json"),
+        indexes: liveFlags("default_json").indexes.filter((i) => i.name !== "idx_flags_default"),
+      }])),
+      [renamedRef],
+      { rowCounts: new Map([["flags", 0]]) },
+    );
+    expect(plan.steps.map((s) => s.kind)).toEqual(["rename_column"]);
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("does not rebuild an index over a renamed column for nothing", () => {
+    const plan = planFor([RENAMED], live([liveFlags("default_value")]));
+    expect(plan.steps.some((s) => s.kind === "replace_index")).toBe(false);
+  });
+
+  it("renames on a populated table, because no row is read or written", () => {
+    const plan = planSchemaReconciliation(
+      diffSchema([RENAMED], live([liveFlags("default_value")])),
+      [RENAMED],
+      { rowCounts: new Map([["flags", 20_000]]) },
+    );
+    expect(plan.steps.map((s) => s.kind)).toEqual(["rename_column"]);
+  });
+
+  it("prints the rename in the plan report", () => {
+    const out = formatReconciliationPlan(planFor([RENAMED], live([liveFlags("default_value")])));
+    expect(out).toContain("rename_column flags.default_json");
   });
 });

@@ -62,9 +62,20 @@ export function twilioCallsPath(accountSid: string): string {
 /** Twilio rejects a `Twiml` parameter longer than this. */
 export const MAX_TWIML_CHARACTERS = 4000;
 
+/**
+ * Removes the characters XML 1.0 has no representation for at all — the C0 controls other than tab,
+ * newline and carriage return. Escaping cannot save them: `&#11;` is as illegal as the raw byte, so
+ * a single stray one in a composed line would make Twilio reject the whole call with a parse error.
+ * Dropping them is the only outcome that still places the call, and they are inaudible anyway.
+ */
+export function stripXmlForbiddenChars(text: string): string {
+  /* eslint-disable-next-line no-control-regex -- the point of this function is the control range */
+  return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+}
+
 /** TwiML is XML: an unescaped `&` in a template id is a 400, and an unescaped `<` is an injected verb. */
 export function escapeXmlText(text: string): string {
-  return text
+  return stripXmlForbiddenChars(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

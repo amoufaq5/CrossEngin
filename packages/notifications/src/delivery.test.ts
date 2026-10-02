@@ -9,8 +9,11 @@ import {
   PRIORITY_MAX_LATENCY_SECONDS,
   RETRYABLE_DELIVERY_OUTCOMES,
   TERMINAL_DELIVERY_OUTCOMES,
+  TERMINAL_DISPATCH_STATUSES,
   canTransitionDispatch,
   decideRetry,
+  dispatchHandoffAt,
+  isDispatchTerminal,
   summarizeDispatches,
   type DeliveryAttempt,
   type NotificationDispatch,
@@ -145,6 +148,134 @@ describe("NotificationDispatchSchema", () => {
         completedAt: "2026-05-16T10:00:00.500Z",
       }),
     ).toThrow(/completedAt cannot precede startedAt/);
+  });
+});
+
+describe("TERMINAL_DISPATCH_STATUSES", () => {
+  it("names the three statuses nothing moves out of", () => {
+    expect([...TERMINAL_DISPATCH_STATUSES].sort()).toEqual([
+      "cancelled",
+      "completed",
+      "failed",
+    ]);
+  });
+
+  it("agrees with the transition map — a terminal status has no successors", () => {
+    for (const status of DISPATCH_STATUSES) {
+      const hasSuccessors = DISPATCH_STATUSES.some((to) =>
+        canTransitionDispatch(status, to),
+      );
+      expect(isDispatchTerminal(status)).toBe(!hasSuccessors);
+    }
+  });
+});
+
+describe("NotificationDispatchSchema — completedAt pairing", () => {
+  it("requires completedAt on a failed dispatch, which only completed used to", () => {
+    expect(() =>
+      NotificationDispatchSchema.parse({
+        ...baseDispatch,
+        status: "failed",
+        completedAt: null,
+        deliveredCount: 0,
+        failedCount: 1,
+      }),
+    ).toThrow(/failed dispatch requires completedAt/);
+  });
+
+  it("requires completedAt on a cancelled dispatch", () => {
+    expect(() =>
+      NotificationDispatchSchema.parse({
+        ...baseDispatch,
+        status: "cancelled",
+        cancelledReason: "tenant opted out",
+        completedAt: null,
+      }),
+    ).toThrow(/cancelled dispatch requires completedAt/);
+  });
+
+  it("accepts a failed dispatch that names when it finished", () => {
+    expect(() =>
+      NotificationDispatchSchema.parse({
+        ...baseDispatch,
+        status: "failed",
+        deliveredCount: 0,
+        failedCount: 1,
+      }),
+    ).not.toThrow();
+  });
+
+  it("forbids completedAt on every non-terminal status", () => {
+    for (const status of DISPATCH_STATUSES) {
+      if (isDispatchTerminal(status)) continue;
+      expect(() =>
+        NotificationDispatchSchema.parse({ ...baseDispatch, status }),
+      ).toThrow(/must not have completedAt/);
+    }
+  });
+
+  it("accepts a sending dispatch with no end time", () => {
+    expect(() =>
+      NotificationDispatchSchema.parse({
+        ...baseDispatch,
+        status: "sending",
+        completedAt: null,
+        deliveredCount: 0,
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("dispatchHandoffAt", () => {
+  const sent = (sentAt: string | null, id: string): DeliveryAttempt => ({
+    ...baseAttempt,
+    id,
+    sentAt,
+    finalizedAt: null,
+    latencyMs: null,
+  });
+
+  it("returns the earliest sentAt across a fan-out", () => {
+    expect(
+      dispatchHandoffAt([
+        sent("2026-05-16T10:00:04.000Z", "dlv_hand00003"),
+        sent("2026-05-16T10:00:02.000Z", "dlv_hand00001"),
+        sent("2026-05-16T10:00:03.000Z", "dlv_hand00002"),
+      ]),
+    ).toBe("2026-05-16T10:00:02.000Z");
+  });
+
+  it("returns null when nothing has been handed off yet", () => {
+    expect(dispatchHandoffAt([sent(null, "dlv_hand00004")])).toBeNull();
+  });
+
+  it("returns null for no attempts at all", () => {
+    expect(dispatchHandoffAt([])).toBeNull();
+  });
+
+  it("ignores an attempt with an unparseable sentAt", () => {
+    expect(
+      dispatchHandoffAt([
+        sent("later", "dlv_hand00005"),
+        sent("2026-05-16T10:00:09.000Z", "dlv_hand00006"),
+      ]),
+    ).toBe("2026-05-16T10:00:09.000Z");
+  });
+
+  it("preserves the attempt's own spelling of the instant", () => {
+    expect(dispatchHandoffAt([sent("2026-05-16T12:00:00+02:00", "dlv_hand00007")])).toBe(
+      "2026-05-16T12:00:00+02:00",
+    );
+  });
+
+  it("is order-independent", () => {
+    const attempts = [
+      sent("2026-05-16T10:00:05.000Z", "dlv_hand00008"),
+      sent("2026-05-16T10:00:01.000Z", "dlv_hand00009"),
+    ];
+    expect(dispatchHandoffAt(attempts)).toBe(
+      dispatchHandoffAt([...attempts].reverse()),
+    );
   });
 });
 

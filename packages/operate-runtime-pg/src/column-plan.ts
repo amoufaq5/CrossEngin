@@ -102,6 +102,19 @@ export function columnPlansForManifest(
   return out;
 }
 
+/**
+ * Whether any planned column is stored as pgcrypto ciphertext, i.e. whether the
+ * `pgcrypto` extension has to exist before the DDL is applied. Derived from the
+ * plans rather than from the manifest so it cannot disagree with what the emitter
+ * will actually write.
+ */
+export function plansRequirePgcrypto(plans: ReadonlyMap<string, EntityTablePlan>): boolean {
+  for (const plan of plans.values()) {
+    if (plan.columns.some((c) => c.encryptAtRest)) return true;
+  }
+  return false;
+}
+
 /** The distinct reference targets of a plan (deduped, in column order). */
 export function referencedEntities(plan: EntityTablePlan): readonly string[] {
   const seen = new Set<string>();

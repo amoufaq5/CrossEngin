@@ -35,3 +35,13 @@ export interface JobClaimer {
 export interface JobProcessor {
   process(job: ClaimedJob): Promise<void>;
 }
+
+/**
+ * Reads whether a cancellation is durably recorded for a run — satisfied by the Postgres
+ * `observeJobCancellation`. The worker consults it twice per run: once before starting an item (the
+ * promise "no further items will start") and, while a handler runs, on a poll that trips the
+ * handler's `AbortSignal`.
+ */
+export interface JobCancellationWatcher {
+  isCancelRequested(opts: { readonly jobId: string; readonly tenantId: string }): Promise<boolean>;
+}

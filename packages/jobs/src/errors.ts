@@ -28,6 +28,29 @@ export class PermanentError extends JobError {
   }
 }
 
+/**
+ * Thrown *into* a handler's `AbortSignal.reason` when a cancellation is observed mid-flight, and the
+ * error a cooperating handler is expected to surface. Deliberately not a `RetryableError` or a
+ * `PermanentError`: cancellation is not a failure classification, so `classifyError` does not report
+ * it and the engine never routes it through the retry / dead-letter mapping.
+ */
+export class JobCancelledError extends JobError {
+  override readonly name = "JobCancelledError" as const;
+  readonly kind = "cancelled" as const;
+  readonly requestedBy?: string;
+
+  constructor(message = "job run cancelled", options?: { requestedBy?: string; cause?: unknown }) {
+    super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
+    if (options?.requestedBy !== undefined) {
+      this.requestedBy = options.requestedBy;
+    }
+  }
+}
+
+export function isJobCancelled(err: unknown): err is JobCancelledError {
+  return err instanceof JobCancelledError;
+}
+
 export function isRetryable(err: unknown): err is RetryableError {
   return err instanceof RetryableError;
 }

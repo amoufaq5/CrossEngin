@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   DIGEST_FREQUENCIES,
   DIGEST_STATUSES,
+  DIGEST_TRANSITIONS,
   DigestBatchSchema,
+  TERMINAL_DIGEST_STATUSES,
+  canTransitionDigest,
   QUIET_HOURS_BEHAVIORS,
   QuietHoursConfigSchema,
   RateLimitPolicySchema,
@@ -338,5 +341,147 @@ describe("DigestBatchSchema", () => {
         status: "dispatched",
       }),
     ).toThrow(/dispatched digest requires dispatchedAt/);
+  });
+});
+
+describe("DIGEST_TRANSITIONS", () => {
+  it("covers every status", () => {
+    for (const status of DIGEST_STATUSES) {
+      expect(DIGEST_TRANSITIONS[status]).toBeDefined();
+    }
+  });
+  it("never names a status outside the enum", () => {
+    for (const status of DIGEST_STATUSES) {
+      for (const to of DIGEST_TRANSITIONS[status]) {
+        expect(DIGEST_STATUSES).toContain(to);
+      }
+    }
+  });
+  it("allows the assembler to close an open pool directly", () => {
+    expect(canTransitionDigest("open", "assembled")).toBe(true);
+  });
+  it("allows the queued path too", () => {
+    expect(canTransitionDigest("open", "queued_for_assembly")).toBe(true);
+    expect(canTransitionDigest("queued_for_assembly", "assembled")).toBe(true);
+  });
+  it("only dispatches from assembled", () => {
+    expect(canTransitionDigest("assembled", "dispatched")).toBe(true);
+    expect(canTransitionDigest("open", "dispatched")).toBe(false);
+    expect(canTransitionDigest("queued_for_assembly", "dispatched")).toBe(false);
+  });
+  it("lets any pending status expire", () => {
+    for (const status of ["open", "queued_for_assembly", "assembled"] as const) {
+      expect(canTransitionDigest(status, "expired")).toBe(true);
+    }
+  });
+  it("never moves backwards", () => {
+    expect(canTransitionDigest("assembled", "open")).toBe(false);
+    expect(canTransitionDigest("dispatched", "assembled")).toBe(false);
+  });
+  it("agrees with TERMINAL_DIGEST_STATUSES", () => {
+    for (const status of DIGEST_STATUSES) {
+      const hasSuccessors = DIGEST_STATUSES.some((to) =>
+        canTransitionDigest(status, to),
+      );
+      expect(TERMINAL_DIGEST_STATUSES.has(status)).toBe(!hasSuccessors);
+    }
+  });
+  it("names dispatched and expired as the terminal pair", () => {
+    expect([...TERMINAL_DIGEST_STATUSES].sort()).toEqual(["dispatched", "expired"]);
+  });
+});
+
+describe("DigestBatchSchema — assembledAt / dispatchedAt pairing", () => {
+  const assembled = {
+    ...baseDigest,
+    status: "assembled" as const,
+    assembledAt: "2026-05-17T08:00:01.000Z",
+  };
+  const dispatched = {
+    ...assembled,
+    status: "dispatched" as const,
+    dispatchedAt: "2026-05-17T08:00:05.000Z",
+  };
+
+  it("accepts an assembled pool that names when it was assembled", () => {
+    expect(() => DigestBatchSchema.parse(assembled)).not.toThrow();
+  });
+  it("accepts a dispatched pool carrying both instants in order", () => {
+    expect(() => DigestBatchSchema.parse(dispatched)).not.toThrow();
+  });
+  it("rejects an assembled pool with no assembledAt", () => {
+    expect(() =>
+      DigestBatchSchema.parse({ ...assembled, assembledAt: null }),
+    ).toThrow(/digest in status assembled requires assembledAt/);
+  });
+  it("rejects a dispatched pool with no assembledAt — it cannot have been sent unbuilt", () => {
+    expect(() =>
+      DigestBatchSchema.parse({ ...dispatched, assembledAt: null }),
+    ).toThrow(/digest in status dispatched requires assembledAt/);
+  });
+  it("rejects an open pool that claims to have been dispatched", () => {
+    expect(() =>
+      DigestBatchSchema.parse({
+        ...baseDigest,
+        dispatchedAt: "2026-05-17T08:00:05.000Z",
+      }),
+    ).toThrow(/must not have dispatchedAt/);
+  });
+  it("rejects an assembled pool that claims to have been dispatched", () => {
+    expect(() =>
+      DigestBatchSchema.parse({
+        ...assembled,
+        dispatchedAt: "2026-05-17T08:00:05.000Z",
+      }),
+    ).toThrow(/must not have dispatchedAt/);
+  });
+  it("rejects an open or queued pool that claims to have been assembled", () => {
+    for (const status of ["open", "queued_for_assembly"] as const) {
+      expect(() =>
+        DigestBatchSchema.parse({
+          ...baseDigest,
+          status,
+          assembledAt: "2026-05-17T08:00:01.000Z",
+        }),
+      ).toThrow(/must not have assembledAt/);
+    }
+  });
+  it("rejects assembledAt before the pool was opened", () => {
+    expect(() =>
+      DigestBatchSchema.parse({
+        ...assembled,
+        assembledAt: "2026-05-16T07:00:00.000Z",
+      }),
+    ).toThrow(/assembledAt cannot precede openedAt/);
+  });
+  it("rejects dispatchedAt before assembledAt", () => {
+    expect(() =>
+      DigestBatchSchema.parse({
+        ...dispatched,
+        dispatchedAt: "2026-05-17T08:00:00.000Z",
+      }),
+    ).toThrow(/dispatchedAt cannot precede assembledAt/);
+  });
+  it("accepts the two instants being equal", () => {
+    expect(() =>
+      DigestBatchSchema.parse({
+        ...dispatched,
+        dispatchedAt: dispatched.assembledAt,
+      }),
+    ).not.toThrow();
+  });
+  it("accepts an expired pool that was never assembled", () => {
+    expect(() =>
+      DigestBatchSchema.parse({ ...baseDigest, status: "expired" }),
+    ).not.toThrow();
+  });
+  it("rejects an expired pool claiming a dispatch", () => {
+    expect(() =>
+      DigestBatchSchema.parse({
+        ...baseDigest,
+        status: "expired",
+        dispatchedAt: "2026-05-17T08:00:05.000Z",
+      }),
+    ).toThrow(/must not have dispatchedAt/);
   });
 });

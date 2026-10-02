@@ -123,3 +123,80 @@ describe("WorkflowJobWorker loop", () => {
     expect(worker.isRunning).toBe(false);
   });
 });
+
+describe("WorkflowJobWorker and cancellation", () => {
+  it("clears every claimed run with the watcher before starting it", async () => {
+    const processed: string[] = [];
+    const released: string[] = [];
+    const worker = new WorkflowJobWorker({
+      workerId: "worker-A",
+      claimer: {
+        claim: async () => [job("a"), job("b")],
+        release: async ({ jobId }) => void released.push(jobId),
+      },
+      processor: { process: async (j) => void processed.push(j.jobId) },
+      cancellation: { isCancelRequested: async ({ jobId }) => jobId === "b" },
+    });
+    const result = await worker.runOnce();
+    expect(processed).toEqual(["a"]);
+    expect(released).toEqual(["b"]);
+    expect(result.skipped).toEqual([{ jobId: "b", reason: "cancel_requested" }]);
+  });
+
+  it("does not report a direct runOnce as a shutdown — `stopping` gates the batch, not `running`", async () => {
+    const processed: string[] = [];
+    const worker = new WorkflowJobWorker({
+      workerId: "worker-A",
+      claimer: { claim: async () => [job("a")], release: async () => undefined },
+      processor: { process: async (j) => void processed.push(j.jobId) },
+    });
+    expect(worker.isRunning).toBe(false);
+    const result = await worker.runOnce();
+    expect(processed).toEqual(["a"]);
+    expect(result.skipped).toEqual([]);
+  });
+
+  it("stop() releases the rest of the in-flight batch instead of draining it", async () => {
+    const processed: string[] = [];
+    const released: string[] = [];
+    let worker: WorkflowJobWorker | undefined;
+    let claims = 0;
+    worker = new WorkflowJobWorker({
+      workerId: "worker-A",
+      claimer: {
+        claim: async () => {
+          claims += 1;
+          return claims === 1 ? [job("a"), job("b"), job("c")] : [];
+        },
+        release: async ({ jobId }) => void released.push(jobId),
+      },
+      processor: {
+        process: async (j) => {
+          processed.push(j.jobId);
+          // Shutdown lands while the first run's handler is still in flight.
+          if (j.jobId === "a") await worker?.stop();
+        },
+      },
+      idlePollMs: 0,
+      activePollMs: 0,
+      sleep: async () => undefined,
+    });
+    worker.start();
+    await worker.stop();
+    expect(processed).toEqual(["a"]);
+    expect(released).toEqual(["b", "c"]);
+  });
+
+  it("reports each skip through onSkipped", async () => {
+    const seen: Array<[string, string]> = [];
+    const worker = new WorkflowJobWorker({
+      workerId: "worker-A",
+      claimer: { claim: async () => [job("a")], release: async () => undefined },
+      processor: noopProcessor,
+      cancellation: { isCancelRequested: async () => true },
+      onSkipped: (j, reason) => void seen.push([j.jobId, reason]),
+    });
+    await worker.runOnce();
+    expect(seen).toEqual([["a", "cancel_requested"]]);
+  });
+});

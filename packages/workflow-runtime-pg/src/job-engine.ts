@@ -1,5 +1,11 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import { nextRetryAt, type RetryPolicy } from "@crossengin/jobs";
+import {
+  jobCancellationDisposition,
+  nextRetryAt,
+  type RetryPolicy,
+} from "@crossengin/jobs";
+
+import { finalizeCancelledJobRun } from "./job-cancellation.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
@@ -29,6 +35,12 @@ export interface JobHandlerContext {
   readonly attempts: number;
   readonly trigger: unknown;
   readonly input: unknown;
+  /**
+   * Aborted when a cancellation is observed while this handler runs. The *only* way a running handler
+   * stops: nothing preempts it, so a handler that never reads this signal runs to completion. Honour
+   * it by throwing (or returning `failed`) — either lands the run as `cancelled`, never as a retry.
+   */
+  readonly signal: AbortSignal;
 }
 
 export type JobHandler = (ctx: JobHandlerContext) => Promise<JobHandlerResult>;
@@ -81,15 +93,26 @@ export type JobRunDisposition =
   | "failed"
   | "dead-lettered"
   | "retry_scheduled"
+  | "cancelled"
   | "not_claimable";
 
 export interface ExecuteJobRunResult {
   readonly runId: string;
-  /** `false` when the run was not `pending` (already terminal / claimed away) — an idempotent no-op. */
+  /** `false` when the handler never ran: the run was not `pending`, or a cancellation preceded it. */
   readonly executed: boolean;
   readonly disposition: JobRunDisposition;
   readonly attempts?: number;
+  /** Which checkpoint honoured a cancellation (`cancelled` dispositions only). */
+  readonly cancelledAt?: "before_handler" | "cooperative_abort";
 }
+
+/** Per-execution inputs. `signal` is the cooperative cancellation channel handed to the handler. */
+export interface ExecuteJobRunOptions {
+  readonly signal?: AbortSignal;
+}
+
+/** A signal that is never aborted — the default when no cancellation watcher is wired. */
+const NEVER_ABORTED: AbortSignal = new AbortController().signal;
 
 interface RunRow {
   readonly job_id: unknown;
@@ -97,6 +120,7 @@ interface RunRow {
   readonly attempts: unknown;
   readonly trigger: unknown;
   readonly input_redacted: unknown;
+  readonly cancel_requested_at: unknown;
 }
 
 function str(v: unknown): string {
@@ -151,11 +175,16 @@ export class PostgresJobRunEngine {
     this.now = options.now ?? (() => new Date());
   }
 
-  async executeJobRun(runId: string, tenantId: string): Promise<ExecuteJobRunResult> {
+  async executeJobRun(
+    runId: string,
+    tenantId: string,
+    options: ExecuteJobRunOptions = {},
+  ): Promise<ExecuteJobRunResult> {
     const execStart = this.now().getTime();
+    const signal = options.signal ?? NEVER_ABORTED;
 
     const read = await this.conn.query<RunRow>(
-      `SELECT job_id, job_kind, attempts, trigger, input_redacted
+      `SELECT job_id, job_kind, attempts, trigger, input_redacted, cancel_requested_at
          FROM ${this.schema}.job_runs
         WHERE run_id = $1 AND tenant_id = $2::uuid AND status = 'pending'`,
       [runId, tenantId],
@@ -163,6 +192,13 @@ export class PostgresJobRunEngine {
     const row = read.rows[0];
     if (row === undefined) {
       return { runId, executed: false, disposition: "not_claimable" };
+    }
+
+    // A cancellation that landed between the claim and here. Checked before the handler is resolved,
+    // let alone invoked, so the strongest promise the engine can make — the handler never ran — holds
+    // even when the worker's own pre-flight check missed the window.
+    if (row.cancel_requested_at !== null && row.cancel_requested_at !== undefined) {
+      return this.finalizeCancellation(runId, tenantId, "before_handler", null);
     }
 
     const jobDefinitionId = str(row.job_id);
@@ -177,15 +213,37 @@ export class PostgresJobRunEngine {
       });
     }
 
-    const result = await registration.handler({
-      runId,
-      tenantId,
-      jobDefinitionId,
-      jobKind,
-      attempts,
-      trigger: parseJson(row.trigger),
-      input: parseJson(row.input_redacted),
-    });
+    let settlement: { readonly outcome: "completed" | "failed"; readonly result: JobHandlerResult };
+    try {
+      const handled = await registration.handler({
+        runId,
+        tenantId,
+        jobDefinitionId,
+        jobKind,
+        attempts,
+        trigger: parseJson(row.trigger),
+        input: parseJson(row.input_redacted),
+        signal,
+      });
+      settlement = { outcome: handled.status === "completed" ? "completed" : "failed", result: handled };
+    } catch (err) {
+      // An *unaborted* throw keeps its old meaning — transient infra trouble, so the run stays
+      // `pending` for re-claim without consuming a business attempt. Only an aborted throw is a
+      // cancellation, and it is terminal: re-claiming it would restart the work someone stopped.
+      if (!signal.aborted) throw err;
+      return this.finalizeCancellation(runId, tenantId, "cooperative_abort", execStart, attempts);
+    }
+
+    if (
+      jobCancellationDisposition({
+        handlerOutcome: settlement.outcome,
+        cancelRequested: signal.aborted,
+      }) === "cancelled"
+    ) {
+      return this.finalizeCancellation(runId, tenantId, "cooperative_abort", execStart, attempts);
+    }
+
+    const result = settlement.result;
 
     if (result.status === "completed") {
       const completedAt = this.now();
@@ -222,6 +280,36 @@ export class PostgresJobRunEngine {
 
     const disposition: "failed" | "dead-lettered" = result.retryable === true ? "dead-lettered" : "failed";
     return this.finalizeFailure(runId, tenantId, execStart, disposition, result.error, attempts);
+  }
+
+  /**
+   * Writes the terminal `cancelled` and reports which checkpoint honoured it. `execStart === null`
+   * means the handler never ran, so the row carries no duration. A `false` from the store means the
+   * run was no longer cancellable — reported as `not_claimable`, the same idempotent no-op every
+   * other finalize path uses when it loses the row.
+   */
+  private async finalizeCancellation(
+    runId: string,
+    tenantId: string,
+    checkpoint: "before_handler" | "cooperative_abort",
+    execStart: number | null,
+    attempts?: number,
+  ): Promise<ExecuteJobRunResult> {
+    const completedAt = this.now();
+    const honoured = await finalizeCancelledJobRun(this.conn, {
+      runId,
+      tenantId,
+      checkpoint,
+      now: completedAt.toISOString(),
+      durationMs: execStart === null ? null : Math.max(0, completedAt.getTime() - execStart),
+      schema: this.schema,
+    });
+    const executed = checkpoint === "cooperative_abort";
+    const withAttempts = attempts !== undefined ? { attempts } : {};
+    if (!honoured) {
+      return { runId, executed, disposition: "not_claimable", ...withAttempts };
+    }
+    return { runId, executed, disposition: "cancelled", cancelledAt: checkpoint, ...withAttempts };
   }
 
   private async finalizeFailure(

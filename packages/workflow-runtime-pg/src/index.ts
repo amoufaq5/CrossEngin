@@ -1,6 +1,7 @@
 export * from "./activity-claim.js";
 export * from "./activity-store.js";
 export * from "./activity-worker.js";
+export * from "./job-cancellation.js";
 export * from "./job-claim.js";
 export * from "./job-engine.js";
 export * from "./job-enqueue.js";

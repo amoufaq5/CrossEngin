@@ -1283,3 +1283,227 @@ describe("CONSTRAINT_DELTA_REASONS", () => {
     ]);
   });
 });
+
+describe("diffSchema — renamed columns", () => {
+  const target: TableDefinition = {
+    schema: "meta",
+    name: "flags",
+    columns: [
+      { name: "id", type: "UUID", notNull: true, primaryKey: true },
+      { name: "default_json", type: "JSONB", renamedFrom: "default_value" },
+    ],
+    uniqueConstraints: [{ name: "flags_default_key", columns: ["default_json"] }],
+    indexes: [{ name: "idx_flags_default", columns: ["default_json"] }],
+  };
+
+  function liveFlags(columnName: string, over: Partial<LiveTable> = {}): LiveTable {
+    return liveTable(
+      "flags",
+      [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: columnName, dataType: "jsonb", isNullable: true, defaultExpr: null },
+      ],
+      {
+        indexes: [
+          { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+          { name: "idx_flags_default", columns: [columnName], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
+          { name: "flags_default_key", columns: [columnName], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
+        ],
+        ...over,
+      },
+    );
+  }
+
+  it("reports a rename, not an addition and a removal", () => {
+    const d = diffSchema([target], liveSchema([liveFlags("default_value")]));
+    const table = d.modifiedTables[0];
+    expect(table?.renamedColumns).toEqual([
+      { column: "default_json", from: "default_value", ambiguous: false },
+    ]);
+    expect(table?.addedColumns).toEqual([]);
+    expect(table?.removedColumns).toEqual([]);
+  });
+
+  it("counts a rename as drift", () => {
+    expect(diffSchema([target], liveSchema([liveFlags("default_value")])).hasDrift).toBe(true);
+  });
+
+  it("reads an index and a unique constraint over the renamed column under its new name", () => {
+    // Both survive a rename pointing at the same column, so the database still reports the old name.
+    // Without reading them through the rename each would be rebuilt for nothing.
+    const d = diffSchema([target], liveSchema([liveFlags("default_value")]));
+    expect(d.modifiedTables[0]?.changedIndexes).toEqual([]);
+  });
+
+  it("marks it ambiguous when the database holds both names", () => {
+    const both = liveFlags("default_value");
+    const d = diffSchema([target], liveSchema([{
+      ...both,
+      columns: [
+        ...both.columns,
+        { name: "default_json", dataType: "jsonb", isNullable: true, defaultExpr: null },
+      ],
+    }]));
+    expect(d.modifiedTables[0]?.renamedColumns).toEqual([
+      { column: "default_json", from: "default_value", ambiguous: true },
+    ]);
+    // Still not an undeclared column: `renamedFrom` accounts for it either way.
+    expect(d.modifiedTables[0]?.removedColumns).toEqual([]);
+  });
+
+  it("compares the rest of the column against the live old one, under the new name", () => {
+    const d = diffSchema([target], liveSchema([
+      liveFlags("default_value", {
+        columns: [
+          { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+          { name: "default_value", dataType: "text", isNullable: false, defaultExpr: null },
+        ],
+      }),
+    ]));
+    const delta = d.modifiedTables[0]?.changedColumns[0];
+    expect(delta?.column).toBe("default_json");
+    expect(delta?.reasons).toEqual(["type", "nullable"]);
+    expect(delta?.live.type).toBe("text");
+  });
+
+  it("reports nothing once the rename has happened", () => {
+    expect(diffSchema([target], liveSchema([liveFlags("default_json")])).hasDrift).toBe(false);
+  });
+
+  it("is an ordinary addition when neither name is live", () => {
+    const d = diffSchema([target], liveSchema([
+      liveTable("flags", [
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+      ]),
+    ]));
+    expect(d.modifiedTables[0]?.renamedColumns).toEqual([]);
+    expect(d.modifiedTables[0]?.addedColumns).toEqual(["default_json"]);
+  });
+});
+
+describe("diffSchema — a table-level foreign key matched by its columns", () => {
+  const target: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [
+      { name: "tenant_id", type: "UUID", notNull: true },
+      { name: "id", type: "UUID", notNull: true },
+    ],
+    primaryKey: ["id"],
+    constraints: [
+      {
+        kind: "foreign_key",
+        name: "comms_incident_fkey",
+        columns: ["tenant_id", "id"],
+        references: { schema: "meta", table: "incidents", columns: ["tenant_id", "id"] },
+        onDelete: "CASCADE",
+      },
+    ],
+  };
+
+  function liveComms(name: string, over: Partial<LiveTable["foreignKeys"][number]> = {}): LiveTable {
+    return liveTable(
+      "comms",
+      [
+        { name: "tenant_id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+      ],
+      {
+        indexes: [
+          { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+        ],
+        foreignKeys: [
+          {
+            name,
+            columns: ["tenant_id", "id"],
+            targetSchema: "meta",
+            targetTable: "incidents",
+            targetColumns: ["tenant_id", "id"],
+            onDelete: "CASCADE",
+            onUpdate: "NO ACTION",
+            ...over,
+          },
+        ],
+      },
+    );
+  }
+
+  it("claims a key under another name rather than reporting it twice", () => {
+    const d = diffSchema([target], liveSchema([liveComms("comms_tenant_id_id_fkey")]));
+    const table = d.modifiedTables[0];
+    expect(table?.addedConstraints).toEqual([]);
+    expect(table?.removedForeignKeys).toEqual([]);
+    expect(table?.changedConstraints[0]?.reasons).toEqual(["name"]);
+    expect(table?.changedConstraints[0]?.liveName).toBe("comms_tenant_id_id_fkey");
+    expect(table?.changedConstraints[0]?.detail).toContain(
+      "named 'comms_tenant_id_id_fkey' → 'comms_incident_fkey'",
+    );
+  });
+
+  it("prefers the name when it matches, and carries no live name then", () => {
+    const d = diffSchema([target], liveSchema([
+      liveComms("comms_incident_fkey", { onDelete: "RESTRICT" }),
+    ]));
+    const delta = d.modifiedTables[0]?.changedConstraints[0];
+    expect(delta?.reasons).toEqual(["on_delete"]);
+    expect(delta?.liveName).toBeUndefined();
+  });
+
+  it("does not match a key over the same columns pointing somewhere else", () => {
+    const d = diffSchema([target], liveSchema([
+      liveComms("comms_other_fkey", { targetTable: "tenants" }),
+    ]));
+    const table = d.modifiedTables[0];
+    expect(table?.addedConstraints).toEqual([{ name: "comms_incident_fkey", kind: "foreign_key" }]);
+    expect(table?.removedForeignKeys.map((f) => f.name)).toEqual(["comms_other_fkey"]);
+  });
+
+  it("does not match a key over different columns", () => {
+    const d = diffSchema([target], liveSchema([
+      liveComms("comms_other_fkey", { columns: ["id", "tenant_id"] }),
+    ]));
+    expect(d.modifiedTables[0]?.addedConstraints).toEqual([
+      { name: "comms_incident_fkey", kind: "foreign_key" },
+    ]);
+  });
+
+  it("leaves the single-column inline path matching by column, not by this fallback", () => {
+    const inline: TableDefinition = {
+      schema: "meta",
+      name: "comms",
+      columns: [
+        { name: "tenant_id", type: "UUID", notNull: true, references: { schema: "meta", table: "tenants", column: "id", onDelete: "CASCADE" } },
+        { name: "id", type: "UUID", notNull: true },
+      ],
+      primaryKey: ["id"],
+    };
+    const d = diffSchema([inline], liveSchema([
+      liveTable(
+        "comms",
+        [
+          { name: "tenant_id", dataType: "uuid", isNullable: false, defaultExpr: null },
+          { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+        ],
+        {
+          indexes: [
+            { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+          ],
+          foreignKeys: [
+            {
+              // Not the name Postgres would pick, and it does not have to be: a column-level
+              // reference is matched by its column.
+              name: "whatever_it_was_called",
+              columns: ["tenant_id"],
+              targetSchema: "meta",
+              targetTable: "tenants",
+              targetColumns: ["id"],
+              onDelete: "CASCADE",
+              onUpdate: "NO ACTION",
+            },
+          ],
+        },
+      ),
+    ]));
+    expect(d.hasDrift).toBe(false);
+  });
+});

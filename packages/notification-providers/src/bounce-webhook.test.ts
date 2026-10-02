@@ -1,7 +1,17 @@
+import {
+  findActiveSuppression,
+  NOTIFICATION_CHANNELS,
+} from "@crossengin/notifications";
 import { describe, expect, it } from "vitest";
 
 import {
+  ADDRESS_NORMALIZATION_RULES,
+  CHANNEL_ADDRESS_NORMALIZATION,
   DEFAULT_BOUNCE_TOLERANCE_SECONDS,
+  normalizeEmailAddress,
+  normalizeOpaqueAddress,
+  normalizePhoneAddress,
+  normalizeRecipientAddress,
   handleBounceWebhook,
   planSuppression,
   recognizeSesEvent,
@@ -447,5 +457,216 @@ describe("planning a suppression", () => {
         providerCode: null,
       }),
     ).toBe("twilio sms_failure");
+  });
+});
+
+describe("address normalization", () => {
+  it("maps every channel to a rule", () => {
+    for (const channel of NOTIFICATION_CHANNELS) {
+      expect(ADDRESS_NORMALIZATION_RULES).toContain(
+        CHANNEL_ADDRESS_NORMALIZATION[channel],
+      );
+    }
+  });
+
+  it("gives the sms and voice channels the same rule, and not the email one", () => {
+    expect(CHANNEL_ADDRESS_NORMALIZATION.sms).toBe("phone");
+    expect(CHANNEL_ADDRESS_NORMALIZATION.voice_call).toBe("phone");
+    expect(CHANNEL_ADDRESS_NORMALIZATION.email).toBe("email");
+  });
+
+  it("is idempotent for every rule, on every channel", () => {
+    const samples = [
+      "Bounced@Example.test",
+      "<Gone@Example.TEST>",
+      "+1 (555) 123-4567",
+      "tel:+15551234567",
+      "11111111-1111-4111-8111-111111111111".toUpperCase(),
+      "dQw4w9WgXcQ:APA91bH_Token",
+      "https://hook.example.test/Path",
+    ];
+    for (const channel of NOTIFICATION_CHANNELS) {
+      for (const sample of samples) {
+        const once = normalizeRecipientAddress(channel, sample);
+        expect(normalizeRecipientAddress(channel, once)).toBe(once);
+      }
+    }
+  });
+
+  it("never lengthens an address, so the column bound still holds", () => {
+    for (const channel of NOTIFICATION_CHANNELS) {
+      for (const sample of ["  A@B.test ", "+1 555 123 4567", "<x@y.test>"]) {
+        expect(
+          normalizeRecipientAddress(channel, sample).length,
+        ).toBeLessThanOrEqual(sample.length);
+      }
+    }
+  });
+
+  describe("email", () => {
+    it("folds case across the whole address", () => {
+      expect(normalizeEmailAddress("Bounced@Example.test")).toBe(
+        "bounced@example.test",
+      );
+    });
+
+    it("strips one surrounding pair of angle brackets", () => {
+      expect(normalizeEmailAddress(" <Gone@Example.test> ")).toBe(
+        "gone@example.test",
+      );
+    });
+
+    it("leaves a display form alone rather than parsing an address out of it", () => {
+      expect(normalizeEmailAddress('"Ops" <o@e.test>')).toBe('"ops" <o@e.test>');
+    });
+
+    it("keeps subaddressing, which would otherwise widen one bounce into many", () => {
+      expect(normalizeEmailAddress("Ops+Alerts@Example.test")).toBe(
+        "ops+alerts@example.test",
+      );
+      expect(normalizeEmailAddress("ops+alerts@example.test")).not.toBe(
+        normalizeEmailAddress("ops@example.test"),
+      );
+    });
+  });
+
+  describe("phone", () => {
+    it("drops the punctuation a provider or a human writes", () => {
+      expect(normalizePhoneAddress("+1 (555) 123-4567")).toBe("+15551234567");
+      expect(normalizePhoneAddress(" tel:+1.555.123.4567 ")).toBe("+15551234567");
+      expect(normalizePhoneAddress("555 123 4567")).toBe("5551234567");
+    });
+
+    it("neither adds nor removes the leading plus", () => {
+      expect(normalizePhoneAddress("15551234567")).toBe("15551234567");
+      expect(normalizePhoneAddress("+15551234567")).toBe("+15551234567");
+      expect(normalizePhoneAddress("15551234567")).not.toBe(
+        normalizePhoneAddress("+15551234567"),
+      );
+    });
+
+    it("leaves a value that is not a phone number untouched beyond trimming", () => {
+      // Live, not hypothetical: the recipient directory hands sms and voice an email today.
+      expect(normalizePhoneAddress(" ops@example.test ")).toBe("ops@example.test");
+      expect(normalizePhoneAddress("+1-555-EXT")).toBe("+1-555-EXT");
+    });
+  });
+
+  describe("opaque", () => {
+    it("lowercases a UUID, which is what the resolver supplies for in_app and push", () => {
+      const upper = TEST_TENANT_ID.toUpperCase();
+      expect(normalizeOpaqueAddress(upper)).toBe(TEST_TENANT_ID);
+    });
+
+    it("never folds the case of a push registration token", () => {
+      const token = "dQw4w9WgXcQ:APA91bHShapeOnly_0123456789abcdefgh";
+      expect(normalizeOpaqueAddress(` ${token} `)).toBe(token);
+    });
+
+    it("never folds the case of a webhook url path", () => {
+      expect(normalizeOpaqueAddress("https://Hook.example.test/Path")).toBe(
+        "https://Hook.example.test/Path",
+      );
+    });
+  });
+});
+
+describe("planSuppression normalizes before deriving the id", () => {
+  it("plans the lowercased address an email bounce actually mails", () => {
+    const planned = planSuppression({
+      tenantId: TEST_TENANT_ID,
+      channel: "email",
+      recipientAddress: "Bounced@Example.test",
+      reason: "hard_bounce",
+      appliedAt: NOW,
+      expiresAt: null,
+    });
+    expect(planned?.recipientAddress).toBe("bounced@example.test");
+  });
+
+  it("gives two spellings of one address the same id, so a replay re-asserts one row", () => {
+    const ids = ["Bounced@Example.test", "bounced@example.test", "<BOUNCED@EXAMPLE.TEST>"].map(
+      (recipientAddress) =>
+        planSuppression({
+          tenantId: TEST_TENANT_ID,
+          channel: "email",
+          recipientAddress,
+          reason: "hard_bounce",
+          appliedAt: NOW,
+          expiresAt: null,
+        })?.id,
+    );
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it("keeps the id a commitment to the address the row actually holds", () => {
+    const planned = planSuppression({
+      tenantId: TEST_TENANT_ID,
+      channel: "email",
+      recipientAddress: "Bounced@Example.test",
+      reason: "hard_bounce",
+      appliedAt: NOW,
+      expiresAt: null,
+    });
+    expect(planned?.id).toBe(
+      suppressionIdFor({
+        tenantId: TEST_TENANT_ID,
+        channel: "email",
+        recipientAddress: planned?.recipientAddress ?? "",
+        reason: "hard_bounce",
+      }),
+    );
+  });
+
+  it("normalizes an sms number by format, not by case", () => {
+    const planned = planSuppression({
+      tenantId: TEST_TENANT_ID,
+      channel: "sms",
+      recipientAddress: "+1 (555) 123-4567",
+      reason: "hard_bounce",
+      appliedAt: NOW,
+      expiresAt: null,
+    });
+    expect(planned?.recipientAddress).toBe("+15551234567");
+  });
+
+  it("matches a mixed-case SES bounce against the address the platform sends to", () => {
+    const result = handleBounceWebhook(
+      signed(sesBounceEvent({ addresses: ["Bounced@Example.test"] })),
+      OPTIONS,
+    );
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) return;
+    expect(result.suppressions[0]?.recipientAddress).toBe("bounced@example.test");
+    // The event keeps the provider's verbatim claim; only the planned row is canonical.
+    expect(result.event.addresses).toEqual(["Bounced@Example.test"]);
+    expect(
+      findActiveSuppression(
+        result.suppressions,
+        "email",
+        "bounced@example.test",
+        NOW,
+      ),
+    ).not.toBeNull();
+  });
+
+  it("matches a differently formatted Twilio number against the stored one", () => {
+    const result = handleBounceWebhook(
+      signed(
+        twilioStatusCallback({
+          MessageStatus: "failed",
+          To: "+1 (555) 123-4567",
+          ErrorCode: "21211",
+          MessageSid: "SM1",
+        }),
+        { source: "twilio" },
+      ),
+      OPTIONS,
+    );
+    expect(result.accepted).toBe(true);
+    if (!result.accepted) return;
+    expect(
+      findActiveSuppression(result.suppressions, "sms", "+15551234567", NOW),
+    ).not.toBeNull();
   });
 });

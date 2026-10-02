@@ -291,6 +291,11 @@ function fcmCode(code: string): string {
  * - a configuration code, or 401/403 → `failed` (retryable), per ADR-0274.
  * - any other 4xx → `dropped` (terminal): the identical retry cannot succeed, and `INVALID_ARGUMENT`
  *   is a malformed message of ours, not evidence about the recipient — so it must not bounce.
+ *
+ * Only a *named* code bounces. A bodyless 404 is not read as `UNREGISTERED` even though that is its
+ * usual cause, because a wrong project id answers 404 on the path as well — and suppressing every
+ * device in a deployment over an environment variable is the error worth avoiding. Without a code it
+ * falls through to `dropped`: terminal for this attempt, but no suppression.
  */
 export function classifyFcmFailure(
   status: number,
@@ -304,7 +309,7 @@ export function classifyFcmFailure(
     return { outcome: "failed", errorCode: suffix ?? "fcm_server_error" };
   }
   if (code !== null && FCM_PERMANENT_RECIPIENT_CODES.includes(code)) {
-    return { outcome: "bounced_hard", errorCode: suffix ?? "fcm_unregistered" };
+    return { outcome: "bounced_hard", errorCode: fcmCode(code) };
   }
   if (
     (code !== null && FCM_CONFIGURATION_CODES.includes(code)) ||

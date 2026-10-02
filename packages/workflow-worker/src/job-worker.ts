@@ -1,5 +1,5 @@
-import { processJobBatch, type JobBatchResult } from "./job-batch.js";
-import type { JobClaimer, JobProcessor } from "./job-types.js";
+import { processJobBatch, type JobBatchResult, type JobSkipReason } from "./job-batch.js";
+import type { ClaimedJob, JobCancellationWatcher, JobClaimer, JobProcessor } from "./job-types.js";
 
 export interface WorkflowJobWorkerOptions {
   /** Stable id recorded on claimed rows; distinct per process for lease ownership + observability. */
@@ -20,6 +20,14 @@ export interface WorkflowJobWorkerOptions {
   readonly onError?: (err: unknown) => void;
   /** Notified with each completed batch result (metrics / logging). */
   readonly onBatch?: (result: JobBatchResult) => void;
+  /**
+   * Consulted before each claimed run is started, so a cancellation recorded while the run sat in a
+   * claimed batch is honoured before the handler is entered. Absent, the worker starts every run it
+   * claims and cancellation is left entirely to the claim predicate and the processor.
+   */
+  readonly cancellation?: JobCancellationWatcher;
+  /** Notified for each claimed run that was handed back instead of started. */
+  readonly onSkipped?: (job: ClaimedJob, reason: JobSkipReason) => void;
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -49,8 +57,15 @@ export class WorkflowJobWorker {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError: ((err: unknown) => void) | undefined;
   private readonly onBatch: ((result: JobBatchResult) => void) | undefined;
+  private readonly cancellation: JobCancellationWatcher | undefined;
+  private readonly onSkipped: ((job: ClaimedJob, reason: JobSkipReason) => void) | undefined;
 
   private running = false;
+  /**
+   * Distinct from `running`: it gates the *batch*, not the loop, and stays false for a direct
+   * `runOnce()` so a caller driving single cycles is not told the worker is shutting down.
+   */
+  private stopping = false;
   private loop: Promise<void> | null = null;
 
   constructor(opts: WorkflowJobWorkerOptions) {
@@ -65,16 +80,27 @@ export class WorkflowJobWorker {
     this.sleep = opts.sleep ?? defaultSleep;
     this.onError = opts.onError;
     this.onBatch = opts.onBatch;
+    this.cancellation = opts.cancellation;
+    this.onSkipped = opts.onSkipped;
   }
 
-  /** Runs a single poll cycle (claim → process → release-failures) and returns its result. */
+  /** Runs a single poll cycle (claim → clear → process → release the rest) and returns its result. */
   async runOnce(): Promise<JobBatchResult> {
-    return processJobBatch(this.claimer, this.processor, {
-      workerId: this.workerId,
-      now: this.now().toISOString(),
-      limit: this.batchLimit,
-      leaseMs: this.leaseMs,
-    });
+    return processJobBatch(
+      this.claimer,
+      this.processor,
+      {
+        workerId: this.workerId,
+        now: this.now().toISOString(),
+        limit: this.batchLimit,
+        leaseMs: this.leaseMs,
+      },
+      {
+        ...(this.cancellation !== undefined ? { cancellation: this.cancellation } : {}),
+        ...(this.onSkipped !== undefined ? { onSkipped: this.onSkipped } : {}),
+        shouldContinue: () => !this.stopping,
+      },
+    );
   }
 
   get isRunning(): boolean {
@@ -84,6 +110,7 @@ export class WorkflowJobWorker {
   /** Starts the poll loop (idempotent). Returns immediately; use `stop()` to await a clean halt. */
   start(): void {
     if (this.running) return;
+    this.stopping = false;
     this.running = true;
     this.loop = (async () => {
       while (this.running) {
@@ -100,8 +127,13 @@ export class WorkflowJobWorker {
     })();
   }
 
-  /** Signals the loop to stop and awaits the in-flight cycle. */
+  /**
+   * Signals the loop to stop and awaits the in-flight cycle. The in-flight *batch* stops too: its
+   * remaining claims are released rather than executed, so "no further items will start" holds for a
+   * shutdown as well as for a cancellation.
+   */
   async stop(): Promise<void> {
+    this.stopping = true;
     this.running = false;
     const loop = this.loop;
     this.loop = null;

@@ -23,15 +23,36 @@ import {
   columnIndex,
   columnPlansForManifest,
   joinTablePlansForManifest,
+  plansRequirePgcrypto,
   relationDeleteIndex,
-  topologicalEntityOrder,
   type ColumnMapping,
   type EntityTablePlan,
   type JoinTablePlan,
 } from "./column-plan.js";
-import { emitEntityTableDdl, emitForeignKeyDdl, emitJoinTableDdl } from "./entity-ddl.js";
+import { emitManifestSchemaDdl } from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
+
+/**
+ * Provisions the database-wide extensions this store's DDL depends on: `pgcrypto`
+ * only when some column is stored as ciphertext, and `unaccent` + `pg_trgm`
+ * always — the `contains` (substring) filter folds accents through `unaccent()`
+ * and is accelerated by the per-text-column trigram GIN indexes the entity DDL
+ * emits.
+ *
+ * Separate from the schema DDL because installing an extension is a
+ * database-wide act, not part of any one schema, and because the per-tenant
+ * applier runs its schema DDL inside a transaction while extension provisioning
+ * is shared ground that must not be rolled back with one tenant's refusal.
+ */
+export async function ensureColumnStoreExtensions(
+  conn: PgConnection,
+  needsPgcrypto: boolean,
+): Promise<void> {
+  if (needsPgcrypto) await ensurePgcryptoExtension(conn);
+  await conn.query("CREATE EXTENSION IF NOT EXISTS unaccent;");
+  await conn.query("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
+}
 
 /**
  * The default SQL *reference* yielding the column-encryption key — never the raw
@@ -83,13 +104,6 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     this.keyRef = keyRef;
   }
 
-  private hasEncryptedColumns(): boolean {
-    for (const plan of this.plans.values()) {
-      if (plan.columns.some((c) => c.encryptAtRest)) return true;
-    }
-    return false;
-  }
-
   private planFor(entity: string): EntityTablePlan {
     const plan = this.plans.get(entity);
     if (plan === undefined) throw new Error(`no column plan for entity '${entity}'`);
@@ -106,46 +120,23 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   /**
-   * Applies idempotent DDL for every entity table. Two-phase: all tables are
-   * created first (in topological reference order — a referenced table before
-   * the one that references it), then all foreign keys are added once every
-   * target exists. The two-phase split keeps reference *cycles* safe to apply.
+   * Applies idempotent DDL for every entity table — the extensions the plans
+   * need, then `emitManifestSchemaDdl`'s single ordered sequence (schema →
+   * tables in topological reference order → foreign keys → join tables).
+   *
+   * The sequence is a shared function rather than a loop here because
+   * `applyTenantManifestSchema` applies the same one to a tenant's own schema:
+   * two call sites, one order, so a tenant-owned table cannot drift from a
+   * shared one.
    */
   async ensureSchema(): Promise<void> {
     const schema = [...this.plans.values()][0]?.schema;
     if (schema !== undefined) {
       await this.conn.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schema)};`);
     }
-    if (this.hasEncryptedColumns()) {
-      await ensurePgcryptoExtension(this.conn);
-    }
-    // Substring search (the `contains` filter) folds accents via unaccent() and
-    // is accelerated by per-text-column pg_trgm GIN indexes (emitted in the
-    // entity-table DDL). Both extensions are provisioned idempotently.
-    await this.conn.query("CREATE EXTENSION IF NOT EXISTS unaccent;");
-    await this.conn.query("CREATE EXTENSION IF NOT EXISTS pg_trgm;");
-    const order = topologicalEntityOrder(this.plans);
-    for (const name of order) {
-      const plan = this.plans.get(name);
-      if (plan === undefined) continue;
-      for (const stmt of emitEntityTableDdl(plan)) {
-        await this.conn.query(stmt);
-      }
-    }
-    const known = new Set(this.plans.keys());
-    for (const name of order) {
-      const plan = this.plans.get(name);
-      if (plan === undefined) continue;
-      const onDeleteFor = (field: string): OnDelete | undefined => this.deletePolicies.get(`${plan.entity}.${field}`);
-      for (const stmt of emitForeignKeyDdl(plan, known, onDeleteFor)) {
-        await this.conn.query(stmt);
-      }
-    }
-    // phase 3: many_to_many join tables (their FKs reference entity tables, now created)
-    for (const joinPlan of this.joinPlans) {
-      for (const stmt of emitJoinTableDdl(joinPlan, known)) {
-        await this.conn.query(stmt);
-      }
+    await ensureColumnStoreExtensions(this.conn, plansRequirePgcrypto(this.plans));
+    for (const stmt of emitManifestSchemaDdl(this.plans, this.joinPlans, this.deletePolicies)) {
+      await this.conn.query(stmt);
     }
   }
 
