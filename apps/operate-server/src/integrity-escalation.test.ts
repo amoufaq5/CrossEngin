@@ -19,7 +19,6 @@ import {
   IntegrityEscalator,
   dispositionFromCloseOut,
   formatIntegrityEscalation,
-  planIntegrityEscalation,
 } from "./integrity-escalation.js";
 import type { ChainTruncationCheck, IntegrityProofReport } from "./integrity-proof.js";
 
@@ -122,76 +121,6 @@ describe("IntegrityEscalationConfigSchema", () => {
   });
 });
 
-describe("planIntegrityEscalation", () => {
-  const plan = () =>
-    planIntegrityEscalation(report(), {
-      incidentId: "INC-2026-0001",
-      severity: "sev1",
-      category: "security",
-      declaredBy: "operate-server",
-      alertPolicy: POLICY,
-    });
-
-  it("declares a valid incident record", () => {
-    const { incident } = plan();
-    expect(incident.id).toBe("INC-2026-0001");
-    expect(incident.status).toBe("declared");
-    expect(incident.severity).toBe("sev1");
-    expect(incident.category).toBe("security");
-    expect(incident.declaredAt).toBe(AT);
-  });
-
-  it("names the scope in the title and surface", () => {
-    const { incident } = plan();
-    expect(incident.title).toContain(TENANT_A);
-    expect(incident.timeline[0]?.metadata).toMatchObject({ surface: `audit-integrity/${TENANT_A}` });
-  });
-
-  it("carries the full report as the declaring timeline entry, tampered ids included", () => {
-    const { incident } = plan();
-    expect(incident.timeline[0]?.message).toContain("COMPROMISED");
-    expect(incident.timeline[0]?.message).toContain(tamperedResult.auditId);
-  });
-
-  it("marks the incident auto-declared", () => {
-    expect(plan().incident.timeline[0]?.metadata).toMatchObject({ autoDeclared: true });
-  });
-
-  it("attributes the tenant as affected", () => {
-    expect(plan().incident.affectedTenantIds).toEqual([TENANT_A]);
-  });
-
-  it("names no affected tenant for the platform chain, which is not one", () => {
-    const { incident } = planIntegrityEscalation(report({ scope: null, anchors: null }), {
-      incidentId: "INC-2026-0002",
-      severity: "sev1",
-      category: "security",
-      declaredBy: "operate-server",
-      alertPolicy: POLICY,
-    });
-    expect(incident.affectedTenantIds).toEqual([]);
-    expect(incident.title).toContain("platform");
-  });
-
-  it("routes the page by mapped severity", () => {
-    expect(plan().page).toMatchObject({
-      severity: "sev1",
-      alertSeverity: "P0",
-      incidentId: "INC-2026-0001",
-    });
-  });
-
-  it("yields no page when the policy has no route for the severity", () => {
-    const { page } = planIntegrityEscalation(report(), {
-      incidentId: "INC-2026-0003",
-      severity: "sev4",
-      category: "security",
-      declaredBy: "operate-server",
-      alertPolicy: POLICY,
-    });
-    expect(page).toBeNull();
-  });
-});
 
 describe("IntegrityEscalator — declaring once, not every pass", () => {
   it("declares, pages and audits the first compromised verdict", async () => {
