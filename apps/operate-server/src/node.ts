@@ -225,6 +225,36 @@ export interface NodeResLike {
 export const MAX_REQUEST_BODY_BYTES = DEFAULT_MAX_REQUEST_BODY_BYTES;
 
 /** The dispatch surface the Node listener needs — an `OperateHttpServer` or a per-tenant wrapper. */
+/**
+ * The options that need a `PostgresAuditEmitter` wired, as a named predicate rather than a condition
+ * inline at the construction site.
+ *
+ * It is a function because the list has been forgotten twice. ADR-0288: gating the emitter on
+ * `--ai-design` meant a deployment running only `--integrity-proof-config` reported `audited=false`
+ * for every escalation, and the row that ADR relies on was never written. Then `--audit-read-routes`,
+ * whose recorder is *required*, was added without being added here — so the surface refused to mount
+ * and a deployment that asked for it silently got nothing. Found live, not by a test, because the
+ * condition was inline and nothing could assert over it.
+ *
+ * Every flag whose feature writes an audit row belongs here. The companion test walks `ServeOptions`
+ * and fails on a flag that looks like one and is missing.
+ */
+export function needsAuditEmitter(options: {
+  readonly aiDesign: boolean;
+  readonly perTenantManifests: boolean;
+  readonly designReview: boolean;
+  readonly auditReadRoutes: boolean;
+  readonly integrityProofConfig: string | null;
+}): boolean {
+  return (
+    options.aiDesign ||
+    options.perTenantManifests ||
+    options.designReview ||
+    options.auditReadRoutes ||
+    options.integrityProofConfig !== null
+  );
+}
+
 export interface DispatchTarget {
   dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse>;
 }
@@ -521,17 +551,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     auditConfig = await loadAuditChainConfig(options.auditChainConfig);
     auditChainProducer = auditChainStore(conn, auditConfig);
   }
-  // Built for anything that writes audit rows, not only the design features: the integrity-proof
-  // escalation records `audit.integrity_compromised` here (ADR-0288), and gating the emitter on
-  // --ai-design meant a deployment running only --integrity-proof-config reported `audited=false`
-  // for every escalation — the row ADR-0288 relies on was never written.
-  if (
-    conn !== undefined &&
-    (options.aiDesign ||
-      options.perTenantManifests ||
-      options.designReview ||
-      options.integrityProofConfig !== null)
-  ) {
+  if (conn !== undefined && needsAuditEmitter(options)) {
     auditEmitter = new PostgresAuditEmitter(conn, {
       ...schemaOpt,
       // No chain configured ⇒ rows are written unanchored. Verification reports them as
@@ -644,8 +664,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // so without the chain-backed emitter there is nothing to record into and the surface stays
       // closed rather than opening a privileged read that leaves no trace.
       console.warn(
-        "[audit] --audit-read-routes requires --audit-chain-config (reads of the trail are " +
-          "themselves audited, and an unrecordable read is refused); skipping",
+        "[audit] --audit-read-routes has no audit emitter (reads of the trail are themselves " +
+          "audited, and an unrecordable read is refused); skipping",
       );
     } else {
       if (

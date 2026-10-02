@@ -1,10 +1,10 @@
 # ADR index
 
-302 records. Generated from the ADR files themselves — regenerate rather than
+310 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 223  **Proposed:** 79
+- **Accepted:** 231  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -314,3 +314,11 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0305](0305-child-workflows.md) | Spawning child workflows — the last stub | Phase 4 | Accepted | 2026-10-01 |
 | [0306](0306-local-provider-in-product.md) | Routing the in-product Architect through the local provider | Phase 4 | Accepted | 2026-10-01 |
 | [0307](0307-typechecking-test-files.md) | Typechecking the test files | Phase 4 | Accepted | 2026-10-01 |
+| [0308](0308-renames-and-deliberate-loosening.md) | The reconciler learns to rename, and to loosen when told | — | Accepted | 2026-10-02 |
+| [0309](0309-notification-read-state-quiet-hours-and-dedup.md) | Read state, per-user quiet hours, and a dedup hash with a reader | — | Accepted | 2026-10-02 |
+| [0310](0310-push-and-voice-senders.md) | Push and voice senders, and a push payload that cannot carry content | — | Accepted | 2026-10-02 |
+| [0311](0311-per-request-ai-cost-and-diagnosable-design-failures.md) | A per-request AI cost ceiling, and design failures that say what went wrong | — | Accepted | 2026-10-02 |
+| [0312](0312-the-request-body-cap-becomes-configuration.md) | The request body cap becomes configuration, and the two adapters share it | — | Accepted | 2026-10-02 |
+| [0313](0313-reading-the-audit-trail-and-authoring-templates-over-http.md) | Reading the audit trail, and authoring templates, over HTTP | — | Accepted | 2026-10-02 |
+| [0314](0314-a-tenant-serving-its-own-manifest-gets-its-own-schema.md) | A tenant serving its own manifest gets its own schema | — | Accepted | 2026-10-02 |
+| [0315](0315-durable-job-cancellation.md) | Durable job cancellation, with four named checkpoints | — | Accepted | 2026-10-02 |

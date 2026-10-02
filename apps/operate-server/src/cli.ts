@@ -573,6 +573,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if ((aiDesign || perTenantManifests) && store === "memory") {
     throw new CliUsageError("--ai-design / --per-tenant-manifests require a Postgres store (--store pg or pg-columns)");
   }
+  if ((auditReadRoutes || notificationTemplateRoutes) && store === "memory") {
+    // Refused here rather than warned about at boot, like every sibling above: both surfaces read and
+    // write `meta.*` tables, so on the memory store they cannot work at all — and `--audit-read-routes`
+    // in particular would otherwise start a server that silently serves none of what was asked for.
+    throw new CliUsageError(
+      "--audit-read-routes / --notification-template-routes require a Postgres store (--store pg or pg-columns)",
+    );
+  }
   if (stripeWebhookSecret !== null && store === "memory") {
     throw new CliUsageError("--stripe-webhook-secret requires a Postgres store (--store pg or pg-columns)");
   }

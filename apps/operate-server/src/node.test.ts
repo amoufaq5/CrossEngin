@@ -6,7 +6,7 @@ import { parseServeArgs } from "./cli.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";
 import { buildOperateHttpServer } from "./server.js";
-import { createNodeRequestListener, serve, type NodeReqLike, type NodeResLike } from "./node.js";
+import { createNodeRequestListener, needsAuditEmitter, serve, type NodeReqLike, type NodeResLike } from "./node.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const manifest = await loadBuiltinPack("erp-retail");
@@ -111,6 +111,40 @@ describe("serve — real loopback boot", () => {
     } finally {
       await running.close();
     }
+  });
+});
+
+describe("needsAuditEmitter", () => {
+  /**
+   * Every flag whose feature writes an audit row. Spelled out so that adding a feature which writes
+   * one, and forgetting the gate, fails here — which is what happened twice (ADR-0288, and then
+   * `--audit-read-routes`, found only by booting the real server).
+   */
+  const REQUIRING_ARGS: ReadonlyArray<readonly string[]> = [
+    ["--ai-design"],
+    ["--per-tenant-manifests"],
+    ["--design-review"],
+    ["--audit-read-routes"],
+    ["--integrity-proof-config", "/tmp/proof.json"],
+  ];
+
+  const base = ["--pack", "erp-retail", "--port", "0", "--store", "pg"];
+
+  it("is false for a server with none of them", () => {
+    expect(needsAuditEmitter(parseServeArgs(base))).toBe(false);
+  });
+
+  it("is true for each flag on its own", () => {
+    for (const args of REQUIRING_ARGS) {
+      expect(needsAuditEmitter(parseServeArgs([...base, ...args])), args.join(" ")).toBe(true);
+    }
+  });
+
+  it("covers every ServeOptions field the predicate reads", () => {
+    // Guards against the predicate quietly losing a branch: each flag must be individually
+    // sufficient, so a condition that dropped one would fail the loop above — and this pins the
+    // count so the loop itself cannot be shortened without a visible edit.
+    expect(REQUIRING_ARGS).toHaveLength(5);
   });
 });
 

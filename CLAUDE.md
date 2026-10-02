@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 302 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 310 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**86 packages + 3 apps, 140 meta-schema tables, ~10,820 tests**, all green, no
+**86 packages + 3 apps, 143 meta-schema tables, ~11,190 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -53,9 +53,16 @@ increment. See **What's actually left** at the bottom for the current open ends.
 - **Tenant isolation by RLS.** Tenant-scoped tables enable row-level security
   with `tenant_id = current_setting('app.current_tenant_id', true)::UUID`.
   Platform-wide tables skip RLS. Both are enforced by the meta-schema test suite.
+  The predicate is `NULLIF`-guarded for a measured reason: `current_setting('app.current_tenant_id',
+  true)` answers NULL only until the setting has been *used once* on a connection, after which its reset
+  value is `''` — and `''::UUID` **raises**, so an unguarded cast fails on every pooled connection that has
+  served a tenant, i.e. in production and not in a fresh psql session.
   Note: a table's **owner bypasses RLS** — verified empirically — so
-  cross-tenant reads are granted explicitly (e.g. `app.platform_review`), never
-  assumed from role.
+  cross-tenant reads are granted explicitly (e.g. `app.platform_review`,
+  `app.platform_audit`), never assumed from role. On `meta.audit_log` that grant is a **second,
+  `SELECT`-only policy** (ADR-0313) rather than an `OR` inside the isolation one: on an `ALL`-scope policy
+  the `USING` expression also serves as the `WITH CHECK`, so a combined form would let an elevated reader
+  forge an entry into another tenant's chain. Verified live as a non-owner role, in both directions.
 - **Strict TypeScript.** No `any`. No `--no-verify`. Explicit return types on
   exported functions.
 
@@ -90,7 +97,7 @@ packages exist at only one layer, noted below where that is true.
 ### Substrate (the kernel itself)
 
 - **`kernel`** — the meta-schema and manifest compiler. Four areas: `bootstrap/`
-  (`META_TABLES`, the catalog of **140** platform Postgres tables, plus deterministic DDL
+  (`META_TABLES`, the catalog of **143** platform Postgres tables, plus deterministic DDL
   emit), `ddl/` (the DDL *vocabulary* — `resolvedFields`, field→Postgres types, built-in
   traits, column naming, default rendering, identifier quoting, structural entity diff;
   it does **not** emit entity tables, `operate-runtime-pg` does — ADR-0284),
@@ -169,6 +176,19 @@ packages exist at only one layer, noted below where that is true.
   migrates additively (`ADD COLUMN IF NOT EXISTS`), so a manifest that gains a field no
   longer bricks the boot. Plus sequence allocator, settings, entitlement, subscription
   stores, Stripe webhook ingest and dangling-link pruning.
+  **A tenant serving its own activated manifest gets its own Postgres schema** (ADR-0314), not a share of
+  the boot tables — two tenants author independently, so A's `Invoice` and B's `Invoice` are different
+  types with the same name, and `ADD COLUMN IF NOT EXISTS` matches on *name only*, so a shared table would
+  let B read integers through A's text column while reporting success. Per-*schema* rather than a table
+  prefix because the schema is the one axis `columnPlansForManifest` / `emitEntityTableDdl` /
+  `ColumnMappedEntityStore` already take, so a tenant's tables come out of the same emitter with the same
+  `tenant_id`, primary key, composite FKs and RLS policy. The schema is **not** the isolation boundary —
+  `tenant_id` and its policy still are — it is a schema-*evolution* boundary.
+  `TenantColumnStoreRegistry.ensure` is the whole lifecycle (idempotent, memoised on the manifest hash,
+  an advisory xact lock per tenant so two replicas cannot race the `DROP POLICY`/`CREATE POLICY` pair, a
+  refusal memoised for 60s so an operator's fix is picked up without a restart); `storeFor` is
+  deliberately synchronous and does not provision; `TenantColumnStoreRouter` routes **per call** to the
+  tenant's store or the JSONB fallback.
 
 ### Request edge
 
@@ -206,12 +226,25 @@ packages exist at only one layer, noted below where that is true.
   `PostgresJobRunEngine` with a job handler registry and enqueue path.
 - **`workflow-worker`** — the thin generic worker loop over those claims: batch processing,
   lease renewal while a handler runs, and three concrete workers (timer, activity, job).
-  Small by design — the logic lives in `workflow-runtime-pg`.
+  Small by design — the logic lives in `workflow-runtime-pg`. `abortWhile` (ADR-0315) is the cooperative
+  half of cancellation: it gives the task an `AbortSignal`, not a kill, and a probe that **throws
+  mid-flight does not abort** — the handler is already part-done and a database blip is not a
+  cancellation. That is the opposite choice from the pre-flight check in `processJobBatch`
+  (`cancellation_unknown` skips the item), where nothing has been done yet and deferring costs nothing.
+  Two answers to "what if we cannot tell?", each correct for its position.
 - **`workflow-signal-bridge`** — verifies an inbound webhook's HMAC, extracts a correlation
   key by field path, and submits a signal to the workflow runtime; ships as a registered
   gateway handler with typed bridge outcomes → HTTP statuses.
 - **`jobs`** — contracts for background work: 6 job kinds, cron expressions, idempotency
-  keys, retry strategies, dead letters, per-run cost ledger, data-class tagging.
+  keys, retry strategies, dead letters, per-run cost ledger, data-class tagging. Also **cancellation**
+  (ADR-0315), whose contract is a bounded promise: `JOB_CANCELLATION_CHECKPOINTS` ×
+  `JOB_CANCELLATION_GUARANTEES` state that **a cancellation guarantees no further work will be *started***
+  — an arbitrary handler cannot be preempted, so it is *told* via an `AbortSignal` and a handler that
+  ignores it still lands `cancelled` rather than `completed`. The checkpoint is stored on the run, so the
+  guarantee is readable from the data rather than inferred from logs. `planJobCancellation` chooses between
+  cancelling now and recording the request; `workflow-runtime-pg`'s `requestJobCancellation` re-asserts the
+  premise *inside* the `UPDATE` predicate so a worker that claimed the run in between wins the row, and
+  `COALESCE`-stamps so cancelling twice is a no-op on the record.
 
 ### Identity, security, data protection
 
@@ -264,8 +297,16 @@ packages exist at only one layer, noted below where that is true.
 - **`ai-architect-pg`** — the Postgres transcript: four stores plus a `PostgresTranscript`
   implementing the `Transcript` lifecycle the chat engine emits into, so every proposal and
   its approval decision is auditable.
-- **`ai-architect-runtime`** — small: a per-session cost tracker and an
-  `ArchitectGuardRuntime` that admits or refuses a design request against budget and policy.
+- **`ai-architect-runtime`** — a per-session cost tracker and an `ArchitectGuardRuntime` that admits or
+  refuses a design request against budget and policy — now **per request** as well as per month
+  (ADR-0311): `estimateRequestCost` bounds the output by construction (`maxTokens` is provider-enforced,
+  and a request declaring none is `unbounded`, which a ceiling refuses) and heuristically on the input
+  (`ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic *because* it feeds a ceiling — over-counting
+  delays, under-counting admits), with `reconcileRequestCost` feeding the worst observed ratio back and
+  `StreamCostMeter` aborting a stream that runs past budget. Plus `classifyDesignOutput`, which splits a
+  failed design into `shape` (what the payload *is*) × `wrapper` (how it was *delivered*), so a fenced
+  manifest (recoverable) and a fenced array (the model answered the wrong question) stop landing in one
+  bucket.
 - **`ai-architect-runtime-pg`** — thin: a Postgres per-tenant monthly AI cost store backing
   that guard.
 
@@ -456,10 +497,26 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   and dispatch/delivery audit with retry, throttle, digest and quiet-hours decisions. Also the
   consent-vs-deliverability split: `UNCONDITIONAL_SUPPRESSION_REASONS` are the reasons a
   non-suppressible category does *not* override, because a hard bounce is not a preference (ADR-0302).
+  Plus (ADR-0309) per-user **read state** — a row per notice opened *and* a per-viewer watermark, because
+  only a watermark can answer for notices the reader was never shown, which is what a go-live backfill
+  needs; per-user **quiet hours**, where the timezone is the user's while the window may be the tenant's
+  (a tenant window of 22:00–07:00 silences a Tokyo user during *Tokyo's* night, a different absolute
+  interval — a window is a statement about the recipient's night) and which **fails open** to no policy,
+  because quiet hours only ever delays and never-sending is the worse failure; and `dispatchDedupHash`
+  over canonical sorted-key JSON through an injected hasher, byte-identical in behaviour to
+  `canonicalAuditEntryPayload` because `JSONB` does not preserve key order.
 - **`notification-providers`** — the impure senders behind `ChannelSender`: `SesEmailSender` (SES v2,
-  real SigV4 from `@crossengin/crypto`), `TwilioSmsSender` (form-encoded, Basic auth), and the bounce
-  parser that turns an SES or Twilio event into planned `SuppressionRecord`s — it plans, and writes
-  nothing. Zero runtime deps, injectable `fetch`, endpoint overrides for VPC endpoints and proxies.
+  real SigV4 from `@crossengin/crypto`), `TwilioSmsSender` (form-encoded, Basic auth), `FcmPushSender`
+  (FCM HTTP v1, with an injected `FcmAccessTokenProvider` — minting the token is a private key, a second
+  endpoint and a refresh cache, none of which belongs in a pure client), `TwilioVoiceSender` (the same
+  Account/credential/error vocabulary as SMS, imported rather than restated), and the bounce parser that
+  turns an SES or Twilio event into planned `SuppressionRecord`s — it plans, and writes nothing, and it
+  attributes each row to `provider:<source>`. Zero runtime deps, injectable `fetch`, endpoint overrides
+  for VPC endpoints and proxies. **A push payload may not vary with the notification's content**
+  (ADR-0310): everything sent is either a notice the deployment declared at construction or an identifier
+  already on the `SendRequest`, `pushPayloadViolations` checks that on every send, and `send` refuses
+  without calling FCM — so a composer that reaches for tenant data is a failed delivery, not a
+  lock-screen disclosure.
 - **`pwa`** — PWA manifest, service-worker cache strategies, IndexedDB outbox with
   conflict strategies, background sync, push (PHI-safe), Capacitor native wrapper config.
 - **`integrations`** — thin: 12 integration kinds (outbound/inbound HTTP, GraphQL, HL7,
@@ -488,9 +545,13 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   human-in-the-loop write approval and optional Postgres transcript), `license`, `version`,
   `help`. Every subcommand takes `--format human|json`; exit 0 / 1 / 2.
 - **`apps/operate-server`** — **long-running process**, the deployed serving binary and the
-  largest app (73 modules). A Node `http` listener over `buildOperateGateway` plus a
-  framework-neutral `dispatch` core with a Fetch/Workers edge adapter. Loads a builtin pack
-  or a manifest file (optionally per-tenant manifests with an activation poller), serves
+  largest app (79 modules). A Node `http` listener over `buildOperateGateway` plus a
+  framework-neutral `dispatch` core with a Fetch/Workers edge adapter — **both** now enforce one
+  configurable request-body cap (`--max-request-body`, default 10 MiB, floor 1 KiB, ceiling 1 GiB, refused
+  rather than clamped out of band, enforced per chunk as the body arrives; ADR-0312), where previously the
+  Fetch path had none. Loads a builtin pack
+  or a manifest file (optionally per-tenant manifests with an activation poller, each tenant's own
+  manifest provisioned into its own schema before its gateway is compiled — ADR-0314), serves
   from the in-memory / JSONB / column-mapped store, and wires in: API-key and JWT auth with
   local or remote JWKS and a background refresh poller; the hash-chained audit log with
   checkpointing and chain verification; notification delivery (planning, throttling,
@@ -498,7 +559,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   Twilio when fully configured, since all but the sender identity are credentials and argv is readable
   via `ps` (ADR-0301) — with `--bounce-webhook` closing the loop by recording provider bounces as
   suppressions, verified against the platform's own HMAC on the raw bytes in front of the gateway,
-  under a per-tenant key derived from `NOTIFICATION_BOUNCE_SECRET` (ADR-0302); the four read-only
+  under a per-tenant key derived from `NOTIFICATION_BOUNCE_SECRET` (ADR-0302);
+  **template authoring** (`--notification-template-routes`) with three fail-closed grants — author,
+  approver (four-eyes at three layers, the store's `UPDATE` carrying `created_by <> $actor` as a
+  predicate so a race cannot land one), and a separate grant for non-suppressible categories — which
+  **refuses** unsafe authored content rather than storing it, because a template body reaches a browser
+  as markup and `z.string().url()` accepts `javascript:alert(1)` (ADR-0313);
+  the **read-only audit trail** (`--audit-read-routes`) whose reads are themselves recorded, where an
+  unrecordable granted read is a 503 and a tenant naming another tenant is a 403 rather than a quietly
+  narrowed query (ADR-0313); **job-run cancellation** (`POST /v1/meta/jobs/runs/{id}/cancel`, gated on the
+  job-invoke roles, tenant from the credential, outcome reported as 200/202/409/404 — ADR-0315);
+  the four read-only
   audit-integrity verdict routes (`--audit-verdict-routes`, ADR-0303); the in-production AI Architect
   (`--ai-design`, local provider first — ADR-0306) with a
   budget guard, design jobs, and a design-review approval gate; access-review campaign
@@ -550,7 +621,7 @@ Recurring patterns enforced by zod `superRefine`:
 
 ## Meta-schema
 
-`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **140**
+`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **143**
 platform-level Postgres tables. Each new package adds tables there and updates
 `meta-schema.test.ts` (count, sorted expected-names list, column assertions).
 
@@ -582,7 +653,13 @@ because tests must not land in `dist`; `tsconfig.typecheck.json` — two lines p
 one plus `@crossengin/config/typescript/typecheck.json` — puts them back and sets `noEmit`. So the
 tests *are* typechecked, and a test double that stops satisfying its interface fails at `typecheck`
 rather than at runtime where a catch can swallow it. A new package needs that file or its `typecheck`
-fails.
+fails — and the rule is **enforced**, not merely conventional:
+`packages/testing/src/strategy/typecheck-config.ts` asserts against the real workspace that every package
+with a `src/` has the file, extends **both** bases (the local one carries the package's own
+`rootDir`/`include`; the shared one re-includes the tests and turns emit off — extending only one
+typechecks *something*, which is the dangerous outcome) and runs the one script. The two exemptions
+(`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
+`.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
 Full workspace build + typecheck + test is several minutes; run it backgrounded
 into a log rather than blocking on it. There is **no top-level lint script** —
@@ -684,16 +761,21 @@ opened them.
   every row satisfies, and the table is empty in every deployment — so declaring it would be correct on
   a fresh install and reported as drift on every existing one, forever. It becomes available once a
   deployment has flags.
-- **Removing a foreign key from the catalog does not remove it from an existing database** (ADR-0296).
-  ADR-0291 deliberately refuses to loosen integrity, so the four kill-switch `meta.users` references
-  are reported with manual SQL. A fresh install is correct; an existing one needs four
-  `DROP CONSTRAINT` statements before a kill switch can be written at all. Measured in both directions.
+- **Removing a foreign key from the catalog requires an explicit flag** (ADR-0296, ADR-0308).
+  `ReconciliationOptions.allowLoosening` turns the undeclared-foreign-key refusal into a real drop, which
+  is what the four kill-switch `meta.users` references of ADR-0296 needed. It is off by default and
+  reaches **foreign keys only** — not a column, table, index, policy or CHECK — because dropping a
+  foreign key is the one loosening that cannot fail against existing rows, which is what keeps
+  ADR-0290's invariant true. Nothing passes it yet; `crossengin-pg apply` would need a flag.
 - **Six indexes now have no reader** (ADR-0296) — they existed to make `ON DELETE RESTRICT` cheap on
   the foreign keys that reconciliation removed. Left in place deliberately: removing them from the
   catalog would leave them reported as undeclared on every drift check until someone drops them.
-- **The reconciler has no concept of a rename** (ADR-0300). Declaring a new name adds a column and
-  reports the old one as undeclared without dropping it, stranding a `NOT NULL` column that every insert
-  then fails on — which is why `meta.feature_flags.default_value` kept a name describing its old type.
+- **A rename is declared, not inferred** (ADR-0308). `ColumnDefinition.renamedFrom` names the column the
+  database may still hold this one under; `planSchemaReconciliation` emits the rename *first* for its
+  table, so every later statement names the column as the catalog declares it, and it is planned on a
+  populated table because no row is read. With **both** names live it refuses — nothing in the catalog
+  says which holds the data. The annotation is history that accumulates: it must stay as long as any
+  deployment might hold the old name, and nothing says when that is.
 - **A unique constraint cannot carry a predicate** (ADR-0302). `UniqueConstraint` is `{name, columns}`,
   so a partial uniqueness rule has to be declared in `indexes` with `unique: true` instead — and the
   predicate cannot mention `now()`, since Postgres requires an IMMUTABLE index predicate. Promoting one
@@ -715,12 +797,19 @@ opened them.
   invisible to hash links, so `--integrity-proof-config` must run alongside
   `--checkpoint-config` or its truncation check has no witness — and entries written
   *and* deleted between two checkpoints leave no trace at all.
-- **Two of 18 notification providers are implemented** (ADR-0301) — SES and Twilio, plus `in_app`. No
-  push or voice sender, and one platform-wide set of credentials, so every tenant sends from one domain.
-- **A suppression cannot name the provider that caused it** (ADR-0302). `applied_by` is a nullable UUID
-  foreign key to `meta.users`, so a bounce-driven row writes NULL — the fifth instance of ADR-0289's
-  column-narrower-than-its-contract finding. `source_delivery_id` carries the real provenance, so the
-  fact is not lost, only unreadable as "who".
+- **Four of 18 notification providers are implemented** (ADR-0301, ADR-0310) — SES, Twilio SMS, FCM push
+  and Twilio Voice, plus `in_app`. A push payload **may not vary with the notification's content**:
+  `pushPayloadViolations` checks that on every send and `send` refuses without calling FCM, because a
+  push body renders on a lock screen through Google's and Apple's servers, and opt-in is consent rather
+  than confidentiality. The two new senders are **not yet constructed from the environment** — FCM needs
+  an `FcmAccessTokenProvider`, which env vars cannot express. One platform-wide credential set per
+  provider, so every tenant still sends from one domain and calls from one number.
+- **A suppression names the provider, and `applied_by` stays nullable** (ADR-0302, ADR-0309). The column
+  is now TEXT holding `user:<uuid>` / `system:<slug>` / `provider:<slug>`, structured rather than free
+  text because `manual_block` must name a *human* and free text would let `system:ses` satisfy that; the
+  bounce webhook writes `provider:ses` / `provider:twilio`. It is still nullable, which is the one place
+  we did not tighten: every row written before this was NULL, and requiring an actor would make the
+  re-parse-on-read replayer refuse rows that were correct when written.
 - **`PostgresRecipientResolver.activeSuppressions` fails open on an unparseable row** (ADR-0302): it
   skips it, so the next drain mails the address the row existed to protect. The new store refuses
   instead. Reconciling them is a deliberate choice, because refusing turns one bad row into an outage
@@ -730,29 +819,55 @@ opened them.
   Normalising in the store would make the id — which commits to the exact address — a lie, so it belongs
   upstream in `planSuppression`.
 
+- **The push senders are built and unwired** (ADR-0310). `FcmPushSender` and `TwilioVoiceSender` exist and
+  are tested; `buildSenderRegistryFromEnv` does not construct them, because FCM takes an
+  `FcmAccessTokenProvider` (RS256-signing a JWT, a second endpoint, a refresh cache — or the instance
+  metadata server on GKE) and ADR-0301's rule is that a partially-configured provider is skipped rather
+  than guessed. Voice status callbacks are unused.
+- **Per-tenant column schemas are additive only, and nothing cleans them up** (ADR-0314). A tenant serving
+  its own manifest gets its own Postgres schema; a removed field's column is never dropped, a changed type
+  is never altered, ADR-0308's rename machinery does not reach there, and `tenant-lifecycle`'s deletion
+  path does not know the schema exists. A **refused** application is loud in the log and silent to the
+  tenant: they are served from the JSONB fallback, so their data is in a different place than they think
+  until an operator runs the reported SQL.
+- **The AI cost estimator is a heuristic on the input side** (ADR-0311). `maxTokens` bounds the output by
+  construction; the input is `ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic because the
+  number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
+  **per session** — a restart forgets that the estimator was optimistic. `classifyDesignOutput` diagnoses
+  a recoverable wrapper and nothing retries selectively on it yet.
 - **`failed` is both terminal and compensatable** (ADR-0307). It is in `TERMINAL_INSTANCE_STATUSES` and
   `INSTANCE_TRANSITIONS.failed` is `["compensating"]`, so `isInstanceTerminal` answers "done" for a status
   the map says you may still move. Deliberate for sagas, but the two disagree; a test pins the exception
   rather than resolving it, because which side should change is a lifecycle decision.
-- **`apps/operate-web` is typechecked separately** (ADR-0307) — it is a Next app outside the per-package
-  layout, so `pnpm -r typecheck` does not cover it; verify it with `npx tsc --noEmit` from its directory.
-  Nothing enforces that a new package carries a `tsconfig.typecheck.json` either, though a missing one
-  fails loudly rather than skipping.
+- **`apps/operate-web` uses its own tsconfig rather than the typecheck overlay** (ADR-0307, corrected).
+  It *is* a workspace member and `pnpm -r typecheck` does run it — the earlier claim that it did not was
+  wrong. It has no `*.test.ts` files, so there is nothing for the overlay to put back; a test added there
+  would not be covered by ADR-0307's rule. Its `npx next build` stays separate because that checks the
+  Next build, not the types. The rule itself is now **enforced**:
+  `packages/testing/src/strategy/typecheck-config.ts` asserts against the real workspace that every
+  package with a `src/` has the file, extends **both** bases, and runs the one script — with the two
+  exemptions spelled out as lines, so adding a third is visible in a diff.
 
 **Contained**
 
-- No per-user notification *read state*; "unread" is a recency approximation
-  (ADR-0273, 0278). Quiet hours is per-tenant only — no per-user window or
-  timezone (ADR-0275). `dedup_sha256` and `dispatched_at` unused (ADR-0276,
-  0277). No route authors a template or reads the audit trail over HTTP
-  (ADR-0277, 0279). Job cancellation is client-side only (ADR-0269). Per-request
-  AI cost ceilings (ADR-0267). Request bodies cap at 10 MiB → 413, a
-  platform-wide gap since P1.7 (ADR-0267). A weak model that drifts out of JSON
-  fails indistinguishably from any other design failure (ADR-0280).
-- Column-store migration is **additive only** (ADR-0283): a removed field's column
+- `dispatched_at` is still unused (ADR-0277). No route writes a read state or reads the *template*
+  audit trail over HTTP (ADR-0279). A platform-scoped audit read is recorded against the reader's own
+  tenant, because `meta.audit_log.tenant_id` is NOT NULL, so a reader with no resolvable tenant cannot
+  read at all (ADR-0313). `--audit-read-sensitive-role` grants unredacted payloads wholesale — per-class
+  grants (pii but not phi) are not expressible. A job handler that ignores its `AbortSignal` runs to
+  completion and commits its effects while the run records `cancelled`; the guarantee is deliberately
+  phrased as "no further work will be *started*" (ADR-0315). Nothing cancels a *workflow* instance's
+  timers or activities — cancellation is jobs only. `ESTIMATED_CHARS_PER_TOKEN` under-counts for CJK,
+  which is the unsafe direction for a ceiling (ADR-0311). A per-route or per-tenant request-body limit
+  is unaddressed; the cap is platform-wide (ADR-0312). Nothing drops a tenant's own schema when their
+  tenant is deleted, and a refused DDL application is invisible to the tenant — they are served from the
+  JSONB fallback rather than the tables they asked for (ADR-0314).
+- Column-store migration is **additive only** (ADR-0283, ADR-0314): a removed field's column
   is never dropped and a changed type is never altered, since both need a decision
-  about existing data. Per-tenant activated manifests still get no DDL at all — the
-  store is built from the boot manifest alone.
+  about existing data. Per-tenant activated manifests now *do* get DDL, into the tenant's
+  own schema; `tenant-schema-diff.ts` reports what the additive path will not do, with
+  `column_encryption_change` named first because a classification change is a type change
+  whose storage consequence is the part that matters.
 
 **Cosmetic** — per-field grant display, data-volume estimates on destructive
 diffs, dark theme, per-tenant branding (ADR-0265, 0266, 0271, 0272).
@@ -764,7 +879,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 302 records; 223 Accepted, 79 Proposed (the
+title or status change cannot drift. 310 records; 231 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
