@@ -374,15 +374,32 @@ describe("policy role canonicalization", () => {
     expect(roles).toEqual(["b", "a"]);
   });
 
-  it("leaves every policy in the real catalog on the two defaults", () => {
-    // The precondition for the 139 tables reading as matching against a database built from this
-    // catalog: nothing declares either field yet, so nothing changes meaning.
+  /**
+   * Policies that deliberately narrow `command`. Enumerated rather than skipped by predicate, so
+   * adding one is a visible edit here: each is a read grant that must not also satisfy a write's
+   * WITH CHECK, which is the only reason to leave the `ALL` default.
+   */
+  const NARROWED_POLICIES: ReadonlySet<string> = new Set(["audit_log_platform_audit_read"]);
+
+  it("leaves every policy in the real catalog on the two defaults, bar the named exceptions", () => {
+    // The precondition for the catalog's tables reading as matching against a database built from it:
+    // a policy that declares neither field emits exactly as one that never could.
+    let narrowed = 0;
     for (const t of META_TABLES) {
       for (const policy of t.rls?.policies ?? []) {
-        expect(declaredPolicyCommand(policy)).toBe("ALL");
+        // No policy anywhere narrows `roles`: a role list is resolved against `pg_authid`, and a
+        // catalog that named a role a deployment has not created would read as undetermined.
         expect([...declaredPolicyRoles(policy)]).toEqual(["PUBLIC"]);
+        if (NARROWED_POLICIES.has(policy.name)) {
+          narrowed += 1;
+          expect(declaredPolicyCommand(policy)).not.toBe("ALL");
+          continue;
+        }
+        expect(declaredPolicyCommand(policy)).toBe("ALL");
       }
     }
+    // So the exception list cannot pass vacuously by naming a policy that no longer exists.
+    expect(narrowed).toBe(NARROWED_POLICIES.size);
   });
 });
 
