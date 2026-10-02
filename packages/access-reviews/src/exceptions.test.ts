@@ -73,6 +73,27 @@ describe("canTransitionException", () => {
   it("allows approved → revoked_early", () => {
     expect(canTransitionException("approved", "revoked_early")).toBe(true);
   });
+
+  it("agrees with EXCEPTION_TRANSITIONS for every status pair", () => {
+    // Walking the map rather than naming paths: the cases above pin what a reader cares about, but
+    // only an exhaustive pass catches a status added to the enum and forgotten in the map.
+    for (const from of EXCEPTION_STATUSES) {
+      const allowed = EXCEPTION_TRANSITIONS[from];
+      expect(allowed, `no transitions declared for ${from}`).toBeDefined();
+      for (const to of EXCEPTION_STATUSES) {
+        expect(canTransitionException(from, to), `${from} → ${to}`).toBe(allowed.includes(to));
+      }
+    }
+  });
+
+  it("gives an exception exactly one way in and no way back out of an end state", () => {
+    // Every status but `requested` and `approved` is an end state; an exception that could be
+    // un-expired or un-revoked would let a lapsed access grant be quietly restored.
+    for (const status of EXCEPTION_STATUSES) {
+      if (status === "requested" || status === "approved") continue;
+      expect(EXCEPTION_TRANSITIONS[status], status).toEqual([]);
+    }
+  });
 });
 
 describe("AccessReviewExceptionSchema", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { TableDefinition } from "./types.js";
+import type { ColumnDefinition, TableDefinition } from "./types.js";
 import { emitMetaBootstrapSql } from "./index.js";
 import {
   META_AA_CONFLICTS,
@@ -122,6 +122,17 @@ import {
   META_WORKFLOW_SIGNALS,
   META_WORKFLOW_TIMERS,
 } from "./meta-schema.js";
+
+/**
+ * The named unique constraint on a column, or undefined when the column declares bare `unique: true`.
+ * `unique` is a union, so reading `.constraintName` straight off it does not typecheck — and a column
+ * that lost its constraint name should fail these assertions, not skip them.
+ */
+function uniqueConstraintName(column: ColumnDefinition | undefined): string | undefined {
+  const unique = column?.unique;
+  return typeof unique === "object" ? unique.constraintName : undefined;
+}
+
 
 describe("META_TABLES", () => {
   it("contains 136 tables", () => {
@@ -573,7 +584,7 @@ describe("table column shapes", () => {
 
   it("META_FEATURE_FLAGS enforces unique flag keys with snake-case dotted check", () => {
     const key = META_FEATURE_FLAGS.columns.find((c) => c.name === "key");
-    expect(key?.unique?.constraintName).toBe("feature_flags_key_key");
+    expect(uniqueConstraintName(key)).toBe("feature_flags_key_key");
     expect(key?.check).toContain("[a-z]");
   });
 
@@ -688,7 +699,7 @@ describe("table column shapes", () => {
     const url = META_WEBHOOK_ENDPOINTS.columns.find((c) => c.name === "url");
     expect(url?.check).toContain("https://");
     const eid = META_WEBHOOK_ENDPOINTS.columns.find((c) => c.name === "endpoint_id");
-    expect(eid?.unique?.constraintName).toBe("webhook_endpoints_endpoint_id_key");
+    expect(uniqueConstraintName(eid)).toBe("webhook_endpoints_endpoint_id_key");
   });
 
   it("META_WEBHOOK_DELIVERIES check-constrains status to the six delivery states", () => {
@@ -987,7 +998,7 @@ describe("table column shapes", () => {
 
   it("META_TENANT_TOMBSTONES enforces unique tombstone_id with 'tomb_' prefix", () => {
     const tid = META_TENANT_TOMBSTONES.columns.find((c) => c.name === "tombstone_id");
-    expect(tid?.unique?.constraintName).toBe("tenant_tombstones_tombstone_id_key");
+    expect(uniqueConstraintName(tid)).toBe("tenant_tombstones_tombstone_id_key");
     expect(tid?.check).toContain("tomb_");
   });
 
@@ -1000,7 +1011,7 @@ describe("table column shapes", () => {
 
   it("META_INCIDENTS enforces unique incident_id with INC-YYYY-NNNN pattern", () => {
     const iid = META_INCIDENTS.columns.find((c) => c.name === "incident_id");
-    expect(iid?.unique?.constraintName).toBe("incidents_incident_id_key");
+    expect(uniqueConstraintName(iid)).toBe("incidents_incident_id_key");
     expect(iid?.check).toContain("INC-");
   });
 
@@ -1095,7 +1106,7 @@ describe("table column shapes", () => {
 
   it("META_SLO_EVALUATIONS enforces sloe_ id pattern + availability target bounds", () => {
     const eid = META_SLO_EVALUATIONS.columns.find((c) => c.name === "evaluation_id");
-    expect(eid?.unique?.constraintName).toBe("slo_evaluations_evaluation_id_key");
+    expect(uniqueConstraintName(eid)).toBe("slo_evaluations_evaluation_id_key");
     expect(eid?.check).toContain("sloe_");
     const target = META_SLO_EVALUATIONS.columns.find((c) => c.name === "target");
     expect(target?.check).toContain("target > 0");
@@ -1130,7 +1141,7 @@ describe("table column shapes", () => {
     for (const col of [exec, comms, pm]) {
       expect(col?.type).toBe("TEXT");
       expect(col?.notNull).toBe(true);
-      expect(col?.unique?.constraintName).toBeDefined();
+      expect(uniqueConstraintName(col)).toBeDefined();
     }
   });
 
@@ -1240,7 +1251,7 @@ describe("table column shapes", () => {
     const col = META_FEATURE_FLAGS.columns.find((c) => c.name === "flag_id");
     expect(col?.type).toBe("TEXT");
     expect(col?.notNull).toBe(true);
-    expect(col?.unique?.constraintName).toBe("feature_flags_flag_id_key");
+    expect(uniqueConstraintName(col)).toBe("feature_flags_flag_id_key");
     expect(col?.check).toContain("^ff_[a-z0-9]{8,32}$");
   });
 
@@ -1302,7 +1313,7 @@ describe("table column shapes", () => {
 
   it("META_SLO_LATENCY_EVALUATIONS enforces slle_ id + percentile/severity enums", () => {
     const eid = META_SLO_LATENCY_EVALUATIONS.columns.find((c) => c.name === "evaluation_id");
-    expect(eid?.unique?.constraintName).toBe("slo_latency_evaluations_evaluation_id_key");
+    expect(uniqueConstraintName(eid)).toBe("slo_latency_evaluations_evaluation_id_key");
     expect(eid?.check).toContain("slle_");
     const pct = META_SLO_LATENCY_EVALUATIONS.columns.find((c) => c.name === "worst_percentile");
     expect(pct?.check).toContain("'p95'");
@@ -1377,7 +1388,7 @@ describe("table column shapes", () => {
   });
 
   it("META_OPERATE_TENANT_MANIFESTS allows an explicit platform-review escape from tenant isolation", () => {
-    const policy = META_OPERATE_TENANT_MANIFESTS.rls?.policies[0];
+    const policy = META_OPERATE_TENANT_MANIFESTS.rls?.policies?.[0];
     expect(policy?.name).toBe("operate_tenant_manifests_tenant_or_platform_review");
     // Tenant isolation still holds by default; the cross-tenant read requires a
     // transaction-scoped flag the platform review store sets and nothing else does.
@@ -2172,7 +2183,7 @@ describe("table column shapes", () => {
     const onSwitch = META_FEATURE_FLAG_KILL_SWITCHES.columns.find((c) => c.name === "flag_id");
     expect(onSwitch?.references).toBeUndefined();
     const target = META_FEATURE_FLAGS.columns.find((c) => c.name === "flag_id");
-    expect(target?.unique?.constraintName).toBe("feature_flags_flag_id_key");
+    expect(uniqueConstraintName(target)).toBe("feature_flags_flag_id_key");
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES status enum has 4 lifecycle states", () => {

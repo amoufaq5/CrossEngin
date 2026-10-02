@@ -181,6 +181,10 @@ describe("EDiscoveryRequestSchema", () => {
 
 describe("helpers", () => {
   const base: EDiscoveryRequest = {
+    // The three `.default(null)` production fields: present-and-null until a production is made.
+    producedSizeBytes: null,
+    productionSha256: null,
+    productionStorageUri: null,
     id: "ED-2026-0001",
     matterReference: "x",
     requestingParty: "p",

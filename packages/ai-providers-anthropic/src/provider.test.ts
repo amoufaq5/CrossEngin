@@ -1,5 +1,5 @@
 import type { CompletionChunk, CompletionRequest } from "@crossengin/ai-providers";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { AnthropicError } from "./errors.js";
 import { AnthropicProvider, type FetchLike, summarizeResponse } from "./provider.js";
@@ -85,7 +85,7 @@ function buildFetch(opts: {
 
 function fixtureRequest(overrides: Partial<CompletionRequest> = {}): CompletionRequest {
   return {
-    task: "architect_chat",
+    task: "executor",
     messages: [{ role: "user", content: "Hello" }],
     tenantId: TENANT,
     sessionId: SESSION,

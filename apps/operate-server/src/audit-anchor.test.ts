@@ -1,3 +1,4 @@
+import type { UserId } from "@crossengin/types";
 import { canonicalAuditEntryPayload, type AuditLogEntry } from "@crossengin/auth";
 import { sha256 } from "@crossengin/crypto";
 import type { ChainedLogEntry } from "@crossengin/forensics";
@@ -91,7 +92,7 @@ describe("verifyAuditAnchors", () => {
     const original = entryOf(ID_A);
     const a = anchorFor(original, 0);
     const edited = entryOf(ID_A, {
-      actor: { kind: "user", userId: "someone-else", sessionId: null, ip: null, userAgent: null },
+      actor: { kind: "user", userId: "someone-else" as UserId, sessionId: null, ip: null, userAgent: null },
     });
     expect(verifyAuditAnchors(TENANT, [rowOf(edited, a)], [a]).tampered[0]?.verdict).toBe(
       "hash_mismatch",

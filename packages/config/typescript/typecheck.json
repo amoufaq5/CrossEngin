@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "display": "Typecheck (includes tests)",
+  "_comment": [
+    "The config `typecheck` runs, as distinct from the one `build` runs.",
+    "A package's tsconfig.json excludes `**/*.test.ts` because tests must not land in dist.",
+    "That exclusion also meant nothing ever typechecked them: vitest transpiles without checking, so a",
+    "test double that no longer satisfied an interface failed at runtime instead of at build — and a",
+    "deliberate catch could swallow the TypeError, leaving a green suite over an unexercised path.",
+    "A package extends this from its own tsconfig.typecheck.json, which re-includes the tests.",
+    "Emit is off here, so the declaration/sourceMap settings the build needs would only be noise."
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "exclude": ["dist", "node_modules"]
+}

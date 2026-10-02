@@ -59,6 +59,7 @@ import {
   resolveAuditPolicy,
   sampleValue,
   shouldRecordAudit,
+  type LiveAuditPolicySource,
 } from "./audit-chain.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
@@ -310,7 +311,7 @@ describe("AuditChainObserver", () => {
     const errs: unknown[] = [];
     let calls = 0;
     const flaky = {
-      append: async (input: unknown) => {
+      append: async (_input: unknown) => {
         calls += 1;
         if (calls === 1) throw new Error("boom");
         return { sequenceNumber: 0 } as never;
@@ -413,7 +414,9 @@ describe("AuditChainObserver", () => {
 
   it("a live outcomes allowlist filters a tenant while another still appends", async () => {
     const store = new PostgresChainLogStore(fakeChainPg(), ed25519ChainSigner(keypair));
-    const policyCache = { get: (t: string) => (t === TENANT ? { outcomes: ["deny", "error"] as const } : undefined) };
+    const policyCache: LiveAuditPolicySource = {
+      get: (t) => (t === TENANT ? { outcomes: ["deny", "error"] } : undefined),
+    };
     const observer = new AuditChainObserver(store, config(), { policyCache });
 
     observer.record(execution({ tenantId: TENANT, finalOutcome: "pass", finalResponseStatus: 200, requestId: "req_aaaaaaaa11111111" }));

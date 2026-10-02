@@ -1,0 +1,6 @@
+{
+  "extends": [
+    "./tsconfig.json",
+    "@crossengin/config/typescript/typecheck.json"
+  ]
+}

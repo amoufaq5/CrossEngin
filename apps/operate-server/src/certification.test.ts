@@ -7,7 +7,6 @@ import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import {
   FixedClock,
   RandomIdGenerator,
-  evidenceFromEncryptionCoverage,
   type CertificationReport,
   type ComplianceFramework,
   type ControlEvidence,

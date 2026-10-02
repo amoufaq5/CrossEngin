@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { PgConnection, PgQueryResult } from "./connection.js";
+import type { PgConnection } from "./connection.js";
 import {
   EncryptionApplier,
   ENCRYPTED_COLUMN_QUERY,
@@ -16,7 +16,9 @@ import {
   type EncryptedColumnRow,
 } from "./encryption.js";
 
-function mockConn(handler: (sql: string, params?: readonly unknown[]) => PgQueryResult): PgConnection {
+function mockConn(
+  handler: (sql: string, params?: readonly unknown[]) => { rows: readonly unknown[]; rowCount: number },
+): PgConnection {
   return {
     query: vi.fn(async (sql: string, params?: readonly unknown[]) => handler(sql, params)) as PgConnection["query"],
     transaction: vi.fn() as PgConnection["transaction"],

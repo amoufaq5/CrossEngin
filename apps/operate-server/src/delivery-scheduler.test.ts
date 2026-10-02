@@ -210,9 +210,9 @@ describe("delivery-scheduler", () => {
   });
 
   it("never overlaps two sweeps", async () => {
-    let release: (() => void) | null = null;
+    const releases: (() => void)[] = [];
     const gate = new Promise<void>((r) => {
-      release = r;
+      releases.push(r);
     });
     const store = new FakeStore();
     const slow: DeliveryStoreLike = {
@@ -238,7 +238,7 @@ describe("delivery-scheduler", () => {
     expect(second).toBeNull();
     expect(store.claimCalls).toBe(1);
 
-    release?.();
+    releases[0]?.();
     await first;
 
     // The lock releases, so a later sweep runs normally.

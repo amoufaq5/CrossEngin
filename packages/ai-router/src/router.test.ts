@@ -76,7 +76,12 @@ class StubProvider implements LlmProvider {
 
   async embed(_req: EmbeddingRequest): Promise<EmbeddingResponse> {
     if (this.behavior === "fatal") throw new FatalError("no embed");
-    return { vectors: [[1, 2, 3]], usage: { inputTokens: 1, outputTokens: 0, cost: 0 } };
+    return {
+      vectors: [[1, 2, 3]],
+      dim: 3,
+      model: "stub-embed",
+      usage: { inputTokens: 1, outputTokens: 0, cost: 0 },
+    };
   }
 }
 

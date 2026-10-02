@@ -228,6 +228,9 @@ describe("helpers", () => {
     conflictRecordIds: [],
     requiresIncidentResponse: true,
     incidentRecordId: "INC-2026-0042",
+    // Present-and-null: the fixture is typed as the parsed record, and the schema's
+    // `.default(null)` makes this field required on the way out even though input may omit it.
+    permanentPartitionAt: null,
     durationSeconds: 1800,
   };
 

@@ -76,6 +76,7 @@ describe("canTransitionIncident", () => {
 
 describe("IncidentRecordSchema", () => {
   const base: IncidentRecord = {
+    autoDeclaredFor: null,
     id: "INC-2026-0042",
     title: "API latency spike",
     severity: "sev2",
@@ -223,6 +224,7 @@ describe("IncidentRecordSchema", () => {
 
 describe("helpers", () => {
   const base: IncidentRecord = {
+    autoDeclaredFor: null,
     id: "INC-2026-0042",
     title: "x",
     severity: "sev2",

@@ -3,7 +3,6 @@ import type { UsageReporter, UsageReportInput } from "@crossengin/billing-runtim
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 
 import {
-  StripeUsageSyncScheduler,
   buildStripeUsageSync,
   parseStripeUsageSyncConfig,
 } from "./stripe-usage-sync.js";

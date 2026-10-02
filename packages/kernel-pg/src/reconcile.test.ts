@@ -310,7 +310,7 @@ describe("planSchemaReconciliation — what it refuses", () => {
     const stale = liveWidgets({
       indexes: [
         ...liveWidgets().indexes,
-        { name: "idx_widgets_adhoc", columns: ["kind"], unique: false, primary: false, method: "btree", predicate: null },
+        { name: "idx_widgets_adhoc", columns: ["kind"], unique: false, primary: false, method: "btree", predicate: null, constraintBacked: false },
       ],
     });
     const plan = planFor([WIDGETS], live([stale]));
@@ -454,7 +454,7 @@ function liveChild(over: Partial<LiveTable> = {}): LiveTable {
       { name: "owner_id", dataType: "uuid", isNullable: true, defaultExpr: null },
       { name: "label", dataType: "text", isNullable: true, defaultExpr: null },
     ],
-    indexes: [{ name: "children_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null }],
+    indexes: [{ name: "children_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true }],
     policies: [],
     foreignKeys: [
       {
@@ -1076,7 +1076,7 @@ describe("a column arriving with the constraints ADD COLUMN carries", () => {
       name: "flags",
       columns: [{ name: "id", dataType: "uuid", isNullable: false, defaultExpr: null }],
       indexes: [
-        { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
+        { name: "flags_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
       ],
       policies: [],
       foreignKeys: [],
@@ -1191,8 +1191,8 @@ describe("table-level constraints — planning", () => {
         { name: "bounces_count", dataType: "integer", isNullable: false, defaultExpr: null },
       ],
       indexes: [
-        { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null },
-        { name: "comms_pair_key", columns: ["tenant_id", "id"], unique: true, primary: false, method: "btree", predicate: null },
+        { name: "comms_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+        { name: "comms_pair_key", columns: ["tenant_id", "id"], unique: true, primary: false, method: "btree", predicate: null, constraintBacked: true },
       ],
       policies: [],
       foreignKeys: [

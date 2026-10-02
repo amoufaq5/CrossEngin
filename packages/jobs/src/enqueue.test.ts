@@ -17,7 +17,6 @@ import { JobDeclarationSchema, type JobDeclaration } from "./types.js";
 
 function job(overrides: Partial<JobDeclaration> & { id: string }): JobDeclaration {
   return JobDeclarationSchema.parse({
-    id: overrides.id,
     name: overrides.name ?? overrides.id,
     trigger: overrides.trigger ?? { kind: "event", eventName: "retail.order_placed" },
     onFailure: overrides.onFailure ?? { strategy: "dead-letter" },

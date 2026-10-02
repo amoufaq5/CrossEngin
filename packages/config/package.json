@@ -13,6 +13,7 @@
     "./typescript/base.json": "./typescript/base.json",
     "./typescript/library.json": "./typescript/library.json",
     "./typescript/nextjs.json": "./typescript/nextjs.json",
+    "./typescript/typecheck.json": "./typescript/typecheck.json",
     "./eslint/base": "./eslint/base.mjs",
     "./prettier": "./prettier/index.json"
   },

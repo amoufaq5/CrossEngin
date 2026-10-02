@@ -196,6 +196,8 @@ describe("BackfillLedgerEntrySchema", () => {
 
 describe("helpers", () => {
   const job: BackfillJob = {
+    // `.default(null)`, so present-and-null on the parsed record.
+    durationSeconds: null,
     id: "job-1",
     tenantId: "t-1",
     sourceId: "src-1",

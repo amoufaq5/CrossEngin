@@ -70,7 +70,7 @@ describe("buildErpEducationPack — resolved against core", () => {
     const resolved = await resolveManifest(buildErpEducationPack(), { registry: coreRegistry() });
     const names = (resolved.entities ?? []).map((e) => e.name);
     for (const core of ["Account", "Invoice", "Item", "Employee"]) expect(names).toContain(core);
-    const coreNames = new Set(buildErpCorePack().entities.map((e) => e.name));
+    const coreNames = new Set((buildErpCorePack().entities ?? []).map((e) => e.name));
     const educationOwn = names.filter((n) => !coreNames.has(n)).sort();
     expect(educationOwn).toEqual(["Course", "Enrollment", "Student"]);
   });

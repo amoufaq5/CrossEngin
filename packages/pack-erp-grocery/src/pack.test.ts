@@ -76,8 +76,8 @@ describe("buildErpGroceryPack — transitive resolution (grocery -> retail -> co
     const names = (resolved.entities ?? []).map((e) => e.name);
     for (const inherited of ["Account", "Invoice", "Item", "Product", "Store"]) expect(names).toContain(inherited);
     const baseNames = new Set([
-      ...buildErpCorePack().entities.map((e) => e.name),
-      ...buildErpRetailPack().entities.map((e) => e.name),
+      ...(buildErpCorePack().entities ?? []).map((e) => e.name),
+      ...(buildErpRetailPack().entities ?? []).map((e) => e.name),
     ]);
     const own = names.filter((n) => !baseNames.has(n)).sort();
     expect(own).toEqual(["PerishableLot", "Supplier"]);

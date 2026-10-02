@@ -93,13 +93,20 @@ export class CountingIncidentDeclarer implements IncidentDeclarer {
     });
   }
 
-  async findOpen(): Promise<IncidentRecord | null> {
+  // Both take the interface's parameters and ignore them. Spelling them out is not ceremony: a
+  // method declared with no parameters still satisfies one that has them, so the omission type-checked
+  // while making every argument a caller passed unpassable — and a test that handed one over read as
+  // though the value mattered.
+  async findOpen(_autoDeclaredFor: string): Promise<IncidentRecord | null> {
     // Nothing stored what this declared, so a restart has genuinely lost it; claiming otherwise
     // would have the engine adopt an incident that does not exist.
     return null;
   }
 
-  async closeOut(): Promise<IncidentCloseOut> {
+  async closeOut(
+    _incidentId: string,
+    _input: IncidentCloseOutInput,
+  ): Promise<IncidentCloseOut> {
     return "unpersisted";
   }
 }

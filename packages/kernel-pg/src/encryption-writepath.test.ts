@@ -132,9 +132,9 @@ function mockConn(rows: EncryptedColumnRow[], observed: string[]): PgConnection 
     query: vi.fn(async (sql: string) => {
       observed.push(sql);
       if (sql.includes("col_description")) {
-        return { rows, rowCount: rows.length } as PgQueryResult;
+        return { rows, rowCount: rows.length } satisfies PgQueryResult<EncryptedColumnRow>;
       }
-      return { rows: [], rowCount: 0 } as PgQueryResult;
+      return { rows: [], rowCount: 0 } satisfies PgQueryResult<EncryptedColumnRow>;
     }) as PgConnection["query"],
     transaction: vi.fn(async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],

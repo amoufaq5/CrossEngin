@@ -64,7 +64,7 @@ describe("isCompleteForLocale / missingPluralCases", () => {
       isCompleteForLocale("ar", ["zero", "one", "two", "few", "many", "other"]),
     ).toBe(true);
     expect(isCompleteForLocale("ar", ["one", "other"])).toBe(false);
-    expect(missingPluralCases("ar", ["one", "other"]).sort()).toEqual([
+    expect([...missingPluralCases("ar", ["one", "other"])].sort()).toEqual([
       "few",
       "many",
       "two",

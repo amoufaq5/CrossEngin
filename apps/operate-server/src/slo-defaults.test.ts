@@ -15,6 +15,21 @@ import {
   DEFAULT_SLO_ALERT_POLICY,
   DEFAULT_SLO_SYSTEM_ACTOR,
 } from "./slo-defaults.js";
+import type { SloConfig, SloRegistrationConfig } from "./slo-config.js";
+
+/**
+ * `SloConfig` marks both registration arrays optional, because a hand-written config may carry only
+ * one. `deriveSloConfig` always produces both, so a missing one is a defect in the deriver rather than
+ * a case to tolerate — hence a throw, not a `?? []` that would quietly assert on an empty array.
+ */
+function registrations(
+  config: SloConfig,
+  kind: "availability" | "latency",
+): readonly SloRegistrationConfig[] {
+  const regs = config[kind];
+  if (regs === undefined) throw new Error(`deriveSloConfig produced no ${kind} registrations`);
+  return regs;
+}
 
 const manifest = await loadBuiltinPack("erp-retail");
 
@@ -38,18 +53,18 @@ describe("deriveSloConfig", () => {
   const config = deriveSloConfig(manifest);
 
   it("produces an availability + latency SLO per entity operation surface", () => {
-    expect(config.availability.length).toBeGreaterThan(0);
-    expect(config.latency.length).toBe(config.availability.length);
+    expect(registrations(config, "availability").length).toBeGreaterThan(0);
+    expect(registrations(config, "latency").length).toBe(registrations(config, "availability").length);
     // Every SLO id is a valid kebab slug; the surface is the dotted operationId.
-    for (const reg of config.availability) {
+    for (const reg of registrations(config, "availability")) {
       expect(reg.slo.id).toMatch(/^[a-z][a-z0-9-]*[a-z0-9]-availability$/);
       expect(reg.slo.surface.length).toBeGreaterThan(0);
     }
   });
 
   it("tunes read surfaces tighter (higher availability) than writes", () => {
-    const list = config.availability.find((r) => r.slo.surface.endsWith(".list"));
-    const create = config.availability.find((r) => r.slo.surface.endsWith(".create"));
+    const list = registrations(config, "availability").find((r) => r.slo.surface.endsWith(".list"));
+    const create = registrations(config, "availability").find((r) => r.slo.surface.endsWith(".create"));
     const listTarget = list?.slo.targets.find((t) => t.kind === "availability");
     const createTarget = create?.slo.targets.find((t) => t.kind === "availability");
     expect(listTarget?.kind).toBe("availability");
@@ -60,7 +75,7 @@ describe("deriveSloConfig", () => {
   });
 
   it("classifies latency endpointClass by read/write", () => {
-    const list = config.latency.find((r) => r.slo.surface.endsWith(".list"));
+    const list = registrations(config, "latency").find((r) => r.slo.surface.endsWith(".list"));
     const latencyTarget = list?.slo.targets.find((t) => t.kind === "latency");
     expect(latencyTarget?.kind).toBe("latency");
     if (latencyTarget?.kind === "latency") {
@@ -82,9 +97,9 @@ describe("deriveSloConfig", () => {
       systemActorUserId: "11111111-1111-1111-1111-111111111111",
     });
     expect(custom.evaluateIntervalMs).toBe(30_000);
-    expect(custom.latency).toEqual([]);
+    expect(registrations(custom, "latency")).toEqual([]);
     expect(custom.systemActorUserId).toBe("11111111-1111-1111-1111-111111111111");
-    const list = custom.availability.find((r) => r.slo.surface.endsWith(".list"));
+    const list = registrations(custom, "availability").find((r) => r.slo.surface.endsWith(".list"));
     const t = list?.slo.targets.find((x) => x.kind === "availability");
     if (t?.kind === "availability") expect(t.target).toBe(0.9999);
   });
@@ -113,7 +128,7 @@ describe("SloDefaultsOverride", () => {
     expect(config.alertPolicy.id).toBe("prod-oncall");
     expect(config.systemActorUserId).toBe("22222222-2222-2222-2222-222222222222");
     expect(config.evaluateIntervalMs).toBe(15_000);
-    const list = config.availability.find((r) => r.slo.surface.endsWith(".list"));
+    const list = registrations(config, "availability").find((r) => r.slo.surface.endsWith(".list"));
     const t = list?.slo.targets.find((x) => x.kind === "availability");
     if (t?.kind === "availability") expect(t.target).toBe(0.9999);
   });
@@ -139,8 +154,8 @@ describe("SloDefaultsOverride", () => {
       ],
     });
     const config = deriveSloConfig(manifest, sloDefaultsOptionsFromOverride(override));
-    expect(config.availability.length).toBe(base.availability.length + 1);
-    expect(config.availability.some((r) => r.slo.surface === "health.check")).toBe(true);
+    expect(registrations(config, "availability").length).toBe(registrations(base, "availability").length + 1);
+    expect(registrations(config, "availability").some((r) => r.slo.surface === "health.check")).toBe(true);
   });
 
   it("loads an override from a file", async () => {

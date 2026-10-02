@@ -111,6 +111,17 @@ describe("selectResponseContentType", () => {
 });
 
 describe("parseAcceptEncodingHeader / selectResponseEncoding", () => {
+  it("treats an absent header as identity at full quality", () => {
+    expect(parseAcceptEncodingHeader(null)).toEqual([{ encoding: "identity", quality: 1 }]);
+  });
+
+  it("parses qualities and drops encodings the server has no name for", () => {
+    const parsed = parseAcceptEncodingHeader("br;q=0.8, gzip, exotic-coding;q=1.0");
+    expect(parsed.map((e) => e.encoding)).not.toContain("exotic-coding");
+    expect(parsed.find((e) => e.encoding === "gzip")?.quality).toBe(1);
+    expect(parsed.find((e) => e.encoding === "br")?.quality).toBe(0.8);
+  });
+
   it("defaults to identity when header absent", () => {
     expect(
       selectResponseEncoding({
@@ -140,6 +151,18 @@ describe("parseAcceptEncodingHeader / selectResponseEncoding", () => {
 });
 
 describe("parseAcceptLanguageHeader / selectResponseLanguage", () => {
+  it("treats an absent header as no stated preference", () => {
+    // Not a default language: "no preference" and "prefers en-US" are different inputs to selection.
+    expect(parseAcceptLanguageHeader(null)).toEqual([]);
+  });
+
+  it("parses tags with their qualities, preserving the header's own tags", () => {
+    expect(parseAcceptLanguageHeader("fr;q=0.5, en-US;q=0.9")).toEqual([
+      { tag: "fr", quality: 0.5 },
+      { tag: "en-US", quality: 0.9 },
+    ]);
+  });
+
   it("picks highest-q matching language", () => {
     expect(
       selectResponseLanguage({

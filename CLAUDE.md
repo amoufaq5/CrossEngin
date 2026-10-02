@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 301 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 302 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**86 packages + 3 apps, 140 meta-schema tables, ~10,812 tests**, all green, no
+**86 packages + 3 apps, 140 meta-schema tables, ~10,820 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -574,7 +574,15 @@ pnpm --filter @crossengin/<name> build|test|typecheck
 
 # Workspace
 pnpm -r build && pnpm -r typecheck && pnpm -r test
+# `-r` bails at the first failing package; add --no-bail to see them all.
 ```
+
+**`build` and `typecheck` read different configs** (ADR-0307). `tsconfig.json` excludes `**/*.test.ts`
+because tests must not land in `dist`; `tsconfig.typecheck.json` — two lines per package, extending that
+one plus `@crossengin/config/typescript/typecheck.json` — puts them back and sets `noEmit`. So the
+tests *are* typechecked, and a test double that stops satisfying its interface fails at `typecheck`
+rather than at runtime where a catch can swallow it. A new package needs that file or its `typecheck`
+fails.
 
 Full workspace build + typecheck + test is several minutes; run it backgrounded
 into a log rather than blocking on it. There is **no top-level lint script** —
@@ -691,10 +699,6 @@ opened them.
   predicate cannot mention `now()`, since Postgres requires an IMMUTABLE index predicate. Promoting one
   to the other is reconcilable (the plan drops the constraint and creates the index in one statement) but
   it is a rebuild.
-- **Test files are not typechecked** anywhere in the repo (`tsconfig.json` excludes `**/*.test.ts`;
-  vitest transpiles without checking), so a test double that no longer satisfies an interface fails at
-  runtime rather than at build. ADR-0294 hit this: a stub missing a new method threw a `TypeError`
-  that a deliberate catch swallowed, and the suite stayed green while the new path went unexercised.
 - **Declaring an SLO incident requires the database** (ADR-0293), which is itself the kind of outage
   an SLO breach describes. A failed declaration leaves the surface unopened and the next tick retries,
   so the page is delayed rather than lost; a failed close-out is not retried at all and leaves the row
@@ -726,6 +730,15 @@ opened them.
   Normalising in the store would make the id — which commits to the exact address — a lie, so it belongs
   upstream in `planSuppression`.
 
+- **`failed` is both terminal and compensatable** (ADR-0307). It is in `TERMINAL_INSTANCE_STATUSES` and
+  `INSTANCE_TRANSITIONS.failed` is `["compensating"]`, so `isInstanceTerminal` answers "done" for a status
+  the map says you may still move. Deliberate for sagas, but the two disagree; a test pins the exception
+  rather than resolving it, because which side should change is a lifecycle decision.
+- **`apps/operate-web` is typechecked separately** (ADR-0307) — it is a Next app outside the per-package
+  layout, so `pnpm -r typecheck` does not cover it; verify it with `npx tsc --noEmit` from its directory.
+  Nothing enforces that a new package carries a `tsconfig.typecheck.json` either, though a missing one
+  fails loudly rather than skipping.
+
 **Contained**
 
 - No per-user notification *read state*; "unread" is a recency approximation
@@ -751,7 +764,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 301 records; 222 Accepted, 79 Proposed (the
+title or status change cannot drift. 302 records; 223 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

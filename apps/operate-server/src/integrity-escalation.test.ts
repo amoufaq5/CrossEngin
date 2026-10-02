@@ -51,7 +51,7 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
     mode: "full",
     checkpointSequence: null,
     integrity: { valid: true, brokenAt: null },
-    signatures: { valid: true, checked: 3, entries: [] },
+    signatures: { valid: true, checked: 3, results: [], unresolvedFingerprints: [] },
   } as ChainVerificationReport;
   const anchors: AuditAnchorReport = {
     tenantId: TENANT_A,
@@ -271,7 +271,9 @@ describe("IntegrityEscalator — declaring once, not every pass", () => {
     const e = new IntegrityEscalator({
       config: config(),
       audit,
-      page: () => paged.push("x"),
+      page: () => {
+        paged.push("x");
+      },
     });
     expect((await e.observe(report({ verdict: "unproven" }))).kind).toBe("none");
     expect(paged).toEqual([]);
@@ -309,7 +311,9 @@ describe("IntegrityEscalator — failure handling", () => {
           throw new Error("audit_log unavailable");
         },
       } as never,
-      page: (_p, i) => paged.push(i.id),
+      page: (_p, i) => {
+        paged.push(i.id);
+      },
       onError: (err) => errors.push(err),
       now: () => new Date(AT),
     });
@@ -357,7 +361,9 @@ describe("IntegrityEscalator — failure handling", () => {
     const e = new IntegrityEscalator({
       config: config(),
       audit,
-      page: () => paged.push("x"),
+      page: () => {
+        paged.push("x");
+      },
       now: () => new Date(AT),
     });
     const out = await e.observe(report({ scope: null, anchors: null }));
@@ -716,7 +722,9 @@ describe("IntegrityEscalator — persisting the incident record", () => {
     const escalation = await new IntegrityEscalator({
       config: config(),
       declarer,
-      page: (p) => paged.push(p.incidentId),
+      page: (p) => {
+        paged.push(p.incidentId);
+      },
     }).observe(report());
     expect(escalation.kind).toBe("ongoing");
     expect(escalation.incidentId).toBe("INC-2026-0007");

@@ -71,7 +71,7 @@ describe("buildErpRetailPack — resolved against core", () => {
     const resolved = await resolveManifest(buildErpRetailPack(), { registry: coreRegistry() });
     const names = (resolved.entities ?? []).map((e) => e.name);
     for (const core of ["Account", "Invoice", "Item", "Employee"]) expect(names).toContain(core);
-    const coreNames = new Set(buildErpCorePack().entities.map((e) => e.name));
+    const coreNames = new Set((buildErpCorePack().entities ?? []).map((e) => e.name));
     const retailOwn = names.filter((n) => !coreNames.has(n)).sort();
     expect(retailOwn).toEqual(["OrderLine", "Product", "Store"]);
     expect(names).toContain("SalesOrder");

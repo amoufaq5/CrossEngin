@@ -76,8 +76,8 @@ describe("complete()", () => {
     const chunks: CompletionChunk[] = [];
     for await (const c of p.complete(req())) chunks.push(c);
 
-    expect(captured[0].url).toBe(`${DEFAULT_LOCAL_BASE_URL}/chat/completions`);
-    expect(JSON.parse(captured[0].body).stream).toBe(true);
+    expect(captured[0]?.url).toBe(`${DEFAULT_LOCAL_BASE_URL}/chat/completions`);
+    expect(JSON.parse(captured[0]?.body ?? "{}").stream).toBe(true);
     const text = chunks
       .filter((c) => c.kind === "text")
       .map((c) => (c as { text: string }).text)
@@ -95,7 +95,7 @@ describe("complete()", () => {
     };
     const p = new LocalLlmProvider({ baseUrl: "http://localhost:8000/v1/", fetch: fetchImpl });
     for await (const _ of p.complete(req())) void _;
-    expect(captured[0].url).toBe("http://localhost:8000/v1/chat/completions");
+    expect(captured[0]?.url).toBe("http://localhost:8000/v1/chat/completions");
   });
 
   it("sends a bearer token only when an apiKey is configured", async () => {
@@ -106,12 +106,13 @@ describe("complete()", () => {
     };
     const withKey = new LocalLlmProvider({ apiKey: "secret", fetch: fetchImpl });
     for await (const _ of withKey.complete(req())) void _;
-    expect(captured[0].headers["authorization"]).toBe("Bearer secret");
+    expect(captured[0]?.headers["authorization"]).toBe("Bearer secret");
 
     captured.length = 0;
     const noKey = new LocalLlmProvider({ fetch: fetchImpl });
     for await (const _ of noKey.complete(req())) void _;
-    expect(captured[0].headers["authorization"]).toBeUndefined();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.headers["authorization"]).toBeUndefined();
   });
 
   it("throws a classified error on a non-ok response", async () => {
@@ -172,6 +173,6 @@ describe("completeNonStreaming()", () => {
       });
     const p = new LocalLlmProvider({ fetch: fetchImpl });
     const res = await p.completeNonStreaming(req());
-    expect(res.choices[0].message.content).toBe("ok");
+    expect(res.choices[0]?.message.content).toBe("ok");
   });
 });

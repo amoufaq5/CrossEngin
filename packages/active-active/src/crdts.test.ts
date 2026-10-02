@@ -120,8 +120,8 @@ describe("OR-Set", () => {
     };
     const merged = orSetMerge(a, b);
     const banana = merged.entries.find((e) => e.value === "banana");
-    expect(banana?.addedTags.sort()).toEqual(["t2", "t3"]);
-    expect(orSetMembers(merged).sort()).toEqual(["apple", "banana"]);
+    expect([...(banana?.addedTags ?? [])].sort()).toEqual(["t2", "t3"]);
+    expect([...orSetMembers(merged)].sort()).toEqual(["apple", "banana"]);
   });
 });
 

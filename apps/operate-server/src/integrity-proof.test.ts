@@ -31,7 +31,7 @@ function chainOk(over: Partial<ChainVerificationReport> = {}): ChainVerification
     mode: "from_checkpoint",
     checkpointSequence: 3,
     integrity: { valid: true, brokenAt: null },
-    signatures: { valid: true, checked: 4, entries: [] },
+    signatures: { valid: true, checked: 4, results: [], unresolvedFingerprints: [] },
     ...over,
   } as ChainVerificationReport;
 }
@@ -223,7 +223,7 @@ describe("IntegrityProofScheduler — verdicts", () => {
 describe("IntegrityProofScheduler — passes", () => {
   it("skips a scope with no chain entries and no audit rows", async () => {
     const empty = report({
-      chain: chainOk({ signatures: { valid: true, checked: 0, entries: [] } }),
+      chain: chainOk({ signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [] } }),
       anchors: anchors({ checked: 0, verified: 0 }),
       truncation: noTruncation({ checkpointSequence: null, tailSequence: null }),
     });
@@ -246,7 +246,7 @@ describe("IntegrityProofScheduler — passes", () => {
     // Rows pointing at a chain with nothing in it is the anchor_missing case — very much not empty.
     const r = report({
       verdict: "compromised",
-      chain: chainOk({ signatures: { valid: true, checked: 0, entries: [] } }),
+      chain: chainOk({ signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [] } }),
       anchors: anchors({ ok: false, checked: 1, verified: 0, tampered: [tamperedResult] }),
       truncation: noTruncation({ checkpointSequence: null, tailSequence: null }),
     });
@@ -500,7 +500,7 @@ describe("integrityVerdictFor", () => {
   it("compromised: valid links but an unverifiable signature", () => {
     const unsigned = chainOk({
       ok: false,
-      signatures: { valid: false, checked: 4, entries: [] },
+      signatures: { valid: false, checked: 4, results: [], unresolvedFingerprints: [] },
     });
     expect(integrityVerdictFor(unsigned, anchors(), noTruncation())).toBe("compromised");
   });
@@ -584,7 +584,7 @@ describe("IntegrityProofScheduler — emptiness is judged by the tail, not the s
         tenantId: null,
         mode: "from_checkpoint",
         checkpointSequence: 11,
-        signatures: { valid: true, checked: 0, entries: [] },
+        signatures: { valid: true, checked: 0, results: [], unresolvedFingerprints: [] },
       }),
       truncation: noTruncation({ checkpointSequence: 11, tailSequence: 11 }),
     });
