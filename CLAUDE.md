@@ -835,6 +835,11 @@ opened them.
   number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
   **per session** — a restart forgets that the estimator was optimistic. `classifyDesignOutput` diagnoses
   a recoverable wrapper and nothing retries selectively on it yet.
+- **A feature flag that writes audit rows must be in `needsAuditEmitter`** (ADR-0288, ADR-0313). The
+  emitter is built behind a list of flags, and the list has now been forgotten twice — the second time
+  silently skipping `--audit-read-routes` entirely, found by booting the real server rather than by a
+  test. It is a named predicate with a test per flag now, but nothing *derives* the list, so a third
+  feature can still omit itself.
 - **`failed` is both terminal and compensatable** (ADR-0307). It is in `TERMINAL_INSTANCE_STATUSES` and
   `INSTANCE_TRANSITIONS.failed` is `["compensating"]`, so `isInstanceTerminal` answers "done" for a status
   the map says you may still move. Deliberate for sagas, but the two disagree; a test pins the exception

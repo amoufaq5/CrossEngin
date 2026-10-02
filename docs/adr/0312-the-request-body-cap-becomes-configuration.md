@@ -118,6 +118,8 @@ import it.
   `CliUsageError` naming the flag.
 - `readLimitedBody` returns `null` for an empty body, which the gateway distinguishes from a zero-length
   one. Preserved from the previous implementation.
+- Verified live: a server booted with `--max-request-body 2mb` answers 413 to a 3 MB body and dispatches
+  a small one normally — so the *configured* limit is in force, not the 10 MiB default.
 
 ## Open questions
 

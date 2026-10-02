@@ -182,6 +182,23 @@ who unsubscribed. Authoring one is therefore its own grant, fail-closed, default
   GUC's reset value after that transaction is `''`; the platform-elevated read on the *same* connection
   returns both tenants' rows rather than raising; and an INSERT under the elevation fails with `new row
   violates row-level security policy`.
+- Verified live through the real server against two tenants' rows. In one response: the read's *own*
+  prior entry (`audit.entries_read`, anchored at sequence 4 — reading the trail appears in the trail);
+  the actor's `ip`/`userAgent` listed in `redactedFields` rather than silently dropped;
+  `Product.unit_cost` redacted as `commercial_sensitive` while `name` survived;
+  `payloadWithheld: "unclassified_entity"` on the `AuditLog` entity itself, which the manifest does not
+  declare; and `anchored: false` on a hand-inserted row, reported as unproven rather than intact.
+  Refusals measured: another tenant named → 403 `cannot read another tenant's audit trail`; an ungranted
+  role → 403; no credential → 401. The template route refused `<script>` with 422
+  `template_content_rejected` / `unsafe_markup`.
+- **A gate found only by booting the server.** `--audit-read-routes` needs the `PostgresAuditEmitter`,
+  which was constructed behind a list of feature flags this one was not in — so the surface warned and
+  skipped, and a deployment that asked for it silently got nothing. This is the *second* instance of that
+  mistake (ADR-0288 records the first, where `--integrity-proof-config` alone reported `audited=false`
+  for every escalation). The condition is now the named predicate `needsAuditEmitter`, with a test that
+  asserts each flag is individually sufficient — the previous form was inline, so nothing could assert
+  over it. `--audit-read-routes` and `--notification-template-routes` also now fail at *parse* on
+  `--store memory`, like every sibling flag, rather than warning at boot.
 
 ## Open questions
 
