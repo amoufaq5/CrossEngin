@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**86 packages + 3 apps, 143 meta-schema tables, ~11,190 tests**, all green, no
+**86 packages + 3 apps, 143 meta-schema tables, ~11,640 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
