@@ -24,8 +24,8 @@ import { withPlatformAudit } from "./integrity-verdict-store.js";
  * recognises, rather than relying on the API happening to connect as the table owner — which
  * bypasses RLS silently.
  *
- * NOTE — the `all` scope needs a policy `meta.audit_log` does not have yet, and it does not merely
- * come back empty without it: measured against a real cluster as a non-owner role, a platform-
+ * The `all` scope needs a policy `meta.audit_log` did not have, and it did not merely come back
+ * empty without it: measured against a real cluster as a non-owner role, a platform-
  * elevated read of a plain tenant-isolation policy raises `invalid input syntax for type uuid: ""`.
  * `current_setting('app.current_tenant_id', true)` returns NULL only until that setting has been
  * used once on the connection; afterwards its reset value is the empty string, and `''::UUID`
@@ -34,9 +34,10 @@ import { withPlatformAudit } from "./integrity-verdict-store.js";
  * isolation guarded as `tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID`
  * for ALL commands, plus a SELECT-only `current_setting('app.platform_audit', true) = 'on'`. The
  * SELECT-only half matters — with one combined policy the elevation would also pass the INSERT's
- * WITH CHECK, and a read grant must not become a write grant. Until both land, leave the platform
- * role unconfigured: no grant means no `all` scope is ever attempted, which is the fail-closed
- * direction. A tenant-scoped read needs none of this and is verified working today.
+ * WITH CHECK, and a read grant must not become a write grant. Both are now declared
+ * (`audit_log_tenant_isolation` + `audit_log_platform_audit_read`), so the `all` scope works; a
+ * deployment migrating an older database needs the reconciler to have added the second policy before
+ * configuring a platform role.
  */
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;

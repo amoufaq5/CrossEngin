@@ -272,7 +272,8 @@ describe("suppression-store — shape", () => {
     const insert = captured.find((c) => c.sql.startsWith("INSERT INTO"));
     expect(insert?.sql).toContain("$2::uuid");
     expect(insert?.sql).toContain("$6::timestamptz");
-    expect(insert?.sql).toContain("$7::uuid");
+    // $7 (`applied_by`) is TEXT, so the `text` a bare parameter infers to is already right.
+    expect(insert?.sql).not.toContain("$7::");
     expect(insert?.sql).toContain("$8::timestamptz");
     expect(insert?.sql).toContain("$9::uuid");
   });

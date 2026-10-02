@@ -336,6 +336,13 @@ export const AUDIT_READ_DENIED_OPERATION = "audit.read_denied";
 export interface AuditReadEvent {
   /** The tenant whose trail was read; null for a cross-tenant read, which names no single one. */
   readonly tenantId: string | null;
+  /**
+   * The reader's OWN tenant, which is not the same question as whose trail was read: a platform
+   * operator reading across tenants leaves `tenantId` null and this set. The recorder needs it
+   * because `meta.audit_log.tenant_id` is NOT NULL — without it a cross-tenant read is the one read
+   * that cannot be recorded, and so (fail-closed) the one that cannot be served.
+   */
+  readonly readerTenantId: string | null;
   readonly principalId: string | null;
   readonly roles: readonly string[];
   readonly operation: string;
@@ -552,6 +559,7 @@ function eventFor(
 ): AuditReadEvent {
   return {
     tenantId,
+    readerTenantId: input.principal?.tenantId ?? null,
     principalId: input.principal?.principalId ?? null,
     roles: rolesOf(ctx, input.principal),
     operation,

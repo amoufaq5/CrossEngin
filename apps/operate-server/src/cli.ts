@@ -2,6 +2,7 @@ import { REGIONS } from "@crossengin/residency";
 
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
+import { parseRequestBodyLimit } from "./request-body-limit.js";
 
 export type StoreKind = "memory" | "pg" | "pg-columns";
 
@@ -117,6 +118,28 @@ export interface ServeOptions {
   readonly meteringConfig: string | null;
   /** Path to a JSON Stripe usage-sync config ({intervalMs?, tenants, subscriptionItems}) — periodically reports persisted usage records to Stripe (needs --store pg + --stripe-api-key). */
   readonly stripeUsageSyncConfig: string | null;
+  /** Per-request USD ceiling on AI design spend; null leaves the per-request gate off (the monthly one still applies). */
+  readonly aiMaxRequestDollars: number | null;
+  /** Expose the notification-template authoring routes under /v1/notification-templates (draft/review/approve/retire over meta.notification_templates; needs --store pg). */
+  readonly notificationTemplateRoutes: boolean;
+  /** Roles permitted to draft and submit a template (repeatable; default erp_admin). */
+  readonly notificationTemplateAuthorRoles: readonly string[];
+  /** Roles permitted to approve or reject a submitted template (repeatable; default platform_admin). Four-eyes: an approver may not approve their own draft. */
+  readonly notificationTemplateApproverRoles: readonly string[];
+  /** Roles permitted to author a template in a non-suppressible category (security_alert, transactional), which overrides a recipient's preferences and suppressions (repeatable; default none ⇒ nobody). */
+  readonly notificationTemplateUnconditionalRoles: readonly string[];
+  /** Expose the read-only audit-trail routes under /v1/audit (list + fetch entries with their anchors; needs --store pg + --audit-chain-config). */
+  readonly auditReadRoutes: boolean;
+  /** Roles permitted to read their own tenant's audit trail (repeatable; default erp_admin). */
+  readonly auditReadTenantRoles: readonly string[];
+  /** Roles permitted to read any tenant's audit trail (repeatable; default platform_admin). Elevates via app.platform_audit. */
+  readonly auditReadPlatformRoles: readonly string[];
+  /** Roles permitted to see pii/phi/regulated payload fields unredacted (repeatable; default none — everyone gets the redacted view). */
+  readonly auditReadSensitiveRoles: readonly string[];
+  /** Maximum queryable time range in days; null uses the route default. */
+  readonly auditReadMaxRangeDays: number | null;
+  /** Maximum buffered request body, as bytes or a size like 25mb (default 10mb, floor 1kb, ceiling 1gb). */
+  readonly maxRequestBodyBytes: number | null;
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -208,6 +231,17 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let requireDesignReview = false;
   let meteringConfig: string | null = null;
   let stripeUsageSyncConfig: string | null = null;
+  let aiMaxRequestDollars: number | null = null;
+  let notificationTemplateRoutes = false;
+  const notificationTemplateAuthorRoles: string[] = [];
+  const notificationTemplateApproverRoles: string[] = [];
+  const notificationTemplateUnconditionalRoles: string[] = [];
+  let auditReadRoutes = false;
+  const auditReadTenantRoles: string[] = [];
+  const auditReadPlatformRoles: string[] = [];
+  const auditReadSensitiveRoles: string[] = [];
+  let auditReadMaxRangeDays: number | null = null;
+  let maxRequestBodyBytes: number | null = null;
   let help = false;
   let version = false;
 
@@ -445,6 +479,80 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       if (!Number.isFinite(n) || n <= 0) throw new CliUsageError(`invalid --ai-max-usd-per-month: ${raw} (> 0)`);
       aiMaxUsdPerMonth = n;
       i += consumed();
+    } else if (arg === "--ai-max-request-dollars" || arg.startsWith("--ai-max-request-dollars=")) {
+      const raw = takeValue(arg, next, "--ai-max-request-dollars");
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) {
+        throw new CliUsageError(`invalid --ai-max-request-dollars: ${raw} (> 0)`);
+      }
+      aiMaxRequestDollars = n;
+      i += consumed();
+    } else if (arg === "--notification-template-routes") {
+      notificationTemplateRoutes = true;
+    } else if (
+      arg === "--notification-template-author-role" ||
+      arg.startsWith("--notification-template-author-role=")
+    ) {
+      notificationTemplateAuthorRoles.push(
+        takeValue(arg, next, "--notification-template-author-role"),
+      );
+      i += consumed();
+      notificationTemplateRoutes = true;
+    } else if (
+      arg === "--notification-template-approver-role" ||
+      arg.startsWith("--notification-template-approver-role=")
+    ) {
+      notificationTemplateApproverRoles.push(
+        takeValue(arg, next, "--notification-template-approver-role"),
+      );
+      i += consumed();
+      notificationTemplateRoutes = true;
+    } else if (
+      arg === "--notification-template-unconditional-role" ||
+      arg.startsWith("--notification-template-unconditional-role=")
+    ) {
+      notificationTemplateUnconditionalRoles.push(
+        takeValue(arg, next, "--notification-template-unconditional-role"),
+      );
+      i += consumed();
+      notificationTemplateRoutes = true;
+    } else if (arg === "--audit-read-routes") {
+      auditReadRoutes = true;
+    } else if (arg === "--audit-read-tenant-role" || arg.startsWith("--audit-read-tenant-role=")) {
+      auditReadTenantRoles.push(takeValue(arg, next, "--audit-read-tenant-role"));
+      i += consumed();
+      auditReadRoutes = true;
+    } else if (
+      arg === "--audit-read-platform-role" ||
+      arg.startsWith("--audit-read-platform-role=")
+    ) {
+      auditReadPlatformRoles.push(takeValue(arg, next, "--audit-read-platform-role"));
+      i += consumed();
+      auditReadRoutes = true;
+    } else if (
+      arg === "--audit-read-sensitive-role" ||
+      arg.startsWith("--audit-read-sensitive-role=")
+    ) {
+      auditReadSensitiveRoles.push(takeValue(arg, next, "--audit-read-sensitive-role"));
+      i += consumed();
+      auditReadRoutes = true;
+    } else if (
+      arg === "--audit-read-max-range-days" ||
+      arg.startsWith("--audit-read-max-range-days=")
+    ) {
+      const raw = takeValue(arg, next, "--audit-read-max-range-days");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new CliUsageError(`invalid --audit-read-max-range-days: ${raw} (>= 1)`);
+      }
+      auditReadMaxRangeDays = n;
+      i += consumed();
+    } else if (arg === "--max-request-body" || arg.startsWith("--max-request-body=")) {
+      const raw = takeValue(arg, next, "--max-request-body");
+      const parsed = parseRequestBodyLimit(raw);
+      if (!parsed.ok) throw new CliUsageError(`invalid --max-request-body: ${parsed.reason}`);
+      maxRequestBodyBytes = parsed.bytes;
+      i += consumed();
     } else if (arg === "--metering-config" || arg.startsWith("--metering-config=")) {
       meteringConfig = takeValue(arg, next, "--metering-config");
       i += consumed();
@@ -642,6 +750,26 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     requireDesignReview,
     meteringConfig,
     stripeUsageSyncConfig,
+    aiMaxRequestDollars,
+    notificationTemplateRoutes,
+    notificationTemplateAuthorRoles:
+      notificationTemplateAuthorRoles.length > 0 ? notificationTemplateAuthorRoles : ["erp_admin"],
+    notificationTemplateApproverRoles:
+      notificationTemplateApproverRoles.length > 0
+        ? notificationTemplateApproverRoles
+        : ["platform_admin"],
+    // No default, deliberately: authoring in a category that ignores a recipient's opt-out is how a
+    // marketing blast reaches someone who unsubscribed, so it is nobody's privilege until granted.
+    notificationTemplateUnconditionalRoles,
+    auditReadRoutes,
+    auditReadTenantRoles: auditReadTenantRoles.length > 0 ? auditReadTenantRoles : ["erp_admin"],
+    auditReadPlatformRoles:
+      auditReadPlatformRoles.length > 0 ? auditReadPlatformRoles : ["platform_admin"],
+    // No default: an empty list means every reader gets the redacted view, which is the correct
+    // default for a surface whose whole point is that reading pii is a separate, granted privilege.
+    auditReadSensitiveRoles,
+    auditReadMaxRangeDays,
+    maxRequestBodyBytes,
     defaultScheme,
     help,
     version,
@@ -943,6 +1071,30 @@ Options:
   --manifest-refresh-ms <n>  Poll interval (ms, >=1000) invalidating the per-tenant gateway
                        cache when another replica activates a manifest (default: TTL only)
   --ai-max-usd-per-month <n>  Per-tenant monthly USD ceiling on AI design spend
+  --ai-max-request-dollars <n>  Per-REQUEST USD ceiling, refused before the call rather than
+                       discovered after it. The monthly ceiling still applies; this bounds one
+                       prompt. Off by default
+  --notification-template-routes  Expose template authoring under /v1/notification-templates —
+                       draft, submit, approve/reject, retire (needs --store pg)
+  --notification-template-author-role <r>  Role permitted to draft and submit (repeatable;
+                       default erp_admin)
+  --notification-template-approver-role <r>  Role permitted to approve or reject (repeatable;
+                       default platform_admin). Four-eyes: nobody approves their own draft
+  --notification-template-unconditional-role <r>  Role permitted to author a template in a
+                       non-suppressible category (security_alert, transactional), which overrides a
+                       recipient's preferences AND suppressions (repeatable). Default none
+  --audit-read-routes  Expose the read-only audit trail under /v1/audit — list and fetch entries
+                       with their chain anchors (needs --store pg + --audit-chain-config)
+  --audit-read-tenant-role <r>  Role permitted to read its OWN tenant's trail (repeatable;
+                       default erp_admin). Fail-closed
+  --audit-read-platform-role <r>  Role permitted to read ANY tenant's trail (repeatable; default
+                       platform_admin). Elevates via app.platform_audit, which is SELECT-only
+  --audit-read-sensitive-role <r>  Role permitted to see pii/phi/regulated payload fields
+                       unredacted (repeatable). Default none: every reader gets the redacted view
+  --audit-read-max-range-days <n>  Largest queryable time range in days (>=1)
+  --max-request-body <size>  Largest buffered request body — bytes or a size like 25mb (default
+                       10mb, floor 1kb, ceiling 1gb). Not disableable; out-of-band values are
+                       refused at boot rather than clamped
   --design-review      Expose the platform design-review queue (/v1/platform/design-reviews)
   --design-review-role <r>  Role permitted to decide reviews (repeatable; default platform_admin)
   --require-design-review   Require platform approval before a tenant activates a proposal
