@@ -125,8 +125,12 @@ there the drop is a visible step in service of a change the catalog asked for, n
   `RECONCILE_STEP_KINDS`; `emitRenameColumn` renders it.
 - `allowLoosening` is read in exactly one place — the undeclared-foreign-key branch, beside the
   existing `blocksRetype` condition.
-- Verified live against a throwaway cluster: a populated table with the old column name migrates, the
-  rows survive, the plan re-runs to empty, and the ambiguous case refuses with both resolutions.
+- Verified live against a throwaway cluster on `meta.feature_flags` holding a row under the old name:
+  the plan is **one** statement, `rename_column feature_flags.default_value_json [guarded]` — not an
+  addition plus an undeclared-column report; applying it leaves the row readable under the new name; and
+  the plan re-runs to empty. With **both** names live the plan has **zero** steps and one
+  `column_rename_ambiguous` entry carrying both resolutions, so it does nothing rather than half of
+  something.
 
 ## Open questions
 
