@@ -125,6 +125,8 @@ import {
 import { buildDeletionRequestRoutes, newRequestId } from "./deletion-request-routes.js";
 import { DeletionEscalationConfigSchema } from "./deletion-escalation-config.js";
 import { DeletionEvidenceEscalator } from "./deletion-evidence-escalation.js";
+import { buildPageDispatcher, buildPageSendersFromEnv } from "./page-senders-env.js";
+import { formatPageReport, type PageDeliveryReport } from "@crossengin/notification-providers";
 import {
   DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
@@ -861,6 +863,33 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     }
   }
+  // The page transports (ADR-0325). Built once and shared by every escalator, because a page is the
+  // same act whatever planned it; the per-escalator part is only the `signal` label in the payload.
+  // `pagerduty_*` needs nothing — the Events API authenticates on the routing key the alert policy
+  // already carries — so a deployment with a PagerDuty route pages correctly with no environment.
+  const pageSenders = buildPageSendersFromEnv();
+  for (const skipped of pageSenders.report.skipped) {
+    console.warn(`[paging] not wired: ${skipped}`);
+  }
+  const pageLogger =
+    (surface: string) =>
+    (report: PageDeliveryReport): void => {
+      const text = `[${surface}] ${formatPageReport(report)}`;
+      // An undelivered page is an error even though the escalation succeeded: the incident exists
+      // and nobody has been told. A delivered one is informational.
+      if (report.undelivered) console.error(text);
+      else console.info(text);
+    };
+  const deletionPager = buildPageDispatcher(
+    "deletion-evidence",
+    pageSenders,
+    pageLogger("deletion-evidence"),
+  );
+  const integrityPager = buildPageDispatcher(
+    "audit-integrity",
+    pageSenders,
+    pageLogger("integrity-proof"),
+  );
   // Escalation for the two deletion-evidence findings the forensic chain cannot raise (ADR-0324).
   // Built once and shared by the routes and the scheduler, so one tampered row examined by both is
   // still one episode — the episode key is the request, and `findOpen` is what enforces it.
@@ -876,11 +905,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // declaration is retried rather than lost and an in-process id cannot collide with a stored
       // one for no gain (ADR-0293's reasoning for the SLO loop).
       declarer: new PostgresIncidentDeclarer({ conn }),
-      page: (page, incident) =>
-        console.error(
-          `[deletion-evidence] PAGE ${incident.id} severity=${incident.severity}` +
-            ` channels=${page.channels.map((c) => c.kind).join(",")}`,
-        ),
+      page: async (page): Promise<void> => {
+        // Delivered, or loudly undelivered. The incident is already durable by here, so a failed
+        // page is reported rather than thrown (ADR-0325).
+        await deletionPager.deliver(page);
+      },
       onError: (err, requestId) =>
         console.error(`[deletion-evidence] escalation error for ${requestId}`, err),
     });
@@ -1560,11 +1589,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               config: proofConfig.escalation,
               ...(auditEmitter !== null ? { audit: auditEmitter } : {}),
               declarer: new PostgresIncidentDeclarer({ conn }),
-              page: (page, incident) =>
-                console.error(
-                  `[integrity-proof] PAGE ${incident.id} severity=${incident.severity}` +
-                    ` channels=${page.channels.map((c) => c.kind).join(",")}`,
-                ),
+              page: async (page): Promise<void> => {
+                await integrityPager.deliver(page);
+              },
               onError: (err) => console.error("[integrity-proof] escalation error", err),
             });
       integrityProof = buildIntegrityProofLifecycle(conn, proofConfig, {

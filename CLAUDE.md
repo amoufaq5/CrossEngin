@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 319 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 320 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~11,987 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~12,018 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -594,6 +594,20 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   already on the `SendRequest`, `pushPayloadViolations` checks that on every send, and `send` refuses
   without calling FCM — so a composer that reaches for tenant data is a failed delivery, not a
   lock-screen disclosure.
+  Also the **page transports** (ADR-0325), which are deliberately *not* the notification senders:
+  `PagerDutyPageSender` (Events API v2 — needs no configuration, because the `routing_key` **is** the
+  credential and the alert policy already carries it as `serviceKey`, with `dedup_key` = the incident id
+  so re-paging updates one alert), `SlackPageSender` (`chat.postMessage`, because an incoming webhook is
+  bound to one channel and so could not obey the policy's), `WebhookPageSender` (HMAC over
+  `timestamp.body`, the same scheme as the bounce webhook, refused at construction if the secret is under
+  16 bytes), and `PageDispatcher` over them. **A page is not a notification and must not travel as one:**
+  the notification stack exists to *withhold* delivery — preferences, suppressions, quiet hours — and a
+  `sev1` is the one thing none of those may apply to, so `email_digest`/`sms` are reported `unroutable`
+  rather than adapted. `PageContent` is three fields (incident id, severity, a deployment-declared
+  `signal`) and nothing from the finding, which names a tenant and a tombstone — ADR-0310's rule on
+  another surface. Five dispositions, every channel attempted even if one throws, and
+  `delivered === 0` is `undelivered`: logged at error, never thrown, because the incident is already
+  durable and a throw would make a successful declaration look like a failed escalation.
 - **`pwa`** — PWA manifest, service-worker cache strategies, IndexedDB outbox with
   conflict strategies, background sync, push (PHI-safe), Capacitor native wrapper config.
 - **`integrations`** — thin: 12 integration kinds (outbound/inbound HTTP, GraphQL, HL7,
@@ -977,11 +991,22 @@ opened them.
   leaves every digest and the chain entry byte-identical. `verifyStoredEvidence` catches it, refuses to
   complete a request from it, and (ADR-0324) declares a paging `sev1` for it — the finding the chain
   cannot raise now has the alarm the chain cannot provide, one incident per request and cancelled on
-  recovery. What is left there: every finding is graded `sev1` with no per-defect gradation, a
-  `PageDirective` is still only *logged* (here and in the integrity escalator — nothing in the platform
-  delivers one), the escalation leaves no anchored `meta.audit_log` row of its own the way
-  `IntegrityEscalator`'s does, and nothing *schedules* `auditCompleted`, so the reverse direction
-  escalates only when a human loads `GET .../unproven`.
+  recovery. What is left there: every finding is graded `sev1` with no per-defect gradation, the
+  escalation leaves no anchored `meta.audit_log` row of its own the way `IntegrityEscalator`'s does, and
+  nothing *schedules* `auditCompleted`, so the reverse direction escalates only when a human loads
+  `GET .../unproven`.
+- **A page now really leaves the process, and what remains is the record of it** (ADR-0325).
+  `PageDispatcher` delivers over PagerDuty, Slack and a signed webhook, and **reports** rather than
+  throws: `delivered === 0` is `undelivered`, logged at error, because the incident is already durable.
+  What is left: a page is **not recorded durably** — no `meta.audit_log` row and no incident-timeline
+  note, so "we paged at 03:14 and PagerDuty accepted it" lives only in a log line, which is exactly the
+  claim an incident review needs; **nothing retries** a failed page, which is survivable for the two
+  escalators that re-derive their finding every tick and not for the one-shot integrity escalator;
+  `email_digest`/`sms` are `unroutable` by the deliberate decision that a page must not travel as a
+  notification, so the senders that could serve them stay unused; the **SLO loop still logs** its page
+  rather than dispatching it, so two of three planners deliver and one does not; and a PagerDuty alert
+  is only ever *triggered* — `event_action: "resolve"` on the same `dedup_key` would close it when an
+  escalator cancels its incident, and nothing sends it.
   There is also no tooling to *resolve* an unverified tombstone (the attestations beside it are enough to
   recompute what the scope should have been, but rewriting a proof is not something to automate blindly),
   and a tombstone with no `relatedDeletionRequestId` — every one the synchronous route of ADR-0320 writes —
@@ -1047,7 +1072,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 319 records; 240 Accepted, 79 Proposed (the
+title or status change cannot drift. 320 records; 241 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
