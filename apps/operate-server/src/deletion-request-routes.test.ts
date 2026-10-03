@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { ResolvedPrincipal } from "@crossengin/api-gateway";
+import { matchRoute, type ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput } from "@crossengin/api-gateway-runtime";
 
 import {
@@ -11,9 +11,11 @@ import {
   buildDeletionRequestRoutes,
   newRequestId,
   requestHandle,
+  DELETION_REQUEST_RECONCILED_OPERATION,
   type DeletionRequestEvent,
   type DeletionRequestLike,
   type DeletionRequestRoutesContext,
+  type ReconciliationLike,
 } from "./deletion-request-routes.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -57,11 +59,28 @@ function requestOf(over: Partial<DeletionRequestLike> = {}): DeletionRequestLike
   };
 }
 
+function verdictOf(over: Partial<ReconciliationLike> = {}): ReconciliationLike {
+  return {
+    requestId: REQ,
+    tenantId: TENANT,
+    verdict: "never_committed",
+    tombstoneId: null,
+    tombstoneIds: [],
+    applied: false,
+    tenantRetired: null,
+    strandedForMs: 7_200_000,
+    detail: "no tombstone names this request, so its transaction did not commit",
+    ...over,
+  };
+}
+
 interface Harness {
   readonly ctx: DeletionRequestRoutesContext;
   readonly events: DeletionRequestEvent[];
   readonly submits: Array<Record<string, unknown>>;
   readonly transitions: Array<{ to: string; fields: Record<string, unknown> }>;
+  readonly reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }>;
+  readonly strandedCalls: string[];
 }
 
 function harness(
@@ -72,11 +91,16 @@ function harness(
     readonly submitThrows?: unknown;
     readonly transitionThrows?: unknown;
     readonly transitionReturnsNull?: boolean;
+    readonly verdict?: ReconciliationLike;
+    readonly stranded?: readonly DeletionRequestLike[];
+    readonly strandedThrows?: boolean;
   } = {},
 ): Harness {
   const events: DeletionRequestEvent[] = [];
   const submits: Array<Record<string, unknown>> = [];
   const transitions: Array<{ to: string; fields: Record<string, unknown> }> = [];
+  const reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }> = [];
+  const strandedCalls: string[] = [];
   const ctx: DeletionRequestRoutesContext = {
     store: {
       submit: async (input): Promise<DeletionRequestLike> => {
@@ -94,7 +118,23 @@ function harness(
         if (behaviour.transitionReturnsNull === true) return null;
         return requestOf({ status: to, verifiedAt: AT, verifiedBy: CALLER });
       },
+      stranded: async (olderThan): Promise<readonly DeletionRequestLike[]> => {
+        strandedCalls.push(olderThan);
+        if (behaviour.strandedThrows === true) throw new Error("a stored row no longer parses");
+        return behaviour.stranded ?? [requestOf({ status: "in_progress", inProgressAt: AT })];
+      },
     },
+    reconciler: {
+      assess: async (): Promise<ReconciliationLike> => behaviour.verdict ?? verdictOf(),
+      reconcileOne: async (request, opts): Promise<ReconciliationLike> => {
+        reconciled.push({
+          id: request.id,
+          applyNeverCommitted: opts?.applyNeverCommitted,
+        });
+        return behaviour.verdict ?? verdictOf();
+      },
+    },
+    reconcileRoles: new Set(["platform_admin"]),
     principalRoles: (p) => ({
       primaryRole: p === null ? "anonymous" : "platform_admin",
       secondaryRoles: [],
@@ -108,13 +148,15 @@ function harness(
     clock: () => new Date(AT),
     ...over,
   };
-  return { ctx, events, submits, transitions };
+  return { ctx, events, submits, transitions, reconciled, strandedCalls };
 }
 
 const SUBMIT = "platform.deletion_requests.submit";
 const VERIFY = "platform.deletion_requests.verify";
 const REJECT = "platform.deletion_requests.reject";
 const READ = "platform.deletion_requests.read";
+const RECONCILE = "platform.deletion_requests.reconcile";
+const STRANDED = "platform.deletion_requests.stranded";
 
 function handlerFor(ctx: DeletionRequestRoutesContext, op: string): Handler {
   const found = buildDeletionRequestRoutes(ctx).find((r) => r.route.operationId === op);
@@ -146,7 +188,7 @@ const SUBMIT_BODY = {
 };
 
 describe("the route declarations", () => {
-  it("are submit, verify, reject and read", () => {
+  it("are submit, verify, reject, reconcile, stranded and read", () => {
     const routes = buildDeletionRequestRoutes(harness().ctx);
     expect(
       routes.map((r) => ({
@@ -162,6 +204,8 @@ describe("the route declarations", () => {
       { method: "POST", path: "v1/platform/deletion-requests" },
       { method: "POST", path: "v1/platform/deletion-requests/{id}/verify" },
       { method: "POST", path: "v1/platform/deletion-requests/{id}/reject" },
+      { method: "POST", path: "v1/platform/deletion-requests/{id}/reconcile" },
+      { method: "GET", path: "v1/platform/deletion-requests/stranded" },
       { method: "GET", path: "v1/platform/deletion-requests/{id}" },
     ]);
   });
@@ -170,7 +214,34 @@ describe("the route declarations", () => {
     const routes = buildDeletionRequestRoutes(harness().ctx);
     // The id is generated server-side, so a retry without a key opens a *second* request for the same
     // subject — and both would run. Nothing else here creates anything.
-    expect(routes.map((r) => r.route.idempotencyRequired)).toEqual([true, false, false, false]);
+    expect(routes.map((r) => r.route.idempotencyRequired)).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  it("matches /stranded as the literal route, not as a request whose id is 'stranded'", () => {
+    // Pinned against the REAL matcher, because `matchRoute` returns the first declaration-order
+    // match with no preference for a literal over a parameter — so this is a property of the order
+    // these are declared in, and a comment could not enforce it.
+    const routes = buildDeletionRequestRoutes(harness().ctx).map((r) => r.route);
+    const at = new Date(AT);
+    const matched = matchRoute(
+      routes,
+      "GET",
+      "/v1/platform/deletion-requests/stranded",
+      "v1",
+      at,
+    );
+    expect(matched.outcome).toBe("matched");
+    expect(matched.route?.operationId).toBe("platform.deletion_requests.stranded");
+    const byId = matchRoute(routes, "GET", `/v1/platform/deletion-requests/${REQ}`, "v1", at);
+    expect(byId.route?.operationId).toBe("platform.deletion_requests.read");
+    expect(byId.pathParameters["id"]).toBe(REQ);
   });
 });
 
@@ -393,5 +464,121 @@ describe("read", () => {
   it("narrows to readRoles when one is configured", async () => {
     const h = harness({ readRoles: new Set(["auditor"]) });
     expect((await call(h.ctx, READ)).status).toBe(403);
+  });
+});
+
+describe("stranded", () => {
+  it("lists every in_progress request with its verdict, writing nothing", async () => {
+    const h = harness();
+    const res = await call(h.ctx, STRANDED);
+    expect(res.status).toBe(200);
+    const data = res.body["data"] as Array<Record<string, unknown>>;
+    expect(data).toHaveLength(1);
+    expect((data[0]?.["reconciliation"] as ReconciliationLike).verdict).toBe("never_committed");
+    // A list is for looking at; applying is the POST.
+    expect(h.reconciled).toEqual([]);
+  });
+
+  it("asks for everything in_progress, not just what is past the window", async () => {
+    const h = harness();
+    await call(h.ctx, STRANDED);
+    // The window governs the inference from absence, not the listing (ADR-0322).
+    expect(h.strandedCalls).toEqual([AT]);
+  });
+
+  it("503s when a stored request cannot be read", async () => {
+    const h = harness({}, { strandedThrows: true });
+    const res = await call(h.ctx, STRANDED);
+    expect(res.status).toBe(503);
+  });
+
+  it("is its own grant, not the read one", async () => {
+    const h = harness({ reconcileRoles: new Set(["sre"]), readRoles: new Set(["platform_admin"]) });
+    expect((await call(h.ctx, STRANDED)).status).toBe(403);
+  });
+
+  it("refuses an ungranted caller before admitting whether reconciliation is even wired", async () => {
+    const h = harness({ reconciler: undefined, reconcileRoles: new Set() });
+    // Fail-closed ordering: a 501 would tell an unauthorised caller about the deployment's config.
+    expect((await call(h.ctx, STRANDED)).status).toBe(403);
+  });
+
+  it("501s a granted caller when no reconciler is wired", async () => {
+    const h = harness({ reconciler: undefined });
+    expect((await call(h.ctx, STRANDED)).status).toBe(501);
+  });
+});
+
+describe("reconcile", () => {
+  it("applies a conclusive verdict and returns 200 with the refreshed handle", async () => {
+    const h = harness(
+      {},
+      { verdict: verdictOf({ verdict: "completed_by_evidence", tombstoneId: TOMB, applied: true }) },
+    );
+    const res = await call(h.ctx, RECONCILE, { parsedBody: {} });
+    expect(res.status).toBe(200);
+    expect((res.body["reconciliation"] as ReconciliationLike).tombstoneId).toBe(TOMB);
+    expect(h.events[0]?.operation).toBe(DELETION_REQUEST_RECONCILED_OPERATION);
+    expect(h.events[0]?.detail).toBe("applied: completed_by_evidence");
+  });
+
+  it("does not authorise the inference by default", async () => {
+    const h = harness();
+    await call(h.ctx, RECONCILE, { parsedBody: {} });
+    // An absence is an inference, so applying it is never a default.
+    expect(h.reconciled).toEqual([{ id: REQ, applyNeverCommitted: false }]);
+  });
+
+  it("passes the operator's authorisation through when they give it", async () => {
+    const h = harness({}, { verdict: verdictOf({ applied: true }) });
+    const res = await call(h.ctx, RECONCILE, { parsedBody: { acceptNeverCommitted: true } });
+    expect(h.reconciled).toEqual([{ id: REQ, applyNeverCommitted: true }]);
+    expect(res.status).toBe(200);
+  });
+
+  it("409s a verdict that needs an operator, so a 200 cannot read as resolved", async () => {
+    const h = harness();
+    const res = await call(h.ctx, RECONCILE, { parsedBody: {} });
+    expect(res.status).toBe(409);
+    expect((res.body["reconciliation"] as ReconciliationLike).verdict).toBe("never_committed");
+  });
+
+  it("409s ambiguous evidence rather than choosing", async () => {
+    const h = harness(
+      {},
+      {
+        verdict: verdictOf({
+          verdict: "ambiguous_evidence",
+          tombstoneIds: [TOMB, "tomb_bbbbccccddddeeee"],
+        }),
+      },
+    );
+    const res = await call(h.ctx, RECONCILE, { parsedBody: { acceptNeverCommitted: true } });
+    expect(res.status).toBe(409);
+    expect((res.body["reconciliation"] as ReconciliationLike).tombstoneIds).toHaveLength(2);
+  });
+
+  it("records the assessment even when nothing was applied", async () => {
+    const h = harness();
+    await call(h.ctx, RECONCILE, { parsedBody: {} });
+    expect(h.events[0]?.detail).toBe("assessed: never_committed");
+  });
+
+  it("refuses a body it does not recognise", async () => {
+    const h = harness();
+    const res = await call(h.ctx, RECONCILE, { parsedBody: { force: true } });
+    expect(res.status).toBe(400);
+    expect(h.reconciled).toEqual([]);
+  });
+
+  it("404s a request that is not there, and 503s one that will not parse", async () => {
+    expect((await call(harness({}, { stored: null }).ctx, RECONCILE, { parsedBody: {} })).status).toBe(404);
+    expect((await call(harness({}, { readThrows: true }).ctx, RECONCILE, { parsedBody: {} })).status).toBe(503);
+  });
+
+  it("refuses an id the column's CHECK would reject", async () => {
+    const h = harness();
+    const res = await call(h.ctx, RECONCILE, { params: { id: "stranded" }, parsedBody: {} });
+    expect(res.status).toBe(400);
   });
 });

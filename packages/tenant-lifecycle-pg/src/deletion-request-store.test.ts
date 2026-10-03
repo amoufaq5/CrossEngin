@@ -222,6 +222,17 @@ describe("read and dueForExecution", () => {
     expect(select?.sql).toContain("ORDER BY deadline_at, request_id");
   });
 
+  it("finds the requests a run stranded, oldest first", async () => {
+    const { conn, calls } = fakePg([rowOf({ status: "in_progress", in_progress_at: "2026-10-03T12:00:00.000Z" })]);
+    await new PostgresDeletionRequestStore(conn).stranded("2026-10-03T13:00:00.000Z", 5);
+    const select = calls.find((c) => c.sql.includes("in_progress_at <"));
+    // dueForExecution only looks at `verified`, so without this nothing ever sees these again.
+    expect(select?.sql).toContain("status = 'in_progress'");
+    expect(select?.sql).toContain("ORDER BY in_progress_at, request_id");
+    // Oldest first, because the oldest is the one whose absence of evidence is most conclusive.
+    expect(select?.params).toEqual(["2026-10-03T13:00:00.000Z", 5]);
+  });
+
   it("clamps the limit into a sane band", async () => {
     const { conn, calls } = fakePg();
     const store = new PostgresDeletionRequestStore(conn);

@@ -362,6 +362,27 @@ export class PostgresTombstoneStore {
   }
 
   /**
+   * Every tombstone naming one deletion request.
+   *
+   * This is the evidence a stranded request is reconciled from (ADR-0322). The pipeline writes the
+   * tombstone in the **same transaction** as the `DROP SCHEMA` (ADR-0319) and ADR-0321 put the
+   * request's id on it, so a tombstone naming a request exists if and only if that request's
+   * deletion committed. Returning every match rather than the first is the point: two would mean the
+   * premise is broken, and a `LIMIT 1` would hide that instead of reporting it.
+   */
+  async findForRequest(requestId: string): Promise<readonly StoredTombstone[]> {
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${TOMBSTONE_COLUMNS.join(", ")} FROM ${this.table}` +
+          " WHERE related_deletion_request_id = $1 ORDER BY deleted_at, tombstone_id",
+        [requestId],
+      );
+      return result.rows.map((row) => rowToStoredTombstone(row));
+    });
+  }
+
+  /**
    * Whether a stored tombstone still stands up: its own hashes, and its scope against the
    * attestations stored beside it.
    *

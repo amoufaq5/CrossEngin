@@ -850,3 +850,27 @@ describe("parseServeArgs — the GDPR deletion handle", () => {
     ).toBe("a");
   });
 });
+
+describe("parseServeArgs — reconciling a stranded deletion", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("defaults the reconcile grant to nobody and the window to unset", () => {
+    const opts = parseServeArgs([...PG, "--deletion-request-routes"]);
+    expect(opts.deletionRequestReconcileRoles).toEqual([]);
+    expect(opts.deletionStrandedAfterMs).toBeNull();
+  });
+
+  it("a reconcile role implies the routes", () => {
+    const opts = parseServeArgs([...PG, "--deletion-request-reconcile-role=platform_admin"]);
+    expect(opts.deletionRequestRoutes).toBe(true);
+    expect(opts.deletionRequestReconcileRoles).toEqual(["platform_admin"]);
+  });
+
+  it("floors the staleness window at a minute", () => {
+    expect(parseServeArgs([...PG, "--deletion-stranded-after-ms", "60000"]).deletionStrandedAfterMs).toBe(60_000);
+    // The window exists to be far longer than any pipeline run; a shorter one would read "still
+    // running" as "never committed".
+    expect(() => parseServeArgs([...PG, "--deletion-stranded-after-ms", "5000"])).toThrow(/60000/);
+    expect(() => parseServeArgs([...PG, "--deletion-stranded-after-ms", "nope"])).toThrow();
+  });
+});

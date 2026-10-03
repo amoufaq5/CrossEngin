@@ -268,6 +268,26 @@ export class PostgresDeletionRequestStore {
   }
 
   /**
+   * Requests left `in_progress` since before `olderThan` — the ones a run stranded.
+   *
+   * `dueForExecution` only ever looks at `verified`, so without this a stranded request is never
+   * seen again by anything (ADR-0321's open question, ADR-0322's answer). Ordered oldest first,
+   * because the oldest is the one whose absence of evidence is most certainly conclusive.
+   */
+  async stranded(olderThan: string, limit = 50): Promise<readonly GdprDeletionRequest[]> {
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
+          WHERE status = 'in_progress' AND in_progress_at < $1::timestamptz
+          ORDER BY in_progress_at, request_id LIMIT $2`,
+        [olderThan, Math.max(1, Math.min(200, Math.trunc(limit)))],
+      );
+      return result.rows.map((row) => rowToDeletionRequest(row));
+    });
+  }
+
+  /**
    * Moves a request to `status`, refusing a transition the state machine forbids.
    *
    * The guard is re-asserted **inside the `UPDATE` predicate**, not merely checked before it: two

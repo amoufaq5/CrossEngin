@@ -68,6 +68,28 @@ export interface DeletionRequestLike {
   readonly tombstoneId: string | null;
 }
 
+/** Structural mirror of a `ReconciliationResult` (ADR-0322). */
+export interface ReconciliationLike {
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly verdict: string;
+  readonly tombstoneId: string | null;
+  readonly tombstoneIds: readonly string[];
+  readonly applied: boolean;
+  readonly tenantRetired: boolean | null;
+  readonly strandedForMs: number;
+  readonly detail: string | null;
+}
+
+/** The slice of `DeletionReconciler` the reconcile route drives. */
+export interface DeletionReconcilerLike {
+  assess(request: DeletionRequestLike): Promise<ReconciliationLike>;
+  reconcileOne(
+    request: DeletionRequestLike,
+    opts?: { readonly applyNeverCommitted?: boolean },
+  ): Promise<ReconciliationLike>;
+}
+
 /** The slice of `PostgresDeletionRequestStore` these routes drive. */
 export interface DeletionRequestStoreLike {
   submit(input: {
@@ -92,12 +114,15 @@ export interface DeletionRequestStoreLike {
       readonly rejectedReason?: string;
     },
   ): Promise<DeletionRequestLike | null>;
+  /** Requests left `in_progress` since before `olderThan` (ADR-0322). */
+  stranded(olderThan: string, limit?: number): Promise<readonly DeletionRequestLike[]>;
 }
 
 export const DELETION_REQUEST_SUBMITTED_OPERATION = "platform.deletion_request_submitted";
 export const DELETION_REQUEST_VERIFIED_OPERATION = "platform.deletion_request_verified";
 export const DELETION_REQUEST_REJECTED_OPERATION = "platform.deletion_request_rejected";
 export const DELETION_REQUEST_READ_OPERATION = "platform.deletion_request_read";
+export const DELETION_REQUEST_RECONCILED_OPERATION = "platform.deletion_request_reconciled";
 
 export interface DeletionRequestEvent {
   readonly tenantId: string;
@@ -121,6 +146,16 @@ export interface DeletionRequestRoutesContext {
   readonly verifyRoles: ReadonlySet<string>;
   /** Roles permitted to poll a handle. Defaults to the union of the two above. */
   readonly readRoles?: ReadonlySet<string>;
+  /**
+   * Reconciling a stranded request (ADR-0322). Absent ⇒ the two routes are not mounted at all, since
+   * a reconciler is needed to serve them.
+   */
+  readonly reconciler?: DeletionReconcilerLike;
+  /**
+   * Roles permitted to reconcile. Fail-closed, and its own grant: the verdict comes from evidence,
+   * but authorising the inference from an *absence* of evidence is a judgement.
+   */
+  readonly reconcileRoles?: ReadonlySet<string>;
   readonly deadlineDays?: number;
   readonly recordAction: DeletionRequestRecorder;
   readonly newRequestId?: () => string;
@@ -452,6 +487,112 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+export const ReconcileDeletionRequestBodySchema = z
+  .object({
+    /**
+     * Authorises applying the one verdict the evidence does not establish: marking the request
+     * `rejected` because *no* tombstone names it. An absence is an inference — "not committed" and
+     * "not committed yet" look identical — so it belongs to an operator looking at the row, never to
+     * a default. The conclusive verdict is applied regardless of this flag.
+     */
+    acceptNeverCommitted: z.boolean().default(false),
+  })
+  .strict();
+
+function buildStrandedHandler(ctx: DeletionRequestRoutesContext): Handler {
+  return async (input) => {
+    const principal = input.principal;
+    if (principal === null) return json(401, { error: "authentication_required" });
+    if (!allowed(ctx, principal, ctx.reconcileRoles ?? new Set())) {
+      return json(403, {
+        error: "forbidden",
+        detail: "reconciling deletion requests is not granted to this role",
+      });
+    }
+    const reconciler = ctx.reconciler;
+    if (reconciler === undefined) return json(501, { error: "reconciliation_unavailable" });
+    const now = (ctx.clock ?? ((): Date => new Date()))();
+    let stranded: readonly DeletionRequestLike[];
+    try {
+      stranded = await ctx.store.stranded(now.toISOString(), 50);
+    } catch {
+      return json(503, {
+        error: "requests_unreadable",
+        detail: "a stored deletion request could not be read; do not treat this as an absence",
+      });
+    }
+    // The verdict per row, writing nothing: a list is for looking at. Applying is the POST.
+    const assessed = await Promise.all(
+      stranded.map(async (request) => ({
+        ...requestHandle(request),
+        reconciliation: await reconciler.assess(request),
+      })),
+    );
+    return json(200, { data: assessed });
+  };
+}
+
+function buildReconcileHandler(ctx: DeletionRequestRoutesContext): Handler {
+  return async (input) => {
+    const principal = input.principal;
+    if (principal === null) return json(401, { error: "authentication_required" });
+    if (!allowed(ctx, principal, ctx.reconcileRoles ?? new Set())) {
+      return json(403, {
+        error: "forbidden",
+        detail: "reconciling a deletion request is not granted to this role",
+      });
+    }
+    const reconciler = ctx.reconciler;
+    if (reconciler === undefined) return json(501, { error: "reconciliation_unavailable" });
+    const requestId = input.params["id"] ?? "";
+    if (!REQUEST_ID_RE.test(requestId)) {
+      return json(400, { error: "invalid_request", detail: "request id must be a dreq_… id" });
+    }
+    const parsed = ReconcileDeletionRequestBodySchema.safeParse(input.parsedBody ?? {});
+    if (!parsed.success) {
+      return json(400, {
+        error: "invalid_request",
+        detail: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+      });
+    }
+    let request: DeletionRequestLike | null;
+    try {
+      request = await ctx.store.read(requestId);
+    } catch {
+      return json(503, {
+        error: "request_unreadable",
+        detail: "a stored deletion request could not be read; do not treat this as an absence",
+      });
+    }
+    if (request === null) return json(404, { error: "not_found" });
+
+    const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
+    const result = await reconciler.reconcileOne(request, {
+      applyNeverCommitted: parsed.data.acceptNeverCommitted,
+    });
+    await record(ctx, {
+      tenantId: result.tenantId,
+      requestId: result.requestId,
+      principalId: principal.principalId,
+      operation: DELETION_REQUEST_RECONCILED_OPERATION,
+      status: result.verdict,
+      tombstoneId: result.tombstoneId,
+      detail: result.applied ? `applied: ${result.verdict}` : `assessed: ${result.verdict}`,
+      at,
+    });
+
+    let updated = request;
+    if (result.applied) {
+      const reread = await ctx.store.read(requestId).catch(() => null);
+      if (reread !== null) updated = reread;
+    }
+    // 200 when something was written, 409 when a verdict needs an operator and nothing was: the
+    // caller asked for a resolution and did not get one, and a 200 would read as "resolved".
+    const status = result.applied ? 200 : 409;
+    return json(status, { ...requestHandle(updated), reconciliation: result });
+  };
+}
+
 function route(
   operationId: string,
   method: RouteDefinition["method"],
@@ -511,6 +652,30 @@ export function buildDeletionRequestRoutes(
         false,
       ),
       handler: buildRejectHandler(ctx),
+    },
+    {
+      route: route(
+        "platform.deletion_requests.reconcile",
+        "POST",
+        ["v1", "platform", "deletion-requests", { param: "id" }, "reconcile"],
+        false,
+      ),
+      handler: buildReconcileHandler(ctx),
+    },
+    {
+      /**
+       * **Declared before the `{id}` route on purpose.** `matchRoute` returns the first route whose
+       * segments match, in declaration order, with no preference for a literal over a parameter — so
+       * after the `{id}` route this would be read as a request whose id is "stranded". The ordering
+       * is pinned by a test against the real matcher rather than left to this comment.
+       */
+      route: route(
+        "platform.deletion_requests.stranded",
+        "GET",
+        ["v1", "platform", "deletion-requests", "stranded"],
+        false,
+      ),
+      handler: buildStrandedHandler(ctx),
     },
     {
       route: route(

@@ -317,6 +317,33 @@ describe("read and listForTenant", () => {
   });
 });
 
+describe("findForRequest", () => {
+  it("queries by the deletion request the tombstone names", async () => {
+    const record = recordOf();
+    const { conn, anchorer, calls } = fakePg([rowOf(record)]);
+    const found = await new PostgresTombstoneStore(conn, anchorer).findForRequest("dreq_abcdefgh1234");
+    const select = calls.find((c) => c.sql.includes("related_deletion_request_id"));
+    expect(select?.sql).toContain("WHERE related_deletion_request_id = $1");
+    expect(select?.params).toEqual(["dreq_abcdefgh1234"]);
+    expect(found).toHaveLength(1);
+  });
+
+  it("elevates with app.platform_audit, since the evidence outlives its tenant", async () => {
+    const { conn, anchorer, sql } = fakePg([]);
+    await new PostgresTombstoneStore(conn, anchorer).findForRequest("dreq_abcdefgh1234");
+    expect(sql().some((s) => s.includes("set_config('app.platform_audit', 'on', true)"))).toBe(true);
+  });
+
+  it("does not LIMIT, so two tombstones for one request are visible", async () => {
+    const record = recordOf();
+    const { conn, anchorer, calls } = fakePg([rowOf(record)]);
+    await new PostgresTombstoneStore(conn, anchorer).findForRequest("dreq_abcdefgh1234");
+    // A LIMIT 1 would hide the one case that means the premise is broken (ADR-0322).
+    const select = calls.find((c) => c.sql.includes("related_deletion_request_id"));
+    expect(select?.sql).not.toContain("LIMIT");
+  });
+});
+
 describe("rowToStoredTombstone", () => {
   it("throws on a row the contract cannot represent", () => {
     const record = recordOf();

@@ -1,10 +1,10 @@
 # ADR index
 
-316 records. Generated from the ADR files themselves — regenerate rather than
+317 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 237  **Proposed:** 79
+- **Accepted:** 238  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -328,3 +328,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0319](0319-the-deletion-and-its-proof-commit-together.md) | The deletion and its proof commit together | — | Accepted | 2026-10-03 |
 | [0320](0320-the-deletion-flow-is-reachable.md) | The deletion flow is reachable, and the response is the receipt | — | Accepted | 2026-10-03 |
 | [0321](0321-the-deletion-request-is-the-handle.md) | The deletion request is the handle, and a scheduler does the work | — | Accepted | 2026-10-03 |
+| [0322](0322-a-stranded-deletion-is-reconciled-from-evidence.md) | A stranded deletion is reconciled from evidence, and an absence is not evidence | — | Accepted | 2026-10-03 |

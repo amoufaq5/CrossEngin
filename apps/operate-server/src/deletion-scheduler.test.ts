@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { DeletionScheduler, type DeletionRunnerLike } from "./deletion-scheduler.js";
+import {
+  DeletionScheduler,
+  type StrandedReconcilerLike,
+  type DeletionRunnerLike,
+} from "./deletion-scheduler.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
 interface FakeScheduler extends IntervalScheduler {
@@ -132,5 +136,129 @@ describe("DeletionScheduler", () => {
     s.stop();
     s.stop();
     expect(sched.cleared).toBe(1);
+  });
+});
+
+describe("DeletionScheduler — reconciliation", () => {
+  function reconciler(behaviour: { throws?: boolean; repaired?: number } = {}): {
+    readonly reconciler: StrandedReconcilerLike;
+    readonly limits: (number | undefined)[];
+  } {
+    const limits: (number | undefined)[] = [];
+    return {
+      limits,
+      reconciler: {
+        reconcileStranded: async (limit) => {
+          limits.push(limit);
+          if (behaviour.throws === true) throw new Error("evidence unreadable");
+          return Array.from({ length: behaviour.repaired ?? 0 }, (_v, i) => ({
+            requestId: `dreq_repaired1234${i.toString()}`,
+            verdict: "completed_by_evidence",
+            applied: true,
+            tombstoneId: "tomb_aaaabbbbccccdddd",
+          }));
+        },
+      },
+    };
+  }
+
+  it("reconciles on each tick, after the due run", async () => {
+    const order: string[] = [];
+    const rec = reconciler({ repaired: 1 });
+    const seen: string[][] = [];
+    const s = new DeletionScheduler({
+      runner: {
+        runDue: async () => {
+          order.push("runDue");
+          return [];
+        },
+      },
+      reconciler: {
+        reconcileStranded: async (limit) => {
+          order.push("reconcile");
+          return rec.reconciler.reconcileStranded(limit);
+        },
+      },
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+      onReconciled: (r) => seen.push(r.map((x) => x.requestId)),
+    });
+    await s.runOnce();
+    expect(order).toEqual(["runDue", "reconcile"]);
+    expect(seen).toEqual([["dreq_repaired12340"]]);
+  });
+
+  it("still reconciles on a tick whose due run threw", async () => {
+    const errors: unknown[] = [];
+    const rec = reconciler({ repaired: 1 });
+    const s = new DeletionScheduler({
+      runner: runner({ throws: true }).runner,
+      reconciler: rec.reconciler,
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+      onError: (e) => errors.push(e),
+    });
+    await s.runOnce();
+    // The most likely reason a request is stranded is that a run failed, so the repair pass must not
+    // be skipped by the failure that caused it.
+    expect(rec.limits).toEqual([5]);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("routes a failed reconciliation to onError without failing the tick", async () => {
+    const errors: unknown[] = [];
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: reconciler({ throws: true }).reconciler,
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+      onError: (e) => errors.push(e),
+    });
+    await expect(s.runOnce()).resolves.toBeUndefined();
+    expect(errors).toHaveLength(1);
+  });
+
+  it("stays quiet when nothing needed repairing", async () => {
+    let called = 0;
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: reconciler({ repaired: 0 }).reconciler,
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+      onReconciled: () => {
+        called += 1;
+      },
+    });
+    await s.runOnce();
+    expect(called).toBe(0);
+  });
+
+  it("reports nothing for a verdict it did not apply, however many ticks run", async () => {
+    const seen: unknown[] = [];
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: {
+        reconcileStranded: async () => [
+          { requestId: "dreq_pending12345", verdict: "too_recent", applied: false, tombstoneId: null },
+        ],
+      },
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+      onReconciled: (r) => seen.push(r),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    // A standing fact about a row would otherwise be logged every interval for as long as the row
+    // exists; the stranded listing is where an operator reads it.
+    expect(seen).toEqual([]);
+  });
+
+  it("works with no reconciler wired at all", async () => {
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+    });
+    await expect(s.runOnce()).resolves.toBeUndefined();
   });
 });

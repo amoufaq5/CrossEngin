@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 316 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 317 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~11,888 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~11,939 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -408,6 +408,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   deterministic → `rejected`; anything else thrown is genuinely unknown → `aborted`, left `in_progress`
   for a human, since the contract offers no way back to `verified` and re-running on an assumption is how
   a tenant gets deleted twice.
+  **`DeletionReconciler` then resolves what that strands, from evidence** (ADR-0322). Because the pipeline
+  writes the tombstone in the same transaction as the `DROP SCHEMA` and ADR-0321 put the request's id on
+  it, **a tombstone naming the request exists ⟺ that request's deletion committed** — so nothing infers
+  from a missing schema or a log line, it asks `findForRequest` one question. The two directions are
+  **not** symmetric, and that is the decision: presence is conclusive *at any age* and is applied
+  automatically, while an absence is only an inference — "not committed" and "not committed yet" look
+  identical — so `never_committed` is gated behind a staleness window, is never applied by a scheduler,
+  and is its own verdict rather than being folded into the first. `ambiguous_evidence` (two tombstones
+  naming one request) is never applied at all: the premise is broken, which is a finding and not a row to
+  pick from.
 - **`marketplace`** — contracts: 8 pack kinds, a registry with Ed25519 signing and security
   review, per-tenant install lifecycle, permission grants, listings, reviews,
   compatibility.
@@ -638,7 +648,15 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   back another tenant's request), the Article 12(3) deadline computed from the deployment rather than
   accepted from the body, a verifier who may not be the submitter, and a scheduler that deliberately does
   **not** sweep at boot — unlike every sibling scheduler here — because a boot is when a misconfiguration
-  is most likely and this work destroys a tenant's data irreversibly (ADR-0321);
+  is most likely and this work destroys a tenant's data irreversibly (ADR-0321); and the **repair** of
+  what a failed run stranded (`--deletion-request-reconcile-role`, `--deletion-stranded-after-ms`) —
+  `GET .../stranded` lists every `in_progress` request with its verdict beside it and
+  `POST .../{id}/reconcile` resolves one, where the caller asks for a resolution and never supplies the
+  answer: the body's only field authorises applying the inference from an *absence* of evidence, never
+  choosing it, so a verdict that was not applied answers **409** rather than a 200 that would read as
+  resolved. The scheduler's tick repairs the conclusive half in a separate `try` (the likeliest reason a
+  request is stranded is that a run failed) and logs **only what it wrote**, since an unapplied verdict is
+  a standing fact that would otherwise be repeated every tick (ADR-0322);
   **tenant-schema erasure** (`--tenant-erasure-routes`) — a read-only survey route so a destructive act
   is not approved blind, then a drop whose `executedBy` is the credential and whose `approvedBy` is the
   body and must differ, with the tenant id repeated as `confirmTenantId` so an irreversible action is not
@@ -929,11 +947,14 @@ opened them.
   **unenforced**: the audit record's `tenant_id` is a foreign key to that table, so retiring the tenant
   row *first* makes every erasure unrecordable — the 500 fires, visibly, and the data is gone with no
   provenance. Erase, record, then retire the row.
-  **Nothing moves a request out of `in_progress` after an `aborted` run** (ADR-0321): a human reads
-  whether a tombstone exists for that tenant and transitions it in SQL, because there is no route for it,
-  and such a request is then never seen again — `dueForExecution` only looks at `verified`. A request is
-  also submitted for a *tenant*, not for a subject within one: `subjectIdentifier` is recorded and not
-  acted on, so a single data subject inside a multi-user tenant cannot be erased by this path at all.
+  **A stranded request is now reconciled from evidence** (ADR-0322) — `DeletionReconciler` asks whether a
+  tombstone names it, which is conclusive because both commit together — but only the *conclusive* half is
+  automatic. `never_committed` is an inference from an absence and still needs a human to authorise it
+  through `POST .../{id}/reconcile`, and `ambiguous_evidence` is never applied at all. So a deployment that
+  never reads `GET .../stranded` still accumulates rows nothing resolves, and nothing *alerts* on one the
+  way `--integrity-proof-config` alerts on a broken chain. A request is also submitted for a *tenant*, not
+  for a subject within one: `subjectIdentifier` is recorded and not acted on, so a single data subject
+  inside a multi-user tenant cannot be erased by this path at all.
 - **The AI cost estimator is a heuristic on the input side** (ADR-0311). `maxTokens` bounds the output by
   construction; the input is `ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic because the
   number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
@@ -943,7 +964,11 @@ opened them.
   The emitter is built behind a list of flags, and the list was forgotten twice — the second time
   silently skipping `--audit-read-routes` entirely, found by booting the real server rather than by a
   test. It is a named predicate with a test per flag now and the list is up to **nine**, which has caught
-  every flag added since; but nothing *derives* it, so the next feature can still omit itself.
+  every flag added since; but nothing *derives* it, so the next feature can still omit itself. The same
+  class bit again in ADR-0322: the emitter does **not** require the chain, so `--deletion-request-routes`
+  without `--audit-chain-config` mounted the routes, wrote *unanchored* audit rows and had no evidence to
+  reconcile from — a 501 nobody was warned about. It warns at boot now, but the pattern is the lesson:
+  a surface that degrades rather than refusing has to say so out loud.
 - **`failed` is both terminal and compensatable** (ADR-0307). It is in `TERMINAL_INSTANCE_STATUSES` and
   `INSTANCE_TRANSITIONS.failed` is `["compensating"]`, so `isInstanceTerminal` answers "done" for a status
   the map says you may still move. Deliberate for sagas, but the two disagree; a test pins the exception
@@ -989,7 +1014,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 316 records; 237 Accepted, 79 Proposed (the
+title or status change cannot drift. 317 records; 238 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

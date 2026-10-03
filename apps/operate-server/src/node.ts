@@ -91,6 +91,7 @@ import {
 } from "@crossengin/marketplace-runtime-pg";
 import { requestJobCancellation } from "@crossengin/workflow-runtime-pg";
 import {
+  DeletionReconciler,
   DeletionRunner,
   PostgresDeletionRequestStore,
   PostgresTombstoneStore,
@@ -869,8 +870,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     } else if (auditEmitter === null) {
       console.warn(
-        "[platform] --deletion-request-routes requires --audit-chain-config (a request for a " +
-          "tenant's erasure is recorded as it moves); skipping",
+        "[platform] --deletion-request-routes has no audit emitter (a request for a tenant's " +
+          "erasure is recorded as it moves); skipping",
       );
     } else {
       if (
@@ -882,13 +883,43 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             "--deletion-request-verify-role: every request will be refused",
         );
       }
+      if (auditChainProducer === null) {
+        // Found by booting the real server: the emitter does not require the chain, so without
+        // `--audit-chain-config` these routes mount, write *unanchored* audit rows, and reconciliation
+        // has no tombstone table to read as evidence — it answers 501. Degrading quietly at boot is
+        // the ADR-0288 defect, so it is said out loud (ADR-0322).
+        console.warn(
+          "[platform] --deletion-request-routes without --audit-chain-config: its audit rows are " +
+            "unanchored and reconciliation is unavailable (the stranded routes answer 501)",
+        );
+      }
       const emitter = auditEmitter;
+      const reqConn = conn;
+      const requestStore = new PostgresDeletionRequestStore(reqConn, schemaOpt);
+      // Reconciliation reads the tombstone table as its evidence (ADR-0322), so without the forensic
+      // chain there is nothing to reconcile *from* and the two routes answer 501 rather than guessing.
+      const requestReconciler =
+        auditChainProducer === null
+          ? undefined
+          : new DeletionReconciler({
+              requests: requestStore,
+              tombstones: new PostgresTombstoneStore(reqConn, auditChainProducer, schemaOpt),
+              retire: async (tenantId) =>
+                (await new PostgresTenantStore(reqConn).setStatus(tenantId, "deleted")) !== null,
+              ...(options.deletionStrandedAfterMs !== null
+                ? { strandedAfterMs: options.deletionStrandedAfterMs }
+                : {}),
+            });
       extraRouteList.push(
         ...buildDeletionRequestRoutes({
-          store: new PostgresDeletionRequestStore(conn, schemaOpt),
+          store: requestStore,
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           submitRoles: new Set(options.deletionRequestSubmitRoles),
           verifyRoles: new Set(options.deletionRequestVerifyRoles),
+          ...(requestReconciler !== undefined ? { reconciler: requestReconciler } : {}),
+          ...(options.deletionRequestReconcileRoles.length > 0
+            ? { reconcileRoles: new Set(options.deletionRequestReconcileRoles) }
+            : {}),
           ...(options.deletionRequestReadRoles.length > 0
             ? { readRoles: new Set(options.deletionRequestReadRoles) }
             : {}),
@@ -1676,11 +1707,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       });
       deletionScheduler = new DeletionScheduler({
         runner,
+        // The repair half (ADR-0322). Conclusive verdicts only: a scheduler may record a deletion
+        // that demonstrably happened, and may never reject a request on the *absence* of evidence.
+        reconciler: new DeletionReconciler({
+          requests,
+          tombstones,
+          retire: async (tenantId) => (await tenantStore.setStatus(tenantId, "deleted")) !== null,
+          ...(options.deletionStrandedAfterMs !== null
+            ? { strandedAfterMs: options.deletionStrandedAfterMs }
+            : {}),
+        }),
         intervalMs: options.deletionRunnerMs,
         ...(options.deletionRunnerBatchSize !== null
           ? { batchSize: options.deletionRunnerBatchSize }
           : {}),
         onError: (err) => console.error("[platform] deletion runner tick failed", err),
+        onReconciled: (results) => {
+          for (const r of results) {
+            console.log(
+              `[platform] stranded deletion request ${r.requestId} reconciled → ${r.verdict}`,
+            );
+          }
+        },
       });
     }
   }

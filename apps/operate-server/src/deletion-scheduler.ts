@@ -32,14 +32,38 @@ export interface DeletionRunnerLike {
   >;
 }
 
+/**
+ * Structural mirror of `DeletionReconciler.reconcileStranded` (ADR-0322). Optional: a deployment with
+ * no forensic chain has no tombstone store, so there is no evidence to reconcile from.
+ */
+export interface StrandedReconcilerLike {
+  reconcileStranded(limit?: number): Promise<
+    readonly {
+      readonly requestId: string;
+      readonly verdict: string;
+      readonly applied: boolean;
+      readonly tombstoneId: string | null;
+    }[]
+  >;
+}
+
 export interface DeletionSchedulerOptions {
   readonly runner: DeletionRunnerLike;
+  /**
+   * Repairs requests a previous run stranded, in the same tick. One interval and one log line for
+   * one queue: a stranded request is the residue of the work this scheduler does, so a separate
+   * cadence for it would be two knobs describing one thing.
+   */
+  readonly reconciler?: StrandedReconcilerLike;
   readonly intervalMs: number;
   /** Requests per tick. Each one is a whole tenant's data, so the default is deliberately small. */
   readonly batchSize?: number;
   readonly scheduler?: IntervalScheduler;
   readonly onError?: (err: unknown) => void;
   readonly onRun?: (results: readonly { readonly requestId: string; readonly outcome: string }[]) => void;
+  readonly onReconciled?: (
+    results: readonly { readonly requestId: string; readonly verdict: string }[],
+  ) => void;
 }
 
 /**
@@ -80,7 +104,19 @@ export class DeletionScheduler {
       if (results.length > 0) this.opts.onRun?.(results);
     } catch (err) {
       // A failed tick must not throw out of the timer. The next one re-reads what is due, and a
-      // request this tick claimed but did not finish stays `in_progress` for a human (ADR-0321).
+      // request this tick claimed but did not finish stays `in_progress` until it is reconciled.
+      this.opts.onError?.(err);
+    }
+    // Separately, and after: a reconciliation pass must still happen on a tick whose `runDue` threw,
+    // because the most likely reason a request is stranded is that a run failed.
+    try {
+      const assessed = (await this.opts.reconciler?.reconcileStranded(this.opts.batchSize ?? 5)) ?? [];
+      // Only what was actually written. A `too_recent` or an operator-owned verdict is a standing
+      // fact about a row, so reporting it from here would repeat it every single tick for as long as
+      // the row exists — that is what `GET /v1/platform/deletion-requests/stranded` is for.
+      const repaired = assessed.filter((r) => r.applied);
+      if (repaired.length > 0) this.opts.onReconciled?.(repaired);
+    } catch (err) {
       this.opts.onError?.(err);
     }
   }

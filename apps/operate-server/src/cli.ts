@@ -160,6 +160,10 @@ export interface ServeOptions {
   readonly deletionRequestVerifyRoles: readonly string[];
   /** Roles permitted to poll a request handle (repeatable; defaults to the submit and verify roles together). */
   readonly deletionRequestReadRoles: readonly string[];
+  /** Roles permitted to list stranded requests and reconcile one (repeatable; default none ⇒ nobody). Its own grant: the verdict comes from evidence, but authorising the inference from an absence of evidence is a judgement. */
+  readonly deletionRequestReconcileRoles: readonly string[];
+  /** How long a request must be `in_progress` before an absence of evidence is read as "never committed" (ms, default 3600000). Presence of evidence is conclusive at any age. */
+  readonly deletionStrandedAfterMs: number | null;
   /** Days from submission to the Article 12(3) deadline (default 30, cap 90). Set per deployment rather than per request. */
   readonly deletionRequestDeadlineDays: number | null;
   /** Run verified deletion requests out of band every N ms (needs --tenant-deletion-routes' wiring). Off unless set; the first tick is one interval after boot, never at boot. */
@@ -282,6 +286,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const deletionRequestSubmitRoles: string[] = [];
   const deletionRequestVerifyRoles: string[] = [];
   const deletionRequestReadRoles: string[] = [];
+  const deletionRequestReconcileRoles: string[] = [];
+  let deletionStrandedAfterMs: number | null = null;
   let deletionRequestDeadlineDays: number | null = null;
   let deletionRunnerMs: number | null = null;
   let deletionRunnerExecutedBy: string | null = null;
@@ -636,6 +642,26 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
       deletionRequestRoutes = true;
     } else if (
+      arg === "--deletion-request-reconcile-role" ||
+      arg.startsWith("--deletion-request-reconcile-role=")
+    ) {
+      deletionRequestReconcileRoles.push(takeValue(arg, next, "--deletion-request-reconcile-role"));
+      i += consumed();
+      deletionRequestRoutes = true;
+    } else if (
+      arg === "--deletion-stranded-after-ms" ||
+      arg.startsWith("--deletion-stranded-after-ms=")
+    ) {
+      const raw = takeValue(arg, next, "--deletion-stranded-after-ms");
+      const n = Number(raw);
+      // A floor of a minute, because the whole point of the window is that it is far longer than any
+      // pipeline run: a shorter one would read "still running" as "never committed".
+      if (!Number.isInteger(n) || n < 60_000) {
+        throw new CliUsageError(`invalid --deletion-stranded-after-ms: ${raw} (>= 60000)`);
+      }
+      deletionStrandedAfterMs = n;
+      i += consumed();
+    } else if (
       arg === "--deletion-request-deadline-days" ||
       arg.startsWith("--deletion-request-deadline-days=")
     ) {
@@ -953,6 +979,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionRequestSubmitRoles,
     deletionRequestVerifyRoles,
     deletionRequestReadRoles,
+    // No default: listing every tenant whose deletion is in doubt, and resolving one, is granted by
+    // name like the rest of this flow.
+    deletionRequestReconcileRoles,
+    deletionStrandedAfterMs,
     deletionRequestDeadlineDays,
     deletionRunnerMs,
     deletionRunnerExecutedBy,
@@ -1310,6 +1340,12 @@ Options:
                        none ⇒ refused. Separate from submitting: the verifier may not be the submitter
   --deletion-request-read-role <r>  Role permitted to poll a handle (repeatable; defaults to the
                        submit and verify roles together)
+  --deletion-request-reconcile-role <r>  Role permitted to GET .../stranded and POST
+                       .../{id}/reconcile — resolving a request a failed run left in_progress, from
+                       the tombstone evidence (repeatable). Default none => nobody
+  --deletion-stranded-after-ms <n>  How long a request must sit in_progress before an ABSENCE of
+                       evidence is read as "never committed" (>=60000, default 3600000). A tombstone
+                       naming the request is conclusive at any age; an absence never is
   --deletion-request-deadline-days <n>  Days from submission to the Article 12(3) deadline
                        (default 30, max 90). Per deployment, not per request
   --deletion-runner-ms <n>  Run verified deletion requests out of band every n ms (>=1000). The
