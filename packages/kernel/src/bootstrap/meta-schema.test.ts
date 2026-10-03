@@ -1261,6 +1261,47 @@ describe("table column shapes", () => {
     expect(policy?.using).not.toContain("app.platform_review");
   });
 
+  it("META_TENANT_TOMBSTONES outlives the users and the tenant it names", () => {
+    const col = (name: string) => META_TENANT_TOMBSTONES.columns.find((c) => c.name === name);
+    // Free text, unreferenced. The reference was to `meta.users`, whose rows a tenant deletion erases
+    // — so the tombstone would have pointed at rows it had just destroyed, and ON DELETE RESTRICT
+    // would have made those users undeletable *because* a tombstone named them. A scheduled_purge has
+    // no human executor at all.
+    for (const name of ["executed_by", "approved_by"]) {
+      expect(col(name)?.type, name).toBe("TEXT");
+      expect(col(name)?.references, name).toBeUndefined();
+    }
+    expect(col("related_deletion_request_id")?.type).toBe("TEXT");
+    // Always right, and worth pinning: the tenant row is retired after its data is erased, so a
+    // tombstone that required it to exist could not describe a completed deletion.
+    expect(col("tenant_id")?.type).toBe("UUID");
+    expect(col("tenant_id")?.references).toBeUndefined();
+    // The evidence the scope was composed from, so a stored record can be checked against more than
+    // itself (ADR-0317).
+    expect(col("attestations")?.type).toBe("JSONB");
+    expect(col("attestations")?.notNull).toBe(true);
+  });
+
+  it("META_TENANT_TOMBSTONES is readable after its tenant is gone, by SELECT only", () => {
+    const policies = META_TENANT_TOMBSTONES.rls?.policies ?? [];
+    expect(policies).toHaveLength(2);
+    const platform = policies.find((p) => p.name === "tenant_tombstones_platform_audit_read");
+    const isolation = policies.find((p) => p.name === "tenant_tombstones_isolation");
+    // Isolation alone makes the record unreadable by the only people who need it: a tombstone
+    // outlives its tenant, so no tenant session is left to satisfy it.
+    expect(platform?.command).toBe("SELECT");
+    expect(platform?.using).toBe("current_setting('app.platform_audit', true) = 'on'");
+    expect(isolation?.command).toBeUndefined();
+    expect(isolation?.using).toContain("NULLIF(");
+  });
+
+  it("META_TENANT_TOMBSTONES enforces four-eyes at the column, not only in the contract", () => {
+    const check = (META_TENANT_TOMBSTONES.constraints ?? []).find(
+      (c) => c.name === "tenant_tombstones_four_eyes_check",
+    );
+    expect(check?.kind === "check" && check.expression).toBe("executed_by <> approved_by");
+  });
+
   it("META_AUDIT_LOG splits the platform read off as SELECT rather than widening isolation", () => {
     const policies = META_AUDIT_LOG.rls?.policies ?? [];
     expect(policies).toHaveLength(2);

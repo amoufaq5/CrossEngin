@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 312 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 313 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**86 packages + 3 apps, 143 meta-schema tables, ~11,640 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~11,760 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -68,7 +68,7 @@ increment. See **What's actually left** at the bottom for the current open ends.
 
 ## Package map
 
-86 packages under `packages/`, 3 apps under `apps/`. Almost every package is
+87 packages under `packages/`, 3 apps under `apps/`. Almost every package is
 `packages/<name>` with `src/index.ts` re-exporting 3-30 sibling `src/*.ts` modules and a
 matching `*.test.ts` per module.
 
@@ -375,6 +375,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   assembler re-verifies its own output. `tombstoneMatchesAttestations` answers the question a hash cannot:
   whether a stored record still agrees with its evidence — a tampered scope flips `contentManifestOk`
   while `proofOk` stays true, since the proof commits to the stored digest.
+- **`tenant-lifecycle-pg`** — the tombstone's store (ADR-0318), and the first writer
+  `meta.tenant_tombstones` ever had: declared in Phase 1, it had drifted behind its contract in the way
+  ADR-0300 found for `meta.feature_flags`, and in the table where it mattered most. `executed_by` and
+  `approved_by` referenced `meta.users`, which a tenant deletion *erases* — so the tombstone would have
+  named rows it had just destroyed, and `ON DELETE RESTRICT` would have made those users undeletable
+  because a tombstone named them; a `scheduled_purge` has no human executor at all. They are TEXT and
+  unreferenced now, the table gained the `attestations` its claim is composed from and the chain
+  coordinates that witness it, a `SELECT`-only platform policy (isolation alone made the record
+  unreadable by the only people who need it, since a tombstone outlives its tenant), and a four-eyes
+  CHECK — the third layer for one rule. `write` appends the chain entry **first and in the same
+  transaction** (ADR-0286) and **replaces** the caller's `anchors` with it: a claimant choosing their own
+  witness is the hole, not a feature. The chain payload is the two digests and the identity, never the
+  scope, because a scope can name every table a tenant held and every integrity pass rereads the chain.
 - **`marketplace`** — contracts: 8 pack kinds, a registry with Ed25519 signing and security
   review, per-tenant install lifecycle, permission grants, listings, reviews,
   compatibility.
@@ -860,8 +873,8 @@ opened them.
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
   their data is in a different place than they think until an operator runs the reported SQL.
-- **A tenant's schema can be erased and a tombstone composed; nothing persists or anchors it**
-  (ADR-0316, ADR-0317). The erasure measures exactly what it destroys, refuses a cascade that would reach
+- **A tenant's schema can be erased, a tombstone composed, persisted and anchored; no route does it**
+  (ADR-0316, ADR-0317, ADR-0318). The erasure measures exactly what it destroys, refuses a cascade that would reach
   another schema (observed by trial-and-rollback, not inferred from `pg_depend` — which was wrong twice,
   in both directions), and confirms absence before it commits. `assembleTombstone` then composes a
   `DeletionScope` **only** from per-subsystem attestations and refuses when a subsystem in scope has not
@@ -929,7 +942,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 312 records; 233 Accepted, 79 Proposed (the
+title or status change cannot drift. 313 records; 234 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
