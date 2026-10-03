@@ -90,7 +90,12 @@ import {
   buildPersistentPackSubmissionEngine,
 } from "@crossengin/marketplace-runtime-pg";
 import { requestJobCancellation } from "@crossengin/workflow-runtime-pg";
-import { PostgresTombstoneStore, deleteTenantAtomically } from "@crossengin/tenant-lifecycle-pg";
+import {
+  DeletionRunner,
+  PostgresDeletionRequestStore,
+  PostgresTombstoneStore,
+  deleteTenantAtomically,
+} from "@crossengin/tenant-lifecycle-pg";
 import type { DeletionAttestation, DeletionSubsystem } from "@crossengin/tenant-lifecycle";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
@@ -111,7 +116,17 @@ import { buildDesignReviewRoutes } from "./design-review-routes.js";
 import { buildIntegrityVerdictRoutes } from "./integrity-verdict-routes.js";
 import { buildJobCancelRoutes } from "./job-cancel-routes.js";
 import { buildTenantErasureRoutes } from "./tenant-erasure-routes.js";
-import { buildTenantDeletionRoutes } from "./tenant-deletion-routes.js";
+import {
+  TENANT_DELETED_OPERATION,
+  buildTenantDeletionRoutes,
+  newTombstoneId,
+} from "./tenant-deletion-routes.js";
+import { buildDeletionRequestRoutes, newRequestId } from "./deletion-request-routes.js";
+import {
+  DEFAULT_DELETION_APPROVED_BY,
+  DEFAULT_DELETION_EXECUTED_BY,
+  DeletionScheduler,
+} from "./deletion-scheduler.js";
 import { buildAuditReadRoutes, entityFieldLookupFrom } from "./audit-read-routes.js";
 import { PostgresAuditReadStore } from "./audit-read-store.js";
 import { buildNotificationTemplateRoutes } from "./notification-template-routes.js";
@@ -253,6 +268,8 @@ export function needsAuditEmitter(options: {
   readonly auditReadRoutes: boolean;
   readonly tenantErasureRoutes: boolean;
   readonly tenantDeletionRoutes: boolean;
+  readonly deletionRequestRoutes: boolean;
+  readonly deletionRunnerMs: number | null;
   readonly integrityProofConfig: string | null;
 }): boolean {
   return (
@@ -262,6 +279,8 @@ export function needsAuditEmitter(options: {
     options.auditReadRoutes ||
     options.tenantErasureRoutes ||
     options.tenantDeletionRoutes ||
+    options.deletionRequestRoutes ||
+    options.deletionRunnerMs !== null ||
     options.integrityProofConfig !== null
   );
 }
@@ -835,6 +854,68 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                 " the data is gone and proven gone — retire the row by hand",
               err,
             ),
+        }),
+      );
+    }
+  }
+  // The handle (ADR-0321). ADR-0320 left the deletion synchronous and named the cost: a large
+  // tenant's deletion can outlast a proxy timeout, after which the client never learns the receipt it
+  // is obliged to keep. These four routes let a caller hold a request instead of an open connection,
+  // and `--deletion-runner-ms` below does the work.
+  if (options.deletionRequestRoutes) {
+    if (conn === undefined) {
+      console.warn(
+        "[platform] --deletion-request-routes requires a Postgres store (--store pg); skipping",
+      );
+    } else if (auditEmitter === null) {
+      console.warn(
+        "[platform] --deletion-request-routes requires --audit-chain-config (a request for a " +
+          "tenant's erasure is recorded as it moves); skipping",
+      );
+    } else {
+      if (
+        options.deletionRequestSubmitRoles.length === 0 &&
+        options.deletionRequestVerifyRoles.length === 0
+      ) {
+        console.warn(
+          "[platform] --deletion-request-routes is on with no --deletion-request-submit-role or " +
+            "--deletion-request-verify-role: every request will be refused",
+        );
+      }
+      const emitter = auditEmitter;
+      extraRouteList.push(
+        ...buildDeletionRequestRoutes({
+          store: new PostgresDeletionRequestStore(conn, schemaOpt),
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          submitRoles: new Set(options.deletionRequestSubmitRoles),
+          verifyRoles: new Set(options.deletionRequestVerifyRoles),
+          ...(options.deletionRequestReadRoles.length > 0
+            ? { readRoles: new Set(options.deletionRequestReadRoles) }
+            : {}),
+          ...(options.deletionRequestDeadlineDays !== null
+            ? { deadlineDays: options.deletionRequestDeadlineDays }
+            : {}),
+          newRequestId: () => newRequestId(randomUUID()),
+          recordAction: async (event): Promise<void> => {
+            await emitter.emit(
+              auditEntry({
+                id: randomUUID(),
+                tenantId: event.tenantId,
+                occurredAt: event.at,
+                operation: event.operation,
+                entity: "GdprDeletionRequest",
+                entityId: event.requestId,
+                actor: auditActor({ userId: event.principalId }),
+                after: {
+                  status: event.status,
+                  ...(event.tombstoneId !== null ? { tombstoneId: event.tombstoneId } : {}),
+                  ...(event.detail !== null ? { detail: event.detail } : {}),
+                },
+              }),
+            );
+          },
+          onRecordError: (err, operation) =>
+            console.error(`[platform] failed to record ${operation}`, err),
         }),
       );
     }
@@ -1495,6 +1576,114 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       intervalMs: options.pruneLinksMs,
     });
   }
+  // Verified deletion requests, run out of band (ADR-0321). This is the half of the handle that does
+  // the work: the routes above move a request to `verified`, and this claims one, runs the atomic
+  // pipeline and writes the tombstone id back onto the request. Unlike every sibling scheduler here it
+  // does **not** run at boot — see `DeletionScheduler`.
+  let deletionScheduler: DeletionScheduler | null = null;
+  if (options.deletionRunnerMs !== null) {
+    if (conn === undefined) {
+      console.warn("[platform] --deletion-runner-ms requires a Postgres store (--store pg); skipping");
+    } else if (auditChainProducer === null || auditEmitter === null) {
+      console.warn(
+        "[platform] --deletion-runner-ms requires --audit-chain-config (the tombstone is anchored " +
+          "in the chain, and the deletion is recorded); skipping",
+      );
+    } else {
+      const runConn = conn;
+      const emitter = auditEmitter;
+      const tombstones = new PostgresTombstoneStore(runConn, auditChainProducer, schemaOpt);
+      const requests = new PostgresDeletionRequestStore(runConn, schemaOpt);
+      const tenantStore = new PostgresTenantStore(runConn);
+      const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
+      const executedBy = options.deletionRunnerExecutedBy ?? DEFAULT_DELETION_EXECUTED_BY;
+      const approvedBy = options.deletionRunnerApprovedBy ?? DEFAULT_DELETION_APPROVED_BY;
+      const runner = new DeletionRunner({
+        store: requests,
+        executedBy,
+        approvedBy,
+        newTombstoneId: () => newTombstoneId(randomUUID()),
+        run: async (input) => {
+          const outcome = await deleteTenantAtomically(
+            runConn,
+            tombstones,
+            eraseTenantSchemaWithin,
+            {
+              tenantId: input.tenantId,
+              tombstoneId: input.tombstoneId,
+              // Unattended, so always the data subject's erasure — never a commercial wind-down,
+              // which is a decision a person makes through the synchronous route.
+              kind: "data_subject_erasure",
+              executedBy: input.executedBy,
+              approvedBy: input.approvedBy,
+              requiredSubsystems: input.requiredSubsystems,
+              attestations: [],
+              relatedDeletionRequestId: input.relatedDeletionRequestId,
+            },
+          );
+          if (outcome.ok) registry()?.forget(input.tenantId);
+          return outcome;
+        },
+        onRun: (result) => {
+          const line =
+            `[platform] deletion request ${result.requestId} (tenant ${result.tenantId}) → ` +
+            `${result.outcome}${result.tombstoneId !== null ? ` ${result.tombstoneId}` : ""}`;
+          // `aborted` and `completed_unrecorded` both leave the request `in_progress` for a human, so
+          // they are errors in the log even though the tick itself succeeded.
+          if (result.outcome === "aborted" || result.outcome === "completed_unrecorded") {
+            console.error(`${line} — needs reconciliation: ${result.detail ?? "no detail"}`);
+          } else if (result.outcome !== "not_claimed") {
+            console.log(line);
+          }
+          if (result.outcome !== "completed") return;
+          // Retiring the row is ordered after the pipeline for ADR-0316's reason: the tombstone's
+          // anchor references `meta.tenants`.
+          void tenantStore
+            .setStatus(result.tenantId, "deleted")
+            .then(async (row) => {
+              if (row === null) {
+                console.error(
+                  `[platform] tenant ${result.tenantId} was deleted and anchored but no row was ` +
+                    "retired; the data is gone and proven gone — retire the row by hand",
+                );
+              }
+              await emitter.emit(
+                auditEntry({
+                  id: randomUUID(),
+                  tenantId: result.tenantId,
+                  occurredAt: new Date().toISOString(),
+                  operation: TENANT_DELETED_OPERATION,
+                  entity: "Tenant",
+                  entityId: result.tenantId,
+                  actor: auditActor({ userId: executedBy }),
+                  after: {
+                    approvedBy,
+                    tombstoneId: result.tombstoneId,
+                    relatedDeletionRequestId: result.requestId,
+                    tenantRetired: row !== null,
+                  },
+                }),
+              );
+            })
+            .catch((err: unknown) =>
+              console.error(
+                `[platform] tenant ${result.tenantId} was deleted and anchored but the bookkeeping ` +
+                  "after it failed; the data is gone and proven gone",
+                err,
+              ),
+            );
+        },
+      });
+      deletionScheduler = new DeletionScheduler({
+        runner,
+        intervalMs: options.deletionRunnerMs,
+        ...(options.deletionRunnerBatchSize !== null
+          ? { batchSize: options.deletionRunnerBatchSize }
+          : {}),
+        onError: (err) => console.error("[platform] deletion runner tick failed", err),
+      });
+    }
+  }
   // Notification delivery drain: a queued dispatch is only a record of intent until something
   // sends it. Each tick claims every active tenant's queued dispatches (FOR UPDATE SKIP LOCKED,
   // so two servers can drain one database), resolves the audience to real recipients, applies
@@ -1695,6 +1884,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   manifestPoller?.start();
   jobScheduler?.start();
   pruneScheduler?.start();
+  deletionScheduler?.start();
   deliveryScheduler?.start();
   sloEnforcement?.scheduler.start();
   drReadiness?.scheduler.start();
@@ -1721,6 +1911,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         manifestPoller?.stop();
         jobScheduler?.stop();
         pruneScheduler?.stop();
+        deletionScheduler?.stop();
         deliveryScheduler?.stop();
         sloEnforcement?.scheduler.stop();
         drReadiness?.scheduler.stop();

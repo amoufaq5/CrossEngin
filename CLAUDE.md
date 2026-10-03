@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 315 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 316 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~11,810 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~11,888 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -397,6 +397,17 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `tenant_schema`'s attestation is produced by the pipeline from the erasure that just ran and a
   caller-supplied one is dropped — an attestation about work the transaction is about to do is a
   prediction, not evidence.
+  **`PostgresDeletionRequestStore` + `DeletionRunner` make that pipeline asynchronous** (ADR-0321), because
+  ADR-0320 put it behind an HTTP request that a large tenant can outlast. `meta.gdpr_deletion_requests` is
+  the handle — the third never-written Phase-1 table, with the same two defects: `verified_by` referenced
+  `meta.users` (`ON DELETE RESTRICT` would make a verifier undeletable *because they verified the request
+  to delete them*) and nothing joined a completed request to its tombstone. `transition` re-asserts the
+  current status **inside the `UPDATE` predicate**, so the row is the lock and two schedulers cannot both
+  claim one request. The runner's five outcomes turn on one distinction: a `DeletionPipelineAborted` is
+  raised *inside* the pipeline's transaction, so receiving it **proves** the rollback and the refusal is
+  deterministic → `rejected`; anything else thrown is genuinely unknown → `aborted`, left `in_progress`
+  for a human, since the contract offers no way back to `verified` and re-running on an assumption is how
+  a tenant gets deleted twice.
 - **`marketplace`** — contracts: 8 pack kinds, a registry with Ed25519 signing and security
   review, per-tenant install lifecycle, permission grants, listings, reviews,
   compatibility.
@@ -621,6 +632,13 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `meta.tenants`), so a failed retire is `tenantRetired: false` on a **200** rather than an error that
   implies the deletion did not happen, and the body carries the tombstone receipt — digests, anchors,
   chain coordinates — since a bare "deleted" would be ADR-0317's defect in response form (ADR-0320);
+  the **asynchronous half of that flow** (`--deletion-request-routes`, `--deletion-runner-ms`) — submit /
+  verify / reject / poll over `/v1/platform/deletion-requests` so a caller holds a *handle* rather than an
+  open connection, with the request id generated server-side (a caller-chosen one that collided would hand
+  back another tenant's request), the Article 12(3) deadline computed from the deployment rather than
+  accepted from the body, a verifier who may not be the submitter, and a scheduler that deliberately does
+  **not** sweep at boot — unlike every sibling scheduler here — because a boot is when a misconfiguration
+  is most likely and this work destroys a tenant's data irreversibly (ADR-0321);
   **tenant-schema erasure** (`--tenant-erasure-routes`) — a read-only survey route so a destructive act
   is not approved blind, then a drop whose `executedBy` is the credential and whose `approvedBy` is the
   body and must differ, with the tenant id repeated as `confirmTenantId` so an irreversible action is not
@@ -891,8 +909,8 @@ opened them.
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
   their data is in a different place than they think until an operator runs the reported SQL.
-- **A tenant deletion is atomic, reachable, and long-running under an HTTP request**
-  (ADR-0316 – ADR-0320).
+- **A tenant deletion is atomic, reachable, and now also asynchronous**
+  (ADR-0316 – ADR-0321).
   `deleteTenantAtomically` runs erase → attest → assemble → anchor → store in **one transaction**, which
   Postgres allows because DDL is transactional (`probeCascadeCollateral` already depends on it). The
   guarantee: **no outcome destroys a tenant's data without a stored, anchored, verified tombstone
@@ -904,23 +922,28 @@ opened them.
   `DeletionScope` **only** from per-subsystem attestations and refuses when a subsystem in scope has not
   attested, because the original defect was a subsystem nobody asked whose silence read as nothing to
   delete. What remains: `requiredSubsystems` is still caller-supplied, so omitting one yields a tombstone
-  that visibly covers less rather than one that silently claims everything — better, not done; there is
-  no `meta.tombstones`, so a verified record lives only in the response that produced it; nothing wires
-  the forensic chain in as its anchor; and four of the six subsystems cannot attest because their
-  erasures do not exist. The ordering against `meta.tenants` is also **unenforced**: the audit record's
-  `tenant_id` is a foreign key to that table, so retiring the tenant row *first* makes every erasure
-  unrecordable — the 500 fires, visibly, and the data is gone with no provenance. Erase, record, then
-  retire the row.
+  that visibly covers less rather than one that silently claims everything — better, not done; and four
+  of the six subsystems cannot attest because their erasures do not exist, so every deletion today
+  declares object storage, backups, search and caches out of scope by omission — now on a schedule as
+  well, since the runner supplies no attestations but the schema's. The ordering against `meta.tenants` is
+  **unenforced**: the audit record's `tenant_id` is a foreign key to that table, so retiring the tenant
+  row *first* makes every erasure unrecordable — the 500 fires, visibly, and the data is gone with no
+  provenance. Erase, record, then retire the row.
+  **Nothing moves a request out of `in_progress` after an `aborted` run** (ADR-0321): a human reads
+  whether a tombstone exists for that tenant and transitions it in SQL, because there is no route for it,
+  and such a request is then never seen again — `dueForExecution` only looks at `verified`. A request is
+  also submitted for a *tenant*, not for a subject within one: `subjectIdentifier` is recorded and not
+  acted on, so a single data subject inside a multi-user tenant cannot be erased by this path at all.
 - **The AI cost estimator is a heuristic on the input side** (ADR-0311). `maxTokens` bounds the output by
   construction; the input is `ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic because the
   number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
   **per session** — a restart forgets that the estimator was optimistic. `classifyDesignOutput` diagnoses
   a recoverable wrapper and nothing retries selectively on it yet.
-- **A feature flag that writes audit rows must be in `needsAuditEmitter`** (ADR-0288, ADR-0313). The
-  emitter is built behind a list of flags, and the list has now been forgotten twice — the second time
+- **A feature flag that writes audit rows must be in `needsAuditEmitter`** (ADR-0288, ADR-0313, ADR-0321).
+  The emitter is built behind a list of flags, and the list was forgotten twice — the second time
   silently skipping `--audit-read-routes` entirely, found by booting the real server rather than by a
-  test. It is a named predicate with a test per flag now, but nothing *derives* the list, so a third
-  feature can still omit itself.
+  test. It is a named predicate with a test per flag now and the list is up to **nine**, which has caught
+  every flag added since; but nothing *derives* it, so the next feature can still omit itself.
 - **`failed` is both terminal and compensatable** (ADR-0307). It is in `TERMINAL_INSTANCE_STATUSES` and
   `INSTANCE_TRANSITIONS.failed` is `["compensating"]`, so `isInstanceTerminal` answers "done" for a status
   the map says you may still move. Deliberate for sagas, but the two disagree; a test pins the exception
@@ -966,7 +989,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 315 records; 236 Accepted, 79 Proposed (the
+title or status change cannot drift. 316 records; 237 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

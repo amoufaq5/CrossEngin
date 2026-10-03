@@ -73,10 +73,39 @@ describe("GdprDeletionRequestSchema", () => {
     deferredUntil: null,
     retentionObligations: ["none"],
     retainedDataCategories: [],
+    tombstoneId: "tomb_aaaabbbbccccdddd",
   };
 
   it("accepts a valid completed request", () => {
     expect(() => GdprDeletionRequestSchema.parse(base)).not.toThrow();
+  });
+
+  it("requires a completed request to name the tombstone that completed it", () => {
+    // completionSha256 commits to the proof and cannot find it — a digest is not a lookup key — so
+    // without the id a completed request and the deletion it asked for cannot be joined.
+    expect(() => GdprDeletionRequestSchema.parse({ ...base, tombstoneId: null })).toThrow(
+      /must name the tombstone/,
+    );
+  });
+
+  it("refuses a tombstone on a request that is not completed", () => {
+    for (const status of ["submitted", "verified", "in_progress", "rejected", "deferred"] as const) {
+      // Naming a proof it has not been completed by is claiming a proof it does not have.
+      expect(() =>
+        GdprDeletionRequestSchema.parse({ ...base, status, tombstoneId: "tomb_aaaabbbbccccdddd" }),
+      ).toThrow(/must not name a tombstone/);
+    }
+  });
+
+  it("defaults tombstoneId to null for a request that has not completed", () => {
+    const parsed = GdprDeletionRequestSchema.parse({
+      ...base,
+      status: "verified",
+      completedAt: null,
+      completionSha256: null,
+      tombstoneId: undefined,
+    });
+    expect(parsed.tombstoneId).toBeNull();
   });
 
   it("rejects deadline > 3 months after submission", () => {
@@ -191,6 +220,7 @@ describe("helpers", () => {
     deferredUntil: null,
     retentionObligations: ["none"],
     retainedDataCategories: [],
+    tombstoneId: null,
   };
 
   it("isOverdue true after deadline if not completed", () => {

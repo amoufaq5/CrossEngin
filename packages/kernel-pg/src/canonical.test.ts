@@ -382,6 +382,7 @@ describe("policy role canonicalization", () => {
   const NARROWED_POLICIES: ReadonlySet<string> = new Set([
     "audit_log_platform_audit_read",
     "tenant_tombstones_platform_audit_read",
+    "gdpr_deletion_requests_platform_audit_read",
   ]);
 
   it("leaves every policy in the real catalog on the two defaults, bar the named exceptions", () => {

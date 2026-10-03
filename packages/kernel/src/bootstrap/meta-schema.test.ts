@@ -1302,6 +1302,35 @@ describe("table column shapes", () => {
     expect(check?.kind === "check" && check.expression).toBe("executed_by <> approved_by");
   });
 
+  it("META_GDPR_DELETION_REQUESTS outlives the verifier and names its proof", () => {
+    const col = (n: string) => META_GDPR_DELETION_REQUESTS.columns.find((c) => c.name === n);
+    // A deletion erases the tenant's users, and ON DELETE RESTRICT would have made the verifier
+    // undeletable *because they verified the request to delete them* (ADR-0318's finding again).
+    expect(col("verified_by")?.type).toBe("TEXT");
+    expect(col("verified_by")?.references).toBeUndefined();
+    // The contract's own free-text id, so a tombstone's relatedDeletionRequestId can name it.
+    expect(col("request_id")?.type).toBe("TEXT");
+    expect(col("request_id")?.check).toContain("dreq_");
+    // completion_sha256 commits to the proof; this one can find it.
+    expect(col("tombstone_id")?.type).toBe("TEXT");
+    expect(col("tombstone_id")?.check).toContain("tomb_");
+  });
+
+  it("META_GDPR_DELETION_REQUESTS is readable after its tenant is gone, by SELECT only", () => {
+    const policies = META_GDPR_DELETION_REQUESTS.rls?.policies ?? [];
+    expect(policies).toHaveLength(2);
+    const platform = policies.find((p) => p.name === "gdpr_deletion_requests_platform_audit_read");
+    expect(platform?.command).toBe("SELECT");
+    expect(platform?.using).toBe("current_setting('app.platform_audit', true) = 'on'");
+  });
+
+  it("META_GDPR_DELETION_REQUESTS indexes the scheduler's claim partially", () => {
+    const due = META_GDPR_DELETION_REQUESTS.indexes?.find((i) => i.name === "idx_gdpr_deletion_due");
+    // Partial, because the predicate is false for almost every row once requests accumulate.
+    expect(due?.where).toBe("status = 'verified'");
+    expect(due?.columns).toEqual(["status", "deadline_at"]);
+  });
+
   it("META_AUDIT_LOG splits the platform read off as SELECT rather than widening isolation", () => {
     const policies = META_AUDIT_LOG.rls?.policies ?? [];
     expect(policies).toHaveLength(2);

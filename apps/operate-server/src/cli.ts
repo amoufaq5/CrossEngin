@@ -1,5 +1,9 @@
 import { REGIONS } from "@crossengin/residency";
 
+import {
+  DEFAULT_DELETION_APPROVED_BY,
+  DEFAULT_DELETION_EXECUTED_BY,
+} from "./deletion-scheduler.js";
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { parseRequestBodyLimit } from "./request-body-limit.js";
@@ -148,6 +152,24 @@ export interface ServeOptions {
   readonly tenantDeletionRoles: readonly string[];
   /** Roles permitted to read a tenant's tombstones (repeatable; defaults to the delete roles). Separable so an auditor can read receipts without being able to delete. */
   readonly tenantTombstoneReadRoles: readonly string[];
+  /** Expose the GDPR deletion-request handle under /v1/platform/deletion-requests — submit, verify, reject and poll, so a caller holds a handle instead of an open connection while a large tenant's deletion runs (needs --store pg + --audit-chain-config). */
+  readonly deletionRequestRoutes: boolean;
+  /** Roles permitted to submit a deletion request (repeatable; default none ⇒ nobody). */
+  readonly deletionRequestSubmitRoles: readonly string[];
+  /** Roles permitted to verify or reject one (repeatable; default none ⇒ nobody). Separate from submitting: the verifier may not be the submitter. */
+  readonly deletionRequestVerifyRoles: readonly string[];
+  /** Roles permitted to poll a request handle (repeatable; defaults to the submit and verify roles together). */
+  readonly deletionRequestReadRoles: readonly string[];
+  /** Days from submission to the Article 12(3) deadline (default 30, cap 90). Set per deployment rather than per request. */
+  readonly deletionRequestDeadlineDays: number | null;
+  /** Run verified deletion requests out of band every N ms (needs --tenant-deletion-routes' wiring). Off unless set; the first tick is one interval after boot, never at boot. */
+  readonly deletionRunnerMs: number | null;
+  /** The actor unattended deletions execute as (default `system:deletion-runner`). */
+  readonly deletionRunnerExecutedBy: string | null;
+  /** Who authorised unattended execution (default `system:retention-policy`). Must differ from the executor — four-eyes still applies. */
+  readonly deletionRunnerApprovedBy: string | null;
+  /** Requests the runner may take per tick (default 5). Each one is a whole tenant's data. */
+  readonly deletionRunnerBatchSize: number | null;
   /** Maximum buffered request body, as bytes or a size like 25mb (default 10mb, floor 1kb, ceiling 1gb). */
   readonly maxRequestBodyBytes: number | null;
   readonly defaultScheme: "http" | "https";
@@ -256,6 +278,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let tenantDeletionRoutes = false;
   const tenantDeletionRoles: string[] = [];
   const tenantTombstoneReadRoles: string[] = [];
+  let deletionRequestRoutes = false;
+  const deletionRequestSubmitRoles: string[] = [];
+  const deletionRequestVerifyRoles: string[] = [];
+  const deletionRequestReadRoles: string[] = [];
+  let deletionRequestDeadlineDays: number | null = null;
+  let deletionRunnerMs: number | null = null;
+  let deletionRunnerExecutedBy: string | null = null;
+  let deletionRunnerApprovedBy: string | null = null;
+  let deletionRunnerBatchSize: number | null = null;
   let maxRequestBodyBytes: number | null = null;
   let help = false;
   let version = false;
@@ -581,6 +612,75 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       tenantTombstoneReadRoles.push(takeValue(arg, next, "--tenant-tombstone-read-role"));
       i += consumed();
       tenantDeletionRoutes = true;
+    } else if (arg === "--deletion-request-routes") {
+      deletionRequestRoutes = true;
+    } else if (
+      arg === "--deletion-request-submit-role" ||
+      arg.startsWith("--deletion-request-submit-role=")
+    ) {
+      deletionRequestSubmitRoles.push(takeValue(arg, next, "--deletion-request-submit-role"));
+      i += consumed();
+      deletionRequestRoutes = true;
+    } else if (
+      arg === "--deletion-request-verify-role" ||
+      arg.startsWith("--deletion-request-verify-role=")
+    ) {
+      deletionRequestVerifyRoles.push(takeValue(arg, next, "--deletion-request-verify-role"));
+      i += consumed();
+      deletionRequestRoutes = true;
+    } else if (
+      arg === "--deletion-request-read-role" ||
+      arg.startsWith("--deletion-request-read-role=")
+    ) {
+      deletionRequestReadRoles.push(takeValue(arg, next, "--deletion-request-read-role"));
+      i += consumed();
+      deletionRequestRoutes = true;
+    } else if (
+      arg === "--deletion-request-deadline-days" ||
+      arg.startsWith("--deletion-request-deadline-days=")
+    ) {
+      const raw = takeValue(arg, next, "--deletion-request-deadline-days");
+      const n = Number(raw);
+      // Article 12(3) caps the extension at three months, and the contract refuses a longer one — so
+      // the flag refuses it here, where the message can say why.
+      if (!Number.isInteger(n) || n < 1 || n > 90) {
+        throw new CliUsageError(
+          `invalid --deletion-request-deadline-days: ${raw} (1..90; GDPR Article 12(3) caps it)`,
+        );
+      }
+      deletionRequestDeadlineDays = n;
+      i += consumed();
+    } else if (arg === "--deletion-runner-ms" || arg.startsWith("--deletion-runner-ms=")) {
+      const raw = takeValue(arg, next, "--deletion-runner-ms");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1000) {
+        throw new CliUsageError(`invalid --deletion-runner-ms: ${raw} (>= 1000)`);
+      }
+      deletionRunnerMs = n;
+      i += consumed();
+    } else if (
+      arg === "--deletion-runner-executed-by" ||
+      arg.startsWith("--deletion-runner-executed-by=")
+    ) {
+      deletionRunnerExecutedBy = takeValue(arg, next, "--deletion-runner-executed-by");
+      i += consumed();
+    } else if (
+      arg === "--deletion-runner-approved-by" ||
+      arg.startsWith("--deletion-runner-approved-by=")
+    ) {
+      deletionRunnerApprovedBy = takeValue(arg, next, "--deletion-runner-approved-by");
+      i += consumed();
+    } else if (
+      arg === "--deletion-runner-batch-size" ||
+      arg.startsWith("--deletion-runner-batch-size=")
+    ) {
+      const raw = takeValue(arg, next, "--deletion-runner-batch-size");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 100) {
+        throw new CliUsageError(`invalid --deletion-runner-batch-size: ${raw} (1..100)`);
+      }
+      deletionRunnerBatchSize = n;
+      i += consumed();
     } else if (arg === "--max-request-body" || arg.startsWith("--max-request-body=")) {
       const raw = takeValue(arg, next, "--max-request-body");
       const parsed = parseRequestBodyLimit(raw);
@@ -615,6 +715,23 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (tenantErasureRoutes && store === "memory") {
     throw new CliUsageError(
       "--tenant-erasure-routes requires a Postgres store (--store pg or pg-columns)",
+    );
+  }
+  if ((deletionRequestRoutes || deletionRunnerMs !== null) && store === "memory") {
+    throw new CliUsageError(
+      "--deletion-request-routes / --deletion-runner-ms require a Postgres store (--store pg or pg-columns)",
+    );
+  }
+  if (
+    (deletionRunnerExecutedBy ?? DEFAULT_DELETION_EXECUTED_BY) ===
+    (deletionRunnerApprovedBy ?? DEFAULT_DELETION_APPROVED_BY)
+  ) {
+    // Compared against the *resolved* pair, not the flags: passing only
+    // `--deletion-runner-executed-by system:retention-policy` would otherwise pass here and throw at
+    // the runner's construction, which is at boot. Four-eyes holds for an unattended deletion exactly
+    // as it does for a human one.
+    throw new CliUsageError(
+      "--deletion-runner-executed-by must differ from --deletion-runner-approved-by (four-eyes principle)",
     );
   }
   if ((auditReadRoutes || notificationTemplateRoutes) && store === "memory") {
@@ -830,6 +947,17 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     // privilege until granted by name.
     tenantDeletionRoles,
     tenantTombstoneReadRoles,
+    deletionRequestRoutes,
+    // No defaults, for the same reason as the delete grant above: submitting a request for a tenant's
+    // erasure, and attesting that the subject's identity was checked, are each granted by name.
+    deletionRequestSubmitRoles,
+    deletionRequestVerifyRoles,
+    deletionRequestReadRoles,
+    deletionRequestDeadlineDays,
+    deletionRunnerMs,
+    deletionRunnerExecutedBy,
+    deletionRunnerApprovedBy,
+    deletionRunnerBatchSize,
     maxRequestBodyBytes,
     defaultScheme,
     help,
@@ -1172,6 +1300,27 @@ Options:
   --tenant-tombstone-read-role <r>  Role permitted to read a tenant's tombstones (repeatable;
                        defaults to the delete roles), so an auditor can read receipts without
                        being able to delete
+  --deletion-request-routes  Expose the GDPR deletion-request handle under /v1/platform/
+                       deletion-requests — POST to submit, POST .../verify, POST .../reject, GET
+                       .../{id} to poll. The caller holds a handle instead of an open connection
+                       while a large tenant's deletion runs (needs --store pg + --audit-chain-config)
+  --deletion-request-submit-role <r>  Role permitted to submit a deletion request (repeatable).
+                       Default none ⇒ every request refused
+  --deletion-request-verify-role <r>  Role permitted to verify or reject one (repeatable). Default
+                       none ⇒ refused. Separate from submitting: the verifier may not be the submitter
+  --deletion-request-read-role <r>  Role permitted to poll a handle (repeatable; defaults to the
+                       submit and verify roles together)
+  --deletion-request-deadline-days <n>  Days from submission to the Article 12(3) deadline
+                       (default 30, max 90). Per deployment, not per request
+  --deletion-runner-ms <n>  Run verified deletion requests out of band every n ms (>=1000). The
+                       first tick is one interval AFTER boot, never at boot: the work is
+                       irreversible and a boot is when a misconfiguration is most likely
+  --deletion-runner-executed-by <a>  Actor unattended deletions execute as (default
+                       system:deletion-runner)
+  --deletion-runner-approved-by <a>  Who authorised unattended execution (default
+                       system:retention-policy). Must differ from the executor
+  --deletion-runner-batch-size <n>  Requests the runner may take per tick (1..100, default 5).
+                       Each one is a whole tenant's data, and they run serially
   --max-request-body <size>  Largest buffered request body — bytes or a size like 25mb (default
                        10mb, floor 1kb, ceiling 1gb). Not disableable; out-of-band values are
                        refused at boot rather than clamped

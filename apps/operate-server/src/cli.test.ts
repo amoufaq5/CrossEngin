@@ -798,3 +798,55 @@ describe("parseServeArgs — notification audit roles", () => {
     expect(opts.notificationAuditRoles).toEqual(["platform_admin", "compliance_officer"]);
   });
 });
+
+describe("parseServeArgs — the GDPR deletion handle", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("defaults every grant to nobody", () => {
+    const opts = parseServeArgs([...PG, "--deletion-request-routes"]);
+    expect(opts.deletionRequestSubmitRoles).toEqual([]);
+    expect(opts.deletionRequestVerifyRoles).toEqual([]);
+    expect(opts.deletionRequestReadRoles).toEqual([]);
+  });
+
+  it("a role implies the routes, like every sibling flag", () => {
+    const opts = parseServeArgs([...PG, "--deletion-request-submit-role", "support"]);
+    expect(opts.deletionRequestRoutes).toBe(true);
+    expect(opts.deletionRequestSubmitRoles).toEqual(["support"]);
+  });
+
+  it("caps the deadline at Article 12(3)'s three months", () => {
+    expect(parseServeArgs([...PG, "--deletion-request-deadline-days=90"]).deletionRequestDeadlineDays).toBe(90);
+    expect(() => parseServeArgs([...PG, "--deletion-request-deadline-days", "91"])).toThrow(/Article 12\(3\)/);
+    expect(() => parseServeArgs([...PG, "--deletion-request-deadline-days", "0"])).toThrow();
+  });
+
+  it("rejects a sub-second runner interval and a batch size outside 1..100", () => {
+    expect(parseServeArgs([...PG, "--deletion-runner-ms=2000"]).deletionRunnerMs).toBe(2000);
+    expect(() => parseServeArgs([...PG, "--deletion-runner-ms", "999"])).toThrow();
+    expect(() => parseServeArgs([...PG, "--deletion-runner-batch-size", "101"])).toThrow();
+  });
+
+  it("refuses the memory store, rather than booting a surface that cannot work", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--deletion-request-routes"])).toThrow(/Postgres/);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--deletion-runner-ms", "2000"])).toThrow(/Postgres/);
+  });
+
+  it("checks four-eyes against the RESOLVED actor pair, not just the flags", () => {
+    // Passing only one of them, set to the other's default, would otherwise pass here and throw at
+    // the runner's construction — which is at boot.
+    expect(() =>
+      parseServeArgs([...PG, "--deletion-runner-executed-by", "system:retention-policy"]),
+    ).toThrow(/four-eyes/);
+    expect(() =>
+      parseServeArgs([...PG, "--deletion-runner-approved-by", "system:deletion-runner"]),
+    ).toThrow(/four-eyes/);
+    expect(() =>
+      parseServeArgs([...PG, "--deletion-runner-executed-by", "a", "--deletion-runner-approved-by", "a"]),
+    ).toThrow(/four-eyes/);
+    expect(
+      parseServeArgs([...PG, "--deletion-runner-executed-by", "a", "--deletion-runner-approved-by", "b"])
+        .deletionRunnerExecutedBy,
+    ).toBe("a");
+  });
+});

@@ -3505,6 +3505,18 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
   name: "gdpr_deletion_requests",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    /**
+     * The contract's own id, free text — `dreq_…` as this platform writes them. Separate from the
+     * surrogate `id` because `TombstoneRecord.relatedDeletionRequestId` is free text too, and a
+     * tombstone has to be able to name the request that caused it (ADR-0321).
+     */
+    {
+      name: "request_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "gdpr_deletion_requests_request_id_key" },
+      check: "request_id ~ '^dreq_[A-Za-z0-9_-]{8,40}$'",
+    },
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
     { name: "subject_identifier", type: "TEXT", notNull: true },
     {
@@ -3531,7 +3543,12 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
         "verification_method IS NULL OR verification_method IN ('email_link', 'phone_otp', 'in_app_re_authentication', 'government_id_check', 'in_person')",
     },
     { name: "verified_at", type: "TIMESTAMPTZ" },
-    { name: "verified_by", type: "UUID", references: USER_FK },
+    /**
+     * TEXT and unreferenced, for the reason ADR-0318 gave for the tombstone's actors: a deletion
+     * erases the tenant's users, and `ON DELETE RESTRICT` would have made the verifier undeletable
+     * *because they verified the request to delete them*. The contract has it as free text.
+     */
+    { name: "verified_by", type: "TEXT" },
     { name: "in_progress_at", type: "TIMESTAMPTZ" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
     {
@@ -3556,12 +3573,28 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
       default: "'[]'::jsonb",
     },
     { name: "notes", type: "TEXT" },
+    /**
+     * The tombstone that completed this request. Without it a `completed` request names no proof:
+     * `completion_sha256` commits to one but a digest is not a lookup key, so the record of the
+     * deletion and the record of the request for it could not be joined (ADR-0321).
+     */
+    {
+      name: "tombstone_id",
+      type: "TEXT",
+      check: "tombstone_id IS NULL OR tombstone_id ~ '^tomb_[A-Za-z0-9_-]{12,40}$'",
+    },
   ],
   primaryKey: ["id"],
   indexes: [
     {
       name: "idx_gdpr_deletion_tenant_status",
       columns: ["tenant_id", "status"],
+    },
+    /** The scheduler's claim query: find `verified` requests whose deadline is nearest. */
+    {
+      name: "idx_gdpr_deletion_due",
+      columns: ["status", "deadline_at"],
+      where: "status = 'verified'",
     },
     { name: "idx_gdpr_deletion_deadline", columns: ["deadline_at"] },
     { name: "idx_gdpr_deletion_legal_basis", columns: ["legal_basis"] },
@@ -3573,6 +3606,15 @@ export const META_GDPR_DELETION_REQUESTS: TableDefinition = {
       {
         name: "gdpr_deletion_requests_isolation",
         using: TENANT_ISOLATION_USING,
+      },
+      {
+        // Same reasoning as the tombstone's (ADR-0318): a completed request outlives the tenant it
+        // was about, so isolation alone makes it unreadable by the only people who then need it —
+        // and a regulator asking "was this request honoured?" is exactly that reader. SELECT-only, so
+        // the elevation cannot forge a request or mark one completed.
+        name: "gdpr_deletion_requests_platform_audit_read",
+        command: "SELECT",
+        using: "current_setting('app.platform_audit', true) = 'on'",
       },
     ],
   },
