@@ -8,6 +8,7 @@ export * from "./column-store.js";
 export * from "./tenant-schema.js";
 export * from "./tenant-schema-diff.js";
 export * from "./tenant-schema-apply.js";
+export * from "./tenant-schema-erase.js";
 export * from "./tenant-store-registry.js";
 export * from "./link-integrity.js";
 export * from "./sequence-store.js";
