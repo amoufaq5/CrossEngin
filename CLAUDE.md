@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 314 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 315 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~11,780 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~11,810 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -612,6 +612,15 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   unrecordable granted read is a 503 and a tenant naming another tenant is a 403 rather than a quietly
   narrowed query (ADR-0313); **job-run cancellation** (`POST /v1/meta/jobs/runs/{id}/cancel`, gated on the
   job-invoke roles, tenant from the credential, outcome reported as 200/202/409/404 — ADR-0315);
+  the **GDPR Article 17 deletion flow** (`--tenant-deletion-routes`) — the only route that reaches
+  `deleted`, which `platform-admin`'s transition map excludes on purpose; its own grant separate from
+  the erasure's (erasing a schema is a step this contains), four-eyes at three layers, and the **only**
+  route here that *requires* an idempotency key, because a retried delete generates a new tombstone id,
+  erases nothing the second time and would 409 `scope_empty` for a request that had already succeeded.
+  The tenant row is retired **after** the pipeline commits (ADR-0316's ordering: the anchor references
+  `meta.tenants`), so a failed retire is `tenantRetired: false` on a **200** rather than an error that
+  implies the deletion did not happen, and the body carries the tombstone receipt — digests, anchors,
+  chain coordinates — since a bare "deleted" would be ADR-0317's defect in response form (ADR-0320);
   **tenant-schema erasure** (`--tenant-erasure-routes`) — a read-only survey route so a destructive act
   is not approved blind, then a drop whose `executedBy` is the credential and whose `approvedBy` is the
   body and must differ, with the tenant id repeated as `confirmTenantId` so an irreversible action is not
@@ -882,7 +891,8 @@ opened them.
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
   their data is in a different place than they think until an operator runs the reported SQL.
-- **A tenant deletion is atomic end to end; no route runs it** (ADR-0316, ADR-0317, ADR-0318, ADR-0319).
+- **A tenant deletion is atomic, reachable, and long-running under an HTTP request**
+  (ADR-0316 – ADR-0320).
   `deleteTenantAtomically` runs erase → attest → assemble → anchor → store in **one transaction**, which
   Postgres allows because DDL is transactional (`probeCascadeCollateral` already depends on it). The
   guarantee: **no outcome destroys a tenant's data without a stored, anchored, verified tombstone
@@ -956,7 +966,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 314 records; 235 Accepted, 79 Proposed (the
+title or status change cannot drift. 315 records; 236 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

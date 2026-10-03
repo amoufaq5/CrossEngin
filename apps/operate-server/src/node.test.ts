@@ -126,6 +126,7 @@ describe("needsAuditEmitter", () => {
     ["--design-review"],
     ["--audit-read-routes"],
     ["--tenant-erasure-routes"],
+    ["--tenant-deletion-routes"],
     ["--integrity-proof-config", "/tmp/proof.json"],
   ];
 
@@ -145,7 +146,7 @@ describe("needsAuditEmitter", () => {
     // Guards against the predicate quietly losing a branch: each flag must be individually
     // sufficient, so a condition that dropped one would fail the loop above — and this pins the
     // count so the loop itself cannot be shortened without a visible edit.
-    expect(REQUIRING_ARGS).toHaveLength(6);
+    expect(REQUIRING_ARGS).toHaveLength(7);
   });
 });
 
