@@ -839,14 +839,17 @@ opened them.
   bounce webhook writes `provider:ses` / `provider:twilio`. It is still nullable, which is the one place
   we did not tighten: every row written before this was NULL, and requiring an actor would make the
   re-parse-on-read replayer refuse rows that were correct when written.
-- **`PostgresRecipientResolver.activeSuppressions` fails open on an unparseable row** (ADR-0302): it
-  skips it, so the next drain mails the address the row existed to protect. The new store refuses
-  instead. Reconciling them is a deliberate choice, because refusing turns one bad row into an outage
-  of that tenant's notifications.
-- **Suppression addresses match exactly and case-sensitively** (ADR-0302). A bounce reporting
-  `Bounced@Example.test` against a stored `bounced@example.test` writes a row that never matches.
-  Normalising in the store would make the id — which commits to the exact address — a lie, so it belongs
-  upstream in `planSuppression`.
+- **Both suppression readers now fail closed** (ADR-0302). `PostgresRecipientResolver.activeSuppressions`
+  used to skip an unparseable row, which mailed the address the row existed to protect; it throws now,
+  naming the id and never the address. The cost is bounded by design — `drainAllTenants` catches per
+  tenant and continues, so one bad row stops one tenant's sweep and retries, rather than taking delivery
+  down platform-wide.
+- **Suppression addresses are normalised upstream, in `planSuppression`** (ADR-0302), not in the store —
+  the id commits to the exact address, so normalising at write time would make it a lie.
+  `normalizeRecipientAddress` folds case per channel (lowercasing an email's local part despite RFC 5321
+  §2.4 making it formally case-sensitive, because no production provider distinguishes them and the
+  alternative is a row that never matches) and deliberately does **not** collapse subaddressing or parse
+  a display name off, since both would widen a suppression to addresses that never bounced.
 
 - **The push senders are built and unwired** (ADR-0310). `FcmPushSender` and `TwilioVoiceSender` exist and
   are tested; `buildSenderRegistryFromEnv` does not construct them, because FCM takes an
