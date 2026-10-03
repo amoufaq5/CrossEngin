@@ -379,7 +379,10 @@ describe("policy role canonicalization", () => {
    * adding one is a visible edit here: each is a read grant that must not also satisfy a write's
    * WITH CHECK, which is the only reason to leave the `ALL` default.
    */
-  const NARROWED_POLICIES: ReadonlySet<string> = new Set(["audit_log_platform_audit_read"]);
+  const NARROWED_POLICIES: ReadonlySet<string> = new Set([
+    "audit_log_platform_audit_read",
+    "tenant_tombstones_platform_audit_read",
+  ]);
 
   it("leaves every policy in the real catalog on the two defaults, bar the named exceptions", () => {
     // The precondition for the catalog's tables reading as matching against a database built from it:
