@@ -6,6 +6,7 @@ import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   emitAddColumnDdl,
   emitEntityTableDdl,
+  emitManifestSchemaDdl,
   emitForeignKeyDdl,
   emitJoinTableDdl,
   onDeleteClause,
@@ -41,7 +42,9 @@ describe("emitEntityTableDdl", () => {
   it("enables RLS with an idempotent tenant-isolation policy", () => {
     expect(sql).toContain("ENABLE ROW LEVEL SECURITY");
     expect(sql).toContain('DROP POLICY IF EXISTS "widget_tenant_isolation"');
-    expect(sql).toContain("current_setting('app.current_tenant_id', true)::UUID");
+    // NULLIF, not the bare cast: on a pooled connection whose tenant GUC has been reset to the empty
+    // string, `''::UUID` raises instead of matching no rows.
+    expect(sql).toContain("NULLIF(current_setting('app.current_tenant_id', true), '')::UUID");
   });
 
   it("creates a tenant index idempotently", () => {
@@ -250,5 +253,56 @@ describe("emitEntityTableDdl — trigram indexes", () => {
   it("skips encrypted and non-text columns", () => {
     expect(sql).not.toContain('"secret" gin_trgm_ops');
     expect(sql).not.toContain('"count" gin_trgm_ops');
+  });
+});
+
+describe("emitManifestSchemaDdl", () => {
+  const ACCOUNT: Entity = { name: "Account", fields: [{ name: "name", type: { kind: "text" } }] };
+  const ORDER: Entity = {
+    name: "Order",
+    fields: [{ name: "account", type: { kind: "reference", target: "Account" } }],
+  };
+  const plans = new Map([
+    ["Order", columnPlanForEntity(ORDER, { schema: "app" })],
+    ["Account", columnPlanForEntity(ACCOUNT, { schema: "app" })],
+  ]);
+  const joins = joinTablePlansForManifest(
+    { relations: [{ kind: "many_to_many", left: "Order", right: "Account" }] } as unknown as Manifest,
+    { schema: "app" },
+  );
+
+  it("creates a referenced table before the one referencing it", () => {
+    const stmts = emitManifestSchemaDdl(plans);
+    const account = stmts.findIndex((s) => s.includes('"app"."account" ('));
+    const order = stmts.findIndex((s) => s.includes('"app"."order" ('));
+    expect(account).toBeLessThan(order);
+  });
+
+  it("defers every foreign key until after every table, so a reference cycle applies", () => {
+    const stmts = emitManifestSchemaDdl(plans);
+    const lastTable = stmts.reduce((acc, s, i) => (s.startsWith("CREATE TABLE") ? i : acc), -1);
+    const firstFk = stmts.findIndex((s) => s.includes("ADD CONSTRAINT"));
+    expect(firstFk).toBeGreaterThan(lastTable);
+  });
+
+  it("puts join tables last, after both of their FK targets exist", () => {
+    const stmts = emitManifestSchemaDdl(plans, joins);
+    const join = stmts.findIndex((s) => s.includes('"app"."order_account"'));
+    const order = stmts.findIndex((s) => s.includes('"app"."order" ('));
+    expect(order).toBeLessThan(join);
+    expect(join).toBeGreaterThan(stmts.findIndex((s) => s.includes('"app"."account" (')));
+  });
+
+  it("applies the per-relation ON DELETE policy", () => {
+    const stmts = emitManifestSchemaDdl(plans, [], new Map([["Order.account", "cascade"]]));
+    expect(stmts.join("\n")).toContain("ON DELETE CASCADE");
+  });
+
+  it("does not emit CREATE SCHEMA — the caller owns it, so the tenant applier can introspect first", () => {
+    expect(emitManifestSchemaDdl(plans).some((s) => s.startsWith("CREATE SCHEMA"))).toBe(false);
+  });
+
+  it("emits nothing for a manifest with no entities", () => {
+    expect(emitManifestSchemaDdl(new Map())).toEqual([]);
   });
 });

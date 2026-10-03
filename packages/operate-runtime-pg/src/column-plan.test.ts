@@ -7,6 +7,7 @@ import {
   columnPlanForEntity,
   columnPlansForManifest,
   joinTablePlansForManifest,
+  plansRequirePgcrypto,
   referencedEntities,
   relationDeleteIndex,
   topologicalEntityOrder,
@@ -251,5 +252,21 @@ describe("columnPlanForEntity — trait fields", () => {
     const cols = columnPlanForEntity(shadowed, { schema: "app" }).columns;
     expect(cols).toHaveLength(1);
     expect(cols[0]).toMatchObject({ field: "version", sqlType: "TEXT" });
+  });
+});
+
+describe("plansRequirePgcrypto", () => {
+  it("is true when some planned column is stored as ciphertext", () => {
+    const phi: Entity = { name: "Visit", fields: [{ name: "mrn", type: { kind: "text" }, classification: "phi" }] };
+    expect(plansRequirePgcrypto(new Map([["Visit", columnPlanForEntity(phi, { schema: "app" })]]))).toBe(true);
+  });
+
+  it("is false when nothing is encrypted at rest", () => {
+    const plain: Entity = { name: "Visit", fields: [{ name: "note", type: { kind: "text" } }] };
+    expect(plansRequirePgcrypto(new Map([["Visit", columnPlanForEntity(plain, { schema: "app" })]]))).toBe(false);
+  });
+
+  it("is false for no plans at all", () => {
+    expect(plansRequirePgcrypto(new Map())).toBe(false);
   });
 });

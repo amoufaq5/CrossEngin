@@ -38,6 +38,25 @@ export interface ColumnDelta {
   readonly reasons: readonly ("type" | "nullable" | "default")[];
 }
 
+/**
+ * A column the catalog declares under a new name that the database still holds under the old one.
+ *
+ * Carried separately from `addedColumns` and `removedColumns` because it is neither: the data is
+ * already there under a name the catalog no longer uses, and the two halves have to be reconciled
+ * together or not at all.
+ */
+export interface ColumnRename {
+  /** The name the catalog declares — the rename's target. */
+  readonly column: string;
+  /** `renamedFrom`: the name the database still holds it under. */
+  readonly from: string;
+  /**
+   * True when **both** names exist live. Which of the two holds the data is not something the catalog
+   * says, so a plan reports it instead of guessing.
+   */
+  readonly ambiguous: boolean;
+}
+
 export interface ForeignKeyEndpoint {
   readonly table: string;
   readonly column: string;
@@ -93,6 +112,7 @@ export interface PolicyDelta {
 
 export const CONSTRAINT_DELTA_REASONS = [
   "kind",
+  "name",
   "columns",
   "expression",
   "target",
@@ -107,12 +127,19 @@ export interface AddedConstraint {
   readonly kind: TableConstraintKind;
 }
 
-/** A table-level constraint present under the declared name but not the declared constraint. */
+/** A table-level constraint the database holds, but not as the catalog declares it. */
 export interface ConstraintDelta {
+  /** The declared name. */
   readonly name: string;
   readonly kind: TableConstraintKind;
   readonly reasons: readonly ConstraintDeltaReason[];
   readonly detail: string;
+  /**
+   * The name the database holds it under, when that is not the declared name — which happens when a
+   * foreign key was matched by its columns rather than by its name. Whatever drops it has to name
+   * *this*, or the drop is a no-op and the old constraint survives beside the new one.
+   */
+  readonly liveName?: string;
 }
 
 /**
@@ -133,6 +160,12 @@ export interface TableDiff {
   readonly addedColumns: readonly string[];
   readonly removedColumns: readonly string[];
   readonly changedColumns: readonly ColumnDelta[];
+  /**
+   * Columns whose declared `renamedFrom` names a column the database still holds. An old name
+   * accounted for here is **not** also in `removedColumns`: it is not an undeclared column, it is the
+   * same column under its previous name.
+   */
+  readonly renamedColumns: readonly ColumnRename[];
   readonly addedIndexes: readonly string[];
   readonly removedIndexes: readonly string[];
   /** Indexes present under the right name but defined differently. */
@@ -190,6 +223,21 @@ function compareColumn(
 function sameColumns(declared: readonly string[], live: readonly string[]): boolean {
   if (declared.length !== live.length) return false;
   return declared.every((c, i) => c === live[i]);
+}
+
+/**
+ * A live column list read under the renames this diff is planning.
+ *
+ * An index, a unique constraint and a foreign key all survive a column rename and keep pointing at
+ * the same column, so the database still reports the *old* name for them until the rename runs.
+ * Without this every object over a renamed column would read as drifted and be rebuilt for nothing.
+ */
+function underRenames(
+  columns: readonly string[],
+  renames: ReadonlyMap<string, string>,
+): readonly string[] {
+  if (renames.size === 0) return columns;
+  return columns.map((c) => renames.get(c) ?? c);
 }
 
 /**
@@ -265,9 +313,16 @@ export function expressionRequestsFor(
 /**
  * Compares the table-level constraints the catalog declares against what the database holds.
  *
- * Matched **by name**, which is why the name is required on the declaration. ADR-0291's trick of
- * matching a foreign key by its column only worked because an inline reference is single-column and
- * unnamed; two composite keys over overlapping column sets cannot be told apart that way.
+ * Matched **by name first**, which is why the name is required on the declaration — two composite keys
+ * over overlapping column sets cannot be told apart by their columns alone.
+ *
+ * A foreign key then falls back to matching **by its ordered column list plus its referenced table**,
+ * the same identity ADR-0291 gives a single-column inline reference. That fallback is what makes a
+ * composite key the database already holds under some other name — Postgres's own `<table>_<cols>_fkey`,
+ * or whatever an operator called it — read as the declared constraint instead of as two findings at
+ * once: declared-but-missing *and* undeclared. Planning both of those added a second, duplicate key.
+ * The name difference is itself reported, so the constraint converges on the declared name, and
+ * `liveName` carries what any drop has to name in the meantime.
  *
  * `claimedForeignKeys` is filled in with every live foreign key a declaration here accounts for, so
  * the column-matching pass that follows does not claim it a second time and the undeclared-key report
@@ -321,7 +376,18 @@ function diffTableConstraints(
   }
 
   for (const fk of declaredForeignKeyConstraints(target)) {
-    const liveFk = liveFks.get(fk.name);
+    const byName = liveFks.get(fk.name);
+    const declaredTargetTable = declaredConstraintTarget(target, fk);
+    const byColumns =
+      byName === undefined
+        ? live.foreignKeys.find(
+            (candidate) =>
+              !claimedForeignKeys.has(candidate.name) &&
+              sameColumns(fk.columns, candidate.columns) &&
+              `${candidate.targetSchema}.${candidate.targetTable}` === declaredTargetTable,
+          )
+        : undefined;
+    const liveFk = byName ?? byColumns;
     if (liveFk === undefined) {
       const asCheck = liveChecks.get(fk.name);
       if (asCheck !== undefined) {
@@ -339,11 +405,15 @@ function diffTableConstraints(
     claimedForeignKeys.add(liveFk.name);
     const reasons: ConstraintDeltaReason[] = [];
     const details: string[] = [];
+    if (byName === undefined) {
+      reasons.push("name");
+      details.push(`named '${liveFk.name}' → '${fk.name}'`);
+    }
     if (!sameColumns(fk.columns, liveFk.columns)) {
       reasons.push("columns");
       details.push(`columns (${liveFk.columns.join(", ")}) → (${fk.columns.join(", ")})`);
     }
-    const declaredTarget = `${declaredConstraintTarget(target, fk)}(${fk.references.columns.join(", ")})`;
+    const declaredTarget = `${declaredTargetTable}(${fk.references.columns.join(", ")})`;
     const liveTarget = `${liveFk.targetSchema}.${liveFk.targetTable}(${liveFk.targetColumns.join(", ")})`;
     if (declaredTarget !== liveTarget) {
       reasons.push("target");
@@ -360,7 +430,13 @@ function diffTableConstraints(
       details.push(`ON UPDATE ${liveFk.onUpdate} → ${declaredUpdate}`);
     }
     if (reasons.length > 0) {
-      changed.push({ name: fk.name, kind: "foreign_key", reasons, detail: details.join("; ") });
+      changed.push({
+        name: fk.name,
+        kind: "foreign_key",
+        reasons,
+        detail: details.join("; "),
+        ...(byName === undefined ? { liveName: liveFk.name } : {}),
+      });
     }
   }
 
@@ -387,13 +463,35 @@ function diffOneTable(
   const addedColumns: string[] = [];
   const removedColumns: string[] = [];
   const changedColumns: ColumnDelta[] = [];
+  const renamedColumns: ColumnRename[] = [];
+  /** Live name → declared name, for the renames this diff is actually planning. */
+  const renames = new Map<string, string>();
+  /** Old names a `renamedFrom` accounts for, so none of them reads as an undeclared column. */
+  const accountedOldNames = new Set<string>();
   for (const [name, col] of targetColumns) {
     const liveCol = liveColumns.get(name);
-    if (liveCol === undefined) {
+    // A `renamedFrom` naming a column the catalog *still declares* is not a rename — both columns
+    // exist on purpose, and renaming one onto the other would destroy a declared column.
+    const from =
+      col.renamedFrom !== undefined && !targetColumns.has(col.renamedFrom)
+        ? col.renamedFrom
+        : undefined;
+    const liveOld = from === undefined ? undefined : liveColumns.get(from);
+    if (from !== undefined && liveOld !== undefined) {
+      accountedOldNames.add(from);
+      const ambiguous = liveCol !== undefined;
+      renamedColumns.push({ column: name, from, ambiguous });
+      if (!ambiguous) renames.set(from, name);
+    }
+    // The column to compare against: the new name when the database has it, otherwise the old one a
+    // rename is about to turn into it. Those comparisons are reported under the *new* name because
+    // the rename is planned first, so every later statement names a column that exists by then.
+    const comparable = liveCol ?? liveOld;
+    if (comparable === undefined) {
       addedColumns.push(name);
       continue;
     }
-    const reasons = compareColumn(col, liveCol);
+    const reasons = compareColumn(col, comparable);
     if (reasons.length > 0) {
       changedColumns.push({
         column: name,
@@ -403,18 +501,18 @@ function diffOneTable(
           defaultExpr: col.default ?? null,
         },
         live: {
-          type: liveCol.dataType,
-          nullable: liveCol.isNullable,
-          defaultExpr: liveCol.defaultExpr,
+          type: comparable.dataType,
+          nullable: comparable.isNullable,
+          defaultExpr: comparable.defaultExpr,
         },
         reasons,
       });
     }
   }
   for (const name of liveColumns.keys()) {
-    if (!targetColumns.has(name)) {
-      removedColumns.push(name);
-    }
+    if (targetColumns.has(name)) continue;
+    if (accountedOldNames.has(name)) continue;
+    removedColumns.push(name);
   }
 
   const liveIndexes = new Map(live.indexes.map((i) => [i.name, i] as const));
@@ -441,7 +539,7 @@ function diffOneTable(
     if (liveIdx === undefined) continue;
     const reasons: IndexDeltaReason[] = [];
     const details: string[] = [];
-    if (!sameColumns(idx.columns, liveIdx.columns)) {
+    if (!sameColumns(idx.columns, underRenames(liveIdx.columns, renames))) {
       reasons.push("columns");
       details.push(`columns (${liveIdx.columns.join(", ")}) → (${idx.columns.join(", ")})`);
     }
@@ -477,7 +575,7 @@ function diffOneTable(
   for (const uc of declaredUniqueConstraints(target)) {
     const liveIdx = liveIndexes.get(uc.name);
     if (liveIdx === undefined) continue;
-    if (sameColumns(uc.columns, liveIdx.columns) && liveIdx.unique) continue;
+    if (sameColumns(uc.columns, underRenames(liveIdx.columns, renames)) && liveIdx.unique) continue;
     changedIndexes.push({
       name: uc.name,
       reasons: liveIdx.unique ? ["columns"] : ["columns", "unique"],
@@ -564,7 +662,12 @@ function diffOneTable(
   const liveFkByColumn = new Map<string, (typeof live.foreignKeys)[number]>();
   for (const fk of live.foreignKeys) {
     if (matchedFkNames.has(fk.name)) continue;
-    if (fk.columns.length === 1) liveFkByColumn.set(fk.columns[0] as string, fk);
+    // Keyed by the name the *catalog* uses: a foreign key survives a column rename pointing at the
+    // same column, so without this it would read as declared-but-missing and be added a second time.
+    if (fk.columns.length === 1) {
+      const column = fk.columns[0] as string;
+      liveFkByColumn.set(renames.get(column) ?? column, fk);
+    }
   }
   const addedForeignKeys: string[] = [];
   const removedForeignKeys: RemovedForeignKey[] = [];
@@ -615,6 +718,7 @@ function diffOneTable(
     addedColumns,
     removedColumns,
     changedColumns,
+    renamedColumns,
     addedIndexes,
     removedIndexes,
     changedIndexes,
@@ -637,6 +741,7 @@ function tableHasDrift(diff: TableDiff): boolean {
     diff.addedColumns.length > 0 ||
     diff.removedColumns.length > 0 ||
     diff.changedColumns.length > 0 ||
+    diff.renamedColumns.length > 0 ||
     diff.addedIndexes.length > 0 ||
     diff.removedIndexes.length > 0 ||
     diff.changedIndexes.length > 0 ||
@@ -727,6 +832,10 @@ export function formatSchemaDiff(diff: SchemaDiff): string {
       for (const c of m.removedColumns) lines.push(`          - column ${c}`);
       for (const c of m.changedColumns) {
         lines.push(`          ~ column ${c.column} [${c.reasons.join(", ")}]`);
+      }
+      for (const c of m.renamedColumns) {
+        const note = c.ambiguous ? " [ambiguous: both names exist]" : "";
+        lines.push(`          > column ${c.from} → ${c.column}${note}`);
       }
       for (const i of m.addedIndexes) lines.push(`          + index ${i}`);
       for (const i of m.removedIndexes) lines.push(`          - index ${i}`);

@@ -14,6 +14,18 @@ export interface ColumnDefinition {
   readonly unique?: boolean | { readonly constraintName: string };
   readonly references?: ColumnReference;
   readonly check?: string;
+  /**
+   * The name this column used to be declared under, so a rename reconciles as a rename.
+   *
+   * Without it, renaming a column added one under the new name and reported the old one as
+   * undeclared — and a `NOT NULL` old column that nothing dropped then failed every insert.
+   *
+   * It says nothing about emission: a fresh `CREATE TABLE` has no history to honour, so this field
+   * is invisible to the emitter and only the reconciler reads it. It is also *not* an instruction —
+   * a rename is planned only when the old name is live and the new one is not. Both live is
+   * ambiguous and is reported; neither live is an ordinary addition.
+   */
+  readonly renamedFrom?: string;
 }
 
 export interface IndexSpec {

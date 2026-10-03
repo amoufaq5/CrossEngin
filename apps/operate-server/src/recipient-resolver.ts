@@ -413,7 +413,24 @@ export class PostgresRecipientResolver {
             row["source_delivery_id"] == null ? null : String(row["source_delivery_id"]),
           notes: row["notes"] == null ? undefined : String(row["notes"]),
         });
-        if (parsed.success) records.push(parsed.data);
+        if (!parsed.success) {
+          // Fail closed, as the platform-wide invariant requires: a suppression row exists to stop mail
+          // to an address, so skipping the one row we cannot read means mailing exactly the address it
+          // was protecting — and for a hard bounce that feeds the rate a provider throttles the whole
+          // sending domain over.
+          //
+          // The cost is bounded by design: `drainAllTenants` catches per tenant and continues, so this
+          // stops one tenant's sweep and retries on the next one, rather than taking down delivery
+          // platform-wide. Loud and recoverable beats quiet and wrong.
+          //
+          // The id, never the address — a suppression names a real person's mailbox and this message
+          // reaches logs.
+          throw new Error(
+            `suppression row ${String(row["suppression_id"])} does not satisfy SuppressionRecordSchema; ` +
+              "refusing to deliver on this channel until it is corrected",
+          );
+        }
+        records.push(parsed.data);
       }
       return records;
     });

@@ -82,7 +82,9 @@ const SUPPRESSION_COLUMNS: readonly string[] = Object.freeze([
 const COLUMN_CASTS: Readonly<Record<string, string>> = Object.freeze({
   tenant_id: "::uuid",
   applied_at: "::timestamptz",
-  applied_by: "::uuid",
+  // `applied_by` is deliberately absent: it is TEXT, so the `text` an unknown-typed parameter
+  // already resolves to is the right type. Casting it to `uuid` is what the column used to be and
+  // would now reject every `system:` and `provider:` actor a bounce writes.
   expires_at: "::timestamptz",
   source_delivery_id: "::uuid",
 });

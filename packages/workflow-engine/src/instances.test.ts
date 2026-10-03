@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACTIVE_INSTANCE_STATUSES,
   INSTANCE_STATUSES,
+  CLOSED_INSTANCE_STATUSES,
   INSTANCE_TRANSITIONS,
   RELATED_ENTITY_KINDS,
   RelatedEntityRefSchema,
@@ -95,16 +96,39 @@ describe("canTransitionInstance", () => {
     }
   });
 
-  it("leaves every terminal status with no way out, except that a failure may be compensated", () => {
-    // `failed` is terminal *and* has an outgoing edge, which is deliberate for sagas — a failed
-    // instance is still compensatable — but it means `isInstanceTerminal` answers "done" for a status
-    // the map says you may still move. Pinned here rather than resolved: which side should change is a
-    // lifecycle decision, not a test's to make.
+  it("separates 'the clock stops here' from 'there is nowhere to go'", () => {
+    // The two sets answer different questions and differ by exactly `failed`: it must not time out, so
+    // it is terminal, but a saga may still compensate it, so it is not closed. Reusing one for the
+    // other is the mistake this pins — and CLOSED is derived from the map, so it cannot drift from it.
     for (const status of TERMINAL_INSTANCE_STATUSES) {
       expect(INSTANCE_TRANSITIONS[status], status).toEqual(
         status === "failed" ? ["compensating"] : [],
       );
     }
+    expect([...CLOSED_INSTANCE_STATUSES].sort()).toEqual([
+      "cancelled",
+      "compensated",
+      "completed",
+    ]);
+    expect(CLOSED_INSTANCE_STATUSES.has("failed")).toBe(false);
+    expect(TERMINAL_INSTANCE_STATUSES.has("failed")).toBe(true);
+  });
+
+  it("derives CLOSED_INSTANCE_STATUSES from the map rather than repeating it", () => {
+    // The point of deriving it: a status whose transitions are emptied becomes closed with no second
+    // list to remember, and one that gains an edge stops being closed for free.
+    for (const status of INSTANCE_STATUSES) {
+      expect(CLOSED_INSTANCE_STATUSES.has(status), status).toBe(
+        INSTANCE_TRANSITIONS[status].length === 0,
+      );
+    }
+  });
+
+  it("a closed instance is always terminal, but not the reverse", () => {
+    for (const status of CLOSED_INSTANCE_STATUSES) {
+      expect(TERMINAL_INSTANCE_STATUSES.has(status), status).toBe(true);
+    }
+    expect(CLOSED_INSTANCE_STATUSES.size).toBeLessThan(TERMINAL_INSTANCE_STATUSES.size);
   });
 });
 

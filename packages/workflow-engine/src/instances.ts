@@ -25,6 +25,14 @@ export const ACTIVE_INSTANCE_STATUSES: ReadonlySet<InstanceStatus> = new Set([
   "compensating",
 ]);
 
+/**
+ * Statuses the clock no longer advances — what `isInstanceTimedOut` asks about. `failed` belongs here
+ * even though it has an outgoing transition, because a failed instance must not also time out.
+ *
+ * This is **not** "no way out": see `CLOSED_INSTANCE_STATUSES` for that question. The two differ by
+ * exactly `failed`, whose `failed → compensating` edge is a saga compensating a failure, triggered
+ * deliberately rather than by the passage of time.
+ */
 export const TERMINAL_INSTANCE_STATUSES: ReadonlySet<InstanceStatus> = new Set([
   "completed",
   "failed",
@@ -257,6 +265,23 @@ export const isInstanceActive = (instance: WorkflowInstance): boolean =>
 
 export const isInstanceTerminal = (instance: WorkflowInstance): boolean =>
   TERMINAL_INSTANCE_STATUSES.has(instance.status);
+
+/**
+ * Statuses with no outgoing transition at all — genuinely nowhere left to go.
+ *
+ * **Derived from `INSTANCE_TRANSITIONS`, never hand-listed.** A second hand-maintained set is how
+ * `TERMINAL_INSTANCE_STATUSES` came to disagree with the map in the first place: it claims `failed` is
+ * an end state while the map gives it `failed → compensating`, so a reader asking "can this still
+ * move?" and reaching for `isInstanceTerminal` got the wrong answer. Computing it means the two cannot
+ * drift apart again.
+ */
+export const CLOSED_INSTANCE_STATUSES: ReadonlySet<InstanceStatus> = new Set(
+  INSTANCE_STATUSES.filter((status) => INSTANCE_TRANSITIONS[status].length === 0),
+);
+
+/** Whether the state machine offers this instance any transition at all. */
+export const isInstanceClosed = (instance: WorkflowInstance): boolean =>
+  CLOSED_INSTANCE_STATUSES.has(instance.status);
 
 export const isInstanceTimedOut = (
   instance: WorkflowInstance,

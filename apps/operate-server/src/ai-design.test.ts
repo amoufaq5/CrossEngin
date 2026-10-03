@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import type { CompletionChunk, CompletionRequest } from "@crossengin/ai-providers";
+import type {
+  CompletionChunk,
+  CompletionRequest,
+  ProviderPricing,
+} from "@crossengin/ai-providers";
+import { MockLlmProvider } from "@crossengin/ai-providers";
 import { AnthropicProvider } from "@crossengin/ai-providers-anthropic";
 import { DEFAULT_LOCAL_MODEL, LocalLlmProvider } from "@crossengin/ai-providers-local";
 import { OpenAiProvider } from "@crossengin/ai-providers-openai";
@@ -8,6 +13,9 @@ import { ManifestSchema, tryValidateManifest } from "@crossengin/kernel/manifest
 
 import {
   DESIGN_EXAMPLE_MANIFEST,
+  DESIGN_FAILURE_FAULT,
+  DESIGN_FAILURE_KINDS,
+  DESIGN_FAULTS,
   DESIGN_PROGRESS_CHARS_STEP,
   DESIGN_SYSTEM_PROMPT,
   MAX_DESIGN_ATTEMPTS,
@@ -784,5 +792,356 @@ describe("buildDesignProviderFromEnv — self-hosted model", () => {
 
   it("still returns null when neither a local endpoint nor an API key is configured", () => {
     expect(buildDesignProviderFromEnv({ LOCAL_LLM_API_KEY: "lm-token" })).toBeNull();
+  });
+});
+
+describe("designManifest — diagnosable failure classification (ADR-0280)", () => {
+  function mockProvider(
+    turns: readonly Turn[],
+    pricing?: ProviderPricing,
+  ): { provider: DesignCompletionProvider; requests: CompletionRequest[] } {
+    const requests: CompletionRequest[] = [];
+    let index = 0;
+    const provider = new MockLlmProvider({
+      ...(pricing !== undefined ? { pricing } : {}),
+      completeBehavior: (req: CompletionRequest): AsyncIterable<CompletionChunk> => {
+        requests.push(req);
+        const turn = turns[Math.min(index, turns.length - 1)] ?? [];
+        index += 1;
+        return (async function* (): AsyncGenerator<CompletionChunk> {
+          if (turn instanceof Error) throw turn;
+          for (const chunk of turn) yield chunk;
+        })();
+      },
+    });
+    return { provider, requests };
+  }
+
+  async function failWith(text: string): Promise<Awaited<ReturnType<typeof designManifest>>> {
+    const { provider } = mockProvider([textTurn(text)]);
+    return designManifest({ provider, description: "desc", maxAttempts: 1 });
+  }
+
+  it("every failure kind maps to exactly one fault", () => {
+    for (const kind of DESIGN_FAILURE_KINDS) {
+      expect(DESIGN_FAULTS).toContain(DESIGN_FAILURE_FAULT[kind]);
+    }
+    expect(new Set(DESIGN_FAILURE_KINDS).size).toBe(DESIGN_FAILURE_KINDS.length);
+  });
+
+  it("classifies prose with no JSON as not_json, faulting the model", async () => {
+    const r = await failWith("I'd be glad to help — could you tell me more about your business?");
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBe("not_json");
+    expect(r.fault).toBe("model_output");
+    expect(r.diagnosis[0]?.shape).toBe("no_json");
+  });
+
+  it("classifies leading prose then JSON as a prose-wrapped recovery, not a failure", async () => {
+    const { provider } = mockProvider([textTurn(`Certainly! Here it is:\n\n${VALID_JSON}\n\nEnjoy.`)]);
+    const r = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.failure).toBeNull();
+    expect(r.recovery).toBe("surrounding_prose");
+  });
+
+  it("recovers a fenced manifest and still reports the fence", async () => {
+    const { provider } = mockProvider([textTurn(`\`\`\`json\n${VALID_JSON}\n\`\`\``)]);
+    const r = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    expect(r.ok).toBe(true);
+    expect(r.recovery).toBe("code_fence");
+    expect(r.diagnosis).toHaveLength(1);
+    expect(r.diagnosis[0]?.wrapper).toBe("code_fence");
+  });
+
+  it("classifies JSON cut off mid-object as truncated_json, distinct from malformed", async () => {
+    const r = await failWith(VALID_JSON.slice(0, VALID_JSON.length - 30));
+    expect(r.failure).toBe("truncated_json");
+    expect(r.fault).toBe("model_output");
+    expect(r.manifest).toBeNull();
+  });
+
+  it("classifies balanced-but-unparseable JSON as malformed_json and never repairs it", async () => {
+    const r = await failWith('{"manifestVersion": "1.0", "entities": [],}');
+    expect(r.failure).toBe("malformed_json");
+    expect(r.manifest).toBeNull();
+  });
+
+  it("classifies a JSON array as array_not_object, not its first element", async () => {
+    const r = await failWith(`[${VALID_JSON}]`);
+    expect(r.failure).toBe("array_not_object");
+    expect(r.manifest).toBeNull();
+  });
+
+  it("classifies valid JSON that is not a manifest as not_a_manifest", async () => {
+    const r = await failWith('{"reply": "Your business needs a CRM.", "confidence": 0.4}');
+    expect(r.failure).toBe("not_a_manifest");
+    expect(r.fault).toBe("model_output");
+  });
+
+  it("separates a manifest the schema rejects from one the model could not form", async () => {
+    const r = await failWith(
+      JSON.stringify({
+        manifestVersion: "1.0",
+        meta: { name: "X", slug: "generated/x", version: "0.1.0" },
+        entities: [{ name: "lowercase", fields: [] }],
+      }),
+    );
+    expect(r.failure).toBe("schema_invalid");
+    expect(r.fault).toBe("manifest_content");
+  });
+
+  it("separates a cross-validation failure from a schema failure", async () => {
+    const r = await failWith(brokenManifestJson());
+    expect(r.failure).toBe("cross_validation_failed");
+    expect(r.fault).toBe("manifest_content");
+  });
+
+  it("classifies an empty reply as empty_response", async () => {
+    const { provider } = mockProvider([[]]);
+    const r = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    expect(r.failure).toBe("empty_response");
+    expect(r.diagnosis[0]?.shape).toBe("empty");
+  });
+
+  it("classifies a provider throw as a provider fault, not a model one", async () => {
+    const { provider } = mockProvider([new Error("connect ECONNREFUSED")]);
+    const r = await designManifest({ provider, description: "desc", maxAttempts: 1 });
+    expect(r.failure).toBe("provider_error");
+    expect(r.fault).toBe("provider");
+    expect(r.diagnosis[0]?.shape).toBeNull();
+  });
+
+  it("classifies an over-long description as the caller's fault before any call", async () => {
+    const { provider, requests } = mockProvider([textTurn(VALID_JSON)]);
+    const r = await designManifest({
+      provider,
+      description: "x".repeat(MAX_DESIGN_DESCRIPTION_CHARS + 1),
+    });
+    expect(r.failure).toBe("description_too_long");
+    expect(r.fault).toBe("request");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("records one diagnosis per attempt, in order, ending with the success", async () => {
+    const { provider } = mockProvider([
+      textTurn("no json at all"),
+      textTurn(`\`\`\`json\n${VALID_JSON}\n\`\`\``),
+    ]);
+    const r = await designManifest({ provider, description: "desc" });
+    expect(r.ok).toBe(true);
+    expect(r.diagnosis.map((d) => d.failure)).toEqual(["not_json", null]);
+    expect(r.diagnosis.map((d) => d.attempt)).toEqual([1, 2]);
+    expect(r.diagnosis[1]?.wrapper).toBe("code_fence");
+  });
+
+  it("tells a fenced model to drop the fence specifically", async () => {
+    const { provider, requests } = mockProvider([
+      textTurn('```json\n{"reply": "no"}\n```'),
+      textTurn(VALID_JSON),
+    ]);
+    await designManifest({ provider, description: "desc" });
+    const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
+    expect(corrective?.content).toContain("code fence");
+  });
+
+  it("tells a truncating model to produce a smaller manifest", async () => {
+    const { provider, requests } = mockProvider([
+      textTurn(VALID_JSON.slice(0, 200)),
+      textTurn(VALID_JSON),
+    ]);
+    await designManifest({ provider, description: "desc" });
+    const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
+    expect(corrective?.content).toContain("smaller manifest");
+  });
+
+  it("surfaces the classification on the retrying progress event", async () => {
+    const seen: DesignProgress[] = [];
+    const { provider } = mockProvider([textTurn("[1, 2, 3]"), textTurn(VALID_JSON)]);
+    await designManifest({
+      provider,
+      description: "desc",
+      onProgress: (p) => void seen.push(p),
+    });
+    const retry = seen.find((p) => p.phase === "retrying");
+    expect(retry?.failure).toBe("array_not_object");
+    expect(retry?.shape).toBe("array_not_object");
+  });
+});
+
+describe("designManifest — per-request cost ceiling (ADR-0267)", () => {
+  const PAID: ProviderPricing = { inputPerMillionTokens: 3, outputPerMillionTokens: 15 };
+
+  function pricedProvider(
+    turns: readonly Turn[],
+    pricing: ProviderPricing | undefined,
+  ): { provider: DesignCompletionProvider; requests: CompletionRequest[] } {
+    const requests: CompletionRequest[] = [];
+    let index = 0;
+    const base = new MockLlmProvider({
+      ...(pricing !== undefined ? { pricing } : {}),
+      completeBehavior: (req: CompletionRequest): AsyncIterable<CompletionChunk> => {
+        requests.push(req);
+        const turn = turns[Math.min(index, turns.length - 1)] ?? [];
+        index += 1;
+        return (async function* (): AsyncGenerator<CompletionChunk> {
+          if (turn instanceof Error) throw turn;
+          for (const chunk of turn) yield chunk;
+        })();
+      },
+    });
+    const provider: DesignCompletionProvider =
+      pricing === undefined
+        ? { complete: (req: CompletionRequest) => base.complete(req) }
+        : base;
+    return { provider, requests };
+  }
+
+  it("leaves a run unpriced when no ceiling is configured", async () => {
+    const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
+    const r = await designManifest({ provider, description: "desc" });
+    expect(r.ok).toBe(true);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("admits a request whose estimate fits under the ceiling", async () => {
+    const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
+    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 1 });
+    expect(r.ok).toBe(true);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("refuses to send a request estimated over the ceiling, and does not retry it", async () => {
+    const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], PAID);
+    const r = await designManifest({
+      provider,
+      description: "desc",
+      maxRequestDollars: 0.000001,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBe("request_cost_ceiling");
+    expect(r.fault).toBe("request");
+    expect(requests).toHaveLength(0);
+    expect(r.attempts).toBe(1);
+  });
+
+  it("refuses a configured ceiling it cannot compute (provider publishes no pricing)", async () => {
+    const { provider, requests } = pricedProvider([textTurn(VALID_JSON)], undefined);
+    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 10 });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBe("request_cost_ceiling");
+    expect(r.issues[0]).toContain("no pricing");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("a free-priced self-hosted provider is never refused by the ceiling", async () => {
+    const free: ProviderPricing = { inputPerMillionTokens: 0, outputPerMillionTokens: 0 };
+    const { provider } = pricedProvider([textTurn(VALID_JSON)], free);
+    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 0 });
+    expect(r.ok).toBe(true);
+  });
+
+  // A model that writes past its own maxTokens: the pre-flight estimate fits, so the
+  // in-flight meter is the only thing that can stop it.
+  const RUNAWAY = `{"entities": [${'"x",'.repeat(60_000)}`;
+
+  it("abandons a stream mid-flight once accrued output breaks the ceiling", async () => {
+    const { provider } = pricedProvider([chunkedTurn(RUNAWAY, 500), textTurn(VALID_JSON)], PAID);
+    const r = await designManifest({
+      provider,
+      description: "desc",
+      maxTokens: 500,
+      maxRequestDollars: 0.05,
+      maxAttempts: 1,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBe("response_cost_ceiling");
+    expect(r.fault).toBe("request");
+    // The abandoned output is still charged — those tokens were generated.
+    expect(r.usage?.cost ?? 0).toBeGreaterThan(0.05);
+  });
+
+  it("an abandoned stream is retried with a compactness instruction", async () => {
+    const { provider, requests } = pricedProvider(
+      [chunkedTurn(RUNAWAY, 500), textTurn(VALID_JSON)],
+      PAID,
+    );
+    const r = await designManifest({
+      provider,
+      description: "desc",
+      maxTokens: 500,
+      maxRequestDollars: 0.05,
+    });
+    expect(r.ok).toBe(true);
+    const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
+    expect(corrective?.content).toContain("too expensive");
+  });
+
+  it("stops the run when the actual cost broke the ceiling, but keeps a valid manifest", async () => {
+    const { provider, requests } = pricedProvider(
+      [textTurn(VALID_JSON, { input: 10, output: 10, cost: 5 })],
+      PAID,
+    );
+    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 0.5 });
+    expect(r.ok).toBe(true);
+    expect(r.usage?.cost).toBe(5);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("stops retrying after an actual cost over the ceiling", async () => {
+    const { provider, requests } = pricedProvider(
+      [textTurn("not json", { input: 10, output: 10, cost: 5 })],
+      PAID,
+    );
+    const r = await designManifest({ provider, description: "desc", maxRequestDollars: 0.5 });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBe("not_json");
+    expect(r.attempts).toBe(1);
+    expect(requests).toHaveLength(1);
+  });
+
+  it("an over-estimate inflates the next attempt's estimate, refusing it when it no longer fits", async () => {
+    // The first turn settles just inside the ceiling at ~2.4x its estimate. The echoed
+    // reply then grows the prompt, so attempt 2 priced at 2.4x no longer fits — the run
+    // stops instead of spending another ceiling's worth on the same mis-modelled prompt.
+    const { provider, requests } = pricedProvider(
+      [
+        textTurn("I will not answer in JSON. ".repeat(170), {
+          input: 10,
+          output: 10,
+          cost: 0.047,
+        }),
+        textTurn(VALID_JSON, { input: 10, output: 10, cost: 0 }),
+      ],
+      PAID,
+    );
+    const r = await designManifest({
+      provider,
+      description: "desc",
+      maxTokens: 1000,
+      maxRequestDollars: 0.05,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.failure).toBe("request_cost_ceiling");
+    expect(requests).toHaveLength(1);
+    expect(r.attempts).toBe(2);
+  });
+
+  it("an over-estimate that still fits lets the next attempt through", async () => {
+    const { provider, requests } = pricedProvider(
+      [
+        textTurn("not json", { input: 10, output: 10, cost: 0.03 }),
+        textTurn(VALID_JSON, { input: 10, output: 10, cost: 0.03 }),
+      ],
+      PAID,
+    );
+    const r = await designManifest({
+      provider,
+      description: "desc",
+      maxTokens: 1000,
+      maxRequestDollars: 1,
+    });
+    expect(r.ok).toBe(true);
+    expect(requests).toHaveLength(2);
   });
 });

@@ -1,6 +1,7 @@
 import {
   emitAddColumn,
   emitAddForeignKey,
+  emitAddTableConstraint,
   emitAddTableConstraintIfEmpty,
   emitAddUniqueConstraint,
   emitAlterColumnTypeIfEmpty,
@@ -8,8 +9,10 @@ import {
   emitDropColumnNotNull,
   emitDropConstraint,
   emitIndex,
+  emitRenameColumn,
   emitReplaceIndex,
   emitReplaceRlsPolicy,
+  emitReplaceTableConstraint,
   emitReplaceTableConstraintIfEmpty,
   emitRlsEnable,
   emitRlsPolicy,
@@ -19,6 +22,7 @@ import {
   foreignKeyConstraintName,
   type ColumnDefinition,
   type TableConstraint,
+  type TableConstraintKind,
   type TableDefinition,
 } from "@crossengin/kernel/bootstrap";
 
@@ -43,6 +47,7 @@ import { introspectSchema } from "./introspection.js";
 
 export const RECONCILE_STEP_KINDS = [
   "create_table",
+  "rename_column",
   "add_column",
   "create_index",
   "add_unique_constraint",
@@ -78,6 +83,7 @@ export const UNRECONCILED_REASONS = [
   "column_type_changed",
   "column_now_not_null",
   "column_needs_backfill",
+  "column_rename_ambiguous",
   "depends_on_unreconciled",
   "index_removed",
   "policy_removed",
@@ -109,6 +115,31 @@ export interface ReconciliationProbe {
   readonly rowCounts: ReadonlyMap<string, number>;
 }
 
+/**
+ * Choices a caller makes about what the plan is allowed to do, rather than facts about the database.
+ *
+ * There is one, and it is off by default: with no options the plan is byte-identical to what it was
+ * before they existed.
+ */
+export interface ReconciliationOptions {
+  /**
+   * Turn the undeclared-foreign-key refusal into a real `drop_foreign_key` step.
+   *
+   * ADR-0291's rule is that a plan never loosens integrity, which is why a foreign key the catalog
+   * stopped declaring is reported with the SQL instead of dropped. That rule has a cost nobody can pay
+   * once: a reference removed from the catalog is correct on a fresh install and reported as drift on
+   * every existing database, forever, and the four kill-switch references of ADR-0296 are exactly
+   * that. This is the operator saying "yes, I meant to remove them" — once, explicitly, per run.
+   *
+   * **Foreign keys only.** It does not drop a column, a table, an index, a policy or a CHECK, and it
+   * does not reach anything whose outcome depends on existing row data: dropping a foreign key cannot
+   * fail against the rows that are there, which is what keeps the plan's one invariant true. Every
+   * other refusal is either a decision about data or an object someone may have created on purpose,
+   * and neither becomes safe because a flag was passed.
+   */
+  readonly allowLoosening?: boolean;
+}
+
 export interface ReconciliationPlan {
   readonly schema: string;
   readonly steps: readonly ReconcileStep[];
@@ -137,11 +168,17 @@ function quoted(schema: string, table: string): string {
  * rewritten. A removed column, index or policy is reported with the SQL to close it rather than
  * closed, because each is a decision about existing data or about an operator's intent, and a
  * migration that guesses at those is worse than one that stops and says so.
+ *
+ * Two things sit beside that rule rather than inside it. A **rename** moves a column without reading a
+ * row, so it is planned on a populated table and is planned *first* — every later statement names the
+ * column as the catalog declares it. And `options.allowLoosening` lets the caller turn the
+ * undeclared-foreign-key refusal into a real drop; it is off by default and reaches nothing else.
  */
 export function planSchemaReconciliation(
   diff: SchemaDiff,
   tables: readonly TableDefinition[],
   probe?: ReconciliationProbe,
+  options: ReconciliationOptions = {},
 ): ReconciliationPlan {
   const byName = new Map(tables.map((t) => [t.name, t] as const));
   const steps: ReconcileStep[] = [];
@@ -167,7 +204,7 @@ export function planSchemaReconciliation(
   for (const table of tables) {
     const tableDiff = modified.get(table.name);
     if (tableDiff === undefined) continue;
-    planTable(table, tableDiff, steps, unreconciled, probe);
+    planTable(table, tableDiff, steps, unreconciled, probe, options);
   }
 
   for (const name of diff.removedTables) {
@@ -201,11 +238,18 @@ function planTable(
   tableDiff: TableDiff,
   steps: ReconcileStep[],
   unreconciled: UnreconciledItem[],
-  probe?: ReconciliationProbe,
+  probe: ReconciliationProbe | undefined,
+  options: ReconciliationOptions,
 ): void {
   const columns = new Map(table.columns.map((c) => [c.name, c] as const));
 
   const rowCount = probe?.rowCounts.get(table.name);
+
+  // **Before anything else on this table.** Every later statement — a type change, a default, an index
+  // rebuild, a foreign key — names the column as the catalog declares it, and until the rename runs
+  // that name does not exist. Renaming first is what makes the rest of the plan applicable at all.
+  planRenames(table, tableDiff, steps, unreconciled);
+
   // Columns the plan will not add. Anything that covers one of them cannot be created either, so
   // the refusal has to propagate — a unique constraint over a column that was never added fails
   // with `column "…" named in key does not exist`, which is how this was found live.
@@ -263,6 +307,14 @@ function planTable(
       .map((d) => d.column),
   );
 
+  // What the database actually calls each declared table-level constraint. It is the declared name
+  // unless the diff matched a foreign key by its columns, in which case dropping the declared name is
+  // a no-op that leaves the old constraint standing.
+  const liveConstraintNames = new Map<string, string>();
+  for (const delta of tableDiff.changedConstraints) {
+    if (delta.liveName !== undefined) liveConstraintNames.set(delta.name, delta.liveName);
+  }
+
   // A declared table-level foreign key over a column being retyped blocks the rewrite exactly as an
   // undeclared one does, and matching by name means it is never in `removedForeignKeys` — so it has
   // to be found from the declaration and dropped here, then re-added with the others below.
@@ -275,12 +327,12 @@ function planTable(
       kind: "drop_foreign_key",
       table: table.name,
       target: fk.name,
-      sql: emitDropConstraint(table, fk.name),
+      sql: emitDropConstraint(table, liveConstraintNames.get(fk.name) ?? fk.name),
       guarded: false,
     });
   }
 
-  planForeignKeyDrops(table, tableDiff, retypedColumns, steps, unreconciled);
+  planForeignKeyDrops(table, tableDiff, retypedColumns, options, steps, unreconciled);
 
   for (const delta of tableDiff.changedColumns) {
     planChangedColumn(table, delta, columns.get(delta.column), steps, unreconciled, rowCount);
@@ -298,7 +350,15 @@ function planTable(
   // After the column additions, so a table-level constraint over a column this plan is adding is
   // created once the column exists. Nothing `ADD COLUMN` writes can be a table-level constraint —
   // `emitColumn` has no spelling for one — so there is nothing to subsume here.
-  planTableConstraints(table, tableDiff, droppedForRetype, rowCount, steps, unreconciled);
+  planTableConstraints(
+    table,
+    tableDiff,
+    droppedForRetype,
+    liveConstraintNames,
+    rowCount,
+    steps,
+    unreconciled,
+  );
 
   const expected = expectedIndexNames(table);
   const declaredIndexes = new Map((table.indexes ?? []).map((i) => [i.name, i] as const));
@@ -480,6 +540,53 @@ function planTable(
 }
 
 /**
+ * Plans the column renames, and refuses the ambiguous ones.
+ *
+ * A rename is the one repair that moves data without touching it, so it is planned on a populated table
+ * where almost nothing else is — the row count is irrelevant because no row is read or rewritten.
+ *
+ * It is planned only when the old name is live and the new one is not. With **both** live there are two
+ * columns and nothing in the catalog says which holds the data: renaming onto an occupied name fails
+ * outright, and dropping one first is a decision about existing data. So that case is reported with
+ * both resolutions spelled out. With **neither** live there is nothing to rename, and the diff has
+ * already treated the column as an ordinary addition — `renamedFrom` describes history, it does not
+ * ask for anything.
+ */
+function planRenames(
+  table: TableDefinition,
+  tableDiff: TableDiff,
+  steps: ReconcileStep[],
+  unreconciled: UnreconciledItem[],
+): void {
+  const fq = quoted(table.schema, table.name);
+  for (const rename of tableDiff.renamedColumns) {
+    if (rename.ambiguous) {
+      unreconciled.push({
+        reason: "column_rename_ambiguous",
+        table: table.name,
+        target: rename.column,
+        detail:
+          `column '${rename.column}' declares renamedFrom '${rename.from}' and the database holds ` +
+          "both; which one holds the data is not something the catalog says",
+        manualSql:
+          `-- if '${rename.column}' is the live one, discard the old column:\n` +
+          `ALTER TABLE ${fq} DROP COLUMN "${rename.from}";\n` +
+          `-- if '${rename.from}' is, move the data across and drop the new one, then re-run apply:\n` +
+          `ALTER TABLE ${fq} DROP COLUMN "${rename.column}";`,
+      });
+      continue;
+    }
+    steps.push({
+      kind: "rename_column",
+      table: table.name,
+      target: rename.column,
+      sql: emitRenameColumn(table, rename.from, rename.column),
+      guarded: true,
+    });
+  }
+}
+
+/**
  * Plans the table-level constraints the catalog declares and the database does not hold as declared.
  *
  * **Only on an empty table.** A CHECK and a foreign key can both fail against rows that are already
@@ -501,6 +608,7 @@ function planTableConstraints(
   table: TableDefinition,
   tableDiff: TableDiff,
   droppedForRetype: ReadonlySet<string>,
+  liveConstraintNames: ReadonlyMap<string, string>,
   rowCount: number | undefined,
   steps: ReconcileStep[],
   unreconciled: UnreconciledItem[],
@@ -529,6 +637,26 @@ function planTableConstraints(
   }
 
   for (const { constraint, replacing } of pending) {
+    const liveName = liveConstraintNames.get(constraint.name) ?? constraint.name;
+    // A foreign key takes ADR-0291's rule, not ADR-0299's: `ADD CONSTRAINT … FOREIGN KEY` fails only
+    // when the table holds rows whose reference does not resolve, which means the database already
+    // contradicts a constraint the catalog declares — an integrity problem the operator needs to see,
+    // not a decision about data that a plan would be guessing at. Gating it on emptiness instead left
+    // a composite key declarable and never reconciled on any database with rows in it, which is the
+    // whole of the ADR-0291/0299 follow-up. A CHECK keeps the guard: an expression the catalog just
+    // started declaring says nothing about rows written before it.
+    if (constraint.kind === "foreign_key") {
+      steps.push({
+        kind: replacing ? "replace_table_constraint" : "add_table_constraint",
+        table: table.name,
+        target: constraint.name,
+        sql: replacing
+          ? emitReplaceTableConstraint(table, constraint, liveName)
+          : emitAddTableConstraint(table, constraint),
+        guarded: false,
+      });
+      continue;
+    }
     if (rowCount !== 0) {
       unreconciled.push({
         reason: "constraint_needs_validation",
@@ -547,7 +675,7 @@ function planTableConstraints(
       table: table.name,
       target: constraint.name,
       sql: replacing
-        ? emitReplaceTableConstraintIfEmpty(table, constraint)
+        ? emitReplaceTableConstraintIfEmpty(table, constraint, liveName)
         : emitAddTableConstraintIfEmpty(table, constraint),
       guarded: true,
     });
@@ -605,11 +733,15 @@ function manualConstraintSql(
  * a constraint sitting on a column whose type is being rewritten, where the drop is not a judgement
  * about the constraint but a prerequisite of a change the catalog does ask for — and it appears as
  * its own visible step rather than hiding inside the type change.
+ *
+ * `allowLoosening` is the operator overriding that judgement for undeclared keys, and nothing else;
+ * see `ReconciliationOptions`.
  */
 function planForeignKeyDrops(
   table: TableDefinition,
   tableDiff: TableDiff,
   retypedColumns: ReadonlySet<string>,
+  options: ReconciliationOptions,
   steps: ReconcileStep[],
   unreconciled: UnreconciledItem[],
 ): void {
@@ -624,7 +756,7 @@ function planForeignKeyDrops(
   }
   for (const fk of tableDiff.removedForeignKeys) {
     const blocksRetype = fk.columns.some((c) => retypedColumns.has(c));
-    if (blocksRetype) {
+    if (blocksRetype || options.allowLoosening === true) {
       steps.push({
         kind: "drop_foreign_key",
         table: table.name,
@@ -910,6 +1042,7 @@ export async function planLiveReconciliation(
   conn: PgConnection,
   schema: string,
   tables: readonly TableDefinition[],
+  options: ReconciliationOptions = {},
 ): Promise<ReconciliationPlan> {
   const live = await introspectSchema(conn, schema);
   // Only tables that already exist can carry a probe constraint; a table being created has nothing
@@ -921,7 +1054,7 @@ export async function planLiveReconciliation(
   const rendered = await renderExpressions(conn, schema, requests);
   const diff = diffSchema(tables, live, rendered);
   const probe = await probeRowCounts(conn, schema, diff);
-  return planSchemaReconciliation(diff, tables, probe);
+  return planSchemaReconciliation(diff, tables, probe, options);
 }
 
 async function probeRowCounts(
@@ -931,14 +1064,17 @@ async function probeRowCounts(
 ): Promise<ReconciliationProbe> {
   // Every case that hinges on whether the table holds anything: rewriting a column's type, adding a
   // NOT NULL column with no default, and adding or replacing a table-level constraint the existing
-  // rows might not satisfy.
+  // rows might not satisfy. A *foreign key* constraint is not one of those — it follows ADR-0291's
+  // rule and is planned either way — so counting for it would be a `count(*)` on a large table that
+  // changes no decision.
+  const needsConstraintCount = (kind: TableConstraintKind): boolean => kind !== "foreign_key";
   const needed = diff.modifiedTables
     .filter(
       (m) =>
         m.addedColumns.length > 0 ||
         m.changedColumns.some((c) => c.reasons.includes("type")) ||
-        m.addedConstraints.length > 0 ||
-        m.changedConstraints.length > 0,
+        m.addedConstraints.some((c) => needsConstraintCount(c.kind)) ||
+        m.changedConstraints.some((c) => needsConstraintCount(c.kind)),
     )
     .map((m) => m.table);
   const rowCounts = new Map<string, number>();

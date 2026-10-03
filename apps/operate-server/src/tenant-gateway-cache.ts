@@ -53,7 +53,13 @@ export function resolveRequestTenant(raw: RawHttpRequest, apiKeys: readonly ApiK
 
 export interface TenantGatewayCacheOptions {
   source: { activeManifestFor(tenantId: string): Promise<Record<string, unknown> | null> };
-  build: (manifest: Manifest) => OperateHttpServer;
+  /**
+   * Compiles the tenant's gateway. It receives the tenant id, and may be async, because a build
+   * can have to *provision* before it can serve: the per-tenant column store applies this
+   * manifest's DDL to that tenant's own schema first. A build that throws is not cached, so the
+   * next request retries rather than stranding the tenant on the fallback for a whole TTL.
+   */
+  build: (manifest: Manifest, tenantId: string) => OperateHttpServer | Promise<OperateHttpServer>;
   ttlMs?: number;
   now?: () => number;
   onInvalidManifest?: (tenantId: string, issues: readonly string[]) => void;
@@ -77,7 +83,7 @@ interface CacheEntry {
  */
 export class TenantGatewayCache {
   private readonly source: TenantGatewayCacheOptions["source"];
-  private readonly build: (manifest: Manifest) => OperateHttpServer;
+  private readonly build: TenantGatewayCacheOptions["build"];
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly onInvalidManifest: ((tenantId: string, issues: readonly string[]) => void) | null;
@@ -123,7 +129,19 @@ export class TenantGatewayCache {
       );
       return this.remember(tenantId, null);
     }
-    return this.remember(tenantId, this.build(parsed.data));
+    let built: OperateHttpServer;
+    try {
+      built = await this.build(parsed.data, tenantId);
+    } catch (err) {
+      // Not cached, for the same reason a source failure is not: a provisioning failure is usually
+      // transient (a lock, a connection) and caching it would hold the tenant on the fallback store
+      // — and so on a different set of tables — for the whole TTL.
+      this.reportInvalid(tenantId, [
+        `gateway build failed: ${err instanceof Error ? err.message : String(err)}`,
+      ]);
+      return null;
+    }
+    return this.remember(tenantId, built);
   }
 
   invalidate(tenantId: string): void {

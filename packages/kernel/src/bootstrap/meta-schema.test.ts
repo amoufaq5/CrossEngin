@@ -135,8 +135,8 @@ function uniqueConstraintName(column: ColumnDefinition | undefined): string | un
 
 
 describe("META_TABLES", () => {
-  it("contains 136 tables", () => {
-    expect(META_TABLES).toHaveLength(140);
+  it("contains 143 tables", () => {
+    expect(META_TABLES).toHaveLength(143);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -235,8 +235,11 @@ describe("META_TABLES", () => {
       "notification_digests",
       "notification_dispatches",
       "notification_preferences",
+      "notification_read_states",
+      "notification_read_watermarks",
       "notification_suppressions",
       "notification_templates",
+      "notification_user_quiet_hours",
       "onboarding_runs",
       "operate_design_jobs",
       "operate_entity_links",
@@ -322,6 +325,34 @@ describe("META_TABLES", () => {
     for (const table of META_TABLES) {
       expect(table.primaryKey).toBeDefined();
     }
+  });
+});
+
+describe("tenant isolation predicates", () => {
+  it("never casts the tenant GUC without NULLIF", () => {
+    // `current_setting(x, true)` answers NULL only until the setting has been used once on a
+    // connection; after a transaction-local `set_config` ends, its reset value is the empty string,
+    // and `''::UUID` raises rather than returning no rows. Measured on a real cluster — a fresh psql
+    // session does not reproduce it, a pooled connection that has served one tenant does. So the
+    // guard is an invariant, not a preference, and a policy that loses it must fail here.
+    const offenders = META_TABLES.flatMap((table) =>
+      (table.rls?.policies ?? []).flatMap((policy) =>
+        [policy.using, policy.check]
+          .filter((clause): clause is string => typeof clause === "string")
+          .filter((clause) => clause.includes("current_setting") && clause.includes("::UUID"))
+          .filter((clause) => !clause.includes("NULLIF("))
+          .map((clause) => `${table.name}.${policy.name}: ${clause}`),
+      ),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it("guards every tenant-scoped table, so the rule covers the whole catalog", () => {
+    // Guards against the invariant above passing because nothing matched it any more.
+    const guarded = META_TABLES.filter((table) =>
+      (table.rls?.policies ?? []).some((policy) => (policy.using ?? "").includes("NULLIF(")),
+    );
+    expect(guarded.length).toBeGreaterThan(90);
   });
 });
 
@@ -1230,6 +1261,24 @@ describe("table column shapes", () => {
     expect(policy?.using).not.toContain("app.platform_review");
   });
 
+  it("META_AUDIT_LOG splits the platform read off as SELECT rather than widening isolation", () => {
+    const policies = META_AUDIT_LOG.rls?.policies ?? [];
+    expect(policies).toHaveLength(2);
+    const isolation = policies.find((p) => p.name === "audit_log_tenant_isolation");
+    const platform = policies.find((p) => p.name === "audit_log_platform_audit_read");
+    // The isolation half stays at the `ALL` default and never mentions the flag: an elevated
+    // session must not be able to satisfy an INSERT's WITH CHECK and forge an entry into another
+    // tenant's chain. That is the whole reason this is two policies and not one `OR`.
+    expect(isolation?.command).toBeUndefined();
+    expect(isolation?.using).not.toContain("app.platform_audit");
+    expect(platform?.command).toBe("SELECT");
+    expect(platform?.using).toBe("current_setting('app.platform_audit', true) = 'on'");
+    // And the isolation predicate is NULLIF-guarded, without which the platform read fails on any
+    // pooled connection that previously served a tenant — adding the SELECT policy alone does not
+    // help, because the other policy's cast still evaluates.
+    expect(isolation?.using).toContain("NULLIF(");
+  });
+
   it("META_INCIDENT_COMMUNICATIONS holds its two cross-column rules in the database", () => {
     // ADR-0296 recorded both as having nowhere to live, enforced only by the re-parse on read.
     const names = (META_INCIDENT_COMMUNICATIONS.constraints ?? []).map((c) => c.name);
@@ -1335,7 +1384,7 @@ describe("table column shapes", () => {
       "record_id",
     ]);
     expect(META_OPERATE_ENTITY_RECORDS.rls?.policies?.[0]?.using).toBe(
-      "tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+      "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
     );
   });
 
@@ -1392,7 +1441,9 @@ describe("table column shapes", () => {
     expect(policy?.name).toBe("operate_tenant_manifests_tenant_or_platform_review");
     // Tenant isolation still holds by default; the cross-tenant read requires a
     // transaction-scoped flag the platform review store sets and nothing else does.
-    expect(policy?.using).toContain("tenant_id = current_setting('app.current_tenant_id', true)::UUID");
+    expect(policy?.using).toContain(
+      "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+    );
     expect(policy?.using).toContain("current_setting('app.platform_review', true) = 'on'");
     const statements = emitMetaBootstrapSql();
     expect(

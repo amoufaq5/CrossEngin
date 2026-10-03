@@ -47,6 +47,64 @@ export const UNCONDITIONAL_SUPPRESSION_REASONS: ReadonlySet<SuppressionReason> =
 export const isSuppressionUnconditional = (reason: SuppressionReason): boolean =>
   UNCONDITIONAL_SUPPRESSION_REASONS.has(reason);
 
+export const SUPPRESSION_ACTOR_KINDS = ["user", "system", "provider"] as const;
+export type SuppressionActorKind = (typeof SUPPRESSION_ACTOR_KINDS)[number];
+
+const UUID_PATTERN =
+  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const ACTOR_SLUG = "[a-z][a-z0-9_-]{0,62}";
+
+/**
+ * Who applied a suppression, as `user:<uuid>` / `system:<slug>` / `provider:<slug>`.
+ *
+ * It was a `meta.users` UUID, which made the only suppressions anything actually produces
+ * unattributable: a bounce webhook has no user behind it, so every automatically-recorded row wrote
+ * NULL and "SES told us" was unrepresentable (ADR-0302). This is the same finding ADR-0289 recorded
+ * for `IncidentRecord.declaredBy`, and the fix is the same — widen the field past a user id.
+ *
+ * Unlike `declaredBy` it is **not** free text, because a rule branches on it: `manual_block` must
+ * name the human who placed it, and free text would let `system:ses` satisfy that. Encoding the kind
+ * keeps the check honest and is still something a webhook can produce without a user table.
+ */
+export const SUPPRESSION_ACTOR_PATTERN = new RegExp(
+  `^(user:${UUID_PATTERN}|system:${ACTOR_SLUG}|provider:${ACTOR_SLUG})$`,
+);
+
+export interface SuppressionActor {
+  readonly kind: SuppressionActorKind;
+  readonly id: string;
+}
+
+export const parseSuppressionActor = (
+  value: string,
+): SuppressionActor | null => {
+  if (!SUPPRESSION_ACTOR_PATTERN.test(value)) return null;
+  const separator = value.indexOf(":");
+  const kind = value.slice(0, separator) as SuppressionActorKind;
+  return { kind, id: value.slice(separator + 1) };
+};
+
+export const suppressionActorRef = (
+  kind: SuppressionActorKind,
+  id: string,
+): string => {
+  const ref = `${kind}:${id}`;
+  if (!SUPPRESSION_ACTOR_PATTERN.test(ref)) {
+    throw new RangeError(`invalid suppression actor ref: ${ref}`);
+  }
+  return ref;
+};
+
+export const isHumanSuppressionActor = (value: string | null): boolean =>
+  value !== null && parseSuppressionActor(value)?.kind === "user";
+
+/**
+ * Reasons that are a provider's or the platform's observation, never a person's decision. Nobody
+ * *chooses* that an address hard-bounced.
+ */
+export const OBSERVED_SUPPRESSION_REASONS: ReadonlySet<SuppressionReason> =
+  new Set(["hard_bounce", "soft_bounce_exceeded", "spam_complaint"]);
+
 export const PreferenceMatrixEntrySchema = z.object({
   category: z.enum(CONTENT_CATEGORIES),
   channel: z.enum(NOTIFICATION_CHANNELS),
@@ -120,7 +178,7 @@ export const SuppressionRecordSchema = z
     recipientAddress: z.string().min(1).max(500),
     reason: z.enum(SUPPRESSION_REASONS),
     appliedAt: z.string().datetime({ offset: true }),
-    appliedBy: z.string().uuid().nullable(),
+    appliedBy: z.string().regex(SUPPRESSION_ACTOR_PATTERN).nullable(),
     expiresAt: z.string().datetime({ offset: true }).nullable(),
     sourceDeliveryId: z.string().uuid().nullable(),
     notes: z.string().max(500).optional(),
@@ -133,17 +191,36 @@ export const SuppressionRecordSchema = z
         message: `${s.reason} is a permanent reason; expiresAt must be null`,
       });
     }
-    if (
-      s.reason === "manual_block" ||
-      s.reason === "do_not_contact_register"
-    ) {
-      if (s.appliedBy === null && s.reason === "manual_block") {
+    if (s.reason === "manual_block") {
+      if (s.appliedBy === null) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["appliedBy"],
           message: "manual_block requires appliedBy",
         });
+      } else if (!isHumanSuppressionActor(s.appliedBy)) {
+        // A human block must name the human. Before `appliedBy` carried a kind this was only
+        // "non-null", which a scheduler could satisfy.
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["appliedBy"],
+          message: `manual_block requires a user: actor, got ${s.appliedBy}`,
+        });
       }
+    }
+    if (
+      OBSERVED_SUPPRESSION_REASONS.has(s.reason) &&
+      isHumanSuppressionActor(s.appliedBy)
+    ) {
+      // `appliedBy` stays nullable for these: an existing deployment's bounce rows were written
+      // before provenance could be expressed, and refusing to parse them would turn ADR-0289's
+      // finding inside out — a contract stricter than the data it has to read back. What is
+      // refused is a *wrong* attribution, since no person decides that an address bounced.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["appliedBy"],
+        message: `${s.reason} is observed, not decided; appliedBy must not be a user: actor`,
+      });
     }
     if (s.expiresAt !== null) {
       if (Date.parse(s.expiresAt) <= Date.parse(s.appliedAt)) {

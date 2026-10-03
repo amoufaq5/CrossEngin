@@ -28,11 +28,19 @@ import {
   PostgresSequenceAllocator,
   PostgresSettingsStore,
   PostgresSubscriptionStore,
+  TenantColumnStoreRegistry,
+  TenantColumnStoreRouter,
   ingestStripeWebhook,
 } from "@crossengin/operate-runtime-pg";
 
 import type { PruneOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
+import {
+  DEFAULT_MAX_REQUEST_BODY_BYTES,
+  RequestBodyTooLargeError,
+  readLimitedBody,
+  resolveMaxRequestBodyBytes,
+} from "./request-body-limit.js";
 import { loadBuiltinPack, loadManifestFromJson } from "./manifest-source.js";
 import {
   isDanglingLinkPruner,
@@ -78,6 +86,7 @@ import {
   PostgresPackVersionStore,
   buildPersistentPackSubmissionEngine,
 } from "@crossengin/marketplace-runtime-pg";
+import { requestJobCancellation } from "@crossengin/workflow-runtime-pg";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
@@ -95,6 +104,11 @@ import { PostgresDesignJobStore } from "./design-jobs.js";
 import { PostgresDesignReviewStore } from "./design-review-store.js";
 import { buildDesignReviewRoutes } from "./design-review-routes.js";
 import { buildIntegrityVerdictRoutes } from "./integrity-verdict-routes.js";
+import { buildJobCancelRoutes } from "./job-cancel-routes.js";
+import { buildAuditReadRoutes, entityFieldLookupFrom } from "./audit-read-routes.js";
+import { PostgresAuditReadStore } from "./audit-read-store.js";
+import { buildNotificationTemplateRoutes } from "./notification-template-routes.js";
+import { PostgresNotificationTemplateStore } from "./notification-template-store.js";
 import { PostgresIntegrityVerdictStore } from "./integrity-verdict-store.js";
 import { assessManifestRisk } from "./design-review.js";
 import { projectManifestView } from "./manifest-view.js";
@@ -203,34 +217,44 @@ export interface NodeResLike {
   end(chunk?: Uint8Array): void;
 }
 
-export const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
-
-class BodyTooLargeError extends Error {
-  constructor(limit: number) {
-    super(`request body exceeds ${limit.toString()} bytes`);
-    this.name = "BodyTooLargeError";
-  }
-}
-
-async function readBody(req: NodeReqLike): Promise<Uint8Array | null> {
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for await (const chunk of req) {
-    chunks.push(chunk);
-    total += chunk.byteLength;
-    if (total > MAX_REQUEST_BODY_BYTES) throw new BodyTooLargeError(MAX_REQUEST_BODY_BYTES);
-  }
-  if (total === 0) return null;
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.byteLength;
-  }
-  return out;
-}
+/**
+ * Kept as a re-export, not a second definition: this was the only cap for the whole of P1.7 and
+ * callers import it. It is now the *default*, and the enforcement lives in `request-body-limit.ts`
+ * so the Node listener and the Fetch adapter cannot drift apart on what the cap is or when it fires.
+ */
+export const MAX_REQUEST_BODY_BYTES = DEFAULT_MAX_REQUEST_BODY_BYTES;
 
 /** The dispatch surface the Node listener needs — an `OperateHttpServer` or a per-tenant wrapper. */
+/**
+ * The options that need a `PostgresAuditEmitter` wired, as a named predicate rather than a condition
+ * inline at the construction site.
+ *
+ * It is a function because the list has been forgotten twice. ADR-0288: gating the emitter on
+ * `--ai-design` meant a deployment running only `--integrity-proof-config` reported `audited=false`
+ * for every escalation, and the row that ADR relies on was never written. Then `--audit-read-routes`,
+ * whose recorder is *required*, was added without being added here — so the surface refused to mount
+ * and a deployment that asked for it silently got nothing. Found live, not by a test, because the
+ * condition was inline and nothing could assert over it.
+ *
+ * Every flag whose feature writes an audit row belongs here. The companion test walks `ServeOptions`
+ * and fails on a flag that looks like one and is missing.
+ */
+export function needsAuditEmitter(options: {
+  readonly aiDesign: boolean;
+  readonly perTenantManifests: boolean;
+  readonly designReview: boolean;
+  readonly auditReadRoutes: boolean;
+  readonly integrityProofConfig: string | null;
+}): boolean {
+  return (
+    options.aiDesign ||
+    options.perTenantManifests ||
+    options.designReview ||
+    options.auditReadRoutes ||
+    options.integrityProofConfig !== null
+  );
+}
+
 export interface DispatchTarget {
   dispatch(raw: RawHttpRequest, body: Uint8Array | null): Promise<RawHttpResponse>;
 }
@@ -242,10 +266,14 @@ export interface DispatchTarget {
  */
 export function createNodeRequestListener(
   server: DispatchTarget,
+  maxRequestBodyBytes?: number | null,
 ): (req: NodeReqLike, res: NodeResLike) => Promise<void> {
+  // Resolved once, at build time, rather than per request: an out-of-band limit must fail the boot,
+  // not every request after it.
+  const limit = resolveMaxRequestBodyBytes(maxRequestBodyBytes);
   return async (req, res) => {
     try {
-      const body = await readBody(req);
+      const body = await readLimitedBody(req, limit);
       const raw: RawHttpRequest = {
         method: req.method ?? "GET",
         url: req.url ?? "/",
@@ -256,7 +284,7 @@ export function createNodeRequestListener(
       res.writeHead(response.status, response.headers);
       res.end(response.body ?? undefined);
     } catch (err) {
-      if (err instanceof BodyTooLargeError) {
+      if (err instanceof RequestBodyTooLargeError) {
         const payload = new TextEncoder().encode(
           JSON.stringify({
             type: "https://crossengin.io/problems/payload-too-large",
@@ -508,6 +536,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   let manifestStore: PostgresTenantManifestStore | null = null;
   let gatewayCache: TenantGatewayCache | null = null;
   let manifestPoller: ManifestActivationPoller | null = null;
+  let tenantStoreRegistry: TenantColumnStoreRegistry | null = null;
   let notificationStore: PostgresNotificationStore | null = null;
   let digestReadStore: PostgresDigestStore | null = null;
   let templateStore: PostgresTemplateStore | null = null;
@@ -522,17 +551,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     auditConfig = await loadAuditChainConfig(options.auditChainConfig);
     auditChainProducer = auditChainStore(conn, auditConfig);
   }
-  // Built for anything that writes audit rows, not only the design features: the integrity-proof
-  // escalation records `audit.integrity_compromised` here (ADR-0288), and gating the emitter on
-  // --ai-design meant a deployment running only --integrity-proof-config reported `audited=false`
-  // for every escalation — the row ADR-0288 relies on was never written.
-  if (
-    conn !== undefined &&
-    (options.aiDesign ||
-      options.perTenantManifests ||
-      options.designReview ||
-      options.integrityProofConfig !== null)
-  ) {
+  if (conn !== undefined && needsAuditEmitter(options)) {
     auditEmitter = new PostgresAuditEmitter(conn, {
       ...schemaOpt,
       // No chain configured ⇒ rows are written unanchored. Verification reports them as
@@ -580,6 +599,131 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           platformRoles: new Set(options.integrityVerdictPlatformRoles),
           tenantRoles: new Set(options.integrityVerdictTenantRoles),
+        }),
+      );
+    }
+  }
+
+  // Cancelling a run over HTTP (ADR-0269 left cancellation client-side only). Gated on the same
+  // roles as invoking one: being able to start a job and being able to stop it are the same
+  // privilege over the same queue, and splitting them would let somebody start work nobody can stop.
+  if (jobInvoker !== undefined && conn !== undefined) {
+    const cancelConn = conn;
+    extraRouteList.push(
+      ...buildJobCancelRoutes({
+        canceller: {
+          requestCancellation: async (request) =>
+            requestJobCancellation(cancelConn, {
+              runId: request.runId,
+              tenantId: request.tenantId,
+              requestedBy: request.requestedBy,
+              ...(request.reason !== undefined ? { reason: request.reason } : {}),
+              now: new Date().toISOString(),
+              ...schemaOpt,
+            }),
+        },
+        principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+        allowedRoles: new Set(options.jobInvokeRoles),
+        onDecided: (result, tenantId) =>
+          console.info(
+            `[jobs] tenant ${tenantId} run ${result.runId} cancel → ${result.outcome}` +
+              ` (status ${result.status ?? "unknown"})`,
+          ),
+      }),
+    );
+  }
+  // Template authoring over HTTP (ADR-0277/0279 left it CLI-only). Three grants, each fail-closed,
+  // because the three privileges are genuinely different: drafting, approving someone else's draft
+  // (four-eyes, enforced in the route), and authoring in a category that overrides a recipient's
+  // preferences and suppressions — which is how an opted-out address gets mailed anyway.
+  if (options.notificationTemplateRoutes) {
+    if (conn === undefined) {
+      console.warn(
+        "[notifications] --notification-template-routes requires a Postgres store (--store pg); skipping",
+      );
+    } else {
+      extraRouteList.push(
+        ...buildNotificationTemplateRoutes({
+          store: new PostgresNotificationTemplateStore(conn, schemaOpt),
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          authorRoles: new Set(options.notificationTemplateAuthorRoles),
+          approverRoles: new Set(options.notificationTemplateApproverRoles),
+          nonSuppressibleCategoryRoles: new Set(options.notificationTemplateUnconditionalRoles),
+        }),
+      );
+    }
+  }
+  // The read side of the audit trail (ADR-0277/0279: nothing read it over HTTP). Payload redaction
+  // is classification-driven from the served manifest, and the reads are themselves audited — an
+  // unrecordable privileged read is refused, not served unaudited.
+  if (options.auditReadRoutes) {
+    if (conn === undefined) {
+      console.warn("[audit] --audit-read-routes requires a Postgres store (--store pg); skipping");
+    } else if (auditEmitter === null) {
+      // Not a warning that degrades to an unaudited read: these routes take a *required* recorder,
+      // so without the chain-backed emitter there is nothing to record into and the surface stays
+      // closed rather than opening a privileged read that leaves no trace.
+      console.warn(
+        "[audit] --audit-read-routes has no audit emitter (reads of the trail are themselves " +
+          "audited, and an unrecordable read is refused); skipping",
+      );
+    } else {
+      if (
+        options.auditReadTenantRoles.length === 0 &&
+        options.auditReadPlatformRoles.length === 0
+      ) {
+        console.warn(
+          "[audit] --audit-read-routes is on with no --audit-read-tenant-role or " +
+            "--audit-read-platform-role: every request will be refused",
+        );
+      }
+      const emitter = auditEmitter;
+      extraRouteList.push(
+        ...buildAuditReadRoutes({
+          source: new PostgresAuditReadStore(conn, schemaOpt),
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          platformRoles: new Set(options.auditReadPlatformRoles),
+          tenantRoles: new Set(options.auditReadTenantRoles),
+          classification: {
+            fieldsFor: entityFieldLookupFrom(manifest),
+            roles: new Map(Object.entries(manifest.roles ?? {})),
+            policy: { privilegedRoles: options.auditReadSensitiveRoles },
+          },
+          recordRead: async (event): Promise<void> => {
+            // A cross-tenant read names no single tenant, so it is recorded against the *reader's*
+            // own: `meta.audit_log.tenant_id` is NOT NULL, and an unrecordable read is a refused
+            // one. A reader with no resolvable tenant at all therefore cannot read — which is the
+            // same fail-closed direction the grant resolution already takes.
+            const tenantId = event.tenantId ?? event.readerTenantId;
+            if (tenantId === null) {
+              throw new Error("audit read has no tenant to record against");
+            }
+            await emitter.emit(
+              auditEntry({
+                id: randomUUID(),
+                tenantId,
+                occurredAt: event.at,
+                operation: event.operation,
+                entity: "AuditLog",
+                entityId: null,
+                actor: auditActor({ userId: event.principalId }),
+                // The query itself, not merely that something was read: `scope` says which trail,
+                // and `tenantId` is present when the read crossed into another tenant's.
+                after: {
+                  scope: event.scopeKind,
+                  granted: event.granted,
+                  roles: event.roles,
+                  ...(event.tenantId !== null ? { readTenantId: event.tenantId } : {}),
+                  ...event.filters,
+                },
+              }),
+            );
+          },
+          ...(options.auditReadMaxRangeDays !== null
+            ? { maxRangeDays: options.auditReadMaxRangeDays }
+            : {}),
+          onRecordError: (err, scopeKind) =>
+            console.error(`[audit] failed to record a ${scopeKind}-scoped audit read`, err),
         }),
       );
     }
@@ -748,6 +892,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ? buildAiDesignBudget({
             store: new PostgresTenantCostStore(conn, schemaOpt),
             maxUsdPerMonth: options.aiMaxUsdPerMonth ?? DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH,
+            // Bounds one prompt rather than one month (ADR-0267). Off unless configured: a request
+            // ceiling that is wrong refuses legitimate designs, which the monthly ceiling never
+            // does, so this one is opt-in and the monthly one always applies.
+            ...(options.aiMaxRequestDollars !== null
+              ? { maxUsdPerRequest: options.aiMaxRequestDollars }
+              : {}),
             onDenied: (tenantId, spentUsd, limitUsd) =>
               console.warn(
                 `[ai-design] tenant ${tenantId} denied: $${spentUsd.toFixed(2)} of $${limitUsd.toFixed(2)} monthly budget spent`,
@@ -1209,13 +1359,44 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // observers (SLO, audit chain, metering, billing) stay on the default server for now.
   let dispatchTarget: DispatchTarget = httpServer;
   if (options.perTenantManifests && manifestStore !== null) {
-    // The column-mapped store only knows the boot pack's entities (its column plans are derived
-    // at boot), so custom-manifest tenants are served from the manifest-agnostic JSONB store
-    // over the same connection instead of 500ing on every unplanned entity.
-    const tenantStore: EntityStore =
+    // The boot store's column plans are derived from the boot manifest, so it cannot serve a
+    // custom manifest's entities. Two answers, in order of preference:
+    //
+    //  - a per-tenant **column** store: the tenant's own manifest applied as real typed tables in
+    //    their own schema, provisioned by `registry.ensure` as part of building their gateway. This
+    //    is what makes an activated manifest a first-class schema rather than a document shape.
+    //  - the manifest-agnostic JSONB store as the fallback, which is what every custom-manifest
+    //    tenant got before and is still what a tenant whose DDL application is *refused* gets —
+    //    served, rather than 500ing on every unplanned entity.
+    const jsonbStore: EntityStore =
       store instanceof ColumnMappedEntityStore && conn !== undefined
         ? new PostgresEntityStore(conn, schemaOpt)
         : store;
+    if (store instanceof ColumnMappedEntityStore && conn !== undefined) {
+      tenantStoreRegistry = new TenantColumnStoreRegistry(conn, {
+        onApplication: (application) => {
+          if (application.applied) {
+            console.info(
+              `[tenant-schema] ${application.tenantId} applied to ${application.schema}` +
+                ` (${application.statements.length.toString()} statements)`,
+            );
+            return;
+          }
+          // A refusal is not a failure to report once and forget: the tenant is being served from
+          // the fallback store until an operator runs the reported SQL, so it is logged loudly with
+          // the reason attached.
+          const blocking = application.changes.filter((c) => c.blocking);
+          console.error(
+            `[tenant-schema] ${application.tenantId} REFUSED; serving from the JSONB fallback. ` +
+              blocking.map((c) => `${c.table}.${c.column ?? "-"}: ${c.detail}`).join("; "),
+          );
+        },
+      });
+    }
+    const tenantStore: EntityStore =
+      tenantStoreRegistry === null
+        ? jsonbStore
+        : new TenantColumnStoreRouter({ registry: tenantStoreRegistry, fallback: jsonbStore });
     gatewayCache = new TenantGatewayCache({
       source: manifestStore,
       // Tenant gateways mirror the default server's cross-cutting wiring — extra routes (AI
@@ -1225,8 +1406,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       // billing, or the tamper-evident audit trail. Only the deployment-wide singletons that
       // are not per-request (the Stripe webhook + billing-portal routes) stay on the default
       // server, which still handles them for every tenant.
-      build: (tenantManifest): OperateHttpServer =>
-        buildOperateHttpServer({
+      build: async (tenantManifest, tenantId): Promise<OperateHttpServer> => {
+        // Provision before compiling, not on first request: `storeFor` is synchronous and does not
+        // provision, so a gateway built before `ensure` resolved would route that tenant's very
+        // first requests to the fallback store and then silently switch tables under them.
+        if (tenantStoreRegistry !== null) await tenantStoreRegistry.ensure(tenantId, tenantManifest);
+        return buildOperateHttpServer({
           manifest: tenantManifest,
           store: tenantStore,
           apiKeys,
@@ -1246,7 +1431,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             : {}),
           ...(onExecution !== undefined ? { onExecution } : {}),
           defaultScheme: options.defaultScheme,
-        }).httpServer,
+        }).httpServer;
+      },
       onInvalidManifest: (tenantId, issues) =>
         console.error(`[ai-design] tenant ${tenantId} stored manifest invalid: ${issues.slice(0, 3).join("; ")}`),
     });
@@ -1259,8 +1445,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         source: new PostgresActivationWatermarkSource(conn, schemaOpt),
         cache: gatewayCache,
         intervalMs: options.manifestRefreshMs,
-        onInvalidated: (tenantId) =>
-          console.info(`[manifest-refresh] tenant ${tenantId} activated elsewhere; cache invalidated`),
+        onInvalidated: (tenantId) => {
+          // Forget the schema too, not just the compiled gateway. A *changed* manifest has a
+          // different hash and would re-apply regardless; what this catches is the re-activation of
+          // an *unchanged* one, which is exactly what happens after an operator runs the SQL a
+          // refused application reported. Without it that tenant stays on the fallback store until
+          // the refusal memo expires, having already done the thing that fixes it.
+          tenantStoreRegistry?.forget(tenantId);
+          console.info(`[manifest-refresh] tenant ${tenantId} activated elsewhere; cache invalidated`);
+        },
         onError: (err) => console.error("[manifest-refresh] poll error", err),
       });
     }
@@ -1329,7 +1522,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   auditPolicy?.refresher.start();
   metering?.flushScheduler?.start();
   stripeUsageSync?.scheduler.start();
-  const listener = createNodeRequestListener(dispatchTarget);
+  const listener = createNodeRequestListener(dispatchTarget, options.maxRequestBodyBytes);
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
   });

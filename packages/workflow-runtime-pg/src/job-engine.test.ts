@@ -257,3 +257,170 @@ describe("PostgresJobRunEngine.executeJobRun", () => {
     );
   });
 });
+
+describe("PostgresJobRunEngine — cancellation", () => {
+  it("honours a cancellation that landed between the claim and the handler: the handler is never invoked", async () => {
+    const calls: Call[] = [];
+    let invoked = 0;
+    const registry = new JobHandlerRegistry().register("overdue-invoice-reminder", {
+      handler: async () => {
+        invoked += 1;
+        return { status: "completed" };
+      },
+      retry: { maxAttempts: 5 },
+    });
+    const engine = new PostgresJobRunEngine(
+      mockConnection({
+        readRows: [runRow({ cancel_requested_at: "2026-05-17T11:59:00.000Z" })],
+        calls,
+      }),
+      registry,
+      { now: FIXED_NOW },
+    );
+
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result).toEqual({
+      runId: RUN,
+      executed: false,
+      disposition: "cancelled",
+      cancelledAt: "before_handler",
+    });
+    expect(invoked).toBe(0);
+    expect(calls[0]!.sql).toContain("cancel_requested_at");
+    expect(calls[1]!.sql).toContain("SET status = 'cancelled'");
+    expect(calls[1]!.params).toEqual([RUN, TENANT, "2026-05-17T12:00:00.000Z", null, "before_handler"]);
+  });
+
+  it("reports not_claimable when another actor finalized the cancellation first", async () => {
+    const engine = new PostgresJobRunEngine(
+      mockConnection({
+        readRows: [runRow({ cancel_requested_at: "2026-05-17T11:59:00.000Z" })],
+        updateRowCount: 0,
+      }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async () => ({ status: "completed" }),
+      }),
+      { now: FIXED_NOW },
+    );
+    expect(await engine.executeJobRun(RUN, TENANT)).toEqual({
+      runId: RUN,
+      executed: false,
+      disposition: "not_claimable",
+    });
+  });
+
+  it("passes a never-aborted signal when no watcher is wired", async () => {
+    let seen: AbortSignal | undefined;
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow()] }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async (ctx: JobHandlerContext) => {
+          seen = ctx.signal;
+          return { status: "completed" };
+        },
+      }),
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT);
+    expect(result.disposition).toBe("completed");
+    expect(seen?.aborted).toBe(false);
+  });
+
+  it("cancels a handler that threw after its signal tripped, instead of leaving the run pending", async () => {
+    const calls: Call[] = [];
+    const controller = new AbortController();
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow()], calls }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async (ctx: JobHandlerContext) => {
+          // The cancellation arrives mid-handler; the handler cooperates by throwing.
+          controller.abort(new Error("cancelled"));
+          if (ctx.signal.aborted) throw new Error("aborted");
+          return { status: "completed" };
+        },
+        retry: { maxAttempts: 5 },
+      }),
+      { now: FIXED_NOW },
+    );
+
+    const result = await engine.executeJobRun(RUN, TENANT, { signal: controller.signal });
+    expect(result).toEqual({
+      runId: RUN,
+      executed: true,
+      disposition: "cancelled",
+      attempts: 1,
+      cancelledAt: "cooperative_abort",
+    });
+    // Not a retry: the attempt counter is never bumped and `started_at` is never pushed out.
+    expect(calls.some((c) => c.sql.includes("attempts = attempts + 1"))).toBe(false);
+    expect(calls[1]!.params?.[4]).toBe("cooperative_abort");
+  });
+
+  it("cancels a handler that returned failed under cancellation, rather than retrying or blaming it", async () => {
+    const calls: Call[] = [];
+    const controller = new AbortController();
+    controller.abort();
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow()], calls }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async () => ({ status: "failed", error: { code: "stopped" }, retryable: true }),
+        retry: { maxAttempts: 5 },
+      }),
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT, { signal: controller.signal });
+    expect(result.disposition).toBe("cancelled");
+    expect(calls.some((c) => c.sql.includes("attempts = attempts + 1"))).toBe(false);
+    expect(calls.some((c) => c.sql.includes("status = $3"))).toBe(false);
+  });
+
+  it("honours a handler that finished first — a cancellation never retracts completed work", async () => {
+    const controller = new AbortController();
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow()] }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async () => {
+          // The abort lands at the same moment the handler returns success.
+          controller.abort();
+          return { status: "completed", output: { sent: 3 } };
+        },
+      }),
+      { now: FIXED_NOW },
+    );
+    const result = await engine.executeJobRun(RUN, TENANT, { signal: controller.signal });
+    expect(result).toEqual({ runId: RUN, executed: true, disposition: "completed", attempts: 1 });
+  });
+
+  it("still lets an unaborted throw mean 'transient infra' — the run stays pending for re-claim", async () => {
+    const calls: Call[] = [];
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow()], calls }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async () => {
+          throw new Error("connection reset");
+        },
+      }),
+      { now: FIXED_NOW },
+    );
+    await expect(engine.executeJobRun(RUN, TENANT)).rejects.toThrow("connection reset");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("reports not_claimable when the cancel finalize loses the row after an abort", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const engine = new PostgresJobRunEngine(
+      mockConnection({ readRows: [runRow()], updateRowCount: 0 }),
+      new JobHandlerRegistry().register("overdue-invoice-reminder", {
+        handler: async () => ({ status: "failed", error: { code: "stopped" } }),
+      }),
+      { now: FIXED_NOW },
+    );
+    expect(await engine.executeJobRun(RUN, TENANT, { signal: controller.signal })).toEqual({
+      runId: RUN,
+      executed: true,
+      disposition: "not_claimable",
+      attempts: 1,
+    });
+  });
+});

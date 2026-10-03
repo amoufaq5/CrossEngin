@@ -1,9 +1,24 @@
 import { qualifyTable, quoteIdent, toTableName } from "@crossengin/kernel/ddl";
 import type { OnDelete } from "@crossengin/types/meta-schema";
 
-import type { ColumnMapping, EntityTablePlan, JoinTablePlan } from "./column-plan.js";
+import {
+  topologicalEntityOrder,
+  type ColumnMapping,
+  type EntityTablePlan,
+  type JoinTablePlan,
+} from "./column-plan.js";
 
-const TENANT_ISOLATION = "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
+/**
+ * The isolation predicate every served entity table carries.
+ *
+ * `NULLIF` is load-bearing: `current_setting(x, true)` answers NULL only until the setting has been
+ * used once on a connection, after which its reset value is the empty string — and `''::UUID` raises
+ * `invalid input syntax for type uuid: ""` rather than returning no rows. So on a pooled connection
+ * that has already served one tenant, a query without a tenant context became an error instead of an
+ * empty result. Both are fail-closed, but only one matches the platform rule that an unresolvable
+ * identity yields an empty result set, and only one is debuggable.
+ */
+const TENANT_ISOLATION = "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
 
 const MAX_IDENTIFIER_LEN = 63;
 
@@ -220,7 +235,7 @@ export function emitJoinTableDdl(plan: JoinTablePlan, knownEntities: ReadonlySet
     `CREATE TABLE IF NOT EXISTS ${qualified} (\n  ${columnLines.join(",\n  ")}\n);`,
     `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
     `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};`,
-    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (tenant_id = current_setting('app.current_tenant_id', true)::UUID);`,
+    `CREATE POLICY ${quoteIdent(policyName)} ON ${qualified} USING (${TENANT_ISOLATION});`,
   ];
   if (knownEntities.has(plan.leftEntity)) {
     stmts.push(
@@ -244,5 +259,53 @@ export function emitJoinTableDdl(plan: JoinTablePlan, knownEntities: ReadonlySet
       ),
     );
   }
+  return stmts;
+}
+
+/**
+ * The whole idempotent DDL sequence for one resolved manifest's tables, in the
+ * one order that is safe to apply: **every entity table** in topological
+ * reference order, then **every foreign key** once all the targets exist, then
+ * the `many_to_many` join tables whose FKs point at those entity tables.
+ *
+ * The three phases are not stylistic. Creating tables before any FK is what makes
+ * a reference *cycle* applicable at all — which is the invariant
+ * `topologicalEntityOrder` deliberately tolerates a cycle for (ADR-0285) — and
+ * join tables come last because both of their FK targets must already exist.
+ *
+ * This is the single sequence: `ColumnMappedEntityStore.ensureSchema` executes it
+ * against the deployment's shared boot schema and
+ * `applyTenantManifestSchema` executes it against one tenant's own schema, so a
+ * tenant-owned table cannot drift from a shared one in shape, order, tenancy or
+ * RLS. Every statement is schema-qualified, so neither path depends on
+ * `search_path` (the one exception is `gin_trgm_ops`, resolved from the extension's
+ * own schema — conventionally `public`, which is on the default path).
+ *
+ * Neither the schema nor the extensions are here. Creating the schema is the
+ * caller's: the per-tenant applier has to create it *before* it introspects what
+ * is in it, so emitting it again here would be a duplicate — and the per-tenant
+ * applier reports the statements it ran. Installing an extension is
+ * database-wide, not part of any one schema's DDL.
+ */
+export function emitManifestSchemaDdl(
+  plans: ReadonlyMap<string, EntityTablePlan>,
+  joinPlans: readonly JoinTablePlan[] = [],
+  deletePolicies: ReadonlyMap<string, OnDelete> = new Map(),
+): readonly string[] {
+  const stmts: string[] = [];
+  const order = topologicalEntityOrder(plans);
+  for (const name of order) {
+    const plan = plans.get(name);
+    if (plan !== undefined) stmts.push(...emitEntityTableDdl(plan));
+  }
+  const known = new Set(plans.keys());
+  for (const name of order) {
+    const plan = plans.get(name);
+    if (plan === undefined) continue;
+    const onDeleteFor = (field: string): OnDelete | undefined =>
+      deletePolicies.get(`${plan.entity}.${field}`);
+    stmts.push(...emitForeignKeyDdl(plan, known, onDeleteFor));
+  }
+  for (const joinPlan of joinPlans) stmts.push(...emitJoinTableDdl(joinPlan, known));
   return stmts;
 }

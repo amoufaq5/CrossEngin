@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyError,
+  isJobCancelled,
   isPermanent,
   isRetryable,
+  JobCancelledError,
   JobError,
   PermanentError,
   RetryableError,
@@ -72,5 +74,31 @@ describe("classifyError", () => {
   it("returns 'unknown' for non-Errors", () => {
     expect(classifyError("string")).toBe("unknown");
     expect(classifyError(null)).toBe("unknown");
+  });
+});
+
+describe("JobCancelledError", () => {
+  it("is a JobError carrying the cancelling actor", () => {
+    const err = new JobCancelledError("cancelled by operator", { requestedBy: "user:7" });
+    expect(err).toBeInstanceOf(JobError);
+    expect(err.name).toBe("JobCancelledError");
+    expect(err.kind).toBe("cancelled");
+    expect(err.requestedBy).toBe("user:7");
+    expect(isJobCancelled(err)).toBe(true);
+  });
+
+  it("defaults its message and omits requestedBy when unknown", () => {
+    const err = new JobCancelledError();
+    expect(err.message).toBe("job run cancelled");
+    expect(err.requestedBy).toBeUndefined();
+  });
+
+  it("is neither retryable nor permanent, so classifyError never routes it to retry or dead-letter", () => {
+    const err = new JobCancelledError();
+    expect(isRetryable(err)).toBe(false);
+    expect(isPermanent(err)).toBe(false);
+    expect(classifyError(err)).toBe("unknown");
+    expect(isJobCancelled(new RetryableError("later"))).toBe(false);
+    expect(isJobCancelled("cancelled")).toBe(false);
   });
 });

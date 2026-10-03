@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   emitAddColumn,
   emitAddForeignKey,
+  emitAddTableConstraint,
   emitAddTableConstraintIfEmpty,
   emitAddUniqueConstraint,
   emitAlterColumnTypeIfEmpty,
@@ -14,7 +15,9 @@ import {
   emitDropColumnNotNull,
   emitIndex,
   emitReplaceIndex,
+  emitRenameColumn,
   emitReplaceRlsPolicy,
+  emitReplaceTableConstraint,
   emitReplaceTableConstraintIfEmpty,
   emitSetColumnDefault,
   emitRlsEnable,
@@ -624,6 +627,110 @@ describe("guarded table-constraint emitters", () => {
       "DROP CONSTRAINT IF EXISTS",
     );
   });
+
+  it("drops the name the database holds, not the declared one, when told they differ", () => {
+    expect(emitReplaceTableConstraintIfEmpty(table, check, "comms_legacy_check")).toContain(
+      `DROP CONSTRAINT IF EXISTS "comms_legacy_check";`,
+    );
+  });
+
+  it("drops the declared name when no live name is given", () => {
+    expect(emitReplaceTableConstraintIfEmpty(table, check)).toContain(
+      `DROP CONSTRAINT IF EXISTS "comms_window_check";`,
+    );
+  });
+});
+
+describe("unguarded table-constraint emitters", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "comms",
+    columns: [
+      { name: "tenant_id", type: "UUID", notNull: true },
+      { name: "id", type: "UUID", notNull: true },
+    ],
+    primaryKey: ["id"],
+  };
+  const fk: TableConstraint = {
+    kind: "foreign_key",
+    name: "comms_incident_fkey",
+    columns: ["tenant_id", "id"],
+    references: { schema: "meta", table: "incidents", columns: ["tenant_id", "id"] },
+    onDelete: "CASCADE",
+  };
+
+  it("adds a composite foreign key in one plain statement", () => {
+    expect(emitAddTableConstraint(table, fk)).toBe(
+      `ALTER TABLE "meta"."comms" ADD CONSTRAINT "comms_incident_fkey" ` +
+        `FOREIGN KEY ("tenant_id", "id") REFERENCES "meta"."incidents"("tenant_id", "id") ` +
+        `ON DELETE CASCADE;`,
+    );
+  });
+
+  it("does not guard on emptiness, by the same rule as emitAddForeignKey", () => {
+    expect(emitAddTableConstraint(table, fk)).not.toContain("count(*)");
+    expect(emitAddTableConstraint(table, fk)).not.toContain("DO $$");
+  });
+
+  it("replaces in one statement, so the table is never committed without the key", () => {
+    const sql = emitReplaceTableConstraint(table, fk);
+    const drop = sql.indexOf("DROP CONSTRAINT");
+    const add = sql.indexOf("ADD CONSTRAINT");
+    expect(drop).toBeGreaterThanOrEqual(0);
+    expect(add).toBeGreaterThan(drop);
+    expect(sql).toContain(`DROP CONSTRAINT IF EXISTS "comms_incident_fkey";`);
+  });
+
+  it("replaces under the live name when the database holds another", () => {
+    expect(emitReplaceTableConstraint(table, fk, "comms_tenant_id_id_fkey")).toContain(
+      `DROP CONSTRAINT IF EXISTS "comms_tenant_id_id_fkey";`,
+    );
+  });
+});
+
+describe("emitRenameColumn", () => {
+  const table: TableDefinition = {
+    schema: "meta",
+    name: "feature_flags",
+    columns: [{ name: "default_json", type: "JSONB", renamedFrom: "default_value" }],
+  };
+  const sql = emitRenameColumn(table, "default_value", "default_json");
+
+  it("renames the column", () => {
+    expect(sql).toContain(
+      `ALTER TABLE "meta"."feature_flags" RENAME COLUMN "default_value" TO "default_json";`,
+    );
+  });
+
+  it("re-checks both names in its own transaction", () => {
+    expect(sql.startsWith("DO $$")).toBe(true);
+    expect(sql.endsWith("END $$;")).toBe(true);
+    expect(sql).toContain(`attname = 'default_value'`);
+    expect(sql).toContain(`attname = 'default_json'`);
+    expect(sql).toContain("NOT attisdropped");
+  });
+
+  it("refuses when both columns exist, rather than picking one", () => {
+    expect(sql).toContain("IF has_old AND has_new THEN");
+    expect(sql).toContain("both columns exist");
+  });
+
+  it("is a no-op when only the new name exists, so a retry does not fail", () => {
+    // `ELSIF NOT has_new` is the whole rule: old gone and new present means the rename already
+    // happened, which an applier re-running a statement has to tolerate.
+    expect(sql).toContain("ELSIF NOT has_new THEN");
+    expect(sql).toContain("neither column exists");
+  });
+
+  it("never reads or writes a row, so it is safe on a populated table", () => {
+    expect(sql).not.toContain("count(*)");
+  });
+
+  it("leaves emission alone — renamedFrom is history, not DDL", () => {
+    expect(emitCreateTable(table)).toBe(
+      `CREATE TABLE "meta"."feature_flags" (\n  "default_json" JSONB\n);`,
+    );
+  });
 });
 
 describe("the catalog's own emission is unchanged", () => {
@@ -640,20 +747,31 @@ describe("the catalog's own emission is unchanged", () => {
 
   it("writes a table-level CHECK line only for the table that declares one", () => {
     // A column's own CHECK and inline REFERENCES are written on the column, so a `CONSTRAINT … `
-    // line appears only where `constraints` is used — today exactly one table, for the two
-    // cross-column rules ADR-0296 had nowhere to put. This test exists to catch a table gaining one
-    // by accident, so it is scoped by table rather than deleted.
-    const withCheckLine = statements.filter((sql) => /CONSTRAINT "[^"]+" CHECK \(/.test(sql));
-    expect(withCheckLine).toHaveLength(1);
-    expect(withCheckLine[0]).toContain('CREATE TABLE "meta"."incident_communications"');
+    // line appears only where `constraints` is used — the tables with a genuinely cross-column rule.
+    // Named rather than counted, so a table gaining one by accident still fails here.
+    const withCheckLine = statements
+      .filter((sql) => /CONSTRAINT "[^"]+" CHECK \(/.test(sql))
+      .map((sql) => /CREATE TABLE "meta"\."([^"]+)"/.exec(sql)?.[1] ?? "?")
+      .sort();
+    expect(withCheckLine).toEqual([
+      "incident_communications",
+      "notification_read_watermarks",
+      "notification_user_quiet_hours",
+    ]);
     for (const sql of statements) {
       expect(sql).not.toMatch(/CONSTRAINT "[^"]+" FOREIGN KEY \(/);
     }
   });
 
   it("declares a table-level constraint only where intended, and no permissiveness anywhere", () => {
-    const declaring = META_TABLES.filter((t) => t.constraints !== undefined).map((t) => t.name);
-    expect(declaring).toEqual(["incident_communications"]);
+    const declaring = META_TABLES.filter((t) => t.constraints !== undefined)
+      .map((t) => t.name)
+      .sort();
+    expect(declaring).toEqual([
+      "incident_communications",
+      "notification_read_watermarks",
+      "notification_user_quiet_hours",
+    ]);
     for (const table of META_TABLES) {
       for (const policy of table.rls?.policies ?? []) {
         // Nothing declares permissiveness yet; a restrictive policy added by hand would still be

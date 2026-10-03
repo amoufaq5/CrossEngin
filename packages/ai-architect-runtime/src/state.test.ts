@@ -48,6 +48,39 @@ describe("SessionCostTracker", () => {
     expect(t.session(S)).toEqual({ tokensUsed: 0, toolCallsThisTurn: 0, toolCallsBySession: {} });
   });
 
+  it("defaults estimate inflation to 1 and leaves a session unsealed", () => {
+    const t = new SessionCostTracker();
+    expect(t.estimateInflation(S)).toBe(1);
+    expect(t.sealedReason(S)).toBeNull();
+  });
+
+  it("raises estimate inflation only on a worse ratio, and ignores non-positive ones", () => {
+    const t = new SessionCostTracker();
+    t.observeEstimateRatio(S, 2.5);
+    t.observeEstimateRatio(S, 1.2);
+    expect(t.estimateInflation(S)).toBe(2.5);
+    t.observeEstimateRatio(S, 0.5);
+    t.observeEstimateRatio(S, Number.POSITIVE_INFINITY);
+    t.observeEstimateRatio(S, Number.NaN);
+    expect(t.estimateInflation(S)).toBe(2.5);
+  });
+
+  it("keeps the first seal reason — a seal is never re-explained or lifted", () => {
+    const t = new SessionCostTracker();
+    t.seal(S, "first");
+    t.seal(S, "second");
+    expect(t.sealedReason(S)).toBe("first");
+  });
+
+  it("resetSession clears a seal, because the session identity is gone", () => {
+    const t = new SessionCostTracker();
+    t.seal(S, "over ceiling");
+    t.observeEstimateRatio(S, 4);
+    t.resetSession(S);
+    expect(t.sealedReason(S)).toBeNull();
+    expect(t.estimateInflation(S)).toBe(1);
+  });
+
   it("returns a frozen snapshot (mutating it doesn't affect the tracker)", () => {
     const t = new SessionCostTracker();
     t.recordToolCall(S, "x");

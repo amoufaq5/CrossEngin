@@ -1,7 +1,17 @@
+import {
+  StreamCostMeter,
+  admitRequestCost,
+  classifyDesignOutput,
+  reconcileRequestCost,
+  type DesignOutputShape,
+  type DesignOutputWrapper,
+  type PerRequestCostCeiling,
+} from "@crossengin/ai-architect-runtime";
 import type {
   CompletionChunk,
   CompletionRequest,
   LlmMessage,
+  ProviderPricing,
   Usage,
 } from "@crossengin/ai-providers";
 import {
@@ -23,12 +33,87 @@ import {
 
 export interface DesignCompletionProvider {
   complete(req: CompletionRequest): AsyncIterable<CompletionChunk>;
+  /** Present on every real provider; needed to price a request before it is sent. */
+  readonly pricing?: ProviderPricing;
 }
 
 export interface DesignUsage {
   inputTokens: number;
   outputTokens: number;
   cost: number;
+}
+
+/**
+ * Why a design run ended without a manifest. The point of naming these separately is
+ * that they are not one operator action: a `model_output` fault means the model could
+ * not produce the asked-for *form* at all (swap the model), a `manifest_content` fault
+ * means it produced a manifest the platform rejected (fix the description or the
+ * prompt), `provider` is a transport failure, and `request` is the operator's own limits.
+ */
+export const DESIGN_FAILURE_KINDS = [
+  "description_too_long",
+  "request_cost_ceiling",
+  "response_cost_ceiling",
+  "response_too_long",
+  "provider_error",
+  "empty_response",
+  "not_json",
+  "truncated_json",
+  "malformed_json",
+  "array_not_object",
+  "scalar_not_object",
+  "not_a_manifest",
+  "schema_invalid",
+  "cross_validation_failed",
+] as const;
+export type DesignFailureKind = (typeof DESIGN_FAILURE_KINDS)[number];
+
+export const DESIGN_FAULTS = ["request", "provider", "model_output", "manifest_content"] as const;
+export type DesignFault = (typeof DESIGN_FAULTS)[number];
+
+export const DESIGN_FAILURE_FAULT: Readonly<Record<DesignFailureKind, DesignFault>> = {
+  description_too_long: "request",
+  request_cost_ceiling: "request",
+  response_cost_ceiling: "request",
+  provider_error: "provider",
+  response_too_long: "model_output",
+  empty_response: "model_output",
+  not_json: "model_output",
+  truncated_json: "model_output",
+  malformed_json: "model_output",
+  array_not_object: "model_output",
+  scalar_not_object: "model_output",
+  not_a_manifest: "model_output",
+  schema_invalid: "manifest_content",
+  cross_validation_failed: "manifest_content",
+};
+
+const SHAPE_FAILURE: Readonly<Record<DesignOutputShape, DesignFailureKind | null>> = {
+  empty: "empty_response",
+  no_json: "not_json",
+  truncated_json: "truncated_json",
+  malformed_json: "malformed_json",
+  array_not_object: "array_not_object",
+  scalar_not_object: "scalar_not_object",
+  object_not_manifest: "not_a_manifest",
+  manifest_shaped_object: null,
+};
+
+/** The failure a classified output shape implies, or `null` when the output was readable. */
+export function designFailureForShape(shape: DesignOutputShape): DesignFailureKind | null {
+  return SHAPE_FAILURE[shape];
+}
+
+export interface DesignAttemptDiagnosis {
+  readonly attempt: number;
+  /** `null` when this attempt produced the manifest that was returned. */
+  readonly failure: DesignFailureKind | null;
+  readonly fault: DesignFault | null;
+  /** `null` when nothing was read back from the model (a refused or failed call). */
+  readonly shape: DesignOutputShape | null;
+  readonly wrapper: DesignOutputWrapper | null;
+  readonly outputChars: number;
+  readonly issues: readonly string[];
 }
 
 export interface DesignResult {
@@ -39,6 +124,12 @@ export interface DesignResult {
   attempts: number;
   providerLabel: string | null;
   usage: DesignUsage | null;
+  /** The classification of the final attempt; `null` on success. */
+  readonly failure: DesignFailureKind | null;
+  readonly fault: DesignFault | null;
+  /** How the accepted manifest had to be unwrapped; `null` when there is no manifest. */
+  readonly recovery: DesignOutputWrapper | null;
+  readonly diagnosis: readonly DesignAttemptDiagnosis[];
 }
 
 export type DesignPhase = "generating" | "validating" | "retrying";
@@ -49,6 +140,9 @@ export interface DesignProgress {
   readonly maxAttempts: number;
   readonly outputChars: number;
   readonly issues: readonly string[];
+  readonly failure?: DesignFailureKind;
+  readonly shape?: DesignOutputShape;
+  readonly wrapper?: DesignOutputWrapper;
 }
 
 export type DesignProgressListener = (progress: DesignProgress) => void;
@@ -155,40 +249,13 @@ export const DESIGN_SYSTEM_PROMPT: string = [
   JSON.stringify(DESIGN_EXAMPLE_MANIFEST, null, 2),
 ].join("\n");
 
+/**
+ * The top-level JSON object in a model reply, or `null`. A thin read of
+ * `classifyDesignOutput` so there is exactly one parser: the diagnosis an operator sees
+ * and the object the validator runs on can never disagree about what the model said.
+ */
 export function extractJsonObject(text: string): Record<string, unknown> | null {
-  const stripped = text.replace(/```[A-Za-z0-9_-]*/g, "");
-  const start = stripped.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < stripped.length; i++) {
-    const ch = stripped.charAt(i);
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-    } else if (ch === "{") {
-      depth += 1;
-    } else if (ch === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        try {
-          const parsed: unknown = JSON.parse(stripped.slice(start, i + 1));
-          return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
-            ? (parsed as Record<string, unknown>)
-            : null;
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
+  return classifyDesignOutput(text).object;
 }
 
 export function normalizeGeneratedManifest(
@@ -245,6 +312,41 @@ function correctiveMessage(issues: readonly string[]): string {
     "That manifest is not valid. Fix these issues and respond again with ONLY the corrected JSON object — no prose, no code fences:",
     ...issues.map((issue) => `- ${issue}`),
   ].join("\n");
+}
+
+/**
+ * The retry instruction for an unreadable reply. Each shape gets its own, because the
+ * corrective action differs: a fenced reply needs the fence dropped, a truncated one
+ * needs to be shorter, and a non-JSON one needs the format restated.
+ */
+function correctiveForShape(shape: DesignOutputShape, wrapper: DesignOutputWrapper): string {
+  const head = ((): string => {
+    switch (shape) {
+      case "empty":
+        return "Your previous reply was empty.";
+      case "no_json":
+        return "Your previous reply was prose with no JSON in it.";
+      case "truncated_json":
+        return "Your previous reply was cut off mid-structure. Produce a smaller manifest — fewer entities and fewer fields per entity — so it fits in one reply.";
+      case "malformed_json":
+        return "Your previous reply was not valid JSON (check for trailing commas, unquoted keys and single quotes).";
+      case "array_not_object":
+        return "Your previous reply was a JSON array. A manifest is one JSON object, not a list.";
+      case "scalar_not_object":
+        return "Your previous reply was a JSON string or number, not an object.";
+      case "object_not_manifest":
+        return "Your previous reply was a JSON object, but not a manifest — it must have manifestVersion, meta and entities.";
+      case "manifest_shaped_object":
+        return "Your previous reply needs correcting.";
+    }
+  })();
+  const fence =
+    wrapper === "code_fence"
+      ? " Do not wrap it in a markdown code fence."
+      : wrapper === "surrounding_prose"
+        ? " Do not write anything before or after it."
+        : "";
+  return `${head} Respond with ONLY one JSON object — the manifest.${fence}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -317,12 +419,18 @@ export async function designManifest(opts: {
   maxAttempts?: number;
   providerLabel?: string | null;
   ensureRoles?: readonly string[];
+  /**
+   * The per-request cost ceiling (ADR-0267). Absent leaves the pre-ceiling behaviour:
+   * only the caller's monthly budget is consulted, between requests.
+   */
+  maxRequestDollars?: number;
   onProgress?: DesignProgressListener;
 }): Promise<DesignResult> {
   const providerLabel = opts.providerLabel ?? null;
   const maxAttempts = opts.maxAttempts ?? MAX_DESIGN_ATTEMPTS;
   const maxTokens = opts.maxTokens ?? DEFAULT_DESIGN_MAX_TOKENS;
   const onProgress = opts.onProgress;
+  const diagnosis: DesignAttemptDiagnosis[] = [];
 
   const emit = (progress: DesignProgress): void => {
     if (onProgress === undefined) return;
@@ -333,18 +441,46 @@ export async function designManifest(opts: {
     }
   };
 
+  const fail = (
+    failure: DesignFailureKind,
+    failIssues: readonly string[],
+    attempts: number,
+    usage: DesignUsage | null,
+  ): DesignResult => ({
+    ok: false,
+    manifest: null,
+    manifestHash: null,
+    issues: failIssues,
+    attempts,
+    providerLabel,
+    usage,
+    failure,
+    fault: DESIGN_FAILURE_FAULT[failure],
+    recovery: null,
+    diagnosis,
+  });
+
   if (opts.description.length > MAX_DESIGN_DESCRIPTION_CHARS) {
-    return {
-      ok: false,
-      manifest: null,
-      manifestHash: null,
-      issues: [
-        `description is ${opts.description.length} chars; the limit is ${MAX_DESIGN_DESCRIPTION_CHARS}`,
-      ],
-      attempts: 0,
-      providerLabel,
-      usage: null,
-    };
+    return fail(
+      "description_too_long",
+      [`description is ${opts.description.length} chars; the limit is ${MAX_DESIGN_DESCRIPTION_CHARS}`],
+      0,
+      null,
+    );
+  }
+
+  const ceiling: PerRequestCostCeiling | null =
+    opts.maxRequestDollars !== undefined ? { maxDollars: opts.maxRequestDollars } : null;
+  const pricing = opts.provider.pricing;
+  if (ceiling !== null && pricing === undefined) {
+    // Fail closed: a configured ceiling that cannot be computed is not a ceiling. Sending
+    // the request anyway would re-open exactly the hole the ceiling was added to close.
+    return fail(
+      "request_cost_ceiling",
+      ["a per-request cost ceiling is configured but the provider publishes no pricing"],
+      0,
+      null,
+    );
   }
 
   const userPrompt = [
@@ -361,19 +497,47 @@ export async function designManifest(opts: {
 
   let attempts = 0;
   let issues: readonly string[] = [];
+  let failure: DesignFailureKind = "provider_error";
   let usage: DesignUsage | null = null;
+  // Raised whenever a settled request cost more than it was estimated to, so the next
+  // attempt in this run is priced against what this model actually does rather than
+  // against the same optimistic guess.
+  let inflation = 1;
+  let sealed = false;
 
-  while (attempts < maxAttempts) {
+  while (attempts < maxAttempts && !sealed) {
     attempts += 1;
     const attemptNumber = attempts;
-    const emitRetrying = (reason: readonly string[], outputChars: number): void => {
-      if (attemptNumber >= maxAttempts) return;
+    const record = (
+      kind: DesignFailureKind,
+      reason: readonly string[],
+      outputChars: number,
+      shape: DesignOutputShape | null,
+      wrapper: DesignOutputWrapper | null,
+      terminal = false,
+    ): void => {
+      issues = reason;
+      failure = kind;
+      diagnosis.push({
+        attempt: attemptNumber,
+        failure: kind,
+        fault: DESIGN_FAILURE_FAULT[kind],
+        shape,
+        wrapper,
+        outputChars,
+        issues: reason,
+      });
+      // A terminal failure is not followed by a retry, so announcing one would be a lie.
+      if (terminal || attemptNumber >= maxAttempts) return;
       emit({
         phase: "retrying",
         attempt: attemptNumber,
         maxAttempts,
         outputChars,
         issues: reason,
+        failure: kind,
+        ...(shape !== null ? { shape } : {}),
+        ...(wrapper !== null ? { wrapper } : {}),
       });
     };
     emit({
@@ -393,13 +557,45 @@ export async function designManifest(opts: {
       ...(opts.model !== undefined ? { model: opts.model } : {}),
     };
 
+    let meter: StreamCostMeter | null = null;
+    let estimatedDollars = 0;
+    if (ceiling !== null && pricing !== undefined) {
+      const promptChars = request.messages.reduce((n, m) => n + m.content.length, 0);
+      const admission = admitRequestCost(ceiling, {
+        pricing,
+        promptChars,
+        maxOutputTokens: maxTokens,
+        inflation,
+      });
+      if (admission.outcome === "refuse") {
+        // Terminal, not retryable: the prompt only ever grows across attempts, so the
+        // next estimate cannot come out lower than this one.
+        record("request_cost_ceiling", [admission.reason], 0, null, null, true);
+        break;
+      }
+      if (admission.estimate.kind === "bounded") {
+        estimatedDollars = admission.estimate.dollars;
+        meter = new StreamCostMeter({
+          pricing,
+          ceiling,
+          inputTokens: admission.estimate.inputTokens,
+        });
+      }
+    }
+
     let text = "";
     let oversized = false;
+    let overCost = false;
+    let turnCost: number | null = null;
     let lastEmittedChars = 0;
     try {
       for await (const chunk of opts.provider.complete(request)) {
         if (chunk.kind === "text") {
           text += chunk.text;
+          if (meter !== null && meter.accrueChars(chunk.text.length) === "abort") {
+            overCost = true;
+            break;
+          }
           if (text.length > MAX_DESIGN_RESPONSE_CHARS) {
             oversized = true;
             break;
@@ -415,18 +611,70 @@ export async function designManifest(opts: {
             });
           }
         } else if (chunk.kind === "usage_final") {
+          turnCost = chunk.usage.cost;
           usage = addUsage(usage, chunk.usage);
         }
       }
     } catch (err) {
-      issues = [`provider error: ${err instanceof Error ? err.message : String(err)}`];
-      emitRetrying(issues, text.length);
+      record(
+        "provider_error",
+        [`provider error: ${err instanceof Error ? err.message : String(err)}`],
+        text.length,
+        null,
+        null,
+      );
       continue;
     }
 
+    if (overCost && meter !== null) {
+      // The stream was abandoned, so no `usage_final` ever arrived — but those tokens were
+      // generated and will be billed, so the meter's own figure stands in for them rather
+      // than reporting the attempt as free.
+      usage = addUsage(usage, {
+        inputTokens: 0,
+        outputTokens: meter.outputTokens,
+        cost: meter.dollars,
+      });
+      record(
+        "response_cost_ceiling",
+        [
+          `response was abandoned at an estimated $${meter.dollars.toFixed(4)}, over the per-request ceiling of $${(ceiling?.maxDollars ?? 0).toFixed(4)}`,
+        ],
+        text.length,
+        null,
+        null,
+      );
+      messages.push({
+        role: "user",
+        content:
+          "Your previous response was too expensive to finish. Respond with ONLY one compact JSON manifest object.",
+      });
+      continue;
+    }
+
+    if (turnCost !== null && ceiling !== null) {
+      const verdict = reconcileRequestCost({
+        ceiling,
+        estimatedDollars,
+        actualDollars: turnCost,
+      });
+      if (verdict.kind !== "within_estimate" && verdict.ratio !== undefined) {
+        inflation = Math.max(inflation, verdict.ratio);
+      }
+      // An actual cost over the cap means the estimator does not model this model, so stop
+      // after this attempt. The attempt itself is still read out below: the money is spent,
+      // and throwing away a manifest that turned out valid would waste it for nothing.
+      if (verdict.kind === "over_ceiling") sealed = true;
+    }
+
     if (oversized) {
-      issues = [`model response exceeded ${MAX_DESIGN_RESPONSE_CHARS} chars`];
-      emitRetrying(issues, text.length);
+      record(
+        "response_too_long",
+        [`model response exceeded ${MAX_DESIGN_RESPONSE_CHARS} chars`],
+        text.length,
+        null,
+        null,
+      );
       messages.push({
         role: "user",
         content:
@@ -435,15 +683,16 @@ export async function designManifest(opts: {
       continue;
     }
 
-    const extracted = extractJsonObject(text);
-    if (extracted === null) {
-      issues = ["model output did not contain a parseable JSON object"];
-      emitRetrying(issues, text.length);
+    const classified = classifyDesignOutput(text);
+    if (classified.shape !== "manifest_shaped_object" || classified.object === null) {
+      // The `??` arm is unreachable — a manifest-shaped diagnosis always carries its
+      // object — but `not_a_manifest` is the honest reading if that ever stops holding.
+      const kind = designFailureForShape(classified.shape) ?? "not_a_manifest";
+      record(kind, [classified.detail], text.length, classified.shape, classified.wrapper);
       messages.push({ role: "assistant", content: truncate(text, MAX_ASSISTANT_ECHO_CHARS) });
       messages.push({
         role: "user",
-        content:
-          "Your previous reply did not contain a single parseable JSON object. Respond with ONLY one JSON object — no prose, no code fences.",
+        content: correctiveForShape(classified.shape, classified.wrapper),
       });
       continue;
     }
@@ -454,27 +703,47 @@ export async function designManifest(opts: {
       maxAttempts,
       outputChars: text.length,
       issues: [],
+      shape: classified.shape,
+      wrapper: classified.wrapper,
     });
 
     const normalized = ensureRolesInManifest(
-      normalizeGeneratedManifest(extracted, opts.name !== undefined ? { name: opts.name } : {}),
+      normalizeGeneratedManifest(
+        classified.object,
+        opts.name !== undefined ? { name: opts.name } : {},
+      ),
       opts.ensureRoles ?? [],
     );
     const parsed = ManifestSchema.safeParse(normalized);
     if (!parsed.success) {
-      issues = parsed.error.issues
-        .slice(0, MAX_FEEDBACK_ISSUES)
-        .map((issue) => `${issue.path.join(".")}: ${issue.message}`);
-      emitRetrying(issues, text.length);
+      record(
+        "schema_invalid",
+        parsed.error.issues
+          .slice(0, MAX_FEEDBACK_ISSUES)
+          .map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+        text.length,
+        classified.shape,
+        classified.wrapper,
+      );
       messages.push({ role: "assistant", content: truncate(text, MAX_ASSISTANT_ECHO_CHARS) });
       messages.push({ role: "user", content: correctiveMessage(issues) });
       continue;
     }
 
     const manifest: Manifest = parsed.data;
+    let crossIssues: readonly string[];
     try {
       const result = tryValidateManifest(manifest);
       if (result.ok) {
+        diagnosis.push({
+          attempt: attemptNumber,
+          failure: null,
+          fault: null,
+          shape: classified.shape,
+          wrapper: classified.wrapper,
+          outputChars: text.length,
+          issues: [],
+        });
         return {
           ok: true,
           manifest: manifest as unknown as Record<string, unknown>,
@@ -483,27 +752,29 @@ export async function designManifest(opts: {
           attempts,
           providerLabel,
           usage,
+          failure: null,
+          fault: null,
+          recovery: classified.wrapper,
+          diagnosis,
         };
       }
-      issues = result.errors.slice(0, MAX_FEEDBACK_ISSUES).map((e) => e.message);
+      crossIssues = result.errors.slice(0, MAX_FEEDBACK_ISSUES).map((e) => e.message);
     } catch (err) {
       // validateManifest throws non-ManifestValidationError kinds (e.g. cycle errors) past tryValidateManifest
-      issues = [err instanceof Error ? err.message : String(err)];
+      crossIssues = [err instanceof Error ? err.message : String(err)];
     }
-    emitRetrying(issues, text.length);
+    record(
+      "cross_validation_failed",
+      crossIssues,
+      text.length,
+      classified.shape,
+      classified.wrapper,
+    );
     messages.push({ role: "assistant", content: truncate(text, MAX_ASSISTANT_ECHO_CHARS) });
     messages.push({ role: "user", content: correctiveMessage(issues) });
   }
 
-  return {
-    ok: false,
-    manifest: null,
-    manifestHash: null,
-    issues,
-    attempts,
-    providerLabel,
-    usage,
-  };
+  return fail(failure, issues, attempts, usage);
 }
 
 export function buildDesignDesigner(opts: {
@@ -512,6 +783,7 @@ export function buildDesignDesigner(opts: {
   maxTokens?: number;
   providerLabel?: string | null;
   ensureRoles?: readonly string[];
+  maxRequestDollars?: number;
   onProgress?: DesignProgressListener;
 }): ManifestDesigner {
   return async (input: {
@@ -530,6 +802,7 @@ export function buildDesignDesigner(opts: {
       ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
       ...(opts.providerLabel !== undefined ? { providerLabel: opts.providerLabel } : {}),
       ...(opts.ensureRoles !== undefined ? { ensureRoles: opts.ensureRoles } : {}),
+      ...(opts.maxRequestDollars !== undefined ? { maxRequestDollars: opts.maxRequestDollars } : {}),
       ...(listener !== undefined ? { onProgress: listener } : {}),
     });
   };

@@ -30,6 +30,15 @@ export const canTransitionDispatch = (
   to: DispatchStatus,
 ): boolean => DISPATCH_TRANSITIONS[from].includes(to);
 
+export const TERMINAL_DISPATCH_STATUSES: ReadonlySet<DispatchStatus> = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export const isDispatchTerminal = (status: DispatchStatus): boolean =>
+  TERMINAL_DISPATCH_STATUSES.has(status);
+
 export const DELIVERY_OUTCOMES = [
   "queued",
   "delivered",
@@ -105,11 +114,21 @@ export const NotificationDispatchSchema = z
     requestingSystem: z.string().min(1).max(80),
   })
   .superRefine((d, ctx) => {
-    if (d.status === "completed" && d.completedAt === null) {
+    // `completedAt` is the finalisation instant of any terminal status, not only `completed`: a
+    // `failed` dispatch finished too. Only `completed` required it, so a failed one could sit with no
+    // end time at all and look indistinguishable from one still being retried.
+    if (isDispatchTerminal(d.status) && d.completedAt === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["completedAt"],
-        message: "completed dispatch requires completedAt",
+        message: `${d.status} dispatch requires completedAt`,
+      });
+    }
+    if (!isDispatchTerminal(d.status) && d.completedAt !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["completedAt"],
+        message: `dispatch in status ${d.status} must not have completedAt`,
       });
     }
     if (d.status === "cancelled" && d.cancelledReason === null) {
@@ -236,6 +255,33 @@ export const DeliveryAttemptSchema = z
     }
   });
 export type DeliveryAttempt = z.infer<typeof DeliveryAttemptSchema>;
+
+/**
+ * When a dispatch was actually handed to a provider: the earliest `sentAt` across its attempts.
+ *
+ * This is the instant a `dispatched_at` column on `meta.notification_dispatches` would hold, and the
+ * reason that column is not needed — it is derivable, exactly, from rows that already exist. The
+ * dispatch's own `startedAt` is stamped when rendering begins and `completedAt` when the last
+ * attempt finalises; the hand-off sits between them and belongs to the attempt, because a fan-out to
+ * 400 addresses has 400 of them and only the ledger can say which came first. A column on the parent
+ * would have to pick one and would then disagree with the rows it summarises.
+ */
+export const dispatchHandoffAt = (
+  attempts: readonly DeliveryAttempt[],
+): string | null => {
+  let earliestMs: number | null = null;
+  let earliest: string | null = null;
+  for (const attempt of attempts) {
+    if (attempt.sentAt === null) continue;
+    const ms = Date.parse(attempt.sentAt);
+    if (Number.isNaN(ms)) continue;
+    if (earliestMs === null || ms < earliestMs) {
+      earliestMs = ms;
+      earliest = attempt.sentAt;
+    }
+  }
+  return earliest;
+};
 
 export interface RetryDecisionInput {
   readonly outcome: DeliveryOutcome;

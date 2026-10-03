@@ -1,4 +1,15 @@
-# operate-web (minimal UI)
+# web-ui — a development demo, not a deployed surface
+
+**This is not the product UI.** `apps/operate-web` is: a Next.js app that renders any manifest from
+the server's `UiSchema`, and the thing `deploy/` ships. This directory is a deliberately tiny
+development tool, and it is intentionally absent from every compose file and deployment guide — do not
+add one. It binds a dev API key into a local proxy and has no auth of its own, so it has no business
+being reachable from anywhere but your own machine.
+
+It survives because it does one thing `apps/operate-web` does not do conveniently: show
+**classification redaction** changing in front of you, by pointing the same page at two different roles
+and watching a `commercial_sensitive` field appear and disappear. That is worth three files and zero
+dependencies for a demo or for debugging the redaction path.
 
 A tiny, zero-dependency web UI for the CrossEngin `operate-server` API.
 Plain HTML + vanilla JS + a small Node proxy. No build step, no npm install.

@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  OBSERVED_SUPPRESSION_REASONS,
   PERMANENT_SUPPRESSION_REASONS,
+  SUPPRESSION_ACTOR_KINDS,
   SUPPRESSION_REASONS,
   SuppressionRecordSchema,
   UserPreferenceMatrixSchema,
   computeDispatchEligibility,
   findActiveSuppression,
+  isHumanSuppressionActor,
   isPreferenceOptedIn,
   isSuppressionActive,
+  parseSuppressionActor,
+  suppressionActorRef,
   type SuppressionRecord,
   type UserPreferenceMatrix,
 } from "./preferences.js";
@@ -327,5 +332,175 @@ describe("computeDispatchEligibility", () => {
     });
     expect(r.eligible).toBe(false);
     expect(r.reason).toBe("not_opted_in");
+  });
+});
+
+describe("suppression actor refs", () => {
+  const USER_ID = "44444444-4444-4444-8444-444444444444";
+
+  it("has 3 actor kinds", () => {
+    expect(SUPPRESSION_ACTOR_KINDS).toHaveLength(3);
+  });
+
+  it("accepts a user ref", () => {
+    expect(parseSuppressionActor(`user:${USER_ID}`)).toEqual({
+      kind: "user",
+      id: USER_ID,
+    });
+  });
+
+  it("accepts a provider ref, which is the whole point of widening the field", () => {
+    expect(parseSuppressionActor("provider:ses")).toEqual({
+      kind: "provider",
+      id: "ses",
+    });
+  });
+
+  it("accepts a system ref with dashes and underscores", () => {
+    expect(parseSuppressionActor("system:soft-bounce_threshold")?.kind).toBe("system");
+  });
+
+  it("rejects a bare uuid — the kind is not optional", () => {
+    expect(parseSuppressionActor(USER_ID)).toBeNull();
+  });
+
+  it("rejects free text, which a plain min(1) string would have accepted", () => {
+    for (const bad of ["nope", "ses", "", "SES", "user:", "user:not-a-uuid"]) {
+      expect(parseSuppressionActor(bad)).toBeNull();
+    }
+  });
+
+  it("rejects an unknown kind", () => {
+    expect(parseSuppressionActor("robot:ses")).toBeNull();
+  });
+
+  it("rejects an uppercase user uuid, so one id has one spelling", () => {
+    const mixed = "4a4a4a4a-4b4b-4c4c-8d4d-4e4e4e4e4e4e";
+    expect(parseSuppressionActor(`user:${mixed}`)?.kind).toBe("user");
+    expect(parseSuppressionActor(`user:${mixed.toUpperCase()}`)).toBeNull();
+  });
+
+  it("builds a ref through suppressionActorRef", () => {
+    expect(suppressionActorRef("provider", "twilio")).toBe("provider:twilio");
+  });
+
+  it("refuses to build an invalid ref", () => {
+    expect(() => suppressionActorRef("provider", "Twilio!")).toThrow(RangeError);
+    expect(() => suppressionActorRef("user", "nope")).toThrow(RangeError);
+  });
+
+  it("identifies only a user ref as human", () => {
+    expect(isHumanSuppressionActor(`user:${USER_ID}`)).toBe(true);
+    expect(isHumanSuppressionActor("provider:ses")).toBe(false);
+    expect(isHumanSuppressionActor("system:drain")).toBe(false);
+    expect(isHumanSuppressionActor(null)).toBe(false);
+  });
+
+  it("names the three observed reasons no person decides", () => {
+    expect([...OBSERVED_SUPPRESSION_REASONS].sort()).toEqual([
+      "hard_bounce",
+      "soft_bounce_exceeded",
+      "spam_complaint",
+    ]);
+  });
+});
+
+describe("SuppressionRecordSchema — appliedBy", () => {
+  const USER_ID = "44444444-4444-4444-8444-444444444444";
+
+  it("accepts a provider-applied bounce suppression", () => {
+    expect(() =>
+      SuppressionRecordSchema.parse({
+        ...baseSuppression,
+        appliedBy: "provider:ses",
+        sourceDeliveryId: "55555555-5555-4555-8555-555555555555",
+      }),
+    ).not.toThrow();
+  });
+
+  it("still accepts a null appliedBy on a bounce, so existing rows keep parsing", () => {
+    expect(() => SuppressionRecordSchema.parse(baseSuppression)).not.toThrow();
+  });
+
+  it("rejects a bare uuid, which the old UUID field required", () => {
+    expect(() =>
+      SuppressionRecordSchema.parse({ ...baseSuppression, appliedBy: USER_ID }),
+    ).toThrow();
+  });
+
+  it("rejects free text", () => {
+    expect(() =>
+      SuppressionRecordSchema.parse({ ...baseSuppression, appliedBy: "nope" }),
+    ).toThrow();
+  });
+
+  it("accepts a manual_block naming the human who placed it", () => {
+    expect(() =>
+      SuppressionRecordSchema.parse({
+        ...baseSuppression,
+        reason: "manual_block",
+        appliedBy: `user:${USER_ID}`,
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects a manual_block attributed to a system", () => {
+    expect(() =>
+      SuppressionRecordSchema.parse({
+        ...baseSuppression,
+        reason: "manual_block",
+        appliedBy: "system:drain",
+      }),
+    ).toThrow(/manual_block requires a user: actor/);
+  });
+
+  it("rejects a manual_block attributed to a provider", () => {
+    expect(() =>
+      SuppressionRecordSchema.parse({
+        ...baseSuppression,
+        reason: "manual_block",
+        appliedBy: "provider:ses",
+      }),
+    ).toThrow(/manual_block requires a user: actor/);
+  });
+
+  it("rejects attributing an observed bounce to a person", () => {
+    for (const reason of OBSERVED_SUPPRESSION_REASONS) {
+      expect(() =>
+        SuppressionRecordSchema.parse({
+          ...baseSuppression,
+          reason,
+          expiresAt: null,
+          appliedBy: `user:${USER_ID}`,
+        }),
+      ).toThrow(/observed, not decided/);
+    }
+  });
+
+  it("lets a person apply a regulatory block or a DNC entry", () => {
+    for (const reason of ["regulatory_block", "do_not_contact_register"] as const) {
+      expect(() =>
+        SuppressionRecordSchema.parse({
+          ...baseSuppression,
+          reason,
+          appliedBy: `user:${USER_ID}`,
+        }),
+      ).not.toThrow();
+    }
+  });
+
+  it("leaves the consent-vs-deliverability split untouched", () => {
+    // A provider-applied hard bounce still refuses a transactional send; widening who applied it
+    // changes nothing about what it overrides.
+    const r = computeDispatchEligibility({
+      category: "transactional",
+      channel: "email",
+      preferences: baseMatrix,
+      suppressions: [{ ...baseSuppression, appliedBy: "provider:ses" }],
+      recipientAddress: "alice@acme.com",
+      now: new Date("2026-05-20T10:00:00Z"),
+    });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toBe("suppressed");
   });
 });

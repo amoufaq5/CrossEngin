@@ -1,6 +1,7 @@
 import { sha256, verifyWebhookSignature } from "@crossengin/crypto";
 import {
   PERMANENT_SUPPRESSION_REASONS,
+  suppressionActorRef,
   SuppressionRecordSchema,
   type NotificationChannel,
   type SuppressionReason,
@@ -118,12 +119,164 @@ function refuse(
 }
 
 // ---------------------------------------------------------------------------
+// Normalising the address
+// ---------------------------------------------------------------------------
+
+/*
+ * ADR-0302 left this open: a bounce reporting `Bounced@Example.test` planned a suppression on that
+ * exact spelling, while the address the platform sends to is `bounced@example.test`. The store's
+ * lookup and `findActiveSuppression` both compare the address exactly, so the row existed, was
+ * active, and matched nothing — the worst shape a safety record can take, because the table says the
+ * address is suppressed and the drain keeps mailing it.
+ *
+ * It is fixed here rather than in the store, deliberately. `suppressionIdFor` commits to the address
+ * in the row: lowercasing inside the store would leave a row whose id was derived from a string the
+ * row does not contain, which makes the id a lie and makes two different raw addresses collide onto
+ * one id. Normalising *upstream*, before the id is derived, keeps the id honest — it still commits to
+ * exactly what is stored — and is the only place where the channel is known, which matters because
+ * the rule is per-channel.
+ *
+ * Two properties hold for every rule below, and are tested:
+ *
+ *   1. **Idempotence.** Normalising a normalised address returns it unchanged, so a replayed event
+ *      plans the same id.
+ *   2. **Normalisation re-spells, it never widens.** No rule may map two addresses that could be
+ *      different mailboxes, handsets or devices onto one. Suppressing an address that did not bounce
+ *      is not a safer error than failing to suppress one that did; it is a silent outage.
+ */
+
+export const ADDRESS_NORMALIZATION_RULES = ["email", "phone", "opaque"] as const;
+export type AddressNormalizationRule =
+  (typeof ADDRESS_NORMALIZATION_RULES)[number];
+
+/**
+ * Which rule each channel's address takes. `sms` and `voice_call` are both telephone numbers and
+ * normalise identically to each other and nothing like an email address; `in_app`, `push_mobile` and
+ * `webhook` carry opaque identifiers — a user id, a device registration token, a URL.
+ */
+export const CHANNEL_ADDRESS_NORMALIZATION: Readonly<
+  Record<NotificationChannel, AddressNormalizationRule>
+> = {
+  email: "email",
+  sms: "phone",
+  voice_call: "phone",
+  push_mobile: "opaque",
+  in_app: "opaque",
+  webhook: "opaque",
+};
+
+/**
+ * Lowercases the whole address, after trimming and removing one surrounding pair of angle brackets.
+ *
+ * The domain is uncontroversial: DNS is case-insensitive, so `Example.test` and `example.test` are
+ * the same host by definition. The local-part is a real decision. RFC 5321 §2.4 is explicit that only
+ * the destination server may interpret its own local-parts and that they are formally
+ * case-**sensitive**, so `Bounced@` and `bounced@` are, to the letter, two mailboxes.
+ *
+ * We lowercase it anyway. No mail provider in production distinguishes them — every major one folds
+ * case on delivery — and the alternative is not RFC purity, it is a suppression row that never
+ * matches. That costs more than over-matching could: mail sent to an address a provider has already
+ * told us is dead cannot arrive, and the bounce and complaint rates it feeds are exactly what gets a
+ * whole sending domain throttled or paused, taking every other tenant's mail with it. That is the
+ * reasoning `UNCONDITIONAL_SUPPRESSION_REASONS` already rests on (ADR-0302), applied one layer down.
+ *
+ * Two things it deliberately does *not* do:
+ *
+ *   - **Subaddressing is kept.** `ops+alerts@example.test` is not rewritten to `ops@example.test`.
+ *     Providers differ on whether the tag selects a folder or a mailbox, and collapsing it would turn
+ *     one bounced address into a suppression covering addresses that never bounced — widening, which
+ *     the invariant above forbids.
+ *   - **A display name is not parsed off.** One surrounding `<…>` pair is removed because
+ *     `<bounced@example.test>` is unambiguously the same address in RFC 5322 form; `"Ops" <o@e.test>`
+ *     is left as it came, because extracting an address from a display form is parsing, and a parser
+ *     that gets it wrong suppresses the wrong mailbox.
+ */
+export function normalizeEmailAddress(raw: string): string {
+  const trimmed = raw.trim();
+  const unwrapped =
+    trimmed.startsWith("<") && trimmed.endsWith(">") && trimmed.length > 2
+      ? trimmed.slice(1, -1).trim()
+      : trimmed;
+  return unwrapped.toLowerCase();
+}
+
+/**
+ * Anything that is unambiguously one telephone number written with punctuation: digits, an optional
+ * leading `+`, and the separators a provider or a human might put between them.
+ */
+const PHONE_SHAPED = /^(tel:)?\+?[0-9][0-9\s().\-]*$/;
+
+/**
+ * Strips the punctuation out of a telephone number, keeping the digits and a leading `+`.
+ *
+ * Case folding is a no-op on a phone number; what varies between a provider's echo and a directory's
+ * record is formatting — `+1 (555) 123-4567` against `+15551234567`. So this rule is nothing like the
+ * email rule, and conflating them is how an email address gets "normalised" into an empty string.
+ *
+ * A `+` is neither added nor removed. E.164 requires it, and inventing one would be asserting a
+ * country code we were not told; dropping one would merge a national number with an international
+ * number that happens to share its digits.
+ *
+ * Normalisation applies **only when the value is recognisably a phone number**. Anything else is
+ * returned trimmed and otherwise untouched, because rewriting an unrecognised address into a
+ * phone-shaped one would invent an address rather than re-spell it. That case is live, not
+ * hypothetical: the serving recipient directory hands the `sms` and `voice_call` channels the user's
+ * email address today, so a Twilio failure can carry one in `To`.
+ */
+export function normalizePhoneAddress(raw: string): string {
+  const trimmed = raw.trim();
+  if (!PHONE_SHAPED.test(trimmed)) return trimmed;
+  const withoutScheme = trimmed.startsWith("tel:") ? trimmed.slice(4) : trimmed;
+  const digits = withoutScheme.replace(/[^0-9]/g, "");
+  return withoutScheme.startsWith("+") ? `+${digits}` : digits;
+}
+
+const UUID_SHAPED =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+/**
+ * Trims, and lowercases only a UUID.
+ *
+ * An opaque address is not something a human typed, so there is no spelling to forgive. A push
+ * registration token is base64url and case-**significant**: folding it would produce a token that
+ * matches no device and could in principle collide with another one. A webhook URL has a
+ * case-sensitive path. Neither may be touched beyond whitespace.
+ *
+ * A UUID is the exception, and the reason this rule is not simply `trim`: `in_app` and `push_mobile`
+ * addresses are the recipient's user id today, hex case carries no meaning in a UUID, and Postgres
+ * renders one lowercase — so an upper-case spelling is the same identifier and can be folded safely.
+ */
+export function normalizeOpaqueAddress(raw: string): string {
+  const trimmed = raw.trim();
+  return UUID_SHAPED.test(trimmed) ? trimmed.toLowerCase() : trimmed;
+}
+
+export function normalizeRecipientAddress(
+  channel: NotificationChannel,
+  raw: string,
+): string {
+  switch (CHANNEL_ADDRESS_NORMALIZATION[channel]) {
+    case "email":
+      return normalizeEmailAddress(raw);
+    case "phone":
+      return normalizePhoneAddress(raw);
+    case "opaque":
+      return normalizeOpaqueAddress(raw);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Planning a suppression
 // ---------------------------------------------------------------------------
 
 /**
  * Derived from the tuple the suppressions table is unique on, plus the reason, so a replayed or
  * re-delivered provider event plans the identical row rather than a second one.
+ *
+ * It hashes exactly the address it is given and does no normalising of its own: the id has to commit
+ * to the address actually stored, so `planSuppression` normalises first and calls this with the
+ * result. A caller that derives an id for a row it already holds therefore passes that row's address
+ * and gets that row's id.
  */
 export function suppressionIdFor(input: {
   readonly tenantId: string;
@@ -157,22 +310,33 @@ export function planSuppression(input: {
   readonly appliedAt: Date;
   readonly expiresAt: Date | null;
   readonly notes?: string;
+  /**
+   * The actor ref to attribute the row to. Omitted means NULL, which is what every bounce row
+   * written before `applied_by` widened past a `meta.users` id holds; the webhook path passes
+   * `provider:<source>` so a new row says which provider reported it.
+   */
+  readonly appliedBy?: string | null;
 }): SuppressionRecord | null {
   const appliedAt = input.appliedAt.toISOString();
+  // Normalised here, once, before anything else reads it — so the id, the stored address and the
+  // uniqueness tuple are all derived from the same canonical string (see the rules above).
+  const recipientAddress = normalizeRecipientAddress(
+    input.channel,
+    input.recipientAddress,
+  );
   const candidate = {
     id: suppressionIdFor({
       tenantId: input.tenantId,
       channel: input.channel,
-      recipientAddress: input.recipientAddress,
+      recipientAddress,
       reason: input.reason,
     }),
     tenantId: input.tenantId,
     channel: input.channel,
-    recipientAddress: input.recipientAddress,
+    recipientAddress,
     reason: input.reason,
     appliedAt,
-    // No human applied this one, and the provider is not a `meta.users` row.
-    appliedBy: null,
+    appliedBy: input.appliedBy ?? null,
     expiresAt: PERMANENT_SUPPRESSION_REASONS.has(input.reason)
       ? null
       : (input.expiresAt?.toISOString() ?? null),
@@ -545,6 +709,10 @@ function planAll(
       reason,
       appliedAt: request.now,
       expiresAt,
+      // No human applied this one, so the row names the provider that reported it instead of
+      // writing NULL. The reason is observed, never decided, so the schema requires this not be a
+      // `user:` actor — which is exactly what `provider:<source>` is not.
+      appliedBy: suppressionActorRef("provider", request.source),
       ...(notes !== undefined ? { notes } : {}),
     });
     if (planned === null) {

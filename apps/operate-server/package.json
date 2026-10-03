@@ -31,6 +31,7 @@
     "@crossengin/access-reviews": "workspace:*",
     "@crossengin/access-reviews-runtime": "workspace:*",
     "@crossengin/access-reviews-runtime-pg": "workspace:*",
+    "@crossengin/ai-architect-runtime": "workspace:*",
     "@crossengin/ai-architect-runtime-pg": "workspace:*",
     "@crossengin/ai-providers": "workspace:*",
     "@crossengin/ai-providers-anthropic": "workspace:*",

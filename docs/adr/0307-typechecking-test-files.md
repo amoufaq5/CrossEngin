@@ -35,7 +35,10 @@ Each package gains a `tsconfig.typecheck.json` of two lines — `extends: ["./ts
 drops both `**/*.test.ts` and the `src/test-fakes.ts` exclusions eight packages carried. One invocation
 covers everything the build config covered plus the tests, so `typecheck` is not run twice.
 
-`apps/operate-web` keeps its own `npx tsc --noEmit`, since it is a Next app outside this layout.
+`apps/operate-web` keeps its own `tsconfig.json` and its own `typecheck` script rather than gaining the
+overlay. It is a workspace member (`apps/*`), so `pnpm -r typecheck` already runs it — but it is a Next
+app with no `*.test.ts` files at all, so there is nothing for the overlay to put back. Its `npx next
+build` remains separate because that checks the Next build, not the types.
 
 **Policy for the fixes**, because "make it compile" and "keep the test honest" are not the same thing:
 
@@ -131,7 +134,7 @@ covers everything the build config covered plus the tests, so `typecheck` is not
 | Question | Owner | Deadline |
 |---|---|---|
 | `failed` is both terminal and compensatable (`workflow-engine`). Should `TERMINAL_INSTANCE_STATUSES` drop it, or should `isInstanceTerminal` answer differently? | amoufaq5 | _unscheduled_ |
-| `apps/operate-web` is still checked separately and is not covered by `pnpm -r typecheck`. | amoufaq5 | _unscheduled_ |
+| `apps/operate-web` uses its own tsconfig rather than the overlay. Harmless today (it has no test files), but a test added there would not be typechecked by the rule this ADR establishes. | amoufaq5 | _unscheduled_ |
 | Nothing enforces that a new package has a `tsconfig.typecheck.json`; a lint or a test over the workspace could. | amoufaq5 | _unscheduled_ |
 
 ## References

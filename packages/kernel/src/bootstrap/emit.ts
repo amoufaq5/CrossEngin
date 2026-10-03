@@ -174,6 +174,54 @@ export function emitDropConstraint(table: TableDefinition, name: string): string
   return `ALTER TABLE ${qualifyTable(table.schema, table.name)} DROP CONSTRAINT IF EXISTS ${quoteIdent(name)};`;
 }
 
+/** `EXISTS` test for a live, non-dropped column, as a subquery body. */
+function columnExistsQuery(relLiteral: string, column: string): string {
+  return (
+    `SELECT 1 FROM pg_attribute WHERE attrelid = ${relLiteral}::regclass ` +
+    `AND attname = ${quoteLiteral(column)} AND attnum > 0 AND NOT attisdropped`
+  );
+}
+
+/**
+ * Renames a column, re-checking in its own transaction that the rename is still the unambiguous one.
+ *
+ * Postgres has no `IF EXISTS` for `RENAME COLUMN`, and a plan is built from a live schema and applied
+ * a moment later, so the three states this can land in are all handled explicitly rather than left to
+ * whichever error the bare statement happens to raise:
+ *
+ * - only the old name — the rename happens;
+ * - only the new name — already renamed, so nothing to do, which keeps the step re-runnable after an
+ *   applier retry;
+ * - both — refused, because which of the two holds the data is not something the catalog says, and
+ *   picking one would be the migrator deciding about existing data;
+ * - neither — refused, because the plan was built against a table this is no longer describing.
+ */
+export function emitRenameColumn(
+  table: TableDefinition,
+  from: string,
+  to: string,
+): string {
+  const fq = qualifyTable(table.schema, table.name);
+  const rel = quoteLiteral(`${table.schema}.${table.name}`);
+  const label = messageText(`${table.schema}.${table.name}."${from}" to "${to}"`);
+  return [
+    "DO $$",
+    "DECLARE has_old boolean; has_new boolean;",
+    "BEGIN",
+    `  SELECT EXISTS (${columnExistsQuery(rel, from)}) INTO has_old;`,
+    `  SELECT EXISTS (${columnExistsQuery(rel, to)}) INTO has_new;`,
+    "  IF has_old AND has_new THEN",
+    `    RAISE EXCEPTION 'refusing to rename ${label}: both columns exist — which one holds the data is not something the catalog says';`,
+    "  END IF;",
+    "  IF has_old THEN",
+    `    ALTER TABLE ${fq} RENAME COLUMN ${quoteIdent(from)} TO ${quoteIdent(to)};`,
+    "  ELSIF NOT has_new THEN",
+    `    RAISE EXCEPTION 'refusing to rename ${label}: neither column exists';`,
+    "  END IF;",
+    "END $$;",
+  ].join("\n");
+}
+
 /**
  * Changes a column's type, but only on an empty table, re-checking that in the same transaction.
  *
@@ -232,16 +280,57 @@ export function emitAddTableConstraintIfEmpty(
  * Replaces a table-level constraint on an empty table. Postgres can alter neither a CHECK expression
  * nor a foreign key's target or actions in place, so a changed declaration means drop then add —
  * inside one guarded block, so the table is never left without the rule in a committed state.
+ *
+ * `liveName` is what the database holds the constraint under, which is the declared name unless the
+ * constraint was matched by its columns rather than by its name. Dropping the declared name in that
+ * case is a no-op that leaves the old constraint standing beside the new one.
  */
 export function emitReplaceTableConstraintIfEmpty(
   table: TableDefinition,
   constraint: TableConstraint,
+  liveName: string = constraint.name,
 ): string {
   const fq = qualifyTable(table.schema, table.name);
   return emitGuardedConstraintStatements(table, constraint.name, [
-    `ALTER TABLE ${fq} DROP CONSTRAINT IF EXISTS ${quoteIdent(constraint.name)};`,
+    `ALTER TABLE ${fq} DROP CONSTRAINT IF EXISTS ${quoteIdent(liveName)};`,
     `ALTER TABLE ${fq} ADD ${emitTableConstraint(constraint)};`,
   ]);
+}
+
+/**
+ * Adds a table-level constraint without the emptiness guard.
+ *
+ * Only a foreign key earns this, and for the reason `emitAddForeignKey` already states: the statement
+ * fails only when the table holds rows whose reference does not resolve, which means the database
+ * already contradicts a constraint the catalog declares. That is an integrity problem the operator
+ * needs to see, not an ambiguous decision about existing data. A CHECK has no such argument — an
+ * expression the catalog just started declaring says nothing about rows written before it — so it
+ * keeps the guarded form.
+ */
+export function emitAddTableConstraint(
+  table: TableDefinition,
+  constraint: TableConstraint,
+): string {
+  return `ALTER TABLE ${qualifyTable(table.schema, table.name)} ADD ${emitTableConstraint(constraint)};`;
+}
+
+/**
+ * Replaces a table-level constraint without the emptiness guard, in **one** statement, so the table is
+ * never committed without the rule — the same reasoning as `emitReplaceIndex`, since the applier runs
+ * each statement in its own transaction and two statements would leave a window with no constraint.
+ *
+ * `liveName` is the name the database holds it under; see `emitReplaceTableConstraintIfEmpty`.
+ */
+export function emitReplaceTableConstraint(
+  table: TableDefinition,
+  constraint: TableConstraint,
+  liveName: string = constraint.name,
+): string {
+  const fq = qualifyTable(table.schema, table.name);
+  return (
+    `ALTER TABLE ${fq} DROP CONSTRAINT IF EXISTS ${quoteIdent(liveName)}; ` +
+    `ALTER TABLE ${fq} ADD ${emitTableConstraint(constraint)};`
+  );
 }
 
 function emitGuardedConstraintStatements(
@@ -282,6 +371,11 @@ export function emitDropColumnNotNull(table: TableDefinition, column: string): s
 
 function quoteLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** Text spliced into a `RAISE EXCEPTION` message, which is itself a single-quoted literal. */
+function messageText(value: string): string {
+  return value.replace(/'/g, "''");
 }
 
 export function emitIndex(table: TableDefinition, idx: IndexSpec): string {

@@ -690,6 +690,32 @@ describe("recipient-resolver — activeSuppressions", () => {
     expect(records[0]?.expiresAt).toBeNull();
   });
 
+  it("refuses the channel when a stored suppression row cannot be parsed", async () => {
+    // Fail closed. Skipping the unreadable row means mailing exactly the address it was protecting,
+    // and for a hard bounce that feeds the rate a provider throttles a whole sending domain over.
+    const db = fakeRecipientDb();
+    db.suppressions.push(suppressionRow({ reason: "not_a_reason_we_know" }));
+    const resolver = new PostgresRecipientResolver(db.conn);
+    await expect(resolver.activeSuppressions(TENANT_A, "email", NOW)).rejects.toThrow(
+      /supp_hardbounce01.*refusing to deliver/s,
+    );
+  });
+
+  it("names the row but never the address it protects", async () => {
+    // This message reaches logs, and a suppression names a real person's mailbox.
+    const db = fakeRecipientDb();
+    db.suppressions.push(
+      suppressionRow({ recipient_address: "private@person.example", reason: "nope" }),
+    );
+    const resolver = new PostgresRecipientResolver(db.conn);
+    await expect(
+      resolver.activeSuppressions(TENANT_A, "email", NOW),
+    ).rejects.toThrow(/supp_hardbounce01/);
+    await expect(resolver.activeSuppressions(TENANT_A, "email", NOW)).rejects.not.toThrow(
+      /private@person\.example/,
+    );
+  });
+
   it("filters out expired rows in SQL with now bound, keeping a future expiry", async () => {
     const db = fakeRecipientDb();
     db.suppressions.push(
@@ -733,7 +759,13 @@ describe("recipient-resolver — activeSuppressions", () => {
     expect(db.captured.find((c) => isRead(c))?.sql).toContain("channel = $2");
   });
 
-  it("drops a row that fails SuppressionRecordSchema rather than throwing", async () => {
+  it("refuses the whole read rather than returning the rows it could parse", async () => {
+    // This previously returned the valid rows and dropped the rest, which reads as reasonable until you
+    // ask what a dropped suppression means: the address it named becomes deliverable again. Partial
+    // success is the wrong shape for a blocklist — there is no safe way to use two thirds of one.
+    //
+    // The blast radius is one tenant's sweep (`drainAllTenants` catches per tenant and continues) and it
+    // retries next cycle, so a bad row delays that tenant's mail instead of misdirecting it.
     const db = fakeRecipientDb();
     db.suppressions.push(
       suppressionRow({ suppression_id: "supp_bad0000001", reason: "made_up_reason" }),
@@ -741,8 +773,9 @@ describe("recipient-resolver — activeSuppressions", () => {
       suppressionRow(),
     );
     const resolver = new PostgresRecipientResolver(db.conn);
-    const records = await resolver.activeSuppressions(TENANT_A, "email", NOW);
-    expect(records.map((r) => r.id)).toEqual(["supp_hardbounce01"]);
+    await expect(resolver.activeSuppressions(TENANT_A, "email", NOW)).rejects.toThrow(
+      /refusing to deliver/,
+    );
   });
 
   it("carries optional notes through and normalizes a Date-valued applied_at", async () => {

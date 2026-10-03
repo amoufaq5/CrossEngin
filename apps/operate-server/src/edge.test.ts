@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { asModuleWorker, buildEdgeFetchHandler, fetchToRaw } from "./edge.js";
+import { RequestBodyTooLargeError } from "./request-body-limit.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";
 
@@ -50,6 +51,38 @@ describe("fetchToRaw", () => {
     const { body } = await fetchToRaw(postReq("/v1/products", "k", { a: 1 }));
     expect(body).not.toBeNull();
     expect(JSON.parse(new TextDecoder().decode(body!))).toEqual({ a: 1 });
+  });
+
+  it("refuses a body over the cap instead of buffering it", async () => {
+    // This path called `request.arrayBuffer()` with no limit, so the 10 MiB control existed only on
+    // the Node listener — and the edge is the surface actually exposed to the internet.
+    const body = new Uint8Array(4096).fill(0x61);
+    const request = new Request("https://api.example.com/v1/products", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    await expect(fetchToRaw(request, 1024)).rejects.toThrow(RequestBodyTooLargeError);
+  });
+
+  it("answers an oversized request with a 413 problem document, not a 500", async () => {
+    const h = buildEdgeFetchHandler({
+      manifest,
+      apiKeys: [parseApiKeySpec(`k:store_manager:${TENANT}`)],
+      maxRequestBodyBytes: 1024,
+    });
+    const res = await h.fetch(
+      new Request("https://api.example.com/v1/products", {
+        method: "POST",
+        headers: { "x-api-key": "k", "content-type": "application/json" },
+        body: new Uint8Array(4096).fill(0x61),
+      }),
+    );
+    expect(res.status).toBe(413);
+    expect(res.headers.get("content-type")).toBe("application/problem+json");
+    const problem = (await res.json()) as { type: string; status: number };
+    expect(problem.type).toBe("https://crossengin.io/problems/payload-too-large");
+    expect(problem.status).toBe(413);
   });
 });
 

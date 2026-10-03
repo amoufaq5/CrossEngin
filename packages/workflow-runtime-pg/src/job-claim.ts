@@ -44,7 +44,12 @@ function int(v: unknown, fallback: number): number {
  * using `FOR UPDATE SKIP LOCKED` — so concurrent workers get disjoint batches and never execute the
  * same job twice. A job is claimable when it is unclaimed **or** its lease lapsed (so a crashed
  * worker's jobs are recovered). Executing a job flips its status out of `pending`
- * (running → completed/failed/dead-lettered/cancelled), removing it from the claim set. The worker
+ * (running → completed/failed/dead-lettered/cancelled), removing it from the claim set.
+ *
+ * A run with a recorded cancellation is **never** claimed: once `cancel_requested_at` is set the work
+ * must not start on a fresh worker, so the predicate excludes it rather than relying on a later check.
+ * That leaves such a run unclaimable, which is why `reapCancelledJobRuns` exists to finalize the ones
+ * no live worker is going to honour. The worker
  * connection is platform-scoped (RLS-bypassing), so one fleet serves every tenant; `tenant_id` rides
  * back per row. (The job worker + jobs execution engine that consume this queue substrate are the
  * follow-ups; this is the primitive they plug into.)
@@ -67,6 +72,7 @@ export async function claimDueJobs(
          FROM ${schema}.job_runs
         WHERE status = 'pending'
           AND started_at <= $1::timestamptz
+          AND cancel_requested_at IS NULL
           AND (claimed_by IS NULL OR claim_expires_at IS NULL OR claim_expires_at < $1::timestamptz)
         ORDER BY started_at ASC
         LIMIT $2

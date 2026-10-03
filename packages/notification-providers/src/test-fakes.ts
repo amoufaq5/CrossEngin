@@ -79,6 +79,16 @@ export function sendRequest(overrides: Partial<SendRequest> = {}): SendRequest {
   };
 }
 
+/**
+ * Shaped like a real FCM registration token: an instance id, a colon, then a long base64url body.
+ * Deliberately long enough to pass `looksLikeFcmRegistrationToken`, which a user id does not.
+ */
+export const TEST_FCM_REGISTRATION_TOKEN =
+  "dQw4w9WgXcQ:APA91bHShapeOnly-not-a-real-token_0123456789abcdefghijklmnopqrstuvwxyz";
+
+/** A test E.164 number, in the +1 555 range reserved for fiction. */
+export const TEST_E164_NUMBER = "+15551234567";
+
 /** 32 bytes, the minimum `hmacSha256Hex` is happy with and the length a deployment should use. */
 export const TEST_WEBHOOK_SECRET: Uint8Array = new Uint8Array(32).fill(7);
 

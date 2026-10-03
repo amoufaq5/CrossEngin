@@ -10,12 +10,8 @@ import {
   type IncidentDeclarationRequest,
   type IncidentDeclarer,
 } from "@crossengin/incident-response-runtime";
-import type { AlertChannelTarget, AlertPolicy } from "@crossengin/observability";
-import {
-  planIncidentDeclaration,
-  planPageDirective,
-  type PageDirective,
-} from "@crossengin/observability-runtime";
+import type { AlertChannelTarget } from "@crossengin/observability";
+import { planPageDirective, type PageDirective } from "@crossengin/observability-runtime";
 
 import { auditActor, auditEntry, type PostgresAuditEmitter } from "./audit-log-store.js";
 import type { IntegrityEscalationConfig } from "./integrity-escalation-config.js";
@@ -98,38 +94,11 @@ export interface IntegrityEscalationPlan {
   readonly page: PageDirective | null;
 }
 
-/**
- * Turns a compromised verdict into a declared incident and a page directive, reusing the same
- * pure planners the SLO enforcement loop uses so an auto-declared integrity incident is
- * indistinguishable in shape from an auto-declared availability one.
- */
-export function planIntegrityEscalation(
-  report: IntegrityProofReport,
-  opts: {
-    readonly incidentId: string;
-    readonly severity: IntegrityEscalationConfig["severity"];
-    readonly category: IntegrityEscalationConfig["category"];
-    readonly declaredBy: string;
-    readonly alertPolicy: AlertPolicy;
-  },
-): IntegrityEscalationPlan {
-  const scope = report.scope ?? "platform";
-  const incident = planIncidentDeclaration({
-    incidentId: opts.incidentId,
-    autoDeclaredFor: integrityIncidentKey(report.scope),
-    title: `Audit integrity compromised for ${scope}`,
-    severity: opts.severity,
-    category: opts.category,
-    surface: `audit-integrity/${scope}`,
-    nowIso: report.verifiedAt,
-    declaredBy: opts.declaredBy,
-    // Empty for the platform chain: `affectedTenantIds` names tenants, and the platform
-    // scope is not one.
-    affectedTenantIds: report.scope === null ? [] : [report.scope],
-    detail: formatIntegrityProof(report),
-  });
-  return { incident, page: planPageDirective(opts.alertPolicy, opts.severity, opts.incidentId) };
-}
+// `planIntegrityEscalation` lived here: it built an incident record around an id the *caller* invented,
+// which is the arrangement ADR-0293 replaced with the `IncidentDeclarer` seam — the declarer allocates
+// the id so the one on the row, in the log line and on the page is one string by construction. Nothing
+// had called this since; it is removed rather than left as public API that cannot be used correctly.
+// `IntegrityEscalationPlan` below stays, because the live escalator returns it.
 
 /** Where a page goes. Left to the caller — this app has no pager integration of its own. */
 export type PageSink = (page: PageDirective, incident: IncidentRecord) => void | Promise<void>;

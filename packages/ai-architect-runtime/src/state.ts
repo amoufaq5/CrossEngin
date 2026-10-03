@@ -4,6 +4,9 @@ interface MutableSessionState {
   tokensUsed: number;
   toolCallsThisTurn: number;
   toolCallsBySession: Record<string, number>;
+  /** Worst observed actual/estimate cost ratio; inflates this session's next estimate. */
+  estimateInflation: number;
+  sealedReason: string | null;
 }
 
 /**
@@ -19,7 +22,13 @@ export class SessionCostTracker {
   private sessionState(sessionId: string): MutableSessionState {
     let s = this.sessions.get(sessionId);
     if (s === undefined) {
-      s = { tokensUsed: 0, toolCallsThisTurn: 0, toolCallsBySession: {} };
+      s = {
+        tokensUsed: 0,
+        toolCallsThisTurn: 0,
+        toolCallsBySession: {},
+        estimateInflation: 1,
+        sealedReason: null,
+      };
       this.sessions.set(sessionId, s);
     }
     return s;
@@ -57,6 +66,33 @@ export class SessionCostTracker {
   /** Records `dollars` of spend against a tenant's monthly total. */
   recordDollars(tenantId: string, dollars: number): void {
     this.tenants.set(tenantId, (this.tenants.get(tenantId) ?? 0) + dollars);
+  }
+
+  /**
+   * The factor this session's next cost estimate should be multiplied by. Starts at 1
+   * and only ever rises, because an estimator caught being optimistic once on a given
+   * prompt shape will be optimistic again on the next turn of the same session.
+   */
+  estimateInflation(sessionId: string): number {
+    return this.sessions.get(sessionId)?.estimateInflation ?? 1;
+  }
+
+  /** Raises the session's inflation factor if `ratio` is worse than what is recorded. */
+  observeEstimateRatio(sessionId: string, ratio: number): void {
+    if (!Number.isFinite(ratio) || ratio <= 1) return;
+    const s = this.sessionState(sessionId);
+    if (ratio > s.estimateInflation) s.estimateInflation = ratio;
+  }
+
+  /** Seals a session: every later guard evaluation blocks. Fail closed, never reversed. */
+  seal(sessionId: string, reason: string): void {
+    const s = this.sessionState(sessionId);
+    if (s.sealedReason === null) s.sealedReason = reason;
+  }
+
+  /** Why this session is sealed, or `null` if it is not. */
+  sealedReason(sessionId: string): string | null {
+    return this.sessions.get(sessionId)?.sealedReason ?? null;
   }
 
   /** Drops a session's accumulated state (e.g. when the session ends). */

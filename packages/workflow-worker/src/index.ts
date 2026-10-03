@@ -1,6 +1,7 @@
 export * from "./types.js";
 export * from "./batch.js";
 export * from "./renew.js";
+export * from "./abort.js";
 export * from "./worker.js";
 export * from "./activity-types.js";
 export * from "./activity-batch.js";

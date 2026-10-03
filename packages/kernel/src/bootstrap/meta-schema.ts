@@ -14,8 +14,21 @@ const USER_FK: ColumnReference = {
   onDelete: "RESTRICT",
 };
 
+/**
+ * The tenant-isolation predicate every tenant-scoped table uses.
+ *
+ * The `NULLIF` is load-bearing and was measured, not reasoned about.
+ * `current_setting('app.current_tenant_id', true)` answers NULL only until the setting has been used
+ * once on a connection; after a transaction-local `set_config` ends, its reset value is the empty
+ * string. `NULL::UUID` is NULL, so the comparison is false and the row is invisible — the fail-closed
+ * answer we want. `''::UUID` **raises** `invalid input syntax for type uuid: ""`. So on any pooled
+ * connection that has already served one tenant, a query against a tenant-scoped table without a
+ * tenant context turned into an error instead of an empty result — which is the opposite of the
+ * platform invariant that an unresolvable identity yields an empty result set, and it failed in
+ * production while passing in a fresh psql session.
+ */
 const TENANT_ISOLATION_USING =
-  "tenant_id = current_setting('app.current_tenant_id', true)::UUID";
+  "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
 
 export const META_TENANTS: TableDefinition = {
   schema: "meta",
@@ -87,6 +100,18 @@ export const META_USERS: TableDefinition = {
       unique: { constraintName: "users_email_key" },
     },
     { name: "display_name", type: "TEXT" },
+    {
+      // Where a voice call or an SMS actually goes. Nullable, because most users have no number on
+      // file and a channel with no address must be refused, not guessed at — before this column the
+      // drain handed the voice sender an *email*, which Twilio answers with a 21211 that reads as a
+      // hard bounce and would have written a permanent suppression against our own misconfiguration.
+      //
+      // E.164 is enforced here rather than left to the sender: a number that cannot be dialled is
+      // worth rejecting at the write, and the check is the same shape the senders apply.
+      name: "phone_e164",
+      type: "TEXT",
+      check: "phone_e164 IS NULL OR phone_e164 ~ '^\\+[1-9][0-9]{6,14}$'",
+    },
     {
       name: "status",
       type: "TEXT",
@@ -324,6 +349,18 @@ export const META_AUDIT_LOG: TableDefinition = {
         name: "audit_log_tenant_isolation",
         using: TENANT_ISOLATION_USING,
       },
+      {
+        // The platform's own integrity checker reads every tenant's entries, and a verdict route
+        // answers for a tenant the caller is not. Both are reads, so the elevation is scoped to
+        // SELECT rather than left at the `ALL` default: splitting it off is what stops the same
+        // flag also satisfying an INSERT's WITH CHECK and letting an elevated session forge an
+        // entry into another tenant's chain. The flag is `app.platform_audit`, shared with
+        // `meta.audit_integrity_verdicts` — reading the chain and reading the verdict about it are
+        // one privilege.
+        name: "audit_log_platform_audit_read",
+        command: "SELECT",
+        using: "current_setting('app.platform_audit', true) = 'on'",
+      },
     ],
   },
 };
@@ -547,6 +584,22 @@ export const META_JOB_RUNS: TableDefinition = {
     { name: "error", type: "JSONB" },
     { name: "claimed_by", type: "TEXT" },
     { name: "claim_expires_at", type: "TIMESTAMPTZ" },
+    // `cancel_requested_at` *is* the cancellation: it outlives the process that asked, it is what the
+    // claim predicate excludes on so a cancelled run is never handed to a worker, and it is what the
+    // finalize fail-closes against so a worker may only cancel what someone durably requested.
+    { name: "cancel_requested_at", type: "TIMESTAMPTZ" },
+    // TEXT, not a UUID FK to meta.users: a scheduler cancelling a run is not a user. The fourth
+    // instance of the same finding (ADR-0289, ADR-0302) — a column narrower than what writes it.
+    { name: "cancel_requested_by", type: "TEXT" },
+    { name: "cancel_reason", type: "TEXT" },
+    {
+      // Which guarantee was actually met, on the row, so the promise is readable from the data rather
+      // than inferred from logs. `cooperative_abort` is the only one that implies a handler had begun.
+      name: "cancelled_at_checkpoint",
+      type: "TEXT",
+      check:
+        "cancelled_at_checkpoint IS NULL OR cancelled_at_checkpoint IN ('before_claim', 'before_handler', 'cooperative_abort', 'lease_reaped')",
+    },
   ],
   primaryKey: ["id"],
   uniqueConstraints: [
@@ -557,6 +610,13 @@ export const META_JOB_RUNS: TableDefinition = {
     { name: "idx_job_runs_job_id", columns: ["tenant_id", "job_id"] },
     { name: "idx_job_runs_status", columns: ["tenant_id", "status"] },
     { name: "idx_job_runs_due", columns: ["status", "started_at"] },
+    {
+      // Backs the reaper, which sweeps on every claim poll. Partial, because the rows it wants are a
+      // vanishing fraction of the table.
+      name: "idx_job_runs_cancel_requested",
+      columns: ["status"],
+      where: "cancel_requested_at IS NOT NULL",
+    },
   ],
   rls: {
     enabled: true,
@@ -1295,11 +1355,14 @@ export const META_FEATURE_FLAGS: TableDefinition = {
       // round trip would not return what was stored. Its sibling
       // `feature_flag_kill_switches.overridden_value_json` is TEXT for the same reason.
       //
-      // The *name* stays `default_value` deliberately, though `default_value_json` would read
-      // better: the reconciler has no concept of a rename, so renaming would add the new column and
-      // report the old one as undeclared without dropping it — leaving a `NOT NULL` column with no
-      // default that every insert would then fail on (ADR-0291 refuses to drop or loosen).
-      name: "default_value",
+      // Named for what it holds, matching the contract's `defaultValueJson` and its sibling
+      // `killed_value_json`. It was `default_value` only because the reconciler had no concept of a
+      // rename — declaring the better name would have added a second column and reported the old one
+      // as undeclared without dropping it, leaving a `NOT NULL` column with no default that every
+      // insert then failed on. `renamedFrom` is the mechanism that makes it safe: a guarded
+      // `RENAME COLUMN` on an existing database, and nothing at all on a fresh one.
+      name: "default_value_json",
+      renamedFrom: "default_value",
       type: "TEXT",
       notNull: true,
     },
@@ -1382,7 +1445,7 @@ export const META_FEATURE_FLAGS: TableDefinition = {
         // intent, so opposite policy.
         name: "feature_flags_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -3126,7 +3189,7 @@ export const META_COST_ATTRIBUTION: TableDefinition = {
     policies: [
       {
         name: "cost_attribution_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+        using: "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -3194,7 +3257,7 @@ export const META_COST_BUDGETS: TableDefinition = {
     policies: [
       {
         name: "cost_budgets_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+        using: "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -4857,7 +4920,7 @@ export const META_SSO_PROVIDERS: TableDefinition = {
       {
         name: "sso_providers_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -5223,7 +5286,7 @@ export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
       {
         name: "notification_templates_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -5324,7 +5387,17 @@ export const META_NOTIFICATION_SUPPRESSIONS: TableDefinition = {
         "reason IN ('hard_bounce', 'soft_bounce_exceeded', 'spam_complaint', 'manual_block', 'unsubscribe', 'do_not_contact_register', 'regulatory_block')",
     },
     { name: "applied_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
-    { name: "applied_by", type: "UUID", references: USER_FK },
+    {
+      // `user:<uuid>` / `system:<slug>` / `provider:<slug>`, not a UUID FK to meta.users — a bounce
+      // webhook has no user behind it, so every automatically-recorded suppression wrote NULL and "SES
+      // told us" was unrepresentable. A *structured* string rather than free text like
+      // `incidents.declared_by`, because a contract rule branches on it: `manual_block` must name a
+      // human, and free text would let `system:ses` satisfy that.
+      name: "applied_by",
+      type: "TEXT",
+      check:
+        "applied_by IS NULL OR applied_by ~ '^(user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|system:[a-z][a-z0-9_-]{0,62}|provider:[a-z][a-z0-9_-]{0,62})$'",
+    },
     { name: "expires_at", type: "TIMESTAMPTZ" },
     { name: "source_delivery_id", type: "UUID" },
     { name: "notes", type: "TEXT" },
@@ -5424,6 +5497,19 @@ export const META_NOTIFICATION_DISPATCHES: TableDefinition = {
       type: "CHAR(64)",
       notNull: true,
       check: "variables_sha256 ~ '^[0-9a-f]{64}$'",
+    },
+    {
+      // The hash of what a notice *is* — tenant, template, locale, channel, category, audience,
+      // variables — so the same logical notice raised twice can be recognised. Deliberately excludes
+      // every timestamp and the idempotency key: the key is unique per call by construction, so
+      // including it would make dedup a no-op, and the two mechanisms answer different questions
+      // ("this request twice" versus "this notice twice").
+      //
+      // Nullable because every existing row predates it, and a NOT NULL with no default is exactly the
+      // case ADR-0291 cannot reconcile on a populated table.
+      name: "dedup_sha256",
+      type: "TEXT",
+      check: "dedup_sha256 IS NULL OR dedup_sha256 ~ '^[0-9a-f]{64}$'",
     },
     { name: "correlation_id", type: "TEXT" },
     {
@@ -5826,7 +5912,7 @@ export const META_ACCESS_REVIEW_TEMPLATES: TableDefinition = {
       {
         name: "access_review_templates_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -6559,7 +6645,7 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
       {
         name: "workflow_definitions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7236,7 +7322,7 @@ export const META_LINEAGE_NODES: TableDefinition = {
       {
         name: "lineage_nodes_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7356,7 +7442,7 @@ export const META_LINEAGE_EDGES: TableDefinition = {
       {
         name: "lineage_edges_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7467,7 +7553,7 @@ export const META_PROVENANCE_RECORDS: TableDefinition = {
       {
         name: "provenance_records_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7876,7 +7962,7 @@ export const META_RATE_LIMIT_POLICIES: TableDefinition = {
       {
         name: "rate_limit_policies_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -7952,7 +8038,7 @@ export const META_QUOTA_DEFINITIONS: TableDefinition = {
       {
         name: "quota_definitions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8158,7 +8244,7 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
       {
         name: "rate_limit_decisions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8268,7 +8354,7 @@ export const META_RATE_LIMIT_EXCEPTIONS: TableDefinition = {
       {
         name: "rate_limit_exceptions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8343,7 +8429,7 @@ export const META_THROTTLE_EVENTS: TableDefinition = {
       {
         name: "throttle_events_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8647,7 +8733,7 @@ export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
       {
         name: "gateway_pipeline_executions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8720,7 +8806,7 @@ export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
       {
         name: "feature_flag_targeting_rules_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8833,7 +8919,7 @@ export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
       {
         name: "feature_flag_kill_switches_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -8932,7 +9018,7 @@ export const META_FEATURE_FLAG_EVALUATIONS: TableDefinition = {
       {
         name: "feature_flag_evaluations_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9037,7 +9123,7 @@ export const META_FEATURE_FLAG_CHANGES: TableDefinition = {
       {
         name: "feature_flag_changes_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9123,7 +9209,7 @@ export const META_CRYPTO_KEYS: TableDefinition = {
       {
         name: "crypto_keys_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9189,7 +9275,7 @@ export const META_CRYPTO_AUDIT: TableDefinition = {
       {
         name: "crypto_audit_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9500,7 +9586,7 @@ export const META_SLO_EVALUATIONS: TableDefinition = {
       {
         name: "slo_evaluations_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9590,7 +9676,7 @@ export const META_SLO_ENFORCEMENT_ACTIONS: TableDefinition = {
       {
         name: "slo_enforcement_actions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9646,7 +9732,7 @@ export const META_SLO_LATENCY_EVALUATIONS: TableDefinition = {
       {
         name: "slo_latency_evaluations_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9844,7 +9930,7 @@ export const META_DR_FAILOVER_EXECUTIONS: TableDefinition = {
       {
         name: "dr_failover_executions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9886,7 +9972,7 @@ export const META_DR_DRILL_EXECUTIONS: TableDefinition = {
       {
         name: "dr_drill_executions_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -9928,7 +10014,7 @@ export const META_DR_READINESS_SNAPSHOTS: TableDefinition = {
       {
         name: "dr_readiness_snapshots_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -10029,7 +10115,7 @@ export const META_CERTIFICATION_REPORTS: TableDefinition = {
       {
         name: "certification_reports_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -10081,7 +10167,7 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
       {
         name: "forensic_chain_entries_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -10123,7 +10209,7 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
       {
         name: "forensic_chain_checkpoints_tenant_or_platform",
         using:
-          "tenant_id IS NULL OR tenant_id = current_setting('app.current_tenant_id', true)::UUID",
+          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
       },
     ],
   },
@@ -10427,6 +10513,188 @@ export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
   },
 };
 
+/**
+ * One row per notice a person actually opened, so "unread" stops being a guess.
+ *
+ * Before this the inbox approximated unread by recency (ADR-0273, ADR-0278), which cannot distinguish
+ * "not read" from "read a while ago". First-read-wins on the unique tuple: `read_at` answers when you
+ * first saw a notice, not when you last looked at it, so an upsert here does nothing on conflict.
+ */
+export const META_NOTIFICATION_READ_STATES: TableDefinition = {
+  schema: "meta",
+  name: "notification_read_states",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    {
+      name: "read_state_id",
+      type: "TEXT",
+      notNull: true,
+      unique: { constraintName: "notification_read_states_read_state_id_key" },
+      check: "read_state_id ~ '^nrs_[A-Za-z0-9_-]{8,40}$'",
+    },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
+    {
+      name: "dispatch_id",
+      type: "UUID",
+      notNull: true,
+      references: {
+        schema: "meta",
+        table: "notification_dispatches",
+        column: "id",
+        onDelete: "CASCADE",
+      },
+    },
+    { name: "read_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      name: "source",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "source IN ('user_action', 'bulk_mark_read', 'digest_rollup', 'system_backfill')",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "notification_read_states_tenant_user_dispatch_key",
+      columns: ["tenant_id", "user_id", "dispatch_id"],
+    },
+  ],
+  indexes: [
+    { name: "idx_notification_read_states_user", columns: ["tenant_id", "user_id"] },
+    { name: "idx_notification_read_states_user_only", columns: ["user_id"] },
+    { name: "idx_notification_read_states_dispatch", columns: ["dispatch_id"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "notification_read_states_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+/**
+ * "I have read everything up to here", one row per viewer.
+ *
+ * Not an optimisation for mark-all-read: it is the only shape that can answer for notices the reader
+ * was never shown. Turning read state on in an existing deployment needs the backlog to read as read,
+ * and as individual rows that backfill is unbounded — hence `system_backfill` as a source.
+ */
+export const META_NOTIFICATION_READ_WATERMARKS: TableDefinition = {
+  schema: "meta",
+  name: "notification_read_watermarks",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "read_through_at", type: "TIMESTAMPTZ", notNull: true },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      name: "source",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "source IN ('user_action', 'bulk_mark_read', 'digest_rollup', 'system_backfill')",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "notification_read_watermarks_tenant_user_key",
+      columns: ["tenant_id", "user_id"],
+    },
+  ],
+  indexes: [{ name: "idx_notification_read_watermarks_user", columns: ["user_id"] }],
+  constraints: [
+    {
+      kind: "check",
+      name: "notification_read_watermarks_not_future_check",
+      // A watermark ahead of its own last write would claim the reader has read into the future.
+      expression: "read_through_at <= updated_at",
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "notification_read_watermarks_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
+/**
+ * A person's own quiet-hours window and timezone (ADR-0275 had tenant-wide only).
+ *
+ * Its own table rather than columns on `notification_preferences`, because that table is keyed
+ * `(tenant, user, category, channel)` and a window is per-user — storing it there would repeat it once
+ * per category/channel pair and let the copies disagree with each other.
+ *
+ * Every column is nullable because each field falls back to the tenant policy *independently*: a user
+ * who sets only a timezone keeps the tenant's window. The two-column CHECK is what stops half a window
+ * inheriting its other half and producing a span neither party asked for. An IANA timezone cannot be
+ * validated in SQL — only the contract can — so this column is deliberately only length-bounded.
+ */
+export const META_NOTIFICATION_USER_QUIET_HOURS: TableDefinition = {
+  schema: "meta",
+  name: "notification_user_quiet_hours",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
+    { name: "enabled", type: "BOOLEAN", notNull: true, default: "true" },
+    {
+      name: "start_time",
+      type: "TEXT",
+      check: "start_time IS NULL OR start_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'",
+    },
+    {
+      name: "end_time",
+      type: "TEXT",
+      check: "end_time IS NULL OR end_time ~ '^([01][0-9]|2[0-3]):[0-5][0-9]$'",
+    },
+    { name: "timezone", type: "TEXT", check: "timezone IS NULL OR length(timezone) <= 64" },
+    {
+      name: "behavior",
+      type: "TEXT",
+      check:
+        "behavior IS NULL OR behavior IN ('deliver_anyway', 'defer_to_morning', 'batch_until_morning', 'drop_silently')",
+    },
+    // NULL means "inherit the tenant's list"; an empty array means "override it to nothing". The two
+    // are different answers and the contract distinguishes them, so the column must too.
+    { name: "bypass_categories", type: "TEXT[]" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    {
+      name: "source",
+      type: "TEXT",
+      notNull: true,
+      check: "source IN ('user_set', 'admin_set', 'import')",
+    },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "notification_user_quiet_hours_tenant_user_key",
+      columns: ["tenant_id", "user_id"],
+    },
+  ],
+  indexes: [{ name: "idx_notification_user_quiet_hours_user", columns: ["user_id"] }],
+  constraints: [
+    {
+      kind: "check",
+      name: "notification_user_quiet_hours_window_pair_check",
+      // Half a window is not a window: the missing half would be inherited and produce a span the
+      // user never asked for.
+      expression: "(start_time IS NULL) = (end_time IS NULL)",
+    },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "notification_user_quiet_hours_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -10568,4 +10836,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_OPERATE_DESIGN_JOBS,
   META_NOTIFICATION_DIGEST_ITEMS,
   META_AUDIT_INTEGRITY_VERDICTS,
+  META_NOTIFICATION_READ_STATES,
+  META_NOTIFICATION_READ_WATERMARKS,
+  META_NOTIFICATION_USER_QUIET_HOURS,
 ];
