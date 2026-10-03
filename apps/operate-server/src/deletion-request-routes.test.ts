@@ -84,6 +84,8 @@ interface Harness {
   readonly reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }>;
   readonly strandedCalls: string[];
   readonly auditCalls: (number | undefined)[];
+  readonly escalated: string[];
+  readonly escalatedVerdicts: string[];
 }
 
 function harness(
@@ -107,6 +109,8 @@ function harness(
   const reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }> = [];
   const strandedCalls: string[] = [];
   const auditCalls: (number | undefined)[] = [];
+  const escalated: string[] = [];
+  const escalatedVerdicts: string[] = [];
   const ctx: DeletionRequestRoutesContext = {
     store: {
       submit: async (input): Promise<DeletionRequestLike> => {
@@ -146,6 +150,12 @@ function harness(
       },
     },
     reconcileRoles: new Set(["platform_admin"]),
+    escalate: async (finding): Promise<void> => {
+      escalated.push(finding.requestId);
+    },
+    escalateVerdict: async (result): Promise<void> => {
+      escalatedVerdicts.push(result.verdict);
+    },
     principalRoles: (p) => ({
       primaryRole: p === null ? "anonymous" : "platform_admin",
       secondaryRoles: [],
@@ -159,7 +169,17 @@ function harness(
     clock: () => new Date(AT),
     ...over,
   };
-  return { ctx, events, submits, transitions, reconciled, strandedCalls, auditCalls };
+  return {
+    ctx,
+    events,
+    submits,
+    transitions,
+    reconciled,
+    strandedCalls,
+    auditCalls,
+    escalated,
+    escalatedVerdicts,
+  };
 }
 
 const SUBMIT = "platform.deletion_requests.submit";
@@ -679,5 +699,55 @@ describe("unproven", () => {
   it("is the reconcile grant, and 501s when reconciliation is unwired", async () => {
     expect((await call(harness({ reconcileRoles: new Set(["sre"]) }).ctx, UNPROVEN)).status).toBe(403);
     expect((await call(harness({ reconciler: undefined }).ctx, UNPROVEN)).status).toBe(501);
+  });
+});
+
+describe("escalation from the routes (ADR-0324)", () => {
+  it("escalates each audit finding, even though a human triggered the look", async () => {
+    const h = harness({}, { findings: [findingOf(), findingOf({ requestId: "dreq_two12345678" })] });
+    await call(h.ctx, UNPROVEN);
+    // The audit exists to find a compromise the chain cannot see; one found warrants the incident
+    // regardless of who was looking, and the escalator is idempotent per episode.
+    expect(h.escalated).toEqual([REQ, "dreq_two12345678"]);
+  });
+
+  it("does not fail the audit when escalation throws", async () => {
+    const errors: string[] = [];
+    const h = harness(
+      {
+        escalate: async (): Promise<void> => {
+          throw new Error("incident store unreachable");
+        },
+        onRecordError: (_e, op) => errors.push(op),
+      },
+      { findings: [findingOf()] },
+    );
+    const res = await call(h.ctx, UNPROVEN);
+    expect(res.status).toBe(200);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("escalates a verdict reached through the reconcile route", async () => {
+    const h = harness({}, { verdict: verdictOf({ verdict: "evidence_unverified" }) });
+    await call(h.ctx, RECONCILE, { parsedBody: {} });
+    // A deployment may expose these routes without the scheduler (ADR-0321), in which case this is
+    // the only path that would ever see one.
+    expect(h.escalatedVerdicts).toEqual(["evidence_unverified"]);
+  });
+
+  it("records the stranded listing, which ADR-0323 flagged as its own inconsistency", async () => {
+    const h = harness();
+    await call(h.ctx, STRANDED);
+    expect(h.events[0]?.operation).toBe("platform.deletion_requests_stranded_read");
+    expect(h.events[0]?.tenantId).toBe(TENANT);
+    expect(h.events[0]?.detail).toBe("1 stranded");
+  });
+
+  it("refuses the stranded listing when the reader's tenant cannot be resolved", async () => {
+    const h = harness();
+    const res = await call(h.ctx, STRANDED, { principal: principal({ tenantId: null }) });
+    expect(res.status).toBe(503);
+    expect(res.body["error"]).toBe("audit_unrecordable");
+    expect(h.strandedCalls).toEqual([]);
   });
 });

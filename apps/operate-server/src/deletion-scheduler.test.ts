@@ -153,9 +153,12 @@ describe("DeletionScheduler — reconciliation", () => {
           if (behaviour.throws === true) throw new Error("evidence unreadable");
           return Array.from({ length: behaviour.repaired ?? 0 }, (_v, i) => ({
             requestId: `dreq_repaired1234${i.toString()}`,
+            tenantId: "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8",
             verdict: "completed_by_evidence",
             applied: true,
             tombstoneId: "tomb_aaaabbbbccccdddd",
+            tombstoneIds: ["tomb_aaaabbbbccccdddd"],
+            detail: null,
           }));
         },
       },
@@ -239,7 +242,15 @@ describe("DeletionScheduler — reconciliation", () => {
       runner: runner().runner,
       reconciler: {
         reconcileStranded: async () => [
-          { requestId: "dreq_pending12345", verdict: "too_recent", applied: false, tombstoneId: null },
+          {
+            requestId: "dreq_pending12345",
+            tenantId: "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8",
+            verdict: "too_recent",
+            applied: false,
+            tombstoneId: null,
+            tombstoneIds: [],
+            detail: null,
+          },
         ],
       },
       intervalMs: 1000,

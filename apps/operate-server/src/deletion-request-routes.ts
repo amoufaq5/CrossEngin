@@ -146,6 +146,7 @@ export const DELETION_REQUEST_REJECTED_OPERATION = "platform.deletion_request_re
 export const DELETION_REQUEST_READ_OPERATION = "platform.deletion_request_read";
 export const DELETION_REQUEST_RECONCILED_OPERATION = "platform.deletion_request_reconciled";
 export const DELETION_EVIDENCE_AUDITED_OPERATION = "platform.deletion_evidence_audited";
+export const DELETION_REQUESTS_STRANDED_READ_OPERATION = "platform.deletion_requests_stranded_read";
 
 export interface DeletionRequestEvent {
   readonly tenantId: string;
@@ -179,6 +180,18 @@ export interface DeletionRequestRoutesContext {
    * but authorising the inference from an *absence* of evidence is a judgement.
    */
   readonly reconcileRoles?: ReadonlySet<string>;
+  /**
+   * Declares an incident for a finding the chain cannot raise (ADR-0324). Absent ⇒ nothing is
+   * escalated from these routes, which is what a deployment without an alert policy gets.
+   */
+  readonly escalate?: (finding: EvidenceAuditLike) => Promise<void>;
+  /**
+   * The same, for a verdict reached through `POST .../{id}/reconcile`. Separate from `escalate`
+   * because the inputs genuinely differ — a finding always names a tombstone, a verdict need not —
+   * and because a deployment may expose these routes without running the scheduler (ADR-0321), in
+   * which case this is the only path that would ever see an `evidence_unverified`.
+   */
+  readonly escalateVerdict?: (result: ReconciliationLike) => Promise<void>;
   readonly deadlineDays?: number;
   readonly recordAction: DeletionRequestRecorder;
   readonly newRequestId?: () => string;
@@ -534,6 +547,15 @@ function buildStrandedHandler(ctx: DeletionRequestRoutesContext): Handler {
     }
     const reconciler = ctx.reconciler;
     if (reconciler === undefined) return json(501, { error: "reconciliation_unavailable" });
+    // Same rule as `unproven`: the listing spans tenants, `meta.audit_log.tenant_id` is NOT NULL, and
+    // an unrecordable privileged read is refused rather than served unaudited (ADR-0313).
+    const readerTenant = principal.tenantId;
+    if (readerTenant === null) {
+      return json(503, {
+        error: "audit_unrecordable",
+        detail: "this read is recorded against the reader's tenant, and none could be resolved",
+      });
+    }
     const now = (ctx.clock ?? ((): Date => new Date()))();
     let stranded: readonly DeletionRequestLike[];
     try {
@@ -551,6 +573,19 @@ function buildStrandedHandler(ctx: DeletionRequestRoutesContext): Handler {
         reconciliation: await reconciler.assess(request),
       })),
     );
+    // Recorded, which it was not before (ADR-0323 flagged its own inconsistency): this is a
+    // privileged read over which tenants' deletions are in doubt, exactly like `unproven`. Same rule
+    // for the reader's tenant, and the same refusal when none resolves.
+    await record(ctx, {
+      tenantId: readerTenant,
+      requestId: assessed[0]?.reconciliation.requestId ?? "-",
+      principalId: principal.principalId,
+      operation: DELETION_REQUESTS_STRANDED_READ_OPERATION,
+      status: assessed.length === 0 ? "none" : "stranded",
+      tombstoneId: null,
+      detail: `${assessed.length.toString()} stranded`,
+      at: now.toISOString(),
+    });
     return json(200, { data: assessed });
   };
 }
@@ -603,6 +638,17 @@ function buildUnprovenHandler(ctx: DeletionRequestRoutesContext): Handler {
       detail: `${findings.length.toString()} finding(s)`,
       at,
     });
+    // Escalated even though a human triggered the look. This audit's whole purpose is to find a
+    // compromise the chain cannot see, so one found gets an incident and a page regardless of who
+    // was looking — and the escalator is idempotent per episode, so re-running the audit does not
+    // declare again (ADR-0324).
+    for (const finding of findings) {
+      try {
+        await ctx.escalate?.(finding);
+      } catch (err) {
+        ctx.onRecordError?.(err, DELETION_EVIDENCE_AUDITED_OPERATION);
+      }
+    }
     return json(200, { findings, clean: findings.length === 0 });
   };
 }
@@ -655,6 +701,12 @@ function buildReconcileHandler(ctx: DeletionRequestRoutesContext): Handler {
       detail: result.applied ? `applied: ${result.verdict}` : `assessed: ${result.verdict}`,
       at,
     });
+
+    try {
+      await ctx.escalateVerdict?.(result);
+    } catch (err) {
+      ctx.onRecordError?.(err, DELETION_REQUEST_RECONCILED_OPERATION);
+    }
 
     let updated = request;
     if (result.applied) {

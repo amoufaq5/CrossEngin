@@ -164,6 +164,8 @@ export interface ServeOptions {
   readonly deletionRequestReconcileRoles: readonly string[];
   /** How long a request must be `in_progress` before an absence of evidence is read as "never committed" (ms, default 3600000). Presence of evidence is conclusive at any age. */
   readonly deletionStrandedAfterMs: number | null;
+  /** JSON escalation config ({severity?, category?, declaredBy?, alertPolicy}) — declares a sev1 and pages when a deletion proof does not verify, which is the one tamper the forensic chain cannot see. */
+  readonly deletionEscalationConfig: string | null;
   /** Days from submission to the Article 12(3) deadline (default 30, cap 90). Set per deployment rather than per request. */
   readonly deletionRequestDeadlineDays: number | null;
   /** Run verified deletion requests out of band every N ms (needs --tenant-deletion-routes' wiring). Off unless set; the first tick is one interval after boot, never at boot. */
@@ -288,6 +290,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const deletionRequestReadRoles: string[] = [];
   const deletionRequestReconcileRoles: string[] = [];
   let deletionStrandedAfterMs: number | null = null;
+  let deletionEscalationConfig: string | null = null;
   let deletionRequestDeadlineDays: number | null = null;
   let deletionRunnerMs: number | null = null;
   let deletionRunnerExecutedBy: string | null = null;
@@ -676,6 +679,13 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       }
       deletionRequestDeadlineDays = n;
       i += consumed();
+    } else if (
+      arg === "--deletion-escalation-config" ||
+      arg.startsWith("--deletion-escalation-config=")
+    ) {
+      deletionEscalationConfig = takeValue(arg, next, "--deletion-escalation-config");
+      i += consumed();
+      deletionRequestRoutes = true;
     } else if (arg === "--deletion-runner-ms" || arg.startsWith("--deletion-runner-ms=")) {
       const raw = takeValue(arg, next, "--deletion-runner-ms");
       const n = Number(raw);
@@ -983,6 +993,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     // name like the rest of this flow.
     deletionRequestReconcileRoles,
     deletionStrandedAfterMs,
+    deletionEscalationConfig,
     deletionRequestDeadlineDays,
     deletionRunnerMs,
     deletionRunnerExecutedBy,
@@ -1346,6 +1357,11 @@ Options:
   --deletion-stranded-after-ms <n>  How long a request must sit in_progress before an ABSENCE of
                        evidence is read as "never committed" (>=60000, default 3600000). A tombstone
                        naming the request is conclusive at any age; an absence never is
+  --deletion-escalation-config <file>  JSON ({severity?, category?, declaredBy?, alertPolicy}) —
+                       declares an incident and pages when a deletion proof does not verify or two
+                       tombstones name one request. These are the findings the forensic chain
+                       CANNOT raise, because nothing in it commits to a tombstone's scope. One
+                       incident per request, closed out when the finding resolves
   --deletion-request-deadline-days <n>  Days from submission to the Article 12(3) deadline
                        (default 30, max 90). Per deployment, not per request
   --deletion-runner-ms <n>  Run verified deletion requests out of band every n ms (>=1000). The

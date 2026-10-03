@@ -123,6 +123,8 @@ import {
   newTombstoneId,
 } from "./tenant-deletion-routes.js";
 import { buildDeletionRequestRoutes, newRequestId } from "./deletion-request-routes.js";
+import { DeletionEscalationConfigSchema } from "./deletion-escalation-config.js";
+import { DeletionEvidenceEscalator } from "./deletion-evidence-escalation.js";
 import {
   DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
@@ -859,6 +861,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     }
   }
+  // Escalation for the two deletion-evidence findings the forensic chain cannot raise (ADR-0324).
+  // Built once and shared by the routes and the scheduler, so one tampered row examined by both is
+  // still one episode — the episode key is the request, and `findOpen` is what enforces it.
+  let deletionEscalator: DeletionEvidenceEscalator | null = null;
+  if (options.deletionEscalationConfig !== null && conn !== undefined) {
+    const parsed = DeletionEscalationConfigSchema.parse(
+      JSON.parse(await readFile(options.deletionEscalationConfig, "utf8")) as unknown,
+    );
+    deletionEscalator = new DeletionEvidenceEscalator({
+      config: parsed,
+      // Store-backed, with no fallback declarer: unlike the integrity escalator's one-shot finding
+      // (ADR-0304), this one is re-derived from the same two rows on the next pass, so a failed
+      // declaration is retried rather than lost and an in-process id cannot collide with a stored
+      // one for no gain (ADR-0293's reasoning for the SLO loop).
+      declarer: new PostgresIncidentDeclarer({ conn }),
+      page: (page, incident) =>
+        console.error(
+          `[deletion-evidence] PAGE ${incident.id} severity=${incident.severity}` +
+            ` channels=${page.channels.map((c) => c.kind).join(",")}`,
+        ),
+      onError: (err, requestId) =>
+        console.error(`[deletion-evidence] escalation error for ${requestId}`, err),
+    });
+  }
   // The handle (ADR-0321). ADR-0320 left the deletion synchronous and named the cost: a large
   // tenant's deletion can outlast a proxy timeout, after which the client never learns the receipt it
   // is obliged to keep. These four routes let a caller hold a request instead of an open connection,
@@ -919,6 +945,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ...(requestReconciler !== undefined ? { reconciler: requestReconciler } : {}),
           ...(options.deletionRequestReconcileRoles.length > 0
             ? { reconcileRoles: new Set(options.deletionRequestReconcileRoles) }
+            : {}),
+          ...(deletionEscalator !== null
+            ? ((escalator: DeletionEvidenceEscalator) => ({
+                escalate: async (finding): Promise<void> => {
+                  const outcome = await escalator.onAuditFinding(finding);
+                  if (outcome.action !== "none") {
+                    console.error(
+                      `[deletion-evidence] ${finding.requestId} → ${outcome.action}` +
+                        ` ${outcome.incidentId ?? "-"}`,
+                    );
+                  }
+                },
+                escalateVerdict: async (result): Promise<void> => {
+                  const outcome = await escalator.onVerdict(result);
+                  if (outcome.action !== "none") {
+                    console.error(
+                      `[deletion-evidence] ${result.requestId} → ${outcome.action}` +
+                        ` ${outcome.incidentId ?? "-"}`,
+                    );
+                  }
+                },
+              }))(deletionEscalator)
             : {}),
           ...(options.deletionRequestReadRoles.length > 0
             ? { readRoles: new Set(options.deletionRequestReadRoles) }
@@ -1722,6 +1770,23 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ? { batchSize: options.deletionRunnerBatchSize }
           : {}),
         onError: (err) => console.error("[platform] deletion runner tick failed", err),
+        ...(deletionEscalator !== null
+          ? ((escalator: DeletionEvidenceEscalator) => ({
+              onEscalate: async (results): Promise<void> => {
+                for (const result of results) {
+                  const outcome = await escalator.onVerdict(result);
+                  // `adopted` is the steady state for an unresolved finding and would otherwise be
+                  // logged every tick; only a transition is worth a line.
+                  if (outcome.action === "declared" || outcome.action === "closed_out") {
+                    console.error(
+                      `[deletion-evidence] ${result.requestId} → ${outcome.action}` +
+                        ` ${outcome.incidentId ?? "-"}${outcome.closeOut === null ? "" : ` (${outcome.closeOut})`}`,
+                    );
+                  }
+                }
+              },
+            }))(deletionEscalator)
+          : {}),
         onReconciled: (results) => {
           for (const r of results) {
             console.log(

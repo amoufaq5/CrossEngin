@@ -874,3 +874,14 @@ describe("parseServeArgs — reconciling a stranded deletion", () => {
     expect(() => parseServeArgs([...PG, "--deletion-stranded-after-ms", "nope"])).toThrow();
   });
 });
+
+describe("parseServeArgs — deletion-evidence escalation", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off unless a config is given, and implies the routes", () => {
+    expect(parseServeArgs([...PG, "--deletion-request-routes"]).deletionEscalationConfig).toBeNull();
+    const opts = parseServeArgs([...PG, "--deletion-escalation-config=/tmp/esc.json"]);
+    expect(opts.deletionEscalationConfig).toBe("/tmp/esc.json");
+    expect(opts.deletionRequestRoutes).toBe(true);
+  });
+});

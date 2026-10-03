@@ -40,9 +40,12 @@ export interface StrandedReconcilerLike {
   reconcileStranded(limit?: number): Promise<
     readonly {
       readonly requestId: string;
+      readonly tenantId: string;
       readonly verdict: string;
       readonly applied: boolean;
       readonly tombstoneId: string | null;
+      readonly tombstoneIds: readonly string[];
+      readonly detail: string | null;
     }[]
   >;
 }
@@ -64,6 +67,24 @@ export interface DeletionSchedulerOptions {
   readonly onReconciled?: (
     results: readonly { readonly requestId: string; readonly verdict: string }[],
   ) => void;
+  /**
+   * Given **every** result the pass produced, not just the applied ones, and awaited (ADR-0324).
+   *
+   * Escalation needs the verdicts that were *not* applied — `evidence_unverified` is the whole point
+   * — so it cannot share `onReconciled`, whose rule is the opposite: log only what was written. It is
+   * idempotent per episode by construction, which is what makes handing it the same finding on every
+   * tick harmless.
+   */
+  readonly onEscalate?: (
+    results: readonly {
+      readonly requestId: string;
+      readonly tenantId: string;
+      readonly verdict: string;
+      readonly tombstoneId: string | null;
+      readonly tombstoneIds: readonly string[];
+      readonly detail: string | null;
+    }[],
+  ) => void | Promise<void>;
 }
 
 /**
@@ -116,6 +137,9 @@ export class DeletionScheduler {
       // the row exists — that is what `GET /v1/platform/deletion-requests/stranded` is for.
       const repaired = assessed.filter((r) => r.applied);
       if (repaired.length > 0) this.opts.onReconciled?.(repaired);
+      // Separately again, and awaited: a finding that warrants an incident must not be lost because
+      // the logging callback threw, and escalation is given every result rather than the written ones.
+      if (assessed.length > 0) await this.opts.onEscalate?.(assessed);
     } catch (err) {
       this.opts.onError?.(err);
     }

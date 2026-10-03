@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 318 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 319 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~11,964 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~11,987 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -673,7 +673,12 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `GET .../unproven`, the audit of *completed* requests whose proof no longer stands up — findings only,
   recorded against the reader's own tenant and **refused** when none resolves (ADR-0313), and recorded
   even when clean, because "we checked and found nothing" cannot be claimed from the absence of a log
-  line (ADR-0323);
+  line (ADR-0323) — and both directions **escalate** (`--deletion-escalation-config`), declaring a paging
+  `sev1` for the one tamper class the forensic chain is structurally unable to raise, **one incident per
+  request** (`findOpen` on `deletion_evidence:<requestId>`, so a three-second scheduler adopts rather than
+  re-declares), cancelled when the evidence is put right, and with **no fallback declarer** — the opposite
+  of the integrity escalator's choice, because this finding is re-derived every tick and so is retried
+  rather than lost (ADR-0324);
   **tenant-schema erasure** (`--tenant-erasure-routes`) — a read-only survey route so a destructive act
   is not approved blind, then a drop whose `executedBy` is the credential and whose `approvedBy` is the
   body and must differ, with the tenant id repeated as `confirmTenantId` so an irreversible action is not
@@ -969,11 +974,14 @@ opened them.
   automatic. `never_committed` is an inference from an absence and still needs a human to authorise it
   through `POST .../{id}/reconcile`, and `ambiguous_evidence` is never applied at all. **And a scope tamper
   is invisible to the forensic chain** (ADR-0323): nothing in the chain commits to the scope, so editing it
-  leaves every digest and the chain entry byte-identical. `verifyStoredEvidence` catches it and refuses to
-  complete a request from it, but **nothing escalates** — `evidence_unverified` and `ambiguous_evidence`
-  are findings the chain cannot raise and no incident is declared for either, which is the most valuable
-  remaining follow-up in this line. Nothing *schedules* `auditCompleted` either: a tamper is found when
-  somebody loads `GET .../unproven`, and `GET .../stranded` is not even recorded while `.../unproven` is.
+  leaves every digest and the chain entry byte-identical. `verifyStoredEvidence` catches it, refuses to
+  complete a request from it, and (ADR-0324) declares a paging `sev1` for it — the finding the chain
+  cannot raise now has the alarm the chain cannot provide, one incident per request and cancelled on
+  recovery. What is left there: every finding is graded `sev1` with no per-defect gradation, a
+  `PageDirective` is still only *logged* (here and in the integrity escalator — nothing in the platform
+  delivers one), the escalation leaves no anchored `meta.audit_log` row of its own the way
+  `IntegrityEscalator`'s does, and nothing *schedules* `auditCompleted`, so the reverse direction
+  escalates only when a human loads `GET .../unproven`.
   There is also no tooling to *resolve* an unverified tombstone (the attestations beside it are enough to
   recompute what the scope should have been, but rewriting a proof is not something to automate blindly),
   and a tombstone with no `relatedDeletionRequestId` — every one the synchronous route of ADR-0320 writes —
@@ -1039,7 +1047,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 318 records; 239 Accepted, 79 Proposed (the
+title or status change cannot drift. 319 records; 240 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
