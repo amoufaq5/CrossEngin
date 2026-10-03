@@ -852,7 +852,10 @@ opened them.
   honestly account for. What is still missing is the *flow*: no deletion-request store, no scheduler, and
   nothing that builds a `TombstoneRecord` from the scope — so the proof is issued by hand. Object
   storage, backup generations, search indexes and cache keys remain unaccounted for, each needing its own
-  erasure with its own measurement.
+  erasure with its own measurement. And the ordering against `meta.tenants` is **unenforced**: the audit
+  record's `tenant_id` is a foreign key to that table, so retiring the tenant row *first* makes every
+  erasure unrecordable — the 500 fires, visibly, and the data is gone with no provenance. Erase, record,
+  then retire the row.
 - **The AI cost estimator is a heuristic on the input side** (ADR-0311). `maxTokens` bounds the output by
   construction; the input is `ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic because the
   number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only

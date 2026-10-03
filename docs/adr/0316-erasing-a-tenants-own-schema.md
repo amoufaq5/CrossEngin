@@ -201,12 +201,26 @@ that *earns* the transition; it is not the transition.
 - `--tenant-erasure-routes` is the **third** flag that had to be added to `needsAuditEmitter`
   (ADR-0288, ADR-0313). The named predicate and its per-flag test caught it this time, which is what
   it was extracted for.
+- **The erasure must run before the tenant's `meta.tenants` row is removed.** Found live: the audit
+  record lands in `meta.audit_log`, whose `tenant_id` is a foreign key to `meta.tenants`, and the
+  forensic anchor carries the same reference. With the tenant row already gone the record fails
+  `23503` — so the erasure succeeds, the 500 `erasure_unrecorded` path fires, and the data is destroyed
+  with no provenance. That is the designed behaviour in a bad situation and it is also an ordering
+  nobody had written down: erase the schema, record it, *then* retire the tenant row.
 - Verified live on a throwaway cluster against a populated tenant schema with a composite foreign key
   and RLS: the tenant's own primary keys and foreign key are **not** collateral; a view *and* a
   materialised view in `public` **are**, and both survive the probe's rollback with the tenant's 25
   rows intact; the erasure refuses while they exist and refuses `executedBy === approvedBy`; after
   they are dropped it erases 26 rows / 65,536 bytes, reports that scope, and a fresh query confirms the
   schema gone; a second call reports `alreadyAbsent`; `meta` (144 tables) and `public` are untouched.
+- Verified live end to end through the real server (`--tenant-erasure-routes
+  --tenant-erasure-role platform_admin`): the survey reports `erasable: true`, then `false` naming
+  `view public.leaky` once one exists; the erase is refused `409` with an empty scope and the tenant's
+  25 rows intact; after the view is dropped it returns `200` with the scope
+  (26 rows / 65,536 bytes) and the schema is confirmed gone. `meta.audit_log` then holds **three
+  anchored rows** — `platform.tenant_schema_surveyed`, `…_erase_refused` and `…_erased` — each carrying
+  the schema, the table list, the figures and the approver, all with a chain sequence number. An
+  ungranted role is refused `403`, and a `confirmTenantId` that disagrees with the path is `400`.
 
 ## Open questions
 
@@ -216,6 +230,7 @@ that *earns* the transition; it is not the transition.
 | Object storage, backup generations, search indexes and cache keys are still unaccounted for in a `DeletionScope`. Each needs its own erasure with its own measurement. | amoufaq5 | _unscheduled_ |
 | A refused erasure leaves an operator to drop the collateral by hand. Should the refusal offer the `DROP` statements, as ADR-0290's `unreconciled` does? | amoufaq5 | _unscheduled_ |
 | `count(*)` over a large tenant is slow and holds a transaction open. A bounded or sampled mode would weaken the proof; is that ever the right trade? | amoufaq5 | _unscheduled_ |
+| Nothing enforces the ordering against `meta.tenants`. A deployment that retires the tenant row first destroys the schema with no provenance, visibly (500) but irreversibly. Should the erasure refuse when the tenant row is already gone? | amoufaq5 | _unscheduled_ |
 
 ## References
 
