@@ -163,6 +163,56 @@ function qualify(schema: string, relations: readonly ErasureRelationLike[]): rea
   return relations.map((r) => `${schema}.${r.table}`);
 }
 
+/**
+ * The erasure as a `DeletionAttestation` for `@crossengin/tenant-lifecycle`'s assembler, in exactly
+ * the shape it parses.
+ *
+ * Emitted rather than left to the caller because transcribing it by hand is how ADR-0316's defect
+ * happened one level up: a scope assembled from memory rather than from what a subsystem reported.
+ * Shaped structurally instead of importing the type, like every mirror in this module, so the route
+ * layer keeps no dependency on the contracts package.
+ *
+ * `outcome` distinguishes the two honest answers: `erased` carries figures, `nothing_to_erase` carries
+ * none and is what an already-absent schema reports — the assembler refuses a scope on anything but
+ * `erased`, so there is no way to report figures for a deletion that did not happen.
+ */
+export function erasureAttestation(
+  erasure: SchemaErasureLike,
+  attestedBy: string,
+): {
+  readonly subsystem: "tenant_schema";
+  readonly outcome: "erased" | "nothing_to_erase";
+  readonly scope?: {
+    readonly schemas: readonly string[];
+    readonly tables: readonly string[];
+    readonly rowCount: number;
+    readonly storageBytes: number;
+  };
+  readonly attestedBy: string;
+  readonly attestedAt: string;
+} {
+  if (!erasure.erased) {
+    return {
+      subsystem: "tenant_schema",
+      outcome: "nothing_to_erase",
+      attestedBy,
+      attestedAt: erasure.erasedAt,
+    };
+  }
+  return {
+    subsystem: "tenant_schema",
+    outcome: "erased",
+    scope: {
+      schemas: [erasure.schema],
+      tables: qualify(erasure.schema, erasure.erasedRelations),
+      rowCount: erasure.rowCount,
+      storageBytes: erasure.storageBytes,
+    },
+    attestedBy,
+    attestedAt: erasure.erasedAt,
+  };
+}
+
 /** The `DeletionScope` fields this erasure accounts for, in the shape a tombstone takes. */
 export function erasureScopeView(erasure: SchemaErasureLike): {
   readonly schemas: readonly string[];
@@ -323,6 +373,9 @@ function buildEraseHandler(ctx: TenantErasureRoutesContext): Handler {
       erasedAt: erasure.erasedAt,
       statements: erasure.statements,
       scope: erasureScopeView(erasure),
+      // Ready to POST into the tombstone assembler without transcription: a scope retyped by hand is
+      // a scope that can disagree with what was destroyed.
+      attestation: erasureAttestation(erasure, `operate-server/tenant-erasure:${executedBy}`),
     });
   };
 }

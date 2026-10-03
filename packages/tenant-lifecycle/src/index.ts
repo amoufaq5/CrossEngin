@@ -5,3 +5,4 @@ export * from "./gdpr-deletion.js";
 export * from "./exports.js";
 export * from "./tombstones.js";
 export * from "./tombstone-proof.js";
+export * from "./tombstone-assembly.js";

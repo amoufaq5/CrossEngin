@@ -8,6 +8,7 @@ import {
   TENANT_SCHEMA_ERASE_REFUSED_OPERATION,
   TENANT_SCHEMA_SURVEY_OPERATION,
   buildTenantErasureRoutes,
+  erasureAttestation,
   erasureScopeView,
   type SchemaErasureLike,
   type SchemaSurveyLike,
@@ -409,6 +410,42 @@ describe("the erase route", () => {
     const res = await call(cashier.ctx, ERASE, { parsedBody: BODY });
     expect(res.status).toBe(403);
     expect(cashier.eraseCalls).toEqual([]);
+  });
+});
+
+describe("erasureAttestation", () => {
+  it("reports an erasure in the shape the tombstone assembler parses", () => {
+    expect(erasureAttestation(erasureOf(), "op/1")).toEqual({
+      subsystem: "tenant_schema",
+      outcome: "erased",
+      scope: {
+        schemas: [SCHEMA],
+        tables: [`${SCHEMA}.invoice`, `${SCHEMA}.line`],
+        rowCount: 52,
+        storageBytes: 12288,
+      },
+      attestedBy: "op/1",
+      attestedAt: "2026-10-03T00:00:00.000Z",
+    });
+  });
+
+  it("reports nothing_to_erase with NO scope, so figures cannot describe a non-deletion", () => {
+    // The assembler refuses a scope on anything but `erased`, so emitting one here would be refused
+    // rather than believed — but not emitting it is what makes the attestation honest at the source.
+    for (const e of [erasureOf({ erased: false }), erasureOf({ erased: false, alreadyAbsent: true })]) {
+      const a = erasureAttestation(e, "op/1");
+      expect(a.outcome).toBe("nothing_to_erase");
+      expect(a.scope).toBeUndefined();
+    }
+  });
+
+  it("is carried on the erase response, ready to POST without transcription", async () => {
+    const { ctx } = harness();
+    const res = await call(ctx, ERASE, { parsedBody: BODY });
+    const attestation = res.body["attestation"] as Record<string, unknown>;
+    expect(attestation["subsystem"]).toBe("tenant_schema");
+    expect(attestation["outcome"]).toBe("erased");
+    expect(String(attestation["attestedBy"])).toContain(CALLER);
   });
 });
 
