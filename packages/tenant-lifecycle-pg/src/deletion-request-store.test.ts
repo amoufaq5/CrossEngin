@@ -233,6 +233,23 @@ describe("read and dueForExecution", () => {
     expect(select?.params).toEqual(["2026-10-03T13:00:00.000Z", 5]);
   });
 
+  it("lists completed requests that name a tombstone, newest first", async () => {
+    const { conn, calls } = fakePg([
+      rowOf({
+        status: "completed",
+        in_progress_at: "2026-10-03T00:00:00.000Z",
+        completed_at: "2026-10-03T01:00:00.000Z",
+        completion_sha256: SHA,
+        tombstone_id: TOMB,
+      }),
+    ]);
+    await new PostgresDeletionRequestStore(conn).completedWithTombstone(9);
+    const select = calls.find((c) => c.sql.includes("status = 'completed'"));
+    expect(select?.sql).toContain("tombstone_id IS NOT NULL");
+    expect(select?.sql).toContain("ORDER BY completed_at DESC, request_id");
+    expect(select?.params).toEqual([9]);
+  });
+
   it("clamps the limit into a sane band", async () => {
     const { conn, calls } = fakePg();
     const store = new PostgresDeletionRequestStore(conn);

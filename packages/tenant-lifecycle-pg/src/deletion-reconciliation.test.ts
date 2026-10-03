@@ -1,12 +1,18 @@
-import type { GdprDeletionRequest } from "@crossengin/tenant-lifecycle";
+import {
+  assembleTombstone,
+  type DeletionAttestation,
+  type GdprDeletionRequest,
+} from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_STRANDED_AFTER_MS,
   DeletionReconciler,
   RECONCILIATION_VERDICTS,
+  EVIDENCE_DEFECTS,
   isConclusive,
   needsOperator,
+  verifyStoredEvidence,
   type ReconciliationResult,
   type ReconcilerOptions,
 } from "./deletion-reconciliation.js";
@@ -16,7 +22,7 @@ import type { PostgresTombstoneStore, StoredTombstone } from "./tombstone-store.
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 const REQ = "dreq_abcdefgh1234";
 const TOMB = "tomb_aaaabbbbccccdddd";
-const PROOF = "b".repeat(64);
+
 const NOW = "2026-10-03T14:00:00.000Z";
 
 function requestOf(over: Partial<GdprDeletionRequest> = {}): GdprDeletionRequest {
@@ -45,13 +51,70 @@ function requestOf(over: Partial<GdprDeletionRequest> = {}): GdprDeletionRequest
   } as GdprDeletionRequest;
 }
 
+const CHAIN_HASH = "c".repeat(64);
+
+const ATTESTATION: DeletionAttestation = {
+  subsystem: "tenant_schema",
+  outcome: "erased",
+  scope: { schemas: ["t_abc"], tables: ["t_abc.invoice"], rowCount: 17, storageBytes: 8192 },
+  attestedBy: "tenant-lifecycle-pg/deletion:alice",
+  attestedAt: "2026-10-03T11:00:00.000Z",
+};
+
+/**
+ * A **real** tombstone, assembled the way the pipeline assembles one and anchored the way the store
+ * anchors one — not a stub. The verification under test is the real hash arithmetic, so a fixture
+ * that merely looked like a record would have tested nothing.
+ */
 function tombstoneOf(id = TOMB): StoredTombstone {
+  const assembled = assembleTombstone({
+    id,
+    kind: "data_subject_erasure",
+    tenantId: TENANT,
+    relatedDeletionRequestId: REQ,
+    deletedAt: "2026-10-03T11:00:00.000Z",
+    executedBy: "system:deletion-runner",
+    approvedBy: "system:retention-policy",
+    anchors: [
+      {
+        kind: "internal_audit_log",
+        reference: "pending-chain-append",
+        anchoredAt: "2026-10-03T11:00:00.000Z",
+      },
+    ],
+    requiredSubsystems: ["tenant_schema"],
+    attestations: [ATTESTATION],
+  });
+  if (!assembled.ok) throw new Error(`fixture does not assemble: ${JSON.stringify(assembled.refusals)}`);
   return {
-    record: { id, tenantId: TENANT, proofSha256: PROOF },
-    attestations: [],
-    chainEntryHash: "c".repeat(64),
+    // The store replaces the caller's anchors with the chain entry it appended (ADR-0318). Anchors are
+    // not part of the content manifest, which is why it can.
+    record: {
+      ...assembled.record,
+      anchors: [
+        {
+          kind: "internal_audit_log",
+          reference: CHAIN_HASH,
+          anchoredAt: "2026-10-03T11:00:00.000Z",
+        },
+      ],
+    },
+    attestations: [ATTESTATION],
+    chainEntryHash: CHAIN_HASH,
     chainSequenceNumber: 7,
-  } as unknown as StoredTombstone;
+  };
+}
+
+/** The honest fixture's real proof digest, so an assertion cannot drift from the arithmetic. */
+const PROOF = tombstoneOf().record.proofSha256;
+
+/** The same record with its scope edited in place — the tamper the chain cannot see. */
+function tamperedTombstone(): StoredTombstone {
+  const honest = tombstoneOf();
+  return {
+    ...honest,
+    record: { ...honest.record, scope: { ...honest.record.scope, rowCount: 1 } },
+  };
 }
 
 interface Harness {
@@ -59,6 +122,7 @@ interface Harness {
   readonly transitions: Array<{ id: string; to: string; fields: Record<string, unknown> }>;
   readonly retired: string[];
   readonly strandedCalls: Array<{ olderThan: string; limit: number | undefined }>;
+  readonly completedCalls: (number | undefined)[];
   readonly reported: ReconciliationResult[];
 }
 
@@ -68,12 +132,15 @@ function harness(
     readonly stranded?: readonly GdprDeletionRequest[];
     readonly retires?: boolean;
     readonly retireThrows?: boolean;
+    readonly completed?: readonly GdprDeletionRequest[];
+    readonly storedMissing?: boolean;
   } = {},
   over: Partial<ReconcilerOptions> = {},
 ): Harness {
   const transitions: Array<{ id: string; to: string; fields: Record<string, unknown> }> = [];
   const retired: string[] = [];
   const strandedCalls: Array<{ olderThan: string; limit: number | undefined }> = [];
+  const completedCalls: (number | undefined)[] = [];
   const reported: ReconciliationResult[] = [];
   const requests = {
     transition: async (
@@ -91,9 +158,17 @@ function harness(
       strandedCalls.push({ olderThan, limit });
       return behaviour.stranded ?? [requestOf()];
     },
+    completedWithTombstone: async (limit?: number): Promise<readonly GdprDeletionRequest[]> => {
+      completedCalls.push(limit);
+      return behaviour.completed ?? [];
+    },
   } as unknown as PostgresDeletionRequestStore;
   const tombstones = {
     findForRequest: async (): Promise<readonly StoredTombstone[]> => behaviour.evidence ?? [],
+    read: async (id: string): Promise<StoredTombstone | null> => {
+      if (behaviour.storedMissing === true) return null;
+      return (behaviour.evidence ?? [tombstoneOf()]).find((t) => t.record.id === id) ?? null;
+    },
   } as unknown as PostgresTombstoneStore;
 
   const reconciler = new DeletionReconciler({
@@ -108,7 +183,7 @@ function harness(
     onReconciled: (r) => reported.push(r),
     ...over,
   });
-  return { reconciler, transitions, retired, strandedCalls, reported };
+  return { reconciler, transitions, retired, strandedCalls, completedCalls, reported };
 }
 
 describe("the verdicts", () => {
@@ -118,6 +193,7 @@ describe("the verdicts", () => {
       "never_committed",
       "ambiguous_evidence",
       "too_recent",
+      "evidence_unverified",
       "not_stranded",
     ]);
     // Only a present tombstone stands on its own: an absence is an inference, however old.
@@ -127,6 +203,7 @@ describe("the verdicts", () => {
     expect(RECONCILIATION_VERDICTS.filter((v) => needsOperator(v))).toEqual([
       "never_committed",
       "ambiguous_evidence",
+      "evidence_unverified",
     ]);
   });
 
@@ -311,5 +388,150 @@ describe("reconcileStranded", () => {
   it("returns an empty list when nothing is in progress", async () => {
     const h = harness({ stranded: [] });
     expect(await h.reconciler.reconcileStranded()).toEqual([]);
+  });
+});
+
+describe("verifyStoredEvidence", () => {
+  it("accepts a tombstone the pipeline really assembled and the store really anchored", () => {
+    const check = verifyStoredEvidence(tombstoneOf());
+    expect(check).toEqual({ ok: true, defects: [], matchesAttestations: true });
+  });
+
+  it("names every defect it can find", () => {
+    expect(EVIDENCE_DEFECTS).toEqual([
+      "scope_tampered",
+      "proof_mismatch",
+      "scope_disagrees_with_attestations",
+      "unwitnessed",
+    ]);
+  });
+
+  it("catches the scope tamper the chain cannot see", () => {
+    const check = verifyStoredEvidence(tamperedTombstone());
+    // The chain entry commits to the digests and the identity, never the scope (ADR-0318), and
+    // `proofSha256` commits to `contentManifestSha256` rather than to the scope — so editing the
+    // scope column leaves the proof and the chain intact. These two are the only detectors.
+    expect(check.ok).toBe(false);
+    expect(check.defects).toContain("scope_tampered");
+    expect(check.defects).toContain("scope_disagrees_with_attestations");
+    expect(check.matchesAttestations).toBe(false);
+    // Proving the point: the proof itself still checks out.
+    expect(check.defects).not.toContain("proof_mismatch");
+  });
+
+  it("refuses a tombstone nothing in the chain witnesses", () => {
+    const honest = tombstoneOf();
+    const unwitnessed = { ...honest, chainEntryHash: null, chainSequenceNumber: null };
+    // A row anybody with write access could have inserted is not a proof.
+    expect(verifyStoredEvidence(unwitnessed).defects).toEqual(["unwitnessed"]);
+  });
+
+  it("refuses a chain hash the record itself does not commit to", () => {
+    const honest = tombstoneOf();
+    const mismatched = { ...honest, chainEntryHash: "d".repeat(64) };
+    // Stronger than "is the column set": the record's anchors must name that entry, so setting the
+    // column without the record committing to it does not pass.
+    expect(verifyStoredEvidence(mismatched).defects).toEqual(["unwitnessed"]);
+  });
+
+  it("reports no attestations as cannot-say, and does not fail over it", () => {
+    const honest = tombstoneOf();
+    const check = verifyStoredEvidence({ ...honest, attestations: [] });
+    // null, not false: the hashes still establish the record is intact and commits to its own scope,
+    // which is what completing a request needs (ADR-0318's habit).
+    expect(check.matchesAttestations).toBeNull();
+    expect(check.ok).toBe(true);
+  });
+});
+
+describe("the evidence gate on completing a request", () => {
+  it("refuses to complete a request from a tampered tombstone", async () => {
+    const h = harness({ evidence: [tamperedTombstone()] });
+    const result = await h.reconciler.reconcileOne(requestOf());
+    expect(result.verdict).toBe("evidence_unverified");
+    expect(result.applied).toBe(false);
+    // Nothing written: the request's completionSha256 is the platform's claim about a proof, and
+    // copying a digest off a record that fails verification launders the defect into a second row.
+    expect(h.transitions).toEqual([]);
+    expect(h.retired).toEqual([]);
+  });
+
+  it("names the tombstone and its defects so an operator can act", async () => {
+    const h = harness({ evidence: [tamperedTombstone()] });
+    const result = await h.reconciler.reconcileOne(requestOf());
+    expect(result.tombstoneId).toBe(TOMB);
+    expect(result.evidence?.defects).toContain("scope_tampered");
+    expect(result.detail).toContain("does not verify");
+  });
+
+  it("is not overridable by the operator's authorisation", async () => {
+    const h = harness({ evidence: [tamperedTombstone()] });
+    const result = await h.reconciler.reconcileOne(requestOf(), { applyNeverCommitted: true });
+    // That flag authorises an inference from an absence; it says nothing about a record that lies.
+    expect(result.verdict).toBe("evidence_unverified");
+    expect(h.transitions).toEqual([]);
+  });
+
+  it("carries the passing check on a conclusive verdict too", async () => {
+    const h = harness({ evidence: [tombstoneOf()] });
+    const result = await h.reconciler.reconcileOne(requestOf());
+    expect(result.verdict).toBe("completed_by_evidence");
+    expect(result.evidence?.ok).toBe(true);
+  });
+
+  it("a scheduler pass never applies an unverified one", async () => {
+    const h = harness({ evidence: [tamperedTombstone()] });
+    const results = await h.reconciler.reconcileStranded();
+    expect(results.map((r) => r.verdict)).toEqual(["evidence_unverified"]);
+    expect(h.transitions).toEqual([]);
+  });
+});
+
+describe("auditCompleted", () => {
+  const COMPLETED = requestOf({
+    status: "completed",
+    completedAt: "2026-10-03T12:00:00.000Z",
+    completionSha256: PROOF,
+    tombstoneId: TOMB,
+  });
+
+  it("reports nothing when a completed request's proof still stands up", async () => {
+    const h = harness({ completed: [COMPLETED], evidence: [tombstoneOf()] });
+    // Findings only: a listing of every completed request grows without bound and says nothing.
+    expect(await h.reconciler.auditCompleted()).toEqual([]);
+  });
+
+  it("finds a request whose tombstone is gone", async () => {
+    const h = harness({ completed: [COMPLETED], storedMissing: true });
+    const findings = await h.reconciler.auditCompleted();
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.present).toBe(false);
+    expect(findings[0]?.check).toBeNull();
+    expect(findings[0]?.detail).toContain("no longer exists");
+  });
+
+  it("finds a request whose tombstone no longer verifies", async () => {
+    const h = harness({ completed: [COMPLETED], evidence: [tamperedTombstone()] });
+    const findings = await h.reconciler.auditCompleted();
+    expect(findings[0]?.present).toBe(true);
+    expect(findings[0]?.check?.defects).toContain("scope_tampered");
+  });
+
+  it("finds a request whose own digest disagrees with the proof", async () => {
+    const h = harness({
+      completed: [requestOf({ ...COMPLETED, completionSha256: "f".repeat(64) })],
+      evidence: [tombstoneOf()],
+    });
+    const findings = await h.reconciler.auditCompleted();
+    // A third question the stranded path never asks: the request carries its own copy, so the two
+    // can disagree even when both records are internally intact.
+    expect(findings[0]?.digestMatches).toBe(false);
+    expect(findings[0]?.detail).toContain("does not match");
+  });
+
+  it("forwards the limit", async () => {
+    const h = harness({ completed: [] });
+    await h.reconciler.auditCompleted(7);
+    expect(h.completedCalls).toEqual([7]);
   });
 });

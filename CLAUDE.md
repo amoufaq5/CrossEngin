@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 317 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 318 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~11,939 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~11,964 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -418,6 +418,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   and is its own verdict rather than being folded into the first. `ambiguous_evidence` (two tombstones
   naming one request) is never applied at all: the premise is broken, which is a finding and not a row to
   pick from.
+  **And evidence is verified before it is used** (ADR-0323), which matters because of what the chain does
+  *not* cover: `proofSha256` commits to `contentManifestSha256` and the chain entry commits to the two
+  digests and the identity — **neither commits to the scope** — so editing a stored tombstone's `scope`
+  leaves every digest and the chain entry byte-identical and `--integrity-proof-config` cannot see it.
+  `contentManifestOk` and `tombstoneMatchesAttestations` are the only two detectors, and until ADR-0323
+  nothing called either on the reconciliation path. `verifyStoredEvidence` now gates
+  `completed_by_evidence` behind four named defects (`scope_tampered`, `proof_mismatch`,
+  `scope_disagrees_with_attestations`, `unwitnessed` — which asks the stronger `isAnchoredByChain`
+  question, not merely "is the column set"), yielding `evidence_unverified`, which **nothing** may apply —
+  not a scheduler and not an operator, since `acceptNeverCommitted` authorises an inference from an
+  absence and says nothing about a record that lies. `auditCompleted` does the reverse direction for
+  requests already `completed`, where a third question arises that the forward path never asks: the
+  request keeps its own copy of the digest, so the two can disagree while both records are intact.
 - **`marketplace`** — contracts: 8 pack kinds, a registry with Ed25519 signing and security
   review, per-tenant install lifecycle, permission grants, listings, reviews,
   compatibility.
@@ -656,7 +669,11 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   choosing it, so a verdict that was not applied answers **409** rather than a 200 that would read as
   resolved. The scheduler's tick repairs the conclusive half in a separate `try` (the likeliest reason a
   request is stranded is that a run failed) and logs **only what it wrote**, since an unapplied verdict is
-  a standing fact that would otherwise be repeated every tick (ADR-0322);
+  a standing fact that would otherwise be repeated every tick (ADR-0322); plus
+  `GET .../unproven`, the audit of *completed* requests whose proof no longer stands up — findings only,
+  recorded against the reader's own tenant and **refused** when none resolves (ADR-0313), and recorded
+  even when clean, because "we checked and found nothing" cannot be claimed from the absence of a log
+  line (ADR-0323);
   **tenant-schema erasure** (`--tenant-erasure-routes`) — a read-only survey route so a destructive act
   is not approved blind, then a drop whose `executedBy` is the credential and whose `approvedBy` is the
   body and must differ, with the tenant id repeated as `confirmTenantId` so an irreversible action is not
@@ -950,11 +967,19 @@ opened them.
   **A stranded request is now reconciled from evidence** (ADR-0322) — `DeletionReconciler` asks whether a
   tombstone names it, which is conclusive because both commit together — but only the *conclusive* half is
   automatic. `never_committed` is an inference from an absence and still needs a human to authorise it
-  through `POST .../{id}/reconcile`, and `ambiguous_evidence` is never applied at all. So a deployment that
-  never reads `GET .../stranded` still accumulates rows nothing resolves, and nothing *alerts* on one the
-  way `--integrity-proof-config` alerts on a broken chain. A request is also submitted for a *tenant*, not
-  for a subject within one: `subjectIdentifier` is recorded and not acted on, so a single data subject
-  inside a multi-user tenant cannot be erased by this path at all.
+  through `POST .../{id}/reconcile`, and `ambiguous_evidence` is never applied at all. **And a scope tamper
+  is invisible to the forensic chain** (ADR-0323): nothing in the chain commits to the scope, so editing it
+  leaves every digest and the chain entry byte-identical. `verifyStoredEvidence` catches it and refuses to
+  complete a request from it, but **nothing escalates** — `evidence_unverified` and `ambiguous_evidence`
+  are findings the chain cannot raise and no incident is declared for either, which is the most valuable
+  remaining follow-up in this line. Nothing *schedules* `auditCompleted` either: a tamper is found when
+  somebody loads `GET .../unproven`, and `GET .../stranded` is not even recorded while `.../unproven` is.
+  There is also no tooling to *resolve* an unverified tombstone (the attestations beside it are enough to
+  recompute what the scope should have been, but rewriting a proof is not something to automate blindly),
+  and a tombstone with no `relatedDeletionRequestId` — every one the synchronous route of ADR-0320 writes —
+  is outside both directions of the audit. A request is also submitted for a *tenant*, not for a subject
+  within one: `subjectIdentifier` is recorded and not acted on, so a single data subject inside a
+  multi-user tenant cannot be erased by this path at all.
 - **The AI cost estimator is a heuristic on the input side** (ADR-0311). `maxTokens` bounds the output by
   construction; the input is `ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic because the
   number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
@@ -1014,7 +1039,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 317 records; 238 Accepted, 79 Proposed (the
+title or status change cannot drift. 318 records; 239 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

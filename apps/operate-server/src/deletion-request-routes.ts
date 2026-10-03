@@ -68,17 +68,37 @@ export interface DeletionRequestLike {
   readonly tombstoneId: string | null;
 }
 
-/** Structural mirror of a `ReconciliationResult` (ADR-0322). */
+/** Structural mirror of a `ReconciliationResult` (ADR-0322, ADR-0323). */
 export interface ReconciliationLike {
   readonly requestId: string;
   readonly tenantId: string;
   readonly verdict: string;
   readonly tombstoneId: string | null;
   readonly tombstoneIds: readonly string[];
+  readonly evidence: {
+    readonly ok: boolean;
+    readonly defects: readonly string[];
+    readonly matchesAttestations: boolean | null;
+  } | null;
   readonly applied: boolean;
   readonly tenantRetired: boolean | null;
   readonly strandedForMs: number;
   readonly detail: string | null;
+}
+
+/** Structural mirror of an `EvidenceAudit` — a completed request whose proof no longer stands up. */
+export interface EvidenceAuditLike {
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly tombstoneId: string;
+  readonly present: boolean;
+  readonly digestMatches: boolean;
+  readonly check: {
+    readonly ok: boolean;
+    readonly defects: readonly string[];
+    readonly matchesAttestations: boolean | null;
+  } | null;
+  readonly detail: string;
 }
 
 /** The slice of `DeletionReconciler` the reconcile route drives. */
@@ -88,6 +108,8 @@ export interface DeletionReconcilerLike {
     request: DeletionRequestLike,
     opts?: { readonly applyNeverCommitted?: boolean },
   ): Promise<ReconciliationLike>;
+  /** Completed requests whose proof no longer stands up (ADR-0323). Findings only. */
+  auditCompleted(limit?: number): Promise<readonly EvidenceAuditLike[]>;
 }
 
 /** The slice of `PostgresDeletionRequestStore` these routes drive. */
@@ -123,6 +145,7 @@ export const DELETION_REQUEST_VERIFIED_OPERATION = "platform.deletion_request_ve
 export const DELETION_REQUEST_REJECTED_OPERATION = "platform.deletion_request_rejected";
 export const DELETION_REQUEST_READ_OPERATION = "platform.deletion_request_read";
 export const DELETION_REQUEST_RECONCILED_OPERATION = "platform.deletion_request_reconciled";
+export const DELETION_EVIDENCE_AUDITED_OPERATION = "platform.deletion_evidence_audited";
 
 export interface DeletionRequestEvent {
   readonly tenantId: string;
@@ -532,6 +555,58 @@ function buildStrandedHandler(ctx: DeletionRequestRoutesContext): Handler {
   };
 }
 
+function buildUnprovenHandler(ctx: DeletionRequestRoutesContext): Handler {
+  return async (input) => {
+    const principal = input.principal;
+    if (principal === null) return json(401, { error: "authentication_required" });
+    if (!allowed(ctx, principal, ctx.reconcileRoles ?? new Set())) {
+      return json(403, {
+        error: "forbidden",
+        detail: "auditing deletion evidence is not granted to this role",
+      });
+    }
+    const reconciler = ctx.reconciler;
+    if (reconciler === undefined) return json(501, { error: "reconciliation_unavailable" });
+    // Recorded against the reader's own tenant, because `meta.audit_log.tenant_id` is NOT NULL and
+    // the findings may span several tenants or none. A reader with no resolvable tenant therefore
+    // cannot be recorded, and ADR-0313's rule is that an unrecordable privileged read is refused
+    // rather than served unaudited.
+    const readerTenant = principal.tenantId;
+    if (readerTenant === null) {
+      return json(503, {
+        error: "audit_unrecordable",
+        detail: "this read is recorded against the reader's tenant, and none could be resolved",
+      });
+    }
+    let findings: readonly EvidenceAuditLike[];
+    try {
+      findings = await reconciler.auditCompleted(100);
+    } catch {
+      // The store re-parses every row, so a throw can mean a stored tombstone or request no longer
+      // satisfies its contract — which is itself the finding this route exists to surface. An empty
+      // list would read as "every completed deletion is provable", the opposite of what is known.
+      return json(503, {
+        error: "evidence_unreadable",
+        detail: "the evidence could not be read; do not treat this as an absence of findings",
+      });
+    }
+    const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
+    // Recorded even when clean: "we checked and found nothing" is the claim an auditor needs, and it
+    // cannot be made from the absence of a log line.
+    await record(ctx, {
+      tenantId: readerTenant,
+      requestId: findings[0]?.requestId ?? "-",
+      principalId: principal.principalId,
+      operation: DELETION_EVIDENCE_AUDITED_OPERATION,
+      status: findings.length === 0 ? "clean" : "findings",
+      tombstoneId: null,
+      detail: `${findings.length.toString()} finding(s)`,
+      at,
+    });
+    return json(200, { findings, clean: findings.length === 0 });
+  };
+}
+
 function buildReconcileHandler(ctx: DeletionRequestRoutesContext): Handler {
   return async (input) => {
     const principal = input.principal;
@@ -661,6 +736,16 @@ export function buildDeletionRequestRoutes(
         false,
       ),
       handler: buildReconcileHandler(ctx),
+    },
+    {
+      /** Literal, and before the `{id}` route for the same reason `stranded` is (ADR-0323). */
+      route: route(
+        "platform.deletion_requests.unproven",
+        "GET",
+        ["v1", "platform", "deletion-requests", "unproven"],
+        false,
+      ),
+      handler: buildUnprovenHandler(ctx),
     },
     {
       /**

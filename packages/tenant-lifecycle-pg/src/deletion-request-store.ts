@@ -288,6 +288,26 @@ export class PostgresDeletionRequestStore {
   }
 
   /**
+   * `completed` requests that name a tombstone, newest first — the audit's input (ADR-0323).
+   *
+   * Every completed request names one, because the contract requires it and `rowToDeletionRequest`
+   * refuses a row that does not; the predicate is belt-and-braces against a row written before that
+   * rule existed.
+   */
+  async completedWithTombstone(limit = 100): Promise<readonly GdprDeletionRequest[]> {
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${REQUEST_COLUMNS.join(", ")} FROM ${this.table}
+          WHERE status = 'completed' AND tombstone_id IS NOT NULL
+          ORDER BY completed_at DESC, request_id LIMIT $1`,
+        [Math.max(1, Math.min(500, Math.trunc(limit)))],
+      );
+      return result.rows.map((row) => rowToDeletionRequest(row));
+    });
+  }
+
+  /**
    * Moves a request to `status`, refusing a transition the state machine forbids.
    *
    * The guard is re-asserted **inside the `UPDATE` predicate**, not merely checked before it: two

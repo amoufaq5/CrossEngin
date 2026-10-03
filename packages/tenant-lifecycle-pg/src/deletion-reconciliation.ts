@@ -1,5 +1,10 @@
-import type { GdprDeletionRequest } from "@crossengin/tenant-lifecycle";
+import {
+  tombstoneMatchesAttestations,
+  verifyTombstoneHashes,
+  type GdprDeletionRequest,
+} from "@crossengin/tenant-lifecycle";
 
+import { isAnchoredByChain } from "./deletion-pipeline.js";
 import type { PostgresDeletionRequestStore } from "./deletion-request-store.js";
 import type { PostgresTombstoneStore, StoredTombstone } from "./tombstone-store.js";
 
@@ -48,10 +53,77 @@ export const RECONCILIATION_VERDICTS = [
   "ambiguous_evidence",
   /** Stranded for less than the window and no tombstone: a run may still be in flight. */
   "too_recent",
+  /**
+   * A tombstone names the request and does **not** stand up — its hashes disagree with its content,
+   * its scope disagrees with the attestations stored beside it, or nothing in the chain witnesses it.
+   * Never applied: the request's `completionSha256` is the platform's claim about a proof, and
+   * copying a digest off a record that fails verification launders the defect into a second row.
+   */
+  "evidence_unverified",
   /** Not `in_progress` at all, so there is nothing to reconcile. */
   "not_stranded",
 ] as const;
 export type ReconciliationVerdict = (typeof RECONCILIATION_VERDICTS)[number];
+
+/**
+ * Why a stored tombstone does not stand up.
+ *
+ * `scope_tampered` is the one the forensic chain **cannot** catch, and it is the reason this check
+ * exists at all. The chain entry commits to the two digests and the identity, never the scope
+ * (ADR-0318, deliberately — a scope can name every table a tenant held and every integrity pass
+ * rereads the chain). And `proofSha256` commits to `contentManifestSha256` rather than to the scope
+ * itself. So editing a stored row's `scope` column leaves `proofOk` true and the chain intact:
+ * `contentManifestOk` and `tombstoneMatchesAttestations` are the only two things in the system that
+ * can see it.
+ */
+export const EVIDENCE_DEFECTS = [
+  /** `contentManifestSha256` does not match the stored scope. */
+  "scope_tampered",
+  /** `proofSha256` does not match the record's own identity and manifest digest. */
+  "proof_mismatch",
+  /** The scope disagrees with the attestations stored beside it. */
+  "scope_disagrees_with_attestations",
+  /** No chain entry witnesses it, or the record does not commit to the one that does. */
+  "unwitnessed",
+] as const;
+export type EvidenceDefect = (typeof EVIDENCE_DEFECTS)[number];
+
+export interface EvidenceCheck {
+  readonly ok: boolean;
+  readonly defects: readonly EvidenceDefect[];
+  /**
+   * `null` when the row carries no attestations to compare against — "cannot say" rather than
+   * "disagrees" (ADR-0318's habit). It does **not** disqualify: the hashes still establish that the
+   * record is internally intact and commits to its own scope, which is what completing a *request*
+   * needs. A row with no evidence beside it predates `attestations` or was not written by the
+   * pipeline, and that is worth seeing without stranding the request over it.
+   */
+  readonly matchesAttestations: boolean | null;
+}
+
+/**
+ * Whether a stored tombstone stands up well enough to close a GDPR request against it.
+ *
+ * Pure, and computed from the record already in hand rather than through `store.verify` — which
+ * re-reads the row, so the digest written to the request could differ from the one that was checked.
+ */
+export function verifyStoredEvidence(stored: StoredTombstone): EvidenceCheck {
+  const hashes = verifyTombstoneHashes(stored.record);
+  const matchesAttestations =
+    stored.attestations.length === 0
+      ? null
+      : tombstoneMatchesAttestations(stored.record, stored.attestations);
+  const defects: EvidenceDefect[] = [];
+  if (!hashes.contentManifestOk) defects.push("scope_tampered");
+  if (!hashes.proofOk) defects.push("proof_mismatch");
+  if (matchesAttestations === false) defects.push("scope_disagrees_with_attestations");
+  // A tombstone nothing witnessed is a row, not a proof: without the chain entry anybody with write
+  // access to the table could have inserted it. `isAnchoredByChain` is the stronger question than
+  // "is `chain_entry_hash` set" — it also requires the record's own anchors to name that entry, so a
+  // column set without the record committing to it does not pass.
+  if (!isAnchoredByChain(stored)) defects.push("unwitnessed");
+  return { ok: defects.length === 0, defects, matchesAttestations };
+}
 
 /** Verdicts whose evidence stands on its own, so applying them needs no operator judgement. */
 export function isConclusive(verdict: ReconciliationVerdict): boolean {
@@ -60,7 +132,11 @@ export function isConclusive(verdict: ReconciliationVerdict): boolean {
 
 /** Verdicts a human has to look at. */
 export function needsOperator(verdict: ReconciliationVerdict): boolean {
-  return verdict === "never_committed" || verdict === "ambiguous_evidence";
+  return (
+    verdict === "never_committed" ||
+    verdict === "ambiguous_evidence" ||
+    verdict === "evidence_unverified"
+  );
 }
 
 /**
@@ -79,6 +155,8 @@ export interface ReconciliationResult {
   readonly tombstoneId: string | null;
   /** Every tombstone naming the request, so an ambiguous verdict can be investigated. */
   readonly tombstoneIds: readonly string[];
+  /** The verification of the tombstone the evidence points at, when there is exactly one. */
+  readonly evidence: EvidenceCheck | null;
   /** Whether the verdict was written to the request. */
   readonly applied: boolean;
   /** Whether the tenant row was retired as part of applying it. `null` when not attempted. */
@@ -140,6 +218,7 @@ export class DeletionReconciler {
     const base = {
       requestId: request.id,
       tenantId: request.tenantId,
+      evidence: null,
       applied: false,
       tenantRetired: null,
     };
@@ -173,11 +252,28 @@ export class DeletionReconciler {
     }
     const only = found[0];
     if (only !== undefined) {
+      const check = verifyStoredEvidence(only);
+      if (!check.ok) {
+        // The deletion did commit — the row is here — but this record cannot be used to close the
+        // request, because the request's `completionSha256` is the platform's claim about a proof.
+        // Reported, never applied: a human has a tampered or unwitnessed tombstone to deal with, and
+        // that is a bigger problem than a request stuck `in_progress`.
+        return {
+          ...base,
+          verdict: "evidence_unverified",
+          evidence: check,
+          tombstoneId: only.record.id,
+          tombstoneIds: ids,
+          strandedForMs,
+          detail: `tombstone ${only.record.id} does not verify: ${check.defects.join(", ")}`,
+        };
+      }
       // Conclusive, and conclusive immediately: the tombstone and the drop committed together, so its
       // existence is not a hint about what probably happened.
       return {
         ...base,
         verdict: "completed_by_evidence",
+        evidence: check,
         tombstoneId: only.record.id,
         tombstoneIds: ids,
         strandedForMs,
@@ -276,10 +372,72 @@ export class DeletionReconciler {
     return results;
   }
 
+  /**
+   * The other direction: `completed` requests whose proof no longer stands up.
+   *
+   * ADR-0322 closed the stranded case and left this one open — a request completed against a
+   * tombstone that has since been deleted or edited was found by nothing, because reconciliation only
+   * ever looked at `in_progress`. A completed request is the platform's standing claim that an
+   * Article 17 erasure was carried out and can be evidenced; this is the audit of that claim.
+   *
+   * Returns **only** the findings. A listing of every completed request grows without bound and says
+   * nothing; "which completed deletions can no longer be proven" is a page an operator can act on.
+   */
+  async auditCompleted(limit = 100): Promise<readonly EvidenceAudit[]> {
+    const completed = await this.opts.requests.completedWithTombstone(limit);
+    const findings: EvidenceAudit[] = [];
+    for (const request of completed) {
+      const named = request.tombstoneId;
+      if (named === null) continue; // The contract forbids it; the store would have refused the row.
+      const stored = await this.opts.tombstones.read(named);
+      if (stored === null) {
+        findings.push({
+          requestId: request.id,
+          tenantId: request.tenantId,
+          tombstoneId: named,
+          present: false,
+          digestMatches: false,
+          check: null,
+          detail: "the tombstone this request was completed against no longer exists",
+        });
+        continue;
+      }
+      const check = verifyStoredEvidence(stored);
+      // A third question the stranded path never has to ask: the request carries its own copy of the
+      // digest, so the two can disagree even when both records are internally intact.
+      const digestMatches = request.completionSha256 === stored.record.proofSha256;
+      if (check.ok && digestMatches) continue;
+      findings.push({
+        requestId: request.id,
+        tenantId: request.tenantId,
+        tombstoneId: named,
+        present: true,
+        digestMatches,
+        check,
+        detail: digestMatches
+          ? `tombstone does not verify: ${check.defects.join(", ")}`
+          : "the request's completionSha256 does not match the tombstone's proof",
+      });
+    }
+    return findings;
+  }
+
   private report(result: ReconciliationResult): ReconciliationResult {
     this.opts.onReconciled?.(result);
     return result;
   }
+}
+
+/** One finding from `auditCompleted`: a completed request whose proof no longer stands up. */
+export interface EvidenceAudit {
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly tombstoneId: string;
+  readonly present: boolean;
+  readonly digestMatches: boolean;
+  /** `null` when the tombstone is gone, so there was nothing to check. */
+  readonly check: EvidenceCheck | null;
+  readonly detail: string;
 }
 
 /** Re-exported so a caller need not reach into the tombstone module for the one type it reads. */

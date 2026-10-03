@@ -15,6 +15,7 @@ import {
   type DeletionRequestEvent,
   type DeletionRequestLike,
   type DeletionRequestRoutesContext,
+  type EvidenceAuditLike,
   type ReconciliationLike,
 } from "./deletion-request-routes.js";
 
@@ -27,7 +28,7 @@ const AT = "2026-10-03T13:00:00.000Z";
 function principal(over: Partial<ResolvedPrincipal> = {}): ResolvedPrincipal {
   return {
     principalId: CALLER,
-    tenantId: null,
+    tenantId: TENANT,
     principalKind: "user",
     authScheme: "api_key_header",
     grantedScopes: [],
@@ -66,6 +67,7 @@ function verdictOf(over: Partial<ReconciliationLike> = {}): ReconciliationLike {
     verdict: "never_committed",
     tombstoneId: null,
     tombstoneIds: [],
+    evidence: { ok: true, defects: [], matchesAttestations: true },
     applied: false,
     tenantRetired: null,
     strandedForMs: 7_200_000,
@@ -81,6 +83,7 @@ interface Harness {
   readonly transitions: Array<{ to: string; fields: Record<string, unknown> }>;
   readonly reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }>;
   readonly strandedCalls: string[];
+  readonly auditCalls: (number | undefined)[];
 }
 
 function harness(
@@ -94,6 +97,8 @@ function harness(
     readonly verdict?: ReconciliationLike;
     readonly stranded?: readonly DeletionRequestLike[];
     readonly strandedThrows?: boolean;
+    readonly findings?: readonly EvidenceAuditLike[];
+    readonly auditThrows?: boolean;
   } = {},
 ): Harness {
   const events: DeletionRequestEvent[] = [];
@@ -101,6 +106,7 @@ function harness(
   const transitions: Array<{ to: string; fields: Record<string, unknown> }> = [];
   const reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }> = [];
   const strandedCalls: string[] = [];
+  const auditCalls: (number | undefined)[] = [];
   const ctx: DeletionRequestRoutesContext = {
     store: {
       submit: async (input): Promise<DeletionRequestLike> => {
@@ -126,6 +132,11 @@ function harness(
     },
     reconciler: {
       assess: async (): Promise<ReconciliationLike> => behaviour.verdict ?? verdictOf(),
+      auditCompleted: async (limit): Promise<readonly EvidenceAuditLike[]> => {
+        auditCalls.push(limit);
+        if (behaviour.auditThrows === true) throw new Error("a stored tombstone no longer parses");
+        return behaviour.findings ?? [];
+      },
       reconcileOne: async (request, opts): Promise<ReconciliationLike> => {
         reconciled.push({
           id: request.id,
@@ -148,7 +159,7 @@ function harness(
     clock: () => new Date(AT),
     ...over,
   };
-  return { ctx, events, submits, transitions, reconciled, strandedCalls };
+  return { ctx, events, submits, transitions, reconciled, strandedCalls, auditCalls };
 }
 
 const SUBMIT = "platform.deletion_requests.submit";
@@ -205,6 +216,7 @@ describe("the route declarations", () => {
       { method: "POST", path: "v1/platform/deletion-requests/{id}/verify" },
       { method: "POST", path: "v1/platform/deletion-requests/{id}/reject" },
       { method: "POST", path: "v1/platform/deletion-requests/{id}/reconcile" },
+      { method: "GET", path: "v1/platform/deletion-requests/unproven" },
       { method: "GET", path: "v1/platform/deletion-requests/stranded" },
       { method: "GET", path: "v1/platform/deletion-requests/{id}" },
     ]);
@@ -216,6 +228,7 @@ describe("the route declarations", () => {
     // subject — and both would run. Nothing else here creates anything.
     expect(routes.map((r) => r.route.idempotencyRequired)).toEqual([
       true,
+      false,
       false,
       false,
       false,
@@ -580,5 +593,91 @@ describe("reconcile", () => {
     const h = harness();
     const res = await call(h.ctx, RECONCILE, { params: { id: "stranded" }, parsedBody: {} });
     expect(res.status).toBe(400);
+  });
+});
+
+const UNPROVEN = "platform.deletion_requests.unproven";
+
+function findingOf(over: Partial<EvidenceAuditLike> = {}): EvidenceAuditLike {
+  return {
+    requestId: REQ,
+    tenantId: TENANT,
+    tombstoneId: TOMB,
+    present: true,
+    digestMatches: true,
+    check: { ok: false, defects: ["scope_tampered"], matchesAttestations: false },
+    detail: "tombstone does not verify: scope_tampered",
+    ...over,
+  };
+}
+
+describe("unproven", () => {
+  it("matches as a literal route, like stranded", () => {
+    const routes = buildDeletionRequestRoutes(harness().ctx).map((r) => r.route);
+    const matched = matchRoute(
+      routes,
+      "GET",
+      "/v1/platform/deletion-requests/unproven",
+      "v1",
+      new Date(AT),
+    );
+    expect(matched.route?.operationId).toBe(UNPROVEN);
+  });
+
+  it("returns the findings and says so when there are none", async () => {
+    const h = harness();
+    const res = await call(h.ctx, UNPROVEN);
+    expect(res.status).toBe(200);
+    expect(res.body["findings"]).toEqual([]);
+    expect(res.body["clean"]).toBe(true);
+  });
+
+  it("reports a completed request whose proof no longer stands up", async () => {
+    const h = harness({}, { findings: [findingOf()] });
+    const res = await call(h.ctx, UNPROVEN);
+    const findings = res.body["findings"] as EvidenceAuditLike[];
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.check?.defects).toEqual(["scope_tampered"]);
+    expect(res.body["clean"]).toBe(false);
+  });
+
+  it("records the audit even when it is clean", async () => {
+    const h = harness();
+    await call(h.ctx, UNPROVEN);
+    // "We checked and found nothing" is the claim an auditor needs, and it cannot be made from the
+    // absence of a log line.
+    expect(h.events[0]?.operation).toBe("platform.deletion_evidence_audited");
+    expect(h.events[0]?.status).toBe("clean");
+    expect(h.events[0]?.detail).toBe("0 finding(s)");
+  });
+
+  it("records the audit against the reader's own tenant", async () => {
+    const h = harness();
+    await call(h.ctx, UNPROVEN, { principal: principal({ tenantId: TENANT }) });
+    // meta.audit_log.tenant_id is NOT NULL and the findings may span several tenants or none.
+    expect(h.events[0]?.tenantId).toBe(TENANT);
+  });
+
+  it("refuses a reader whose tenant cannot be resolved, rather than serving unaudited", async () => {
+    const h = harness();
+    const res = await call(h.ctx, UNPROVEN, { principal: principal({ tenantId: null }) });
+    // ADR-0313's rule: an unrecordable privileged read is refused.
+    expect(res.status).toBe(503);
+    expect(res.body["error"]).toBe("audit_unrecordable");
+    expect(h.auditCalls).toEqual([]);
+  });
+
+  it("503s an unreadable audit rather than reporting it clean", async () => {
+    const h = harness({}, { auditThrows: true });
+    const res = await call(h.ctx, UNPROVEN);
+    // An empty list would read as "every completed deletion is provable", the opposite of what is
+    // known — and an unparseable row is itself the finding this route exists to surface.
+    expect(res.status).toBe(503);
+    expect(res.body["error"]).toBe("evidence_unreadable");
+  });
+
+  it("is the reconcile grant, and 501s when reconciliation is unwired", async () => {
+    expect((await call(harness({ reconcileRoles: new Set(["sre"]) }).ctx, UNPROVEN)).status).toBe(403);
+    expect((await call(harness({ reconciler: undefined }).ctx, UNPROVEN)).status).toBe(501);
   });
 });
