@@ -142,6 +142,12 @@ export interface ServeOptions {
   readonly tenantErasureRoutes: boolean;
   /** Roles permitted to survey and erase a tenant's schema (repeatable; default none ⇒ nobody). Four-eyes is enforced separately: the caller may not be the approver. */
   readonly tenantErasureRoles: readonly string[];
+  /** Expose the GDPR Article 17 deletion flow under /v1/platform/tenants/{id}/delete — erase, attest, assemble, anchor and store a tombstone in ONE transaction, then retire the tenant row (needs --store pg + --audit-chain-config). The only route that reaches the `deleted` state. */
+  readonly tenantDeletionRoutes: boolean;
+  /** Roles permitted to delete a tenant (repeatable; default none ⇒ nobody). Separate from the erasure's grant: erasing a schema is a step this contains. */
+  readonly tenantDeletionRoles: readonly string[];
+  /** Roles permitted to read a tenant's tombstones (repeatable; defaults to the delete roles). Separable so an auditor can read receipts without being able to delete. */
+  readonly tenantTombstoneReadRoles: readonly string[];
   /** Maximum buffered request body, as bytes or a size like 25mb (default 10mb, floor 1kb, ceiling 1gb). */
   readonly maxRequestBodyBytes: number | null;
   readonly defaultScheme: "http" | "https";
@@ -247,6 +253,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let auditReadMaxRangeDays: number | null = null;
   let tenantErasureRoutes = false;
   const tenantErasureRoles: string[] = [];
+  let tenantDeletionRoutes = false;
+  const tenantDeletionRoles: string[] = [];
+  const tenantTombstoneReadRoles: string[] = [];
   let maxRequestBodyBytes: number | null = null;
   let help = false;
   let version = false;
@@ -559,6 +568,19 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       tenantErasureRoles.push(takeValue(arg, next, "--tenant-erasure-role"));
       i += consumed();
       tenantErasureRoutes = true;
+    } else if (arg === "--tenant-deletion-routes") {
+      tenantDeletionRoutes = true;
+    } else if (arg === "--tenant-deletion-role" || arg.startsWith("--tenant-deletion-role=")) {
+      tenantDeletionRoles.push(takeValue(arg, next, "--tenant-deletion-role"));
+      i += consumed();
+      tenantDeletionRoutes = true;
+    } else if (
+      arg === "--tenant-tombstone-read-role" ||
+      arg.startsWith("--tenant-tombstone-read-role=")
+    ) {
+      tenantTombstoneReadRoles.push(takeValue(arg, next, "--tenant-tombstone-read-role"));
+      i += consumed();
+      tenantDeletionRoutes = true;
     } else if (arg === "--max-request-body" || arg.startsWith("--max-request-body=")) {
       const raw = takeValue(arg, next, "--max-request-body");
       const parsed = parseRequestBodyLimit(raw);
@@ -584,6 +606,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if ((aiDesign || perTenantManifests) && store === "memory") {
     throw new CliUsageError("--ai-design / --per-tenant-manifests require a Postgres store (--store pg or pg-columns)");
+  }
+  if (tenantDeletionRoutes && store === "memory") {
+    throw new CliUsageError(
+      "--tenant-deletion-routes requires a Postgres store (--store pg or pg-columns)",
+    );
   }
   if (tenantErasureRoutes && store === "memory") {
     throw new CliUsageError(
@@ -798,6 +825,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     // No default: irreversibly destroying a tenant's business data is nobody's privilege until it is
     // granted by name, not even the platform admin's by inheritance.
     tenantErasureRoles,
+    tenantDeletionRoutes,
+    // No default: this is the most destructive act the platform can perform, so it is nobody's
+    // privilege until granted by name.
+    tenantDeletionRoles,
+    tenantTombstoneReadRoles,
     maxRequestBodyBytes,
     defaultScheme,
     help,
@@ -1128,6 +1160,18 @@ Options:
                        an erasure is recorded before it is reported, and an unrecorded one is refused
   --tenant-erasure-role <r>  Role permitted to survey and erase (repeatable). Default none ⇒ nobody.
                        Four-eyes is separate and not overridable: the caller may not be the approver
+  --tenant-deletion-routes  Expose POST /v1/platform/tenants/{id}/delete and GET .../tombstones —
+                       the GDPR Article 17 flow. Erase the tenant's schema, attest what was
+                       destroyed, assemble and anchor a tombstone, store it: all in ONE transaction,
+                       so no outcome destroys data without a proof of it. Then retire the tenant
+                       row, in that order, because the anchor references meta.tenants. The only
+                       route that reaches 'deleted'. Needs --store pg + --audit-chain-config
+  --tenant-deletion-role <r>  Role permitted to delete a tenant (repeatable). Default none ⇒
+                       nobody. Separate from --tenant-erasure-role: erasing a schema is a step this
+                       contains. Four-eyes is not overridable — the caller may not be the approver
+  --tenant-tombstone-read-role <r>  Role permitted to read a tenant's tombstones (repeatable;
+                       defaults to the delete roles), so an auditor can read receipts without
+                       being able to delete
   --max-request-body <size>  Largest buffered request body — bytes or a size like 25mb (default
                        10mb, floor 1kb, ceiling 1gb). Not disableable; out-of-band values are
                        refused at boot rather than clamped

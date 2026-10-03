@@ -231,6 +231,12 @@ importers:
       '@crossengin/residency-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/residency-runtime-pg
+      '@crossengin/tenant-lifecycle':
+        specifier: workspace:*
+        version: link:../../packages/tenant-lifecycle
+      '@crossengin/tenant-lifecycle-pg':
+        specifier: workspace:*
+        version: link:../../packages/tenant-lifecycle-pg
       '@crossengin/types':
         specifier: workspace:*
         version: link:../../packages/types

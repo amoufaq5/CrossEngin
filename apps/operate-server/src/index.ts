@@ -61,6 +61,7 @@ export * from "./edge.js";
 export * from "./request-body-limit.js";
 export * from "./job-cancel-routes.js";
 export * from "./tenant-erasure-routes.js";
+export * from "./tenant-deletion-routes.js";
 export * from "./audit-read-routes.js";
 export * from "./audit-read-store.js";
 export * from "./notification-template-routes.js";

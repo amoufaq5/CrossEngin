@@ -31,6 +31,7 @@ import {
   TenantColumnStoreRegistry,
   TenantColumnStoreRouter,
   eraseTenantSchema,
+  eraseTenantSchemaWithin,
   ingestStripeWebhook,
   surveyTenantSchemaWithCollateral,
 } from "@crossengin/operate-runtime-pg";
@@ -89,6 +90,8 @@ import {
   buildPersistentPackSubmissionEngine,
 } from "@crossengin/marketplace-runtime-pg";
 import { requestJobCancellation } from "@crossengin/workflow-runtime-pg";
+import { PostgresTombstoneStore, deleteTenantAtomically } from "@crossengin/tenant-lifecycle-pg";
+import type { DeletionAttestation, DeletionSubsystem } from "@crossengin/tenant-lifecycle";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
@@ -108,6 +111,7 @@ import { buildDesignReviewRoutes } from "./design-review-routes.js";
 import { buildIntegrityVerdictRoutes } from "./integrity-verdict-routes.js";
 import { buildJobCancelRoutes } from "./job-cancel-routes.js";
 import { buildTenantErasureRoutes } from "./tenant-erasure-routes.js";
+import { buildTenantDeletionRoutes } from "./tenant-deletion-routes.js";
 import { buildAuditReadRoutes, entityFieldLookupFrom } from "./audit-read-routes.js";
 import { PostgresAuditReadStore } from "./audit-read-store.js";
 import { buildNotificationTemplateRoutes } from "./notification-template-routes.js";
@@ -248,6 +252,7 @@ export function needsAuditEmitter(options: {
   readonly designReview: boolean;
   readonly auditReadRoutes: boolean;
   readonly tenantErasureRoutes: boolean;
+  readonly tenantDeletionRoutes: boolean;
   readonly integrityProofConfig: string | null;
 }): boolean {
   return (
@@ -256,6 +261,7 @@ export function needsAuditEmitter(options: {
     options.designReview ||
     options.auditReadRoutes ||
     options.tenantErasureRoutes ||
+    options.tenantDeletionRoutes ||
     options.integrityProofConfig !== null
   );
 }
@@ -731,6 +737,104 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           },
           onRecordError: (err, operation) =>
             console.error(`[platform] failed to record ${operation}`, err),
+        }),
+      );
+    }
+  }
+  // The GDPR Article 17 flow, end to end and atomic (ADR-0320). Mounted here rather than with the
+  // platform-admin routes for the same reason the erasure is: its recorder needs the audit emitter,
+  // which does not exist up there.
+  if (options.tenantDeletionRoutes) {
+    if (conn === undefined) {
+      console.warn(
+        "[platform] --tenant-deletion-routes requires a Postgres store (--store pg); skipping",
+      );
+    } else if (auditEmitter === null) {
+      console.warn(
+        "[platform] --tenant-deletion-routes requires --audit-chain-config (the tombstone is " +
+          "anchored in the chain, and the deletion is recorded); skipping",
+      );
+    } else if (auditChainProducer === null) {
+      console.warn(
+        "[platform] --tenant-deletion-routes needs the forensic chain (--audit-chain-config); skipping",
+      );
+    } else {
+      if (options.tenantDeletionRoles.length === 0) {
+        console.warn(
+          "[platform] --tenant-deletion-routes is on with no --tenant-deletion-role: every request " +
+            "will be refused",
+        );
+      }
+      const delConn = conn;
+      const emitter = auditEmitter;
+      // The same chain the audit log anchors into, not a second one: one tamper-evident trail per
+      // tenant is the point (ADR-0286).
+      const tombstones = new PostgresTombstoneStore(delConn, auditChainProducer, schemaOpt);
+      const tenantStore = new PostgresTenantStore(delConn);
+      const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
+      extraRouteList.push(
+        ...buildTenantDeletionRoutes({
+          deleter: {
+            delete: async (req) => {
+              const outcome = await deleteTenantAtomically(
+                delConn,
+                tombstones,
+                eraseTenantSchemaWithin,
+                {
+                  tenantId: req.tenantId,
+                  tombstoneId: req.tombstoneId,
+                  kind: req.kind,
+                  executedBy: req.executedBy,
+                  approvedBy: req.approvedBy,
+                  requiredSubsystems: req.requiredSubsystems as readonly DeletionSubsystem[],
+                  attestations: req.attestations as readonly DeletionAttestation[],
+                  ...(req.relatedDeletionRequestId !== undefined
+                    ? { relatedDeletionRequestId: req.relatedDeletionRequestId }
+                    : {}),
+                },
+              );
+              // Forget only on success: a rolled-back deletion left the schema in place, and
+              // forgetting it would send that tenant to the JSONB fallback for no reason.
+              if (outcome.ok) registry()?.forget(req.tenantId);
+              return outcome;
+            },
+            retire: async (tenantId) => (await tenantStore.setStatus(tenantId, "deleted")) !== null,
+            tombstonesFor: async (tenantId) => tombstones.listForTenant(tenantId),
+          },
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          deleteRoles: new Set(options.tenantDeletionRoles),
+          ...(options.tenantTombstoneReadRoles.length > 0
+            ? { readRoles: new Set(options.tenantTombstoneReadRoles) }
+            : {}),
+          recordAction: async (event): Promise<void> => {
+            await emitter.emit(
+              auditEntry({
+                id: randomUUID(),
+                tenantId: event.tenantId,
+                occurredAt: event.at,
+                operation: event.operation,
+                entity: "Tenant",
+                entityId: event.tenantId,
+                actor: auditActor({ userId: event.principalId }),
+                after: {
+                  approvedBy: event.approvedBy,
+                  tombstoneId: event.tombstoneId,
+                  chainEntryHash: event.chainEntryHash,
+                  rowCount: event.rowCount,
+                  tenantRetired: event.tenantRetired,
+                  ...(event.refusals.length > 0 ? { refusals: event.refusals } : {}),
+                },
+              }),
+            );
+          },
+          onRecordError: (err, operation) =>
+            console.error(`[platform] failed to record ${operation}`, err),
+          onRetireError: (err, tenantId) =>
+            console.error(
+              `[platform] tenant ${tenantId} was deleted and anchored but its row was not retired;` +
+                " the data is gone and proven gone — retire the row by hand",
+              err,
+            ),
         }),
       );
     }
