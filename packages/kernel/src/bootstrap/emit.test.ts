@@ -757,6 +757,7 @@ describe("the catalog's own emission is unchanged", () => {
       "incident_communications",
       "notification_read_watermarks",
       "notification_user_quiet_hours",
+      "tenant_tombstones",
     ]);
     for (const sql of statements) {
       expect(sql).not.toMatch(/CONSTRAINT "[^"]+" FOREIGN KEY \(/);
@@ -771,6 +772,7 @@ describe("the catalog's own emission is unchanged", () => {
       "incident_communications",
       "notification_read_watermarks",
       "notification_user_quiet_hours",
+      "tenant_tombstones",
     ]);
     for (const table of META_TABLES) {
       for (const policy of table.rls?.policies ?? []) {

@@ -3679,6 +3679,26 @@ export const META_TENANT_DATA_EXPORTS: TableDefinition = {
   },
 };
 
+/**
+ * The record that a deletion happened, which has to outlive everything it describes.
+ *
+ * Declared in Phase 1 and never written until ADR-0318, by which point it had drifted behind
+ * `TombstoneRecordSchema` in three places — the second instance of ADR-0300's finding, and the one
+ * where it mattered most:
+ *
+ *  - `executed_by` and `approved_by` were `UUID` referencing `meta.users`. The contract has them as
+ *    free text, and the reference was self-defeating: a tenant deletion erases that tenant's users, so
+ *    the tombstone would have pointed at rows it had just destroyed. `ON DELETE RESTRICT` would then
+ *    have made the users undeletable *because* a tombstone named them. A `scheduled_purge` has no human
+ *    executor at all.
+ *  - `related_deletion_request_id` was `UUID`; the contract's ids are free text.
+ *  - there was nowhere to put the attestations the scope was composed from (ADR-0317), so a stored
+ *    record could not be checked against its own evidence — only against itself.
+ *
+ * `tenant_id` is `UUID NOT NULL` with **no** reference, and that was always right: the tenant row is
+ * retired after its data is erased, and a tombstone that required it to exist could not describe a
+ * completed deletion.
+ */
 export const META_TENANT_TOMBSTONES: TableDefinition = {
   schema: "meta",
   name: "tenant_tombstones",
@@ -3700,10 +3720,11 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
     },
     { name: "tenant_id", type: "UUID", notNull: true },
     { name: "subject_identifier", type: "TEXT" },
-    { name: "related_deletion_request_id", type: "UUID" },
+    { name: "related_deletion_request_id", type: "TEXT" },
     { name: "deleted_at", type: "TIMESTAMPTZ", notNull: true },
-    { name: "executed_by", type: "UUID", notNull: true, references: USER_FK },
-    { name: "approved_by", type: "UUID", notNull: true, references: USER_FK },
+    // TEXT and unreferenced: see the note above. A tombstone names who acted, not a row that survives.
+    { name: "executed_by", type: "TEXT", notNull: true },
+    { name: "approved_by", type: "TEXT", notNull: true },
     { name: "scope", type: "JSONB", notNull: true },
     {
       name: "content_manifest_sha256",
@@ -3721,8 +3742,27 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
     { name: "retained_reason", type: "TEXT" },
     { name: "retained_data_reference", type: "TEXT" },
     { name: "invalidation_of_prior_tombstone_id", type: "TEXT" },
+    /** The per-subsystem reports the scope was composed from (ADR-0317), so the claim keeps its evidence. */
+    { name: "attestations", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    /** The chain entry this record was anchored by, written in the same transaction (ADR-0286). */
+    {
+      name: "chain_entry_hash",
+      type: "TEXT",
+      check: "chain_entry_hash IS NULL OR chain_entry_hash ~ '^[0-9a-f]{64}$'",
+    },
+    { name: "chain_sequence_number", type: "INTEGER" },
   ],
   primaryKey: ["id"],
+  constraints: [
+    {
+      kind: "check",
+      name: "tenant_tombstones_four_eyes_check",
+      // The third layer for one rule, as ADR-0313 did for template approval: the contract refuses it,
+      // the store refuses it, and the column refuses it — because the only way a privileged act stays
+      // privileged is if the check holds where the write lands.
+      expression: "executed_by <> approved_by",
+    },
+  ],
   indexes: [
     { name: "idx_tenant_tombstones_tenant", columns: ["tenant_id"] },
     { name: "idx_tenant_tombstones_kind", columns: ["kind"] },
@@ -3736,6 +3776,16 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
       {
         name: "tenant_tombstones_isolation",
         using: TENANT_ISOLATION_USING,
+      },
+      {
+        // Without this the table is unreadable by the only people who need it. A tombstone outlives
+        // its tenant, so after the deletion there is no tenant session left to satisfy the isolation
+        // policy — the record would exist for exactly the readers it excluded. `SELECT`-only and split
+        // off for ADR-0313's reason: on an `ALL`-scope policy the `USING` also serves as the
+        // `WITH CHECK`, and a read grant must not become the ability to forge a deletion receipt.
+        name: "tenant_tombstones_platform_audit_read",
+        command: "SELECT",
+        using: "current_setting('app.platform_audit', true) = 'on'",
       },
     ],
   },
