@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 310 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 311 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -189,6 +189,17 @@ packages exist at only one layer, noted below where that is true.
   refusal memoised for 60s so an operator's fix is picked up without a restart); `storeFor` is
   deliberately synchronous and does not provision; `TenantColumnStoreRouter` routes **per call** to the
   tenant's store or the JSONB fallback.
+  **And erases it** (ADR-0316), because ADR-0314's schema was never removed and `tenant-lifecycle` then
+  signed a GDPR Article 17 tombstone over data that survived. `surveyTenantSchema` measures with
+  `count(*)`, not `reltuples`, since a cryptographic proof commits to the figure; `probeCascadeCollateral`
+  establishes what `DROP SCHEMA … CASCADE` would destroy **outside** the schema by running it in a
+  savepoint and rolling back, because inferring it from `pg_depend` was wrong twice in opposite
+  directions (a constraint's `objid` is a `pg_constraint` oid, so every primary key read as external and
+  nothing could be erased; and `pg_identify_object(…).schema` is NULL for a *rule*, so a view in another
+  schema — the one case the check exists for — went straight through). `eraseTenantSchema` settles the
+  cheap refusals before it probes, drops under the apply path's advisory lock, and **confirms absence
+  before committing** — a `DROP` that reported success while the schema remained would produce a signed
+  tombstone for live data.
 
 ### Request edge
 
@@ -545,7 +556,7 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   human-in-the-loop write approval and optional Postgres transcript), `license`, `version`,
   `help`. Every subcommand takes `--format human|json`; exit 0 / 1 / 2.
 - **`apps/operate-server`** — **long-running process**, the deployed serving binary and the
-  largest app (79 modules). A Node `http` listener over `buildOperateGateway` plus a
+  largest app (80 modules). A Node `http` listener over `buildOperateGateway` plus a
   framework-neutral `dispatch` core with a Fetch/Workers edge adapter — **both** now enforce one
   configurable request-body cap (`--max-request-body`, default 10 MiB, floor 1 KiB, ceiling 1 GiB, refused
   rather than clamped out of band, enforced per chunk as the body arrives; ADR-0312), where previously the
@@ -569,6 +580,12 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   unrecordable granted read is a 503 and a tenant naming another tenant is a 403 rather than a quietly
   narrowed query (ADR-0313); **job-run cancellation** (`POST /v1/meta/jobs/runs/{id}/cancel`, gated on the
   job-invoke roles, tenant from the credential, outcome reported as 200/202/409/404 — ADR-0315);
+  **tenant-schema erasure** (`--tenant-erasure-routes`) — a read-only survey route so a destructive act
+  is not approved blind, then a drop whose `executedBy` is the credential and whose `approvedBy` is the
+  body and must differ, with the tenant id repeated as `confirmTenantId` so an irreversible action is not
+  one mistyped path segment away; an erasure that succeeds and cannot be recorded returns **500
+  `erasure_unrecorded`** with the scope and an instruction not to issue a tombstone from it, since a 200
+  would license a proof with nothing behind it and a 503 would read as "nothing happened" (ADR-0316);
   the four read-only
   audit-integrity verdict routes (`--audit-verdict-routes`, ADR-0303); the in-production AI Architect
   (`--ai-design`, local provider first — ADR-0306) with a
@@ -824,12 +841,18 @@ opened them.
   `FcmAccessTokenProvider` (RS256-signing a JWT, a second endpoint, a refresh cache — or the instance
   metadata server on GKE) and ADR-0301's rule is that a partially-configured provider is skipped rather
   than guessed. Voice status callbacks are unused.
-- **Per-tenant column schemas are additive only, and nothing cleans them up** (ADR-0314). A tenant serving
-  its own manifest gets its own Postgres schema; a removed field's column is never dropped, a changed type
-  is never altered, ADR-0308's rename machinery does not reach there, and `tenant-lifecycle`'s deletion
-  path does not know the schema exists. A **refused** application is loud in the log and silent to the
-  tenant: they are served from the JSONB fallback, so their data is in a different place than they think
-  until an operator runs the reported SQL.
+- **Per-tenant column schemas are additive only** (ADR-0314). A removed field's column is never dropped,
+  a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
+  application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
+  their data is in a different place than they think until an operator runs the reported SQL.
+- **A tenant's schema can be erased, and nothing assembles the tombstone** (ADR-0316). The erasure
+  exists, measures exactly what it destroys, refuses a cascade that would reach another schema (observed
+  by trial-and-rollback, not inferred from `pg_depend` — which was wrong twice, in both directions), and
+  confirms absence before it commits. `erasureDeletionScope` yields the `DeletionScope` fields it can
+  honestly account for. What is still missing is the *flow*: no deletion-request store, no scheduler, and
+  nothing that builds a `TombstoneRecord` from the scope — so the proof is issued by hand. Object
+  storage, backup generations, search indexes and cache keys remain unaccounted for, each needing its own
+  erasure with its own measurement.
 - **The AI cost estimator is a heuristic on the input side** (ADR-0311). `maxTokens` bounds the output by
   construction; the input is `ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic because the
   number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
@@ -864,9 +887,10 @@ opened them.
   phrased as "no further work will be *started*" (ADR-0315). Nothing cancels a *workflow* instance's
   timers or activities — cancellation is jobs only. `ESTIMATED_CHARS_PER_TOKEN` under-counts for CJK,
   which is the unsafe direction for a ceiling (ADR-0311). A per-route or per-tenant request-body limit
-  is unaddressed; the cap is platform-wide (ADR-0312). Nothing drops a tenant's own schema when their
-  tenant is deleted, and a refused DDL application is invisible to the tenant — they are served from the
-  JSONB fallback rather than the tables they asked for (ADR-0314).
+  is unaddressed; the cap is platform-wide (ADR-0312). A refused DDL application is invisible to the
+  tenant — they are served from the JSONB fallback rather than the tables they asked for (ADR-0314). A
+  refused erasure leaves an operator to drop the collateral by hand; the refusal names it but does not
+  hand over the SQL the way ADR-0290's `unreconciled` does (ADR-0316).
 - Column-store migration is **additive only** (ADR-0283, ADR-0314): a removed field's column
   is never dropped and a changed type is never altered, since both need a decision
   about existing data. Per-tenant activated manifests now *do* get DDL, into the tenant's
@@ -884,7 +908,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 310 records; 231 Accepted, 79 Proposed (the
+title or status change cannot drift. 311 records; 232 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -30,7 +30,9 @@ import {
   PostgresSubscriptionStore,
   TenantColumnStoreRegistry,
   TenantColumnStoreRouter,
+  eraseTenantSchema,
   ingestStripeWebhook,
+  surveyTenantSchemaWithCollateral,
 } from "@crossengin/operate-runtime-pg";
 
 import type { PruneOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
@@ -105,6 +107,7 @@ import { PostgresDesignReviewStore } from "./design-review-store.js";
 import { buildDesignReviewRoutes } from "./design-review-routes.js";
 import { buildIntegrityVerdictRoutes } from "./integrity-verdict-routes.js";
 import { buildJobCancelRoutes } from "./job-cancel-routes.js";
+import { buildTenantErasureRoutes } from "./tenant-erasure-routes.js";
 import { buildAuditReadRoutes, entityFieldLookupFrom } from "./audit-read-routes.js";
 import { PostgresAuditReadStore } from "./audit-read-store.js";
 import { buildNotificationTemplateRoutes } from "./notification-template-routes.js";
@@ -244,6 +247,7 @@ export function needsAuditEmitter(options: {
   readonly perTenantManifests: boolean;
   readonly designReview: boolean;
   readonly auditReadRoutes: boolean;
+  readonly tenantErasureRoutes: boolean;
   readonly integrityProofConfig: string | null;
 }): boolean {
   return (
@@ -251,6 +255,7 @@ export function needsAuditEmitter(options: {
     options.perTenantManifests ||
     options.designReview ||
     options.auditReadRoutes ||
+    options.tenantErasureRoutes ||
     options.integrityProofConfig !== null
   );
 }
@@ -656,6 +661,80 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // The read side of the audit trail (ADR-0277/0279: nothing read it over HTTP). Payload redaction
   // is classification-driven from the served manifest, and the reads are themselves audited — an
   // unrecordable privileged read is refused, not served unaudited.
+  // Erasing a tenant's own schema, which is what makes a tenant deletion true (ADR-0316). Mounted
+  // here rather than beside the other platform-admin routes because its recorder is required and the
+  // audit emitter does not exist yet up there — destroying a tenant's data unrecorded leaves the
+  // deletion with no provenance at all, which is precisely what a tombstone exists to supply.
+  if (options.tenantErasureRoutes) {
+    if (conn === undefined) {
+      console.warn(
+        "[platform] --tenant-erasure-routes requires a Postgres store (--store pg); skipping",
+      );
+    } else if (auditEmitter === null) {
+      console.warn(
+        "[platform] --tenant-erasure-routes requires --audit-chain-config (an erasure is recorded " +
+          "before it is reported, and an unrecorded one is refused); skipping",
+      );
+    } else {
+      if (options.tenantErasureRoles.length === 0) {
+        console.warn(
+          "[platform] --tenant-erasure-routes is on with no --tenant-erasure-role: every request " +
+            "will be refused",
+        );
+      }
+      const eraseConn = conn;
+      const emitter = auditEmitter;
+      const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
+      extraRouteList.push(
+        ...buildTenantErasureRoutes({
+          eraser: {
+            survey: async (tenantId) => {
+              const { survey, collateral } = await surveyTenantSchemaWithCollateral(
+                eraseConn,
+                tenantId,
+              );
+              return { ...survey, collateral };
+            },
+            erase: async (tenantId, authority) => {
+              const erasure = await eraseTenantSchema(eraseConn, tenantId, authority);
+              // Forget before reporting: `storeFor` is synchronous and would otherwise keep handing
+              // out a store bound to a schema that no longer exists, so the next request for this
+              // tenant would fail against dropped tables instead of falling back.
+              if (erasure.erased) registry()?.forget(tenantId);
+              return erasure;
+            },
+          },
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          adminRoles: new Set(options.tenantErasureRoles),
+          recordAction: async (event): Promise<void> => {
+            await emitter.emit(
+              auditEntry({
+                id: randomUUID(),
+                tenantId: event.tenantId,
+                occurredAt: event.at,
+                operation: event.operation,
+                entity: "TenantSchema",
+                entityId: event.schema,
+                actor: auditActor({ userId: event.principalId }),
+                // The figures a tombstone commits to, recorded in the tenant's own anchored trail so
+                // the receipt and the proof agree.
+                after: {
+                  schema: event.schema,
+                  approvedBy: event.approvedBy,
+                  rowCount: event.rowCount,
+                  storageBytes: event.storageBytes,
+                  tables: event.tables,
+                  ...(event.refusals.length > 0 ? { refusals: event.refusals } : {}),
+                },
+              }),
+            );
+          },
+          onRecordError: (err, operation) =>
+            console.error(`[platform] failed to record ${operation}`, err),
+        }),
+      );
+    }
+  }
   if (options.auditReadRoutes) {
     if (conn === undefined) {
       console.warn("[audit] --audit-read-routes requires a Postgres store (--store pg); skipping");

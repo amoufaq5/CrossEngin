@@ -138,6 +138,10 @@ export interface ServeOptions {
   readonly auditReadSensitiveRoles: readonly string[];
   /** Maximum queryable time range in days; null uses the route default. */
   readonly auditReadMaxRangeDays: number | null;
+  /** Expose the tenant-schema survey and erasure under /v1/platform/tenants/{id} — the step that makes a tenant deletion true, since ADR-0314's per-tenant schema was never removed (needs --store pg + --audit-chain-config). */
+  readonly tenantErasureRoutes: boolean;
+  /** Roles permitted to survey and erase a tenant's schema (repeatable; default none ⇒ nobody). Four-eyes is enforced separately: the caller may not be the approver. */
+  readonly tenantErasureRoles: readonly string[];
   /** Maximum buffered request body, as bytes or a size like 25mb (default 10mb, floor 1kb, ceiling 1gb). */
   readonly maxRequestBodyBytes: number | null;
   readonly defaultScheme: "http" | "https";
@@ -241,6 +245,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const auditReadPlatformRoles: string[] = [];
   const auditReadSensitiveRoles: string[] = [];
   let auditReadMaxRangeDays: number | null = null;
+  let tenantErasureRoutes = false;
+  const tenantErasureRoles: string[] = [];
   let maxRequestBodyBytes: number | null = null;
   let help = false;
   let version = false;
@@ -547,6 +553,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       }
       auditReadMaxRangeDays = n;
       i += consumed();
+    } else if (arg === "--tenant-erasure-routes") {
+      tenantErasureRoutes = true;
+    } else if (arg === "--tenant-erasure-role" || arg.startsWith("--tenant-erasure-role=")) {
+      tenantErasureRoles.push(takeValue(arg, next, "--tenant-erasure-role"));
+      i += consumed();
+      tenantErasureRoutes = true;
     } else if (arg === "--max-request-body" || arg.startsWith("--max-request-body=")) {
       const raw = takeValue(arg, next, "--max-request-body");
       const parsed = parseRequestBodyLimit(raw);
@@ -572,6 +584,11 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if ((aiDesign || perTenantManifests) && store === "memory") {
     throw new CliUsageError("--ai-design / --per-tenant-manifests require a Postgres store (--store pg or pg-columns)");
+  }
+  if (tenantErasureRoutes && store === "memory") {
+    throw new CliUsageError(
+      "--tenant-erasure-routes requires a Postgres store (--store pg or pg-columns)",
+    );
   }
   if ((auditReadRoutes || notificationTemplateRoutes) && store === "memory") {
     // Refused here rather than warned about at boot, like every sibling above: both surfaces read and
@@ -777,6 +794,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     // default for a surface whose whole point is that reading pii is a separate, granted privilege.
     auditReadSensitiveRoles,
     auditReadMaxRangeDays,
+    tenantErasureRoutes,
+    // No default: irreversibly destroying a tenant's business data is nobody's privilege until it is
+    // granted by name, not even the platform admin's by inheritance.
+    tenantErasureRoles,
     maxRequestBodyBytes,
     defaultScheme,
     help,
@@ -1100,6 +1121,13 @@ Options:
   --audit-read-sensitive-role <r>  Role permitted to see pii/phi/regulated payload fields
                        unredacted (repeatable). Default none: every reader gets the redacted view
   --audit-read-max-range-days <n>  Largest queryable time range in days (>=1)
+  --tenant-erasure-routes  Expose GET /v1/platform/tenants/{id}/schema and POST .../erase-schema —
+                       survey exactly what a tenant's own schema holds, then drop it. ADR-0314 gave a
+                       tenant its own schema and nothing removed it, so a GDPR Article 17 tombstone
+                       was signed over data that survived. Needs --store pg + --audit-chain-config:
+                       an erasure is recorded before it is reported, and an unrecorded one is refused
+  --tenant-erasure-role <r>  Role permitted to survey and erase (repeatable). Default none ⇒ nobody.
+                       Four-eyes is separate and not overridable: the caller may not be the approver
   --max-request-body <size>  Largest buffered request body — bytes or a size like 25mb (default
                        10mb, floor 1kb, ceiling 1gb). Not disableable; out-of-band values are
                        refused at boot rather than clamped
