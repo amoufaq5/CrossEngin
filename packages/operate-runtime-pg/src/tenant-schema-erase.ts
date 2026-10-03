@@ -362,7 +362,7 @@ export interface TenantSchemaErasure {
 }
 
 /**
- * Drops one tenant's schema and proves it is gone.
+ * Drops one tenant's schema and proves it is gone, in its own transaction.
  *
  * Under the same per-tenant advisory lock `applyTenantManifestSchema` takes, which is what stops a
  * concurrent activation from re-creating the schema between the drop and the check — and, more
@@ -378,8 +378,34 @@ export async function eraseTenantSchema(
   authority: ErasureAuthority,
   opts: TenantSchemaOptions = {},
 ): Promise<TenantSchemaErasure> {
+  // Resolved before the transaction opens, not inside it: a non-UUID tenant id can never produce a
+  // schema name, so it must not cost a BEGIN and a ROLLBACK to find out.
+  resolveTenantSchema(tenantId, opts);
+  return conn.transaction(async (tx) => eraseTenantSchemaWithin(tx, tenantId, authority, opts));
+}
+
+/**
+ * The same erasure, inside a transaction the caller owns.
+ *
+ * This exists so a tenant deletion can commit the drop and the **tombstone that records it** together
+ * (ADR-0319). Postgres DDL is transactional — `probeCascadeCollateral` already relies on it, dropping
+ * a schema in a savepoint and rolling it back — so the alternative is a window in which the data is
+ * gone and the proof of its deletion is not. For a deletion that is cryptographically attested, that
+ * window is the worst state the system can be in: irreversible and unaccounted for.
+ *
+ * Takes the per-tenant advisory lock as an *xact* lock, so it is the caller's commit that releases it
+ * and nothing can re-create the schema before the tombstone lands beside the drop.
+ *
+ * Mirrors `appendWithin`'s shape, for the same reason it exists.
+ */
+export async function eraseTenantSchemaWithin(
+  tx: PgConnection,
+  tenantId: string,
+  authority: ErasureAuthority,
+  opts: TenantSchemaOptions = {},
+): Promise<TenantSchemaErasure> {
   const resolved = resolveTenantSchema(tenantId, opts);
-  return conn.transaction(async (tx) => {
+  return (async () => {
     await tx.query(TENANT_SCHEMA_LOCK_SQL, [resolved]);
     const survey = await surveyTenantSchema(tx, tenantId, opts);
     // Planned twice, and the order is deliberate. The first pass has no collateral to judge, so it
@@ -449,7 +475,7 @@ export async function eraseTenantSchema(
       storageBytes: 0,
       erasedAt: at,
     };
-  });
+  })();
 }
 
 /**

@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 313 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 314 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~11,760 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~11,780 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -388,6 +388,15 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   transaction** (ADR-0286) and **replaces** the caller's `anchors` with it: a claimant choosing their own
   witness is the hole, not a feature. The chain payload is the two digests and the identity, never the
   scope, because a scope can name every table a tenant held and every integrity pass rereads the chain.
+  `deleteTenantAtomically` (ADR-0319) then runs the whole deletion — erase, attest, assemble, anchor,
+  store — in **one** transaction, so the data and its proof cannot disagree: run separately there is a
+  window where the schema is gone and the record of its deletion is not, which ADR-0316 actually hit and
+  had to answer with a 500 saying "do not issue a tombstone from this response". `eraseTenantSchemaWithin`
+  and `writeWithin` are the seams, following `appendWithin`'s precedent; the erase's advisory lock
+  becomes the *caller's* to release, so nothing re-creates the schema between the drop and the tombstone.
+  `tenant_schema`'s attestation is produced by the pipeline from the erasure that just ran and a
+  caller-supplied one is dropped — an attestation about work the transaction is about to do is a
+  prediction, not evidence.
 - **`marketplace`** — contracts: 8 pack kinds, a registry with Ed25519 signing and security
   review, per-tenant install lifecycle, permission grants, listings, reviews,
   compatibility.
@@ -873,8 +882,13 @@ opened them.
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
   their data is in a different place than they think until an operator runs the reported SQL.
-- **A tenant's schema can be erased, a tombstone composed, persisted and anchored; no route does it**
-  (ADR-0316, ADR-0317, ADR-0318). The erasure measures exactly what it destroys, refuses a cascade that would reach
+- **A tenant deletion is atomic end to end; no route runs it** (ADR-0316, ADR-0317, ADR-0318, ADR-0319).
+  `deleteTenantAtomically` runs erase → attest → assemble → anchor → store in **one transaction**, which
+  Postgres allows because DDL is transactional (`probeCascadeCollateral` already depends on it). The
+  guarantee: **no outcome destroys a tenant's data without a stored, anchored, verified tombstone
+  describing it — either both, or neither.** It does not make the deletion reversible; the *commit* is
+  all-or-nothing. An erase refusal is returned (nothing was dropped); an assembly refusal **throws**, so
+  the drop rolls back rather than committing a deletion with no record. The erasure measures exactly what it destroys, refuses a cascade that would reach
   another schema (observed by trial-and-rollback, not inferred from `pg_depend` — which was wrong twice,
   in both directions), and confirms absence before it commits. `assembleTombstone` then composes a
   `DeletionScope` **only** from per-subsystem attestations and refuses when a subsystem in scope has not
@@ -942,7 +956,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 313 records; 234 Accepted, 79 Proposed (the
+title or status change cannot drift. 314 records; 235 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
