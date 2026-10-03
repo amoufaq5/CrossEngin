@@ -194,6 +194,35 @@ export class PostgresTombstoneStore {
     record: TombstoneRecord,
     attestations: readonly DeletionAttestation[] = [],
   ): Promise<StoredTombstone> {
+    this.assertWritable(record, attestations);
+    return this.conn.transaction(async (tx) => this.insertWithin(tx, record, attestations));
+  }
+
+  /**
+   * The same write, inside a transaction the caller owns.
+   *
+   * This is what lets a tenant deletion commit the `DROP SCHEMA` and the tombstone that records it
+   * **together** (ADR-0319). Postgres DDL is transactional, so the alternative is a window in which
+   * the data is gone and the proof of its deletion is not — for a cryptographically attested deletion
+   * that is the worst state available: irreversible and unaccounted for.
+   *
+   * Refusals are raised before the caller's transaction is touched, so a refused write leaves whatever
+   * else the caller had done intact and rollback-able on its own terms.
+   */
+  async writeWithin(
+    tx: PgConnection,
+    record: TombstoneRecord,
+    attestations: readonly DeletionAttestation[] = [],
+  ): Promise<StoredTombstone> {
+    this.assertWritable(record, attestations);
+    return this.insertWithin(tx, record, attestations);
+  }
+
+  /** Everything refusable about a write, checked before any statement is sent. */
+  private assertWritable(
+    record: TombstoneRecord,
+    attestations: readonly DeletionAttestation[],
+  ): void {
     if (!UUID_RE.test(record.tenantId)) {
       // The column is UUID; a contract that accepts free text would otherwise fail at the bind with a
       // message about syntax rather than about the tenant.
@@ -225,8 +254,14 @@ export class PostgresTombstoneStore {
         "the record's scope is not the one its attestations compose to",
       );
     }
+  }
 
-    return this.conn.transaction(async (tx) => {
+  private async insertWithin(
+    tx: PgConnection,
+    record: TombstoneRecord,
+    attestations: readonly DeletionAttestation[],
+  ): Promise<StoredTombstone> {
+    return (async () => {
       // Appended first so the row can carry its coordinates without an UPDATE, which would give an
       // append-only table a rewrite path (ADR-0286).
       const entry = await this.anchorer.appendWithin(tx, {
@@ -287,7 +322,7 @@ export class PostgresTombstoneStore {
         chainEntryHash: entry.entryHash,
         chainSequenceNumber: entry.sequenceNumber,
       };
-    });
+    })();
   }
 
   /**
