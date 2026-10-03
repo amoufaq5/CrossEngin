@@ -19,6 +19,27 @@ export const INCIDENT_CLOSE_OUTS = [
 ] as const;
 export type IncidentCloseOut = (typeof INCIDENT_CLOSE_OUTS)[number];
 
+/**
+ * Whether this close-out means the alert at the paging provider should be closed too (ADR-0326).
+ *
+ * An escalator that paged on declaration has an open alert at PagerDuty keyed on the incident id,
+ * and a recovery is the only thing that should close it. Two of the four close-outs mean the episode
+ * is genuinely over and two do not, and the distinction is not "did we write a row":
+ *
+ * - `cancelled` — the record was closed. The alert should close with it.
+ * - `unpersisted` — no record outlived the process, but the *page* did: it left over a real
+ *   transport with a real `dedup_key`. The alert is no less open for the record being in-memory, so
+ *   leaving it open would strand exactly the deployments with no incident store to look in.
+ * - `human_owned` — the declarer refused to close it because somebody triaged it. The incident is
+ *   open and owned; resolving its alert would tell the provider the opposite of what is true, and
+ *   take the alert off the board of the person holding it.
+ * - `failed` — the store could not be reached, so the row is still open and we do not know what
+ *   state it is in. Fail closed: an alert left open is noise, an alert wrongly closed is silence.
+ */
+export function closeOutClosesAlert(closeOut: IncidentCloseOut): boolean {
+  return closeOut === "cancelled" || closeOut === "unpersisted";
+}
+
 export interface IncidentCloseOutInput {
   readonly reason: string;
   readonly actorUserId: string;

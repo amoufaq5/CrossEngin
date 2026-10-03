@@ -1,7 +1,7 @@
 import { hmacSha256Hex } from "@crossengin/crypto";
 
 import { truncateErrorMessage, type FetchLike } from "./email-ses.js";
-import type { PageContent, PageSendResult } from "./page-pagerduty.js";
+import { classifyPageFailure, type PageContent, type PageSendResult } from "./page-pagerduty.js";
 
 /*
  * Two more page transports, both thin.
@@ -65,7 +65,9 @@ export class SlackPageSender {
       const ok = response.ok && slackOk(text);
       if (!ok) {
         return {
-          outcome: response.ok ? "rejected" : response.status >= 500 ? "failed" : "rejected",
+          // `response.ok` with `ok: false` is an application refusal (`channel_not_found`), which no
+          // retry fixes. A non-ok status goes through the shared classifier so 429 is retryable.
+          outcome: response.ok ? "rejected" : classifyPageFailure(response.status),
           provider: this.provider,
           httpStatus: response.status,
           reference: null,
@@ -160,7 +162,7 @@ export class WebhookPageSender {
       const text = await response.text();
       if (!response.ok) {
         return {
-          outcome: response.status >= 500 ? "failed" : "rejected",
+          outcome: classifyPageFailure(response.status),
           provider: this.provider,
           httpStatus: response.status,
           reference: null,

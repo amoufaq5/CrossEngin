@@ -126,7 +126,9 @@ import { buildDeletionRequestRoutes, newRequestId } from "./deletion-request-rou
 import { DeletionEscalationConfigSchema } from "./deletion-escalation-config.js";
 import { DeletionEvidenceEscalator } from "./deletion-evidence-escalation.js";
 import { buildPageDispatcher, buildPageSendersFromEnv } from "./page-senders-env.js";
+import { PageRecorder, formatPageRecord } from "./page-record.js";
 import { formatPageReport, type PageDeliveryReport } from "@crossengin/notification-providers";
+import type { PageDirective } from "@crossengin/observability-runtime";
 import {
   DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
@@ -871,6 +873,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   for (const skipped of pageSenders.report.skipped) {
     console.warn(`[paging] not wired: ${skipped}`);
   }
+  // A page is now written down as well as sent (ADR-0326). `tenantIdFor` is the deployment's answer
+  // to "whose row is this": `meta.audit_log.tenant_id` is NOT NULL, so a page for a platform-scope
+  // incident cannot leave a row and the recorder reports that rather than inventing a tenant.
+  const pageRecorder =
+    conn === undefined || auditEmitter === null
+      ? null
+      : new PageRecorder({
+          audit: auditEmitter,
+          onError: (err) => console.error("[paging] could not record a page", err),
+        });
   const pageLogger =
     (surface: string) =>
     (report: PageDeliveryReport): void => {
@@ -880,6 +892,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (report.undelivered) console.error(text);
       else console.info(text);
     };
+  /**
+   * Delivers a page and writes it down, which only the call site can do: the report carries no
+   * tenant (ADR-0325's content rule), so the tenant comes from the incident that caused it.
+   *
+   * A `resolve` fan-out is deliberately NOT routed through here — an all-`unsupported` resolve would
+   * land as `platform.page_undelivered`, claiming a page failed when none was sent.
+   */
+  const deliverAndRecord = async (
+    pager: { deliver: (d: PageDirective) => Promise<PageDeliveryReport> },
+    directive: PageDirective,
+    surface: string,
+    tenantId: string | null,
+  ): Promise<void> => {
+    const report = await pager.deliver(directive);
+    const outcome = await (pageRecorder?.record(report, tenantId) ??
+      Promise.resolve({ audited: false, reason: "no recorder" }));
+    if (!outcome.audited) console.warn(`[${surface}] ${formatPageRecord(report, outcome)}`);
+  };
   const deletionPager = buildPageDispatcher(
     "deletion-evidence",
     pageSenders,
@@ -890,6 +920,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     pageSenders,
     pageLogger("integrity-proof"),
   );
+  // The SLO loop's pages, which `EnforcementPlan.pages` has planned since Phase 2 and nothing has
+  // ever read (ADR-0326).
+  const sloPager = buildPageDispatcher("slo", pageSenders, pageLogger("slo"));
   // Escalation for the two deletion-evidence findings the forensic chain cannot raise (ADR-0324).
   // Built once and shared by the routes and the scheduler, so one tampered row examined by both is
   // still one episode — the episode key is the request, and `findOpen` is what enforces it.
@@ -900,15 +933,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     );
     deletionEscalator = new DeletionEvidenceEscalator({
       config: parsed,
+      // The escalation leaves its own anchored row, as the integrity escalator's does (ADR-0326):
+      // the incident says a sev1 happened, this says why it was graded that way.
+      ...(auditEmitter !== null ? { audit: auditEmitter } : {}),
+      // Closes the provider's alert when the incident is cancelled on recovery.
+      resolvePage: async (page): Promise<void> => {
+        await deletionPager.resolve(page);
+      },
       // Store-backed, with no fallback declarer: unlike the integrity escalator's one-shot finding
       // (ADR-0304), this one is re-derived from the same two rows on the next pass, so a failed
       // declaration is retried rather than lost and an in-process id cannot collide with a stored
       // one for no gain (ADR-0293's reasoning for the SLO loop).
       declarer: new PostgresIncidentDeclarer({ conn }),
-      page: async (page): Promise<void> => {
+      page: async (page, incident): Promise<void> => {
         // Delivered, or loudly undelivered. The incident is already durable by here, so a failed
-        // page is reported rather than thrown (ADR-0325).
-        await deletionPager.deliver(page);
+        // page is reported rather than thrown (ADR-0325). The incident is also where the tenant
+        // comes from, since the page itself may not carry one (ADR-0326).
+        await deliverAndRecord(
+          deletionPager,
+          page,
+          "deletion-evidence",
+          incident.affectedTenantIds[0] ?? null,
+        );
       },
       onError: (err, requestId) =>
         console.error(`[deletion-evidence] escalation error for ${requestId}`, err),
@@ -987,7 +1033,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   }
                 },
                 escalateVerdict: async (result): Promise<void> => {
-                  const outcome = await escalator.onVerdict(result);
+                  const outcome = await escalator.onVerdict({
+                    ...result,
+                    ...(result.evidence?.defects !== undefined
+                      ? { defects: result.evidence.defects }
+                      : {}),
+                  });
                   if (outcome.action !== "none") {
                     console.error(
                       `[deletion-evidence] ${result.requestId} → ${outcome.action}` +
@@ -1373,6 +1424,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                 (d.incidentId !== null ? ` incident=${d.incidentId}` : "") +
                 (d.closeOut !== null ? ` closeOut=${d.closeOut}` : ""),
             ),
+          // The pages the engines have been planning since Phase 2 and nothing ever read. Awaited,
+          // so a pass does not report a breach handled before anybody was told (ADR-0326).
+          onPage: async (d): Promise<void> => {
+            // An SLO surface is not a tenant, so these pages are recorded only if a future resolver
+            // can name one — reported as unrecorded rather than attributed to a guess.
+            for (const directive of d.pages) {
+              await deliverAndRecord(sloPager, directive, "slo", null);
+            }
+          },
+          // Closes those alerts when the breach recovers, over the directives that were actually
+          // delivered rather than freshly-planned ones: a recovered decision carries no severity,
+          // so there is nothing to re-plan from (ADR-0326). Not routed through `deliverAndRecord` —
+          // a resolve is not a page and must not be recorded as one.
+          onResolvePage: async (_decision, pages): Promise<void> => {
+            for (const directive of pages) await sloPager.resolve(directive);
+          },
           onError: (err) => console.error("[slo] evaluation error", err),
         })
       : null;
@@ -1589,8 +1656,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               config: proofConfig.escalation,
               ...(auditEmitter !== null ? { audit: auditEmitter } : {}),
               declarer: new PostgresIncidentDeclarer({ conn }),
-              page: async (page): Promise<void> => {
-                await integrityPager.deliver(page);
+              page: async (page, incident): Promise<void> => {
+                // `affectedTenantIds` is empty for the platform chain, which is the genuinely
+                // unrecordable case the integrity escalator already documents.
+                await deliverAndRecord(
+                  integrityPager,
+                  page,
+                  "integrity-proof",
+                  incident.affectedTenantIds[0] ?? null,
+                );
+              },
+              // Closes the alert the declaration opened once the proof stops finding the tamper.
+              // Not routed through `deliverAndRecord`: a resolve is not a page, and recording it as
+              // `platform.page_delivered` would claim somebody was woken (ADR-0326).
+              resolvePage: async (page): Promise<void> => {
+                await integrityPager.resolve(page);
               },
               onError: (err) => console.error("[integrity-proof] escalation error", err),
             });
@@ -1782,6 +1862,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       });
       deletionScheduler = new DeletionScheduler({
         runner,
+        // The reverse-direction audit on a multiple of the tick (ADR-0326). Off unless asked for:
+        // it re-reads and re-hashes every completed request's tombstone, so running it every tick
+        // would re-verify the same rows hundreds of times an hour to find a tamper that is not
+        // time-critical in minutes.
+        ...(options.deletionAuditEveryTicks !== null
+          ? { auditEveryTicks: options.deletionAuditEveryTicks }
+          : {}),
         // The repair half (ADR-0322). Conclusive verdicts only: a scheduler may record a deletion
         // that demonstrably happened, and may never reject a request on the *absence* of evidence.
         reconciler: new DeletionReconciler({
@@ -1801,13 +1888,36 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ? ((escalator: DeletionEvidenceEscalator) => ({
               onEscalate: async (results): Promise<void> => {
                 for (const result of results) {
-                  const outcome = await escalator.onVerdict(result);
+                  const outcome = await escalator.onVerdict({
+                    ...result,
+                    // Graded per defect rather than every finding being sev1 (ADR-0326).
+                    ...(result.evidence?.defects !== undefined
+                      ? { defects: result.evidence.defects }
+                      : {}),
+                  });
                   // `adopted` is the steady state for an unresolved finding and would otherwise be
                   // logged every tick; only a transition is worth a line.
                   if (outcome.action === "declared" || outcome.action === "closed_out") {
                     console.error(
                       `[deletion-evidence] ${result.requestId} → ${outcome.action}` +
                         ` ${outcome.incidentId ?? "-"}${outcome.closeOut === null ? "" : ` (${outcome.closeOut})`}`,
+                    );
+                  }
+                }
+              },
+            }))(deletionEscalator)
+          : {}),
+        ...(deletionEscalator !== null && options.deletionAuditEveryTicks !== null
+          ? ((escalator: DeletionEvidenceEscalator) => ({
+              onAuditFindings: async (findings): Promise<void> => {
+                for (const finding of findings) {
+                  // The same escalator the forward direction uses, so one tampered row examined by
+                  // both paths is still one episode (the key is the request).
+                  const outcome = await escalator.onAuditFinding(finding);
+                  if (outcome.action === "declared") {
+                    console.error(
+                      `[deletion-evidence] audit found ${finding.requestId} → declared` +
+                        ` ${outcome.incidentId ?? "-"}`,
                     );
                   }
                 }

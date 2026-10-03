@@ -885,3 +885,19 @@ describe("parseServeArgs — deletion-evidence escalation", () => {
     expect(opts.deletionRequestRoutes).toBe(true);
   });
 });
+
+describe("parseServeArgs — the reverse-direction audit cadence", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off unless asked for", () => {
+    expect(parseServeArgs([...PG, "--deletion-runner-ms=3000"]).deletionAuditEveryTicks).toBeNull();
+  });
+
+  it("takes a tick multiple and refuses zero or a fraction", () => {
+    expect(parseServeArgs([...PG, "--deletion-audit-every-ticks=20"]).deletionAuditEveryTicks).toBe(20);
+    // A multiple of the tick, not a duration: 0 would mean "every tick", which is what the flag
+    // exists to avoid.
+    expect(() => parseServeArgs([...PG, "--deletion-audit-every-ticks", "0"])).toThrow();
+    expect(() => parseServeArgs([...PG, "--deletion-audit-every-ticks", "1.5"])).toThrow();
+  });
+});

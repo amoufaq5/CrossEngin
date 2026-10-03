@@ -17,6 +17,26 @@ export type PagerDutySeverity = (typeof PAGERDUTY_SEVERITIES)[number];
 export const PAGE_DELIVERY_OUTCOMES = ["delivered", "rejected", "failed"] as const;
 export type PageDeliveryOutcome = (typeof PAGE_DELIVERY_OUTCOMES)[number];
 
+/** `Too Many Requests`: the one 4xx that means "ask again", not "no". */
+export const PAGE_RATE_LIMIT_STATUS = 429;
+
+/**
+ * A non-2xx page response, classified for the dispatcher's retry rule.
+ *
+ * The split is the whole reason `rejected` and `failed` are different outcomes: `failed` is retried
+ * and `rejected` is not, because resending a refusal only collects it again. So **429 must be
+ * `failed`** — PagerDuty's Events API and Slack's `chat.postMessage` both answer 429 with a
+ * `Retry-After` under load, which is the canonical retryable condition, and classifying it with the
+ * other 4xx made the retry unable to help in precisely the case it exists for. Found by review rather
+ * than by a test, because every sender had the same wrong rule and the tests agreed with them.
+ *
+ * Shared by all three transports so a page cannot behave differently per channel.
+ */
+export function classifyPageFailure(status: number): PageDeliveryOutcome {
+  if (status === PAGE_RATE_LIMIT_STATUS) return "failed";
+  return status >= 400 && status < 500 ? "rejected" : "failed";
+}
+
 export interface PageSendResult {
   readonly outcome: PageDeliveryOutcome;
   readonly provider: string;
@@ -83,6 +103,25 @@ export function pagerDutyEventBody(
   });
 }
 
+/**
+ * The resolve body, which closes the alert `pagerDutyEventBody` opened.
+ *
+ * Same `dedup_key`, so this closes the one alert that incident opened rather than guessing at an
+ * alert id — which is the whole reason `dedup_key` is the incident id. ADR-0324 already cancels its
+ * incident when the evidence is put right; without this the PagerDuty alert stayed open, so a
+ * resolved finding kept a rotation awake.
+ *
+ * There is deliberately **no `payload`**: the Events API rejects one on a resolve, and there is
+ * nothing to say anyway — the alert being closed already names the incident.
+ */
+export function pagerDutyResolveBody(incidentId: string, routingKey: string): string {
+  return JSON.stringify({
+    routing_key: routingKey,
+    event_action: "resolve",
+    dedup_key: incidentId,
+  });
+}
+
 export class PagerDutyPageSender {
   readonly provider = "pagerduty";
   private readonly opts: PagerDutyPageSenderOptions;
@@ -93,7 +132,22 @@ export class PagerDutyPageSender {
 
   /** `routingKey` comes from the alert policy's `serviceKey`, per channel target. */
   async send(content: PageContent, routingKey: string): Promise<PageSendResult> {
-    const body = pagerDutyEventBody(content, routingKey, this.opts.source ?? "crossengin");
+    return this.post(
+      pagerDutyEventBody(content, routingKey, this.opts.source ?? "crossengin"),
+      content.incidentId,
+    );
+  }
+
+  /**
+   * Close this incident's alert. The counterpart to `send`, and the reason `PageChannelSender`'s
+   * `resolve` is optional: PagerDuty is the only one of the three transports that holds open state
+   * a later call can close. A posted Slack message cannot be unposted.
+   */
+  async resolve(incidentId: string, routingKey: string): Promise<PageSendResult> {
+    return this.post(pagerDutyResolveBody(incidentId, routingKey), incidentId);
+  }
+
+  private async post(body: string, dedupKey: string): Promise<PageSendResult> {
     const url = this.opts.endpoint ?? PAGERDUTY_EVENTS_URL;
     const doFetch = this.opts.fetch ?? defaultFetch;
     const controller = new AbortController();
@@ -108,7 +162,7 @@ export class PagerDutyPageSender {
       const text = await response.text();
       if (!response.ok) {
         return {
-          outcome: response.status >= 400 && response.status < 500 ? "rejected" : "failed",
+          outcome: classifyPageFailure(response.status),
           provider: this.provider,
           httpStatus: response.status,
           reference: null,
@@ -119,12 +173,13 @@ export class PagerDutyPageSender {
         outcome: "delivered",
         provider: this.provider,
         httpStatus: response.status,
-        reference: parseDedupKey(text) ?? content.incidentId,
+        reference: parseDedupKey(text) ?? dedupKey,
         errorMessage: null,
       };
     } catch (err) {
-      // A timeout or a DNS failure. `failed` rather than `rejected`: retrying may work, and the
-      // dispatcher's job is to say which channels got through, not to decide about retries.
+      // A timeout or a DNS failure. `failed` rather than `rejected`: retrying may work. The
+      // sender never retries on its own — the dispatcher owns that policy, because only it sees
+      // the whole directive and the caller's cadence (ADR-0325).
       return {
         outcome: "failed",
         provider: this.provider,

@@ -164,8 +164,10 @@ export interface ServeOptions {
   readonly deletionRequestReconcileRoles: readonly string[];
   /** How long a request must be `in_progress` before an absence of evidence is read as "never committed" (ms, default 3600000). Presence of evidence is conclusive at any age. */
   readonly deletionStrandedAfterMs: number | null;
-  /** JSON escalation config ({severity?, category?, declaredBy?, alertPolicy}) — declares a sev1 and pages when a deletion proof does not verify, which is the one tamper the forensic chain cannot see. */
+  /** JSON escalation config ({severity?, category?, declaredBy?, severityByDefect?, alertPolicy}) — declares a sev1 and pages when a deletion proof does not verify, which is the one tamper the forensic chain cannot see. */
   readonly deletionEscalationConfig: string | null;
+  /** Run the reverse-direction audit (completed requests whose proof no longer stands up) every Nth deletion-runner tick. Default 0 = never; it re-hashes every completed request's tombstone, so it is far more expensive than the forward pass. */
+  readonly deletionAuditEveryTicks: number | null;
   /** Days from submission to the Article 12(3) deadline (default 30, cap 90). Set per deployment rather than per request. */
   readonly deletionRequestDeadlineDays: number | null;
   /** Run verified deletion requests out of band every N ms (needs --tenant-deletion-routes' wiring). Off unless set; the first tick is one interval after boot, never at boot. */
@@ -291,6 +293,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const deletionRequestReconcileRoles: string[] = [];
   let deletionStrandedAfterMs: number | null = null;
   let deletionEscalationConfig: string | null = null;
+  let deletionAuditEveryTicks: number | null = null;
   let deletionRequestDeadlineDays: number | null = null;
   let deletionRunnerMs: number | null = null;
   let deletionRunnerExecutedBy: string | null = null;
@@ -686,6 +689,17 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       deletionEscalationConfig = takeValue(arg, next, "--deletion-escalation-config");
       i += consumed();
       deletionRequestRoutes = true;
+    } else if (
+      arg === "--deletion-audit-every-ticks" ||
+      arg.startsWith("--deletion-audit-every-ticks=")
+    ) {
+      const raw = takeValue(arg, next, "--deletion-audit-every-ticks");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new CliUsageError(`invalid --deletion-audit-every-ticks: ${raw} (>= 1)`);
+      }
+      deletionAuditEveryTicks = n;
+      i += consumed();
     } else if (arg === "--deletion-runner-ms" || arg.startsWith("--deletion-runner-ms=")) {
       const raw = takeValue(arg, next, "--deletion-runner-ms");
       const n = Number(raw);
@@ -994,6 +1008,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionRequestReconcileRoles,
     deletionStrandedAfterMs,
     deletionEscalationConfig,
+    deletionAuditEveryTicks,
     deletionRequestDeadlineDays,
     deletionRunnerMs,
     deletionRunnerExecutedBy,

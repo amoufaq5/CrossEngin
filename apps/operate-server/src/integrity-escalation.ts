@@ -5,6 +5,7 @@ import {
   CountingIncidentDeclarer,
   FallbackIncidentDeclarer,
   SystemClock,
+  closeOutClosesAlert,
   type Clock,
   type IncidentCloseOut,
   type IncidentDeclarationRequest,
@@ -123,6 +124,14 @@ export interface IntegrityEscalatorOptions {
    */
   readonly declarer?: IncidentDeclarer;
   readonly page?: PageSink;
+  /**
+   * Closes the alert at the paging provider when a recovery closes the record out (ADR-0326).
+   *
+   * Separate from `page` and takes no incident, because there is nothing to wake: the directive's
+   * channels and the incident id are the whole instruction. A transport with nothing to close —
+   * Slack, a webhook — reports `unsupported`, which is not a failure.
+   */
+  readonly resolvePage?: (page: PageDirective) => void | Promise<void>;
   /** Clock for the fallback declarer. Declarations are stamped with the proof's verification time. */
   readonly now?: () => Date;
   readonly onError?: (err: unknown) => void;
@@ -195,8 +204,9 @@ export class IntegrityEscalator {
         };
       }
       this.open.delete(key);
-      const disposition = await this.closeOut(openId);
+      const { closeOut, disposition } = await this.closeOut(openId);
       const audited = await this.record(report, openId, INTEGRITY_RECOVERY_OPERATION);
+      if (closeOutClosesAlert(closeOut)) await this.emitResolve(openId);
       return {
         scope: report.scope,
         kind: "recovered",
@@ -336,7 +346,9 @@ export class IntegrityEscalator {
    * wrapper routes it back to the declarer that minted it rather than asking the store to cancel an
    * id it never issued.
    */
-  private async closeOut(incidentId: string): Promise<IncidentDisposition> {
+  private async closeOut(
+    incidentId: string,
+  ): Promise<{ readonly closeOut: IncidentCloseOut; readonly disposition: IncidentDisposition }> {
     let closeOut: IncidentCloseOut;
     try {
       closeOut = await this.declarer.closeOut(incidentId, {
@@ -347,7 +359,35 @@ export class IntegrityEscalator {
       this.opts.onError?.(err);
       closeOut = "failed";
     }
-    return dispositionFromCloseOut(closeOut);
+    // Both, because the disposition is lossy in exactly the place the alert cares about: `failed`
+    // maps to `declared`, which is indistinguishable from an incident that is simply still open.
+    return { closeOut, disposition: dispositionFromCloseOut(closeOut) };
+  }
+
+  /**
+   * Closes the alert at the provider when the record closed (ADR-0326).
+   *
+   * The page went out on declaration and PagerDuty keys on the incident id, so the alert is still
+   * open until something resolves it. `closeOutClosesAlert` is the gate: a `human_owned` incident is
+   * open and owned, and a `failed` close-out means we do not know. Severity is the config's rather
+   * than the record's because this escalator declares every compromise at one grade — unlike the
+   * deletion escalator, which grades per defect and therefore has to read the grade off the record.
+   */
+  private async emitResolve(incidentId: string): Promise<void> {
+    if (this.opts.resolvePage === undefined) return;
+    const directive = planPageDirective(
+      this.opts.config.alertPolicy,
+      this.opts.config.severity,
+      incidentId,
+    );
+    if (directive === null) return;
+    try {
+      await this.opts.resolvePage(directive);
+    } catch (err) {
+      // Same rule as `emitPage`: the recovery is already recorded, and a provider that will not
+      // take the resolve must not turn a recovery into a thrown pass.
+      this.opts.onError?.(err);
+    }
   }
 
   /** Whether a scope currently has an open integrity incident (for tests / metrics). */

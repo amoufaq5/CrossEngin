@@ -13,6 +13,7 @@ import {
   type EnforcementDecision,
   type LatencyEnforcementDecision,
   type LatencyRegistration,
+  type PageDirective,
   type SloRegistration,
 } from "@crossengin/observability-runtime";
 import {
@@ -114,6 +115,17 @@ export interface BuildSloEnforcementOptions {
   readonly clock?: Clock;
   readonly scheduler?: IntervalScheduler;
   readonly onDecision?: (decision: ObservedEnforcementDecision) => void;
+  /** Delivers the pages a decision planned. Awaited by the scheduler (ADR-0326). */
+  readonly onPage?: (decision: ObservedEnforcementDecision) => Promise<void>;
+  /**
+   * Closes the alerts a recovered breach's page opened, over the directives that were actually
+   * delivered — the scheduler remembers them, because a recovery has no plan to re-derive from
+   * (ADR-0326).
+   */
+  readonly onResolvePage?: (
+    decision: ObservedEnforcementDecision,
+    pages: readonly PageDirective[],
+  ) => Promise<void>;
   readonly onError?: (err: unknown) => void;
   /**
    * With a connection the engines persist: each evaluation, each enforcement action, and the
@@ -222,6 +234,8 @@ export function buildSloEnforcement(
     intervalMs: config.evaluateIntervalMs ?? DEFAULT_EVALUATE_INTERVAL_MS,
     ...(opts.scheduler !== undefined ? { scheduler: opts.scheduler } : {}),
     ...(opts.onDecision !== undefined ? { onDecision: opts.onDecision } : {}),
+    ...(opts.onPage !== undefined ? { onPage: opts.onPage } : {}),
+    ...(opts.onResolvePage !== undefined ? { onResolvePage: opts.onResolvePage } : {}),
     ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
   });
 

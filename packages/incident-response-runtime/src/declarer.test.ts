@@ -4,6 +4,7 @@ import { FixedClock } from "./clock.js";
 import {
   CountingIncidentDeclarer,
   INCIDENT_CLOSE_OUTS,
+  closeOutClosesAlert,
   type IncidentDeclarationRequest,
 } from "./declarer.js";
 import { IncidentExecutor } from "./executor.js";
@@ -32,6 +33,36 @@ describe("INCIDENT_CLOSE_OUTS", () => {
       "human_owned",
       "failed",
     ]);
+  });
+});
+
+describe("closeOutClosesAlert", () => {
+  it("closes the alert for a cancelled record", () => {
+    expect(closeOutClosesAlert("cancelled")).toBe(true);
+  });
+
+  it("closes the alert for an unpersisted episode, because the page was real either way", () => {
+    // Nothing stored the record, but the page left over a real transport with a real dedup key.
+    // Leaving the alert up would strand exactly the deployments with no incident store to look in.
+    expect(closeOutClosesAlert("unpersisted")).toBe(true);
+  });
+
+  it("leaves a triaged incident's alert alone", () => {
+    // The record is open and owned; resolving its alert takes it off the board of the person
+    // holding it, which is the opposite of what is true.
+    expect(closeOutClosesAlert("human_owned")).toBe(false);
+  });
+
+  it("leaves the alert up when the close-out failed", () => {
+    // Fail closed: an alert left up is noise, an alert wrongly closed is silence.
+    expect(closeOutClosesAlert("failed")).toBe(false);
+  });
+
+  it("answers for every close-out in the vocabulary", () => {
+    // So a fifth close-out is a compile break here rather than a silently-false answer.
+    for (const closeOut of INCIDENT_CLOSE_OUTS) {
+      expect(typeof closeOutClosesAlert(closeOut)).toBe("boolean");
+    }
   });
 });
 

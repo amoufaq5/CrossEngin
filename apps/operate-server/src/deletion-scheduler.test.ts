@@ -273,3 +273,350 @@ describe("DeletionScheduler — reconciliation", () => {
     await expect(s.runOnce()).resolves.toBeUndefined();
   });
 });
+
+describe("DeletionScheduler — the reverse-direction audit", () => {
+  function auditor(behaviour: { throws?: boolean; findings?: number } = {}): {
+    readonly reconciler: StrandedReconcilerLike;
+    readonly limits: (number | undefined)[];
+  } {
+    const limits: (number | undefined)[] = [];
+    return {
+      limits,
+      reconciler: {
+        reconcileStranded: async () => [],
+        auditCompleted: async (limit) => {
+          limits.push(limit);
+          if (behaviour.throws === true) throw new Error("a stored row will not parse");
+          return Array.from({ length: behaviour.findings ?? 0 }, (_v, i) => ({
+            requestId: `dreq_unproven123${i.toString()}`,
+            tenantId: "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8",
+            tombstoneId: "tomb_aaaabbbbccccdddd",
+            present: true,
+            detail: "tombstone does not verify: scope_tampered",
+          }));
+        },
+      },
+    };
+  }
+
+  it("never audits when auditEveryTicks is absent", async () => {
+    const a = auditor({ findings: 1 });
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: a.reconciler,
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    // Off by default: the pass re-hashes every completed request's tombstone, so a deployment opts in.
+    expect(a.limits).toEqual([]);
+  });
+
+  it("never audits when auditEveryTicks is 0", async () => {
+    const a = auditor({ findings: 1 });
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: a.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 0,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    expect(a.limits).toEqual([]);
+  });
+
+  it("reads a negative, fractional or non-finite cadence as off rather than as every tick", async () => {
+    for (const every of [-1, -20, 0.5, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const a = auditor({ findings: 1 });
+      const s = new DeletionScheduler({
+        runner: runner().runner,
+        reconciler: a.reconciler,
+        intervalMs: 1000,
+        auditEveryTicks: every,
+        scheduler: fakeScheduler(),
+      });
+      await s.runOnce();
+      await s.runOnce();
+      // A malformed flag must not turn the expensive pass on; failing closed here means not running.
+      expect(a.limits, `cadence ${every.toString()}`).toEqual([]);
+    }
+  });
+
+  it("audits on exactly the Nth tick and not before", async () => {
+    const a = auditor();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: a.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 3,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    expect(a.limits).toEqual([]);
+    await s.runOnce();
+    expect(a.limits).toEqual([]);
+    await s.runOnce();
+    expect(a.limits).toHaveLength(1);
+  });
+
+  it("does not audit on the first tick, because the counter is incremented before it is tested", async () => {
+    const a = auditor();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: a.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 2,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    // A counter tested at zero would audit at boot, which is the one thing the run pass refuses to do.
+    expect(a.limits).toEqual([]);
+  });
+
+  it("audits every tick when the cadence is 1, including the first", async () => {
+    const a = auditor();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: a.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    expect(a.limits).toHaveLength(2);
+  });
+
+  it("keeps counting across ticks rather than auditing once and stopping", async () => {
+    const a = auditor();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: a.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 2,
+      scheduler: fakeScheduler(),
+    });
+    for (let i = 0; i < 5; i += 1) await s.runOnce();
+    // Ticks 2 and 4; tick 5 is not a multiple.
+    expect(a.limits).toHaveLength(2);
+  });
+
+  it("does not let stop()/start() reset the cadence", async () => {
+    const a = auditor();
+    const sched = fakeScheduler();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: a.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 2,
+      scheduler: sched,
+    });
+    s.start();
+    await s.runOnce();
+    s.stop();
+    s.start();
+    await s.runOnce();
+    // A config reload or a crash loop around the interval must not re-enter the countdown; the count
+    // lives on the instance and nothing in the lifecycle touches it.
+    expect(a.limits).toHaveLength(1);
+  });
+
+  it("is a no-op for a reconciler that has no auditCompleted at all", async () => {
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: { reconcileStranded: async () => [] },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+    });
+    await expect(s.runOnce()).resolves.toBeUndefined();
+  });
+
+  it("is a no-op with a cadence set and no reconciler wired", async () => {
+    let called = 0;
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onAuditFindings: () => {
+        called += 1;
+      },
+    });
+    await expect(s.runOnce()).resolves.toBeUndefined();
+    expect(called).toBe(0);
+  });
+
+  it("hands findings to onAuditFindings and awaits it", async () => {
+    const seen: string[][] = [];
+    let settled = false;
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: auditor({ findings: 2 }).reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onAuditFindings: async (findings) => {
+        await Promise.resolve();
+        seen.push(findings.map((f) => f.requestId));
+        settled = true;
+      },
+    });
+    await s.runOnce();
+    // Awaited for the same reason `onEscalate` is: a finding that warrants an incident must not be
+    // abandoned half-declared when the tick returns.
+    expect(settled).toBe(true);
+    expect(seen).toEqual([["dreq_unproven1230", "dreq_unproven1231"]]);
+  });
+
+  it("does not invoke onAuditFindings for a clean audit", async () => {
+    const seen: unknown[] = [];
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: auditor({ findings: 0 }).reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onAuditFindings: (f) => {
+        seen.push(f);
+      },
+    });
+    await s.runOnce();
+    await s.runOnce();
+    // `auditCompleted` returns findings only, so an empty array is "nothing wrong" — not news, the
+    // same rule `onReconciled` follows. The route records the clean read; this callback does not.
+    expect(seen).toEqual([]);
+  });
+
+  it("routes a throwing audit to onError without skipping the run or repair passes", async () => {
+    const errors: unknown[] = [];
+    const ran: string[] = [];
+    const a = auditor({ throws: true });
+    const s = new DeletionScheduler({
+      runner: {
+        runDue: async () => {
+          ran.push("runDue");
+          return [];
+        },
+      },
+      reconciler: {
+        reconcileStranded: async () => {
+          ran.push("reconcile");
+          return [];
+        },
+        auditCompleted: a.reconciler.auditCompleted?.bind(a.reconciler),
+      },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onError: (e) => errors.push(e),
+    });
+    await expect(s.runOnce()).resolves.toBeUndefined();
+    // The pass most likely to throw — it re-parses stored rows, and an unparseable row *is* the
+    // finding — so its own `try` keeps the two passes that destroy and repair data intact.
+    expect(ran).toEqual(["runDue", "reconcile"]);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("keeps auditing on later ticks after one threw", async () => {
+    const errors: unknown[] = [];
+    const a = auditor({ throws: true });
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: a.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onError: (e) => errors.push(e),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    expect(a.limits).toHaveLength(2);
+    expect(errors).toHaveLength(2);
+  });
+
+  it("forwards auditLimit, and forwards nothing when it is absent", async () => {
+    const withLimit = auditor();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: withLimit.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      auditLimit: 7,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    expect(withLimit.limits).toEqual([7]);
+
+    const noLimit = auditor();
+    const t = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: noLimit.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+    });
+    await t.runOnce();
+    // Not restated here: the ceiling on this pass belongs to the reconciler and its store.
+    expect(noLimit.limits).toEqual([undefined]);
+  });
+
+  it("runs the audit last, after the due run and the repair pass", async () => {
+    const order: string[] = [];
+    const s = new DeletionScheduler({
+      runner: {
+        runDue: async () => {
+          order.push("runDue");
+          return [];
+        },
+      },
+      reconciler: {
+        reconcileStranded: async () => {
+          order.push("reconcile");
+          return [];
+        },
+        auditCompleted: async () => {
+          order.push("audit");
+          return [];
+        },
+      },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    // Last because it is the only pass that writes nothing: a tick with time for one thing should
+    // spend it on the deletions that are due.
+    expect(order).toEqual(["runDue", "reconcile", "audit"]);
+  });
+
+  it("does not disturb the forward direction's escalation hook", async () => {
+    const escalated: string[][] = [];
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: {
+        reconcileStranded: async () => [
+          {
+            requestId: "dreq_unverified12",
+            tenantId: "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8",
+            verdict: "evidence_unverified",
+            applied: false,
+            tombstoneId: "tomb_aaaabbbbccccdddd",
+            tombstoneIds: ["tomb_aaaabbbbccccdddd"],
+            detail: "scope_tampered",
+          },
+        ],
+        auditCompleted: async () => [],
+      },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onEscalate: (results) => {
+        escalated.push(results.map((r) => r.verdict));
+      },
+    });
+    await s.runOnce();
+    expect(escalated).toEqual([["evidence_unverified"]]);
+  });
+});

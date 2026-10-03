@@ -33,6 +33,24 @@ export interface DeletionRunnerLike {
 }
 
 /**
+ * One `auditCompleted` finding (ADR-0323): a *completed* request whose proof no longer stands up.
+ *
+ * Written out structurally here rather than imported, like `DeletionRunnerLike` above, so this file
+ * depends on no `tenant-lifecycle-pg` type. Named `AuditFinding` and not `EvidenceAuditLike` because
+ * `deletion-request-routes.ts` already owns that name for the same five fields, and two modules
+ * re-exported through `index.ts` cannot both export one name. These are the fields
+ * `DeletionEvidenceEscalator.onAuditFinding` reads, so a finding travels from here to the escalator
+ * untouched.
+ */
+export interface AuditFinding {
+  readonly requestId: string;
+  readonly tenantId: string;
+  readonly tombstoneId: string;
+  readonly present: boolean;
+  readonly detail: string;
+}
+
+/**
  * Structural mirror of `DeletionReconciler.reconcileStranded` (ADR-0322). Optional: a deployment with
  * no forensic chain has no tombstone store, so there is no evidence to reconcile from.
  */
@@ -48,6 +66,12 @@ export interface StrandedReconcilerLike {
       readonly detail: string | null;
     }[]
   >;
+  /**
+   * The reverse direction (ADR-0323). **Optional on the mirror**, not merely optional to configure:
+   * a reconciler that predates it, or a deployment that does not want the pass, leaves the audit
+   * section a no-op rather than failing to typecheck or throwing at the first tick.
+   */
+  auditCompleted?(limit?: number): Promise<readonly AuditFinding[]>;
 }
 
 export interface DeletionSchedulerOptions {
@@ -83,14 +107,46 @@ export interface DeletionSchedulerOptions {
       readonly tombstoneId: string | null;
       readonly tombstoneIds: readonly string[];
       readonly detail: string | null;
+      /**
+       * The verification's defects, carried so the escalator can grade the severity per defect
+       * rather than declaring every finding `sev1` (ADR-0326). Optional: a reconciler that does not
+       * report them yields the configured default.
+       */
+      readonly evidence?: { readonly defects: readonly string[] } | null;
     }[],
   ) => void | Promise<void>;
+  /**
+   * How often the reverse-direction audit runs, as a multiple of ticks. Default 0 = never.
+   *
+   * **A multiple of the tick rather than every tick, because the two passes do not cost the same.**
+   * The forward pass is one indexed query plus a lookup per stranded row, and a stranded request is
+   * time-critical — ADR-0321's `completed_unrecorded` leaves a deleted tenant reading `in_progress`.
+   * `auditCompleted` re-reads and re-hashes *every* completed request's tombstone (ADR-0323: O(completed
+   * requests), capped at 500 by the store), and what it looks for is a tamper on a record that is not
+   * going anywhere. At the three-second cadence the live verification used, every tick would re-verify
+   * the same rows ~1200 times an hour to find something that is not urgent in minutes.
+   *
+   * A negative, zero, fractional or non-finite value is **off**, not clamped to 1: a scheduler is
+   * configured from a CLI flag, and reading a malformed number as "run the expensive pass every tick"
+   * is the wrong direction to fail in.
+   */
+  readonly auditEveryTicks?: number;
+  /**
+   * Given the audit's findings, awaited, and **only** when there are some (ADR-0324's escalator is
+   * what this feeds). `auditCompleted` already returns findings only — a clean audit is an empty
+   * array — so this follows `onReconciled`'s rule rather than `onEscalate`'s: a clean audit is not
+   * news. The *recorded* claim that an audit ran clean belongs to the route, which writes an audit row
+   * either way (ADR-0313); this callback is for what was found.
+   */
+  readonly onAuditFindings?: (findings: readonly AuditFinding[]) => void | Promise<void>;
+  /** Forwarded as-is, so the reconciler's own default governs when it is absent. */
+  readonly auditLimit?: number;
 }
 
 /**
  * Runs verified GDPR deletion requests out of band, on an interval.
  *
- * Two things it does differently from every sibling scheduler in this app, both deliberate.
+ * Three things it does differently from every sibling scheduler in this app, all deliberate.
  *
  * **It does not sweep on `start()`.** `JobScheduler`, `PruneScheduler` and `DeliveryScheduler` all run
  * once immediately, because a missed prune or a late notification costs nothing. This one waits a full
@@ -102,9 +158,27 @@ export interface DeletionSchedulerOptions {
  * **Two replicas running it is safe, and there is no lock here.** `PostgresDeletionRequestStore.transition`
  * re-asserts `status = 'verified'` inside the `UPDATE`, so of two schedulers claiming the same request
  * exactly one wins and the loser is told `not_claimed`. The row is the lock (ADR-0321).
+ *
+ * **Not every pass runs on every tick.** The due run and the stranded repair do; the reverse-direction
+ * audit of already-completed requests (ADR-0323) runs on a multiple of the tick and is off by default,
+ * because it re-hashes every completed request's tombstone to look for a tamper that is not urgent in
+ * minutes. One interval with three cadences, rather than a second timer for a queue of the same work.
  */
 export class DeletionScheduler {
   private handle: IntervalHandle | null = null;
+  /**
+   * Ticks elapsed, for the audit's cadence.
+   *
+   * **On the instance, and deliberately not touched by `start()` or `stop()`.** If it were reset where
+   * the interval is installed, a server that restarts its schedulers — a config reload, a crash loop,
+   * a `stop(); start()` pair around a manifest swap — would re-enter the audit's countdown from zero
+   * every time. Because the test below increments first and then asks for a multiple, a reset is the
+   * *safe* direction — it delays the pass rather than repeating it — whereas the opposite test
+   * ("the counter is 0, so audit") would have made a restart loop run the expensive pass on every
+   * single tick, which is the failure this comment exists to rule out. A fresh process does start at
+   * zero, and that is the same grace `start()` already gives the run pass.
+   */
+  private ticks = 0;
 
   constructor(private readonly opts: DeletionSchedulerOptions) {}
 
@@ -143,6 +217,38 @@ export class DeletionScheduler {
     } catch (err) {
       this.opts.onError?.(err);
     }
+    // Counted before the audit is considered, and counted on every tick whatever the cadence is, so
+    // the number means "ticks elapsed" and not "ticks since the last audit".
+    this.ticks += 1;
+    // A third separate `try`, for the same reason the first two are separate — a throw in one pass must
+    // not skip the others — and this is the pass most likely to throw: `auditCompleted` re-parses stored
+    // rows, and a row bad enough to fail parsing is itself the finding this pass exists to surface.
+    try {
+      await this.auditOnce();
+    } catch (err) {
+      this.opts.onError?.(err);
+    }
+  }
+
+  /**
+   * The reverse-direction audit (ADR-0323), on its own cadence.
+   *
+   * The first audit lands on the `auditEveryTicks`-th tick, never on the first: incrementing *before*
+   * the modulo is what makes that true, where a counter tested at zero would audit at boot. The run
+   * pass declines to sweep at boot because the work is irreversible (ADR-0321); this pass only reads,
+   * so the reason is weaker — but a boot is still when a misconfiguration is most likely, and an audit
+   * that fires on every restart is noise an operator learns to ignore. Consistency wins.
+   */
+  private async auditOnce(): Promise<void> {
+    const every = this.auditEveryTicks();
+    if (every === 0 || this.ticks % every !== 0) return;
+    const findings = (await this.opts.reconciler?.auditCompleted?.(this.opts.auditLimit)) ?? [];
+    if (findings.length > 0) await this.opts.onAuditFindings?.(findings);
+  }
+
+  private auditEveryTicks(): number {
+    const every = this.opts.auditEveryTicks ?? 0;
+    return Number.isInteger(every) && every > 0 ? every : 0;
   }
 
   private scheduler(): IntervalScheduler {
