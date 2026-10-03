@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 311 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 312 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -365,6 +365,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`tenant-lifecycle`** — 7-state tenant lifecycle (trial → … → deleted), grace periods,
   GDPR Article 17 deletion requests with legal bases and retention obligations, data
   exports with TTL-bounded download links, cryptographic tombstones with proof hashes.
+  A tombstone is **composed from per-subsystem attestations, never written by hand** (ADR-0317), because
+  what made the first one false was not a wrong number but a subsystem nobody asked whose silence read as
+  nothing to delete: `assembleTombstone` refuses `subsystem_unattested` for any of the six
+  `DELETION_SUBSYSTEMS` in scope that did not report, each owns its `DeletionScope` fields exclusively so
+  a list has one provenance, and only an `erased` outcome may carry figures — a `nothing_to_erase` that
+  could would smuggle numbers into the proof. `retainedReason`/`retainedDataReference` are *derived* from
+  a `retained` attestation rather than remembered. Every refusal lands before a hash is computed, and the
+  assembler re-verifies its own output. `tombstoneMatchesAttestations` answers the question a hash cannot:
+  whether a stored record still agrees with its evidence — a tampered scope flips `contentManifestOk`
+  while `proofOk` stays true, since the proof commits to the stored digest.
 - **`marketplace`** — contracts: 8 pack kinds, a registry with Ed25519 signing and security
   review, per-tenant install lifecycle, permission grants, listings, reviews,
   compatibility.
@@ -585,7 +595,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   body and must differ, with the tenant id repeated as `confirmTenantId` so an irreversible action is not
   one mistyped path segment away; an erasure that succeeds and cannot be recorded returns **500
   `erasure_unrecorded`** with the scope and an instruction not to issue a tombstone from it, since a 200
-  would license a proof with nothing behind it and a 503 would read as "nothing happened" (ADR-0316);
+  would license a proof with nothing behind it and a 503 would read as "nothing happened" (ADR-0316),
+  and whose 200 carries the erasure as a ready-to-paste `DeletionAttestation` so the handoff to the
+  tombstone assembler is not a transcription (ADR-0317);
   the four read-only
   audit-integrity verdict routes (`--audit-verdict-routes`, ADR-0303); the in-production AI Architect
   (`--ai-design`, local provider first — ADR-0306) with a
@@ -827,14 +839,17 @@ opened them.
   bounce webhook writes `provider:ses` / `provider:twilio`. It is still nullable, which is the one place
   we did not tighten: every row written before this was NULL, and requiring an actor would make the
   re-parse-on-read replayer refuse rows that were correct when written.
-- **`PostgresRecipientResolver.activeSuppressions` fails open on an unparseable row** (ADR-0302): it
-  skips it, so the next drain mails the address the row existed to protect. The new store refuses
-  instead. Reconciling them is a deliberate choice, because refusing turns one bad row into an outage
-  of that tenant's notifications.
-- **Suppression addresses match exactly and case-sensitively** (ADR-0302). A bounce reporting
-  `Bounced@Example.test` against a stored `bounced@example.test` writes a row that never matches.
-  Normalising in the store would make the id — which commits to the exact address — a lie, so it belongs
-  upstream in `planSuppression`.
+- **Both suppression readers now fail closed** (ADR-0302). `PostgresRecipientResolver.activeSuppressions`
+  used to skip an unparseable row, which mailed the address the row existed to protect; it throws now,
+  naming the id and never the address. The cost is bounded by design — `drainAllTenants` catches per
+  tenant and continues, so one bad row stops one tenant's sweep and retries, rather than taking delivery
+  down platform-wide.
+- **Suppression addresses are normalised upstream, in `planSuppression`** (ADR-0302), not in the store —
+  the id commits to the exact address, so normalising at write time would make it a lie.
+  `normalizeRecipientAddress` folds case per channel (lowercasing an email's local part despite RFC 5321
+  §2.4 making it formally case-sensitive, because no production provider distinguishes them and the
+  alternative is a row that never matches) and deliberately does **not** collapse subaddressing or parse
+  a display name off, since both would widen a suppression to addresses that never bounced.
 
 - **The push senders are built and unwired** (ADR-0310). `FcmPushSender` and `TwilioVoiceSender` exist and
   are tested; `buildSenderRegistryFromEnv` does not construct them, because FCM takes an
@@ -845,17 +860,20 @@ opened them.
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
   their data is in a different place than they think until an operator runs the reported SQL.
-- **A tenant's schema can be erased, and nothing assembles the tombstone** (ADR-0316). The erasure
-  exists, measures exactly what it destroys, refuses a cascade that would reach another schema (observed
-  by trial-and-rollback, not inferred from `pg_depend` — which was wrong twice, in both directions), and
-  confirms absence before it commits. `erasureDeletionScope` yields the `DeletionScope` fields it can
-  honestly account for. What is still missing is the *flow*: no deletion-request store, no scheduler, and
-  nothing that builds a `TombstoneRecord` from the scope — so the proof is issued by hand. Object
-  storage, backup generations, search indexes and cache keys remain unaccounted for, each needing its own
-  erasure with its own measurement. And the ordering against `meta.tenants` is **unenforced**: the audit
-  record's `tenant_id` is a foreign key to that table, so retiring the tenant row *first* makes every
-  erasure unrecordable — the 500 fires, visibly, and the data is gone with no provenance. Erase, record,
-  then retire the row.
+- **A tenant's schema can be erased and a tombstone composed; nothing persists or anchors it**
+  (ADR-0316, ADR-0317). The erasure measures exactly what it destroys, refuses a cascade that would reach
+  another schema (observed by trial-and-rollback, not inferred from `pg_depend` — which was wrong twice,
+  in both directions), and confirms absence before it commits. `assembleTombstone` then composes a
+  `DeletionScope` **only** from per-subsystem attestations and refuses when a subsystem in scope has not
+  attested, because the original defect was a subsystem nobody asked whose silence read as nothing to
+  delete. What remains: `requiredSubsystems` is still caller-supplied, so omitting one yields a tombstone
+  that visibly covers less rather than one that silently claims everything — better, not done; there is
+  no `meta.tombstones`, so a verified record lives only in the response that produced it; nothing wires
+  the forensic chain in as its anchor; and four of the six subsystems cannot attest because their
+  erasures do not exist. The ordering against `meta.tenants` is also **unenforced**: the audit record's
+  `tenant_id` is a foreign key to that table, so retiring the tenant row *first* makes every erasure
+  unrecordable — the 500 fires, visibly, and the data is gone with no provenance. Erase, record, then
+  retire the row.
 - **The AI cost estimator is a heuristic on the input side** (ADR-0311). `maxTokens` bounds the output by
   construction; the input is `ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic because the
   number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
@@ -911,7 +929,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 311 records; 232 Accepted, 79 Proposed (the
+title or status change cannot drift. 312 records; 233 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

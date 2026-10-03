@@ -1,10 +1,10 @@
 # ADR index
 
-311 records. Generated from the ADR files themselves — regenerate rather than
+312 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 232  **Proposed:** 79
+- **Accepted:** 233  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -323,3 +323,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0314](0314-a-tenant-serving-its-own-manifest-gets-its-own-schema.md) | A tenant serving its own manifest gets its own schema | — | Accepted | 2026-10-02 |
 | [0315](0315-durable-job-cancellation.md) | Durable job cancellation, with four named checkpoints | — | Accepted | 2026-10-02 |
 | [0316](0316-erasing-a-tenants-own-schema.md) | Erasing a tenant's own schema, and asking Postgres what a cascade would destroy | — | Accepted | 2026-10-03 |
+| [0317](0317-a-tombstone-is-composed-from-attestations.md) | A tombstone is composed from attestations, and silence is not "none" | — | Accepted | 2026-10-03 |
