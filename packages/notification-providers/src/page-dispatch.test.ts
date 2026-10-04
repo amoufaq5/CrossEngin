@@ -6,6 +6,7 @@ import {
   PageDispatcher,
   formatPageReport,
   pageAddressFor,
+  waitBefore,
   type PageChannelSender,
   type PageDirectiveLike,
 } from "./page-dispatch.js";
@@ -28,7 +29,7 @@ import {
   WebhookPageSender,
   slackPageBody,
 } from "./page-slack.js";
-import type { FetchLike } from "./email-ses.js";
+import { MAX_RETRY_AFTER_MS, type PageFetchLike } from "./retry-after.js";
 
 const INC = "INC-2026-0007";
 const CONTENT: PageContent = { incidentId: INC, severity: "sev1", signal: "deletion-evidence" };
@@ -39,8 +40,20 @@ interface Call {
   body: string;
 }
 
-function fakeFetch(responses: readonly { ok: boolean; status: number; text: string }[]): {
-  readonly fetch: FetchLike;
+/**
+ * `retryAfter` is optional, and a response without one exposes **no `headers` member at all** —
+ * which is the shape every `FetchLike` double in this repo has, and the shape whose behaviour must
+ * stay exactly what it was.
+ */
+interface FakeResponse {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly text: string;
+  readonly retryAfter?: string;
+}
+
+function fakeFetch(responses: readonly FakeResponse[]): {
+  readonly fetch: PageFetchLike;
   readonly calls: Call[];
 } {
   const calls: Call[] = [];
@@ -54,7 +67,13 @@ function fakeFetch(responses: readonly { ok: boolean; status: number; text: stri
         status: 202,
         text: "{}",
       };
-      return { ok: r.ok, status: r.status, text: async () => r.text };
+      const base = { ok: r.ok, status: r.status, text: async (): Promise<string> => r.text };
+      if (r.retryAfter === undefined) return base;
+      const value = r.retryAfter;
+      return {
+        ...base,
+        headers: { get: (n): string | null => (n === "retry-after" ? value : null) },
+      };
     },
   };
 }
@@ -129,6 +148,37 @@ function sequenceSender(
           httpStatus: outcome === "delivered" ? 202 : 503,
           reference: outcome === "delivered" ? incidentId : null,
           errorMessage: outcome === "delivered" ? null : `stub said ${outcome}`,
+        };
+      },
+    },
+  };
+}
+
+/**
+ * A sender whose first `n - 1` answers carry a `Retry-After`, scripted as the dispatcher would see
+ * it: a `retryAfterMs` already parsed by the sender that read the header.
+ */
+function rateLimitedSender(
+  scripted: readonly { readonly outcome: PageDeliveryOutcome; readonly retryAfterMs?: number }[],
+): { readonly sender: PageChannelSender; readonly calls: number[] } {
+  const calls: number[] = [];
+  let i = 0;
+  return {
+    calls,
+    sender: {
+      provider: "pd",
+      send: async (): Promise<PageSendResult> => {
+        const step = scripted[Math.min(i, scripted.length - 1)];
+        i += 1;
+        calls.push(i);
+        const outcome = step?.outcome ?? "failed";
+        return {
+          outcome,
+          provider: "pd",
+          httpStatus: outcome === "delivered" ? 202 : 429,
+          reference: outcome === "delivered" ? "ok" : null,
+          errorMessage: outcome === "delivered" ? null : "rate limited",
+          ...(step?.retryAfterMs === undefined ? {} : { retryAfterMs: step.retryAfterMs }),
         };
       },
     },
@@ -852,5 +902,237 @@ describe("classifyPageFailure", () => {
     }).deliver(DIRECTIVE);
     expect(report.delivered).toBe(1);
     expect(delays).toEqual([100]);
+  });
+});
+
+describe("honouring Retry-After", () => {
+  it("waits the provider's figure rather than the policy's when it is longer", async () => {
+    const sleep = recordingSleep();
+    const s = rateLimitedSender([
+      { outcome: "failed", retryAfterMs: 5000 },
+      { outcome: "delivered" },
+    ]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    // ADR-0326 waited 2s here, inside a window the provider had already said it would refuse.
+    expect(sleep.waits).toEqual([5000]);
+    expect(report.outcomes[0]).toMatchObject({ disposition: "delivered", attemptsMade: 2 });
+  });
+
+  it("does NOT let a shorter instruction shorten the platform's floor", async () => {
+    const sleep = recordingSleep();
+    const s = rateLimitedSender([
+      { outcome: "failed", retryAfterMs: 250 },
+      { outcome: "delivered" },
+    ]);
+    await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([2000]);
+  });
+
+  it("does not turn Retry-After: 0 into a hot loop", async () => {
+    const sleep = recordingSleep();
+    const s = rateLimitedSender([{ outcome: "failed", retryAfterMs: 0 }]);
+    await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    // Zero is an instruction, and the policy delay is the floor it cannot push below.
+    expect(sleep.waits).toEqual([2000, 2000]);
+    expect(s.calls).toHaveLength(3);
+  });
+
+  it("re-reads the instruction each attempt, so a changed figure is honoured", async () => {
+    const sleep = recordingSleep();
+    const s = rateLimitedSender([
+      { outcome: "failed", retryAfterMs: 3000 },
+      { outcome: "failed", retryAfterMs: 8000 },
+      { outcome: "delivered" },
+    ]);
+    await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 1000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([3000, 8000]);
+  });
+
+  it("stops retrying when the provider asks for longer than the ceiling", async () => {
+    const sleep = recordingSleep();
+    const s = rateLimitedSender([
+      { outcome: "failed", retryAfterMs: MAX_RETRY_AFTER_MS },
+      { outcome: "delivered" },
+    ]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 5, delayMs: 2000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    // Holding the page that long is no longer a page, and the scripted second outcome proves a
+    // retry *would* have worked — which is the wrong reason to hold it.
+    expect(s.calls).toHaveLength(1);
+    expect(sleep.waits).toEqual([]);
+    expect(report.outcomes[0]).toMatchObject({
+      disposition: "failed",
+      attemptsMade: 1,
+      // Reported as the ceiling, so the log says what the provider effectively asked for.
+      retryAfterMs: MAX_RETRY_AFTER_MS,
+    });
+    expect(report.undelivered).toBe(true);
+  });
+
+  it("ignores a header on a rejected outcome, because it is never retried", async () => {
+    const sleep = recordingSleep();
+    // A sender that reports one anyway — the senders here do not, and the dispatcher must not
+    // start retrying a refusal just because one arrived.
+    const s = rateLimitedSender([{ outcome: "rejected", retryAfterMs: 5000 }]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(s.calls).toHaveLength(1);
+    expect(sleep.waits).toEqual([]);
+    expect(report.outcomes[0]?.disposition).toBe("rejected");
+  });
+
+  it("reaches the channel outcome, parsed, so an audit record can hold it", async () => {
+    const s = rateLimitedSender([{ outcome: "failed", retryAfterMs: 7000 }]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+    }).deliver(DIRECTIVE);
+    expect(report.outcomes[0]?.retryAfterMs).toBe(7000);
+  });
+
+  it("states no instruction as null rather than leaving the key off", async () => {
+    const delivered = await new PageDispatcher({
+      senders: { pagerduty_phone: senderStub().sender },
+      signal: "s",
+    }).deliver(DIRECTIVE);
+    expect(delivered.outcomes[0]?.retryAfterMs).toBeNull();
+    const unroutable = await new PageDispatcher({ senders: {}, signal: "s" }).deliver(DIRECTIVE);
+    expect(unroutable.outcomes[0]?.retryAfterMs).toBeNull();
+    const threw = await new PageDispatcher({
+      senders: {
+        pagerduty_phone: {
+          provider: "boom",
+          send: async (): Promise<PageSendResult> => {
+            throw new Error("ECONNRESET");
+          },
+        },
+      },
+      signal: "s",
+    }).deliver(DIRECTIVE);
+    expect(threw.outcomes[0]?.retryAfterMs).toBeNull();
+  });
+
+  it("leaves the no-header retry exactly as ADR-0326 left it", async () => {
+    // Pinned explicitly: a regression here silently un-fixes the uniform retry rather than
+    // breaking anything, because a sender reporting nothing is the common case.
+    const sleep = recordingSleep();
+    const s = sequenceSender(["failed", "failed", "delivered"]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([2000, 2000]);
+    expect(report.outcomes[0]).toMatchObject({ disposition: "delivered", attemptsMade: 3 });
+  });
+
+  it("takes the longer of the two, which is the whole rule", () => {
+    expect(waitBefore(2000, 5000)).toBe(5000);
+    expect(waitBefore(2000, 250)).toBe(2000);
+    expect(waitBefore(2000, 0)).toBe(2000);
+    // No instruction leaves the policy untouched.
+    expect(waitBefore(2000, null)).toBe(2000);
+    expect(waitBefore(0, null)).toBe(0);
+  });
+});
+
+describe("a 429 read off a real page sender", () => {
+  it("parses PagerDuty's Retry-After into the result the dispatcher retries on", async () => {
+    const f = fakeFetch([
+      { ok: false, status: 429, text: "rate limited", retryAfter: "5" },
+      { ok: true, status: 202, text: `{"dedup_key":"${INC}"}` },
+    ]);
+    const sleep = recordingSleep();
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: new PagerDutyPageSender({ fetch: f.fetch }) },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([5000]);
+    expect(report.outcomes[0]).toMatchObject({ disposition: "delivered", attemptsMade: 2 });
+  });
+
+  it("carries no instruction from a 400, which is not retryable", async () => {
+    const result = await new PagerDutyPageSender({
+      fetch: fakeFetch([
+        { ok: false, status: 400, text: "bad routing key", retryAfter: "5" },
+      ]).fetch,
+    }).send(CONTENT, "k");
+    expect(result.outcome).toBe("rejected");
+    expect(result.retryAfterMs).toBeNull();
+  });
+
+  it("parses Slack's Retry-After on a 429 too", async () => {
+    const result = await new SlackPageSender({
+      botToken: "xoxb-1",
+      fetch: fakeFetch([{ ok: false, status: 429, text: "ratelimited", retryAfter: "3" }]).fetch,
+    }).send(CONTENT, "#ops");
+    expect(result.outcome).toBe("failed");
+    expect(result.retryAfterMs).toBe(3000);
+  });
+
+  it("does not read one off Slack's 200-with-ok:false, which is a refusal", async () => {
+    const result = await new SlackPageSender({
+      botToken: "xoxb-1",
+      fetch: fakeFetch([
+        { ok: true, status: 200, text: '{"ok":false,"error":"ratelimited"}', retryAfter: "3" },
+      ]).fetch,
+    }).send(CONTENT, "#ops");
+    expect(result.outcome).toBe("rejected");
+    expect(result.retryAfterMs).toBeNull();
+  });
+
+  it("parses one off the signed webhook's 503", async () => {
+    const result = await new WebhookPageSender({
+      fetch: fakeFetch([{ ok: false, status: 503, text: "overloaded", retryAfter: "11" }]).fetch,
+    }).send(CONTENT, "https://ops.test/page");
+    expect(result.outcome).toBe("failed");
+    expect(result.retryAfterMs).toBe(11_000);
+  });
+
+  it("reports no instruction when the response exposes no headers", async () => {
+    // Every pre-existing double in this repo has that shape, and it must behave as it did.
+    const result = await new PagerDutyPageSender({
+      fetch: fakeFetch([{ ok: false, status: 503, text: "unavailable" }]).fetch,
+    }).send(CONTENT, "k");
+    expect(result.outcome).toBe("failed");
+    expect(result.retryAfterMs).toBeNull();
+  });
+
+  it("caps an over-ceiling instruction rather than passing it through", async () => {
+    const result = await new PagerDutyPageSender({
+      fetch: fakeFetch([{ ok: false, status: 429, text: "slow down", retryAfter: "600" }]).fetch,
+    }).send(CONTENT, "k");
+    expect(result.retryAfterMs).toBe(MAX_RETRY_AFTER_MS);
   });
 });

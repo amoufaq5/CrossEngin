@@ -11,6 +11,7 @@ import {
   PostgresTombstoneStore,
   TOMBSTONE_COLUMNS,
   TOMBSTONE_LOG_KIND,
+  TOMBSTONE_SCAN_MAX_LIMIT,
   TOMBSTONE_WRITE_REFUSALS,
   TombstoneWriteRefused,
   rowToStoredTombstone,
@@ -341,6 +342,118 @@ describe("findForRequest", () => {
     // A LIMIT 1 would hide the one case that means the premise is broken (ADR-0322).
     const select = calls.find((c) => c.sql.includes("related_deletion_request_id"));
     expect(select?.sql).not.toContain("LIMIT");
+  });
+});
+
+describe("scanAll", () => {
+  /** The SELECT that actually reads the table, as opposed to the elevation. */
+  function scanSelect(calls: { sql: string; params: readonly unknown[] }[]):
+    | { sql: string; params: readonly unknown[] }
+    | undefined {
+    return calls.find((c) => c.sql.includes("FROM meta.tenant_tombstones"));
+  }
+
+  it("orders on a key that cannot tie, and never on a timestamp or an OFFSET", async () => {
+    const { conn, anchorer, calls } = fakePg([rowOf(recordOf())]);
+    await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
+    const select = scanSelect(calls);
+    // `deleted_at` can be shared by two rows, and a sweep on a key with ties steps over a row at
+    // every page boundary — which here is a row no other audit will ever verify.
+    expect(select?.sql).toContain("ORDER BY tombstone_id LIMIT");
+    expect(select?.sql).not.toContain("deleted_at DESC");
+    expect(select?.sql).not.toContain("OFFSET");
+  });
+
+  it("omits the cursor predicate on the first page", async () => {
+    const { conn, anchorer, calls } = fakePg([]);
+    await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 25 });
+    const select = scanSelect(calls);
+    // Not `($1 IS NULL OR tombstone_id > $1)`: that form makes the planner choose one path for both
+    // shapes and gives up the unique index.
+    expect(select?.sql).not.toContain("WHERE");
+    expect(select?.sql).toContain("LIMIT $1");
+    expect(select?.params).toEqual([25]);
+  });
+
+  it("binds the cursor with a strict > so a later page re-reads nothing", async () => {
+    const { conn, anchorer, calls } = fakePg([]);
+    await new PostgresTombstoneStore(conn, anchorer).scanAll({
+      limit: 25,
+      afterTombstoneId: "tomb_store0001abc",
+    });
+    const select = scanSelect(calls);
+    expect(select?.sql).toContain("WHERE tombstone_id > $1");
+    expect(select?.sql).toContain("LIMIT $2");
+    expect(select?.params).toEqual(["tomb_store0001abc", 25]);
+  });
+
+  it("treats an explicit null cursor as the first page", async () => {
+    const { conn, anchorer, calls } = fakePg([]);
+    await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 5, afterTombstoneId: null });
+    expect(scanSelect(calls)?.params).toEqual([5]);
+  });
+
+  it("elevates with app.platform_audit, because this is a cross-tenant sweep", async () => {
+    const { conn, anchorer, sql } = fakePg([]);
+    await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
+    // Under the isolation policy it would see only whichever tenant's context the connection held,
+    // which for a tombstone is usually none — a sweep that silently covers one tenant is worse than
+    // no sweep.
+    expect(sql().some((s) => s.includes("set_config('app.platform_audit', 'on', true)"))).toBe(true);
+  });
+
+  it("clamps the page size to the exported cap and to a floor of one", async () => {
+    const { conn, anchorer, calls } = fakePg([]);
+    const store = new PostgresTombstoneStore(conn, anchorer);
+    await store.scanAll({ limit: 5000 });
+    expect(scanSelect(calls)?.params).toEqual([TOMBSTONE_SCAN_MAX_LIMIT]);
+    const second = fakePg([]);
+    await new PostgresTombstoneStore(second.conn, anchorer).scanAll({ limit: 0 });
+    expect(scanSelect(second.calls)?.params).toEqual([1]);
+  });
+
+  it("publishes the cap, because a caller reading a short page as the end needs to know it", () => {
+    expect(TOMBSTONE_SCAN_MAX_LIMIT).toBe(500);
+  });
+
+  it("returns an empty page for an empty table", async () => {
+    const { conn, anchorer } = fakePg([]);
+    expect(await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 })).toEqual([]);
+  });
+
+  it("re-parses every row, so a corrupted one is a finding rather than data", async () => {
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([rowOf(record, { approved_by: record.executedBy })]);
+    await expect(new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 })).rejects.toThrow();
+  });
+
+  it("hands back the full record, evidence and anchor for each row", async () => {
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([rowOf(record)]);
+    const page = await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
+    expect(page).toHaveLength(1);
+    expect(page[0]?.record.id).toBe(record.id);
+    expect(page[0]?.attestations).toEqual([ATTESTATION]);
+    expect(page[0]?.chainEntryHash).toBe(ENTRY_HASH);
+  });
+
+  it("selects every column the verification needs", async () => {
+    const { conn, anchorer, calls } = fakePg([]);
+    await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
+    const select = scanSelect(calls);
+    for (const column of TOMBSTONE_COLUMNS) expect(select?.sql).toContain(column);
+  });
+
+  it("honours a schema override", async () => {
+    const { conn, anchorer, calls } = fakePg([]);
+    await new PostgresTombstoneStore(conn, anchorer, { schema: "other" }).scanAll({ limit: 10 });
+    expect(calls.some((c) => c.sql.includes("other.tenant_tombstones"))).toBe(true);
+  });
+
+  it("writes nothing", async () => {
+    const { conn, anchorer, sql } = fakePg([rowOf(recordOf())]);
+    await new PostgresTombstoneStore(conn, anchorer).scanAll({ limit: 10 });
+    expect(sql().some((s) => /^\s*(UPDATE|INSERT|DELETE)/.test(s))).toBe(false);
   });
 });
 

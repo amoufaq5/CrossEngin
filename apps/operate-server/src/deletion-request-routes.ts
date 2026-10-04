@@ -110,6 +110,31 @@ export interface DeletionReconcilerLike {
   ): Promise<ReconciliationLike>;
   /** Completed requests whose proof no longer stands up (ADR-0323). Findings only. */
   auditCompleted(limit?: number): Promise<readonly EvidenceAuditLike[]>;
+  /**
+   * Every tombstone, whether or not a request names one (ADR-0327). Findings only.
+   *
+   * Optional on the mirror, unlike `auditCompleted`, because this route is the only caller and a
+   * deployment on an older store should mount the rest rather than fail to mount at all.
+   */
+  auditTombstones?(input?: {
+    readonly limit?: number;
+    readonly afterTombstoneId?: string | null;
+  }): Promise<TombstoneAuditPageLike>;
+}
+
+/** The slice of `TombstoneAudit` this route serves. Structural, so it imports no store type. */
+export interface TombstoneAuditLike {
+  readonly tombstoneId: string;
+  readonly tenantId: string;
+  readonly reference: string;
+  readonly relatedDeletionRequestId: string | null;
+  readonly detail: string;
+}
+
+export interface TombstoneAuditPageLike {
+  readonly examined: number;
+  readonly findings: readonly TombstoneAuditLike[];
+  readonly nextAfterTombstoneId: string | null;
 }
 
 /** The slice of `PostgresDeletionRequestStore` these routes drive. */
@@ -146,6 +171,8 @@ export const DELETION_REQUEST_REJECTED_OPERATION = "platform.deletion_request_re
 export const DELETION_REQUEST_READ_OPERATION = "platform.deletion_request_read";
 export const DELETION_REQUEST_RECONCILED_OPERATION = "platform.deletion_request_reconciled";
 export const DELETION_EVIDENCE_AUDITED_OPERATION = "platform.deletion_evidence_audited";
+/** The sweep that starts from the tombstone table rather than from a request (ADR-0327). */
+export const TOMBSTONE_SWEEP_AUDITED_OPERATION = "platform.tombstone_sweep_audited";
 export const DELETION_REQUESTS_STRANDED_READ_OPERATION = "platform.deletion_requests_stranded_read";
 
 export interface DeletionRequestEvent {
@@ -653,6 +680,89 @@ function buildUnprovenHandler(ctx: DeletionRequestRoutesContext): Handler {
   };
 }
 
+/**
+ * The `?after=` cursor, read the way the audit-read routes read a query parameter: off
+ * `input.request`, which carries it, rather than off `HandlerInput`, which does not.
+ */
+function cursorParam(input: Parameters<Handler>[0]): string | null {
+  const query = (input.request as { query?: Record<string, string | string[]> } | undefined)?.query;
+  const raw = query?.["after"];
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  return first === undefined || first.length === 0 ? null : first;
+}
+
+/**
+ * `GET /v1/platform/tombstones/unproven` — the sweep that starts from the proofs (ADR-0327).
+ *
+ * Both existing audit directions start from a *request*, so a tombstone written by the synchronous
+ * `--tenant-deletion-routes` path — which has no request at all — was verified by nothing. That is
+ * not a small hole: `verifyStoredEvidence` is the only detector for a tampered `scope`, because
+ * nothing in the forensic chain commits to the scope (ADR-0323), so for those tombstones a rewritten
+ * scope left every digest and the chain entry byte-identical and no code path looked.
+ *
+ * Paged, because the tombstone table only grows and a sweep that cannot be resumed is one that stops
+ * being run. `?after=` carries the cursor the previous page returned.
+ */
+function buildTombstoneSweepHandler(ctx: DeletionRequestRoutesContext): Handler {
+  return async (input) => {
+    const principal = input.principal;
+    if (principal === null) return json(401, { error: "authentication_required" });
+    if (!allowed(ctx, principal, ctx.reconcileRoles ?? new Set())) {
+      return json(403, {
+        error: "forbidden",
+        detail: "auditing deletion evidence is not granted to this role",
+      });
+    }
+    const reconciler = ctx.reconciler;
+    if (reconciler?.auditTombstones === undefined) {
+      return json(501, { error: "reconciliation_unavailable" });
+    }
+    // ADR-0313's rule, as on `unproven`: the findings span tenants or none, `meta.audit_log.tenant_id`
+    // is NOT NULL, and an unrecordable privileged read is refused rather than served unaudited.
+    const readerTenant = principal.tenantId;
+    if (readerTenant === null) {
+      return json(503, {
+        error: "audit_unrecordable",
+        detail: "this read is recorded against the reader's tenant, and none could be resolved",
+      });
+    }
+    const after = cursorParam(input);
+    let page: TombstoneAuditPageLike;
+    try {
+      page = await reconciler.auditTombstones({
+        ...(after !== null && after.length > 0 ? { afterTombstoneId: after } : {}),
+      });
+    } catch {
+      // The store re-parses every row, so a throw can itself be the finding. An empty list would
+      // read as "every proof on file is sound", the opposite of what is known.
+      return json(503, {
+        error: "evidence_unreadable",
+        detail: "the evidence could not be read; do not treat this as an absence of findings",
+      });
+    }
+    const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
+    // Recorded even when clean, and recording the *examined* count is the point: "we verified 412
+    // proofs and found nothing" is a claim an auditor can use, where the absence of a log line is
+    // not (ADR-0323).
+    await record(ctx, {
+      tenantId: readerTenant,
+      requestId: page.findings[0]?.relatedDeletionRequestId ?? "-",
+      principalId: principal.principalId,
+      operation: TOMBSTONE_SWEEP_AUDITED_OPERATION,
+      status: page.findings.length === 0 ? "clean" : "findings",
+      tombstoneId: page.findings[0]?.tombstoneId ?? null,
+      detail: `${page.examined.toString()} examined, ${page.findings.length.toString()} finding(s)`,
+      at,
+    });
+    return json(200, {
+      examined: page.examined,
+      findings: page.findings,
+      clean: page.findings.length === 0,
+      nextAfter: page.nextAfterTombstoneId,
+    });
+  };
+}
+
 function buildReconcileHandler(ctx: DeletionRequestRoutesContext): Handler {
   return async (input) => {
     const principal = input.principal;
@@ -798,6 +908,20 @@ export function buildDeletionRequestRoutes(
         false,
       ),
       handler: buildUnprovenHandler(ctx),
+    },
+    {
+      /**
+       * The third audit direction, and the only one that starts from the proofs rather than from a
+       * request — so it is the only one that ever looks at a tombstone the synchronous deletion
+       * route wrote (ADR-0327).
+       */
+      route: route(
+        "platform.tombstones.unproven",
+        "GET",
+        ["v1", "platform", "tombstones", "unproven"],
+        false,
+      ),
+      handler: buildTombstoneSweepHandler(ctx),
     },
     {
       /**

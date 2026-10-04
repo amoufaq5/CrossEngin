@@ -354,9 +354,7 @@ describe("INTEGRITY_ESCALATIONS", () => {
  * what has already been "stored", which is the property that matters: it continues rather than
  * restarts.
  *
- * Written out by hand on purpose. Test files are not typechecked in this repo, so a double that
- * stops satisfying `IncidentDeclarer` fails at runtime inside a `catch` that exists by design —
- * which is why every test below asserts on a recorded *call* (`declared`, `lookups`, `closedOut`)
+ * Written out by hand on purpose, and every test below asserts on a recorded *call* (`declared`, `lookups`, `closedOut`)
  * rather than on nothing having thrown.
  */
 function fakeDeclarer(

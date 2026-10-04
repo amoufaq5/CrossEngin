@@ -1,7 +1,8 @@
 import { hmacSha256Hex } from "@crossengin/crypto";
 
-import { truncateErrorMessage, type FetchLike } from "./email-ses.js";
+import { truncateErrorMessage } from "./email-ses.js";
 import { classifyPageFailure, type PageContent, type PageSendResult } from "./page-pagerduty.js";
+import { retryAfterFromResponse, type PageFetchLike } from "./retry-after.js";
 
 /*
  * Two more page transports, both thin.
@@ -23,7 +24,7 @@ export const MIN_PAGE_SIGNING_SECRET_BYTES = 16;
 
 export interface SlackPageSenderOptions {
   readonly botToken: string;
-  readonly fetch?: FetchLike;
+  readonly fetch?: PageFetchLike;
   readonly endpoint?: string;
   readonly timeoutMs?: number;
 }
@@ -64,14 +65,16 @@ export class SlackPageSender {
       // HTTP status alone would report a page as delivered that Slack refused.
       const ok = response.ok && slackOk(text);
       if (!ok) {
+        // `response.ok` with `ok: false` is an application refusal (`channel_not_found`), which no
+        // retry fixes. A non-ok status goes through the shared classifier so 429 is retryable.
+        const outcome = response.ok ? "rejected" : classifyPageFailure(response.status);
         return {
-          // `response.ok` with `ok: false` is an application refusal (`channel_not_found`), which no
-          // retry fixes. A non-ok status goes through the shared classifier so 429 is retryable.
-          outcome: response.ok ? "rejected" : classifyPageFailure(response.status),
+          outcome,
           provider: this.provider,
           httpStatus: response.status,
           reference: null,
           errorMessage: truncateErrorMessage(text),
+          retryAfterMs: retryAfterFromResponse(response, outcome === "failed"),
         };
       }
       return {
@@ -111,7 +114,7 @@ export interface WebhookPageSenderOptions {
    * a secret too short to sign with must fail when the server boots, not when a `sev1` is paging.
    */
   readonly signingSecret?: string;
-  readonly fetch?: FetchLike;
+  readonly fetch?: PageFetchLike;
   readonly timeoutMs?: number;
   readonly clock?: () => Date;
 }
@@ -161,12 +164,14 @@ export class WebhookPageSender {
       });
       const text = await response.text();
       if (!response.ok) {
+        const outcome = classifyPageFailure(response.status);
         return {
-          outcome: classifyPageFailure(response.status),
+          outcome,
           provider: this.provider,
           httpStatus: response.status,
           reference: null,
           errorMessage: truncateErrorMessage(text),
+          retryAfterMs: retryAfterFromResponse(response, outcome === "failed"),
         };
       }
       return {
@@ -190,7 +195,13 @@ export class WebhookPageSender {
   }
 }
 
-const defaultFetch: FetchLike = async (url, init) => {
+const defaultFetch: PageFetchLike = async (url, init) => {
   const response = await fetch(url, init as RequestInit);
-  return { ok: response.ok, status: response.status, text: () => response.text() };
+  // `headers` carried through so a 429's `Retry-After` reaches the dispatcher.
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: () => response.text(),
+    headers: response.headers,
+  };
 };

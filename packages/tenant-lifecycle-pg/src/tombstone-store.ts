@@ -45,6 +45,14 @@ const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0
 /** The chain's `deletion_event` kind, which is what a tombstone is. */
 export const TOMBSTONE_LOG_KIND = "deletion_event";
 
+/**
+ * The most rows one `scanAll` page may hold.
+ *
+ * Exported because the cap has to be the caller's too: a sweep that asks for more than this gets a
+ * short page, and a caller reading a short page as the end of the table would stop mid-sweep.
+ */
+export const TOMBSTONE_SCAN_MAX_LIMIT = 500;
+
 export const TOMBSTONE_COLUMNS = [
   "tombstone_id",
   "kind",
@@ -377,6 +385,52 @@ export class PostgresTombstoneStore {
         `SELECT ${TOMBSTONE_COLUMNS.join(", ")} FROM ${this.table}` +
           " WHERE related_deletion_request_id = $1 ORDER BY deleted_at, tombstone_id",
         [requestId],
+      );
+      return result.rows.map((row) => rowToStoredTombstone(row));
+    });
+  }
+
+  /**
+   * Every tombstone in the table, a page at a time — the one reader that does **not** start from
+   * something already naming a tombstone.
+   *
+   * That is the whole reason it exists (ADR-0327). `read` takes an id, `findForRequest` takes a
+   * request id, and `listForTenant` takes a tenant; a tombstone written by the synchronous deletion
+   * route names no request, so no audit that walks requests ever reaches it — and
+   * `verifyStoredEvidence` is the only detector for a tampered `scope`, because neither
+   * `proofSha256` nor the chain entry commits to it (ADR-0323).
+   *
+   * **Keyset-paged on a key that cannot tie.** `tombstone_id` is `NOT NULL` and uniquely
+   * constrained, so the ordering is total and the cursor is exact. `deleted_at` was the natural
+   * choice and is wrong: two tombstones can share it, and a sweep ordered on a key with ties either
+   * re-reads a row or steps over one at every page boundary. Stepping over one is the failure that
+   * matters here — the row skipped is a row nothing else will ever verify, so a tie is the
+   * difference between an audit and an audit with holes in it. `OFFSET` has the same defect for a
+   * different reason: a row inserted mid-sweep shifts every later page.
+   *
+   * Reads under the platform grant, like `read` and `listForTenant` and for a stronger version of
+   * their reason: this is a cross-tenant sweep, so under the isolation policy it would see only
+   * whichever tenant's context the connection happened to hold — which for a tombstone is usually
+   * none at all. `tenant_tombstones_platform_audit_read` is `SELECT`-only at the policy, so the
+   * elevation cannot write (ADR-0318).
+   */
+  async scanAll(input: {
+    readonly limit: number;
+    readonly afterTombstoneId?: string | null;
+  }): Promise<readonly StoredTombstone[]> {
+    const limit = Math.max(1, Math.min(TOMBSTONE_SCAN_MAX_LIMIT, Math.trunc(input.limit)));
+    const after = input.afterTombstoneId ?? null;
+    // The cursor predicate is omitted rather than written `($1 IS NULL OR tombstone_id > $1)`: that
+    // form makes the planner pick one path for both shapes and gives up the unique index.
+    const where = after === null ? "" : " WHERE tombstone_id > $1";
+    const limitPlaceholder = after === null ? "$1" : "$2";
+    const params: readonly unknown[] = after === null ? [limit] : [after, limit];
+    return this.conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.platform_audit', 'on', true)");
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT ${TOMBSTONE_COLUMNS.join(", ")} FROM ${this.table}${where}` +
+          ` ORDER BY tombstone_id LIMIT ${limitPlaceholder}`,
+        params,
       );
       return result.rows.map((row) => rowToStoredTombstone(row));
     });

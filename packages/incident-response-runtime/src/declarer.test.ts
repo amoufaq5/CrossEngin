@@ -6,6 +6,7 @@ import {
   INCIDENT_CLOSE_OUTS,
   closeOutClosesAlert,
   type IncidentDeclarationRequest,
+  type IncidentDeclarer,
 } from "./declarer.js";
 import { IncidentExecutor } from "./executor.js";
 
@@ -158,5 +159,102 @@ describe("CountingIncidentDeclarer", () => {
     const before = Date.now();
     const record = await new CountingIncidentDeclarer().declare(request());
     expect(new Date(record.declaredAt).getTime()).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe("CountingIncidentDeclarer — findById", () => {
+  it("answers for an id it minted in this process", async () => {
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    const record = await declarer.declare(request());
+    expect(await declarer.findById(record.id)).toEqual(record);
+  });
+
+  it("answers with the grade the declaration was made at, which is what a resolve routes on", async () => {
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    const record = await declarer.declare(request({ severity: "sev1" }));
+    expect((await declarer.findById(record.id))?.severity).toBe("sev1");
+  });
+
+  it("answers null for an id it never minted", async () => {
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    await declarer.declare(request());
+    expect(await declarer.findById("INC-2026-0099")).toBeNull();
+  });
+
+  it("answers null from a fresh declarer, which is what a restart looks like", async () => {
+    // The id a previous process minted is not authoritative anyway, so "cannot tell" is the only
+    // honest answer — and it is the answer that leaves the alert for a human.
+    const before = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    const record = await before.declare(request());
+    const after = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    expect(await after.findById(record.id)).toBeNull();
+  });
+
+  it("keeps each episode's record distinct", async () => {
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    const first = await declarer.declare(request({ severity: "sev3" }));
+    const second = await declarer.declare(request({ severity: "sev1" }));
+    const grades = [
+      (await declarer.findById(first.id))?.severity,
+      (await declarer.findById(second.id))?.severity,
+    ];
+    expect(grades).toEqual(["sev3", "sev1"]);
+  });
+
+  it("still answers after the episode was closed out", async () => {
+    // Pruning on close-out would make the answer depend on whether the caller asks before or after
+    // it closes the record, and a resolve may legitimately do either.
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    const record = await declarer.declare(request());
+    expect(await declarer.closeOut(record.id, { reason: "recovered", actorUserId: "sys" })).toBe(
+      "unpersisted",
+    );
+    expect((await declarer.findById(record.id))?.id).toBe(record.id);
+  });
+
+  it("remembers nothing for a declaration the contract refused", async () => {
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    await expect(declarer.declare(request({ title: "" }))).rejects.toThrow();
+    expect(await declarer.findById("INC-2026-0001")).toBeNull();
+  });
+
+  it("does not make findOpen answer from the same map", async () => {
+    // The two questions are not the same question. `findOpen` drives adoption, and adopting an
+    // incident that exists nowhere but this map is the thing its null answer prevents.
+    const declarer = new CountingIncidentDeclarer({ clock: new FixedClock(new Date(AT)) });
+    const record = await declarer.declare(request({ autoDeclaredFor: "availability:api.read" }));
+    expect(await declarer.findById(record.id)).not.toBeNull();
+    expect(await declarer.findOpen("availability:api.read")).toBeNull();
+  });
+});
+
+describe("IncidentDeclarer — findById is optional", () => {
+  it("accepts a declarer that does not implement it", async () => {
+    // Pinned with a double that omits the method: a required `findById` would break every
+    // implementation and every test double in this repo at once, for a caller that has to handle
+    // "cannot tell" regardless.
+    const minimal: IncidentDeclarer = {
+      declare: async (req) =>
+        new IncidentExecutor({ clock: new FixedClock(new Date(AT)) }).declare({
+          ...req,
+          id: "INC-2026-0001",
+          declaredAt: AT,
+        }),
+      findOpen: async () => null,
+      closeOut: async () => "unpersisted",
+    };
+    expect(minimal.findById).toBeUndefined();
+    expect((await minimal.declare(request())).id).toBe("INC-2026-0001");
+  });
+
+  it("reads absent the same way it reads null: nothing to resolve", async () => {
+    const minimal: IncidentDeclarer = {
+      declare: async () => {
+        throw new Error("not used");
+      },
+      findOpen: async () => null,
+      closeOut: async () => "unpersisted",
+    };
+    expect(await minimal.findById?.("INC-2026-0001")).toBeUndefined();
   });
 });

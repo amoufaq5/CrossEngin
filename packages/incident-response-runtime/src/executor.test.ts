@@ -459,3 +459,204 @@ describe("transition", () => {
     expect(triaged.ackedAt).toBe(T2);
   });
 });
+
+describe("notePage", () => {
+  const FACTS = {
+    channels: ["pagerduty_phone", "slack"],
+    delivered: 2,
+    attempted: 3,
+  } as const;
+
+  function closedSev3(exec: IncidentExecutor): IncidentRecord {
+    return IncidentRecordSchema.parse({
+      ...exec.declare(BASE),
+      status: "closed",
+      ackedAt: T1,
+      mitigatedAt: T1,
+      resolvedAt: T2,
+      closedAt: T2,
+      rootCause: "pool exhaustion",
+    });
+  }
+
+  it("appends exactly one paged entry", () => {
+    const exec = executor();
+    const noted = exec.notePage(exec.declare(BASE), {
+      facts: FACTS,
+      actorUserId: "system-slo-enforcer",
+      at: T1,
+    });
+    expect(noted.timeline).toHaveLength(2);
+    expect(noted.timeline[1]?.kind).toBe("paged");
+  });
+
+  it("writes the message and metadata the contract builds", () => {
+    const exec = executor();
+    const noted = exec.notePage(exec.declare(BASE), {
+      facts: FACTS,
+      actorUserId: "system-slo-enforcer",
+      at: T1,
+    });
+    expect(noted.timeline[1]?.message).toBe("paged 2/3 over pagerduty_phone, slack");
+    expect(noted.timeline[1]?.metadata).toEqual({
+      operation: "trigger",
+      channels: ["pagerduty_phone", "slack"],
+      delivered: 2,
+      attempted: 3,
+    });
+  });
+
+  it("attributes the entry to the actor and the given instant", () => {
+    const exec = executor();
+    const noted = exec.notePage(exec.declare(BASE), {
+      facts: FACTS,
+      actorUserId: "system-integrity-escalator",
+      at: T2,
+    });
+    expect(noted.timeline[1]?.actorUserId).toBe("system-integrity-escalator");
+    expect(noted.timeline[1]?.occurredAt).toBe(T2);
+  });
+
+  it("uses the injected clock when at is omitted", () => {
+    const exec = executor(T2);
+    const noted = exec.notePage(exec.declare({ ...BASE, declaredAt: T0 }), {
+      facts: FACTS,
+      actorUserId: "u0",
+    });
+    expect(noted.timeline[1]?.occurredAt).toBe(T2);
+  });
+
+  it("changes nothing but the timeline", () => {
+    const exec = executor();
+    const before = exec.declare(BASE);
+    const after = exec.notePage(before, { facts: FACTS, actorUserId: "u0", at: T1 });
+    const { timeline: _beforeTimeline, ...beforeRest } = before;
+    const { timeline: _afterTimeline, ...afterRest } = after;
+    expect(afterRest).toEqual(beforeRest);
+  });
+
+  it("leaves the already-recorded entries byte-identical", () => {
+    const exec = executor();
+    const before = exec.declare(BASE);
+    const after = exec.notePage(before, { facts: FACTS, actorUserId: "u0", at: T1 });
+    expect(JSON.stringify(after.timeline[0])).toBe(JSON.stringify(before.timeline[0]));
+  });
+
+  it("records a page on a closed incident", () => {
+    // A resolve's note arrives *after* the close-out, so refusing on a terminal status would
+    // drop precisely the note that says the alert was closed.
+    const exec = executor();
+    const noted = exec.notePage(closedSev3(exec), {
+      facts: { ...FACTS, operation: "resolve", delivered: 1, attempted: 1 },
+      actorUserId: "u0",
+      at: T2,
+    });
+    expect(noted.status).toBe("closed");
+    expect(noted.timeline[1]?.kind).toBe("paged");
+    expect(noted.timeline[1]?.message).toBe("resolved the alert on pagerduty_phone, slack");
+  });
+
+  it("records a page on a cancelled incident", () => {
+    const exec = executor();
+    const cancelled = IncidentRecordSchema.parse({
+      ...exec.declare(BASE),
+      status: "cancelled",
+      cancelledAt: T1,
+      cancelledReason: "signal recovered",
+    });
+    const noted = exec.notePage(cancelled, {
+      facts: { channels: ["pagerduty_phone"], delivered: 1, attempted: 1, operation: "resolve" },
+      actorUserId: "u0",
+      at: T2,
+    });
+    expect(noted.status).toBe("cancelled");
+    expect(noted.timeline).toHaveLength(2);
+  });
+
+  it("records a page on a triaged incident without disturbing its roles", () => {
+    const exec = executor();
+    const triaged = exec.transition(withRoles(exec, exec.declare(BASE)), {
+      to: "triaged",
+      at: T2,
+      actorUserId: "u0",
+    });
+    const noted = exec.notePage(triaged, { facts: FACTS, actorUserId: "u0", at: T2 });
+    expect(noted.status).toBe("triaged");
+    expect(noted.roleAssignments).toEqual(triaged.roleAssignments);
+  });
+
+  it("carries a provider reference through to the entry", () => {
+    const exec = executor();
+    const noted = exec.notePage(exec.declare(BASE), {
+      facts: { ...FACTS, reference: "INC-2026-0001" },
+      actorUserId: "u0",
+      at: T1,
+    });
+    expect(noted.timeline[1]?.metadata).toMatchObject({ reference: "INC-2026-0001" });
+  });
+
+  it("records an undelivered page as the alarming thing it is", () => {
+    const exec = executor();
+    const noted = exec.notePage(exec.declare(BASE), {
+      facts: { channels: ["slack"], delivered: 0, attempted: 1 },
+      actorUserId: "u0",
+      at: T1,
+    });
+    expect(noted.timeline[1]?.message).toContain("PAGED NOBODY");
+  });
+
+  it("records an unroutable page, which has no channel at all", () => {
+    const exec = executor();
+    const noted = exec.notePage(exec.declare(BASE), {
+      facts: { channels: [], delivered: 0, attempted: 0 },
+      actorUserId: "u0",
+      at: T1,
+    });
+    expect(noted.timeline[1]?.message).toBe("PAGED NOBODY — no page channel was attempted");
+    expect(noted.timeline[1]?.metadata).toEqual({
+      operation: "trigger",
+      channels: [],
+      delivered: 0,
+      attempted: 0,
+    });
+  });
+
+  it("propagates the contract's refusal of impossible counts", () => {
+    const exec = executor();
+    expect(() =>
+      exec.notePage(exec.declare(BASE), {
+        facts: { channels: ["slack"], delivered: 2, attempted: 1 },
+        actorUserId: "u0",
+        at: T1,
+      }),
+    ).toThrow(RangeError);
+  });
+
+  it("refuses an empty actor, so an entry always names who paged", () => {
+    const exec = executor();
+    expect(() =>
+      exec.notePage(exec.declare(BASE), { facts: FACTS, actorUserId: "", at: T1 }),
+    ).toThrow();
+  });
+
+  it("appends twice for a trigger and its resolve, in order", () => {
+    const exec = executor();
+    const triggered = exec.notePage(exec.declare(BASE), {
+      facts: FACTS,
+      actorUserId: "u0",
+      at: T1,
+    });
+    const resolved = exec.notePage(triggered, {
+      facts: { channels: ["pagerduty_phone"], delivered: 1, attempted: 1, operation: "resolve" },
+      actorUserId: "u0",
+      at: T2,
+    });
+    expect(resolved.timeline.map((e) => e.kind)).toEqual(["declared", "paged", "paged"]);
+    expect(resolved.timeline[1]?.metadata).toMatchObject({ operation: "trigger" });
+    expect(resolved.timeline[2]?.metadata).toMatchObject({ operation: "resolve" });
+  });
+
+  it("is not a NOTE_KIND — a page is stamped, not written by hand", () => {
+    expect([...NOTE_KINDS]).not.toContain("paged");
+  });
+});

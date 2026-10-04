@@ -1,9 +1,10 @@
-import { truncateErrorMessage, type FetchLike } from "./email-ses.js";
+import { truncateErrorMessage } from "./email-ses.js";
 import {
   classifyPageFailure,
   type PageContent,
   type PageSendResult,
 } from "./page-pagerduty.js";
+import { retryAfterFromResponse, type PageFetchLike } from "./retry-after.js";
 import {
   basicAuthHeader,
   encodeTwilioForm,
@@ -74,7 +75,7 @@ export interface SmsPageSenderOptions {
   /** Exactly one sender identity: an E.164 number, or a messaging service. */
   readonly fromNumber?: string;
   readonly messagingServiceSid?: string;
-  readonly fetch?: FetchLike;
+  readonly fetch?: PageFetchLike;
   /** Full URL, not a base — a VPC endpoint, an egress proxy, or a staging stand-in receiver. */
   readonly endpoint?: string;
   readonly timeoutMs?: number;
@@ -184,12 +185,14 @@ export class SmsPageSender {
       });
       const text = await response.text();
       if (!response.ok) {
+        const outcome = classifyPageFailure(response.status);
         return {
-          outcome: classifyPageFailure(response.status),
+          outcome,
           provider: this.provider,
           httpStatus: response.status,
           reference: null,
           errorMessage: truncateErrorMessage(text),
+          retryAfterMs: retryAfterFromResponse(response, outcome === "failed"),
         };
       }
       // `delivered` means Twilio took custody, which is as far as a synchronous send can see — the
@@ -226,7 +229,13 @@ function parseMessageSid(text: string): string | null {
   }
 }
 
-const defaultFetch: FetchLike = async (url, init) => {
+const defaultFetch: PageFetchLike = async (url, init) => {
   const response = await fetch(url, init as RequestInit);
-  return { ok: response.ok, status: response.status, text: () => response.text() };
+  // `headers` carried through so a 429's `Retry-After` reaches the dispatcher.
+  return {
+    ok: response.ok,
+    status: response.status,
+    text: () => response.text(),
+    headers: response.headers,
+  };
 };

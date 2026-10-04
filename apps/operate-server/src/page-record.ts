@@ -97,6 +97,7 @@ interface PageOutcomeFields {
   readonly reference: string | null;
   readonly errorMessage: string | null;
   readonly attemptsMade?: number;
+  readonly retryAfterMs?: number | null;
 }
 
 /** The slice of an outcome that is evidence. Nothing here derives from the finding. */
@@ -108,6 +109,7 @@ interface RecordedChannelOutcome {
   readonly reference: string | null;
   readonly errorMessage: string | null;
   readonly attemptsMade: number | null;
+  readonly retryAfterMs: number | null;
 }
 
 function recordedOutcome(outcome: PageOutcomeFields): RecordedChannelOutcome {
@@ -126,6 +128,11 @@ function recordedOutcome(outcome: PageOutcomeFields): RecordedChannelOutcome {
     // nine seconds" are different facts about the same `failed` disposition, and a review that is
     // asking why nobody came needs the second one.
     attemptsMade: outcome.attemptsMade ?? null,
+    // What the provider itself said about when to come back (ADR-0327). On a page that failed after
+    // its whole budget this is the most informative field on the row — "PagerDuty asked for 45s and
+    // we stopped rather than hold the page that long" is a different incident-review finding from
+    // "the transport was down", and the two are indistinguishable without it.
+    retryAfterMs: outcome.retryAfterMs ?? null,
   };
 }
 

@@ -1,4 +1,11 @@
-import { SesEmailSender, TwilioSmsSender } from "@crossengin/notification-providers";
+import {
+  FcmPushSender,
+  SesEmailSender,
+  ServiceAccountFcmTokenProvider,
+  TwilioSmsSender,
+  normalizePrivateKeyPem,
+  parseServiceAccountJson,
+} from "@crossengin/notification-providers";
 
 import { InAppSender, SenderRegistry, type ChannelSender } from "./delivery-senders.js";
 
@@ -57,6 +64,13 @@ const TWILIO_VARS = [
   "TWILIO_API_KEY_SECRET",
   "TWILIO_FROM_NUMBER",
   "TWILIO_MESSAGING_SERVICE_SID",
+] as const;
+
+const FCM_VARS = [
+  "FCM_PROJECT_ID",
+  "FCM_SERVICE_ACCOUNT_JSON",
+  "FCM_SERVICE_ACCOUNT_CLIENT_EMAIL",
+  "FCM_SERVICE_ACCOUNT_PRIVATE_KEY",
 ] as const;
 
 /**
@@ -192,6 +206,70 @@ function buildTwilio(env: NodeJS.ProcessEnv, skipped: string[]): ChannelSender |
 }
 
 /**
+ * Mobile push, which ADR-0310 built and could not wire (ADR-0327).
+ *
+ * `FcmPushSender` has existed and been tested since ADR-0310 and `buildSenderRegistryFromEnv` never
+ * constructed it, for one reason: FCM HTTP v1 wants a short-lived OAuth2 access token, and minting
+ * one is a private key, a second endpoint and a refresh cache — "env vars cannot express an
+ * `FcmAccessTokenProvider`". They can express the *credential*, and the provider is now a real
+ * implementation, so this is the wiring that was missing rather than a guess.
+ *
+ * The service account arrives as the key file **verbatim** in one variable. Splitting it into three
+ * is what produces the classic literal-`\n` private key that OpenSSL then refuses; a deployment that
+ * does keep them in separate secrets can use the pair instead, and the provider normalises the PEM.
+ * Either way it is a private key, which is the strongest case there is for ADR-0301's rule that
+ * these come from the environment and never from argv.
+ */
+function buildFcm(env: NodeJS.ProcessEnv, skipped: string[]): ChannelSender | null {
+  const projectId = value(env, "FCM_PROJECT_ID");
+  const json = value(env, "FCM_SERVICE_ACCOUNT_JSON");
+  const clientEmail = value(env, "FCM_SERVICE_ACCOUNT_CLIENT_EMAIL");
+  const privateKeyPem = value(env, "FCM_SERVICE_ACCOUNT_PRIVATE_KEY");
+  const hasPair = clientEmail !== null && privateKeyPem !== null;
+  if (projectId === null || (json === null && !hasPair)) {
+    if (anyPresent(env, FCM_VARS)) {
+      skipped.push(
+        "push_mobile (FCM): needs FCM_PROJECT_ID and either FCM_SERVICE_ACCOUNT_JSON or both " +
+          "FCM_SERVICE_ACCOUNT_CLIENT_EMAIL and FCM_SERVICE_ACCOUNT_PRIVATE_KEY; partial " +
+          "configuration is ignored rather than guessed",
+      );
+    }
+    return null;
+  }
+  const tokenEndpoint = value(env, "FCM_TOKEN_ENDPOINT");
+  const baseUrl = value(env, "FCM_BASE_URL");
+  return construct("push_mobile (FCM)", skipped, () => {
+    // Parsed and validated here, inside `construct`, so a malformed key costs this channel and not
+    // the boot — and the provider refuses an EC key, a non-https token endpoint and a malformed PEM
+    // at construction rather than at 3am. Its errors never echo the key material.
+    const credentials =
+      json !== null
+        ? parseServiceAccountJson(json)
+        : {
+            clientEmail: clientEmail as string,
+            // `parseServiceAccountJson` normalises the key it reads; the split form has to do the
+            // same, or the literal-`\n` key an env var or Kubernetes secret produces — the most
+            // common way this configuration goes wrong — is refused as undecodable.
+            privateKeyPem: normalizePrivateKeyPem(privateKeyPem as string),
+          };
+    const tokens = new ServiceAccountFcmTokenProvider({
+      credentials: {
+        ...credentials,
+        ...(tokenEndpoint !== null ? { tokenUri: tokenEndpoint } : {}),
+      },
+    });
+    return new FcmPushSender({
+      projectId,
+      accessToken: tokens.asProvider(),
+      // So a credential FCM refuses is not re-presented on every send for the rest of its cached
+      // lifetime (ADR-0327).
+      invalidateToken: () => tokens.invalidate(),
+      ...(baseUrl !== null ? { baseUrl } : {}),
+    });
+  });
+}
+
+/**
  * The registry the server actually delivers through: in-app always, plus whichever real channels the
  * environment fully configures.
  */
@@ -204,6 +282,8 @@ export function buildSenderRegistryFromEnv(
   if (ses !== null) senders.push(ses);
   const twilio = buildTwilio(env, skipped);
   if (twilio !== null) senders.push(twilio);
+  const fcm = buildFcm(env, skipped);
+  if (fcm !== null) senders.push(fcm);
   const registry = new SenderRegistry(senders);
   return { registry, report: { channels: registry.channels(), skipped } };
 }

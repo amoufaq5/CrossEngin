@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { buildSenderRegistryFromEnv } from "./delivery-senders-env.js";
@@ -19,6 +20,79 @@ const TWILIO: NodeJS.ProcessEnv = {
   TWILIO_FROM_NUMBER: "+15555550100",
   TWILIO_STATUS_CALLBACK_URL: "https://api.example.com/v1/notifications/bounces",
 };
+
+/*
+ * One real 2048-bit RSA keypair and one EC keypair, generated once for the file rather than pasted
+ * as fixtures. Generated because the EC case below is about what OpenSSL says when it decodes the
+ * key, and a fixture would also be a committed private key — a thing nobody should have to decide
+ * whether to rotate.
+ */
+const FCM_KEYPAIR = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+});
+
+const FCM_EC_KEYPAIR = generateKeyPairSync("ec", {
+  namedCurve: "P-256",
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs8", format: "pem" },
+});
+
+const FCM_CLIENT_EMAIL = "fcm-sender@crossengin-prod.iam.gserviceaccount.com";
+
+function serviceAccountJson(overrides: Readonly<Record<string, unknown>> = {}): string {
+  return JSON.stringify({
+    type: "service_account",
+    project_id: "crossengin-prod",
+    private_key_id: "0123456789abcdef",
+    private_key: FCM_KEYPAIR.privateKey,
+    client_email: FCM_CLIENT_EMAIL,
+    token_uri: "https://oauth2.googleapis.com/token",
+    ...overrides,
+  });
+}
+
+/** The key file verbatim in one variable — the form that cannot produce a mangled PEM. */
+const FCM_JSON: NodeJS.ProcessEnv = {
+  FCM_PROJECT_ID: "crossengin-prod",
+  FCM_SERVICE_ACCOUNT_JSON: serviceAccountJson(),
+};
+
+/** The split form, for a deployment that keeps the two fields in separate secrets. */
+const FCM_PAIR: NodeJS.ProcessEnv = {
+  FCM_PROJECT_ID: "crossengin-prod",
+  FCM_SERVICE_ACCOUNT_CLIENT_EMAIL: FCM_CLIENT_EMAIL,
+  FCM_SERVICE_ACCOUNT_PRIVATE_KEY: FCM_KEYPAIR.privateKey,
+};
+
+/**
+ * Every 24-character window of the key's base64 body. A skipped-channel reason containing any one of
+ * these has carried part of a private key into the boot log and whatever aggregates it — at which
+ * point the key has to be rotated, which is a far worse outcome than the misconfiguration it was
+ * reporting.
+ */
+const FCM_KEY_WINDOWS: readonly string[] = (() => {
+  const body = FCM_KEYPAIR.privateKey
+    .split("\n")
+    .filter((line) => !line.startsWith("-----") && line.length > 0)
+    .join("");
+  const windows: string[] = [];
+  for (let i = 0; i + 24 <= body.length; i += 1) windows.push(body.slice(i, i + 24));
+  return windows;
+})();
+
+function expectNoKeyMaterial(messages: readonly string[]): void {
+  const joined = messages.join("\n");
+  const leaked = FCM_KEY_WINDOWS.find((window) => joined.includes(window));
+  expect(leaked).toBeUndefined();
+}
+
+function fcmSkips(env: NodeJS.ProcessEnv): readonly string[] {
+  return buildSenderRegistryFromEnv(env).report.skipped.filter((s) =>
+    s.startsWith("push_mobile"),
+  );
+}
 
 describe("buildSenderRegistryFromEnv", () => {
   it("registers in_app with no configuration at all", () => {
@@ -207,5 +281,307 @@ describe("buildSenderRegistryFromEnv", () => {
     // Otherwise a test or a sidecar's stray AWS credentials would silently register a real sender.
     const { registry } = buildSenderRegistryFromEnv({ UNRELATED: "x" });
     expect(registry.channels()).toEqual(["in_app"]);
+  });
+});
+
+describe("mobile push from the environment (ADR-0327)", () => {
+  it("says nothing at all when nobody tried to configure push", () => {
+    // Not wanted is not wanted-and-broken. A warning for every unconfigured channel is noise an
+    // operator learns to scroll past, which is how the one that matters gets missed.
+    const { registry, report } = buildSenderRegistryFromEnv({ ...SES });
+    expect(registry.for("push_mobile")).toBeNull();
+    expect(report.channels).not.toContain("push_mobile");
+    expect(report.skipped.some((s) => s.startsWith("push_mobile"))).toBe(false);
+  });
+
+  it("warns when only the project id is set, because the operator has clearly started", () => {
+    const skips = fcmSkips({ FCM_PROJECT_ID: "crossengin-prod" });
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("FCM_SERVICE_ACCOUNT_JSON");
+    expect(skips[0]).toContain("FCM_SERVICE_ACCOUNT_CLIENT_EMAIL");
+    expect(skips[0]).toContain("FCM_SERVICE_ACCOUNT_PRIVATE_KEY");
+  });
+
+  it("warns when the credential is set but the project id is not", () => {
+    // FCM has no sender identity other than the project, so a key with no project cannot send: the
+    // half-configured channel has to be loud rather than inferred from the key file's `project_id`.
+    const skips = fcmSkips({ FCM_SERVICE_ACCOUNT_JSON: serviceAccountJson() });
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("FCM_PROJECT_ID");
+  });
+
+  it("registers push_mobile from the verbatim key file, with nothing skipped", () => {
+    const { registry, report } = buildSenderRegistryFromEnv({ ...FCM_JSON });
+    expect(registry.for("push_mobile")?.channel).toBe("push_mobile");
+    expect(report.channels).toContain("push_mobile");
+    expect(report.skipped).toEqual([]);
+  });
+
+  it("names fcm as the provider behind the channel", () => {
+    const { registry } = buildSenderRegistryFromEnv({ ...FCM_JSON });
+    expect(registry.for("push_mobile")?.provider).toBe("fcm");
+  });
+
+  it("registers push_mobile from the split client-email and private-key pair", () => {
+    const { registry, report } = buildSenderRegistryFromEnv({ ...FCM_PAIR });
+    expect(registry.for("push_mobile")).not.toBeNull();
+    expect(report.skipped).toEqual([]);
+  });
+
+  it("refuses the client email half on its own", () => {
+    const skips = fcmSkips({
+      FCM_PROJECT_ID: "crossengin-prod",
+      FCM_SERVICE_ACCOUNT_CLIENT_EMAIL: FCM_CLIENT_EMAIL,
+    });
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("partial configuration is ignored rather than guessed");
+  });
+
+  it("refuses the private key half on its own", () => {
+    const skips = fcmSkips({
+      FCM_PROJECT_ID: "crossengin-prod",
+      FCM_SERVICE_ACCOUNT_PRIVATE_KEY: FCM_KEYPAIR.privateKey,
+    });
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("FCM_SERVICE_ACCOUNT_CLIENT_EMAIL");
+  });
+
+  /*
+   * The single most common way this configuration goes wrong: the key file's JSON holds
+   * `"…KEY-----\nMIIE…"`, where `\n` is an escape `JSON.parse` resolves — but the same string lifted
+   * into an env var, a `.env` file or a Kubernetes secret arrives with the backslash and the `n` as
+   * two literal characters, and OpenSSL then refuses a PEM whose body is one 1600-character line.
+   */
+  it("accepts a split-form private key whose newlines arrived as two characters", () => {
+    const { registry, report } = buildSenderRegistryFromEnv({
+      ...FCM_PAIR,
+      FCM_SERVICE_ACCOUNT_PRIVATE_KEY: FCM_KEYPAIR.privateKey.replace(/\n/g, "\\n"),
+    });
+    expect(registry.for("push_mobile")).not.toBeNull();
+    expect(report.skipped).toEqual([]);
+  });
+
+  it("accepts the same mangling inside the JSON form", () => {
+    const { registry } = buildSenderRegistryFromEnv({
+      ...FCM_JSON,
+      FCM_SERVICE_ACCOUNT_JSON: serviceAccountJson({
+        private_key: FCM_KEYPAIR.privateKey.replace(/\n/g, "\\n"),
+      }),
+    });
+    expect(registry.for("push_mobile")).not.toBeNull();
+  });
+
+  it("skips rather than throws on malformed JSON", () => {
+    const env = { ...FCM_JSON, FCM_SERVICE_ACCOUNT_JSON: "{not json" };
+    expect(() => buildSenderRegistryFromEnv(env)).not.toThrow();
+    const skips = fcmSkips(env);
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("not valid JSON");
+  });
+
+  it("skips JSON that parses to something other than an object", () => {
+    const skips = fcmSkips({ ...FCM_JSON, FCM_SERVICE_ACCOUNT_JSON: "[1,2]" });
+    expect(skips[0]).toContain("not a JSON object");
+  });
+
+  it("skips a key file declaring a credential type other than a service account", () => {
+    const skips = fcmSkips({
+      ...FCM_JSON,
+      FCM_SERVICE_ACCOUNT_JSON: serviceAccountJson({ type: "authorized_user" }),
+    });
+    expect(skips[0]).toContain("is not a service account");
+  });
+
+  it("skips a private key that is not a PEM at all", () => {
+    const skips = fcmSkips({
+      ...FCM_PAIR,
+      FCM_SERVICE_ACCOUNT_PRIVATE_KEY: "hunter2",
+    });
+    expect(skips[0]).toContain("not a PEM-encoded private key");
+  });
+
+  it("recognises the public half pasted into the private key variable", () => {
+    const skips = fcmSkips({
+      ...FCM_PAIR,
+      FCM_SERVICE_ACCOUNT_PRIVATE_KEY: FCM_KEYPAIR.publicKey,
+    });
+    expect(skips[0]).toContain("is a public key, not a private key");
+  });
+
+  /*
+   * Worth its own test because no textual check can catch it: an EC key is also wrapped in
+   * `-----BEGIN PRIVATE KEY-----`, and `createSign("RSA-SHA256")` signs with it quite happily —
+   * that name selects the digest and node takes the algorithm from the key. The result is a valid
+   * ECDSA JWT that Google refuses as `invalid_grant`, the non-retryable kind, reported as "this
+   * service account is wrong" for a key that is merely the wrong type. So it is a boot refusal.
+   */
+  it("refuses an EC key where Google requires RS256 over RSA", () => {
+    const skips = fcmSkips({
+      ...FCM_PAIR,
+      FCM_SERVICE_ACCOUNT_PRIVATE_KEY: FCM_EC_KEYPAIR.privateKey,
+    });
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("requires RS256 over an RSA key");
+  });
+
+  it("refuses a non-https token endpoint, with no escape hatch for a local stand-in", () => {
+    // The assertion POSTed to that endpoint is a bearer credential in its own right, so "it works
+    // in staging over http" is exactly how a plaintext credential exchange reaches production.
+    const skips = fcmSkips({ ...FCM_JSON, FCM_TOKEN_ENDPOINT: "http://localhost:8080/token" });
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("tokenUri must be https");
+  });
+
+  it("accepts an https token endpoint override, for an egress proxy", () => {
+    const { registry, report } = buildSenderRegistryFromEnv({
+      ...FCM_JSON,
+      FCM_TOKEN_ENDPOINT: "https://egress.internal.example/google/token",
+    });
+    expect(registry.for("push_mobile")).not.toBeNull();
+    expect(report.skipped).toEqual([]);
+  });
+
+  it("prefers the verbatim key file over a split pair when both are set", () => {
+    // The JSON form cannot have been mangled, so it is the better evidence of intent; a stale pair
+    // left beside it must not be able to break a channel the key file fully configures.
+    const { registry } = buildSenderRegistryFromEnv({
+      ...FCM_JSON,
+      FCM_SERVICE_ACCOUNT_CLIENT_EMAIL: "not-an-email",
+      FCM_SERVICE_ACCOUNT_PRIVATE_KEY: "hunter2",
+    });
+    expect(registry.for("push_mobile")).not.toBeNull();
+  });
+
+  it("treats a whitespace-only credential as unset rather than passing it on", () => {
+    const skips = fcmSkips({
+      FCM_PROJECT_ID: "crossengin-prod",
+      FCM_SERVICE_ACCOUNT_JSON: "   ",
+    });
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain("partial configuration is ignored rather than guessed");
+  });
+
+  it("treats a whitespace-only project id as unset", () => {
+    const skips = fcmSkips({ ...FCM_JSON, FCM_PROJECT_ID: "  " });
+    expect(skips[0]).toContain("FCM_PROJECT_ID");
+  });
+
+  it("attributes every refusal to the channel it cost", () => {
+    const skips = fcmSkips({ ...FCM_PAIR, FCM_SERVICE_ACCOUNT_PRIVATE_KEY: "hunter2" });
+    expect(skips[0]).toMatch(/^push_mobile \(FCM\): refused its configuration: /);
+  });
+
+  /*
+   * The test that matters most here. The refusals are built from credentials that *contain* the real
+   * key, so a message that interpolated any of it would be caught — and a private key in a boot log
+   * is a private key that has to be rotated.
+   */
+  it("never carries any part of the private key into a skipped reason", () => {
+    const corrupt = `-----BEGIN PRIVATE KEY-----\n${FCM_KEY_WINDOWS[0] ?? ""}\n-----END PRIVATE KEY-----`;
+    const broken: readonly NodeJS.ProcessEnv[] = [
+      // The whole real key present, refused for the field beside it.
+      { ...FCM_PAIR, FCM_SERVICE_ACCOUNT_CLIENT_EMAIL: "crossengin-prod" },
+      { ...FCM_PAIR, FCM_TOKEN_ENDPOINT: "http://localhost:8080/token" },
+      { ...FCM_JSON, FCM_TOKEN_ENDPOINT: "ftp://nope" },
+      {
+        ...FCM_JSON,
+        FCM_SERVICE_ACCOUNT_JSON: serviceAccountJson({ client_email: undefined }),
+      },
+      // A real slice of the key's body, in a PEM OpenSSL cannot decode.
+      { ...FCM_PAIR, FCM_SERVICE_ACCOUNT_PRIVATE_KEY: corrupt },
+      { ...FCM_JSON, FCM_SERVICE_ACCOUNT_JSON: serviceAccountJson({ private_key: corrupt }) },
+      // The key where the JSON belongs, which is a thing operators really do.
+      { FCM_PROJECT_ID: "crossengin-prod", FCM_SERVICE_ACCOUNT_JSON: FCM_KEYPAIR.privateKey },
+    ];
+    const messages: string[] = [];
+    for (const env of broken) {
+      const skips = fcmSkips(env);
+      expect(skips.length).toBeGreaterThan(0);
+      messages.push(...skips);
+    }
+    expectNoKeyMaterial(messages);
+  });
+
+  it("costs the channel and never the boot, whatever the configuration says", () => {
+    // A typo in one credential taking the whole API down would be a far worse outage than losing
+    // push until it is fixed, which is the entire reason `construct` catches.
+    const broken: readonly NodeJS.ProcessEnv[] = [
+      { ...FCM_JSON, FCM_SERVICE_ACCOUNT_JSON: "{not json" },
+      { ...FCM_PAIR, FCM_SERVICE_ACCOUNT_PRIVATE_KEY: FCM_EC_KEYPAIR.privateKey },
+      { ...FCM_PAIR, FCM_SERVICE_ACCOUNT_PRIVATE_KEY: "hunter2" },
+      { ...FCM_JSON, FCM_TOKEN_ENDPOINT: "not-a-url" },
+      { ...FCM_JSON, FCM_BASE_URL: "not-a-url" },
+    ];
+    for (const env of broken) {
+      expect(() => buildSenderRegistryFromEnv(env)).not.toThrow();
+      expect(buildSenderRegistryFromEnv(env).registry.for("in_app")).not.toBeNull();
+    }
+  });
+
+  it("leaves the other channels alone when FCM is broken", () => {
+    const { registry, report } = buildSenderRegistryFromEnv({
+      ...SES,
+      ...TWILIO,
+      ...FCM_PAIR,
+      FCM_SERVICE_ACCOUNT_PRIVATE_KEY: "hunter2",
+    });
+    expect(registry.for("push_mobile")).toBeNull();
+    expect([...report.channels].sort()).toEqual(["email", "in_app", "sms"]);
+  });
+
+  it("registers all four channels when all three providers are configured", () => {
+    const { report } = buildSenderRegistryFromEnv({ ...SES, ...TWILIO, ...FCM_JSON });
+    expect([...report.channels].sort()).toEqual([
+      "email",
+      "in_app",
+      "push_mobile",
+      "sms",
+    ]);
+    expect(report.skipped).toEqual([]);
+  });
+
+  it("sends to the overridden token and FCM endpoints rather than Google's own", async () => {
+    // The only observable of an override is where the request goes. Asserting the sender merely
+    // exists would pass whether or not either override reached the two objects that need them —
+    // the token provider and the push sender are built separately and take one each.
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown): Promise<Response> => {
+      const url = String(input);
+      seen.push(url);
+      return url.includes("/token")
+        ? new Response(
+            JSON.stringify({ access_token: "ya29.stub", expires_in: 3599 }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          )
+        : new Response("{}", { status: 500 });
+    }) as typeof globalThis.fetch;
+    try {
+      const { registry } = buildSenderRegistryFromEnv({
+        ...FCM_JSON,
+        FCM_TOKEN_ENDPOINT: "https://egress.internal.example/google/token",
+        FCM_BASE_URL: "https://fcm.internal.example",
+      });
+      await registry.for("push_mobile")?.send({
+        dispatchId: "disp_1",
+        tenantId: "00000000-0000-0000-0000-000000000001",
+        channel: "push_mobile",
+        templateId: "ntpl_1",
+        locale: "en-US",
+        // Shaped like a real registration token: the sender refuses a UUID outright, so a toy
+        // address here would never reach the network and the assertion below would be vacuous.
+        recipientAddress: `cE1:APA91b${"x".repeat(48)}`,
+        attemptNumber: 1,
+      });
+    } finally {
+      globalThis.fetch = original;
+    }
+    expect(seen).toEqual([
+      "https://egress.internal.example/google/token",
+      "https://fcm.internal.example/v1/projects/crossengin-prod/messages:send",
+    ]);
+    expect(
+      seen.some((u) => u.includes("oauth2.googleapis.com") || u.includes("fcm.googleapis.com")),
+    ).toBe(false);
   });
 });

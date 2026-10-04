@@ -211,6 +211,22 @@ export interface SloEvaluationSchedulerOptions {
     decision: ObservedEnforcementDecision,
     pages: readonly PageDirective[],
   ) => Promise<void>;
+  /**
+   * Recovers the directives for an episode this process did not page (ADR-0327).
+   *
+   * ADR-0326 left the in-process memory as a known limit: a restart between a breach and its
+   * recovery forgets what it paged and resolves nothing. This is the way back — the caller holds the
+   * alert policy and can ask the incident store what grade the record was *declared* at, which is
+   * the one authoritative answer, and plan from it. Deliberately a seam rather than logic here: the
+   * scheduler must not learn about `AlertPolicy`, and inferring a grade is the mis-routed resolve
+   * ADR-0326 exists to prevent.
+   *
+   * Answering `[]` — which is what a caller with no store, or a record it cannot read, must do — is
+   * the fail-closed outcome: nothing is resolved and the alert is left for a human.
+   */
+  readonly recoverPages?: (
+    decision: ObservedEnforcementDecision,
+  ) => Promise<readonly PageDirective[]>;
   readonly onError?: (err: unknown) => void;
 }
 
@@ -289,12 +305,17 @@ export class SloEvaluationScheduler {
   private async resolvePages(decision: ObservedEnforcementDecision): Promise<void> {
     const incidentId = decision.incidentId;
     if (incidentId === null) return;
-    const pages = this.paged.get(incidentId);
+    const remembered = this.paged.get(incidentId);
     this.paged.delete(incidentId);
-    if (pages === undefined) return;
     // `human_owned` means a human took the incident, and `failed` means the row is still open and
-    // its state unknown — neither is an alert to close (ADR-0326).
+    // its state unknown — neither is an alert to close (ADR-0326). Checked before recovery, so a
+    // restart does not go to the store for an episode it would not have resolved anyway.
     if (decision.closeOut === null || !closeOutClosesAlert(decision.closeOut)) return;
+    // Remembered beats recovered: these are the directives that actually went out, so they match
+    // the alert even if the policy has been edited since. The store is the fallback for an episode
+    // this process did not page — i.e. one that spanned a restart (ADR-0327).
+    const pages = remembered ?? (await this.opts.recoverPages?.(decision)) ?? [];
+    if (pages.length === 0) return;
     await this.opts.onResolvePage?.(decision, pages);
   }
 

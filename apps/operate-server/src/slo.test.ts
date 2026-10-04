@@ -429,6 +429,7 @@ describe("resolving an SLO breach's page on recovery (ADR-0326)", () => {
   function scheduler(
     decisions: readonly ObservedEnforcementDecision[][],
     sink: Array<readonly PageDirective[]>,
+    recoverPages?: (d: ObservedEnforcementDecision) => Promise<readonly PageDirective[]>,
   ): SloEvaluationScheduler {
     let pass = 0;
     return new SloEvaluationScheduler({
@@ -444,6 +445,7 @@ describe("resolving an SLO breach's page on recovery (ADR-0326)", () => {
       onResolvePage: async (_d, pages) => {
         sink.push(pages);
       },
+      ...(recoverPages !== undefined ? { recoverPages } : {}),
     });
   }
 
@@ -561,5 +563,131 @@ describe("resolving an SLO breach's page on recovery (ADR-0326)", () => {
     await s.evaluateOnce();
     await s.evaluateOnce();
     expect(errors).toHaveLength(1);
+  });
+
+  /**
+   * The restart case ADR-0326 left open (ADR-0327).
+   *
+   * `recoverPages` is the seam a caller holding the alert policy and the incident store answers
+   * through. It is consulted **only** when nothing was remembered, and only for a close-out that
+   * would have closed the alert anyway — the ordering is the behaviour, not an implementation
+   * detail, so each test below asserts whether the seam was *asked* rather than only what came back.
+   */
+  describe("recovering what a restart forgot (ADR-0327)", () => {
+    /** A directive that could only have come from the recovery, never from the remembered page. */
+    const RECOVERED = {
+      incidentId: INC,
+      severity: "sev3",
+      alertSeverity: "P2",
+      channels: [{ kind: "slack", channel: "#oncall" }],
+    } as unknown as PageDirective;
+
+    function recovery(returns: readonly PageDirective[]): {
+      readonly asked: ObservedEnforcementDecision[];
+      readonly fn: (d: ObservedEnforcementDecision) => Promise<readonly PageDirective[]>;
+    } {
+      const asked: ObservedEnforcementDecision[] = [];
+      return {
+        asked,
+        fn: async (d) => {
+          asked.push(d);
+          return returns;
+        },
+      };
+    }
+
+    it("resolves an episode it never paged over the recovered directives", async () => {
+      const resolved: Array<readonly PageDirective[]> = [];
+      const rec = recovery([RECOVERED]);
+      // No breach pass: this process came up after the page went out, which is exactly what a
+      // restart mid-episode looks like from here.
+      const s = scheduler([[recovered()]], resolved, rec.fn);
+      await s.evaluateOnce();
+      expect(resolved).toEqual([[RECOVERED]]);
+      expect(rec.asked.map((d) => d.incidentId)).toEqual([INC]);
+    });
+
+    it("never asks for an episode it paged itself", async () => {
+      const resolved: Array<readonly PageDirective[]> = [];
+      const rec = recovery([RECOVERED]);
+      const s = scheduler([[breached([DIRECTIVE])], [recovered()]], resolved, rec.fn);
+      await s.evaluateOnce();
+      await s.evaluateOnce();
+      // The remembered directives are what actually went out, so they match the alert even if the
+      // policy has been edited since — and the store is not consulted at all.
+      expect(resolved).toEqual([[DIRECTIVE]]);
+      expect(rec.asked).toEqual([]);
+    });
+
+    it("resolves nothing when the recovery answers []", async () => {
+      const resolved: Array<readonly PageDirective[]> = [];
+      const rec = recovery([]);
+      const s = scheduler([[recovered()]], resolved, rec.fn);
+      await s.evaluateOnce();
+      // Asked, and answered "cannot tell". Leaving the alert up for a human is the fail-closed
+      // direction; closing one somewhere nobody was woken is the failure that produces silence.
+      expect(rec.asked).toHaveLength(1);
+      expect(resolved).toEqual([]);
+    });
+
+    it("does not even ask for a close-out that would not close the alert", async () => {
+      for (const closeOut of ["human_owned", "failed"] as const) {
+        const resolved: Array<readonly PageDirective[]> = [];
+        const rec = recovery([RECOVERED]);
+        const s = scheduler([[recovered({ closeOut })]], resolved, rec.fn);
+        await s.evaluateOnce();
+        // The gate is checked *before* the recovery: going to the store for an episode this loop
+        // would not have resolved anyway is wasted work on a recovery path.
+        expect(rec.asked).toEqual([]);
+        expect(resolved).toEqual([]);
+      }
+    });
+
+    it("does not ask for a recovery with no incident id", async () => {
+      const resolved: Array<readonly PageDirective[]> = [];
+      const rec = recovery([RECOVERED]);
+      const s = scheduler([[recovered({ incidentId: null })]], resolved, rec.fn);
+      await s.evaluateOnce();
+      // The id is the provider's `dedup_key`; with none there is no alert to name.
+      expect(rec.asked).toEqual([]);
+      expect(resolved).toEqual([]);
+    });
+
+    it("routes a throwing recovery to onError and abandons the rest of the pass", async () => {
+      const errors: unknown[] = [];
+      const resolved: Array<readonly PageDirective[]> = [];
+      const second = recovered({ incidentId: "INC-2026-0002" });
+      const s = new SloEvaluationScheduler({
+        evaluators: [async () => [recovered(), second]],
+        intervalMs: 1_000,
+        onResolvePage: async (_d, pages) => {
+          resolved.push(pages);
+        },
+        recoverPages: async () => {
+          throw new Error("incident store unavailable");
+        },
+        onError: (err) => errors.push(err),
+      });
+      // Nothing special: a failing recovery fails its pass like any other step, and the next tick
+      // tries again rather than this one limping on with a store it cannot read.
+      const emitted = await s.evaluateOnce();
+      expect((errors[0] as Error).message).toBe("incident store unavailable");
+      expect(emitted.map((d) => d.incidentId)).toEqual([INC]);
+      expect(resolved).toEqual([]);
+    });
+
+    it("treats a breach that planned no page as an episode to recover", async () => {
+      const resolved: Array<readonly PageDirective[]> = [];
+      const rec = recovery([RECOVERED]);
+      // A breach whose grade the policy has no route for plans nothing, so nothing is remembered —
+      // indistinguishable from a restart, and deliberately so: a resolve on a `dedup_key` that
+      // never opened is a no-op at the provider, while refusing to ask would reintroduce the gap.
+      const s = scheduler([[breached([])], [recovered()]], resolved, rec.fn);
+      await s.evaluateOnce();
+      expect(s.pagedFor(INC)).toBeNull();
+      await s.evaluateOnce();
+      expect(rec.asked).toHaveLength(1);
+      expect(resolved).toEqual([[RECOVERED]]);
+    });
   });
 });

@@ -3,10 +3,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PipelineExecutionSchema, type PipelineExecution } from "@crossengin/api-gateway";
+import { IncidentRecordSchema, type IncidentRecord } from "@crossengin/incident-response";
+import {
+  CountingIncidentDeclarer,
+  type IncidentCloseOut,
+  type IncidentCloseOutInput,
+  type IncidentDeclarationRequest,
+  type IncidentDeclarer,
+} from "@crossengin/incident-response-runtime";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import type { AlertPolicy, Slo } from "@crossengin/observability";
-import { FixedClock } from "@crossengin/observability-runtime";
-import { buildSloEnforcement, loadSloConfig, parseSloConfig, type SloConfig } from "./slo-config.js";
+import { FixedClock, type PageDirective } from "@crossengin/observability-runtime";
+import {
+  buildSloEnforcement,
+  defaultRecoverPages,
+  loadSloConfig,
+  parseSloConfig,
+  type SloConfig,
+} from "./slo-config.js";
+import type { ObservedEnforcementDecision } from "./slo.js";
 
 const SYSTEM_ACTOR = "00000000-0000-0000-0000-000000000001";
 const SURFACE = "product.list";
@@ -287,5 +302,254 @@ describe("buildSloEnforcement", () => {
     const ids = (await enforcement.scheduler.evaluateOnce()).map((d) => d.incidentId);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toEqual(["INC-2026-0088", "INC-2026-0089"]);
+  });
+});
+
+/**
+ * Recovering the grade of an episode this process did not page (ADR-0327).
+ *
+ * ADR-0326's rule is that a resolve reaches exactly where its trigger did, because `AlertPolicy`
+ * maps a severity to a channel set — so the grade *is* the route. A `recovered` decision carries no
+ * severity, so the only non-guessing source for one is the stored record, and every way of failing
+ * to read it must answer `[]`: an alert left up is noise, an alert wrongly closed is silence.
+ */
+describe("defaultRecoverPages", () => {
+  const INC = "INC-2026-0042";
+  const DECLARED_AT = "2026-06-02T11:00:00.000Z";
+
+  /** Two routes to deliberately *different* channel sets, so a mis-graded resolve is visible. */
+  const gradedPolicy: AlertPolicy = {
+    id: "graded",
+    routes: [
+      { severity: "P0", channels: [{ kind: "pagerduty_phone", serviceKey: "svc-p0" }] },
+      { severity: "P2", channels: [{ kind: "slack", channel: "#oncall-p2" }] },
+    ],
+  };
+
+  function record(severity: IncidentRecord["severity"], id: string = INC): IncidentRecord {
+    return IncidentRecordSchema.parse({
+      id,
+      title: `error-budget burn on ${SURFACE}`,
+      severity,
+      category: "availability",
+      status: "declared",
+      declaredAt: DECLARED_AT,
+      declaredBy: "operate-server",
+      autoDeclaredFor: `availability:${SURFACE}`,
+      timeline: [
+        {
+          occurredAt: DECLARED_AT,
+          actorUserId: "operate-server",
+          kind: "declared",
+          message: "burn rate over threshold",
+        },
+      ],
+    });
+  }
+
+  function recovered(over: Record<string, unknown> = {}): ObservedEnforcementDecision {
+    return {
+      signal: "availability",
+      kind: "recovered",
+      surface: SURFACE,
+      sloId: "product-list-availability",
+      severity: null,
+      incidentId: INC,
+      killSwitchId: null,
+      closeOut: "cancelled",
+      pages: [],
+      ...over,
+    } as ObservedEnforcementDecision;
+  }
+
+  /**
+   * A declarer that answers `findById` the way the test asks and nothing else — `declare` throws
+   * because reaching it would mean this seam was wired to the wrong method.
+   */
+  function declarerFor(
+    answer: { readonly record: IncidentRecord | null } | { readonly throws: Error },
+  ): { readonly declarer: IncidentDeclarer; readonly lookups: string[] } {
+    const lookups: string[] = [];
+    const declarer: IncidentDeclarer = {
+      declare: async (_request: IncidentDeclarationRequest): Promise<IncidentRecord> => {
+        throw new Error("declare must not be reached by a recovery");
+      },
+      findOpen: async (_autoDeclaredFor: string): Promise<IncidentRecord | null> => null,
+      findById: async (incidentId: string): Promise<IncidentRecord | null> => {
+        lookups.push(incidentId);
+        if ("throws" in answer) throw answer.throws;
+        return answer.record;
+      },
+      closeOut: async (
+        _incidentId: string,
+        _input: IncidentCloseOutInput,
+      ): Promise<IncidentCloseOut> => "unpersisted",
+    };
+    return { declarer, lookups };
+  }
+
+  it("plans from the record's own grade, not from a default", async () => {
+    const { declarer, lookups } = declarerFor({ record: record("sev3") });
+    const pages = await defaultRecoverPages(gradedPolicy, declarer)(recovered());
+    expect(lookups).toEqual([INC]);
+    expect(pages).toHaveLength(1);
+    // The defect ADR-0326 fixed, in a new place: a sev3 episode resolved at the P0 service would
+    // close an alert that service never had, and leave the P2 rotation a page nobody closed.
+    expect(pages[0]?.severity).toBe("sev3");
+    expect(pages[0]?.alertSeverity).toBe("P2");
+    expect(pages[0]?.channels).toEqual([{ kind: "slack", channel: "#oncall-p2" }]);
+    expect(pages[0]?.incidentId).toBe(INC);
+  });
+
+  it("plans the other grade's route for the other grade", async () => {
+    const { declarer } = declarerFor({ record: record("sev1") });
+    const pages = await defaultRecoverPages(gradedPolicy, declarer)(recovered());
+    expect(pages[0]?.alertSeverity).toBe("P0");
+    expect(pages[0]?.channels).toEqual([{ kind: "pagerduty_phone", serviceKey: "svc-p0" }]);
+  });
+
+  it("names the record's id, not the decision's, as the alert to close", async () => {
+    // They are the same id in practice; pinning it means a future change that reads the id off the
+    // decision instead cannot pass by accident.
+    const { declarer } = declarerFor({ record: record("sev3", "INC-2026-0099") });
+    const pages = await defaultRecoverPages(gradedPolicy, declarer)(recovered());
+    expect(pages[0]?.incidentId).toBe("INC-2026-0099");
+  });
+
+  it("answers [] with no declarer at all", async () => {
+    // No `--store pg`: ids came from a per-process counter and name no row anywhere.
+    expect(await defaultRecoverPages(gradedPolicy, undefined)(recovered())).toEqual([]);
+  });
+
+  it("answers [] for a declarer that does not implement findById", async () => {
+    // The seam is optional, and absent means to a caller exactly what null means.
+    const minimal: IncidentDeclarer = {
+      declare: async (_request: IncidentDeclarationRequest): Promise<IncidentRecord> => {
+        throw new Error("declare must not be reached by a recovery");
+      },
+      findOpen: async (_autoDeclaredFor: string): Promise<IncidentRecord | null> => null,
+      closeOut: async (
+        _incidentId: string,
+        _input: IncidentCloseOutInput,
+      ): Promise<IncidentCloseOut> => "unpersisted",
+    };
+    expect(minimal.findById).toBeUndefined();
+    expect(await defaultRecoverPages(gradedPolicy, minimal)(recovered())).toEqual([]);
+  });
+
+  it("answers [] when findById finds no such incident", async () => {
+    const { declarer, lookups } = declarerFor({ record: null });
+    expect(await defaultRecoverPages(gradedPolicy, declarer)(recovered())).toEqual([]);
+    expect(lookups).toEqual([INC]);
+  });
+
+  it("answers [] without a lookup when the decision carries no incident id", async () => {
+    const { declarer, lookups } = declarerFor({ record: record("sev3") });
+    const pages = await defaultRecoverPages(gradedPolicy, declarer)(
+      recovered({ incidentId: null }),
+    );
+    expect(pages).toEqual([]);
+    expect(lookups).toEqual([]);
+  });
+
+  it("lets a throw from findById propagate rather than swallowing it", async () => {
+    // `PostgresIncidentDeclarer.findById` throws only for a row that exists and no longer parses
+    // (ADR-0289) — a tampered or corrupted record. Planning an alert's closure from a record the
+    // contract rejects is worse than failing the pass, which `evaluateOnce` routes to `onError`.
+    const { declarer } = declarerFor({ throws: new Error("incident row no longer parses") });
+    await expect(defaultRecoverPages(gradedPolicy, declarer)(recovered())).rejects.toThrow(
+      /no longer parses/,
+    );
+  });
+
+  it("answers [] when the policy has no route for the record's grade", async () => {
+    // `planPageDirective` answers null, and an ungraded route is not a licence to pick another.
+    const { declarer } = declarerFor({ record: record("sev4") });
+    expect(await defaultRecoverPages(gradedPolicy, declarer)(recovered())).toEqual([]);
+  });
+});
+
+/**
+ * The default is wired into the scheduler, and an explicit one overrides it (ADR-0327).
+ *
+ * Both tests breach the engine **directly**, bypassing the scheduler, so the scheduler never sees
+ * the `breach_opened` decision and remembers no directives — which is precisely what a restart
+ * mid-episode leaves behind. Advancing the clock past the burn windows then makes the next
+ * scheduler pass a recovery with nothing remembered for it.
+ */
+describe("buildSloEnforcement — recoverPages", () => {
+  const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1_000;
+
+  async function breachThenRecover(
+    enforcement: ReturnType<typeof buildSloEnforcement>,
+    clock: FixedClock,
+  ): Promise<readonly ObservedEnforcementDecision[]> {
+    const engine = enforcement.engines.availability;
+    if (engine === null) throw new Error("expected an availability engine");
+    for (let i = 0; i < 25; i += 1) {
+      engine.recordOutcome({
+        surface: SURFACE,
+        outcome: "error",
+        at: new Date(Date.parse(END) - i * 1_000).toISOString(),
+        statusCode: 503,
+      });
+    }
+    const opened = await engine.evaluate();
+    expect(opened[0]?.kind).toBe("breach_opened");
+    clock.advance(SEVEN_DAYS_MS);
+    return enforcement.scheduler.evaluateOnce();
+  }
+
+  it("uses an explicit recoverPages when one is given", async () => {
+    const clock = new FixedClock(new Date(END));
+    const resolved: Array<readonly PageDirective[]> = [];
+    const directive = {
+      incidentId: "INC-2026-0001",
+      severity: "sev2",
+      alertSeverity: "P1",
+      channels: [{ kind: "pagerduty_phone", serviceKey: "svc-explicit" }],
+    } as unknown as PageDirective;
+    let asked = 0;
+    const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      clock,
+      recoverPages: async () => {
+        asked += 1;
+        return [directive];
+      },
+      onResolvePage: async (_d, pages) => {
+        resolved.push(pages);
+      },
+    });
+    const decisions = await breachThenRecover(enforcement, clock);
+    expect(decisions[0]?.kind).toBe("recovered");
+    expect(asked).toBe(1);
+    expect(resolved).toEqual([[directive]]);
+  });
+
+  it("defaults to the config's own policy and the shared declarer", async () => {
+    const clock = new FixedClock(new Date(END));
+    const resolved: Array<readonly PageDirective[]> = [];
+    // The declarer must be the *shared* one: `buildSloEnforcement` only has a declarer to ask when
+    // the caller supplies one (or a connection). The engine's own private fallback is unreachable
+    // from here, which is why a deployment with no store recovers nothing.
+    const declarer = new CountingIncidentDeclarer({ clock });
+    const enforcement = buildSloEnforcement(parseSloConfig(validConfig()), {
+      clock,
+      declarer,
+      onResolvePage: async (_d, pages) => {
+        resolved.push(pages);
+      },
+    });
+    const decisions = await breachThenRecover(enforcement, clock);
+    const incidentId = decisions[0]?.incidentId ?? null;
+    expect(incidentId).toMatch(/^INC-/);
+    // Planned from the grade on the record the declarer still holds, routed through the config's
+    // own alert policy — the P1 route, which is the one the trigger would have used.
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.[0]?.alertSeverity).toBe("P1");
+    expect(resolved[0]?.[0]?.channels).toEqual([
+      { kind: "pagerduty_phone", serviceKey: "svc-oncall" },
+    ]);
+    expect(resolved[0]?.[0]?.incidentId).toBe(incidentId);
   });
 });

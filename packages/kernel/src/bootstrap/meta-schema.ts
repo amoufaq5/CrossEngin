@@ -3811,6 +3811,17 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
     { name: "idx_tenant_tombstones_deleted_at", columns: ["deleted_at"] },
     { name: "idx_tenant_tombstones_executed_by", columns: ["executed_by"] },
     { name: "idx_tenant_tombstones_approved_by", columns: ["approved_by"] },
+    // The question every reconciliation pass asks: "does a tombstone name this request?" ADR-0322
+    // made that the conclusive evidence a deletion committed, and ADR-0321's `related_deletion_
+    // request_id` is where the answer lives — so `findForRequest` runs on every stranded request on
+    // every scheduler tick, and ran as a sequential scan. Partial, because the column is NULL for
+    // every tombstone the synchronous route of ADR-0320 writes and those rows can never match a
+    // lookup by request id: indexing them would be pure bloat on the one table that only grows.
+    {
+      name: "idx_tenant_tombstones_related_request",
+      columns: ["related_deletion_request_id"],
+      where: "related_deletion_request_id IS NOT NULL",
+    },
   ],
   rls: {
     enabled: true,

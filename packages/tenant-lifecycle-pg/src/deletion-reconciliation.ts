@@ -6,7 +6,11 @@ import {
 
 import { isAnchoredByChain } from "./deletion-pipeline.js";
 import type { PostgresDeletionRequestStore } from "./deletion-request-store.js";
-import type { PostgresTombstoneStore, StoredTombstone } from "./tombstone-store.js";
+import {
+  TOMBSTONE_SCAN_MAX_LIMIT,
+  type PostgresTombstoneStore,
+  type StoredTombstone,
+} from "./tombstone-store.js";
 
 /**
  * Resolving a deletion request that a run left `in_progress`, from evidence rather than from a guess.
@@ -422,6 +426,82 @@ export class DeletionReconciler {
     return findings;
   }
 
+  /**
+   * The third direction: every tombstone, whether or not anything names it.
+   *
+   * Both other directions start from a *request* — `reconcileStranded` walks `in_progress` ones and
+   * `auditCompleted` walks `completed` ones — so a tombstone written by the synchronous deletion
+   * route of ADR-0320 is examined by neither, because it has no request at all. That is not a small
+   * gap: `verifyStoredEvidence` is the **only** detector for a tampered `scope`, since `proofSha256`
+   * commits to `contentManifestSha256` and the chain entry commits to the two digests and the
+   * identity — **neither commits to the scope** (ADR-0323). For these tombstones nothing looked.
+   *
+   * **Findings only, and this one writes nothing at all.** ADR-0323 established that
+   * `evidence_unverified` is a verdict nothing may apply — not a scheduler and not an operator —
+   * because `acceptNeverCommitted` authorises an inference from an *absence* of evidence and says
+   * nothing about a record that lies. A sweep that found a tampered scope has even less standing
+   * than that: it starts from no request, so there is nothing whose status it could be right about,
+   * and the only honest act is to report the row.
+   */
+  async auditTombstones(
+    input: { readonly limit?: number; readonly afterTombstoneId?: string | null } = {},
+  ): Promise<TombstoneAuditPage> {
+    // Clamped to the store's own cap, not merely floored: asking for more than the store will serve
+    // yields a short page, and a short page is how this reports the end of the table.
+    const limit = Math.max(
+      1,
+      Math.min(TOMBSTONE_SCAN_MAX_LIMIT, Math.trunc(input.limit ?? DEFAULT_TOMBSTONE_AUDIT_LIMIT)),
+    );
+    const page = await this.opts.tombstones.scanAll({
+      limit,
+      afterTombstoneId: input.afterTombstoneId ?? null,
+    });
+    const findings: TombstoneAudit[] = [];
+    for (const stored of page) {
+      const named = stored.record.relatedDeletionRequestId ?? null;
+      // At most one lookup per row, and none for an unreferenced one — the majority case this
+      // direction exists for.
+      const reference: TombstoneReferenceState =
+        named === null
+          ? "unreferenced"
+          : (await this.opts.requests.read(named)) === null
+            ? "dangling"
+            : "referenced";
+      const check = verifyStoredEvidence(stored);
+      // Every defect is reported, **including** on a tombstone a request names, rather than leaving
+      // the referenced ones to `auditCompleted`. Suppressing them would be wrong twice over: that
+      // direction walks only `status = 'completed'` requests under its own limit, so a tombstone
+      // whose request sits `in_progress`, `rejected` or `deferred` would fall through both; and it
+      // would make this sweep's coverage depend on another sweep's filter. A duplicate finding is
+      // noise a caller can drop on the tombstone id — a missed one is not recoverable at all.
+      if (check.ok && reference !== "dangling") continue;
+      const parts: string[] = [];
+      if (!check.ok) parts.push(`does not verify: ${check.defects.join(", ")}`);
+      if (reference === "dangling") {
+        parts.push(`names deletion request ${named ?? ""}, which does not exist`);
+      }
+      findings.push({
+        tombstoneId: stored.record.id,
+        tenantId: stored.record.tenantId,
+        reference,
+        relatedDeletionRequestId: named,
+        check,
+        detail: parts.join("; "),
+      });
+    }
+    const last = page[page.length - 1];
+    return {
+      // What this call actually verified, never what it hoped to: "we examined 4,000 and found
+      // nothing" is a claim an auditor can be given, and it cannot be made from the absence of a
+      // log line (ADR-0323).
+      examined: page.length,
+      findings,
+      // A page shorter than the limit is the end of the table, not a boundary — a cursor here would
+      // make the caller ask again for nothing, forever.
+      nextAfterTombstoneId: page.length < limit || last === undefined ? null : last.record.id,
+    };
+  }
+
   private report(result: ReconciliationResult): ReconciliationResult {
     this.opts.onReconciled?.(result);
     return result;
@@ -438,6 +518,48 @@ export interface EvidenceAudit {
   /** `null` when the tombstone is gone, so there was nothing to check. */
   readonly check: EvidenceCheck | null;
   readonly detail: string;
+}
+
+/**
+ * How a tombstone is reached, which is an operational fact distinct from whether it verifies.
+ *
+ * The three are genuinely different problems and collapsing them would lose the one this direction
+ * was built for: `unreferenced` is a tombstone **no other audit can see**, and `dangling` is a
+ * request row deleted out from under a proof — not the same thing as never having had one.
+ */
+export const TOMBSTONE_REFERENCE_STATES = [
+  /** No `relatedDeletionRequestId`: every tombstone the synchronous deletion route writes. */
+  "unreferenced",
+  /** Names a deletion request that exists. */
+  "referenced",
+  /** Names a deletion request that is not there. */
+  "dangling",
+] as const;
+export type TombstoneReferenceState = (typeof TOMBSTONE_REFERENCE_STATES)[number];
+
+/** How many tombstones one `auditTombstones` page verifies when the caller does not say. */
+export const DEFAULT_TOMBSTONE_AUDIT_LIMIT = 100;
+
+/** One finding from `auditTombstones`: a stored tombstone that does not stand up on its own terms. */
+export interface TombstoneAudit {
+  readonly tombstoneId: string;
+  readonly tenantId: string;
+  readonly reference: TombstoneReferenceState;
+  readonly relatedDeletionRequestId: string | null;
+  /** Always present: unlike `auditCompleted`, this direction starts from the record itself. */
+  readonly check: EvidenceCheck;
+  readonly detail: string;
+}
+
+export interface TombstoneAuditPage {
+  /**
+   * How many tombstones this page verified. The findings alone cannot say it, and "nothing was
+   * found" is only a claim if the number of records looked at comes with it.
+   */
+  readonly examined: number;
+  readonly findings: readonly TombstoneAudit[];
+  /** The cursor for the next page, or `null` when the sweep reached the end of the table. */
+  readonly nextAfterTombstoneId: string | null;
 }
 
 /** Re-exported so a caller need not reach into the tombstone module for the one type it reads. */

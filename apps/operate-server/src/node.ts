@@ -133,6 +133,7 @@ import {
   DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
   DeletionScheduler,
+  type TombstoneSweepPage,
 } from "./deletion-scheduler.js";
 import { buildAuditReadRoutes, entityFieldLookupFrom } from "./audit-read-routes.js";
 import { PostgresAuditReadStore } from "./audit-read-store.js";
@@ -204,7 +205,10 @@ import {
 } from "./checkpoint-scheduler.js";
 import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
 import { PostgresChainCheckpointStore, PostgresChainLogReader } from "@crossengin/forensics-pg";
-import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-pg";
+import {
+  PostgresIncidentDeclarer,
+  PostgresIncidentStore,
+} from "@crossengin/incident-response-runtime-pg";
 import {
   buildTenantAuditPolicyCache,
   type TenantAuditPolicyLifecycle,
@@ -253,43 +257,38 @@ export interface NodeResLike {
  */
 export const MAX_REQUEST_BODY_BYTES = DEFAULT_MAX_REQUEST_BODY_BYTES;
 
+/**
+ * Who a page's timeline note is attributed to (ADR-0327).
+ *
+ * `TimelineEntry.actorUserId` is a non-empty string, not a uuid, and the deployment is the honest
+ * answer: no human chose to page, a scheduler did. The same name the escalation configs default
+ * `declaredBy` to, so the declaration and the page it caused read as one actor on the timeline.
+ */
+export const PAGE_NOTE_ACTOR = "operate-server";
+
 /** The dispatch surface the Node listener needs — an `OperateHttpServer` or a per-tenant wrapper. */
 /**
- * The options that need a `PostgresAuditEmitter` wired, as a named predicate rather than a condition
- * inline at the construction site.
+ * Whether this deployment can write audit rows at all — which is exactly "does it have a database",
+ * and deliberately **not** a list of features any more (ADR-0327).
  *
- * It is a function because the list has been forgotten twice. ADR-0288: gating the emitter on
- * `--ai-design` meant a deployment running only `--integrity-proof-config` reported `audited=false`
- * for every escalation, and the row that ADR relies on was never written. Then `--audit-read-routes`,
- * whose recorder is *required*, was added without being added here — so the surface refused to mount
- * and a deployment that asked for it silently got nothing. Found live, not by a test, because the
- * condition was inline and nothing could assert over it.
+ * `needsAuditEmitter` used to answer this by enumerating every flag whose feature writes an audit
+ * row, and the list was forgotten three times. ADR-0288: gating the emitter on `--ai-design` meant a
+ * deployment running only `--integrity-proof-config` reported `audited=false` for every escalation,
+ * and the row that ADR relies on was never written. Then `--audit-read-routes`, whose recorder is
+ * *required*, was added without being added to the list, so the surface refused to mount and a
+ * deployment that asked for it silently got nothing — found by booting the real server, not by a
+ * test. The list grew a test per flag after that, and the third miss still got through it:
+ * `--deletion-escalation-config` was listed in the test and **absent from the predicate**, and the
+ * test passed anyway because the argument parser happens to turn `--deletion-request-routes` on
+ * alongside it. A per-flag test over a hand-maintained list cannot catch a flag missing from both.
  *
- * Every flag whose feature writes an audit row belongs here. The companion test walks `ServeOptions`
- * and fails on a flag that looks like one and is missing.
+ * So the list is gone. Constructing a `PostgresAuditEmitter` is an object allocation — no
+ * connection, no scheduler, no DDL — so gating it never bought anything and cost three defects. The
+ * emitter now exists whenever a connection does, which is the only condition that was ever real, and
+ * a feature added tomorrow cannot omit itself from a list that no longer exists.
  */
-export function needsAuditEmitter(options: {
-  readonly aiDesign: boolean;
-  readonly perTenantManifests: boolean;
-  readonly designReview: boolean;
-  readonly auditReadRoutes: boolean;
-  readonly tenantErasureRoutes: boolean;
-  readonly tenantDeletionRoutes: boolean;
-  readonly deletionRequestRoutes: boolean;
-  readonly deletionRunnerMs: number | null;
-  readonly integrityProofConfig: string | null;
-}): boolean {
-  return (
-    options.aiDesign ||
-    options.perTenantManifests ||
-    options.designReview ||
-    options.auditReadRoutes ||
-    options.tenantErasureRoutes ||
-    options.tenantDeletionRoutes ||
-    options.deletionRequestRoutes ||
-    options.deletionRunnerMs !== null ||
-    options.integrityProofConfig !== null
-  );
+export function auditEmitterAvailable(options: { readonly store: string }): boolean {
+  return options.store === "pg";
 }
 
 export interface DispatchTarget {
@@ -588,7 +587,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     auditConfig = await loadAuditChainConfig(options.auditChainConfig);
     auditChainProducer = auditChainStore(conn, auditConfig);
   }
-  if (conn !== undefined && needsAuditEmitter(options)) {
+  // Built for every Postgres deployment, gated on nothing else (ADR-0327 — see
+  // `auditEmitterAvailable` for the three defects the old flag list caused).
+  if (conn !== undefined) {
     auditEmitter = new PostgresAuditEmitter(conn, {
       ...schemaOpt,
       // No chain configured ⇒ rows are written unanchored. Verification reports them as
@@ -596,6 +597,23 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ...(auditChainProducer !== null ? { chain: auditChainProducer } : {}),
     });
   }
+  /**
+   * The emitter, for a surface that has already established it has a connection.
+   *
+   * Non-null for every Postgres deployment now that nothing gates it, but that is an invariant of
+   * this function rather than something the type system can see across the `conn === undefined`
+   * branch above. Named once so the surfaces below do not each carry a null-check that cannot fire
+   * — which is what the old flag list turned into four pieces of dead code with three misleading
+   * messages. The throw is a boot-time programming error, not a runtime condition.
+   */
+  const requireEmitter = (surface: string): PostgresAuditEmitter => {
+    if (auditEmitter === null) {
+      throw new Error(
+        `${surface} asked for the audit emitter, which every Postgres deployment has; this is a wiring bug`,
+      );
+    }
+    return auditEmitter;
+  };
   if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
     notificationStore = new PostgresNotificationStore(conn, schemaOpt);
@@ -702,12 +720,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       console.warn(
         "[platform] --tenant-erasure-routes requires a Postgres store (--store pg); skipping",
       );
-    } else if (auditEmitter === null) {
-      console.warn(
-        "[platform] --tenant-erasure-routes requires --audit-chain-config (an erasure is recorded " +
-          "before it is reported, and an unrecorded one is refused); skipping",
-      );
     } else {
+      if (auditChainProducer === null) {
+        // Mounts anyway, and says so out loud. The surface's own rule is that an erasure which
+        // succeeds and cannot be *recorded* is refused (ADR-0316) — and without a chain it is still
+        // recorded, just unanchored, so refusing here would deny a working surface over a weaker
+        // guarantee. The branch this replaced tested `auditEmitter === null`, which the flag list
+        // made unreachable, while its message claimed `--audit-chain-config` was required: a
+        // refusal that never fired for a requirement that was not real. ADR-0322's lesson, again —
+        // a surface that degrades rather than refusing has to say so.
+        console.warn(
+          "[platform] --tenant-erasure-routes has no --audit-chain-config: erasures are recorded " +
+            "but their rows are UNANCHORED, so the integrity proof reports them as unproven",
+        );
+      }
       if (options.tenantErasureRoles.length === 0) {
         console.warn(
           "[platform] --tenant-erasure-routes is on with no --tenant-erasure-role: every request " +
@@ -715,7 +741,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         );
       }
       const eraseConn = conn;
-      const emitter = auditEmitter;
+      const emitter = requireEmitter("--tenant-erasure-routes");
       const registry = (): TenantColumnStoreRegistry | null => tenantStoreRegistry;
       extraRouteList.push(
         ...buildTenantErasureRoutes({
@@ -775,11 +801,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       console.warn(
         "[platform] --tenant-deletion-routes requires a Postgres store (--store pg); skipping",
       );
-    } else if (auditEmitter === null) {
-      console.warn(
-        "[platform] --tenant-deletion-routes requires --audit-chain-config (the tombstone is " +
-          "anchored in the chain, and the deletion is recorded); skipping",
-      );
     } else if (auditChainProducer === null) {
       console.warn(
         "[platform] --tenant-deletion-routes needs the forensic chain (--audit-chain-config); skipping",
@@ -792,7 +813,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         );
       }
       const delConn = conn;
-      const emitter = auditEmitter;
+      const emitter = requireEmitter("--tenant-deletion-routes");
       // The same chain the audit log anchors into, not a second one: one tamper-evident trail per
       // tenant is the point (ADR-0286).
       const tombstones = new PostgresTombstoneStore(delConn, auditChainProducer, schemaOpt);
@@ -892,12 +913,49 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (report.undelivered) console.error(text);
       else console.info(text);
     };
+  // The incident's own timeline, which is the *other* place a page is written down — and the only
+  // one that works for a platform-scope page (ADR-0327). `meta.audit_log.tenant_id` is NOT NULL, so
+  // the SLO loop's pages can never leave an audit row; `meta.incidents.timeline` has no tenant
+  // column, is append-only, and sits on the record an incident review actually opens.
+  const pagedNoteStore = conn === undefined ? null : new PostgresIncidentStore(conn);
   /**
-   * Delivers a page and writes it down, which only the call site can do: the report carries no
-   * tenant (ADR-0325's content rule), so the tenant comes from the incident that caused it.
+   * Appends the page to its incident's timeline.
+   *
+   * Returns rather than throws, like the audit record beside it: the page has already gone out and
+   * the incident is already durable, so a failed note must not turn a successful escalation into an
+   * error. `appendPagedNote` already reports instead of raising; this only logs what it reported.
+   */
+  const notePage = async (
+    incidentId: string,
+    report: PageDeliveryReport,
+    operation: "trigger" | "resolve",
+    surface: string,
+  ): Promise<void> => {
+    if (pagedNoteStore === null) return;
+    const noted = await pagedNoteStore.appendPagedNote(incidentId, {
+      facts: {
+        // Channel **kinds** only, and the first provider-issued handle. Nothing from the finding —
+        // ADR-0310's rule, which the note inherits because it is read by the same people.
+        channels: report.outcomes.map((o) => o.kind),
+        delivered: report.delivered,
+        attempted: report.attempted,
+        reference: report.outcomes.find((o) => o.reference !== null)?.reference ?? null,
+        operation,
+      },
+      actorUserId: PAGE_NOTE_ACTOR,
+    });
+    if (!noted.recorded) {
+      console.warn(`[${surface}] page note not added to ${incidentId}: ${noted.reason ?? "unknown"}`);
+    }
+  };
+  /**
+   * Delivers a page and writes it down twice, which only the call site can do: the report carries no
+   * tenant (ADR-0325's content rule), so the audit row's tenant comes from the incident that caused
+   * it — and when there is none, the timeline note is the record that still lands.
    *
    * A `resolve` fan-out is deliberately NOT routed through here — an all-`unsupported` resolve would
-   * land as `platform.page_undelivered`, claiming a page failed when none was sent.
+   * land as `platform.page_undelivered`, claiming a page failed when none was sent. It gets its own
+   * timeline note instead, through `resolveAndNote`.
    */
   const deliverAndRecord = async (
     pager: { deliver: (d: PageDirective) => Promise<PageDeliveryReport> },
@@ -909,6 +967,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     const outcome = await (pageRecorder?.record(report, tenantId) ??
       Promise.resolve({ audited: false, reason: "no recorder" }));
     if (!outcome.audited) console.warn(`[${surface}] ${formatPageRecord(report, outcome)}`);
+    await notePage(directive.incidentId, report, "trigger", surface);
+  };
+  /**
+   * Closes the alert and notes that it was closed.
+   *
+   * No audit row, for ADR-0326's reason — a resolve is not a page and must not be counted as one —
+   * but very much a timeline entry: "the alert was closed at 03:52" is the other half of the story
+   * the incident record is supposed to tell.
+   */
+  const resolveAndNote = async (
+    pager: { resolve: (d: PageDirective) => Promise<PageDeliveryReport> },
+    directive: PageDirective,
+    surface: string,
+  ): Promise<void> => {
+    const report = await pager.resolve(directive);
+    await notePage(directive.incidentId, report, "resolve", surface);
   };
   const deletionPager = buildPageDispatcher(
     "deletion-evidence",
@@ -938,7 +1012,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       ...(auditEmitter !== null ? { audit: auditEmitter } : {}),
       // Closes the provider's alert when the incident is cancelled on recovery.
       resolvePage: async (page): Promise<void> => {
-        await deletionPager.resolve(page);
+        await resolveAndNote(deletionPager, page, "deletion-evidence");
       },
       // Store-backed, with no fallback declarer: unlike the integrity escalator's one-shot finding
       // (ADR-0304), this one is re-derived from the same two rows on the next pass, so a failed
@@ -969,11 +1043,6 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       console.warn(
         "[platform] --deletion-request-routes requires a Postgres store (--store pg); skipping",
       );
-    } else if (auditEmitter === null) {
-      console.warn(
-        "[platform] --deletion-request-routes has no audit emitter (a request for a tenant's " +
-          "erasure is recorded as it moves); skipping",
-      );
     } else {
       if (
         options.deletionRequestSubmitRoles.length === 0 &&
@@ -994,7 +1063,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             "unanchored and reconciliation is unavailable (the stranded routes answer 501)",
         );
       }
-      const emitter = auditEmitter;
+      const emitter = requireEmitter("--deletion-request-routes");
       const reqConn = conn;
       const requestStore = new PostgresDeletionRequestStore(reqConn, schemaOpt);
       // Reconciliation reads the tombstone table as its evidence (ADR-0322), so without the forensic
@@ -1082,15 +1151,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   if (options.auditReadRoutes) {
     if (conn === undefined) {
       console.warn("[audit] --audit-read-routes requires a Postgres store (--store pg); skipping");
-    } else if (auditEmitter === null) {
-      // Not a warning that degrades to an unaudited read: these routes take a *required* recorder,
-      // so without the chain-backed emitter there is nothing to record into and the surface stays
-      // closed rather than opening a privileged read that leaves no trace.
-      console.warn(
-        "[audit] --audit-read-routes has no audit emitter (reads of the trail are themselves " +
-          "audited, and an unrecordable read is refused); skipping",
-      );
     } else {
+      if (auditChainProducer === null) {
+        // The routes take a *required* recorder and an unrecordable read is refused per request
+        // (ADR-0313), so the surface is never open and unaudited — it is the *anchoring* that is
+        // missing here, not the recording. Mount and say so, rather than the refusal this replaced,
+        // which tested `auditEmitter === null` and so never fired at all.
+        console.warn(
+          "[audit] --audit-read-routes has no --audit-chain-config: each privileged read is still " +
+            "recorded, but its row is UNANCHORED and the integrity proof reports it as unproven",
+        );
+      }
       if (
         options.auditReadTenantRoles.length === 0 &&
         options.auditReadPlatformRoles.length === 0
@@ -1100,7 +1171,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             "--audit-read-platform-role: every request will be refused",
         );
       }
-      const emitter = auditEmitter;
+      const emitter = requireEmitter("--audit-read-routes");
       extraRouteList.push(
         ...buildAuditReadRoutes({
           source: new PostgresAuditReadStore(conn, schemaOpt),
@@ -1438,7 +1509,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // so there is nothing to re-plan from (ADR-0326). Not routed through `deliverAndRecord` —
           // a resolve is not a page and must not be recorded as one.
           onResolvePage: async (_decision, pages): Promise<void> => {
-            for (const directive of pages) await sloPager.resolve(directive);
+            for (const directive of pages) await resolveAndNote(sloPager, directive, "slo");
           },
           onError: (err) => console.error("[slo] evaluation error", err),
         })
@@ -1670,7 +1741,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               // Not routed through `deliverAndRecord`: a resolve is not a page, and recording it as
               // `platform.page_delivered` would claim somebody was woken (ADR-0326).
               resolvePage: async (page): Promise<void> => {
-                await integrityPager.resolve(page);
+                await resolveAndNote(integrityPager, page, "integrity-proof");
               },
               onError: (err) => console.error("[integrity-proof] escalation error", err),
             });
@@ -1907,6 +1978,39 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               },
             }))(deletionEscalator)
           : {}),
+        // The tombstone sweep (ADR-0327). Reported, not escalated: these findings name a *proof*,
+        // and the ones that matter most name no request at all, so the escalator's episode key
+        // (`deletion_evidence:<requestId>`) cannot identify them. Choosing a tombstone-keyed
+        // episode is a real decision — a tampered tombstone that *is* referenced would otherwise
+        // declare twice for one fact — and it is left open deliberately rather than guessed at.
+        onTombstoneFindings: ((): ((page: TombstoneSweepPage) => void) => {
+          // Deduped here rather than in the scheduler, which reports every page honestly. An
+          // unproven tombstone is a *standing* fact — nothing in this increment repairs one, and a
+          // short lap re-reads the same rows — so logging it on every tick is how an operator
+          // learns to mute the log, which would defeat the sweep. ADR-0322 answered the same shape
+          // by logging only what it wrote; there is nothing written here, so the equivalent is to
+          // log only what **changed**.
+          let last: string | null = null;
+          return (page): void => {
+            const fingerprint = JSON.stringify([
+              page.examined,
+              page.findings.map((f) => [f.tombstoneId, f.detail]),
+            ]);
+            if (fingerprint === last) return;
+            last = fingerprint;
+            const lap = `${page.examined.toString()} proof(s) verified`;
+            if (page.findings.length === 0) {
+              console.info(`[platform] tombstone sweep: ${lap}, clean`);
+              return;
+            }
+            console.error(
+              `[platform] tombstone sweep: ${lap}, ${page.findings.length.toString()} UNPROVEN —\n` +
+                page.findings
+                  .map((f) => `  ${f.tombstoneId} (${f.reference}) tenant=${f.tenantId}: ${f.detail}`)
+                  .join("\n"),
+            );
+          };
+        })(),
         ...(deletionEscalator !== null && options.deletionAuditEveryTicks !== null
           ? ((escalator: DeletionEvidenceEscalator) => ({
               onAuditFindings: async (findings): Promise<void> => {

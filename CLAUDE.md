@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 321 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 322 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~12,214 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~12,553 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -431,6 +431,20 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   absence and says nothing about a record that lies. `auditCompleted` does the reverse direction for
   requests already `completed`, where a third question arises that the forward path never asks: the
   request keeps its own copy of the digest, so the two can disagree while both records are intact.
+  **And a third direction starts from the proofs** (ADR-0327), because both of those start from a
+  *request* and a tombstone written by the synchronous route of ADR-0320 has none — so every one of
+  them was verified by nothing, in the one table where `verifyStoredEvidence` is the only detector
+  there is. `scanAll` keysets on `tombstone_id` (NOT NULL and unique-constrained, so the ordering is
+  total: `deleted_at` can tie and a tie makes a sweep re-read or step over a row at every page
+  boundary — and the skipped row is one nothing else verifies; `chain_sequence_number` is nullable for
+  pre-anchoring rows; `OFFSET` shifts under a mid-sweep insert), reading through the same
+  `app.platform_audit` elevation its siblings use. `auditTombstones` classifies each finding
+  `unreferenced` / `referenced` / `dangling` — the last being a proof naming a request that is *gone*,
+  which is not the same fact as a proof naming none — and reports the **referenced** ones too, because
+  `auditCompleted` only walks `status = 'completed'` under its own limit, so a tombstone whose request
+  sits `in_progress` would otherwise fall through both. It writes nothing, pinned by a test that
+  records every statement: ADR-0323 established that `evidence_unverified` is a verdict nothing may
+  apply, and a sweep that found a tampered scope has even less standing to act than that.
 - **`marketplace`** — contracts: 8 pack kinds, a registry with Ed25519 signing and security
   review, per-tenant install lifecycle, permission grants, listings, reviews,
   compatibility.
@@ -468,7 +482,13 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   is `recovered` and refused in both directions (ADR-0297).
 - **`incident-response`** — 5 SEV levels with SLA profiles, 7 incident roles, an 8-state
   incident lifecycle, runbook executions with per-step outcomes, blameless postmortems with
-  prioritized action items, and customer comms carrying the GDPR 72h breach deadline. Also owns
+  prioritized action items, and customer comms carrying the GDPR 72h breach deadline. The timeline's
+  11th kind is **`paged`** (ADR-0327), with `pagedTimelineMetadata` / `pagedTimelineMessage` as the one
+  shape its three callers share: channel **kinds**, counts and the provider's own handle, and nothing
+  from the finding — ADR-0310's rule, inherited because the note is read by the same people. The
+  channel-kind pattern is the mechanical half of that: an address, a `+1555…` number, a `#channel` and
+  a mixed-case routing key are structurally rejected, and the refusal names the *position, not the
+  value*, since a rejected "channel kind" is exactly the thing that might be an address. Also owns
   the `INC-YYYY-NNNN` vocabulary (`formatIncidentId` / `parseIncidentId`), which
   `observability-runtime` re-exports, and `IncidentRecord.autoDeclaredFor` + `autoDeclaredForKey` —
   the `signal:subject` key an automated declarer declares under, which a restart looks an open
@@ -484,7 +504,14 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   helpers only answer for targets already reached). Also the `IncidentDeclarer` seam (ADR-0293) —
   "who chooses an auto-declared incident's id and whether the record outlives the process", and
   answers "which open incident did this signal already open?" — with `CountingIncidentDeclarer` as the
-  offline implementation, which finds nothing because nothing it declared survived.
+  offline implementation, which finds nothing because nothing it declared survived. `findById?`
+  (ADR-0327) is the third question: *what grade was this incident declared at?*, which is what lets a
+  resolve route where its trigger did after a restart. Optional on the seam, following
+  `PageChannelSender.resolve?`'s precedent, and absent/`null` mean the same thing to a caller —
+  nothing to resolve, leave the alert for a human. `notePage` appends a `paged` entry and changes
+  nothing else, and is callable on **any** status including `closed` and `cancelled`, because a
+  resolve's note arrives *after* the close-out and refusing on a terminal status would drop precisely
+  the note that says the alert was closed.
 - **`incident-response-runtime-pg`** — `meta.incidents` as the store, with ids allocated from
   `MAX(sequence_number) + 1` under an advisory lock (so a restart continues the year's sequence),
   a `revision` guard on every write, an append-only timeline the engine enforces before any SQL,
@@ -495,7 +522,12 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `findOpenFor` answers hydration's question from `auto_declared_for` (ADR-0294). Also the three stores
   that were dead since Phase 1 — `PostgresRunbookExecutionStore`, `PostgresPostmortemStore`,
   `PostgresCustomerCommsStore` (ADR-0296) — each with its own revision guard, since a postmortem edited
-  by two people over days was last-writer-wins.
+  by two people over days was last-writer-wins. `appendPagedNote` (ADR-0327) is the paged timeline
+  note's writer and **never throws** — the page has already gone out and the incident is already
+  durable, so raising would turn a successful escalation into an error — retrying a lost revision race
+  three times before reporting `revision_conflict`. `findById` throws on an unparseable row rather than
+  answering null: null means no row ever held the id, while a parse failure means one did and has been
+  edited into a state the contract forbids and a CHECK permits (ADR-0289).
 - **`dr`** — 5 DR tiers with RPO/RTO targets, replication topology, backup kinds, failover
   records, drills with finding severities, runbooks.
 - **`dr-runtime`** — executes it: a `FailoverExecutor` state machine (plan → start →
@@ -620,6 +652,26 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `rejected` is a decision, and retrying collects it again at the one moment the attempts matter.
   `classifyPageFailure` is shared by all three HTTP senders because each had classified **429** as
   `rejected`, which is the never-retried set, for the most ordinary transient failure a provider emits.
+  **And the retry honours `Retry-After`** (ADR-0327, `retry-after.ts`): both RFC 9110 forms, with the
+  wait `max(policy.delayMs, retryAfterMs)` — the policy's delay is the platform's floor, so a
+  `Retry-After: 0` cannot become a hot loop, and the provider's figure is the floor when longer — and a
+  request beyond `MAX_RETRY_AFTER_MS` (30s) **stops** the retry rather than holding a page past the
+  point where it is still a page. The numeric-shape guard is load-bearing, not theoretical:
+  `Date.parse("-5")`, `("+5")` and `("1.5")` all answer a date in 2001, so without `/^\d+$/` first a
+  malformed delta became a decades-long wait.
+  `fcm-token.ts` (ADR-0327) is the `FcmAccessTokenProvider` ADR-0310 left as a seam: an RS256-signed
+  JWT assertion exchanged for a short-lived access token, cached until 60s *before* expiry (a token
+  lapsing between the check and FCM's receipt is a 401 indistinguishable from revocation), with
+  concurrent callers awaiting one in-flight mint and a rejection never poisoning the cache. It refuses
+  at construction, and an **EC** key is one of the refusals — it passes every textual check and
+  `createSign("RSA-SHA256")` signs with it anyway (the name selects the digest; node takes the
+  algorithm from the key), producing a valid ECDSA JWT that Google rejects as `invalid_grant`. No error
+  message may contain key material. `FcmPushSender` now reports a **non-retryable** mint as `dropped`
+  rather than letting it propagate as `failed`, because a permanently-wrong service account was
+  otherwise indistinguishable from a 5xx blip and the dispatch was retried forever; and a credential
+  FCM itself refuses is discarded from the cache, via one `fcmRefusedTheCredential(status, code)` with
+  two readers — deriving it from the resulting `errorCode` was wrong and a test caught it, since the
+  code carries the provider's status suffix so `PERMISSION_DENIED` yields `fcm_permission_denied`.
 - **`pwa`** — PWA manifest, service-worker cache strategies, IndexedDB outbox with
   conflict strategies, background sync, push (PHI-safe), Capacitor native wrapper config.
 - **`integrations`** — thin: 12 integration kinds (outbound/inbound HTTP, GraphQL, HL7,
@@ -738,7 +790,18 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `meta.audit_log` with the tenant taken from the `IncidentRecord` the escalator holds, since the report
   carries none. A **resolve** is deliberately *not* routed through `deliverAndRecord` — an
   all-`unsupported` resolve would land as `platform.page_undelivered`, claiming a page failed when none
-  was sent.
+  was sent — but it does get its own timeline note, through `resolveAndNote`.
+  **Every page is also appended to its incident's timeline** (ADR-0327), which is the record that
+  still lands when the audit row cannot: `meta.audit_log.tenant_id` is NOT NULL and an SLO surface is
+  never a tenant, so for that escalator the row is *structurally impossible* while the timeline — no
+  tenant column, append-only, on the record a review actually opens — takes it either way.
+  The **tombstone sweep** is reachable too: `GET /v1/platform/tombstones/unproven` (paged, `?after=`,
+  recorded even when clean because the *examined* count is the claim — ADR-0323), plus one page per
+  audit tick on the deletion scheduler, lapping when it reaches the end rather than sweeping the whole
+  table, since that table only grows and a full sweep per tick would eventually outlast its interval.
+  Mobile **push** is finally built from the environment (`FCM_PROJECT_ID` plus either
+  `FCM_SERVICE_ACCOUNT_JSON` or the client-email/private-key pair, which `normalizePrivateKeyPem`
+  absorbs the literal-`\n` form of), closing ADR-0310's last open end.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -940,8 +1003,6 @@ opened them.
   open. `FallbackIncidentDeclarer` (ADR-0304) now exists for the trade — an unpersisted record so the
   page still goes out — but only the integrity escalator uses it: an SLO breach has a working retry and
   does not need a possibly-colliding id, while a compromise finding is one-shot.
-- **`planIntegrityEscalation` is now unused** (ADR-0297) — still exported and tested, nothing calls it.
-  Deleting public API is a separate decision.
 - **Adding a table constraint to a populated table is manual** (ADR-0299). `TableDefinition.constraints`
   can now declare a cross-column CHECK and the reconciler adds and replaces one, but only under the
   emptiness guard a type change uses — validating against existing rows means deciding what happens to
@@ -978,11 +1039,15 @@ opened them.
   alternative is a row that never matches) and deliberately does **not** collapse subaddressing or parse
   a display name off, since both would widen a suppression to addresses that never bounced.
 
-- **The push senders are built and unwired** (ADR-0310). `FcmPushSender` and `TwilioVoiceSender` exist and
-  are tested; `buildSenderRegistryFromEnv` does not construct them, because FCM takes an
-  `FcmAccessTokenProvider` (RS256-signing a JWT, a second endpoint, a refresh cache — or the instance
-  metadata server on GKE) and ADR-0301's rule is that a partially-configured provider is skipped rather
-  than guessed. Voice status callbacks are unused.
+- **Mobile push is wired; voice is not** (ADR-0310, ADR-0327). `ServiceAccountFcmTokenProvider` is the
+  `FcmAccessTokenProvider` ADR-0310 left as a seam, and `buildSenderRegistryFromEnv` now constructs
+  `FcmPushSender` from `FCM_PROJECT_ID` plus the service-account key — one variable holding the key file
+  verbatim, because splitting it is what produces the literal-`\n` PEM that OpenSSL refuses (the split
+  pair is supported and normalised; a test caught that branch passing the key through *un*normalised).
+  Partial configuration is still skipped rather than guessed, per ADR-0301, and the refusal costs that
+  channel and never the boot. **GKE metadata-server credentials are not implemented**, so a deployment
+  relying on workload identity has to supply a key file; and `TwilioVoiceSender` is still not built
+  from the environment, with its status callbacks unused.
 - **Per-tenant column schemas are additive only** (ADR-0314). A removed field's column is never dropped,
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
@@ -1020,6 +1085,15 @@ opened them.
   the escalation and its recovery each leaving an anchored `platform.deletion_evidence_escalated` /
   `_resolved` row carrying the grade, the defects and the verdict; and `auditCompleted` runs on a
   schedule (`--deletion-audit-every-ticks`) rather than only when a human loads `GET .../unproven`.
+  **And ADR-0327 closes the last hole in that audit**: a tombstone with no `relatedDeletionRequestId` —
+  every one the synchronous route of ADR-0320 writes — was outside *both* directions, because both start
+  from a request. `auditTombstones` starts from the proofs instead, over a keyset-paged `scanAll`, and it
+  found a real unreferenced `scope_tampered` row on the first live run. Its findings are **reported, not
+  escalated**: the escalator's episode key is `deletion_evidence:<requestId>` and these may have no
+  request, so a tombstone-keyed episode is a real decision — a tampered tombstone that *is* referenced
+  would otherwise declare twice for one fact — left open deliberately rather than guessed at.
+  `meta.tenant_tombstones` also gained the index `findForRequest` had always lacked, partial because the
+  column is NULL for exactly the rows that can never match a lookup by request id.
 - **A page now really leaves the process, and closes itself when the finding is put right**
   (ADR-0325, ADR-0326). `PageDispatcher` delivers over PagerDuty, Slack, a signed webhook and SMS, and
   **reports** rather than throws: `delivered === 0` is `undelivered`, logged at error, because the
@@ -1038,13 +1112,21 @@ opened them.
   noise, an alert wrongly closed is silence. And the record's tenant is **supplied by the caller**, since
   ADR-0325's own content rule means a `PageDeliveryReport` carries none and so a `tenantIdFor(report)`
   resolver has nothing to resolve from.
-  What is left: a page leaves no incident-*timeline* note, so the incident record alone still does not
-  say when it was paged; the SLO resolve's memory is in-process, so a restart mid-breach resolves nothing
-  (fail-closed — it leaves the alert for a human rather than guessing a grade); a platform-scope page
-  cannot be recorded at all, because `meta.audit_log.tenant_id` is NOT NULL and an SLO surface is never
-  a tenant; the retry is uniform and does not honour a `Retry-After`; and `email_digest` stays
+  **All six of ADR-0326's open ends are closed by ADR-0327.** A page is appended to its incident's
+  timeline as a `paged` entry, which is the record that still lands when the audit row *cannot* — an
+  SLO surface is never a tenant and `meta.audit_log.tenant_id` is NOT NULL, so for that escalator the
+  row is structurally impossible and the timeline has no tenant column to lie about. The retry honours
+  `Retry-After` (`max` with the policy's floor; over the 30s ceiling it stops rather than holding a
+  page past the point where it is still a page). And a resolve for an episode this process did not
+  page is recovered from the store through the declarer's new `findById`, planned from the record's
+  own severity — remembered beats recovered, because the remembered directives are what actually went
+  out, and all three ways of not knowing answer `[]`, which leaves the alert up for a human.
+  What is left: the retry does not jitter or back off, and reads `Retry-After` only from a *response*
+  — a sender that throws has no instruction and falls back to the policy delay; `email_digest` stays
   `unroutable` by design, so a deployment with only email has no page at all and is told so once per
-  page.
+  page; and `appendPagedNote` bypasses `PersistentIncidentEngine.apply`, so the store's
+  `assertAppendOnly` check does not cover it (the executor's append-only behaviour is pinned by a test
+  instead).
   There is also no tooling to *resolve* an unverified tombstone (the attestations beside it are enough to
   recompute what the scope should have been, but rewriting a proof is not something to automate blindly),
   and a tombstone with no `relatedDeletionRequestId` — every one the synchronous route of ADR-0320 writes —
@@ -1056,15 +1138,20 @@ opened them.
   number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
   **per session** — a restart forgets that the estimator was optimistic. `classifyDesignOutput` diagnoses
   a recoverable wrapper and nothing retries selectively on it yet.
-- **A feature flag that writes audit rows must be in `needsAuditEmitter`** (ADR-0288, ADR-0313, ADR-0321).
-  The emitter is built behind a list of flags, and the list was forgotten twice — the second time
-  silently skipping `--audit-read-routes` entirely, found by booting the real server rather than by a
-  test. It is a named predicate with a test per flag now and the list is up to **nine**, which has caught
-  every flag added since; but nothing *derives* it, so the next feature can still omit itself. The same
-  class bit again in ADR-0322: the emitter does **not** require the chain, so `--deletion-request-routes`
-  without `--audit-chain-config` mounted the routes, wrote *unanchored* audit rows and had no evidence to
-  reconcile from — a 501 nobody was warned about. It warns at boot now, but the pattern is the lesson:
-  a surface that degrades rather than refusing has to say so out loud.
+- **The audit emitter's flag list is gone, because it was wrong three times** (ADR-0288, ADR-0313,
+  ADR-0321, ADR-0327). `needsAuditEmitter` enumerated every flag whose feature writes an audit row.
+  ADR-0288 was the first miss; `--audit-read-routes` the second, found by booting the real server; and
+  the third got through the per-flag test added after the second — `--deletion-escalation-config` was
+  listed **in the test** and **absent from the predicate**, and the test passed because the parser
+  happens to turn `--deletion-request-routes` on alongside it. A per-flag test over a hand-maintained
+  list cannot catch a flag missing from both copies of itself. So `auditEmitterAvailable` is now
+  `store === "pg"` and nothing else: constructing the emitter is an object allocation, so gating it
+  never bought anything, and a feature added tomorrow cannot omit itself from a list that does not
+  exist. Removing it exposed four `auditEmitter === null` branches that could never fire, three of
+  whose messages claimed `--audit-chain-config` was *required* when it was not; two surfaces now warn
+  that their rows will be **unanchored** and mount anyway, which is ADR-0322's rule rather than a
+  refusal that never fired. That remains the lesson: a surface that degrades rather than refusing has
+  to say so out loud.
 - **`failed` is both terminal and compensatable** (ADR-0307). It is in `TERMINAL_INSTANCE_STATUSES` and
   `INSTANCE_TRANSITIONS.failed` is `["compensating"]`, so `isInstanceTerminal` answers "done" for a status
   the map says you may still move. Deliberate for sagas, but the two disagree; a test pins the exception
@@ -1093,6 +1180,11 @@ opened them.
   tenant — they are served from the JSONB fallback rather than the tables they asked for (ADR-0314). A
   refused erasure leaves an operator to drop the collateral by hand; the refusal names it but does not
   hand over the SQL the way ADR-0290's `unreconciled` does (ADR-0316).
+- A tombstone-sweep **lap** is the coverage guarantee, so a tamper is found within one pass of the
+  table rather than at once, and nothing reports how long a lap takes or whether one completed
+  (ADR-0327). `PostgresIncidentStore` has no injectable clock, so a paged note with no `at` reads the
+  wall clock rather than a `Clock`. A revoked FCM key can still 401 once before the cached token is
+  discarded.
 - Column-store migration is **additive only** (ADR-0283, ADR-0314): a removed field's column
   is never dropped and a changed type is never altered, since both need a decision
   about existing data. Per-tenant activated manifests now *do* get DDL, into the tenant's
@@ -1110,7 +1202,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 321 records; 242 Accepted, 79 Proposed (the
+title or status change cannot drift. 322 records; 243 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

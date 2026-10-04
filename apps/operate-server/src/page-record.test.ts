@@ -78,6 +78,7 @@ function outcome(over: OutcomeOver = {}): PageChannelOutcome {
     reference: "ref-1",
     errorMessage: null,
     attemptsMade: 1,
+    retryAfterMs: null,
   };
   return { ...base, ...over };
 }
@@ -213,6 +214,7 @@ describe("PageRecorder.record", () => {
       reference: "ref-1",
       errorMessage: null,
       attemptsMade: 1,
+      retryAfterMs: null,
     });
     expect(rows[1]).toMatchObject({
       kind: "slack",
@@ -228,6 +230,24 @@ describe("PageRecorder.record", () => {
       report({ outcomes: [outcome({ disposition: "failed", attemptsMade: 3 })] }),
     );
     expect(outcomesOf(emitted[0] as Emitted)[0]).toMatchObject({ attemptsMade: 3 });
+  });
+
+  it("records what the provider said about when to come back", async () => {
+    const { audit, emitted } = fakeAudit();
+    await new PageRecorder({ audit }).record(
+      report({ outcomes: [outcome({ disposition: "failed", httpStatus: 429, retryAfterMs: 45_000 })] }),
+      TENANT_A,
+    );
+    // On a page that burned its whole budget this is the sharpest field on the row: "PagerDuty asked
+    // for 45s and we stopped" is a different finding from "the transport was down" (ADR-0327).
+    expect(outcomesOf(emitted[0] as Emitted)[0]).toMatchObject({ retryAfterMs: 45_000 });
+  });
+
+  it("records an absent Retry-After as null, never as zero", async () => {
+    const { audit, emitted } = fakeAudit();
+    await new PageRecorder({ audit }).record(report(), TENANT_A);
+    // Zero would read as "come back immediately", which is an instruction nobody gave.
+    expect(outcomesOf(emitted[0] as Emitted)[0]).toMatchObject({ retryAfterMs: null });
   });
 
   it("records an unreported attempt count as null, never as zero", async () => {
@@ -257,6 +277,10 @@ describe("PageRecorder.record", () => {
       "kind",
       "provider",
       "reference",
+      // Added deliberately, not by accident: this list is the guard that makes a new field on
+      // `PageChannelOutcome` a decision here rather than a silent passthrough, and it caught
+      // `retryAfterMs` the moment the dispatcher grew it (ADR-0327).
+      "retryAfterMs",
     ]);
   });
 

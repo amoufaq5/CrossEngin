@@ -1,4 +1,5 @@
 import type { PageContent, PageSendResult } from "./page-pagerduty.js";
+import { retryAfterExceedsCeiling } from "./retry-after.js";
 
 /**
  * Delivering a page, or saying loudly that it was not delivered.
@@ -36,6 +37,14 @@ import type { PageContent, PageSendResult } from "./page-pagerduty.js";
  * And the dispatcher — not the senders — owns a bounded retry, because only it sees the whole
  * directive and because `failed` is the one disposition worth another call: `rejected` means the
  * provider said no and will say no again.
+ *
+ * **A retry honours the provider's own `Retry-After`, up to a ceiling.** The retry above was
+ * uniform, which made it worse than useless against the condition it exists for: a 429 carrying
+ * `Retry-After: 10` was retried at 2s and 4s, both refused, and the page reported `failed` having
+ * spent its budget inside the window the provider named. So the wait is `max(policy, provider)` —
+ * the policy is the floor so `Retry-After: 0` cannot become a hot loop, the provider's figure is
+ * the floor when longer — and an instruction past `MAX_RETRY_AFTER_MS` ends the retry instead of
+ * being obeyed, because a page held that long is no longer a page.
  */
 
 /** The channel kinds an `AlertPolicy` can name. Mirrored, so this package needs no observability dep. */
@@ -112,6 +121,15 @@ export interface PageChannelOutcome {
    * three times over nine seconds".
    */
   readonly attemptsMade: number;
+  /**
+   * What the provider's `Retry-After` asked for on the last attempt, or null for "said nothing".
+   *
+   * **Required with null**, unlike `PageSendResult.retryAfterMs` which is optional: the dispatcher
+   * constructs these itself, so there is no double to break, and a reader that walks an outcome
+   * structurally (the audit-record writer in `apps/operate-server` does) should see "no
+   * instruction" stated rather than inferred from an absent key.
+   */
+  readonly retryAfterMs: number | null;
 }
 
 export interface PageDeliveryReport {
@@ -159,7 +177,25 @@ export function pageAddressFor(target: PageChannelTargetLike): string | null {
  */
 export interface PageRetryPolicy {
   readonly attempts: number;
+  /**
+   * The platform's **floor** between attempts, not the whole rule: a provider's `Retry-After` wins
+   * when it is longer. See `waitBefore`.
+   */
   readonly delayMs: number;
+}
+
+/**
+ * How long to wait before the next attempt.
+ *
+ * `max`, not a replacement, and both halves are load-bearing. The policy's delay is the platform's
+ * floor, so a provider answering `Retry-After: 0` — or a date already past — cannot turn the retry
+ * into a hot loop against a rate limiter. The provider's figure is the floor when it is longer,
+ * because it is the one number that knows when the next attempt can succeed: ADR-0326's uniform
+ * two seconds spent a `sev1`'s whole budget inside a window the provider had already said it would
+ * refuse, which made the retry *less* likely to land than a single attempt.
+ */
+export function waitBefore(policyDelayMs: number, retryAfterMs: number | null): number {
+  return Math.max(policyDelayMs, retryAfterMs ?? 0);
 }
 
 export interface PageDispatcherOptions {
@@ -290,7 +326,13 @@ export class PageDispatcher {
     const sleep = this.opts.sleep ?? defaultSleep;
     let outcome = await this.callOnce(invoke, sender.provider, target.kind, 1);
     while (isRetryable(outcome.disposition) && outcome.attemptsMade < attempts) {
-      await sleep(delayMs);
+      // A provider asking for longer than the ceiling ends the retry here, with the outcome as it
+      // stands. The alternative is holding the page for however long it asked, and past
+      // MAX_RETRY_AFTER_MS what is being held is no longer a page — reporting `failed` hands the
+      // caller back its own cadence, which for two of the three escalators re-derives the finding
+      // and pages again anyway.
+      if (retryAfterExceedsCeiling(outcome.retryAfterMs)) break;
+      await sleep(waitBefore(delayMs, outcome.retryAfterMs));
       outcome = await this.callOnce(invoke, sender.provider, target.kind, outcome.attemptsMade + 1);
     }
     return outcome;
@@ -312,6 +354,8 @@ export class PageDispatcher {
         reference: result.reference,
         errorMessage: result.errorMessage,
         attemptsMade,
+        // Optional on the sender's result, stated here: absent and null both mean "said nothing".
+        retryAfterMs: result.retryAfterMs ?? null,
       };
     } catch (err) {
       // A sender that throws rather than returning a result. Caught per channel so one dead
@@ -324,6 +368,8 @@ export class PageDispatcher {
         reference: null,
         errorMessage: err instanceof Error ? err.message : String(err),
         attemptsMade,
+        // A sender that threw never reached a response, so there is no instruction to honour.
+        retryAfterMs: null,
       };
     }
   }
@@ -344,6 +390,7 @@ function settled(
     reference: null,
     errorMessage,
     attemptsMade: 0,
+    retryAfterMs: null,
   };
 }
 

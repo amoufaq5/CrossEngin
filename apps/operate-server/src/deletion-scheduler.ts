@@ -32,6 +32,19 @@ export interface DeletionRunnerLike {
   >;
 }
 
+/** One page of the tombstone sweep (ADR-0327). Structural, so this file imports no store type. */
+export interface TombstoneSweepPage {
+  readonly examined: number;
+  readonly findings: readonly {
+    readonly tombstoneId: string;
+    readonly tenantId: string;
+    readonly reference: string;
+    readonly relatedDeletionRequestId: string | null;
+    readonly detail: string;
+  }[];
+  readonly nextAfterTombstoneId: string | null;
+}
+
 /**
  * One `auditCompleted` finding (ADR-0323): a *completed* request whose proof no longer stands up.
  *
@@ -72,6 +85,16 @@ export interface StrandedReconcilerLike {
    * section a no-op rather than failing to typecheck or throwing at the first tick.
    */
   auditCompleted?(limit?: number): Promise<readonly AuditFinding[]>;
+  /**
+   * Every tombstone, whether or not a request names one (ADR-0327). Findings only.
+   *
+   * Optional for the same reason `auditCompleted` is: the scheduler is wired against a structural
+   * mirror, so a store that does not offer it simply does not get swept.
+   */
+  auditTombstones?(input?: {
+    readonly limit?: number;
+    readonly afterTombstoneId?: string | null;
+  }): Promise<TombstoneSweepPage>;
 }
 
 export interface DeletionSchedulerOptions {
@@ -139,6 +162,13 @@ export interface DeletionSchedulerOptions {
    * either way (ADR-0313); this callback is for what was found.
    */
   readonly onAuditFindings?: (findings: readonly AuditFinding[]) => void | Promise<void>;
+  /**
+   * The tombstone sweep's findings (ADR-0327), reported separately because they are a different
+   * fact: an `AuditFinding` names a completed *request* whose proof no longer stands up, while these
+   * name a *proof* — and the ones that matter most name no request at all, which is exactly why the
+   * two could not share a shape.
+   */
+  readonly onTombstoneFindings?: (page: TombstoneSweepPage) => void | Promise<void>;
   /** Forwarded as-is, so the reconciler's own default governs when it is absent. */
   readonly auditLimit?: number;
 }
@@ -179,6 +209,12 @@ export class DeletionScheduler {
    * zero, and that is the same grace `start()` already gives the run pass.
    */
   private ticks = 0;
+  /**
+   * Where the tombstone sweep stopped. Null means "start at the beginning", which is both the
+   * initial state and what the end of the table resets it to — so the sweep laps rather than
+   * stopping, and a tombstone tampered with after the sweep passed it is found on the next lap.
+   */
+  private sweepCursor: string | null = null;
 
   constructor(private readonly opts: DeletionSchedulerOptions) {}
 
@@ -242,8 +278,45 @@ export class DeletionScheduler {
   private async auditOnce(): Promise<void> {
     const every = this.auditEveryTicks();
     if (every === 0 || this.ticks % every !== 0) return;
-    const findings = (await this.opts.reconciler?.auditCompleted?.(this.opts.auditLimit)) ?? [];
-    if (findings.length > 0) await this.opts.onAuditFindings?.(findings);
+    // Its own `try`, so a throwing `auditCompleted` does not take the sweep down with it — and that
+    // is not hypothetical: ADR-0323's whole point is that the audit re-parses stored rows and an
+    // unparseable row *is* the finding, so the direction most likely to throw was the one sharing a
+    // `try` with the sweep. The cursor would never advance either, so the sweep would never run at
+    // all while `onError` fired every tick: an audit that looks like it is running. ADR-0322's own
+    // precedent is a separate `try` per pass, for the same reason.
+    try {
+      const findings = (await this.opts.reconciler?.auditCompleted?.(this.opts.auditLimit)) ?? [];
+      if (findings.length > 0) await this.opts.onAuditFindings?.(findings);
+    } catch (err) {
+      this.opts.onError?.(err);
+    }
+    await this.sweepOnce();
+  }
+
+  /**
+   * One page of the tombstone sweep per audit tick, resumed from where the last page stopped.
+   *
+   * Deliberately **one page**, not the whole table: the table only grows and is never pruned, so a
+   * full sweep per tick would make the scheduler's cost rise forever and eventually make the tick
+   * longer than its interval. A page per tick walks the table at a steady rate and starts over when
+   * it reaches the end, which is the right shape for a standing audit — a tampered row is found
+   * within one lap rather than immediately, and nothing else finds it at all.
+   *
+   * Reported even when clean, unlike `auditCompleted` above, because the *examined* count is the
+   * claim: "we verified 412 proofs this lap" is what an auditor can use, and ADR-0323's rule is that
+   * it cannot be inferred from the absence of a log line.
+   */
+  private async sweepOnce(): Promise<void> {
+    const sweep = this.opts.reconciler?.auditTombstones;
+    const reconciler = this.opts.reconciler;
+    if (sweep === undefined || reconciler === undefined) return;
+    const page = await sweep.call(reconciler, {
+      ...(this.opts.auditLimit !== undefined ? { limit: this.opts.auditLimit } : {}),
+      ...(this.sweepCursor !== null ? { afterTombstoneId: this.sweepCursor } : {}),
+    });
+    // Null means the page did not fill, i.e. the end of the table — so the next lap starts over.
+    this.sweepCursor = page.nextAfterTombstoneId;
+    await this.opts.onTombstoneFindings?.(page);
   }
 
   private auditEveryTicks(): number {

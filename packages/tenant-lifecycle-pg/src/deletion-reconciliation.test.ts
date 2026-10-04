@@ -1,3 +1,4 @@
+import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   assembleTombstone,
   type DeletionAttestation,
@@ -7,17 +8,25 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_STRANDED_AFTER_MS,
+  DEFAULT_TOMBSTONE_AUDIT_LIMIT,
   DeletionReconciler,
   RECONCILIATION_VERDICTS,
   EVIDENCE_DEFECTS,
+  TOMBSTONE_REFERENCE_STATES,
   isConclusive,
   needsOperator,
   verifyStoredEvidence,
   type ReconciliationResult,
   type ReconcilerOptions,
 } from "./deletion-reconciliation.js";
-import type { PostgresDeletionRequestStore } from "./deletion-request-store.js";
-import type { PostgresTombstoneStore, StoredTombstone } from "./tombstone-store.js";
+import { PostgresDeletionRequestStore, REQUEST_COLUMNS } from "./deletion-request-store.js";
+import {
+  PostgresTombstoneStore,
+  TOMBSTONE_COLUMNS,
+  TOMBSTONE_SCAN_MAX_LIMIT,
+  type StoredTombstone,
+  type TombstoneAnchorer,
+} from "./tombstone-store.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 const REQ = "dreq_abcdefgh1234";
@@ -117,12 +126,64 @@ function tamperedTombstone(): StoredTombstone {
   };
 }
 
+/**
+ * A tombstone naming **no** deletion request — what the synchronous route of ADR-0320 writes, and
+ * the whole class ADR-0327 exists for. `data_subject_erasure` cannot be one (the contract requires
+ * the reference), so this is the `tenant_deletion` the erasure route produces.
+ */
+function unreferencedTombstone(id = "tomb_unref0001aaaa"): StoredTombstone {
+  const assembled = assembleTombstone({
+    id,
+    kind: "tenant_deletion",
+    tenantId: TENANT,
+    deletedAt: "2026-10-03T11:00:00.000Z",
+    executedBy: "operator:alice",
+    approvedBy: "operator:bob",
+    anchors: [
+      {
+        kind: "internal_audit_log",
+        reference: "pending-chain-append",
+        anchoredAt: "2026-10-03T11:00:00.000Z",
+      },
+    ],
+    requiredSubsystems: ["tenant_schema"],
+    attestations: [ATTESTATION],
+  });
+  if (!assembled.ok) {
+    throw new Error(`fixture does not assemble: ${JSON.stringify(assembled.refusals)}`);
+  }
+  return {
+    record: {
+      ...assembled.record,
+      anchors: [
+        {
+          kind: "internal_audit_log",
+          reference: CHAIN_HASH,
+          anchoredAt: "2026-10-03T11:00:00.000Z",
+        },
+      ],
+    },
+    attestations: [ATTESTATION],
+    chainEntryHash: CHAIN_HASH,
+    chainSequenceNumber: 9,
+  };
+}
+
+function tamper(stored: StoredTombstone): StoredTombstone {
+  return {
+    ...stored,
+    record: { ...stored.record, scope: { ...stored.record.scope, rowCount: 1 } },
+  };
+}
+
 interface Harness {
   readonly reconciler: DeletionReconciler;
   readonly transitions: Array<{ id: string; to: string; fields: Record<string, unknown> }>;
   readonly retired: string[];
   readonly strandedCalls: Array<{ olderThan: string; limit: number | undefined }>;
   readonly completedCalls: (number | undefined)[];
+  readonly scanCalls: Array<{ limit: number; afterTombstoneId: string | null | undefined }>;
+  readonly requestReads: string[];
   readonly reported: ReconciliationResult[];
 }
 
@@ -134,6 +195,9 @@ function harness(
     readonly retireThrows?: boolean;
     readonly completed?: readonly GdprDeletionRequest[];
     readonly storedMissing?: boolean;
+    readonly scan?: readonly StoredTombstone[];
+    /** Which request ids `requests.read` finds. Absent means every one asked for. */
+    readonly knownRequestIds?: readonly string[];
   } = {},
   over: Partial<ReconcilerOptions> = {},
 ): Harness {
@@ -141,6 +205,8 @@ function harness(
   const retired: string[] = [];
   const strandedCalls: Array<{ olderThan: string; limit: number | undefined }> = [];
   const completedCalls: (number | undefined)[] = [];
+  const scanCalls: Array<{ limit: number; afterTombstoneId: string | null | undefined }> = [];
+  const requestReads: string[] = [];
   const reported: ReconciliationResult[] = [];
   const requests = {
     transition: async (
@@ -150,6 +216,12 @@ function harness(
     ): Promise<GdprDeletionRequest | null> => {
       transitions.push({ id, to, fields: { ...fields } });
       return requestOf({ status: to as GdprDeletionRequest["status"] });
+    },
+    read: async (id: string): Promise<GdprDeletionRequest | null> => {
+      requestReads.push(id);
+      const known = behaviour.knownRequestIds;
+      if (known !== undefined && !known.includes(id)) return null;
+      return requestOf({ id });
     },
     stranded: async (
       olderThan: string,
@@ -169,6 +241,18 @@ function harness(
       if (behaviour.storedMissing === true) return null;
       return (behaviour.evidence ?? [tombstoneOf()]).find((t) => t.record.id === id) ?? null;
     },
+    scanAll: async (input: {
+      limit: number;
+      afterTombstoneId?: string | null;
+    }): Promise<readonly StoredTombstone[]> => {
+      scanCalls.push({ limit: input.limit, afterTombstoneId: input.afterTombstoneId });
+      const all = behaviour.scan ?? [];
+      const after = input.afterTombstoneId ?? null;
+      // A real keyset page, so a test about the cursor is a test about the cursor.
+      const ordered = [...all].sort((a, b) => a.record.id.localeCompare(b.record.id));
+      const from = after === null ? ordered : ordered.filter((t) => t.record.id > after);
+      return from.slice(0, input.limit);
+    },
   } as unknown as PostgresTombstoneStore;
 
   const reconciler = new DeletionReconciler({
@@ -183,7 +267,16 @@ function harness(
     onReconciled: (r) => reported.push(r),
     ...over,
   });
-  return { reconciler, transitions, retired, strandedCalls, completedCalls, reported };
+  return {
+    reconciler,
+    transitions,
+    retired,
+    strandedCalls,
+    completedCalls,
+    scanCalls,
+    requestReads,
+    reported,
+  };
 }
 
 describe("the verdicts", () => {
@@ -533,5 +626,305 @@ describe("auditCompleted", () => {
     const h = harness({ completed: [] });
     await h.reconciler.auditCompleted(7);
     expect(h.completedCalls).toEqual([7]);
+  });
+});
+
+describe("auditTombstones", () => {
+  it("names the three ways a tombstone is reached", () => {
+    // Collapsing them would lose the one this direction was built for: `unreferenced` is a tombstone
+    // no other audit can see, and `dangling` is a request row deleted out from under a proof.
+    expect(TOMBSTONE_REFERENCE_STATES).toEqual(["unreferenced", "referenced", "dangling"]);
+    expect(DEFAULT_TOMBSTONE_AUDIT_LIMIT).toBe(100);
+  });
+
+  it("reports no findings over a clean table, with a truthful examined count", async () => {
+    const h = harness({ scan: [unreferencedTombstone(), tombstoneOf()] });
+    const page = await h.reconciler.auditTombstones();
+    // "We examined two and found nothing" is the claim an auditor needs, and it cannot be made from
+    // the absence of a log line (ADR-0323).
+    expect(page.findings).toEqual([]);
+    expect(page.examined).toBe(2);
+  });
+
+  it("finds a tampered scope on a tombstone no request names", async () => {
+    const h = harness({ scan: [tamper(unreferencedTombstone())] });
+    const page = await h.reconciler.auditTombstones();
+    expect(page.examined).toBe(1);
+    expect(page.findings).toHaveLength(1);
+    // Nothing else in the system looks at this row: both other directions start from a request, and
+    // this one has none.
+    expect(page.findings[0]?.reference).toBe("unreferenced");
+    expect(page.findings[0]?.relatedDeletionRequestId).toBeNull();
+    expect(page.findings[0]?.check.defects).toContain("scope_tampered");
+    expect(page.findings[0]?.detail).toContain("does not verify");
+  });
+
+  it("proves the point: the tamper leaves the proof digest and the chain hash untouched", async () => {
+    const tampered = tamper(unreferencedTombstone());
+    const h = harness({ scan: [tampered] });
+    const page = await h.reconciler.auditTombstones();
+    expect(tampered.record.proofSha256).toBe(unreferencedTombstone().record.proofSha256);
+    expect(tampered.chainEntryHash).toBe(CHAIN_HASH);
+    expect(page.findings[0]?.check.defects).not.toContain("proof_mismatch");
+  });
+
+  it("finds a tombstone nothing in the chain witnesses", async () => {
+    const honest = unreferencedTombstone();
+    const h = harness({
+      scan: [{ ...honest, chainEntryHash: null, chainSequenceNumber: null }],
+    });
+    const page = await h.reconciler.auditTombstones();
+    expect(page.findings[0]?.check.defects).toEqual(["unwitnessed"]);
+  });
+
+  it("makes a dangling request reference its own finding, even on evidence that verifies", async () => {
+    const h = harness({ scan: [tombstoneOf()], knownRequestIds: [] });
+    const page = await h.reconciler.auditTombstones();
+    expect(page.findings).toHaveLength(1);
+    // Not "unreferenced": the proof names a request and the request is gone, which means a row was
+    // deleted out from under it.
+    expect(page.findings[0]?.reference).toBe("dangling");
+    expect(page.findings[0]?.relatedDeletionRequestId).toBe(REQ);
+    expect(page.findings[0]?.check.ok).toBe(true);
+    expect(page.findings[0]?.detail).toContain("does not exist");
+  });
+
+  it("reports both defects when a dangling reference also fails verification", async () => {
+    const h = harness({ scan: [tamperedTombstone()], knownRequestIds: [] });
+    const finding = (await h.reconciler.auditTombstones()).findings[0];
+    expect(finding?.reference).toBe("dangling");
+    expect(finding?.detail).toContain("does not verify");
+    expect(finding?.detail).toContain("does not exist");
+  });
+
+  it("says nothing about a referenced tombstone that verifies", async () => {
+    const h = harness({ scan: [tombstoneOf()], knownRequestIds: [REQ] });
+    const page = await h.reconciler.auditTombstones();
+    expect(page.findings).toEqual([]);
+    expect(page.examined).toBe(1);
+  });
+
+  it("still reports a referenced tombstone that does not verify", async () => {
+    const h = harness({ scan: [tamperedTombstone()], knownRequestIds: [REQ] });
+    const page = await h.reconciler.auditTombstones();
+    // Not left to `auditCompleted`: that walks only `status = 'completed'` requests under its own
+    // limit, so a tombstone whose request sits `in_progress` would fall through both directions.
+    expect(page.findings).toHaveLength(1);
+    expect(page.findings[0]?.reference).toBe("referenced");
+  });
+
+  it("spends at most one request lookup per row, and none on an unreferenced one", async () => {
+    const h = harness({ scan: [unreferencedTombstone(), tombstoneOf()], knownRequestIds: [REQ] });
+    await h.reconciler.auditTombstones();
+    expect(h.requestReads).toEqual([REQ]);
+  });
+
+  it("hands back a cursor when the page is full, and the caller's next page skips it", async () => {
+    const all = [
+      unreferencedTombstone("tomb_aaaa0000aaaa"),
+      unreferencedTombstone("tomb_bbbb0000bbbb"),
+      unreferencedTombstone("tomb_cccc0000cccc"),
+    ];
+    const h = harness({ scan: all });
+    const first = await h.reconciler.auditTombstones({ limit: 2 });
+    expect(first.examined).toBe(2);
+    expect(first.nextAfterTombstoneId).toBe("tomb_bbbb0000bbbb");
+    const second = await h.reconciler.auditTombstones({
+      limit: 2,
+      afterTombstoneId: first.nextAfterTombstoneId,
+    });
+    // The second page re-reads nothing: a sweep that re-read or skipped a row would be an audit that
+    // can miss the one tampered record.
+    expect(second.examined).toBe(1);
+    expect(second.nextAfterTombstoneId).toBeNull();
+    expect(h.scanCalls).toEqual([
+      { limit: 2, afterTombstoneId: null },
+      { limit: 2, afterTombstoneId: "tomb_bbbb0000bbbb" },
+    ]);
+  });
+
+  it("ends the sweep on a page shorter than the limit", async () => {
+    const h = harness({ scan: [unreferencedTombstone()] });
+    const page = await h.reconciler.auditTombstones({ limit: 10 });
+    expect(page.examined).toBe(1);
+    expect(page.nextAfterTombstoneId).toBeNull();
+  });
+
+  it("ends the sweep on an empty table without claiming anything was checked", async () => {
+    const h = harness({ scan: [] });
+    const page = await h.reconciler.auditTombstones();
+    expect(page).toEqual({ examined: 0, findings: [], nextAfterTombstoneId: null });
+  });
+
+  it("clamps the page size to the store's cap, so a short page is not misread as the end", async () => {
+    const h = harness({ scan: [] });
+    await h.reconciler.auditTombstones({ limit: 100_000 });
+    // Asking for more than the store will serve would yield a short page, and a short page is how
+    // this reports the end of the table.
+    expect(h.scanCalls[0]?.limit).toBe(TOMBSTONE_SCAN_MAX_LIMIT);
+    await h.reconciler.auditTombstones({ limit: 0 });
+    expect(h.scanCalls[1]?.limit).toBe(1);
+  });
+
+  it("asks for the default page size when the caller says nothing", async () => {
+    const h = harness({ scan: [] });
+    await h.reconciler.auditTombstones();
+    expect(h.scanCalls).toEqual([
+      { limit: DEFAULT_TOMBSTONE_AUDIT_LIMIT, afterTombstoneId: null },
+    ]);
+  });
+
+  it("never transitions a request, whatever it finds", async () => {
+    const h = harness({ scan: [tamperedTombstone()], knownRequestIds: [REQ] });
+    await h.reconciler.auditTombstones();
+    expect(h.transitions).toEqual([]);
+    expect(h.retired).toEqual([]);
+  });
+});
+
+/**
+ * The no-writes invariant, pinned against the real stores over a fake connection rather than against
+ * the fakes above — the fakes could not write even if the code asked them to, so only this says
+ * anything. ADR-0323 established that `evidence_unverified` is a verdict nothing may apply, not a
+ * scheduler and not an operator; a sweep that found a tampered scope has even less standing, because
+ * it starts from no request and so has nothing whose status it could be right about.
+ */
+describe("auditTombstones writes nothing", () => {
+  const ANCHORER: TombstoneAnchorer = {
+    appendWithin: async () => {
+      throw new Error("a read-only audit must never append to the chain");
+    },
+  };
+
+  function tombstoneRow(stored: StoredTombstone): Record<string, unknown> {
+    const r = stored.record;
+    return {
+      tombstone_id: r.id,
+      kind: r.kind,
+      tenant_id: r.tenantId,
+      subject_identifier: r.subjectIdentifier ?? null,
+      related_deletion_request_id: r.relatedDeletionRequestId ?? null,
+      deleted_at: r.deletedAt,
+      executed_by: r.executedBy,
+      approved_by: r.approvedBy,
+      scope: JSON.stringify(r.scope),
+      content_manifest_sha256: r.contentManifestSha256,
+      proof_sha256: r.proofSha256,
+      anchors: JSON.stringify(r.anchors),
+      retained_reason: r.retainedReason ?? null,
+      retained_data_reference: r.retainedDataReference ?? null,
+      invalidation_of_prior_tombstone_id: null,
+      attestations: JSON.stringify(stored.attestations),
+      chain_entry_hash: stored.chainEntryHash,
+      chain_sequence_number: stored.chainSequenceNumber,
+    };
+  }
+
+  function requestRow(request: GdprDeletionRequest): Record<string, unknown> {
+    return {
+      request_id: request.id,
+      tenant_id: request.tenantId,
+      subject_identifier: request.subjectIdentifier,
+      legal_basis: request.legalBasis,
+      status: request.status,
+      submitted_at: request.submittedAt,
+      submitted_by: request.submittedBy,
+      deadline_at: request.deadlineAt,
+      verification_method: request.verificationMethod,
+      verified_at: request.verifiedAt,
+      verified_by: request.verifiedBy,
+      in_progress_at: request.inProgressAt,
+      completed_at: request.completedAt,
+      completion_sha256: request.completionSha256,
+      rejected_at: request.rejectedAt,
+      rejected_reason: null,
+      deferred_until: request.deferredUntil,
+      deferral_reason: null,
+      retention_obligations: JSON.stringify(request.retentionObligations),
+      retained_data_categories: JSON.stringify(request.retainedDataCategories),
+      notes: null,
+      tombstone_id: request.tombstoneId,
+    };
+  }
+
+  function realHarness(
+    scan: readonly StoredTombstone[],
+    requestsFound: readonly GdprDeletionRequest[],
+  ): { readonly reconciler: DeletionReconciler; readonly sql: () => string[] } {
+    const sql: string[] = [];
+    const conn = {
+      query: async (statement: string) => {
+        sql.push(statement);
+        if (statement.includes(`FROM meta.tenant_tombstones`)) {
+          return { rows: scan.map((s) => tombstoneRow(s)), rowCount: scan.length };
+        }
+        if (statement.includes(`FROM meta.gdpr_deletion_requests`)) {
+          return { rows: requestsFound.map((r) => requestRow(r)), rowCount: requestsFound.length };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+      transaction: async <T>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => {
+        sql.push("BEGIN");
+        const out = await fn(conn as unknown as PgConnection);
+        sql.push("COMMIT");
+        return out;
+      },
+      withAdvisoryLock: async <T>(_k: bigint, fn: () => Promise<T>): Promise<T> => fn(),
+      close: async (): Promise<undefined> => undefined,
+    };
+    const pg = conn as unknown as PgConnection;
+    return {
+      reconciler: new DeletionReconciler({
+        requests: new PostgresDeletionRequestStore(pg),
+        tombstones: new PostgresTombstoneStore(pg, ANCHORER),
+        clock: () => new Date(NOW),
+      }),
+      sql: () => sql,
+    };
+  }
+
+  const MUTATING = /^\s*(UPDATE|INSERT|DELETE|TRUNCATE|DROP|ALTER)\b/i;
+
+  it("records no mutating statement over a clean table", async () => {
+    const h = realHarness([unreferencedTombstone()], []);
+    const page = await h.reconciler.auditTombstones();
+    expect(page.findings).toEqual([]);
+    expect(page.examined).toBe(1);
+    expect(h.sql().filter((s) => MUTATING.test(s))).toEqual([]);
+  });
+
+  it("records no mutating statement when it finds a tampered scope", async () => {
+    const h = realHarness([tamper(unreferencedTombstone())], []);
+    const page = await h.reconciler.auditTombstones();
+    expect(page.findings[0]?.check.defects).toContain("scope_tampered");
+    expect(h.sql().filter((s) => MUTATING.test(s))).toEqual([]);
+  });
+
+  it("records no mutating statement when it finds a dangling reference", async () => {
+    const h = realHarness([tombstoneOf()], []);
+    const page = await h.reconciler.auditTombstones();
+    expect(page.findings[0]?.reference).toBe("dangling");
+    expect(h.sql().filter((s) => MUTATING.test(s))).toEqual([]);
+  });
+
+  it("reads the table under the platform grant and keyset-ordered", async () => {
+    const h = realHarness([], []);
+    await h.reconciler.auditTombstones({ limit: 10 });
+    const statements = h.sql();
+    expect(statements.some((s) => s.includes("set_config('app.platform_audit', 'on', true)"))).toBe(
+      true,
+    );
+    const select = statements.find((s) => s.includes("FROM meta.tenant_tombstones"));
+    expect(select).toContain("ORDER BY tombstone_id");
+    for (const column of TOMBSTONE_COLUMNS) expect(select).toContain(column);
+  });
+
+  it("resolves a referenced tombstone through the real request store", async () => {
+    const h = realHarness([tombstoneOf()], [requestOf()]);
+    const page = await h.reconciler.auditTombstones();
+    expect(page.findings).toEqual([]);
+    const select = h.sql().find((s) => s.includes("FROM meta.gdpr_deletion_requests"));
+    expect(select).toContain("WHERE request_id = $1");
+    for (const column of REQUEST_COLUMNS) expect(select).toContain(column);
   });
 });

@@ -1302,6 +1302,19 @@ describe("table column shapes", () => {
     expect(check?.kind === "check" && check.expression).toBe("executed_by <> approved_by");
   });
 
+  it("META_TENANT_TOMBSTONES indexes the question reconciliation asks, partially", () => {
+    const idx = (META_TENANT_TOMBSTONES.indexes ?? []).find((i) =>
+      i.columns.includes("related_deletion_request_id"),
+    );
+    // "Does a tombstone name this request?" is ADR-0322's conclusive evidence that a deletion
+    // committed, and `findForRequest` runs it for every stranded request on every scheduler tick.
+    // It was a sequential scan on a table that only grows (ADR-0327).
+    expect(idx?.name).toBe("idx_tenant_tombstones_related_request");
+    // Partial, because the column is NULL for every tombstone the synchronous route of ADR-0320
+    // writes, and those rows can never match a lookup by request id.
+    expect(idx?.where).toBe("related_deletion_request_id IS NOT NULL");
+  });
+
   it("META_GDPR_DELETION_REQUESTS outlives the verifier and names its proof", () => {
     const col = (n: string) => META_GDPR_DELETION_REQUESTS.columns.find((c) => c.name === n);
     // A deletion erases the tenant's users, and ON DELETE RESTRICT would have made the verifier

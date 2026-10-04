@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { IncidentDeclarer } from "@crossengin/incident-response-runtime";
 import { PostgresIncidentDeclarer } from "@crossengin/incident-response-runtime-pg";
-import { AlertPolicySchema, SloSchema } from "@crossengin/observability";
+import { AlertPolicySchema, SloSchema, type AlertPolicy } from "@crossengin/observability";
 import {
   FlagRollbackSchema,
   LatencySloEngine,
@@ -12,6 +12,7 @@ import {
   type Clock,
   type EnforcementDecision,
   type LatencyEnforcementDecision,
+  planPageDirective,
   type LatencyRegistration,
   type PageDirective,
   type SloRegistration,
@@ -126,6 +127,14 @@ export interface BuildSloEnforcementOptions {
     decision: ObservedEnforcementDecision,
     pages: readonly PageDirective[],
   ) => Promise<void>;
+  /**
+   * Recovers what to resolve for an episode this process did not page — a breach that spanned a
+   * restart (ADR-0327). Defaulted below from the declarer and the config's own alert policy, which
+   * is the only pair that can answer without guessing a grade.
+   */
+  readonly recoverPages?: (
+    decision: ObservedEnforcementDecision,
+  ) => Promise<readonly PageDirective[]>;
   readonly onError?: (err: unknown) => void;
   /**
    * With a connection the engines persist: each evaluation, each enforcement action, and the
@@ -236,6 +245,9 @@ export function buildSloEnforcement(
     ...(opts.onDecision !== undefined ? { onDecision: opts.onDecision } : {}),
     ...(opts.onPage !== undefined ? { onPage: opts.onPage } : {}),
     ...(opts.onResolvePage !== undefined ? { onResolvePage: opts.onResolvePage } : {}),
+    // Defaulted rather than required: a deployment that wires `onResolvePage` gets restart-safe
+    // resolution without asking for it, and one with no store gets a recovery that answers `[]`.
+    recoverPages: opts.recoverPages ?? defaultRecoverPages(config.alertPolicy, declarer),
     ...(opts.onError !== undefined ? { onError: opts.onError } : {}),
   });
 
@@ -244,5 +256,41 @@ export function buildSloEnforcement(
     scheduler,
     engines: { availability, latency },
     persisted: opts.conn !== undefined,
+  };
+}
+
+/**
+ * Asks the incident store what grade an episode was declared at, and plans a resolve from it.
+ *
+ * This is the restart case ADR-0326 left open. ADR-0326's rule is that a resolve must reach exactly
+ * where its trigger did, because `AlertPolicy` maps a severity to a channel set — so the grade is
+ * the route, and the only non-guessing source for the grade of an incident this process did not
+ * declare is the stored record. `findById` is that read.
+ *
+ * Three ways to answer "nothing to resolve", all of them the fail-closed outcome — the alert is left
+ * up for a human rather than closed somewhere nobody was woken:
+ *
+ * - **no declarer** (no `--store pg`): ids came from a per-process counter and name no row at all.
+ * - **no `findById`**: the seam is optional, and absent means the same as null by contract.
+ * - **null**: no stored incident holds that id.
+ *
+ * A throw is a fourth, and deliberately **not** caught here: `PostgresIncidentDeclarer.findById`
+ * throws only for a row that exists and no longer parses (ADR-0289), which is a tampered or
+ * corrupted record. Planning a page's closure from a record the contract rejects is worse than
+ * failing the pass, and `evaluateOnce` already routes the failure to `onError`.
+ */
+export function defaultRecoverPages(
+  alertPolicy: AlertPolicy,
+  declarer: IncidentDeclarer | undefined,
+): (decision: ObservedEnforcementDecision) => Promise<readonly PageDirective[]> {
+  return async (decision): Promise<readonly PageDirective[]> => {
+    const incidentId = decision.incidentId;
+    if (incidentId === null || declarer?.findById === undefined) return [];
+    const record = await declarer.findById(incidentId);
+    if (record === null) return [];
+    // The record's own severity, never the decision's — a `recovered` decision carries none, which
+    // is the whole reason this function exists.
+    const directive = planPageDirective(alertPolicy, record.severity, record.id);
+    return directive === null ? [] : [directive];
   };
 }

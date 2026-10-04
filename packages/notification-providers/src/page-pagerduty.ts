@@ -1,4 +1,5 @@
-import { truncateErrorMessage, type FetchLike } from "./email-ses.js";
+import { truncateErrorMessage } from "./email-ses.js";
+import { retryAfterFromResponse, type PageFetchLike } from "./retry-after.js";
 
 /*
  * PagerDuty Events API v2:
@@ -43,6 +44,14 @@ export interface PageSendResult {
   readonly httpStatus: number | null;
   readonly reference: string | null;
   readonly errorMessage: string | null;
+  /**
+   * What the provider's `Retry-After` asked for, in milliseconds, when the outcome is retryable.
+   *
+   * **Optional, not required.** This interface is implemented by the senders here and by test
+   * doubles across the repo, and making it required would break every one of those at once for no
+   * gain — absent and `null` mean the same thing, which is that the provider said nothing.
+   */
+  readonly retryAfterMs?: number | null;
 }
 
 /**
@@ -64,7 +73,7 @@ export interface PageContent {
 }
 
 export interface PagerDutyPageSenderOptions {
-  readonly fetch?: FetchLike;
+  readonly fetch?: PageFetchLike;
   readonly endpoint?: string;
   /** The `source` field PagerDuty shows on the alert. A deployment name, not tenant data. */
   readonly source?: string;
@@ -161,12 +170,14 @@ export class PagerDutyPageSender {
       });
       const text = await response.text();
       if (!response.ok) {
+        const outcome = classifyPageFailure(response.status);
         return {
-          outcome: classifyPageFailure(response.status),
+          outcome,
           provider: this.provider,
           httpStatus: response.status,
           reference: null,
           errorMessage: truncateErrorMessage(text),
+          retryAfterMs: retryAfterFromResponse(response, outcome === "failed"),
         };
       }
       return {
@@ -203,11 +214,14 @@ function parseDedupKey(text: string): string | null {
   }
 }
 
-const defaultFetch: FetchLike = async (url, init) => {
+const defaultFetch: PageFetchLike = async (url, init) => {
   const response = await fetch(url, init as RequestInit);
   return {
     ok: response.ok,
     status: response.status,
     text: () => response.text(),
+    // Carried through so a 429's `Retry-After` reaches the dispatcher. `Headers.get` is
+    // case-insensitive, which is why the reader asks for the lowercase name.
+    headers: response.headers,
   };
 };

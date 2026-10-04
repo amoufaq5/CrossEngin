@@ -102,6 +102,102 @@ describe("PostgresIncidentDeclarer", () => {
     expect(insert?.params).toContain("availability:product.list");
   });
 
+  it("reads the grade a resolve has to route on, by id", async () => {
+    const record = declaredIncident({}, "sev1");
+    const conn = mockConnection(
+      [],
+      respondTo([["WHERE incident_id = $1", { rows: [incidentRow(record)], rowCount: 1 }]]),
+    );
+    const found = await new PostgresIncidentDeclarer({ conn }).findById(record.id);
+    expect(found?.id).toBe(record.id);
+    expect(found?.severity).toBe("sev1");
+  });
+
+  it("reads by incident_id, binding the id it was given", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    const conn = mockConnection(
+      capture,
+      respondTo([["WHERE incident_id = $1", { rows: [incidentRow(record)], rowCount: 1 }]]),
+    );
+    await new PostgresIncidentDeclarer({ conn }).findById("INC-2026-0007");
+    expect(capture).toHaveLength(1);
+    expect(capture[0]?.sql).toContain("FROM meta.incidents");
+    expect(capture[0]?.sql).toContain("WHERE incident_id = $1");
+    expect(capture[0]?.params).toEqual(["INC-2026-0007"]);
+  });
+
+  it("answers null for an id no row holds", async () => {
+    const conn = mockConnection([], respondTo([["WHERE incident_id = $1", EMPTY]]));
+    expect(await new PostgresIncidentDeclarer({ conn }).findById("INC-2026-0404")).toBeNull();
+  });
+
+  it("writes nothing, so a resolve cannot mutate the record it is reading", async () => {
+    const capture: Captured[] = [];
+    const conn = mockConnection(
+      capture,
+      respondTo([
+        ["WHERE incident_id = $1", { rows: [incidentRow(declaredIncident())], rowCount: 1 }],
+      ]),
+    );
+    await new PostgresIncidentDeclarer({ conn }).findById("INC-2026-0007");
+    expect(capture.some((c) => /INSERT|UPDATE|DELETE/.test(c.sql))).toBe(false);
+  });
+
+  it("refuses a row whose severity is not in the vocabulary", async () => {
+    const row = { ...incidentRow(declaredIncident()), severity: "sev9" };
+    const conn = mockConnection(
+      [],
+      respondTo([["WHERE incident_id = $1", { rows: [row], rowCount: 1 }]]),
+    );
+    await expect(
+      new PostgresIncidentDeclarer({ conn }).findById("INC-2026-0007"),
+    ).rejects.toThrow();
+  });
+
+  it("refuses a row edited into a state the contract forbids but a CHECK permits", async () => {
+    // `status = 'resolved'` with `resolved_at` NULL is beyond what the database can express, so
+    // re-parsing is the only detector (ADR-0289) — and answering null here would make the recovery
+    // path the one read in this package that absorbs a tampered row in silence.
+    const row = { ...incidentRow(declaredIncident()), status: "resolved", resolved_at: null };
+    const conn = mockConnection(
+      [],
+      respondTo([["WHERE incident_id = $1", { rows: [row], rowCount: 1 }]]),
+    );
+    await expect(
+      new PostgresIncidentDeclarer({ conn }).findById("INC-2026-0007"),
+    ).rejects.toThrow();
+  });
+
+  it("distinguishes a tampered row from an absent one", async () => {
+    // Collapsing the two into null would report "nothing to resolve" for a record that has been
+    // rewritten, which is the opposite of what a reviewer needs to hear.
+    const tampered = { ...incidentRow(declaredIncident()), severity: "sev9" };
+    const present = mockConnection(
+      [],
+      respondTo([["WHERE incident_id = $1", { rows: [tampered], rowCount: 1 }]]),
+    );
+    const absent = mockConnection([], respondTo([["WHERE incident_id = $1", EMPTY]]));
+    await expect(
+      new PostgresIncidentDeclarer({ conn: present }).findById("INC-2026-0007"),
+    ).rejects.toThrow();
+    expect(
+      await new PostgresIncidentDeclarer({ conn: absent }).findById("INC-2026-0007"),
+    ).toBeNull();
+  });
+
+  it("reads through a prepared engine when one was supplied", async () => {
+    const record = declaredIncident();
+    const conn = mockConnection(
+      [],
+      respondTo([["WHERE incident_id = $1", { rows: [incidentRow(record)], rowCount: 1 }]]),
+    );
+    const engine = new PersistentIncidentEngine({ conn });
+    expect((await new PostgresIncidentDeclarer({ engine }).findById(record.id))?.id).toBe(
+      record.id,
+    );
+  });
+
   it("cancels an untaken incident on close-out", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(

@@ -12,11 +12,15 @@ import {
   newRequestId,
   requestHandle,
   DELETION_REQUEST_RECONCILED_OPERATION,
+  DELETION_EVIDENCE_AUDITED_OPERATION,
+  TOMBSTONE_SWEEP_AUDITED_OPERATION,
   type DeletionRequestEvent,
   type DeletionRequestLike,
   type DeletionRequestRoutesContext,
   type EvidenceAuditLike,
   type ReconciliationLike,
+  type TombstoneAuditLike,
+  type TombstoneAuditPageLike,
 } from "./deletion-request-routes.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -84,6 +88,7 @@ interface Harness {
   readonly reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }>;
   readonly strandedCalls: string[];
   readonly auditCalls: (number | undefined)[];
+  readonly sweepCalls: Array<Record<string, unknown>>;
   readonly escalated: string[];
   readonly escalatedVerdicts: string[];
 }
@@ -101,6 +106,8 @@ function harness(
     readonly strandedThrows?: boolean;
     readonly findings?: readonly EvidenceAuditLike[];
     readonly auditThrows?: boolean;
+    readonly sweep?: TombstoneAuditPageLike;
+    readonly sweepThrows?: boolean;
   } = {},
 ): Harness {
   const events: DeletionRequestEvent[] = [];
@@ -109,6 +116,7 @@ function harness(
   const reconciled: Array<{ id: string; applyNeverCommitted: boolean | undefined }> = [];
   const strandedCalls: string[] = [];
   const auditCalls: (number | undefined)[] = [];
+  const sweepCalls: Array<Record<string, unknown>> = [];
   const escalated: string[] = [];
   const escalatedVerdicts: string[] = [];
   const ctx: DeletionRequestRoutesContext = {
@@ -140,6 +148,11 @@ function harness(
         auditCalls.push(limit);
         if (behaviour.auditThrows === true) throw new Error("a stored tombstone no longer parses");
         return behaviour.findings ?? [];
+      },
+      auditTombstones: async (input): Promise<TombstoneAuditPageLike> => {
+        sweepCalls.push({ ...input });
+        if (behaviour.sweepThrows === true) throw new Error("a stored tombstone no longer parses");
+        return behaviour.sweep ?? sweepPageOf();
       },
       reconcileOne: async (request, opts): Promise<ReconciliationLike> => {
         reconciled.push({
@@ -177,6 +190,7 @@ function harness(
     reconciled,
     strandedCalls,
     auditCalls,
+    sweepCalls,
     escalated,
     escalatedVerdicts,
   };
@@ -219,7 +233,7 @@ const SUBMIT_BODY = {
 };
 
 describe("the route declarations", () => {
-  it("are submit, verify, reject, reconcile, stranded and read", () => {
+  it("are submit, verify, reject, reconcile, the two unprovens, stranded and read", () => {
     const routes = buildDeletionRequestRoutes(harness().ctx);
     expect(
       routes.map((r) => ({
@@ -237,6 +251,9 @@ describe("the route declarations", () => {
       { method: "POST", path: "v1/platform/deletion-requests/{id}/reject" },
       { method: "POST", path: "v1/platform/deletion-requests/{id}/reconcile" },
       { method: "GET", path: "v1/platform/deletion-requests/unproven" },
+      // The sweep hangs off `tombstones`, not `deletion-requests`, because it starts from the proofs
+      // and the ones it exists for name no request at all (ADR-0327).
+      { method: "GET", path: "v1/platform/tombstones/unproven" },
       { method: "GET", path: "v1/platform/deletion-requests/stranded" },
       { method: "GET", path: "v1/platform/deletion-requests/{id}" },
     ]);
@@ -248,6 +265,7 @@ describe("the route declarations", () => {
     // subject — and both would run. Nothing else here creates anything.
     expect(routes.map((r) => r.route.idempotencyRequired)).toEqual([
       true,
+      false,
       false,
       false,
       false,
@@ -749,5 +767,210 @@ describe("escalation from the routes (ADR-0324)", () => {
     expect(res.status).toBe(503);
     expect(res.body["error"]).toBe("audit_unrecordable");
     expect(h.strandedCalls).toEqual([]);
+  });
+});
+
+const SWEEP = "platform.tombstones.unproven";
+
+function tombstoneFindingOf(over: Partial<TombstoneAuditLike> = {}): TombstoneAuditLike {
+  return {
+    tombstoneId: TOMB,
+    tenantId: TENANT,
+    reference: "unreferenced",
+    // Null is the case this direction exists for: the synchronous deletion route writes no request.
+    relatedDeletionRequestId: null,
+    detail: "does not verify: scope_tampered",
+    ...over,
+  };
+}
+
+function sweepPageOf(over: Partial<TombstoneAuditPageLike> = {}): TombstoneAuditPageLike {
+  return { examined: 412, findings: [], nextAfterTombstoneId: null, ...over };
+}
+
+/** A request carrying only the query, which is all `cursorParam` reads. */
+function withQuery(query: Record<string, string | string[]>): HandlerInput["request"] {
+  return { query } as never;
+}
+
+describe("the tombstone sweep (ADR-0327)", () => {
+  it("matches as its own literal route, under tombstones rather than deletion-requests", () => {
+    const routes = buildDeletionRequestRoutes(harness().ctx).map((r) => r.route);
+    const matched = matchRoute(
+      routes,
+      "GET",
+      "/v1/platform/tombstones/unproven",
+      "v1",
+      new Date(AT),
+    );
+    expect(matched.outcome).toBe("matched");
+    expect(matched.route?.operationId).toBe(SWEEP);
+  });
+
+  it("refuses an unauthenticated caller", async () => {
+    const h = harness();
+    const res = await call(h.ctx, SWEEP, { principal: null });
+    expect(res.status).toBe(401);
+    expect(h.sweepCalls).toEqual([]);
+  });
+
+  it("is the reconcile grant, not the read one", async () => {
+    const h = harness({ reconcileRoles: new Set(["sre"]), readRoles: new Set(["platform_admin"]) });
+    const res = await call(h.ctx, SWEEP);
+    expect(res.status).toBe(403);
+    expect(h.sweepCalls).toEqual([]);
+  });
+
+  it("refuses an ungranted caller before admitting whether reconciliation is wired", async () => {
+    const h = harness({ reconciler: undefined, reconcileRoles: new Set() });
+    // Fail-closed ordering, as on stranded: a 501 would tell an unauthorised caller about the config.
+    expect((await call(h.ctx, SWEEP)).status).toBe(403);
+  });
+
+  it("501s when no reconciler is wired at all", async () => {
+    const h = harness({ reconciler: undefined });
+    const res = await call(h.ctx, SWEEP);
+    expect(res.status).toBe(501);
+    expect(res.body["error"]).toBe("reconciliation_unavailable");
+  });
+
+  it("501s a reconciler that has no auditTombstones, and mounts the rest anyway", async () => {
+    const h = harness({
+      reconciler: {
+        assess: async (): Promise<ReconciliationLike> => verdictOf(),
+        auditCompleted: async (): Promise<readonly EvidenceAuditLike[]> => [],
+        reconcileOne: async (): Promise<ReconciliationLike> => verdictOf(),
+      },
+    });
+    // A different condition from the one above, and the reason the method is optional on the mirror:
+    // a deployment on an older store gets the other two directions rather than no routes at all.
+    expect((await call(h.ctx, SWEEP)).status).toBe(501);
+    expect((await call(h.ctx, UNPROVEN)).status).toBe(200);
+  });
+
+  it("refuses a reader whose tenant cannot be resolved, rather than sweeping unaudited", async () => {
+    const h = harness();
+    const res = await call(h.ctx, SWEEP, { principal: principal({ tenantId: null }) });
+    // ADR-0313's rule: the findings span tenants or none, `meta.audit_log.tenant_id` is NOT NULL, and
+    // an unrecordable privileged read is refused rather than served.
+    expect(res.status).toBe(503);
+    expect(res.body["error"]).toBe("audit_unrecordable");
+    expect(h.sweepCalls).toEqual([]);
+  });
+
+  it("503s an unreadable sweep rather than reporting it clean", async () => {
+    const h = harness({}, { sweepThrows: true });
+    const res = await call(h.ctx, SWEEP);
+    // The store re-parses every row, so a throw can itself be the finding; an empty list would claim
+    // every proof on file is sound.
+    expect(res.status).toBe(503);
+    expect(res.body["error"]).toBe("evidence_unreadable");
+    expect(String(res.body["detail"])).toContain("absence of findings");
+  });
+
+  it("returns the page, and says clean with the number it verified", async () => {
+    const h = harness();
+    const res = await call(h.ctx, SWEEP);
+    expect(res.status).toBe(200);
+    expect(res.body["examined"]).toBe(412);
+    expect(res.body["findings"]).toEqual([]);
+    // The combination is the point: "we verified 412 and found nothing" is a claim, where an empty
+    // findings list on its own is indistinguishable from not having looked.
+    expect(res.body["clean"]).toBe(true);
+    expect(res.body["nextAfter"]).toBeNull();
+  });
+
+  it("reports a tombstone that no request names, which no other direction can see", async () => {
+    const h = harness({}, { sweep: sweepPageOf({ examined: 3, findings: [tombstoneFindingOf()] }) });
+    const res = await call(h.ctx, SWEEP);
+    const findings = res.body["findings"] as TombstoneAuditLike[];
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.reference).toBe("unreferenced");
+    expect(findings[0]?.relatedDeletionRequestId).toBeNull();
+    expect(res.body["clean"]).toBe(false);
+  });
+
+  it("hands back the cursor the page ended on", async () => {
+    const h = harness({}, { sweep: sweepPageOf({ nextAfterTombstoneId: TOMB }) });
+    expect((await call(h.ctx, SWEEP)).body["nextAfter"]).toBe(TOMB);
+  });
+
+  it("passes ?after= through as afterTombstoneId", async () => {
+    const h = harness();
+    await call(h.ctx, SWEEP, { request: withQuery({ after: TOMB }) });
+    expect(h.sweepCalls).toEqual([{ afterTombstoneId: TOMB }]);
+  });
+
+  it("passes nothing at all when after is absent or empty, never an empty string", async () => {
+    const h = harness();
+    await call(h.ctx, SWEEP);
+    await call(h.ctx, SWEEP, { request: withQuery({}) });
+    await call(h.ctx, SWEEP, { request: withQuery({ after: "" }) });
+    // An empty `afterTombstoneId` is not the same question as none: the store would be asked for
+    // tombstones ordered after `''`, and the sweep's first page would depend on collation.
+    expect(h.sweepCalls).toEqual([{}, {}, {}]);
+    for (const c of h.sweepCalls) expect("afterTombstoneId" in c).toBe(false);
+  });
+
+  it("takes the first value of a repeated ?after=", async () => {
+    const h = harness();
+    await call(h.ctx, SWEEP, { request: withQuery({ after: [TOMB, "tomb_bbbbccccddddeeee"] }) });
+    expect(h.sweepCalls).toEqual([{ afterTombstoneId: TOMB }]);
+  });
+
+  it("records the read even when it is clean, with the examined count in the detail", async () => {
+    const h = harness();
+    await call(h.ctx, SWEEP);
+    expect(h.events[0]?.status).toBe("clean");
+    // The count is the claim; "0 finding(s)" alone would not say how much was looked at.
+    expect(h.events[0]?.detail).toBe("412 examined, 0 finding(s)");
+  });
+
+  it("records the sweep's own operation, not the request audit's", async () => {
+    const h = harness();
+    await call(h.ctx, SWEEP);
+    // Two different facts — one sweeps proofs, the other completed requests — and an auditor counting
+    // either must not be counting both.
+    expect(h.events[0]?.operation).toBe(TOMBSTONE_SWEEP_AUDITED_OPERATION);
+    expect(h.events[0]?.operation).not.toBe(DELETION_EVIDENCE_AUDITED_OPERATION);
+  });
+
+  it("records findings with the first one's tombstone, and no request id when it has none", async () => {
+    const h = harness({}, { sweep: sweepPageOf({ examined: 9, findings: [tombstoneFindingOf()] }) });
+    await call(h.ctx, SWEEP);
+    expect(h.events[0]?.status).toBe("findings");
+    expect(h.events[0]?.tombstoneId).toBe(TOMB);
+    // The row these findings are about need not belong to any request, so the event's requestId is a
+    // placeholder rather than a borrowed id.
+    expect(h.events[0]?.requestId).toBe("-");
+    expect(h.events[0]?.detail).toBe("9 examined, 1 finding(s)");
+  });
+
+  it("names the related request when a finding has one", async () => {
+    const finding = tombstoneFindingOf({ reference: "dangling", relatedDeletionRequestId: REQ });
+    const h = harness({}, { sweep: sweepPageOf({ findings: [finding] }) });
+    await call(h.ctx, SWEEP);
+    expect(h.events[0]?.requestId).toBe(REQ);
+  });
+
+  it("records against the reader's own tenant", async () => {
+    const elsewhere = tombstoneFindingOf({ tenantId: "11111111-2222-4333-8444-555555555555" });
+    const h = harness({}, { sweep: sweepPageOf({ findings: [elsewhere] }) });
+    await call(h.ctx, SWEEP);
+    // Not the finding's tenant: a page can span several, and the audit row is about the read.
+    expect(h.events[0]?.tenantId).toBe(TENANT);
+  });
+
+  it("does not fail the sweep when the audit line cannot be written", async () => {
+    const errors: string[] = [];
+    const h = harness({
+      recordAction: async (): Promise<void> => {
+        throw new Error("audit unreachable");
+      },
+      onRecordError: (_e, op) => errors.push(op),
+    });
+    const res = await call(h.ctx, SWEEP);
+    expect(res.status).toBe(200);
+    expect(errors).toEqual([TOMBSTONE_SWEEP_AUDITED_OPERATION]);
   });
 });

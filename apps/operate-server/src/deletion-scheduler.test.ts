@@ -4,6 +4,7 @@ import {
   DeletionScheduler,
   type StrandedReconcilerLike,
   type DeletionRunnerLike,
+  type TombstoneSweepPage,
 } from "./deletion-scheduler.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
@@ -618,5 +619,369 @@ describe("DeletionScheduler — the reverse-direction audit", () => {
     });
     await s.runOnce();
     expect(escalated).toEqual([["evidence_unverified"]]);
+  });
+});
+
+describe("DeletionScheduler — the tombstone sweep (ADR-0327)", () => {
+  const TOMB = "tomb_aaaabbbbccccdddd";
+
+  function pageOf(over: Partial<TombstoneSweepPage> = {}): TombstoneSweepPage {
+    return { examined: 412, findings: [], nextAfterTombstoneId: null, ...over };
+  }
+
+  function sweepFinding(id = TOMB): TombstoneSweepPage["findings"][number] {
+    return {
+      tombstoneId: id,
+      tenantId: "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8",
+      reference: "unreferenced",
+      relatedDeletionRequestId: null,
+      detail: "does not verify: scope_tampered",
+    };
+  }
+
+  /**
+   * A reconciler whose sweep answers a queue of pages, the last repeating — which is what makes the
+   * cursor observable across ticks rather than within one call.
+   */
+  function sweeper(
+    behaviour: { throws?: boolean; pages?: readonly TombstoneSweepPage[] } = {},
+  ): {
+    readonly reconciler: StrandedReconcilerLike;
+    readonly calls: Array<Record<string, unknown>>;
+  } {
+    const calls: Array<Record<string, unknown>> = [];
+    let n = 0;
+    return {
+      calls,
+      reconciler: {
+        reconcileStranded: async () => [],
+        auditCompleted: async () => [],
+        auditTombstones: async (input): Promise<TombstoneSweepPage> => {
+          calls.push({ ...input });
+          if (behaviour.throws === true) throw new Error("a stored tombstone will not parse");
+          const pages = behaviour.pages ?? [pageOf()];
+          const page = pages[Math.min(n, pages.length - 1)] ?? pageOf();
+          n += 1;
+          return page;
+        },
+      },
+    };
+  }
+
+  it("sweeps on an audit tick and not on a tick that is not one", async () => {
+    const sw = sweeper();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: sw.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 2,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    expect(sw.calls).toEqual([]);
+    await s.runOnce();
+    expect(sw.calls).toHaveLength(1);
+  });
+
+  it("never sweeps when no cadence is configured", async () => {
+    const sw = sweeper();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: sw.reconciler,
+      intervalMs: 1000,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    // The sweep rides the audit's cadence, so a deployment opts into both at once or neither.
+    expect(sw.calls).toEqual([]);
+  });
+
+  it("runs after auditCompleted, which is the pass it shares a tick with", async () => {
+    const order: string[] = [];
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: {
+        reconcileStranded: async () => [],
+        auditCompleted: async () => {
+          order.push("auditCompleted");
+          return [];
+        },
+        auditTombstones: async (): Promise<TombstoneSweepPage> => {
+          order.push("sweep");
+          return pageOf();
+        },
+      },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    expect(order).toEqual(["auditCompleted", "sweep"]);
+  });
+
+  it("reports a clean page, unlike onAuditFindings", async () => {
+    const seen: TombstoneSweepPage[] = [];
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: sweeper().reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onTombstoneFindings: (page) => {
+        seen.push(page);
+      },
+    });
+    await s.runOnce();
+    // The examined count *is* the claim: "we verified 412 proofs this lap" cannot be inferred from
+    // the absence of a log line (ADR-0323), so a clean page is news here where findings-only is not.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.examined).toBe(412);
+    expect(seen[0]?.findings).toEqual([]);
+  });
+
+  it("reports the clean page on the very same tick that onAuditFindings stays silent on", async () => {
+    const swept: number[] = [];
+    const audited: unknown[] = [];
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: sweeper().reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onAuditFindings: (f) => {
+        audited.push(f);
+      },
+      onTombstoneFindings: (page) => {
+        swept.push(page.examined);
+      },
+    });
+    await s.runOnce();
+    // Pinned together, and deliberately asymmetric: `auditCompleted` returns findings only, so an
+    // empty array there means "nothing wrong" and is not news, while a sweep's empty findings list
+    // without its count says nothing at all. A later unification of the two callbacks fails here.
+    expect(audited).toEqual([]);
+    expect(swept).toEqual([412]);
+  });
+
+  it("hands the findings through and awaits the callback", async () => {
+    const seen: string[][] = [];
+    let settled = false;
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: sweeper({
+        pages: [
+          pageOf({ examined: 2, findings: [sweepFinding(), sweepFinding("tomb_bbbbccccddddeeee")] }),
+        ],
+      }).reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onTombstoneFindings: async (page) => {
+        await Promise.resolve();
+        seen.push(page.findings.map((f) => f.tombstoneId));
+        settled = true;
+      },
+    });
+    await s.runOnce();
+    expect(settled).toBe(true);
+    expect(seen).toEqual([[TOMB, "tomb_bbbbccccddddeeee"]]);
+  });
+
+  it("advances the cursor to where the last page stopped", async () => {
+    const sw = sweeper({ pages: [pageOf({ nextAfterTombstoneId: TOMB }), pageOf()] });
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: sw.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    // Without this the sweep re-reads page one forever: an audit that looks like it is running while
+    // examining the same rows every tick and never reaching the ones a tamper is hiding in.
+    expect(sw.calls).toEqual([{}, { afterTombstoneId: TOMB }]);
+  });
+
+  it("laps rather than stopping when a page reports the end of the table", async () => {
+    const sw = sweeper({
+      pages: [pageOf({ nextAfterTombstoneId: TOMB }), pageOf({ nextAfterTombstoneId: null })],
+    });
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: sw.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+    });
+    for (let i = 0; i < 3; i += 1) await s.runOnce();
+    // A null cursor is "the end", and the end resets to the beginning — a tombstone tampered with
+    // after the sweep passed it is found on the next lap, and nothing else finds it at all.
+    expect(sw.calls).toEqual([{}, { afterTombstoneId: TOMB }, {}]);
+  });
+
+  it("does not lose its place when a page throws", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let n = 0;
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: {
+        reconcileStranded: async () => [],
+        auditTombstones: async (input): Promise<TombstoneSweepPage> => {
+          calls.push({ ...input });
+          n += 1;
+          if (n === 2) throw new Error("the connection dropped mid-page");
+          return pageOf({ nextAfterTombstoneId: TOMB });
+        },
+      },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onError: () => undefined,
+    });
+    for (let i = 0; i < 3; i += 1) await s.runOnce();
+    // The cursor is assigned after the await, so a failed page is retried from where it started
+    // rather than skipped — a skipped page is a row nothing ever verifies.
+    expect(calls).toEqual([{}, { afterTombstoneId: TOMB }, { afterTombstoneId: TOMB }]);
+  });
+
+  it("is a no-op for a reconciler that has no auditTombstones at all", async () => {
+    let called = 0;
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: { reconcileStranded: async () => [], auditCompleted: async () => [] },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onTombstoneFindings: () => {
+        called += 1;
+      },
+    });
+    // Optional on the mirror, so an older store simply does not get swept — not a throw at the first
+    // audit tick.
+    await expect(s.runOnce()).resolves.toBeUndefined();
+    expect(called).toBe(0);
+  });
+
+  it("is a no-op with a cadence set and no reconciler wired", async () => {
+    let called = 0;
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onTombstoneFindings: () => {
+        called += 1;
+      },
+    });
+    await expect(s.runOnce()).resolves.toBeUndefined();
+    expect(called).toBe(0);
+  });
+
+  it("forwards auditLimit as the page size, and forwards nothing when it is absent", async () => {
+    const withLimit = sweeper();
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: withLimit.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      auditLimit: 7,
+      scheduler: fakeScheduler(),
+    });
+    await s.runOnce();
+    expect(withLimit.calls).toEqual([{ limit: 7 }]);
+
+    const noLimit = sweeper();
+    const t = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: noLimit.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+    });
+    await t.runOnce();
+    // Omitted rather than defaulted here: the page size belongs to the store, which clamps it.
+    expect(noLimit.calls).toEqual([{}]);
+    expect("limit" in (noLimit.calls[0] ?? {})).toBe(false);
+  });
+
+  it("routes a throwing sweep to onError without skipping the run or repair passes", async () => {
+    const errors: unknown[] = [];
+    const ran: string[] = [];
+    const s = new DeletionScheduler({
+      runner: {
+        runDue: async () => {
+          ran.push("runDue");
+          return [];
+        },
+      },
+      reconciler: {
+        reconcileStranded: async () => {
+          ran.push("reconcile");
+          return [];
+        },
+        auditTombstones: async (): Promise<TombstoneSweepPage> => {
+          throw new Error("a stored tombstone will not parse");
+        },
+      },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onError: (e) => errors.push(e),
+    });
+    await expect(s.runOnce()).resolves.toBeUndefined();
+    // It is inside the audit's own `try`, which is why the two passes that destroy and repair data
+    // have already run by the time it throws.
+    expect(ran).toEqual(["runDue", "reconcile"]);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("keeps sweeping on later ticks after one threw", async () => {
+    const errors: unknown[] = [];
+    const sw = sweeper({ throws: true });
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: sw.reconciler,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onError: (e) => errors.push(e),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    expect(sw.calls).toHaveLength(2);
+    expect(errors).toHaveLength(2);
+  });
+
+  it("still sweeps on a tick whose auditCompleted threw", async () => {
+    const sw: Array<Record<string, unknown>> = [];
+    const errors: unknown[] = [];
+    const s = new DeletionScheduler({
+      runner: runner().runner,
+      reconciler: {
+        reconcileStranded: async () => [],
+        auditCompleted: async () => {
+          throw new Error("a completed request's row will not parse");
+        },
+        auditTombstones: async (input): Promise<TombstoneSweepPage> => {
+          sw.push({ ...input });
+          return pageOf();
+        },
+      },
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      onError: (e) => errors.push(e),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    // The two directions get their own `try` (ADR-0327). They are separate facts, and the one most
+    // likely to throw is `auditCompleted` — ADR-0323's whole point is that it re-parses stored rows
+    // and an unparseable row *is* the finding. Sharing a `try` meant a store in exactly that state
+    // had a sweep that silently never ran, while `onError` fired every tick: an audit that looks
+    // like it is running.
+    expect(sw).toHaveLength(2);
+    expect(errors).toHaveLength(2);
   });
 });

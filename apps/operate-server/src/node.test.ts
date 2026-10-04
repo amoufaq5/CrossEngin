@@ -6,7 +6,7 @@ import { parseServeArgs } from "./cli.js";
 import { loadBuiltinPack } from "./manifest-source.js";
 import { parseApiKeySpec } from "./principals.js";
 import { buildOperateHttpServer } from "./server.js";
-import { createNodeRequestListener, needsAuditEmitter, serve, type NodeReqLike, type NodeResLike } from "./node.js";
+import { auditEmitterAvailable, createNodeRequestListener, serve, type NodeReqLike, type NodeResLike } from "./node.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const manifest = await loadBuiltinPack("erp-retail");
@@ -114,13 +114,18 @@ describe("serve — real loopback boot", () => {
   });
 });
 
-describe("needsAuditEmitter", () => {
+describe("auditEmitterAvailable", () => {
   /**
-   * Every flag whose feature writes an audit row. Spelled out so that adding a feature which writes
-   * one, and forgetting the gate, fails here — which is what happened twice (ADR-0288, and then
-   * `--audit-read-routes`, found only by booting the real server).
+   * The flags whose features write an audit row. Kept as a list only to assert that **none of them
+   * matters any more** (ADR-0327).
+   *
+   * `needsAuditEmitter` used to enumerate these and answer false for anything missing, and the
+   * enumeration was wrong three times. The third time got through a per-flag test exactly like the
+   * one below: `--deletion-escalation-config` was in the test's list and **absent from the
+   * predicate**, and the test still passed because the parser turns `--deletion-request-routes` on
+   * alongside it. A hand-maintained list cannot catch a flag missing from both copies of itself.
    */
-  const REQUIRING_ARGS: ReadonlyArray<readonly string[]> = [
+  const AUDIT_WRITING_ARGS: ReadonlyArray<readonly string[]> = [
     ["--ai-design"],
     ["--per-tenant-manifests"],
     ["--design-review"],
@@ -135,21 +140,34 @@ describe("needsAuditEmitter", () => {
 
   const base = ["--pack", "erp-retail", "--port", "0", "--store", "pg"];
 
-  it("is false for a server with none of them", () => {
-    expect(needsAuditEmitter(parseServeArgs(base))).toBe(false);
+  it("is true for a Postgres server with no audit-writing feature at all", () => {
+    // The whole change: an emitter exists because there is a database to write to, not because
+    // somebody remembered to add a flag to a list.
+    expect(auditEmitterAvailable(parseServeArgs(base))).toBe(true);
   });
 
-  it("is true for each flag on its own", () => {
-    for (const args of REQUIRING_ARGS) {
-      expect(needsAuditEmitter(parseServeArgs([...base, ...args])), args.join(" ")).toBe(true);
+  it("is true for each audit-writing flag, by construction rather than by enumeration", () => {
+    for (const args of AUDIT_WRITING_ARGS) {
+      expect(auditEmitterAvailable(parseServeArgs([...base, ...args])), args.join(" ")).toBe(true);
     }
   });
 
-  it("covers every ServeOptions field the predicate reads", () => {
-    // Guards against the predicate quietly losing a branch: each flag must be individually
-    // sufficient, so a condition that dropped one would fail the loop above — and this pins the
-    // count so the loop itself cannot be shortened without a visible edit.
-    expect(REQUIRING_ARGS).toHaveLength(10);
+  it("is false without a Postgres store, which is the only condition that was ever real", () => {
+    const memory = ["--pack", "erp-retail", "--port", "0"];
+    expect(auditEmitterAvailable(parseServeArgs(memory))).toBe(false);
+    // And the CLI refuses the combination outright rather than leaving it to this predicate — a
+    // stronger guarantee than the gate ever gave, and the reason the gate had nothing left to do.
+    expect(() => parseServeArgs([...memory, "--audit-read-routes"])).toThrow(/require a Postgres/);
+  });
+
+  it("does not depend on any flag, so a feature added tomorrow cannot omit itself", () => {
+    // Every flag combination answers the same thing: the store decides. This is the assertion the
+    // old per-flag loop could not make, and the reason the list above is now evidence rather than
+    // a gate.
+    const all = AUDIT_WRITING_ARGS.flatMap((a) => [...a]);
+    expect(auditEmitterAvailable(parseServeArgs([...base, ...all]))).toBe(
+      auditEmitterAvailable(parseServeArgs(base)),
+    );
   });
 });
 

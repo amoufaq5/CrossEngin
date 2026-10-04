@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { IncidentRecord, TimelineEntry } from "@crossengin/incident-response";
 
 import {
   IncidentRevisionConflictError,
+  PAGED_NOTE_MAX_ATTEMPTS,
   PostgresIncidentStore,
 } from "./incident-store.js";
-import { INCIDENT_COLUMN_NAMES } from "./records.js";
+import { INCIDENT_COLUMN_NAMES, incidentRowValues } from "./records.js";
 import {
   EMPTY,
   T0,
@@ -346,5 +348,293 @@ describe("countSince", () => {
   it("returns 0 when the count comes back empty", async () => {
     const conn = mockConnection(undefined, () => EMPTY);
     expect(await new PostgresIncidentStore(conn).countSince(new Date(T0))).toBe(0);
+  });
+});
+
+describe("appendPagedNote", () => {
+  const FACTS = {
+    channels: ["pagerduty_phone", "slack"],
+    delivered: 2,
+    attempted: 3,
+  } as const;
+  const T1 = "2026-09-30T10:05:00.000Z";
+
+  /** A connection that answers the load with `record` and lets the update affect `rowCount` rows. */
+  function loading(
+    record: IncidentRecord,
+    revision = 1,
+    capture?: Captured[],
+    updateRowCount = 1,
+  ) {
+    return mockConnection(capture, (sql) =>
+      sql.includes("SELECT")
+        ? { rows: [incidentRow(record, revision)], rowCount: 1 }
+        : { rows: [], rowCount: updateRowCount },
+    );
+  }
+
+  function appended(capture: Captured[]): TimelineEntry[] {
+    const update = capture.find((c) => c.sql.includes("UPDATE"));
+    const idx = INCIDENT_COLUMN_NAMES.indexOf("timeline");
+    return JSON.parse(String(update?.params?.[idx])) as TimelineEntry[];
+  }
+
+  it("reads the incident, appends one paged entry and writes it back", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    const outcome = await new PostgresIncidentStore(
+      loading(record, 1, capture),
+    ).appendPagedNote(record.id, { facts: FACTS, actorUserId: "system-slo", at: T1 });
+    expect(outcome).toEqual({ recorded: true, reason: null });
+    expect(capture[0]?.sql).toContain("WHERE incident_id = $1");
+    expect(capture[1]?.sql).toContain("UPDATE meta.incidents");
+    const timeline = appended(capture);
+    expect(timeline).toHaveLength(record.timeline.length + 1);
+    expect(timeline[timeline.length - 1]?.kind).toBe("paged");
+  });
+
+  it("writes the message and metadata the contract builds", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, 1, capture)).appendPagedNote(record.id, {
+      facts: { ...FACTS, reference: record.id },
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    const entry = appended(capture).at(-1);
+    expect(entry?.message).toBe("paged 2/3 over pagerduty_phone, slack");
+    expect(entry?.metadata).toEqual({
+      operation: "trigger",
+      channels: ["pagerduty_phone", "slack"],
+      delivered: 2,
+      attempted: 3,
+      reference: record.id,
+    });
+    expect(entry?.actorUserId).toBe("system-slo");
+    expect(entry?.occurredAt).toBe(T1);
+  });
+
+  it("keeps the revision predicate in the UPDATE and advances the revision", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, 4, capture)).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    const update = capture.find((c) => c.sql.includes("UPDATE"));
+    expect(update?.sql).toContain(
+      `WHERE incident_id = $1 AND revision = $${INCIDENT_COLUMN_NAMES.length + 1}`,
+    );
+    expect(update?.params?.[INCIDENT_COLUMN_NAMES.length]).toBe(4);
+    expect(update?.params?.[INCIDENT_COLUMN_NAMES.indexOf("revision")]).toBe(5);
+  });
+
+  it("changes nothing but the timeline and the revision", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, 1, capture)).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    const update = capture.find((c) => c.sql.includes("UPDATE"));
+    const unchanged = incidentRowValues(record, 1, T0);
+    INCIDENT_COLUMN_NAMES.forEach((col, i) => {
+      if (col === "timeline" || col === "revision" || col === "updated_at") return;
+      expect(update?.params?.[i]).toEqual(unchanged[i]);
+    });
+  });
+
+  it("leaves the already-recorded entries byte-identical", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, 1, capture)).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    const timeline = appended(capture);
+    expect(JSON.stringify(timeline[0])).toBe(JSON.stringify(record.timeline[0]));
+  });
+
+  it("reports a missing incident instead of throwing", async () => {
+    // The page has already gone out; raising here would turn a successful escalation into an
+    // error.
+    const conn = mockConnection(undefined, () => EMPTY);
+    const outcome = await new PostgresIncidentStore(conn).appendPagedNote("INC-2026-9999", {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(outcome).toEqual({ recorded: false, reason: "incident_not_found" });
+  });
+
+  it("writes nothing when the incident does not exist", async () => {
+    const capture: Captured[] = [];
+    const conn = mockConnection(capture, () => EMPTY);
+    await new PostgresIncidentStore(conn).appendPagedNote("INC-2026-9999", {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(capture.some((c) => c.sql.includes("UPDATE"))).toBe(false);
+  });
+
+  it("retries a lost revision race and reports a conflict once the attempts run out", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    const outcome = await new PostgresIncidentStore(
+      loading(record, 1, capture, 0),
+    ).appendPagedNote(record.id, { facts: FACTS, actorUserId: "system-slo", at: T1 });
+    expect(outcome).toEqual({ recorded: false, reason: "revision_conflict" });
+    expect(capture.filter((c) => c.sql.includes("UPDATE"))).toHaveLength(
+      PAGED_NOTE_MAX_ATTEMPTS,
+    );
+  });
+
+  it("re-reads the row on each retry rather than re-writing a stale one", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, 1, capture, 0)).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(capture.filter((c) => c.sql.includes("SELECT"))).toHaveLength(
+      PAGED_NOTE_MAX_ATTEMPTS,
+    );
+  });
+
+  it("lands on a retry when the second attempt wins the row", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    let updates = 0;
+    const conn = mockConnection(capture, (sql) => {
+      if (sql.includes("SELECT")) return { rows: [incidentRow(record, 1)], rowCount: 1 };
+      updates += 1;
+      return { rows: [], rowCount: updates === 1 ? 0 : 1 };
+    });
+    const outcome = await new PostgresIncidentStore(conn).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(outcome).toEqual({ recorded: true, reason: null });
+    expect(updates).toBe(2);
+  });
+
+  it("stamps the same instant on every attempt", async () => {
+    // The entry records when the page happened, not when the last retry got through.
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, 1, capture, 0)).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    const stamps = capture
+      .filter((c) => c.sql.includes("UPDATE"))
+      .map((c) => (JSON.parse(String(c.params?.[INCIDENT_COLUMN_NAMES.indexOf("timeline")])) as TimelineEntry[]).at(-1)?.occurredAt);
+    expect(new Set(stamps)).toEqual(new Set([T1]));
+  });
+
+  it("reports the contract's refusal of impossible counts without retrying", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    const outcome = await new PostgresIncidentStore(
+      loading(record, 1, capture),
+    ).appendPagedNote(record.id, {
+      facts: { channels: ["slack"], delivered: 9, attempted: 1 },
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(outcome.recorded).toBe(false);
+    expect(outcome.reason).toMatch(/^note_refused: /);
+    expect(capture.some((c) => c.sql.includes("UPDATE"))).toBe(false);
+  });
+
+  it("reports an unexpected write failure rather than raising it", async () => {
+    const record = declaredIncident();
+    const conn = mockConnection(undefined, (sql) => {
+      if (sql.includes("SELECT")) return { rows: [incidentRow(record, 1)], rowCount: 1 };
+      throw new Error("connection terminated unexpectedly");
+    });
+    const outcome = await new PostgresIncidentStore(conn).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(outcome.recorded).toBe(false);
+    expect(outcome.reason).toBe("write_failed: connection terminated unexpectedly");
+  });
+
+  it("reports an unexpected read failure rather than raising it", async () => {
+    const conn = mockConnection(undefined, () => {
+      throw new Error("relation \"meta.incidents\" does not exist");
+    });
+    const outcome = await new PostgresIncidentStore(conn).appendPagedNote("INC-2026-0007", {
+      facts: FACTS,
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(outcome.recorded).toBe(false);
+    expect(outcome.reason).toMatch(/^read_failed: /);
+  });
+
+  it("records a page on a closed incident", async () => {
+    // A resolve's note arrives after the close-out, so a terminal status must not refuse it.
+    const capture: Captured[] = [];
+    const closed = declaredIncident(
+      {
+        status: "closed",
+        ackedAt: T1,
+        mitigatedAt: T1,
+        resolvedAt: T1,
+        closedAt: T1,
+        rootCause: "pool exhaustion",
+      },
+      "sev3",
+    );
+    const outcome = await new PostgresIncidentStore(
+      loading(closed, 2, capture),
+    ).appendPagedNote(closed.id, {
+      facts: { channels: ["pagerduty_phone"], delivered: 1, attempted: 1, operation: "resolve" },
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(outcome.recorded).toBe(true);
+    expect(appended(capture).at(-1)?.message).toBe("resolved the alert on pagerduty_phone");
+    expect(capture.find((c) => c.sql.includes("UPDATE"))?.params?.[
+      INCIDENT_COLUMN_NAMES.indexOf("status")
+    ]).toBe("closed");
+  });
+
+  it("records an unroutable page, which reached nobody over no channel", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, 1, capture)).appendPagedNote(record.id, {
+      facts: { channels: [], delivered: 0, attempted: 0 },
+      actorUserId: "system-slo",
+      at: T1,
+    });
+    expect(appended(capture).at(-1)?.message).toBe(
+      "PAGED NOBODY — no page channel was attempted",
+    );
+  });
+
+  it("falls back to the current instant when none is given", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, 1, capture)).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+    });
+    const stamp = appended(capture).at(-1)?.occurredAt ?? "";
+    expect(Number.isNaN(new Date(stamp).getTime())).toBe(false);
+  });
+
+  it("retries at most three times, so a page note cannot loop", async () => {
+    expect(PAGED_NOTE_MAX_ATTEMPTS).toBe(3);
   });
 });
