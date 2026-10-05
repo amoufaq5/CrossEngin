@@ -104,6 +104,10 @@ function voiceSkips(env: NodeJS.ProcessEnv): readonly string[] {
 const VOICE: NodeJS.ProcessEnv = {
   ...TWILIO,
   TWILIO_VOICE_FROM_NUMBER: "+15555550199",
+  // A fully configured deployment, including the status callback — `twilio_voice` is a real bounce
+  // source since ADR-0329, so omitting it is a warned half-configuration rather than the baseline.
+  // The test that exercises the warning drops this key explicitly.
+  TWILIO_VOICE_STATUS_CALLBACK_URL: "https://api.example.test/v1/notifications/bounces/twilio_voice",
 };
 
 /** Records where requests go and what they carried, for the wiring that is only observable there. */
@@ -844,12 +848,23 @@ describe("voice from the environment (ADR-0328)", () => {
    * an invalid address — so a carrier failure on a call produces no suppression whether or not a
    * callback is configured, and warning about its absence would promise handling that does not exist.
    */
-  it("does not warn about a missing voice status callback", () => {
-    const { registry, report } = buildSenderRegistryFromEnv({ ...VOICE });
+  it("warns about a missing voice status callback, and names the voice path segment", () => {
+    // Inverted by ADR-0329. ADR-0328 deliberately did *not* warn here, because ADR-0310 had given
+    // voice no bounce-webhook source — warning would have promised handling that did not exist.
+    // `twilio_voice` is a real source now, so the silence became the misleading thing: a channel
+    // that registers at boot, reads as healthy, and can never suppress a dead number.
+    const withoutCallback = { ...VOICE };
+    delete withoutCallback.TWILIO_VOICE_STATUS_CALLBACK_URL;
+    const { registry, report } = buildSenderRegistryFromEnv(withoutCallback);
     expect(registry.for("voice_call")).not.toBeNull();
-    expect(report.skipped.some((s) => s.includes("TWILIO_VOICE_STATUS_CALLBACK_URL"))).toBe(
-      false,
-    );
+    const warning = report.skipped.find((s) => s.includes("TWILIO_VOICE_STATUS_CALLBACK_URL"));
+    expect(warning).toBeDefined();
+    // The path segment, not just the route: the source is declared by the URL a deployment
+    // configures rather than sniffed from the payload, so posting a call callback to `/twilio`
+    // would have it parsed as a *messaging* callback.
+    expect(warning).toContain("/v1/notifications/bounces/twilio_voice");
+    // And it is a warning, not a skip: the sender is still registered.
+    expect(registry.for("voice_call")).not.toBeNull();
   });
 
   it("accepts a status callback and asks Twilio for the answered event", async () => {
@@ -900,12 +915,14 @@ describe("voice from the environment (ADR-0328)", () => {
    * SES and FCM blocks already have, and diverging for one channel would be worse than either rule.
    */
   it("treats a whitespace-only caller id as unset rather than as half-configured", () => {
-    const { registry } = buildSenderRegistryFromEnv({
-      ...VOICE,
-      TWILIO_VOICE_FROM_NUMBER: "   ",
-    });
+    // Built from the SMS base rather than from `VOICE`: `VOICE` now carries a status callback URL
+    // (ADR-0329), which is itself a `TWILIO_VOICE_*` variable, so a blank caller id beside it is a
+    // genuine half-configuration — which the very next test is about. The claim here is narrower
+    // and still worth pinning: whitespace alone, with nothing else declared, is silence.
+    const blank = { ...TWILIO, TWILIO_VOICE_FROM_NUMBER: "   " };
+    const { registry } = buildSenderRegistryFromEnv(blank);
     expect(registry.for("voice_call")).toBeNull();
-    expect(voiceSkips({ ...VOICE, TWILIO_VOICE_FROM_NUMBER: "   " })).toEqual([]);
+    expect(voiceSkips(blank)).toEqual([]);
   });
 
   it("warns when a blank caller id sits beside another voice variable", () => {

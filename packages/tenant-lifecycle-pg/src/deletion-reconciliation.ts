@@ -129,6 +129,35 @@ export function verifyStoredEvidence(stored: StoredTombstone): EvidenceCheck {
   return { ok: defects.length === 0, defects, matchesAttestations };
 }
 
+/**
+ * Whether a stored tombstone is worth reporting, and the sentence that says why.
+ *
+ * **One rule, one place.** The sweep's `continue` and the targeted `verifyTombstone` have to agree
+ * exactly, because the second is what a caller holds up to close an episode the first opened — a
+ * targeted check that was stricter would never close anything, and one that was laxer would close an
+ * episode whose finding still stands. So the condition lives here and both read it.
+ *
+ * A `dangling` reference is not an `EvidenceDefect`: the proof itself is intact and the row it names
+ * is gone. It is reported all the same, because a request row deleted out from under a proof is the
+ * one thing no other direction of the audit can see.
+ */
+export type TombstoneStanding =
+  | { readonly ok: true; readonly detail: null }
+  | { readonly ok: false; readonly detail: string };
+
+export function tombstoneStanding(
+  reference: TombstoneReferenceState,
+  relatedDeletionRequestId: string | null,
+  check: EvidenceCheck,
+): TombstoneStanding {
+  const parts: string[] = [];
+  if (!check.ok) parts.push(`does not verify: ${check.defects.join(", ")}`);
+  if (reference === "dangling") {
+    parts.push(`names deletion request ${relatedDeletionRequestId ?? ""}, which does not exist`);
+  }
+  return parts.length === 0 ? { ok: true, detail: null } : { ok: false, detail: parts.join("; ") };
+}
+
 /** Verdicts whose evidence stands on its own, so applying them needs no operator judgement. */
 export function isConclusive(verdict: ReconciliationVerdict): boolean {
   return verdict === "completed_by_evidence";
@@ -459,14 +488,7 @@ export class DeletionReconciler {
     const findings: TombstoneAudit[] = [];
     for (const stored of page) {
       const named = stored.record.relatedDeletionRequestId ?? null;
-      // At most one lookup per row, and none for an unreferenced one — the majority case this
-      // direction exists for.
-      const reference: TombstoneReferenceState =
-        named === null
-          ? "unreferenced"
-          : (await this.opts.requests.read(named)) === null
-            ? "dangling"
-            : "referenced";
+      const reference = await this.referenceStateOf(named);
       const check = verifyStoredEvidence(stored);
       // Every defect is reported, **including** on a tombstone a request names, rather than leaving
       // the referenced ones to `auditCompleted`. Suppressing them would be wrong twice over: that
@@ -474,19 +496,15 @@ export class DeletionReconciler {
       // whose request sits `in_progress`, `rejected` or `deferred` would fall through both; and it
       // would make this sweep's coverage depend on another sweep's filter. A duplicate finding is
       // noise a caller can drop on the tombstone id — a missed one is not recoverable at all.
-      if (check.ok && reference !== "dangling") continue;
-      const parts: string[] = [];
-      if (!check.ok) parts.push(`does not verify: ${check.defects.join(", ")}`);
-      if (reference === "dangling") {
-        parts.push(`names deletion request ${named ?? ""}, which does not exist`);
-      }
+      const standing = tombstoneStanding(reference, named, check);
+      if (standing.ok) continue;
       findings.push({
         tombstoneId: stored.record.id,
         tenantId: stored.record.tenantId,
         reference,
         relatedDeletionRequestId: named,
         check,
-        detail: parts.join("; "),
+        detail: standing.detail,
       });
     }
     const last = page[page.length - 1];
@@ -499,6 +517,70 @@ export class DeletionReconciler {
       // A page shorter than the limit is the end of the table, not a boundary — a cursor here would
       // make the caller ask again for nothing, forever.
       nextAfterTombstoneId: page.length < limit || last === undefined ? null : last.record.id,
+    };
+  }
+
+  /**
+   * How a tombstone is reached. At most one lookup, and none for an unreferenced one — the majority
+   * case the sweep exists for.
+   */
+  private async referenceStateOf(
+    relatedDeletionRequestId: string | null,
+  ): Promise<TombstoneReferenceState> {
+    if (relatedDeletionRequestId === null) return "unreferenced";
+    return (await this.opts.requests.read(relatedDeletionRequestId)) === null
+      ? "dangling"
+      : "referenced";
+  }
+
+  /**
+   * One tombstone, asked about by id: does it exist, does it stand up **now**, and how is it reached.
+   *
+   * The sweep cannot answer this. It covers one page per tick and laps, so a page that came back
+   * clean says nothing about any particular row — the row may simply not have been on it. That is why
+   * ADR-0328 left `onTombstoneResolved` without a caller: closing an escalated episode needs evidence
+   * about *that* tombstone, and the only thing a clean page establishes is a count.
+   *
+   * **What a caller is entitled to conclude.** On `verified`: this row exists and the sweep would
+   * report nothing for it, so an episode opened against this tombstone may be closed — this is the
+   * proof `onTombstoneResolved` asks for. On `unverified`: the finding still stands, with `check` and
+   * `reference` saying which of the two reasons it is. On `absent`: **nothing may be closed**. A
+   * tombstone that is gone is not a tombstone that verifies; it is the Article 17 proof itself having
+   * been deleted, which is a worse fact than a tampered scope and the one a naive "it no longer
+   * appears in the findings" check would read as recovery.
+   *
+   * A caller is **not** entitled to conclude anything about the tenant's data from any of the three:
+   * this reads the proof, not what the proof is about.
+   *
+   * Writes nothing, like its sibling. ADR-0323's rule is that `evidence_unverified` is a verdict
+   * nothing may apply; a lookup by id has even less standing than a sweep, because a caller chose the
+   * row.
+   */
+  async verifyTombstone(tombstoneId: string): Promise<TombstoneVerification> {
+    const stored = await this.opts.tombstones.read(tombstoneId);
+    if (stored === null) {
+      return {
+        tombstoneId,
+        outcome: "absent",
+        tenantId: null,
+        reference: null,
+        relatedDeletionRequestId: null,
+        check: null,
+        detail: "no tombstone with this id is stored",
+      };
+    }
+    const named = stored.record.relatedDeletionRequestId ?? null;
+    const reference = await this.referenceStateOf(named);
+    const check = verifyStoredEvidence(stored);
+    const standing = tombstoneStanding(reference, named, check);
+    return {
+      tombstoneId: stored.record.id,
+      outcome: standing.ok ? "verified" : "unverified",
+      tenantId: stored.record.tenantId,
+      reference,
+      relatedDeletionRequestId: named,
+      check,
+      detail: standing.detail,
     };
   }
 
@@ -560,6 +642,41 @@ export interface TombstoneAuditPage {
   readonly findings: readonly TombstoneAudit[];
   /** The cursor for the next page, or `null` when the sweep reached the end of the table. */
   readonly nextAfterTombstoneId: string | null;
+}
+
+/**
+ * What `verifyTombstone` can answer. Three outcomes, not two, and the third is the point.
+ *
+ * `absent` is a fact of its own: a proof that has been deleted is neither verified nor unverified,
+ * and folding it into either would let a caller close an episode because the row it was about is no
+ * longer there to fail. A row that cannot be found is the strongest finding this module has.
+ */
+export const TOMBSTONE_VERIFICATION_OUTCOMES = [
+  /** No row holds this id. Closes nothing; the proof is gone. */
+  "absent",
+  /** Stored, and the sweep would report nothing for it. The only outcome that closes an episode. */
+  "verified",
+  /** Stored, and the sweep's finding still stands — see `check` and `reference` for which. */
+  "unverified",
+] as const;
+export type TombstoneVerificationOutcome = (typeof TOMBSTONE_VERIFICATION_OUTCOMES)[number];
+
+/** One targeted verification. `tenantId`, `reference` and `check` are null exactly when `absent`. */
+export interface TombstoneVerification {
+  /** The id asked about, which is the record's own id whenever one was found. */
+  readonly tombstoneId: string;
+  readonly outcome: TombstoneVerificationOutcome;
+  readonly tenantId: string | null;
+  /**
+   * Carried rather than left for the caller to work out, because an episode's key depends on it
+   * (ADR-0328): a referenced tombstone's episode is keyed on the **request** and an unreferenced
+   * one's on the tombstone, so a caller that guessed would close the wrong episode or none.
+   */
+  readonly reference: TombstoneReferenceState | null;
+  readonly relatedDeletionRequestId: string | null;
+  readonly check: EvidenceCheck | null;
+  /** Null exactly when `verified` — there is nothing to say about a row that stands up. */
+  readonly detail: string | null;
 }
 
 /** Re-exported so a caller need not reach into the tombstone module for the one type it reads. */

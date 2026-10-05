@@ -31,6 +31,18 @@ const ATTESTATION: DeletionAttestation = {
   attestedAt: AT,
 };
 
+/**
+ * The second performed subsystem's report (ADR-0329). `nothing_to_erase` so it composes nothing
+ * into the scope — every scope assertion in this file is about `tenant_schema`, and the record has
+ * to carry a `shared_tables` attestation now because the contract refuses declaring it absent.
+ */
+const SHARED_ATTESTATION: DeletionAttestation = {
+  subsystem: "shared_tables",
+  outcome: "nothing_to_erase",
+  attestedBy: "operate-server/shared-table-erasure",
+  attestedAt: AT,
+};
+
 /** A real record, assembled the way production does, so the hashes are genuine. */
 function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
   const out = assembleTombstone({
@@ -41,8 +53,9 @@ function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
     executedBy: "alice@example.test",
     approvedBy: "bob@example.test",
     anchors: [{ kind: "rfc3161_timestamp", reference: "caller-chose-this", anchoredAt: AT }],
-    capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
-    attestations: [ATTESTATION],
+    // `shared_tables` erases and attests (ADR-0329); the contract refuses declaring it absent.
+    capabilities: { tenant_schema: "erases", shared_tables: "erases", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
+    attestations: [ATTESTATION, SHARED_ATTESTATION],
   });
   if (!out.ok) throw new Error(`fixture failed: ${JSON.stringify(out.refusals)}`);
   return { ...out.record, ...over };
@@ -103,6 +116,16 @@ function rowOf(record: TombstoneRecord, over: Record<string, unknown> = {}): Rec
     retained_data_reference: null,
     invalidation_of_prior_tombstone_id: null,
     attestations: JSON.stringify([ATTESTATION]),
+    // ADR-0329. Omitting these two is not a shortcut: the version selects the domain tag the digest
+    // was computed under, so a v2 record round-tripped through a row that drops them reads back as
+    // v1, recomputes the v1 digest, and `verify` reports `contentManifestOk: false` on a proof that
+    // is in fact correct. That is a forgery introduced by the *read*, and it is the one alarm the
+    // forensic chain structurally cannot raise (ADR-0323) — so the fake row carries them.
+    proof_version: record.proofVersion,
+    capability_declaration:
+      record.capabilityDeclaration === undefined
+        ? null
+        : JSON.stringify(record.capabilityDeclaration),
     chain_entry_hash: ENTRY_HASH,
     chain_sequence_number: 7,
     ...over,
@@ -114,7 +137,10 @@ describe("the column list", () => {
     expect(TOMBSTONE_COLUMNS).toContain("attestations");
     expect(TOMBSTONE_COLUMNS).toContain("chain_entry_hash");
     expect(TOMBSTONE_COLUMNS).toContain("chain_sequence_number");
-    expect(TOMBSTONE_COLUMNS).toHaveLength(18);
+    // ADR-0329: the proof version and the declaration it signs.
+    expect(TOMBSTONE_COLUMNS).toContain("proof_version");
+    expect(TOMBSTONE_COLUMNS).toContain("capability_declaration");
+    expect(TOMBSTONE_COLUMNS).toHaveLength(20);
   });
 
   it("anchors as a deletion_event", () => {
@@ -503,6 +529,46 @@ describe("verify", () => {
       anchored: true,
       matchesAttestations: true,
     });
+  });
+
+  it("throws rather than downgrading a v2 row relabelled v1 with its declaration intact", async () => {
+    // ADR-0329. The contract pairs the two fields in both directions, so this row describes no
+    // coherent version at all — and `rowToStoredTombstone` throws rather than answering, which is
+    // ADR-0289's rule: a row the contract cannot represent is a finding, not a shorter answer.
+    const record = recordOf();
+    expect(record.proofVersion).toBe("v2");
+    const { conn, anchorer } = fakePg([rowOf(record, { proof_version: "v1" })]);
+    await expect(new PostgresTombstoneStore(conn, anchorer).verify(record.id)).rejects.toThrow(
+      /outside the signed bytes/,
+    );
+  });
+
+  it("reports a v2 proof tampered if both new columns are dropped on the way back", async () => {
+    // The real shape of the hazard, and a regression guard rather than a hypothetical: this is what
+    // every read did before the two columns existed. A v2 record whose row carries neither field
+    // parses cleanly as a v1 record, the verifier recomputes the digest under the v1 domain tag,
+    // and an **honest** proof is reported tampered — which escalates a `sev1` about a falsified
+    // Article 17 proof that was never falsified, the one alarm the forensic chain structurally
+    // cannot raise or refute (ADR-0323). The assertion is on the failure deliberately: a test that
+    // only walks the happy path goes green again the moment a column leaves the SELECT list.
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([
+      rowOf(record, { proof_version: "v1", capability_declaration: null }),
+    ]);
+    const out = await new PostgresTombstoneStore(conn, anchorer).verify(record.id);
+    expect(out.contentManifestOk).toBe(false);
+    // And `proofSha256` still checks out, which is why nothing upstream catches it: the proof
+    // commits to the content-manifest digest, not to the version that produced it.
+    expect(out.proofOk).toBe(true);
+  });
+
+  it("round-trips a v2 proof through the row and verifies clean", async () => {
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([rowOf(record)]);
+    const stored = await new PostgresTombstoneStore(conn, anchorer).read(record.id);
+    expect(stored?.record.proofVersion).toBe("v2");
+    expect(stored?.record.capabilityDeclaration).toEqual(record.capabilityDeclaration);
+    expect(stored?.record.contentManifestSha256).toBe(record.contentManifestSha256);
   });
 
   it("says null rather than false when there is no evidence to check against", async () => {

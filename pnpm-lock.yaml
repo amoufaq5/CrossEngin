@@ -2431,6 +2431,9 @@ importers:
       '@crossengin/forensics-pg':
         specifier: workspace:*
         version: link:../forensics-pg
+      '@crossengin/kernel':
+        specifier: workspace:*
+        version: link:../kernel
       '@crossengin/kernel-pg':
         specifier: workspace:*
         version: link:../kernel-pg

@@ -5,6 +5,7 @@ import { populateTombstoneHashes, verifyTombstoneHashes } from "./tombstone-proo
 import {
   DeletionScopeSchema,
   TombstoneRecordSchema,
+  asCapabilityDeclaration,
   type DeletionScope,
   type TombstoneAnchor,
   type TombstoneKind,
@@ -145,6 +146,23 @@ export const DeletionCapabilitiesSchema = z
         message:
           "tenant_schema cannot be 'absent': every deployment has one and the deletion pipeline" +
           " erases and attests it unconditionally",
+      });
+    }
+    if (v.shared_tables === "absent") {
+      // ADR-0329 made this the second performed subsystem, and the rule is `tenant_schema`'s for
+      // the same reason: every deployment has a `meta` schema, 112 of its tables carry a
+      // `tenant_id`, and `eraseSharedTablesWithin` erases and attests them unconditionally. A
+      // declaration calling it absent is a configuration error, not a deployment shape.
+      //
+      // The refusal belongs **here** and not only in the pipeline, which is where it was first
+      // enforced: a disposition the pipeline will reject is one a deployment should learn about at
+      // boot, from the flag that declares it, rather than from the first tenant deletion it tries.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["shared_tables"],
+        message:
+          "shared_tables cannot be 'absent': the platform's own tenant-scoped tables always exist" +
+          " and the deletion pipeline erases and attests them unconditionally",
       });
     }
   });
@@ -434,11 +452,13 @@ export type TombstoneAssembly =
        * The declaration the scope was derived from, when there was one — present iff `capabilities`
        * was supplied, so its absence means "named per call" rather than "nothing declared absent".
        *
-       * This is the smallest honest way to carry a declared absence out of the assembler: a reader
-       * can ask `absentSubsystemsFor(declaration)` and distinguish "this deployment has no object
-       * storage" from "nobody asked". It is deliberately *beside* the record and not in it —
-       * `TombstoneRecordSchema` and the content manifest both live in files this change does not own,
-       * and putting it inside the signed bytes is a change to what a proof commits to.
+       * Since ADR-0329 the declaration is also **in** the record, inside the v2 signed bytes, so
+       * this field is a convenience rather than the only way to read it: `record.proofVersion` is
+       * `"v2"` and `readDeclaredAbsences(record)` answers from the proof itself. It is kept because
+       * a caller that supplied `capabilities` and wants them back should not have to know which
+       * proof version the assembler chose, and because the `requiredSubsystems` path still emits v1
+       * and so has no declaration in its bytes at all — there, the absence of this field and the
+       * absence from the proof mean the same thing, which is the honest reading.
        */
       readonly declaration?: DeletionCapabilities;
     }
@@ -614,6 +634,24 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
         }
       : {}),
     invalidationOfPriorTombstoneId: input.invalidationOfPriorTombstoneId ?? null,
+    // The declaration goes **inside the signed bytes** (ADR-0329), which is what makes a declared
+    // `absent` part of the claim rather than a note beside it. ADR-0328 left this open for a reason
+    // worth restating: the figures in a scope are composed from attestations, so a subsystem that
+    // attests is covered by the proof — but a subsystem declared `absent` attests *nothing*, and
+    // under v1 the digest could not tell "this deployment has no object storage" from "nobody
+    // asked", which is ADR-0317's original defect surviving one level up.
+    //
+    // It is a **version**, not an added field, because `crossengin.tombstone.content.v1` bytes are
+    // what every stored digest commits to: appending to them in place would stop every existing
+    // tombstone verifying. So the capabilities path emits `v2` and the legacy `requiredSubsystems`
+    // path stays `v1` — and the schema refuses the two mixed in either direction, so a relabelling
+    // tamper cannot pass itself off as an older record.
+    ...(declaration !== undefined
+      ? {
+          proofVersion: "v2" as const,
+          capabilityDeclaration: asCapabilityDeclaration(declaration),
+        }
+      : {}),
   };
 
   const validated = TombstoneRecordSchema.safeParse(populateTombstoneHashes(candidate));

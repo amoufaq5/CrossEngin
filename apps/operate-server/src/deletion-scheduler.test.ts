@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_SWEEP_STALL_ATTEMPTS,
   DeletionScheduler,
+  SWEEP_STALL_KINDS,
   type StrandedReconcilerLike,
   type DeletionRunnerLike,
   type TombstoneSweepPage,
+  type TombstoneSweepStall,
 } from "./deletion-scheduler.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
@@ -1059,6 +1062,9 @@ describe("DeletionScheduler — lap accounting (ADR-0328)", () => {
       pagesAdvanced: 0,
       pagesSwept: 0,
       lastAdvanceAt: null,
+      // Null, and null for the same reason an untouched sweep makes no claim: nothing has been
+      // attempted, so an absence of motion says nothing yet (ADR-0329).
+      stall: null,
     });
   });
 
@@ -1385,5 +1391,346 @@ describe("DeletionScheduler — lap accounting (ADR-0328)", () => {
     // A `limit` that resolves to 0 laps constantly over nothing. The counters do not hide it: laps
     // climb while `examinedLastLap` stays 0, which reads as "covering no rows" rather than as health.
     expect(s.sweepProgress()).toMatchObject({ lapsCompleted: 4, examinedLastLap: 0 });
+  });
+});
+
+describe("DeletionScheduler — a sweep that says it stalled (ADR-0329)", () => {
+  const TOMB = "tomb_aaaabbbbccccdddd";
+  const NEXT = "tomb_bbbbccccddddeeee";
+
+  function pageOf(over: Partial<TombstoneSweepPage> = {}): TombstoneSweepPage {
+    return { examined: 10, findings: [], nextAfterTombstoneId: null, ...over };
+  }
+
+  /** A page, or a page that never arrives — the two shapes the stall exists to tell apart. */
+  type Step = TombstoneSweepPage | "throws";
+
+  /** Steps in order, the last repeating, so a condition can be made to persist across ticks. */
+  function sweeper(steps: readonly Step[]): StrandedReconcilerLike {
+    let n = 0;
+    return {
+      reconcileStranded: async () => [],
+      auditTombstones: async (): Promise<TombstoneSweepPage> => {
+        const step = steps[Math.min(n, steps.length - 1)] ?? pageOf();
+        n += 1;
+        if (step === "throws") throw new Error("the connection dropped mid-page");
+        return step;
+      },
+    };
+  }
+
+  function build(
+    over: Partial<ConstructorParameters<typeof DeletionScheduler>[0]> = {},
+  ): DeletionScheduler {
+    return new DeletionScheduler({
+      runner: runner().runner,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      clock: (): Date => new Date("2026-10-04T00:00:00.000Z"),
+      onError: () => undefined,
+      ...over,
+    });
+  }
+
+  async function tick(s: DeletionScheduler, times: number): Promise<void> {
+    for (let i = 0; i < times; i += 1) await s.runOnce();
+  }
+
+  it("names the two shapes and the attempts it takes to be sure", () => {
+    // The remedies share nothing: `no_pages` is a store or a connection and the exception is on
+    // `onError`; `pinned_cursor` is the table, and the row after the cursor is the suspect.
+    expect(SWEEP_STALL_KINDS).toEqual(["no_pages", "pinned_cursor"]);
+    expect(DEFAULT_SWEEP_STALL_ATTEMPTS).toBe(3);
+  });
+
+  it("says nothing until enough attempts have failed to advance", async () => {
+    const s = build({ reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]) });
+    // Page one advances (null -> TOMB); pages two and three are the same rows over again.
+    await tick(s, 3);
+    expect(s.sweepProgress().pagesAdvanced).toBe(1);
+    // Two non-advancing attempts is a blip, and the sweep is designed to retry a failed page from
+    // the same place — an alarm on the blip is one an operator mutes.
+    expect(s.sweepProgress().stall).toBeNull();
+  });
+
+  it("concludes a pinned cursor once the condition is standing", async () => {
+    const s = build({ reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]) });
+    await tick(s, 4);
+    const stall = s.sweepProgress().stall;
+    expect(stall?.kind).toBe("pinned_cursor");
+    expect(stall?.attemptsWithoutAdvance).toBe(3);
+    // Pages *are* arriving, which is the whole distinction: three came back and covered nothing new.
+    expect(stall?.pagesWithoutAdvance).toBe(3);
+    expect(stall?.cursor).toBe(TOMB);
+    expect(stall?.detail).toContain(TOMB);
+  });
+
+  it("concludes no pages when every attempt throws", async () => {
+    const s = build({ reconciler: sweeper(["throws"]) });
+    await tick(s, 3);
+    const stall = s.sweepProgress().stall;
+    expect(stall?.kind).toBe("no_pages");
+    // Counted before the await, so an attempt that threw is still an attempt — a counter that moved
+    // only on success would be silent for exactly the failure it exists to report.
+    expect(stall?.attemptsWithoutAdvance).toBe(3);
+    expect(stall?.pagesWithoutAdvance).toBe(0);
+    expect(stall?.lastAdvanceAt).toBeNull();
+    expect(stall?.detail).toContain("no stored Article 17 proof is being verified");
+  });
+
+  it("calls a mixture of throws and pinned pages a pinned cursor", async () => {
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        "throws",
+        pageOf({ nextAfterTombstoneId: TOMB }),
+      ]),
+    });
+    await tick(s, 4);
+    const stall = s.sweepProgress().stall;
+    // Pages are coming back, so the store is reachable and the remedy is the table — the opposite
+    // message from `no_pages`, on a tick that also threw.
+    expect(stall?.kind).toBe("pinned_cursor");
+    expect(stall?.pagesWithoutAdvance).toBe(2);
+    expect(stall?.attemptsWithoutAdvance).toBe(3);
+  });
+
+  it("never reports an empty tombstone table as stalled", async () => {
+    const s = build({ reconciler: sweeper([pageOf({ examined: 0 })]) });
+    await tick(s, 10);
+    // An empty table laps every tick with a null cursor on both sides. A cursor-comparison test
+    // would call this stalled on every deployment that has never deleted a tenant — and an alarm
+    // that cries wolf there costs the real one.
+    expect(s.sweepProgress()).toMatchObject({ lapsCompleted: 10, stall: null });
+  });
+
+  it("never reports a single-page table as stalled", async () => {
+    const s = build({ reconciler: sweeper([pageOf({ examined: 7 })]) });
+    await tick(s, 10);
+    // The same shape with rows in it: the whole table is verified every tick, which is the healthiest
+    // a sweep gets. The end of the table counts as motion (ADR-0328), which is what makes this work.
+    expect(s.sweepProgress()).toMatchObject({ examinedLastLap: 7, pagesAdvanced: 10, stall: null });
+  });
+
+  it("never reports a deployment whose reconciler has no sweep", async () => {
+    let called = 0;
+    const s = build({
+      reconciler: { reconcileStranded: async () => [], auditCompleted: async () => [] },
+      onSweepStall: () => {
+        called += 1;
+      },
+    });
+    await tick(s, 10);
+    // There is no sweep to stall. That the deployment has none is a configuration fact, visible at
+    // boot, and claiming a stall over it would fire on every reconciler that predates ADR-0327.
+    expect(s.sweepProgress().stall).toBeNull();
+    expect(called).toBe(0);
+  });
+
+  it("never reports a deployment with no audit cadence", async () => {
+    const s = build({
+      reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]),
+      auditEveryTicks: 0,
+    });
+    await tick(s, 10);
+    // The sweep rides the audit's cadence, so this deployment opted out of both. Nothing was ever
+    // attempted, and an absence of motion says nothing about a sweep that never ran.
+    expect(s.sweepProgress()).toMatchObject({ pagesSwept: 0, stall: null });
+  });
+
+  it("stops being stalled the moment a page moves the position again", async () => {
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+      ]),
+    });
+    await tick(s, 4);
+    expect(s.sweepProgress().stall?.kind).toBe("pinned_cursor");
+    await s.runOnce();
+    // Motion is what clears it, and both counters reset together — a counter left standing would
+    // keep the conclusion up over a sweep that has recovered.
+    expect(s.sweepProgress().stall).toBeNull();
+    expect(s.sweepProgress().cursor).toBe(NEXT);
+  });
+
+  it("counts attempts in audit ticks, not in ticks", async () => {
+    const s = build({
+      reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]),
+      auditEveryTicks: 3,
+    });
+    await tick(s, 9);
+    // Three sweeps in nine ticks, of which the first advanced. A figure in ticks or milliseconds
+    // would have to be read against `auditEveryTicks` to mean anything.
+    expect(s.sweepProgress().pagesSwept).toBe(3);
+    expect(s.sweepProgress().stall).toBeNull();
+    await tick(s, 3);
+    expect(s.sweepProgress().stall?.attemptsWithoutAdvance).toBe(3);
+  });
+
+  it("hands the conclusion to onSweepStall and awaits it", async () => {
+    const seen: TombstoneSweepStall[] = [];
+    let settled = false;
+    const s = build({
+      reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]),
+      onSweepStall: async (stall) => {
+        await Promise.resolve();
+        seen.push(stall);
+        settled = true;
+      },
+    });
+    await tick(s, 4);
+    expect(settled).toBe(true);
+    expect(seen.map((x) => x.kind)).toEqual(["pinned_cursor"]);
+  });
+
+  it("reports the no-pages stall even though no page arrived to report it with", async () => {
+    const stalls: TombstoneSweepStall[] = [];
+    const findings: number[] = [];
+    const s = build({
+      reconciler: sweeper(["throws"]),
+      onTombstoneFindings: (page) => {
+        findings.push(page.examined);
+      },
+      onSweepStall: (stall) => {
+        stalls.push(stall);
+      },
+    });
+    await tick(s, 3);
+    // The half of the failure that matters most never reaches `onTombstoneFindings` at all: a
+    // throwing sweep has no page to hand it. Before the sweep got its own `try` the stall check sat
+    // behind the throw, so the one surface that could say "no proof is being verified" was skipped
+    // on precisely the ticks it was true.
+    expect(findings).toEqual([]);
+    expect(stalls).toHaveLength(1);
+    expect(stalls[0]?.kind).toBe("no_pages");
+  });
+
+  it("keeps reporting while the condition stands, with a growing figure", async () => {
+    const stalls: number[] = [];
+    const s = build({
+      reconciler: sweeper(["throws"]),
+      onSweepStall: (stall) => {
+        stalls.push(stall.attemptsWithoutAdvance);
+      },
+    });
+    await tick(s, 6);
+    // A stall is a standing condition, not an event. Announced once it would read as resolved by the
+    // next morning; the growing figure is what lets a sink show it hardening rather than repeat one
+    // sentence, and deduping belongs to the sink, as it already does for the sweep's findings.
+    expect(stalls).toEqual([3, 4, 5, 6]);
+  });
+
+  it("does not report before the threshold", async () => {
+    const stalls: TombstoneSweepStall[] = [];
+    const s = build({
+      reconciler: sweeper(["throws"]),
+      onSweepStall: (stall) => {
+        stalls.push(stall);
+      },
+    });
+    await tick(s, 2);
+    expect(stalls).toEqual([]);
+  });
+
+  it("takes a configured threshold", async () => {
+    const s = build({
+      reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]),
+      stallAfterAttempts: 1,
+    });
+    await tick(s, 2);
+    expect(s.sweepProgress().stall?.attemptsWithoutAdvance).toBe(1);
+  });
+
+  it("reads a malformed threshold as the default rather than as off", async () => {
+    const s = build({
+      reconciler: sweeper(["throws"]),
+      stallAfterAttempts: 0,
+    });
+    await tick(s, 2);
+    expect(s.sweepProgress().stall).toBeNull();
+    await s.runOnce();
+    // The opposite of `auditEveryTicks`, deliberately: there, off is the status quo and the surprise
+    // is an expensive pass every tick. Here, off is exactly the silence ADR-0328 named, so a
+    // malformed flag must not buy it.
+    expect(s.sweepProgress().stall?.attemptsWithoutAdvance).toBe(3);
+  });
+
+  it("gives the callback the same conclusion sweepProgress() reports", async () => {
+    const stalls: TombstoneSweepStall[] = [];
+    const s = build({
+      reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]),
+      onSweepStall: (stall) => {
+        stalls.push(stall);
+      },
+    });
+    await tick(s, 4);
+    // One definition of "stalled", read twice: a surface asked between ticks must not be able to
+    // disagree with the line that was logged.
+    expect(s.sweepProgress().stall).toEqual(stalls[0]);
+  });
+
+  it("carries the last advance, so an operator can see how long the table has been uncovered", async () => {
+    let ms = Date.parse("2026-10-04T00:00:00.000Z");
+    const s = build({
+      reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]),
+      clock: (): Date => {
+        const d = new Date(ms);
+        ms += 60_000;
+        return d;
+      },
+    });
+    await tick(s, 4);
+    // The advance that stamped it is the first page's; the three since then covered nothing, and
+    // that gap is the figure a human reads.
+    expect(s.sweepProgress().stall?.lastAdvanceAt).toBe("2026-10-04T00:00:00.000Z");
+  });
+
+  it("routes a throwing stall callback to onError without failing the tick", async () => {
+    const errors: unknown[] = [];
+    const s = build({
+      reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]),
+      onSweepStall: () => {
+        throw new Error("the log sink is gone");
+      },
+      onError: (e) => errors.push(e),
+    });
+    await expect(s.runOnce()).resolves.toBeUndefined();
+    await tick(s, 3);
+    // The sweep's accounting is unaffected: a sink that cannot take the news does not retract the
+    // condition, exactly as a failing findings callback does not retract a verification.
+    expect(errors).toHaveLength(1);
+    expect(s.sweepProgress().stall?.kind).toBe("pinned_cursor");
+  });
+
+  it("does not stop the passes that destroy and repair data", async () => {
+    const ran: string[] = [];
+    const s = build({
+      runner: {
+        runDue: async () => {
+          ran.push("runDue");
+          return [];
+        },
+      },
+      reconciler: {
+        reconcileStranded: async () => {
+          ran.push("reconcile");
+          return [];
+        },
+        auditTombstones: async (): Promise<TombstoneSweepPage> => {
+          throw new Error("the connection dropped mid-page");
+        },
+      },
+      onSweepStall: () => undefined,
+    });
+    await tick(s, 3);
+    // A stalled sweep is a failure of the audit, not of the deletion flow. The two queues share one
+    // interval and nothing else.
+    expect(ran.filter((x) => x === "runDue")).toHaveLength(3);
+    expect(ran.filter((x) => x === "reconcile")).toHaveLength(3);
   });
 });

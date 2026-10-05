@@ -3786,6 +3786,31 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
     { name: "invalidation_of_prior_tombstone_id", type: "TEXT" },
     /** The per-subsystem reports the scope was composed from (ADR-0317), so the claim keeps its evidence. */
     { name: "attestations", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    /**
+     * Which domain tag the content manifest was hashed under (ADR-0329).
+     *
+     * `NOT NULL DEFAULT 'v1'` and not nullable, because the version is what a verifier *selects the
+     * hash function by*: a NULL would make "which bytes does this digest commit to" unanswerable,
+     * and every row written before this column existed was genuinely v1. Reading it back explicitly
+     * rather than inferring it from whether `capability_declaration` is populated is the point — an
+     * inference would read a declaration somebody *deleted* as an older record, a tamper that
+     * covers its own tracks.
+     */
+    {
+      name: "proof_version",
+      type: "TEXT",
+      notNull: true,
+      default: "'v1'",
+      check: "proof_version IN ('v1', 'v2')",
+    },
+    /**
+     * The deployment's capability declaration, inside the v2 signed bytes (ADR-0329).
+     *
+     * Nullable, and paired with the column above by the contract rather than by a CHECK: v2 must
+     * carry it and v1 must not. A cross-column CHECK would be a fourth layer, but adding one to a
+     * populated table is manual (ADR-0299) and the schema refuses both mixtures already.
+     */
+    { name: "capability_declaration", type: "JSONB" },
     /** The chain entry this record was anchored by, written in the same transaction (ADR-0286). */
     {
       name: "chain_entry_hash",
@@ -7272,8 +7297,8 @@ export const META_WORKFLOW_EVENTS: TableDefinition = {
       name: "kind",
       type: "TEXT",
       notNull: true,
-      check:
-        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'instance_suspended', 'instance_resumed', 'state_transitioned', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'activity_timed_out', 'activity_compensated', 'signal_received', 'signal_consumed', 'timer_scheduled', 'timer_fired', 'timer_cancelled', 'variable_updated', 'compensation_started', 'compensation_step_completed', 'compensation_completed', 'manual_action_taken', 'child_workflow_spawned', 'child_workflow_completed')",
+      // The CHECK is **table-level**, in `constraints` below, and this is the one column in the
+      // catalog where that placement is load-bearing rather than stylistic. See the note there.
     },
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "actor_principal_id", type: "UUID", references: USER_FK },
@@ -7295,6 +7320,33 @@ export const META_WORKFLOW_EVENTS: TableDefinition = {
     { name: "causation_event_id", type: "TEXT" },
   ],
   primaryKey: ["id"],
+  constraints: [
+    {
+      kind: "check",
+      // **Table-level on purpose, and it is the enum that grows.** ADR-0329 added
+      // `instance_cancellation_requested` and `activity_cancelled`, and widening this as an inline
+      // column `check` would have been an invisible migration: `declaredCheckConstraints` reads
+      // only `table.constraints`, so a column-level expression is never compared —
+      // `expectedCheckConstraintNames` adds its *name* to the expected set purely so a correct
+      // database is not reported as drifted. A fresh install would therefore get 27 values while
+      // every already-migrated database silently kept its 25 and rejected both new kinds at the
+      // first append.
+      //
+      // Declared here, the reconciler matches it by name and compares the expression through
+      // ADR-0292's deparser, so the difference is *reported* — as `unreconciled` with the SQL,
+      // since revalidating a CHECK against existing rows is ADR-0299's manual case. The name is
+      // deliberately the one Postgres itself gives a single-column column check
+      // (`makeObjectName("workflow_events", "kind", "check")`), so on a database that already
+      // applied the column form the declaration matches the live constraint and reports a changed
+      // expression rather than a missing constraint plus an undeclared one.
+      //
+      // The general hole is still open for the catalog's other column-level checks; this is the
+      // table where it would have bitten now.
+      name: "workflow_events_kind_check",
+      expression:
+        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'instance_cancellation_requested', 'instance_suspended', 'instance_resumed', 'state_transitioned', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'activity_timed_out', 'activity_cancelled', 'activity_compensated', 'signal_received', 'signal_consumed', 'timer_scheduled', 'timer_fired', 'timer_cancelled', 'variable_updated', 'compensation_started', 'compensation_step_completed', 'compensation_completed', 'manual_action_taken', 'child_workflow_spawned', 'child_workflow_completed')",
+    },
+  ],
   uniqueConstraints: [
     {
       name: "workflow_events_instance_sequence_key",

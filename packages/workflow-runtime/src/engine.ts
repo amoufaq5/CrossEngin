@@ -1,7 +1,13 @@
 import { sha256 } from "@crossengin/crypto";
 import {
+  InstanceCancellationRequestSchema,
   TERMINAL_STATE_KINDS,
+  planInstanceCancellation,
   type ActionKind,
+  type ActivityCancellationCheckpoint,
+  type InstanceCancellationCompensationOutcome,
+  type InstanceCancellationOutcome,
+  type InstanceCancellationRequestInput,
   type StateAction,
   type TransitionDefinition,
   type WorkflowDefinition,
@@ -16,7 +22,16 @@ import {
 } from "./activity-handlers.js";
 import { type Clock, type IdGenerator, SystemClock, RandomIdGenerator } from "./clock.js";
 import { type EventLog } from "./event-log.js";
-import { type ProjectedInstance, projectInstance } from "./projection.js";
+import {
+  type OutstandingTimer,
+  outstandingTimersFromLog,
+  surveyCancellableWork,
+} from "./instance-cancellation.js";
+import {
+  type ProjectedInstance,
+  isInstanceCancellationRequested,
+  projectInstance,
+} from "./projection.js";
 import {
   type CompensationStep,
   compensationKindByActivityId,
@@ -100,10 +115,26 @@ function compareDefinitionVersions(left: string, right: string): number {
   return 0;
 }
 
-interface ScheduledTimer {
-  readonly id: string;
-  readonly name: string;
-  readonly fireAt: number;
+export interface CancelInstanceResult {
+  readonly outcome: InstanceCancellationOutcome;
+  /** Unfired timers dropped, each with a `timer_cancelled` in the log. */
+  readonly cancelledTimerIds: readonly string[];
+  /** Scheduled activities whose handler was never entered. */
+  readonly beforeHandlerActivityIds: readonly string[];
+  /**
+   * In-flight activities recorded cancelled at `cooperative_abort`. A subset of these had their
+   * `AbortSignal` actually tripped — see `signalDeliveredActivityIds`.
+   */
+  readonly cooperativeAbortActivityIds: readonly string[];
+  /**
+   * The in-flight activities this process could really tell. An activity started by *another*
+   * process is recorded cancelled but cannot be signalled from here, and claiming otherwise would
+   * overstate the one guarantee that is already the weakest.
+   */
+  readonly signalDeliveredActivityIds: readonly string[];
+  readonly compensationOutcome: InstanceCancellationCompensationOutcome;
+  readonly compensatedActivityIds: readonly string[];
+  readonly unreversedActivityIds: readonly string[];
 }
 
 /**
@@ -213,6 +244,13 @@ export class WorkflowEngine {
   private readonly seenSignalIdempotency: Set<string> = new Set();
   private readonly instanceTenant: Map<string, string> = new Map();
   private readonly instanceCorrelation: Map<string, string> = new Map();
+  /**
+   * The `AbortController` of every activity handler this process currently has running, so a
+   * cancellation can *tell* one. Keyed by instance then activity; an entry exists only for the
+   * window between `activity_started` and the handler settling, which is exactly the window in
+   * which `in_flight_activity`'s weaker guarantee applies.
+   */
+  private readonly inFlightActivities: Map<string, Map<string, AbortController>> = new Map();
   /** Nesting of in-flight `send_signal` dispatches, so a signal cycle is refused, not recursed. */
   private signalDispatchDepth = 0;
 
@@ -318,6 +356,10 @@ export class WorkflowEngine {
       if (corr !== input.correlationKey) continue;
       const state = await this.getInstanceState(instanceId);
       if (state === null) continue;
+      // Driver fence 3 of 4. As with timers, the status check does not cover it: between the fence
+      // and the finalizing event the instance is still `running`, and a delivered signal would
+      // transition it — running on-entry actions, scheduling activities, spawning children.
+      if (isInstanceCancellationRequested(state)) continue;
       if (state.status !== "running" && state.status !== "waiting_for_signal") continue;
       const definition = this.definitions.get(state.definitionId);
       if (definition === undefined) continue;
@@ -409,6 +451,12 @@ export class WorkflowEngine {
   async fireDueTimersForInstance(instanceId: string, nowMs: number): Promise<TickTimersResult> {
     const state = await this.getInstanceState(instanceId);
     if (state === null) return { firedTimerIds: [], affectedInstanceIds: [] };
+    // Driver fence 1 of 4. The status check below does not cover this: a cancellation leaves the
+    // instance `running` until its finalizing event, so without this a timer could fire into an
+    // instance that is on its way out — and a cancellation that fires timers is worse than none.
+    if (isInstanceCancellationRequested(state)) {
+      return { firedTimerIds: [], affectedInstanceIds: [] };
+    }
     if (state.status !== "waiting_for_timer" && state.status !== "running") {
       return { firedTimerIds: [], affectedInstanceIds: [] };
     }
@@ -456,54 +504,233 @@ export class WorkflowEngine {
     return { firedTimerIds, affectedInstanceIds: firedTimerIds.length > 0 ? [instanceId] : [] };
   }
 
-  /**
-   * The instance's timers that are still outstanding, derived from the log alone: scheduled and not
-   * yet fired or cancelled. Both the firing path and `cancel_timer` read from here, so an already
-   * fired or cancelled timer is invisible to both and a re-delivered claim or a repeated cancel is a
-   * no-op rather than a second terminal event for one timer.
-   */
-  private async outstandingTimers(instanceId: string): Promise<readonly ScheduledTimer[]> {
-    const events = await this.eventLog.listByInstance(instanceId);
-    const scheduled = new Map<string, ScheduledTimer>();
-    for (const e of events) {
-      if (e.kind === "timer_scheduled" && e.timerId !== null) {
-        const name = typeof e.payload["timerName"] === "string" ? (e.payload["timerName"] as string) : "";
-        const fireAt = typeof e.payload["fireAt"] === "string" ? Date.parse(e.payload["fireAt"] as string) : Number.MAX_SAFE_INTEGER;
-        scheduled.set(e.timerId, { id: e.timerId, name, fireAt });
-      } else if ((e.kind === "timer_fired" || e.kind === "timer_cancelled") && e.timerId !== null) {
-        scheduled.delete(e.timerId);
-      }
-    }
-    return [...scheduled.values()];
+  /** This instance's still-scheduled timers, from the log (see `outstandingTimersFromLog`). */
+  private async outstandingTimers(instanceId: string): Promise<readonly OutstandingTimer[]> {
+    return outstandingTimersFromLog(await this.eventLog.listByInstance(instanceId));
   }
 
-  async cancelInstance(input: {
-    instanceId: string;
-    reason: string;
-    cancelledByUserId?: string | null;
-  }): Promise<void> {
-    const state = await this.getInstanceState(input.instanceId);
-    if (state === null) throw new Error(`unknown instance ${input.instanceId}`);
-    if (state.status === "completed" || state.status === "cancelled" || state.status === "compensated") {
-      throw new Error(`cannot cancel instance in terminal status ${state.status}`);
+  /**
+   * Cancels a workflow instance: drops its unfired timers, refuses to start anything further, tells
+   * whatever is already running, optionally rolls the instance back, and finalizes it.
+   *
+   * **The order of the appends is the guarantee.** `instance_cancellation_requested` goes first and
+   * is the fence every driver loop reads, so from that moment no timer fires, no activity starts and
+   * no automatic transition runs — and that is true *before* any of the slower work below, which is
+   * why the fence is an event and not the terminal status. `instance_cancelled` goes last, because
+   * it seals the projection: once folded, nothing moves the status, which is what lets a handler
+   * that ignored its signal report afterwards without resurrecting the instance.
+   *
+   * **Nothing is thrown for a refusal.** The five outcomes are reported distinctly, as ADR-0315's
+   * route does, because "the instance does not exist", "somebody already cancelled it" and "it
+   * failed, compensate it instead" are three different answers a caller has to act on differently.
+   */
+  async cancelInstance(input: InstanceCancellationRequestInput): Promise<CancelInstanceResult> {
+    const request = InstanceCancellationRequestSchema.parse(input);
+    const state = await this.getInstanceState(request.instanceId);
+    const events =
+      state === null ? [] : await this.eventLog.listByInstance(request.instanceId);
+    const definition =
+      state === null ? undefined : this.definitions.get(state.definitionId);
+    const plan = planInstanceCancellation({
+      status: state?.status ?? null,
+      cancellationAlreadyRequested:
+        state !== null && isInstanceCancellationRequested(state),
+      disposition: request.disposition,
+      // An unregistered definition cannot name a rollback strategy, so the honest reading is that no
+      // compensation is available here — not that the caller's `compensate` silently did nothing.
+      strategy: definition?.compensationStrategy ?? "no_compensation",
+      work: surveyCancellableWork(events),
+    });
+    if (plan.outcome !== "cancelled" || state === null) {
+      return {
+        outcome: plan.outcome,
+        cancelledTimerIds: [],
+        beforeHandlerActivityIds: [],
+        cooperativeAbortActivityIds: [],
+        signalDeliveredActivityIds: [],
+        compensationOutcome: plan.compensationOutcome,
+        compensatedActivityIds: [],
+        unreversedActivityIds: [],
+      };
     }
-    const nextSeq = (await this.eventLog.latestSequence(input.instanceId))!;
-    await this.appendEvent({
-      instanceId: input.instanceId,
-      tenantId: state.tenantId,
-      sequenceNumber: nextSeq + 1,
+
+    const tenantId = state.tenantId;
+    await this.appendInstanceEvent(request.instanceId, tenantId, {
+      kind: "instance_cancellation_requested",
+      actorPrincipalId: request.requestedByUserId,
+      actorSystemId: request.requestedBySystem ?? this.systemActorId,
+      payload: {
+        reason: request.reason,
+        disposition: request.disposition,
+        compensationOutcome: plan.compensationOutcome,
+      },
+    });
+
+    for (const timerId of plan.dropTimerIds) {
+      const timer = (await this.outstandingTimers(request.instanceId)).find(
+        (t) => t.id === timerId,
+      );
+      if (timer === undefined) continue;
+      await this.appendInstanceEvent(request.instanceId, tenantId, {
+        kind: "timer_cancelled",
+        timerId,
+        // The projection keys `awaitingTimerNames` by name, so the drop has to carry the name the
+        // schedule carried or the instance stays recorded as waiting on a timer that cannot fire.
+        payload: { timerName: timer.name, cancelledBy: "instance_cancellation" },
+      });
+    }
+
+    for (const activityId of plan.cancelBeforeHandlerActivityIds) {
+      await this.appendActivityCancelled(
+        request.instanceId,
+        tenantId,
+        activityId,
+        "before_handler",
+        false,
+      );
+    }
+
+    const signalDelivered: string[] = [];
+    for (const activityId of plan.signalActivityIds) {
+      const controller = this.inFlightActivities.get(request.instanceId)?.get(activityId);
+      if (controller !== undefined && !controller.signal.aborted) {
+        controller.abort();
+        signalDelivered.push(activityId);
+      }
+      await this.appendActivityCancelled(
+        request.instanceId,
+        tenantId,
+        activityId,
+        "cooperative_abort",
+        controller !== undefined,
+      );
+    }
+
+    const compensatedActivityIds =
+      plan.compensationOutcome === "executed" && definition !== undefined
+        ? await this.compensateForCancellation(request.instanceId, definition, state)
+        : [];
+
+    await this.appendInstanceEvent(request.instanceId, tenantId, {
       kind: "instance_cancelled",
+      actorPrincipalId: request.requestedByUserId,
+      actorSystemId: request.requestedBySystem ?? this.systemActorId,
+      payload: {
+        reason: request.reason,
+        disposition: request.disposition,
+        compensationOutcome: plan.compensationOutcome,
+        compensatedActivityIds,
+        // What this cancellation leaves standing. On the record rather than only in a return value,
+        // because the caller's process is not what a later reader has.
+        unreversedActivityIds: plan.unreversedActivityIds,
+      },
+    });
+
+    return {
+      outcome: "cancelled",
+      cancelledTimerIds: plan.dropTimerIds,
+      beforeHandlerActivityIds: plan.cancelBeforeHandlerActivityIds,
+      cooperativeAbortActivityIds: plan.signalActivityIds,
+      signalDeliveredActivityIds: signalDelivered,
+      compensationOutcome: plan.compensationOutcome,
+      compensatedActivityIds,
+      unreversedActivityIds: plan.unreversedActivityIds,
+    };
+  }
+
+  /**
+   * Runs the saga rollback as part of a cancellation, emitting `activity_compensated` per step and
+   * **not** the `compensation_started` / `compensation_completed` bracket the failure path uses.
+   *
+   * Those two move the instance to `compensating` and then `compensated`, and `INSTANCE_TRANSITIONS`
+   * offers no `compensated → cancelled` edge — so using them would either leave the instance ending
+   * `compensated` (indistinguishable from a saga unwinding a *failure*, losing the fact that a human
+   * cancelled it) or write a path the state machine forbids. The instance ends `cancelled` in both
+   * dispositions; the rollback is part of that act, not a state the instance passes through.
+   */
+  private async compensateForCancellation(
+    instanceId: string,
+    definition: WorkflowDefinition,
+    state: ProjectedInstance,
+  ): Promise<readonly string[]> {
+    const events = await this.eventLog.listByInstance(instanceId);
+    const plan = planCompensation({ definition, events });
+    if (plan.steps.length === 0) return [];
+    const kindByActivityId = compensationKindByActivityId(events);
+    const inputByActivityId = new Map<string, Record<string, unknown>>();
+    for (const e of events) {
+      if (e.kind === "activity_scheduled" && e.activityId !== null) {
+        inputByActivityId.set(
+          e.activityId,
+          (e.payload["input"] as Record<string, unknown> | undefined) ?? {},
+        );
+      }
+    }
+    const compensated: string[] = [];
+    for (const step of plan.steps) {
+      await this.compensateStep(
+        instanceId,
+        definition,
+        state.tenantId,
+        state.variables,
+        step,
+        kindByActivityId.get(step.originalActivityId) ?? "compensation",
+        inputByActivityId.get(step.originalActivityId) ?? {},
+      );
+      compensated.push(step.originalActivityId);
+    }
+    return compensated;
+  }
+
+  /** Appends one `activity_cancelled`, carrying which of the two guarantees applied. */
+  private async appendActivityCancelled(
+    instanceId: string,
+    tenantId: string,
+    activityId: string,
+    checkpoint: ActivityCancellationCheckpoint,
+    signalDelivered: boolean,
+  ): Promise<void> {
+    await this.appendInstanceEvent(instanceId, tenantId, {
+      kind: "activity_cancelled",
+      activityId,
+      payload: { checkpoint, signalDelivered },
+    });
+  }
+
+  /**
+   * Appends one event at the instance's next sequence number, defaulting every field a cancellation
+   * does not set. The sequence is read immediately before the append so a run of appends stays
+   * dense, which `isHistoryDense` asserts.
+   */
+  private async appendInstanceEvent(
+    instanceId: string,
+    tenantId: string,
+    input: {
+      readonly kind: WorkflowEvent["kind"];
+      readonly payload: Record<string, unknown>;
+      readonly actorPrincipalId?: string | null;
+      readonly actorSystemId?: string | null;
+      readonly activityId?: string | null;
+      readonly timerId?: string | null;
+    },
+  ): Promise<void> {
+    const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: input.kind,
       occurredAt: this.clock.nowIso(),
-      actorPrincipalId: input.cancelledByUserId ?? null,
-      actorSystemId: this.systemActorId,
+      actorPrincipalId: input.actorPrincipalId ?? null,
+      actorSystemId: input.actorSystemId ?? this.systemActorId,
       previousState: null,
       newState: null,
-      activityId: null,
+      activityId: input.activityId ?? null,
       signalId: null,
-      timerId: null,
+      timerId: input.timerId ?? null,
       childInstanceId: null,
       variableName: null,
-      payload: { reason: input.reason },
+      payload: input.payload,
       correlationId: null,
       causationEventId: null,
     });
@@ -538,6 +765,9 @@ export class WorkflowEngine {
     for (let i = 0; i < MAX_STEP_ITERATIONS; i++) {
       const state = await this.getInstanceState(instanceId);
       if (state === null) return;
+      // Driver fence 2 of 4, and it is placed above the terminal-state-kind check on purpose: a
+      // cancelled instance sitting in a `terminal_success` state must not emit `instance_completed`.
+      if (isInstanceCancellationRequested(state)) return;
       if (
         state.status === "completed" ||
         state.status === "failed" ||
@@ -1033,6 +1263,12 @@ export class WorkflowEngine {
     availableAt: string | null,
     compensationActivityKey: string | null = null,
   ): Promise<void> {
+    // Driver fence 4a of 4. The single choke point through which every activity attempt passes —
+    // the first one and every retry — so a cancelled instance neither records a new scheduled
+    // activity nor leaves one claimable by a worker in another process.
+    const fenceState = await this.getInstanceState(instanceId);
+    if (fenceState !== null && isInstanceCancellationRequested(fenceState)) return;
+
     const activityId = this.ids.generate("wfa");
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
@@ -1072,6 +1308,27 @@ export class WorkflowEngine {
     await this.runActivityHandler(instanceId, definition, activityId, activityKey, kind, inputData, attemptNumber, maxAttempts, tenantId, backoff, compensationActivityKey);
   }
 
+  /** Registers a running handler's abort channel, so a cancellation can tell it. */
+  private registerInFlight(
+    instanceId: string,
+    activityId: string,
+    controller: AbortController,
+  ): void {
+    const existing = this.inFlightActivities.get(instanceId);
+    if (existing === undefined) {
+      this.inFlightActivities.set(instanceId, new Map([[activityId, controller]]));
+      return;
+    }
+    existing.set(activityId, controller);
+  }
+
+  private clearInFlight(instanceId: string, activityId: string): void {
+    const byActivity = this.inFlightActivities.get(instanceId);
+    if (byActivity === undefined) return;
+    byActivity.delete(activityId);
+    if (byActivity.size === 0) this.inFlightActivities.delete(instanceId);
+  }
+
   /**
    * Runs a scheduled activity's handler: appends `activity_started`, invokes the resolved handler,
    * appends the outcome (`activity_completed` / `_failed` / `_timed_out`), and applies the resulting
@@ -1090,7 +1347,7 @@ export class WorkflowEngine {
     tenantId: string,
     backoff: ActivityRetryBackoff = null,
     compensationActivityKey: string | null = null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const handler =
       this.registry.resolve({
         kind: kind as never,
@@ -1098,6 +1355,10 @@ export class WorkflowEngine {
         activityKey,
       }) ?? unsupportedHandler;
     const state = await this.getInstanceState(instanceId);
+    // Driver fence 4b of 4. 4a stops a *new* attempt being recorded; this stops an attempt already
+    // sitting `scheduled` in the log from being entered, which is the case a distributed worker
+    // reaches through `executeScheduledActivity` — the one path that does not come via 4a.
+    if (state !== null && isInstanceCancellationRequested(state)) return false;
     const startedSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
       instanceId,
@@ -1120,6 +1381,8 @@ export class WorkflowEngine {
     });
 
     let outcome;
+    const controller = new AbortController();
+    this.registerInFlight(instanceId, activityId, controller);
     try {
       outcome = await handler({
         activityId,
@@ -1131,6 +1394,7 @@ export class WorkflowEngine {
         attemptNumber,
         input: inputData,
         variables: state?.variables ?? {},
+        signal: controller.signal,
       });
     } catch (err) {
       outcome = {
@@ -1139,6 +1403,10 @@ export class WorkflowEngine {
         errorMessage: err instanceof Error ? err.message : String(err),
         retryable: false,
       };
+    } finally {
+      // Deregistered the moment the handler settles, so no cancellation ever aborts a controller
+      // whose work is already over — the same rule as `abortWhile`'s watcher not outliving its task.
+      this.clearInFlight(instanceId, activityId);
     }
 
     const completionSeq = (await this.eventLog.latestSequence(instanceId))!;
@@ -1165,7 +1433,11 @@ export class WorkflowEngine {
         causationEventId: null,
       });
       const liveState = await this.getInstanceState(instanceId);
-      if (liveState !== null) {
+      // A handler that ignored its signal is allowed to *report* — the outcome above is a fact and
+      // ADR-0315 says so out loud. It is not allowed to *move* the instance: applying its trigger
+      // would run the next state's on-entry actions, which is new work starting after a
+      // cancellation. The projection's seal keeps the status right; this keeps the log right.
+      if (liveState !== null && !isInstanceCancellationRequested(liveState)) {
         const transition = evaluateNextTransition({
           definition,
           fromState: liveState.currentState,
@@ -1216,7 +1488,7 @@ export class WorkflowEngine {
         await this.scheduleActivity(instanceId, definition, activityKey, kind, inputData, attemptNumber + 1, maxAttempts, tenantId, backoff, availableAt, compensationActivityKey);
       } else {
         const liveState = await this.getInstanceState(instanceId);
-        if (liveState !== null) {
+        if (liveState !== null && !isInstanceCancellationRequested(liveState)) {
           const transition = evaluateNextTransition({
             definition,
             fromState: liveState.currentState,
@@ -1250,6 +1522,7 @@ export class WorkflowEngine {
         causationEventId: null,
       });
     }
+    return true;
   }
 
   /**
@@ -1302,7 +1575,7 @@ export class WorkflowEngine {
     if (state === null) return { executed: false };
     const definition = this.definitions.get(state.definitionId);
     if (definition === undefined) return { executed: false };
-    await this.runActivityHandler(
+    const handlerRan = await this.runActivityHandler(
       instanceId,
       definition,
       activityId,
@@ -1315,6 +1588,9 @@ export class WorkflowEngine {
       scheduled.backoff,
       scheduled.compensationActivityKey,
     );
+    // `executed` has to mean the handler ran. A cancellation refuses it at fence 4b, and reporting
+    // `true` there would tell a worker its claim was honoured when nothing was invoked.
+    if (!handlerRan) return { executed: false };
     // The inline path runs inside the step loop; the distributed entry point must drive it itself
     // so a terminal transition emits instance_completed / runs the next state's on-entry actions.
     await this.runStepLoop(instanceId, definition);
@@ -1457,6 +1733,9 @@ export class WorkflowEngine {
           attemptNumber: 1,
           input,
           variables,
+          // A compensating handler is never registered as in-flight and gets a signal that cannot
+          // trip: it is the *undo*, so the cancellation that asked for it must not then abort it.
+          signal: new AbortController().signal,
         });
       } catch (err) {
         outcome = {

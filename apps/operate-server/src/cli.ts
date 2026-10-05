@@ -1,4 +1,8 @@
 import { REGIONS } from "@crossengin/residency";
+import {
+  SENSITIVE_DATA_CLASSIFICATIONS,
+  type DataClassification,
+} from "@crossengin/types/meta-schema";
 
 import {
   DEFAULT_DELETION_APPROVED_BY,
@@ -140,6 +144,16 @@ export interface ServeOptions {
   readonly auditReadPlatformRoles: readonly string[];
   /** Roles permitted to see pii/phi/regulated payload fields unredacted (repeatable; default none — everyone gets the redacted view). */
   readonly auditReadSensitiveRoles: readonly string[];
+  /**
+   * Per-class sensitive grants, as `<class>=<role>` repeated (ADR-0329).
+   *
+   * `--audit-read-sensitive-role` is wholesale: a role granted it reads pii *and* phi, so a HIPAA
+   * deployment that wants support staff to see a customer's contact details had to expose patient
+   * records too, or redact everything from them. A class named here is **authoritative for that
+   * class** and the wholesale grant no longer reaches it, which is what makes "pii but not phi"
+   * expressible at all — `--audit-read-sensitive-class phi=` (no role) withholds phi from everyone.
+   */
+  readonly auditReadSensitiveClasses: Readonly<Record<string, readonly string[]>>;
   /** Maximum queryable time range in days; null uses the route default. */
   readonly auditReadMaxRangeDays: number | null;
   /** Expose the tenant-schema survey and erasure under /v1/platform/tenants/{id} — the step that makes a tenant deletion true, since ADR-0314's per-tenant schema was never removed (needs --store pg + --audit-chain-config). */
@@ -290,6 +304,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const auditReadTenantRoles: string[] = [];
   const auditReadPlatformRoles: string[] = [];
   const auditReadSensitiveRoles: string[] = [];
+  const auditReadSensitiveClasses: Record<string, string[]> = {};
   let auditReadMaxRangeDays: number | null = null;
   let tenantErasureRoutes = false;
   const tenantErasureRoles: string[] = [];
@@ -603,6 +618,34 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       arg.startsWith("--audit-read-sensitive-role=")
     ) {
       auditReadSensitiveRoles.push(takeValue(arg, next, "--audit-read-sensitive-role"));
+      i += consumed();
+    } else if (
+      arg === "--audit-read-sensitive-class" ||
+      arg.startsWith("--audit-read-sensitive-class=")
+    ) {
+      const raw = takeValue(arg, next, "--audit-read-sensitive-class");
+      const eq = raw.indexOf("=");
+      if (eq < 1) {
+        throw new CliUsageError(
+          `invalid --audit-read-sensitive-class: ${raw} (expected <class>=<role>, or <class>= to grant it to nobody)`,
+        );
+      }
+      const cls = raw.slice(0, eq).trim();
+      const role = raw.slice(eq + 1).trim();
+      // Checked against the real set, not a copy of it: a typo'd class would otherwise be
+      // accepted, apply to nothing, and leave the wholesale grant quietly reaching the class the
+      // operator meant to withhold — a narrowing that silently does not narrow.
+      if (!SENSITIVE_DATA_CLASSIFICATIONS.has(cls as DataClassification)) {
+        throw new CliUsageError(
+          `invalid --audit-read-sensitive-class: unknown sensitive class '${cls}' (one of ` +
+            `${[...SENSITIVE_DATA_CLASSIFICATIONS].sort().join(", ")})`,
+        );
+      }
+      // An empty role is the point, not an error: naming a class with no role is how a deployment
+      // withholds it from everyone, including a wholesale `--audit-read-sensitive-role` grantee.
+      const bucket = auditReadSensitiveClasses[cls] ?? [];
+      if (role.length > 0) bucket.push(role);
+      auditReadSensitiveClasses[cls] = bucket;
       i += consumed();
       auditReadRoutes = true;
     } else if (
@@ -1004,6 +1047,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     // No default: an empty list means every reader gets the redacted view, which is the correct
     // default for a surface whose whole point is that reading pii is a separate, granted privilege.
     auditReadSensitiveRoles,
+    auditReadSensitiveClasses,
     auditReadMaxRangeDays,
     tenantErasureRoutes,
     // No default: irreversibly destroying a tenant's business data is nobody's privilege until it is
@@ -1284,8 +1328,10 @@ Options:
                        active tenant's queued dispatches, applying per-recipient preferences
                        and suppressions, and records an attempt per recipient
                        (needs --store pg|pg-columns)
-  --bounce-webhook     Serve POST /v1/notifications/bounces/{tenantId}/{ses|twilio}, which
-                       records provider bounces and complaints as suppressions. Needs
+  --bounce-webhook     Serve POST /v1/notifications/bounces/{tenantId}/{ses|twilio|twilio_voice},
+                       which records provider bounces and complaints as suppressions. The
+                       source is the path segment, not sniffed from the payload: a call
+                       callback posted to /twilio would be parsed as a messaging one. Needs
                        NOTIFICATION_BOUNCE_SECRET in the environment (>=32 chars); the
                        per-tenant key is HMAC-SHA256(secret, "bounce-webhook:"+tenantId),
                        which the signing edge must derive the same way
@@ -1353,6 +1399,10 @@ Options:
   --audit-read-platform-role <r>  Role permitted to read ANY tenant's trail (repeatable; default
                        platform_admin). Elevates via app.platform_audit, which is SELECT-only
   --audit-read-sensitive-role <r>  Role permitted to see pii/phi/regulated payload fields
+  --audit-read-sensitive-class <class>=<role>  Narrower: grants ONE class to a role. A class named
+                       here is authoritative for that class and --audit-read-sensitive-role no
+                       longer reaches it, which is what makes "pii but not phi" expressible;
+                       "<class>=" with no role withholds it from everyone
                        unredacted (repeatable). Default none: every reader gets the redacted view
   --audit-read-max-range-days <n>  Largest queryable time range in days (>=1)
   --tenant-erasure-routes  Expose GET /v1/platform/tenants/{id}/schema and POST .../erase-schema —

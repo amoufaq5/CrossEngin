@@ -65,6 +65,14 @@ const OK: DeleteTenantOutcome = {
     storageBytes: 65536,
     alreadyAbsent: false,
   },
+  erasedSharedTables: {
+    schema: "meta",
+    tables: ["meta.operate_entity_records"],
+    rowCount: 7,
+    storageBytes: 700,
+    examinedTables: ["meta.operate_entity_records"],
+    retainedTables: ["meta.audit_log"],
+  },
 };
 
 interface Harness {
@@ -273,7 +281,7 @@ describe("runOne", () => {
       {
         capabilities: {
           tenant_schema: "erases",
-          shared_tables: "absent",
+          shared_tables: "erases",
           object_storage: "absent",
           backups: "erases",
           search_indexes: "absent",
@@ -286,7 +294,7 @@ describe("runOne", () => {
     // proof "this deployment has no object storage" rather than "nobody asked" (ADR-0328).
     expect(h.runs[0]?.["capabilities"]).toEqual({
       tenant_schema: "erases",
-      shared_tables: "absent",
+      shared_tables: "erases",
       object_storage: "absent",
       backups: "erases",
       search_indexes: "absent",

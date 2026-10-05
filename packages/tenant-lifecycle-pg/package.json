@@ -26,6 +26,7 @@
   "dependencies": {
     "@crossengin/forensics": "workspace:*",
     "@crossengin/forensics-pg": "workspace:*",
+    "@crossengin/kernel": "workspace:*",
     "@crossengin/kernel-pg": "workspace:*",
     "@crossengin/tenant-lifecycle": "workspace:*",
     "zod": "^3.23.0"

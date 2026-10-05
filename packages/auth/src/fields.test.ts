@@ -230,3 +230,154 @@ describe("validateClassifiedWriteMask", () => {
     expect(r.ok).toBe(true);
   });
 });
+
+/**
+ * Per-class sensitive grants (ADR-0329).
+ *
+ * `privilegedRoles` is wholesale: a role granted it reads pii *and* phi. So a deployment wanting
+ * support staff to see a customer's contact details had to expose patient records to them too, or
+ * redact everything — and for a HIPAA deployment only the second is acceptable, which means the
+ * grant was unusable for its actual purpose.
+ */
+describe("computeClassifiedFieldRedaction — per-class grants (ADR-0329)", () => {
+  it("grants one class without granting the others", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRolesByClass: { pii: ["front_desk"] } },
+    );
+    // The whole point: contact details readable, the medical record number not.
+    expect(r.readable).toEqual(["given_name", "status"]);
+    expect(r.redacted).toEqual(["mrn"]);
+  });
+
+  it("makes a named class authoritative, so the wholesale grant no longer reaches it", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"], privilegedRolesByClass: { phi: ["auditor"] } },
+    );
+    // Read as a union instead, a wholesale grantee could never be withheld from phi — which is the
+    // one narrowing the feature exists for.
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.readable).toContain("given_name");
+  });
+
+  it("treats an explicit empty list as a refusal, not as a fall-through", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"], privilegedRolesByClass: { phi: [] } },
+    );
+    // `{phi: []}` withholds phi from everyone including the wholesale grantee. Falling through to
+    // the flat list would make the empty array mean nothing at all.
+    expect(r.redacted).toEqual(["mrn"]);
+  });
+
+  it("leaves a class with no entry to the wholesale grant", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"], privilegedRolesByClass: { pii: ["front_desk"] } },
+    );
+    // phi has no entry, so the existing grant still reads it — a deployment that upgrades and names
+    // only one class must not silently lose access to the rest.
+    expect(r.readable).toContain("mrn");
+  });
+
+  it("changes nothing for a policy that names no classes", () => {
+    const withEmpty = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"], privilegedRolesByClass: {} },
+    );
+    const without = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(withEmpty).toEqual(without);
+  });
+
+  it("still redacts for a role in no grant at all", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRolesByClass: { phi: ["clinician"] } },
+    );
+    // Fail closed: naming a class for somebody else grants nothing to anybody else.
+    expect(r.redacted).toEqual(["mrn", "given_name"]);
+  });
+
+  it("lets an explicit field grant still win over a per-class refusal", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      { fields: { mrn: { read: { roles: ["front_desk"] } } } },
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRolesByClass: { phi: [] } },
+    );
+    // Unchanged precedence: an explicit per-field rule is a deliberate statement about one field
+    // and outranks a class-wide default, exactly as it outranks the wholesale grant.
+    expect(r.readable).toContain("mrn");
+  });
+});
+
+describe("validateClassifiedWriteMask — per-class grants (ADR-0329)", () => {
+  it("refuses a write to a class the role is not granted, even holding another", () => {
+    const r = validateClassifiedWriteMask(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      { privilegedRolesByClass: { pii: ["front_desk"] } },
+    );
+    expect(r).toEqual({ ok: false, rejectedField: "mrn" });
+  });
+
+  it("allows a write to the class it is granted", () => {
+    const r = validateClassifiedWriteMask(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "given_name", classification: "pii" }],
+      { privilegedRolesByClass: { pii: ["front_desk"] } },
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("asks the same question the read path does, so write cannot outrun read", () => {
+    const policy = { privilegedRoles: ["clinician"], privilegedRolesByClass: { phi: [] } };
+    const read = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" as const }],
+      policy,
+    );
+    const write = validateClassifiedWriteMask(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      policy,
+    );
+    // One function behind both, so a role cannot end up able to change a value it may not see.
+    expect(read.redacted).toEqual(["mrn"]);
+    expect(write.ok).toBe(false);
+  });
+});

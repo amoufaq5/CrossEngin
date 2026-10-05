@@ -21,8 +21,16 @@ import {
   type DeletionSubsystem,
   type TombstoneAssemblyInput,
 } from "./tombstone-assembly.js";
-import { verifyTombstoneHashes } from "./tombstone-proof.js";
-import type { TombstoneAnchor } from "./tombstones.js";
+import {
+  computeContentManifestSha256,
+  computeContentManifestSha256V2,
+  verifyTombstoneHashes,
+} from "./tombstone-proof.js";
+import {
+  asCapabilityDeclaration,
+  readDeclaredAbsences,
+  type TombstoneAnchor,
+} from "./tombstones.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 const ALICE = "alice@example.test";
@@ -87,17 +95,41 @@ function caps(over: Partial<DeletionCapabilities> = {}): DeletionCapabilities {
   return { ...CONSERVATIVE_DELETION_CAPABILITIES, ...over };
 }
 
-/** An input whose scope comes from a declaration rather than a per-call list. */
+/**
+ * An input whose scope comes from a declaration rather than a per-call list.
+ *
+ * It carries a `shared_tables` attestation by default, because that subsystem can no longer be
+ * declared `absent` (ADR-0329) and so is always in scope. `nothing_to_erase` so it composes nothing
+ * into the scope: every scope assertion in this file is about `tenant_schema`, and a deployment
+ * whose platform tables held nothing for this tenant is a real case rather than a convenience.
+ */
 function declaredInputOf(
   capabilities: DeletionCapabilities,
   over: Partial<TombstoneAssemblyInput> = {},
 ): TombstoneAssemblyInput {
-  return { ...inputOf(over), requiredSubsystems: undefined, capabilities };
+  return {
+    ...inputOf({
+      attestations: [
+        attest(),
+        attest({ subsystem: "shared_tables", outcome: "nothing_to_erase", scope: undefined }),
+      ],
+      ...over,
+    }),
+    requiredSubsystems: undefined,
+    capabilities,
+  };
 }
 
-/** What a deployment looks like today: a tenant schema, and the other five not built yet. */
-const ONLY_SCHEMA: DeletionCapabilities = caps({
-  shared_tables: "absent",
+/**
+ * What a deployment looks like today: the two subsystems the pipeline actually performs, and the
+ * other four not built yet.
+ *
+ * `shared_tables` is `erases` and not `absent` — ADR-0329 made it the second performed subsystem,
+ * and the contract refuses `absent` for the reason it refuses it for `tenant_schema`: every
+ * deployment has a `meta` schema whose tenant-scoped tables the pipeline erases unconditionally,
+ * so a declaration calling it absent is a configuration error rather than a deployment shape.
+ */
+const PERFORMED_ONLY: DeletionCapabilities = caps({
   object_storage: "absent",
   backups: "absent",
   search_indexes: "absent",
@@ -106,7 +138,7 @@ const ONLY_SCHEMA: DeletionCapabilities = caps({
 
 describe("DeletionCapabilitiesSchema", () => {
   it("accepts a total declaration", () => {
-    expect(DeletionCapabilitiesSchema.safeParse(ONLY_SCHEMA).success).toBe(true);
+    expect(DeletionCapabilitiesSchema.safeParse(PERFORMED_ONLY).success).toBe(true);
     expect(DeletionCapabilitiesSchema.safeParse(CONSERVATIVE_DELETION_CAPABILITIES).success).toBe(true);
   });
 
@@ -132,8 +164,8 @@ describe("DeletionCapabilitiesSchema", () => {
   });
 
   it("rejects an unknown subsystem and an unknown disposition", () => {
-    expect(DeletionCapabilitiesSchema.safeParse({ ...ONLY_SCHEMA, blobs: "absent" }).success).toBe(false);
-    expect(DeletionCapabilitiesSchema.safeParse({ ...ONLY_SCHEMA, caches: "maybe" }).success).toBe(false);
+    expect(DeletionCapabilitiesSchema.safeParse({ ...PERFORMED_ONLY, blobs: "absent" }).success).toBe(false);
+    expect(DeletionCapabilitiesSchema.safeParse({ ...PERFORMED_ONLY, caches: "maybe" }).success).toBe(false);
   });
 
   it("refuses tenant_schema: absent, naming why", () => {
@@ -170,12 +202,14 @@ describe("requiredSubsystemsFor", () => {
   });
 
   it("returns DELETION_SUBSYSTEMS order, so the derived list is stable", () => {
-    const required = requiredSubsystemsFor(caps({ shared_tables: "absent" }));
-    expect(required).toEqual(DELETION_SUBSYSTEMS.filter((s) => s !== "shared_tables"));
+    const required = requiredSubsystemsFor(caps({ object_storage: "absent" }));
+    expect(required).toEqual(DELETION_SUBSYSTEMS.filter((s) => s !== "object_storage"));
   });
 
-  it("narrows to tenant_schema alone for a deployment that has nothing else", () => {
-    expect(requiredSubsystemsFor(ONLY_SCHEMA)).toEqual(["tenant_schema"]);
+  it("narrows to the two performed subsystems for a deployment that has nothing else", () => {
+    // Not `tenant_schema` alone any more: ADR-0329 made `shared_tables` the second subsystem the
+    // pipeline performs, and the contract refuses declaring it absent.
+    expect(requiredSubsystemsFor(PERFORMED_ONLY)).toEqual(["tenant_schema", "shared_tables"]);
   });
 
   it("is the exact complement of absentSubsystemsFor", () => {
@@ -197,12 +231,15 @@ describe("CONSERVATIVE_DELETION_CAPABILITIES", () => {
     }
   });
 
-  it("refuses today's single-subsystem deletion, naming the five nobody asked", () => {
+  it("refuses today's two-subsystem deletion, naming the four nobody asked", () => {
     const out = assembleTombstone(declaredInputOf(CONSERVATIVE_DELETION_CAPABILITIES));
     expect(out.ok).toBe(false);
     if (out.ok) return;
     const unattested = out.refusals.filter((r) => r.reason === "subsystem_unattested");
-    expect(unattested).toHaveLength(5);
+    // Four, not five: `shared_tables` attests now (ADR-0329). The conservative declaration is
+    // still refused, because the other four erasures do not exist — which is the point of it being
+    // a starting point rather than a default.
+    expect(unattested).toHaveLength(4);
   });
 });
 
@@ -386,6 +423,7 @@ describe("assembleTombstone", () => {
         requiredSubsystems: ["tenant_schema", "backups"],
         attestations: [
           attest(),
+          attest({ subsystem: "shared_tables", outcome: "nothing_to_erase", scope: undefined }),
           attest({
             subsystem: "backups",
             outcome: "retained",
@@ -452,22 +490,103 @@ describe("assembleTombstone", () => {
 
 describe("assembleTombstone, with scope derived from a declaration", () => {
   it("assembles from a declaration and carries it on the result", () => {
-    const out = assembleTombstone(declaredInputOf(ONLY_SCHEMA));
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
     expect(out.ok).toBe(true);
     if (!out.ok) return;
     expect(verifyTombstoneHashes(out.record)).toEqual({ contentManifestOk: true, proofOk: true });
-    expect(out.declaration).toEqual(ONLY_SCHEMA);
+    expect(out.declaration).toEqual(PERFORMED_ONLY);
     // What a reader of the result can now tell apart: five subsystems this deployment does not have,
     // rather than five nobody asked about.
-    expect(absentSubsystemsFor(out.declaration ?? ONLY_SCHEMA)).toHaveLength(5);
+    expect(absentSubsystemsFor(out.declaration ?? PERFORMED_ONLY)).toHaveLength(4);
     expect(tombstoneMatchesAttestations(out.record, [attest()])).toBe(true);
+  });
+
+  it("puts the declaration inside the signed bytes as a v2 proof", () => {
+    // ADR-0329. Under v1 the digest could not tell "this deployment has no object storage" from
+    // "nobody asked about object storage", which is ADR-0317's defect one level up: the declaration
+    // travelled beside the record and nothing signed it.
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.proofVersion).toBe("v2");
+    expect(out.record.capabilityDeclaration).toEqual(asCapabilityDeclaration(PERFORMED_ONLY));
+    // And the digest is the v2 one, not the v1 one over the same scope — which is the whole point:
+    // two records with identical scopes and different declarations now have different proofs.
+    expect(out.record.contentManifestSha256).toBe(
+      computeContentManifestSha256V2(out.record.scope, asCapabilityDeclaration(PERFORMED_ONLY)),
+    );
+    expect(out.record.contentManifestSha256).not.toBe(
+      computeContentManifestSha256(out.record.scope),
+    );
+  });
+
+  it("makes a declared absence readable from the proof itself", () => {
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const reading = readDeclaredAbsences(out.record);
+    expect(reading.declarationState).toBe("covered_by_proof");
+    if (reading.declarationState !== "covered_by_proof") return;
+    expect([...reading.absentSubsystems].sort()).toEqual([
+      "backups",
+      "caches",
+      "object_storage",
+      "search_indexes",
+    ]);
+  });
+
+  it("distinguishes a subsystem a deployment lacks from one that was empty", () => {
+    // This is the pair ADR-0329 exists for, and the only pair that isolates the declaration from
+    // the scope. "We have no cache layer" and "we have a cache layer and it held nothing" compose
+    // **byte-identical** scopes — `nothing_to_erase` may carry no figures at all (ADR-0317) — so
+    // under v1 the two produced the same proof, and a deployment could answer the harder claim with
+    // the cheaper one. Only the declaration separates them, so only a declaration in the signed
+    // bytes makes the distinction provable.
+    const lacks = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
+    const empty = assembleTombstone(
+      declaredInputOf(caps({ ...PERFORMED_ONLY, caches: "erases" }), {
+        attestations: [
+          attest(),
+          attest({ subsystem: "shared_tables", outcome: "nothing_to_erase", scope: undefined }),
+          attest({ subsystem: "caches", outcome: "nothing_to_erase", scope: undefined }),
+        ],
+      }),
+    );
+    expect(lacks.ok).toBe(true);
+    expect(empty.ok).toBe(true);
+    if (!lacks.ok || !empty.ok) return;
+    expect(empty.record.scope).toEqual(lacks.record.scope);
+    expect(empty.record.contentManifestSha256).not.toBe(lacks.record.contentManifestSha256);
+    // And under v1 they would have been the same proof, which is the defect stated as a test.
+    expect(computeContentManifestSha256(empty.record.scope)).toBe(
+      computeContentManifestSha256(lacks.record.scope),
+    );
+  });
+
+  it("leaves the legacy requiredSubsystems path on v1, with nothing declared", () => {
+    // v1's bytes are what every stored digest commits to. A caller naming its subsystems per call
+    // has declared nothing about the deployment, so there is no declaration to sign and claiming
+    // v2 would assert one.
+    const out = assembleTombstone(inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.proofVersion).toBe("v1");
+    expect(out.record.capabilityDeclaration).toBeUndefined();
+    expect(out.declaration).toBeUndefined();
+    expect(out.record.contentManifestSha256).toBe(
+      computeContentManifestSha256(out.record.scope),
+    );
+    expect(readDeclaredAbsences(out.record)).toEqual({
+      declarationState: "unknown_not_in_proof",
+      reason: "v1_proof",
+    });
   });
 
   it("refuses a retains subsystem that did not attest", () => {
     // The rule `retains` exists for: a lawful retention is a claim the proof must carry, so the
     // subsystem is still obliged to speak.
     const out = assembleTombstone(
-      declaredInputOf(caps({ ...ONLY_SCHEMA, backups: "retains" })),
+      declaredInputOf(caps({ ...PERFORMED_ONLY, backups: "retains" })),
     );
     expect(out.ok).toBe(false);
     if (out.ok) return;
@@ -478,9 +597,10 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
 
   it("accepts a retains subsystem that attested its obligation", () => {
     const out = assembleTombstone(
-      declaredInputOf(caps({ ...ONLY_SCHEMA, backups: "retains" }), {
+      declaredInputOf(caps({ ...PERFORMED_ONLY, backups: "retains" }), {
         attestations: [
           attest(),
+          attest({ subsystem: "shared_tables", outcome: "nothing_to_erase", scope: undefined }),
           attest({
             subsystem: "backups",
             outcome: "retained",
@@ -497,7 +617,7 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
   });
 
   it("does not require an absent subsystem to attest", () => {
-    const out = assembleTombstone(declaredInputOf(ONLY_SCHEMA));
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
     expect(out.ok).toBe(true);
   });
 
@@ -505,7 +625,7 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
     // The declaration and the evidence disagree about what exists, and folding the report in would
     // put figures in a proof that says the subsystem is not there.
     const out = assembleTombstone(
-      declaredInputOf(ONLY_SCHEMA, {
+      declaredInputOf(PERFORMED_ONLY, {
         attestations: [attest(), attest({ subsystem: "caches", outcome: "nothing_to_erase", scope: undefined })],
       }),
     );
@@ -525,7 +645,7 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
 
   it("refuses when both are declared", () => {
     const out = assembleTombstone(
-      inputOf({ capabilities: ONLY_SCHEMA, requiredSubsystems: ["tenant_schema"] }),
+      inputOf({ capabilities: PERFORMED_ONLY, requiredSubsystems: ["tenant_schema"] }),
     );
     expect(out.ok).toBe(false);
     if (out.ok) return;
@@ -545,7 +665,7 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
 
   it("refuses a declaration that puts tenant_schema out of scope", () => {
     const out = assembleTombstone(
-      declaredInputOf({ ...ONLY_SCHEMA, tenant_schema: "absent" } as DeletionCapabilities),
+      declaredInputOf({ ...PERFORMED_ONLY, tenant_schema: "absent" } as DeletionCapabilities),
     );
     expect(out.ok).toBe(false);
     if (out.ok) return;

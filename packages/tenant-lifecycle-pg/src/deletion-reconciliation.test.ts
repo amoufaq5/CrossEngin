@@ -13,8 +13,10 @@ import {
   RECONCILIATION_VERDICTS,
   EVIDENCE_DEFECTS,
   TOMBSTONE_REFERENCE_STATES,
+  TOMBSTONE_VERIFICATION_OUTCOMES,
   isConclusive,
   needsOperator,
+  tombstoneStanding,
   verifyStoredEvidence,
   type ReconciliationResult,
   type ReconcilerOptions,
@@ -71,6 +73,18 @@ const ATTESTATION: DeletionAttestation = {
 };
 
 /**
+ * The second performed subsystem's report (ADR-0329). `nothing_to_erase` so it composes nothing
+ * into the scope — every scope assertion in this file is about `tenant_schema`, and the record has
+ * to carry a `shared_tables` attestation now because the contract refuses declaring it absent.
+ */
+const SHARED_ATTESTATION: DeletionAttestation = {
+  subsystem: "shared_tables",
+  outcome: "nothing_to_erase",
+  attestedBy: "operate-server/shared-table-erasure",
+  attestedAt: "2026-10-03T11:00:00.000Z",
+};
+
+/**
  * A **real** tombstone, assembled the way the pipeline assembles one and anchored the way the store
  * anchors one — not a stub. The verification under test is the real hash arithmetic, so a fixture
  * that merely looked like a record would have tested nothing.
@@ -91,8 +105,9 @@ function tombstoneOf(id = TOMB): StoredTombstone {
         anchoredAt: "2026-10-03T11:00:00.000Z",
       },
     ],
-    capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
-    attestations: [ATTESTATION],
+    // `shared_tables` erases and attests (ADR-0329); the contract refuses declaring it absent.
+    capabilities: { tenant_schema: "erases", shared_tables: "erases", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
+    attestations: [ATTESTATION, SHARED_ATTESTATION],
   });
   if (!assembled.ok) throw new Error(`fixture does not assemble: ${JSON.stringify(assembled.refusals)}`);
   return {
@@ -108,7 +123,7 @@ function tombstoneOf(id = TOMB): StoredTombstone {
         },
       ],
     },
-    attestations: [ATTESTATION],
+    attestations: [ATTESTATION, SHARED_ATTESTATION],
     chainEntryHash: CHAIN_HASH,
     chainSequenceNumber: 7,
   };
@@ -146,8 +161,9 @@ function unreferencedTombstone(id = "tomb_unref0001aaaa"): StoredTombstone {
         anchoredAt: "2026-10-03T11:00:00.000Z",
       },
     ],
-    capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
-    attestations: [ATTESTATION],
+    // `shared_tables` erases and attests (ADR-0329); the contract refuses declaring it absent.
+    capabilities: { tenant_schema: "erases", shared_tables: "erases", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
+    attestations: [ATTESTATION, SHARED_ATTESTATION],
   });
   if (!assembled.ok) {
     throw new Error(`fixture does not assemble: ${JSON.stringify(assembled.refusals)}`);
@@ -163,7 +179,7 @@ function unreferencedTombstone(id = "tomb_unref0001aaaa"): StoredTombstone {
         },
       ],
     },
-    attestations: [ATTESTATION],
+    attestations: [ATTESTATION, SHARED_ATTESTATION],
     chainEntryHash: CHAIN_HASH,
     chainSequenceNumber: 9,
   };
@@ -782,6 +798,143 @@ describe("auditTombstones", () => {
   });
 });
 
+describe("tombstoneStanding", () => {
+  it("passes a tombstone that verifies and whose reference resolves", () => {
+    const standing = tombstoneStanding("referenced", REQ, verifyStoredEvidence(tombstoneOf()));
+    // null detail, not an empty string: there is nothing to say about a row that stands up, and the
+    // discriminated union is what lets a caller rely on that.
+    expect(standing).toEqual({ ok: true, detail: null });
+  });
+
+  it("passes an unreferenced tombstone, which is the majority of the table", () => {
+    const check = verifyStoredEvidence(unreferencedTombstone());
+    expect(tombstoneStanding("unreferenced", null, check).ok).toBe(true);
+  });
+
+  it("fails a dangling reference even on evidence that verifies", () => {
+    const check = verifyStoredEvidence(tombstoneOf());
+    const standing = tombstoneStanding("dangling", REQ, check);
+    // A dangling reference is not an `EvidenceDefect` — the proof is intact and the row it names is
+    // gone — but it is still a finding, because no other direction of the audit can see it.
+    expect(check.ok).toBe(true);
+    expect(standing.ok).toBe(false);
+    expect(standing.detail).toContain("does not exist");
+  });
+
+  it("says both things when a row fails both ways", () => {
+    const standing = tombstoneStanding("dangling", REQ, verifyStoredEvidence(tamperedTombstone()));
+    expect(standing.detail).toContain("does not verify");
+    expect(standing.detail).toContain("does not exist");
+  });
+});
+
+describe("verifyTombstone", () => {
+  it("names the three answers, and keeps absent as one of them", () => {
+    // Three, not two: a proof that has been deleted is neither verified nor unverified, and folding
+    // it into either would let a caller close an episode because the row stopped being able to fail.
+    expect(TOMBSTONE_VERIFICATION_OUTCOMES).toEqual(["absent", "verified", "unverified"]);
+  });
+
+  it("answers absent for a tombstone that is not there", async () => {
+    const h = harness({ storedMissing: true });
+    const v = await h.reconciler.verifyTombstone(TOMB);
+    expect(v.outcome).toBe("absent");
+    // Nothing to classify and nothing to check — and a caller that read a null `check` as "no
+    // defects" would be closing an episode over a missing Article 17 proof.
+    expect(v.check).toBeNull();
+    expect(v.reference).toBeNull();
+    expect(v.tenantId).toBeNull();
+    expect(v.tombstoneId).toBe(TOMB);
+    expect(v.detail).toContain("is stored");
+  });
+
+  it("verifies a referenced tombstone that stands up, and names its reference", async () => {
+    const h = harness({ evidence: [tombstoneOf()], knownRequestIds: [REQ] });
+    const v = await h.reconciler.verifyTombstone(TOMB);
+    expect(v.outcome).toBe("verified");
+    // The reference is carried rather than left to the caller: a referenced tombstone's episode is
+    // keyed on the request and an unreferenced one's on the tombstone (ADR-0328), so a caller that
+    // guessed would close the wrong episode.
+    expect(v.reference).toBe("referenced");
+    expect(v.relatedDeletionRequestId).toBe(REQ);
+    expect(v.tenantId).toBe(TENANT);
+    expect(v.detail).toBeNull();
+  });
+
+  it("verifies an unreferenced tombstone — the class the sweep exists for", async () => {
+    const unref = unreferencedTombstone();
+    const h = harness({ evidence: [unref] });
+    const v = await h.reconciler.verifyTombstone(unref.record.id);
+    expect(v.outcome).toBe("verified");
+    expect(v.reference).toBe("unreferenced");
+    expect(v.relatedDeletionRequestId).toBeNull();
+  });
+
+  it("reports a tampered scope as unverified, with the defect that says so", async () => {
+    const h = harness({ evidence: [tamperedTombstone()], knownRequestIds: [REQ] });
+    const v = await h.reconciler.verifyTombstone(TOMB);
+    expect(v.outcome).toBe("unverified");
+    expect(v.check?.defects).toContain("scope_tampered");
+    expect(v.detail).toContain("does not verify");
+  });
+
+  it("reports a tombstone nothing in the chain witnesses as unverified", async () => {
+    const honest = tombstoneOf();
+    const h = harness({
+      evidence: [{ ...honest, chainEntryHash: null, chainSequenceNumber: null }],
+      knownRequestIds: [REQ],
+    });
+    const v = await h.reconciler.verifyTombstone(TOMB);
+    expect(v.outcome).toBe("unverified");
+    expect(v.check?.defects).toEqual(["unwitnessed"]);
+  });
+
+  it("will not call a dangling tombstone verified, however intact its proof", async () => {
+    const h = harness({ evidence: [tombstoneOf()], knownRequestIds: [] });
+    const v = await h.reconciler.verifyTombstone(TOMB);
+    // This is the case a caller must not be allowed to close on: the hashes are perfect and the
+    // request row the proof names has been deleted, which is a finding the sweep raised and nothing
+    // here has resolved.
+    expect(v.check?.ok).toBe(true);
+    expect(v.outcome).toBe("unverified");
+    expect(v.reference).toBe("dangling");
+    expect(v.detail).toContain("does not exist");
+  });
+
+  it("spends no request lookup on an unreferenced row", async () => {
+    const unref = unreferencedTombstone();
+    const h = harness({ evidence: [unref] });
+    await h.reconciler.verifyTombstone(unref.record.id);
+    expect(h.requestReads).toEqual([]);
+  });
+
+  it("agrees with the sweep on the same row, in both directions", async () => {
+    const clean = harness({ scan: [tombstoneOf()], evidence: [tombstoneOf()], knownRequestIds: [REQ] });
+    expect((await clean.reconciler.auditTombstones()).findings).toEqual([]);
+    expect((await clean.reconciler.verifyTombstone(TOMB)).outcome).toBe("verified");
+
+    const dirty = harness({
+      scan: [tamperedTombstone()],
+      evidence: [tamperedTombstone()],
+      knownRequestIds: [REQ],
+    });
+    const swept = await dirty.reconciler.auditTombstones();
+    const asked = await dirty.reconciler.verifyTombstone(TOMB);
+    // One rule, read twice. A targeted check stricter than the sweep would never close an episode the
+    // sweep opened; a laxer one would close an episode whose finding still stands.
+    expect(swept.findings[0]?.detail).toBe(asked.detail);
+    expect(asked.outcome).toBe("unverified");
+  });
+
+  it("never transitions a request or retires a tenant, whatever it answers", async () => {
+    const h = harness({ evidence: [tamperedTombstone()], knownRequestIds: [] });
+    await h.reconciler.verifyTombstone(TOMB);
+    await h.reconciler.verifyTombstone("tomb_nothinghere00");
+    expect(h.transitions).toEqual([]);
+    expect(h.retired).toEqual([]);
+  });
+});
+
 /**
  * The no-writes invariant, pinned against the real stores over a fake connection rather than against
  * the fakes above — the fakes could not write even if the code asked them to, so only this says
@@ -815,6 +968,14 @@ describe("auditTombstones writes nothing", () => {
       retained_data_reference: r.retainedDataReference ?? null,
       invalidation_of_prior_tombstone_id: null,
       attestations: JSON.stringify(stored.attestations),
+      // ADR-0329, and the reason this fake carries them: the proof version selects the domain tag
+      // the content manifest was hashed under, so a row that drops it reads a v2 record back as v1,
+      // recomputes the v1 digest, and `verifyStoredEvidence` reports `scope_tampered` on an honest
+      // proof. The sweep would then escalate a `sev1` about a falsified Article 17 proof that was
+      // never falsified — which is precisely what these three tests caught when the columns landed.
+      proof_version: r.proofVersion,
+      capability_declaration:
+        r.capabilityDeclaration === undefined ? null : JSON.stringify(r.capabilityDeclaration),
       chain_entry_hash: stored.chainEntryHash,
       chain_sequence_number: stored.chainSequenceNumber,
     };
@@ -917,6 +1078,28 @@ describe("auditTombstones writes nothing", () => {
     const select = statements.find((s) => s.includes("FROM meta.tenant_tombstones"));
     expect(select).toContain("ORDER BY tombstone_id");
     for (const column of TOMBSTONE_COLUMNS) expect(select).toContain(column);
+  });
+
+  it("records no mutating statement for a targeted verification either", async () => {
+    const h = realHarness([tamper(unreferencedTombstone())], []);
+    const v = await h.reconciler.verifyTombstone("tomb_unref0001aaaa");
+    expect(v.outcome).toBe("unverified");
+    // A lookup by id has even *less* standing to act than the sweep: the caller chose the row, so a
+    // write here would be a verdict applied on request (ADR-0323).
+    expect(h.sql().filter((s) => MUTATING.test(s))).toEqual([]);
+  });
+
+  it("asks for the one row by id, under the same platform grant its siblings use", async () => {
+    const h = realHarness([tombstoneOf()], [requestOf()]);
+    expect((await h.reconciler.verifyTombstone(TOMB)).outcome).toBe("verified");
+    const statements = h.sql();
+    expect(statements.some((s) => s.includes("set_config('app.platform_audit', 'on', true)"))).toBe(
+      true,
+    );
+    const select = statements.find((s) => s.includes("FROM meta.tenant_tombstones"));
+    // By id, not a scan: a tombstone outlives its tenant, so there is no tenant session left to
+    // satisfy the isolation policy and nothing narrower than the grant can read it.
+    expect(select).toContain("WHERE tombstone_id = $1");
   });
 
   it("resolves a referenced tombstone through the real request store", async () => {

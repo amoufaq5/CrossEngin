@@ -65,8 +65,45 @@ export interface ClassifiedField {
 }
 
 export interface SensitiveFieldPolicy {
+  /**
+   * Roles privileged for **every** sensitive class. Its meaning is unchanged, deliberately: a
+   * deployment that grants `--audit-read-sensitive-role` today reads pii *and* phi, and narrowing
+   * this field would silently revoke access it already has.
+   */
   readonly privilegedRoles?: readonly RoleName[];
+  /**
+   * Per-class grants, which `privilegedRoles` cannot express (ADR-0329).
+   *
+   * The gap: a support role that should read a customer's `pii` and never a patient's `phi` had no
+   * way to say so — the grant was wholesale, so a deployment either exposed every class to that role
+   * or redacted every class from it, and the second is what a HIPAA deployment is forced into.
+   *
+   * **A class with an entry here is authoritative for that class**, and `privilegedRoles` applies
+   * only to classes with no entry. That is what makes the narrowing possible at all: read as a union
+   * instead, a wholesale grantee could never be withheld from `phi`, which is the whole point. So
+   * `{phi: []}` withholds phi from everyone including a wholesale grantee, and an empty array is a
+   * refusal rather than "fall through" — the fail-closed reading of an explicit empty list.
+   */
+  readonly privilegedRolesByClass?: Readonly<
+    Partial<Record<DataClassification, readonly RoleName[]>>
+  >;
   readonly redactByDefault?: (classification: DataClassification) => boolean;
+}
+
+/**
+ * Whether the principal's effective roles may read a value of this class.
+ *
+ * One function, two callers (read redaction and the write mask), so the per-class rule cannot
+ * diverge between what a role may see and what it may change.
+ */
+function privilegedForClass(
+  policy: SensitiveFieldPolicy,
+  effective: ReadonlySet<RoleName>,
+  classification: DataClassification,
+): boolean {
+  const perClass = policy.privilegedRolesByClass?.[classification];
+  const granted = perClass ?? policy.privilegedRoles ?? [];
+  return granted.some((r) => effective.has(r));
 }
 
 function defaultRedacts(policy: SensitiveFieldPolicy, c: DataClassification): boolean {
@@ -90,8 +127,6 @@ export function computeClassifiedFieldRedaction(
 ): FieldRedactionResult {
   const effective = resolveEffectiveRoles(principal, roles);
   const fieldPerms = entityPerms.fields;
-  const privileged = new Set(policy.privilegedRoles ?? []);
-  const hasPrivilege = [...privileged].some((r) => effective.has(r));
   const readable: string[] = [];
   const redacted: string[] = [];
 
@@ -103,7 +138,9 @@ export function computeClassifiedFieldRedaction(
       continue;
     }
     if (field.classification !== undefined && defaultRedacts(policy, field.classification)) {
-      if (hasPrivilege) readable.push(field.name);
+      // Asked per class, not once per principal: a role may be privileged for `pii` and not for
+      // `phi`, and a single `hasPrivilege` computed outside the loop could not express that.
+      if (privilegedForClass(policy, effective, field.classification)) readable.push(field.name);
       else redacted.push(field.name);
       continue;
     }
@@ -127,8 +164,6 @@ export function validateClassifiedWriteMask(
 ): WriteMaskResult {
   const effective = resolveEffectiveRoles(principal, roles);
   const fieldPerms = entityPerms.fields;
-  const privileged = new Set(policy.privilegedRoles ?? []);
-  const hasPrivilege = [...privileged].some((r) => effective.has(r));
 
   for (const field of patchFields) {
     const rule = fieldPerms?.[field.name]?.update;
@@ -141,7 +176,9 @@ export function validateClassifiedWriteMask(
     if (
       field.classification !== undefined &&
       defaultRedacts(policy, field.classification) &&
-      !hasPrivilege
+      // The same per-class question the read path asks, through the same function, so a role cannot
+      // end up able to *write* a class it may not read (ADR-0329).
+      !privilegedForClass(policy, effective, field.classification)
     ) {
       return { ok: false, rejectedField: field.name };
     }

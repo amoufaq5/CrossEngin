@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 323 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 324 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~12,780 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~13,040 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -33,7 +33,9 @@ type errors.
 - **Phase 4** (commercialisation) is in progress and has **no plan ADR**. It has
   proceeded one shipped increment at a time since ADR-0236 — billing, third-party
   marketplace, SOC 2 / HIPAA certification, the forensics chain, deployment, the
-  platform console, AI onboarding, and the notification stack.
+  platform console, AI onboarding, the notification stack, and a long run on GDPR
+  Article 17 (ADR-0316 – ADR-0329): the erasure, its proof, the proof's reach, the
+  audit of the proofs, and the alarm for what that audit finds.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -225,11 +227,34 @@ packages exist at only one layer, noted below where that is true.
 - **`workflow-engine`** — contracts: workflow definitions (states, 
   triggers, guards, actions), 12 instance statuses, 10 activity kinds with retry policies,
   signals with 3 delivery guarantees, 4 timer kinds, compensation strategies, and the
-  25-kind append-only event history.
+  **27**-kind append-only event history. Also **instance cancellation** (ADR-0329), whose contract is
+  shaped differently from ADR-0315's job promise for a reason: a job has one kind of work and an
+  instance has several, so the guarantee is a **total map** `INSTANCE_CANCELLATION_EFFECTS` from work
+  kind to strength — an unfired timer and a scheduled activity are `dropped`/`never_started`, an
+  in-flight activity is only `signalled` (told via `AbortSignal`; one that ignores it still lands
+  `cancelled`), and a child instance is `not_cascaded`, a separate instance with its own disposition.
+  Whether an instance may be cancelled is answered by `INSTANCE_TRANSITIONS` and not by either
+  terminal set, which matters because of ADR-0307's wart: `failed` is terminal yet the map says
+  `["compensating"]`, and that is the right answer — a failed instance is compensated, not cancelled.
+  `disposition` is a required enum with **no** `z.default()`, because a default is applied to silence
+  and silence must not decide whether a half-written order is reversed. There is deliberately **no new
+  instance status**: `INSTANCE_STATUSES` is a CHECK on `meta.workflow_instances.status`, so unlike
+  `EVENT_KINDS` that is not an additive change — the fence is a field, exactly ADR-0315's shape.
 - **`workflow-runtime`** — the in-process event-sourced executor. Append-only event log,
   deterministic left-fold projection, automatic transitions + on-entry actions until
   quiescent, registered activity handlers, signal correlation with exactly-once dedup,
-  timer firing, saga compensation planning.
+  timer firing, saga compensation planning. `cancelInstance` + `surveyCancellableWork` (ADR-0329)
+  fence **four** places, not three: due timers, automatic transitions, `submitSignal` (a delivered
+  signal would transition the instance, run on-entry actions, schedule activities and spawn children)
+  and activity scheduling — the first and third because the existing status check does not cover them,
+  since the instance is still `running` between the request event and `instance_cancelled`. `setStatus`
+  is now the fold's only status writer and returns early once `cancelled`, so a late
+  `activity_completed` is recorded without resurrecting the instance, and
+  `isInstanceCancellationRequested` also answers true on `status === "cancelled"` — an
+  `instance_cancelled` can arrive with no request event, and reading only the fence would let a
+  cancelled instance's timers fire. The rollback emits `activity_compensated` per step and **not** the
+  `compensation_started`/`_completed` bracket, which would end the instance `compensated` and so
+  indistinguishable from unwinding a *failure*; it ends `cancelled` under both dispositions.
 - **`workflow-runtime-pg`** — persistence *and* distributed execution. `PostgresEventLog` +
   four projection stores + `ProjectingEventLog` (every append re-projects and upserts) +
   `buildPersistentEngine`, a replayer for drift repair, and the claim/lease layer that makes
@@ -263,7 +288,13 @@ packages exist at only one layer, noted below where that is true.
   per-field permissions, write masks, the classification-aware redaction
   (`computeClassifiedFieldRedaction`) that fails closed on pii/phi/regulated fields, and
   `canonicalAuditEntryPayload` — the round-trip-stable bytes a forensic chain commits to for
-  one audit entry (ADR-0286).
+  one audit entry (ADR-0286). Sensitive grants are **per class** since ADR-0329
+  (`privilegedRolesByClass`), on one rule: **a class with an entry is authoritative for that class**,
+  and the wholesale `privilegedRoles` reaches only classes with no entry. Read as a union instead, a
+  wholesale grantee could never be withheld from `phi`, which is the one narrowing the feature exists
+  for — so `{phi: []}` is a refusal, not a fall-through. One function behind both
+  `computeClassifiedFieldRedaction` and `validateClassifiedWriteMask`, so a role cannot write a class
+  it may not read.
 - **`sso`** — federated identity contracts: SAML 2.0 + OIDC provider configs, SCIM 2.0
   provisioning, claim mappings with transforms and JIT user policies, session lifecycle,
   login audit.
@@ -386,7 +417,23 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `CONSERVATIVE_DELETION_CAPABILITIES` (everything `erases`) is an exported *starting point*, never a
   `z.default()` — a schema default is applied to silence, which is the thing ADR-0317 refused, and
   `safeParse({})` fails. The map is a literal `z.object`, not `z.record(z.enum(...))`, because zod 3's
-  record **accepts** a partial object while typing it as total.
+  record **accepts** a partial object while typing it as total. `shared_tables` may not be `absent`
+  either since ADR-0329, for `tenant_schema`'s reason: it is the second subsystem the pipeline
+  *performs*, so a declaration calling it absent is a configuration error caught at boot rather than
+  at the first deletion.
+  **And the declaration is inside the signed bytes** (ADR-0329), as `crossengin.tombstone.content.v2`
+  — a second domain tag, not an edit in place, because v1's bytes are what every stored digest commits
+  to and appending to them would stop every existing tombstone verifying. `crossengin.tombstone.proof.v1`
+  is unchanged for *both* versions: the proof payload commits to `contentManifestSha256`, which is
+  version-bound by its own tag, so the proof inherits the version without its own bytes moving and the
+  chain transitively witnesses the declaration. A verifier selects the version from the explicit
+  `proofVersion` field and **never** by inferring it from whether a declaration is attached — an
+  inference would read a *deleted* declaration as an older record, a tamper that covers its own tracks
+  — and the contract pairs the two in both directions, so a relabelling is refused rather than hashed
+  best-effort. What this buys is the one distinction v1 could not make: "we have no cache layer" and
+  "we have a cache layer and it held nothing" compose **byte-identical** scopes, since
+  `nothing_to_erase` may carry no figures at all, so under v1 a deployment could answer the harder
+  claim with the cheaper one.
 - **`tenant-lifecycle-pg`** — the tombstone's store (ADR-0318), and the first writer
   `meta.tenant_tombstones` ever had: declared in Phase 1, it had drifted behind its contract in the way
   ADR-0300 found for `meta.feature_flags`, and in the table where it mattered most. `executed_by` and
@@ -457,6 +504,36 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   sits `in_progress` would otherwise fall through both. It writes nothing, pinned by a test that
   records every statement: ADR-0323 established that `evidence_unverified` is a verdict nothing may
   apply, and a sweep that found a tampered scope has even less standing to act than that.
+  `verifyTombstone(id)` (ADR-0329) is the **targeted** re-read that finally gives
+  `onTombstoneResolved` a caller able to substantiate a recovery: a clean sweep page does not say a
+  particular tombstone verifies, since it may simply not have been on the page. Its three outcomes
+  are `absent` / `verified` / `unverified`, and `absent` closes nothing — a deleted proof is not a
+  verified one, and it is exactly the fact a naive "it stopped appearing in the findings" check reads
+  as recovery. `tombstoneStanding` is the *extraction* of the rule `auditTombstones` applied inline,
+  so a targeted check cannot be stricter (never closing anything) or laxer (closing an episode whose
+  finding stands); a **dangling-but-intact** tombstone answers `unverified` deliberately, because the
+  sweep still reports it.
+  **And `eraseSharedTablesWithin` is the second real erasure** (ADR-0329), which until then did not
+  exist at all: **112 of the 143 `META_TABLES` carry a `tenant_id`** and nothing erased one of them,
+  so every deployment declared `shared_tables: "absent"` and signed an Article 17 proof over a tenant
+  whose rows were still in `meta.operate_entity_records`. Targets are derived from `META_TABLES` minus
+  a **compile-time** retention set of 16 — a caller-supplied retention list would be ADR-0328's defect
+  in a new field — on one rule: *a retained table holds the platform's record of what happened to the
+  tenant; everything else is the tenant's data and goes.* So the tombstone, the request, the chain and
+  its checkpoints, the audit log and its verdicts, the lifecycle events, the compliance attestations
+  and certification reports, the **public**-key registry the chain's signatures resolve against, and
+  the six access-review tables stay; `tenant_data_exports` does not, since a copy of the subject's own
+  data behind a TTL'd link is reached by Article 17 as much as the original. Deletion is in **reverse
+  `META_TABLES` order**, relying on the meta-schema invariant that an FK resolves to a table declared
+  earlier, so nothing hand-sorts. `rls_would_confine_this_session` is not theoretical and was observed
+  live: as a non-owner role with no tenant context the `DELETE` matched 0 rows, reported 0, and the
+  confirm-absence `count(*)` *also* saw 0 while the rows were still there — both read through the same
+  policy, so the confirmation cannot catch it, and the probe refuses up front. ADR-0319's
+  single-subsystem filter became a **refusal** keyed on `Object.keys(ATTESTERS)`, so a subsystem the
+  pipeline performs cannot be missing from the protected set, and a caller attesting for one gets a
+  pre-transaction `input`-stage refusal rather than a silent drop. The shared erasure runs **first** in
+  the pipeline, because all of its refusals land before it writes anything — which is what keeps "a
+  returned refusal means nothing was destroyed" true for both erasures.
 - **`marketplace`** — contracts: 8 pack kinds, a registry with Ed25519 signing and security
   review, per-tenant install lifecycle, permission grants, listings, reviews,
   compatibility.
@@ -633,7 +710,25 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   Account/credential/error vocabulary as SMS, imported rather than restated), and the bounce parser that
   turns an SES or Twilio event into planned `SuppressionRecord`s — it plans, and writes nothing, and it
   attributes each row to `provider:<source>`. Zero runtime deps, injectable `fetch`, endpoint overrides
-  for VPC endpoints and proxies. **A push payload may not vary with the notification's content**
+  for VPC endpoints and proxies. **`twilio_voice` is the third bounce source** (ADR-0329), and the
+  boundary is *not* "will it recur" — almost everything recurs — **it is whose fact it is**: a
+  permanent code is a statement about the *destination* (`13224` invalid destination, `21214`
+  unallocated, `13225` Twilio forbids calls to this number) and a transient one is about *us* or the
+  moment (`21216` our account may not call it, `21219` an unverified trial number, `21210` a `From` we
+  do not own) and produces **nothing** rather than a bounded soft row — `soft_bounce_exceeded` means a
+  threshold was *crossed*, needs state a pure module lacks, and is itself unconditional, so a bounded
+  row would outrank a `security_alert` for its whole window and keep blaming the callee after the geo
+  permission was enabled. `13225` vs `21216` is the pair that makes the rule concrete: near-identical
+  English, opposite sides. `busy` and `no-answer` suppress nothing and are checked **before** the code
+  table so a code riding along cannot route around them — the line is live, a handset is on it, and
+  `hard_bounce` is unconditional on the channel an on-call rotation reaches a person by. Every voice
+  code maps to `hard_bounce`, which is itself a finding: a callee cannot reply STOP and there is no
+  voice FBL, so no voice code can ever mean `unsubscribe` or `spam_complaint`. A third source rather
+  than a branch inside `twilio` because the two callbacks are different documents suppressing on
+  different channels, and the path segment is the deployment's declaration of which sender it
+  configured — declared beats probed, ADR-0328's rule. The SMS reader also stopped failing open: an
+  unknown `MessageStatus` is `payload_unrecognized`, not "not a failure", since the latter asserts
+  knowledge of a status it has never seen. **A push payload may not vary with the notification's content**
   (ADR-0310): everything sent is either a notice the deployment declared at construction or an identifier
   already on the `SendRequest`, `pushPayloadViolations` checks that on every send, and `send` refuses
   without calling FCM — so a composer that reaches for tenant data is a failed delivery, not a
@@ -850,6 +945,27 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   referenced tombstone adopts its request's episode, one no request names gets
   `deletion_evidence:tombstone:<id>` — and its log line leads with the **lap**, since "every stored
   proof has been verified since ⟨time⟩" is only true per completed lap.
+  **A stalled sweep now says so** (ADR-0329, `onSweepStall` + `sweepProgress().stall`), which closes
+  ADR-0328's "nothing reads `pagesAdvanced`": the findings surface goes quiet in exactly the same way
+  whether every proof verifies or none is being read. `attemptsWithoutAdvance` counts audit ticks that
+  did not move the cursor, built on the rule that **reaching the end of the table counts as motion** —
+  so an empty table and a single-page table, which lap every tick, reset it forever rather than reading
+  as stalled, which is the alarm an operator would mute. The two kinds split on whether any page came
+  back: `no_pages` (the store is unreachable or every page throws) versus `pinned_cursor`. Reported
+  through *both* surfaces because the half that matters most never reaches `onTombstoneFindings` — a
+  `no_pages` stall **is** a throwing sweep, so there is no page to hand over — which required giving
+  `sweepOnce` its own `try` inside `auditOnce`. Logged at error and deliberately **not** deduped: a
+  stall is a standing condition and the growing counter is the signal. Threshold 3, and a malformed
+  `stallAfterAttempts` reads as the **default, not off**, the opposite of `auditEveryTicks`, because
+  there "off" is the status quo and here "off" is precisely the silence this exists to end.
+  Voice's status callback is now **warned about when missing** and asks Twilio for **one** event
+  (ADR-0329): `twilio_voice` is a real bounce source, so the old silence became the misleading thing —
+  a channel that registers at boot, reads as healthy and can never suppress a dead number — and
+  `StatusCallbackEvent` narrowed from four events to `completed`, because three of the four are
+  non-terminal, answer `422`, and Twilio retries non-2xx.
+  The deletion route's 200 also carries **both** erasures (ADR-0329) — `erased` and
+  `erasedSharedTables`, never summed, because they are different claims over different scopes that the
+  tombstone carries as two attestations — while the audit row's single `rowCount` is the total.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -928,6 +1044,18 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 Full workspace build + typecheck + test is several minutes; run it backgrounded
 into a log rather than blocking on it. There is **no top-level lint script** —
 ESLint has not been migrated to v9 flat config. Ignore lint unless asked.
+
+**Run `pnpm -r build` before trusting a consumer's tests after a contract change.**
+Packages resolve each other through `dist/`, so `pnpm --filter <consumer> test` runs
+against whatever was built last: adding a `superRefine` refusal to a schema and then
+testing its consumer reported *219 passed* against a stale `dist`, and the same suite
+failed 31 tests and one whole suite once the sweep rebuilt it (ADR-0329). This is
+ADR-0307's lesson in a second form — there, running vitest was not running the type
+checker; here, it was not running the build.
+
+`.prettierrc.cjs` at the root re-exports `packages/config/prettier`, so a bare
+`npx prettier --write` uses the workspace's width. Most of `packages/*/src` is not
+Prettier-clean and there is no `format:check`; don't bulk-format.
 
 `apps/operate-web` is a Next.js app outside the vitest workspace: verify it with
 `npx next build` (and `npx tsc --noEmit`) from `apps/operate-web`.
@@ -1065,9 +1193,11 @@ opened them.
   and Twilio Voice, plus `in_app`. A push payload **may not vary with the notification's content**:
   `pushPayloadViolations` checks that on every send and `send` refuses without calling FCM, because a
   push body renders on a lock screen through Google's and Apple's servers, and opt-in is consent rather
-  than confidentiality. The two new senders are **not yet constructed from the environment** — FCM needs
-  an `FcmAccessTokenProvider`, which env vars cannot express. One platform-wide credential set per
-  provider, so every tenant still sends from one domain and calls from one number. The **page** SMS
+  than confidentiality. All four are built from the environment now (ADR-0328) — `FcmPushSender` from a
+  key file or the GCE metadata server, `TwilioVoiceSender` from its own caller id — so the earlier note
+  that FCM needed an `FcmAccessTokenProvider` env vars could not express is closed. One platform-wide
+  credential set per provider remains, so every tenant sends from one domain and calls from one number.
+  Both ends of the loop are wired for all four since ADR-0329. The **page** SMS
   transport (ADR-0326) is a fifth Twilio client and deliberately not this one: it takes its own
   `PAGE_SMS_*` credentials and bypasses preferences, suppressions and quiet hours, which is the whole
   point of a page.
@@ -1089,16 +1219,20 @@ opened them.
   alternative is a row that never matches) and deliberately does **not** collapse subaddressing or parse
   a display name off, since both would widen a suppression to addresses that never bounced.
 
-- **Push and voice are both wired; the bounce loop for voice is not** (ADR-0310, ADR-0327, ADR-0328).
-  `buildSenderRegistryFromEnv` now constructs `FcmPushSender` from a service-account key **or** from
+- **Both ends of voice are wired now** (ADR-0310, ADR-0327, ADR-0328, ADR-0329).
+  `buildSenderRegistryFromEnv` constructs `FcmPushSender` from a service-account key **or** from
   the GCE metadata server (`FCM_CREDENTIAL_SOURCE=metadata_server`, declared rather than probed), and
   `TwilioVoiceSender` from `TWILIO_VOICE_FROM_NUMBER` plus the SMS account's credential. Partial
   configuration is still skipped rather than guessed, per ADR-0301, and a refusal costs that channel
-  and never the boot — which is now the live state for all four: `in_app, sms, voice_call, push_mobile`.
-  What is left is **the other end of voice**: `bounce-webhook.ts` has no voice source, so Twilio's
-  `CallStatus`/`AnsweredBy` posts land on a route that does not know their shape and a carrier failure
-  produces no suppression. With voice unwired that was unreachable; it is reachable now, and whoever
-  owns the webhook has to decide whether that endpoint 404s, 204s or grows a branch.
+  and never the boot — the live state for all four: `in_app, sms, voice_call, push_mobile`.
+  ADR-0329 closed the other end: `twilio_voice` is the bounce webhook's third source, the sender asks
+  for one terminal callback instead of four, and a missing callback URL is warned about. What remains
+  is the **`fax` verdict**, which is named and deliberately suppresses nothing: `AnsweredBy` is a
+  detector's guess from a few hundred ms of audio, a false `fax` would permanently kill an engineer's
+  voice notifications, and ADR-0302's rule is that a safety record must never widen on an inference.
+  Closing it properly needs a consecutive-`fax` count, i.e. state a pure module does not hold. Also
+  still one platform-wide credential set per provider, so every tenant sends from one domain and calls
+  from one number.
 - **Per-tenant column schemas are additive only** (ADR-0314). A removed field's column is never dropped,
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
@@ -1120,12 +1254,22 @@ opened them.
   to mount without it. That closed a defect worse than the one it was meant to close — the route read
   `requiredSubsystems` from the **request body** with `[]` as its default, so a remote caller chose how
   much of the deployment its Article 17 proof covered and omitting the field covered nothing, while the
-  runner's `?? []` did the same unattended on every scheduled deletion. What remains: four of the six
-  subsystems still cannot attest because their erasures do not exist, so a deployment must declare them
-  `absent` — honest, and now *visible* on the assembly rather than silent — or `erases`, which refuses
-  every deletion until the erasure exists. A declared absence is **not** inside the signed bytes yet;
-  carrying it there needs a `crossengin.tombstone.content.v1` → `v2` domain tag rather than an edit in
-  place, or every stored digest stops verifying. The ordering against `meta.tenants` is
+  runner's `?? []` did the same unattended on every scheduled deletion.
+  **Two of the six subsystems perform a real erasure now** (ADR-0329): `shared_tables` joined
+  `tenant_schema`, which closes the worst of what ADR-0328 left — 112 of the 143 `META_TABLES` carry a
+  `tenant_id` and nothing erased one of them, so every deployment declared it `absent` and signed a
+  proof over data that was still there. **And a declared absence is inside the signed bytes**, as
+  `crossengin.tombstone.content.v2`, so "we have no object storage" is part of the claim rather than a
+  note beside it. What remains: the other **four** still cannot attest because their erasures do not
+  exist, so a deployment declares them `absent` — honest, and now *in the proof* rather than merely
+  visible on the assembly — or `erases`, which refuses every deletion until the erasure exists.
+  Statutory retention of business records is still **not expressible**: a subsystem attests exactly one
+  outcome, so `shared_tables` cannot say "erased these 94 and retained invoices under a 7-year
+  obligation", and the retention set is defined as *not the tenant's data at all* precisely so the
+  attestation can be `erased` without lying. `storageBytes` for shared tables is tuple bytes only,
+  exclusive of index and TOAST overhead, and there is a window between the confirm-absence pass and the
+  commit in which a concurrent writer for the tenant could insert a row — no advisory lock closes it,
+  only quiescing the tenant does. The ordering against `meta.tenants` is
   **unenforced**: the audit record's `tenant_id` is a foreign key to that table, so retiring the tenant
   row *first* makes every erasure unrecordable — the 500 fires, visibly, and the data is gone with no
   provenance. Erase, record, then retire the row.
@@ -1156,10 +1300,16 @@ opened them.
   pair that distinguishes "pages are not arriving" from "pages arrive but the cursor is pinned".
   `meta.tenant_tombstones` also gained the index `findForRequest` had always lacked, partial because the
   column is NULL for exactly the rows that can never match a lookup by request id.
-  What is left there: `onTombstoneResolved` exists but nothing calls it, because a clean sweep page does
-  **not** say a particular tombstone verifies — it may simply not have been on the page, since the sweep
-  laps — so closing an episode needs a caller that can prove the id was among the rows a clean page
-  examined. Nothing reads `pagesAdvanced` either, so a stalled sweep is detectable and undetected.
+  **ADR-0329 closes both of those**: `verifyTombstone(id)` is the targeted re-read that substantiates a
+  recovery, with `absent` as its own outcome closing nothing — a deleted proof is not a verified one,
+  and it is exactly the fact a naive "it stopped appearing" check reads as recovery — and the stall
+  detector reads the cursor. What is left there: a stalled sweep is **reported, not escalated**. The
+  recommended shape is written down (declare at `sev2`, keyed per *surface* as
+  `deletion_evidence:sweep` with the kind as a timeline note, so a database that is half-up and flips
+  between `no_pages` and `pinned_cursor` is one episode) and deliberately not built, because ADR-0324's
+  `sev1` is for a *detected* falsified proof — a fact in hand — while a stall concludes nothing about
+  any row and persists for as long as the misconfiguration does, so paging it would compete with real
+  tamper pages on the same rotation.
 - **A page now really leaves the process, and closes itself when the finding is put right**
   (ADR-0325, ADR-0326). `PageDispatcher` delivers over PagerDuty, Slack, a signed webhook and SMS, and
   **reports** rather than throws: `delivered === 0` is `undelivered`, logged at error, because the
@@ -1240,24 +1390,48 @@ opened them.
 - `dispatched_at` is still unused (ADR-0277). No route writes a read state or reads the *template*
   audit trail over HTTP (ADR-0279). A platform-scoped audit read is recorded against the reader's own
   tenant, because `meta.audit_log.tenant_id` is NOT NULL, so a reader with no resolvable tenant cannot
-  read at all (ADR-0313). `--audit-read-sensitive-role` grants unredacted payloads wholesale — per-class
-  grants (pii but not phi) are not expressible. A job handler that ignores its `AbortSignal` runs to
-  completion and commits its effects while the run records `cancelled`; the guarantee is deliberately
-  phrased as "no further work will be *started*" (ADR-0315). Nothing cancels a *workflow* instance's
-  timers or activities — cancellation is jobs only. `ESTIMATED_CHARS_PER_TOKEN` under-counts for CJK,
+  read at all (ADR-0313). Per-class sensitive grants are expressible now
+  (`--audit-read-sensitive-class <class>=<role>`, ADR-0329), and `--audit-read-sensitive-role` remains
+  the wholesale form, reaching only classes no `=` entry names. A job handler that ignores its
+  `AbortSignal` runs to completion and commits its effects while the run records `cancelled`; the
+  guarantee is deliberately phrased as "no further work will be *started*" (ADR-0315). A **workflow
+  instance** can be cancelled since ADR-0329, but only from the engine — there is no HTTP route the way
+  job cancellation has one, so it is reachable by embedding code and not by a tenant, and that is the
+  obvious first item next. An in-flight activity is only `signalled`, and `signalDelivered` is `false`
+  when its handler belongs to another process: nothing propagates the abort across a process boundary.
+  A `child_instance` is `not_cascaded` by design, and side effects with no compensation key are
+  reported by neither disposition. `ESTIMATED_CHARS_PER_TOKEN` under-counts for CJK,
   which is the unsafe direction for a ceiling (ADR-0311). A per-route or per-tenant request-body limit
   is unaddressed; the cap is platform-wide (ADR-0312). A refused DDL application is invisible to the
   tenant — they are served from the JSONB fallback rather than the tables they asked for (ADR-0314). A
   refused erasure leaves an operator to drop the collateral by hand; the refusal names it but does not
   hand over the SQL the way ADR-0290's `unreconciled` does (ADR-0316).
 - A tombstone-sweep **lap** is the coverage guarantee, so a tamper is found within one pass of the
-  table rather than at once (ADR-0327); `sweepProgress()` reports the lap now, and nothing reads it.
-  A revoked FCM key can still 401 once before the cached token is discarded. `node.ts` casts the
-  delete route's `attestations` into `DeletionAttestation[]` unchecked — it fails closed, but a bad
-  body reads as a platform bug rather than a bad request (ADR-0328). There is no root prettier config
-  or script, so a bare `npx prettier --write` silently reformats at width 80 rather than the
-  workspace's. `FCM_TOKEN_ENDPOINT` and `FCM_BASE_URL` are not in `FCM_VARS`, so setting only one of
-  them is silent where every other half-configuration warns.
+  table rather than at once (ADR-0327); `sweepProgress()` reports the lap and the stall, and a stall is
+  logged rather than escalated (ADR-0329).
+  A revoked FCM key can still 401 once before the cached token is discarded. The delete route parses
+  `attestations` through the real `DeletionAttestationSchema` now rather than a loose mirror plus a cast
+  (ADR-0329) — which immediately caught something the mirror accepted, an `erased` attestation reporting
+  no scope at all; the loose mirror survives on the **read** side only, where a stored row that no
+  longer satisfies its contract is a finding for the audit path rather than something a display route
+  should refuse. `.prettierrc.cjs` at the root re-exports the workspace config, so a bare
+  `npx prettier --write` no longer reformats at width 80 — but **882** of `packages/*/src` are not
+  Prettier-clean (the config existed since Phase 1 and was never applied), so there is deliberately no
+  `format:check` script. `FCM_TOKEN_ENDPOINT` and `FCM_BASE_URL` are not in `FCM_VARS`, so setting only
+  one of them is silent where every other half-configuration warns.
+- **A column-level `check` expression is never compared by the reconciler** (ADR-0329).
+  `declaredCheckConstraints` reads only `table.constraints`, and `expectedCheckConstraintNames` adds a
+  column check's *name* to the expected set purely so a correct database is not reported as drifted — so
+  a changed inline CHECK is neither planned nor reported, across the catalog's 741 of them. It bit this
+  increment directly: `meta.workflow_events.kind` had to grow two values, so that one constraint moved
+  to a **named table-level** one, which *is* compared through ADR-0292's deparser, under exactly the
+  name Postgres gives a single-column column check so a migrated database matches rather than reporting
+  a missing constraint plus an undeclared one. Verified live both ways: on an empty table the plan is a
+  guarded `replace_table_constraint`; on a populated one it is reported `constraint_needs_validation`
+  with the `DROP`/`ADD` pair and a `SELECT … WHERE NOT (…)` naming the rows that would refuse it. Note
+  the cost that leaves: a *widening* CHECK can never fail against existing rows, but the reconciler
+  cannot tell widening from narrowing, so any deployment with workflow history runs that `ALTER` by
+  hand. The general hole stays open; the honest minimum is reporting it `unreconciled` with the SQL.
 - Column-store migration is **additive only** (ADR-0283, ADR-0314): a removed field's column
   is never dropped and a changed type is never altered, since both need a decision
   about existing data. Per-tenant activated manifests now *do* get DDL, into the tenant's
@@ -1275,7 +1449,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 323 records; 244 Accepted, 79 Proposed (the
+title or status change cannot drift. 324 records; 245 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

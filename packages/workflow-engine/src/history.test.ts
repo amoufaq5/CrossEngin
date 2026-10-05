@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ACTIVITY_EVENTS,
+  CANCELLATION_EVENTS,
   EVENT_KINDS,
   SIGNAL_EVENTS,
   STATE_CHANGING_EVENTS,
@@ -34,14 +35,32 @@ const baseEvent: WorkflowEvent = {
 };
 
 describe("constants", () => {
-  it("has 25 event kinds", () => {
-    expect(EVENT_KINDS).toHaveLength(25);
+  it("has 27 event kinds", () => {
+    expect(EVENT_KINDS).toHaveLength(27);
   });
   it("STATE_CHANGING_EVENTS includes instance_started", () => {
     expect(STATE_CHANGING_EVENTS.has("instance_started")).toBe(true);
   });
-  it("ACTIVITY_EVENTS has 6 kinds", () => {
-    expect(ACTIVITY_EVENTS.size).toBe(6);
+  it("leaves instance_cancellation_requested out of STATE_CHANGING_EVENTS", () => {
+    // It changes what the instance promises, not where it stands; the status still moves only at
+    // instance_cancelled, which is in the set.
+    expect(STATE_CHANGING_EVENTS.has("instance_cancellation_requested")).toBe(false);
+    expect(STATE_CHANGING_EVENTS.has("instance_cancelled")).toBe(true);
+  });
+  it("ACTIVITY_EVENTS has 7 kinds, including activity_cancelled", () => {
+    expect(ACTIVITY_EVENTS.size).toBe(7);
+    expect(ACTIVITY_EVENTS.has("activity_cancelled")).toBe(true);
+  });
+  it("CANCELLATION_EVENTS names every kind that records a cancellation", () => {
+    expect([...CANCELLATION_EVENTS].sort()).toEqual([
+      "activity_cancelled",
+      "instance_cancellation_requested",
+      "instance_cancelled",
+      "timer_cancelled",
+    ]);
+    for (const kind of CANCELLATION_EVENTS) {
+      expect(EVENT_KINDS, kind).toContain(kind);
+    }
   });
   it("SIGNAL_EVENTS has 2 kinds", () => {
     expect(SIGNAL_EVENTS.size).toBe(2);

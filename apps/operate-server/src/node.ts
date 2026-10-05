@@ -61,6 +61,7 @@ import {
   BOUNCE_WEBHOOK_PATH_PREFIX,
   buildBounceWebhookInterceptor,
 } from "./bounce-webhook-routes.js";
+import { BOUNCE_WEBHOOK_SOURCES } from "@crossengin/notification-providers";
 import { PostgresSuppressionStore } from "./suppression-store.js";
 import { PostgresDigestStore } from "./digest-store.js";
 import { PostgresTemplateStore } from "./template-store.js";
@@ -99,7 +100,6 @@ import {
 } from "@crossengin/tenant-lifecycle-pg";
 import {
   DeletionCapabilitiesSchema,
-  type DeletionAttestation,
   type DeletionCapabilities,
 } from "@crossengin/tenant-lifecycle";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
@@ -865,7 +865,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   executedBy: req.executedBy,
                   approvedBy: req.approvedBy,
                   capabilities,
-                  attestations: req.attestations as readonly DeletionAttestation[],
+                  // No cast: the route parses these with `DeletionAttestationSchema` itself now
+                  // (ADR-0329), so `req.attestations` is already the contract's type.
+                  attestations: req.attestations,
                   ...(req.relatedDeletionRequestId !== undefined
                     ? { relatedDeletionRequestId: req.relatedDeletionRequestId }
                     : {}),
@@ -1235,7 +1237,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           classification: {
             fieldsFor: entityFieldLookupFrom(manifest),
             roles: new Map(Object.entries(manifest.roles ?? {})),
-            policy: { privilegedRoles: options.auditReadSensitiveRoles },
+            policy: {
+              privilegedRoles: options.auditReadSensitiveRoles,
+              // Per-class grants, authoritative for the classes they name (ADR-0329). A class
+              // listed here is no longer reached by the wholesale grant above, which is the only
+              // way "pii but not phi" can be said.
+              privilegedRolesByClass: options.auditReadSensitiveClasses,
+            },
           },
           recordRead: async (event): Promise<void> => {
             // A cross-tenant read names no single tenant, so it is recorded against the *reader's*
@@ -2106,6 +2114,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             );
           };
         })(),
+        // The sweep's coverage claim, falsified (ADR-0329). ADR-0328 shipped `pagesAdvanced` and
+        // left "nothing reads it, so a stalled sweep is detectable and undetected" open — which is
+        // the worst shape a verifier can fail in, because the *findings* surface goes quiet in
+        // exactly the same way whether every proof verifies or none is being read. A clean log line
+        // and a stalled sweep are indistinguishable to an operator, so the stall gets its own line
+        // and it leads with the consequence rather than the counter.
+        //
+        // Logged at error and deliberately **not** deduped: a stall is a standing condition, and
+        // `attemptsWithoutAdvance` grows on each line, so the repetition is the signal — it says
+        // how long this has been true, which is the one thing an operator needs and the one thing a
+        // deduped line cannot say.
+        onSweepStall: (stall): void => {
+          console.error(
+            `[platform] tombstone sweep STALLED (${stall.kind}): no stored Article 17 proof has` +
+              ` been verified in ${stall.attemptsWithoutAdvance.toString()} audit tick(s)` +
+              ` (${stall.pagesWithoutAdvance.toString()} page(s) returned` +
+              `, last advance ${stall.lastAdvanceAt ?? "never"}` +
+              `, cursor ${stall.cursor ?? "start of table"}) — ${stall.detail}`,
+          );
+        },
         ...(deletionEscalator !== null && options.deletionAuditEveryTicks !== null
           ? ((escalator: DeletionEvidenceEscalator) => ({
               onAuditFindings: async (findings): Promise<void> => {
@@ -2325,7 +2353,14 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         dispatch: async (raw, body): Promise<RawHttpResponse> =>
           (await intercept(raw, body)) ?? (await inner.dispatch(raw, body)),
       };
-      console.info(`[bounce-webhook] serving ${BOUNCE_WEBHOOK_PATH_PREFIX}/{tenantId}/{ses|twilio}`);
+      // The source list is derived rather than written out, because this line was already wrong
+      // once: ADR-0329 added `twilio_voice` and the boot log kept announcing two sources while the
+      // route served three. `BOUNCE_WEBHOOK_SOURCES` is what `SOURCE_SET` is built from, so the two
+      // cannot disagree again.
+      console.info(
+        `[bounce-webhook] serving ${BOUNCE_WEBHOOK_PATH_PREFIX}/{tenantId}/` +
+          `{${BOUNCE_WEBHOOK_SOURCES.join("|")}}`,
+      );
     }
   }
 

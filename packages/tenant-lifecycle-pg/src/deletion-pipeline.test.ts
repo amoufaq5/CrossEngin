@@ -1,14 +1,20 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import { verifyTombstoneHashes, type DeletionAttestation } from "@crossengin/tenant-lifecycle";
+import {
+  verifyTombstoneHashes,
+  type DeletionAttestation,
+  type DeletionCapabilities,
+} from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
 import {
   DeletionPipelineAborted,
+  PIPELINE_PERFORMED_SUBSYSTEMS,
   PIPELINE_REFUSAL_STAGES,
   deleteTenantAtomically,
   isAnchoredByChain,
   type SchemaEraserWithin,
 } from "./deletion-pipeline.js";
+import { RETAINED_SHARED_TABLES } from "./shared-table-erasure.js";
 import { PostgresTombstoneStore, type TombstoneAnchorer } from "./tombstone-store.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -16,6 +22,23 @@ const AT = "2026-10-03T13:00:00.000Z";
 const ENTRY_HASH = "d".repeat(64);
 const ALICE = "alice@example.test";
 const BOB = "bob@example.test";
+
+/** Both subsystems this pipeline performs are declared, because `absent` is now refused for them. */
+const CAPABILITIES: DeletionCapabilities = {
+  tenant_schema: "erases",
+  shared_tables: "erases",
+  object_storage: "absent",
+  backups: "absent",
+  search_indexes: "absent",
+  caches: "absent",
+};
+
+const RELATION_RE = /"([a-z_]+)"\."([a-z_]+)"/;
+
+function relationOf(sql: string): string {
+  const match = RELATION_RE.exec(sql);
+  return match === null ? "" : `${match[1] ?? ""}.${match[2] ?? ""}`;
+}
 
 interface Harness {
   readonly conn: PgConnection;
@@ -27,7 +50,14 @@ interface Harness {
 
 function harness(
   erasureOver: Partial<Awaited<ReturnType<SchemaEraserWithin>>> = {},
-  opts: { readonly insertThrows?: boolean; readonly eraseThrows?: boolean } = {},
+  opts: {
+    readonly insertThrows?: boolean;
+    readonly eraseThrows?: boolean;
+    /** Qualified shared table → rows the tenant holds there. */
+    readonly sharedRows?: Readonly<Record<string, number>>;
+    /** Bare names the shared probe reports `row_security_active` for. */
+    readonly confined?: readonly string[];
+  } = {},
 ): Harness {
   const calls: { sql: string; params: readonly unknown[] }[] = [];
   const conn: PgConnection = {
@@ -35,6 +65,21 @@ function harness(
       calls.push({ sql, params: params ?? [] });
       if (opts.insertThrows === true && sql.startsWith("INSERT INTO")) {
         throw new Error("insert exploded");
+      }
+      if (sql.includes("row_security_active")) {
+        const requested = (params?.[1] ?? []) as readonly string[];
+        const rows = requested.map((name) => ({
+          table_name: name,
+          confined: (opts.confined ?? []).includes(name),
+        }));
+        return { rows, rowCount: rows.length };
+      }
+      if (sql.startsWith("WITH deleted AS (DELETE FROM")) {
+        const n = opts.sharedRows?.[relationOf(sql)] ?? 0;
+        return { rows: [{ n, bytes: n * 100 }], rowCount: 1 };
+      }
+      if (sql.startsWith("SELECT count(*) AS n FROM")) {
+        return { rows: [{ n: 0 }], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
     }) as PgConnection["query"],
@@ -94,34 +139,50 @@ function inputOf(over: Partial<Parameters<typeof deleteTenantAtomically>[3]> = {
     kind: "tenant_deletion",
     executedBy: ALICE,
     approvedBy: BOB,
-    capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
+    capabilities: CAPABILITIES,
     clock: () => new Date(AT),
     ...over,
   };
 }
 
+const SHARED_ROWS = { "meta.operate_entity_records": 7, "meta.operate_sequences": 2 } as const;
+
 describe("deleteTenantAtomically", () => {
-  it("erases, attests, assembles, anchors and stores in ONE transaction", async () => {
-    const h = harness();
+  it("erases shared rows and the schema, attests, assembles, anchors and stores in ONE transaction", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
     expect(out.ok).toBe(true);
     const order = h.sql();
-    // One BEGIN: the drop, the chain append and the insert share it, so the data and its proof
-    // cannot disagree.
+    // One BEGIN: every destructive statement, the chain append and the insert share it, so the data
+    // and its proof cannot disagree.
     expect(order.filter((s) => s === "BEGIN")).toHaveLength(1);
     const begin = order.indexOf("BEGIN");
+    const probe = order.findIndex((s) => s.includes("row_security_active"));
+    const sharedDelete = order.findIndex((s) => s.startsWith("WITH deleted AS (DELETE FROM"));
     const drop = order.findIndex((s) => s.startsWith("DROP SCHEMA"));
     const append = order.indexOf("-- chain append");
     const insert = order.findIndex((s) => s.startsWith("INSERT INTO"));
     const commit = order.indexOf("COMMIT");
-    expect(begin).toBeLessThan(drop);
+    expect(begin).toBeLessThan(probe);
+    expect(probe).toBeLessThan(sharedDelete);
+    // The shared erasure runs first: all of its refusals land before it writes anything, which is
+    // what keeps "a returned refusal means nothing was destroyed" true for both erasures.
+    expect(sharedDelete).toBeLessThan(drop);
     expect(drop).toBeLessThan(append);
     expect(append).toBeLessThan(insert);
     expect(insert).toBeLessThan(commit);
   });
 
+  it("never deletes from a retained table", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    for (const retained of RETAINED_SHARED_TABLES) {
+      expect(h.sql().some((s) => s.includes(`DELETE FROM "meta"."${retained}"`))).toBe(false);
+    }
+  });
+
   it("produces a record anchored by the chain, not by the placeholder", async () => {
-    const h = harness();
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
     expect(out.ok).toBe(true);
     if (!out.ok) return;
@@ -136,8 +197,12 @@ describe("deleteTenantAtomically", () => {
     });
   });
 
-  it("measures the scope from its own erasure, not from a caller's claim", async () => {
-    const h = harness();
+  it("declares the subsystems it performs, derived from the attesters it actually has", () => {
+    expect([...PIPELINE_PERFORMED_SUBSYSTEMS]).toEqual(["tenant_schema", "shared_tables"]);
+  });
+
+  it("refuses a caller's tenant_schema attestation rather than silently dropping it", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const lie: DeletionAttestation = {
       subsystem: "tenant_schema",
       outcome: "erased",
@@ -145,54 +210,142 @@ describe("deleteTenantAtomically", () => {
       attestedBy: "a-caller-who-guessed",
       attestedAt: AT,
     };
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf({ attestations: [lie] }));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals).toEqual([
+      {
+        stage: "input",
+        reason: "performed_subsystem_attested",
+        detail: expect.stringContaining("tenant_schema") as unknown as string,
+      },
+    ]);
+    // Settled before the transaction opened, so not a single statement ran.
+    expect(h.calls).toEqual([]);
+  });
+
+  it("refuses a caller's shared_tables attestation — the subsystem that had no protection at all", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const claim: DeletionAttestation = {
+      subsystem: "shared_tables",
+      outcome: "erased",
+      scope: { tables: ["meta.operate_entity_records"], rowCount: 1, storageBytes: 1 },
+      attestedBy: "a-caller-who-declared-erases",
+      attestedAt: AT,
+    };
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf({ attestations: [claim] }));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual(["performed_subsystem_attested"]);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("refuses a declaration that calls a performed subsystem absent", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const out = await deleteTenantAtomically(
       h.conn,
       h.store,
       h.erase,
-      inputOf({ attestations: [lie] }),
+      inputOf({ capabilities: { ...CAPABILITIES, shared_tables: "absent" } }),
     );
-    expect(out.ok).toBe(true);
-    if (!out.ok) return;
-    // An attestation about work this transaction is about to do is a prediction, not evidence.
-    expect(out.stored.record.scope.rowCount).toBe(26);
-    expect(out.stored.record.scope.tables).toEqual(["t_abc.account", "t_abc.invoice"]);
-    expect(out.stored.attestations.some((a) => a.attestedBy === "a-caller-who-guessed")).toBe(false);
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    // The pipeline erases it whatever the declaration says, so a proof silent about it would be
+    // ADR-0317's defect with a configuration file in front of it.
+    expect(out.refusals).toEqual([
+      {
+        stage: "input",
+        reason: "performed_subsystem_absent",
+        detail: expect.stringContaining("shared_tables") as unknown as string,
+      },
+    ]);
+    expect(h.calls).toEqual([]);
   });
 
-  it("always covers tenant_schema, even when the caller leaves it out", async () => {
-    const h = harness();
-    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf({ capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" } }));
+  it("measures both scopes from its own erasures", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
     expect(out.ok).toBe(true);
     if (!out.ok) return;
+    // 26 from the tenant's own schema plus 9 from the shared tables, and the table list carries both
+    // provenances without either subsystem naming the other's.
+    expect(out.stored.record.scope.rowCount).toBe(35);
     expect(out.stored.record.scope.schemas).toEqual(["t_abc"]);
+    expect(out.stored.record.scope.tables).toEqual([
+      "meta.operate_entity_records",
+      "meta.operate_sequences",
+      "t_abc.account",
+      "t_abc.invoice",
+    ]);
   });
 
-  it("refuses when another required subsystem did not attest, and drops nothing", async () => {
+  it("attests shared_tables with the rows it actually deleted", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const shared = out.stored.attestations.find((a) => a.subsystem === "shared_tables");
+    expect(shared?.outcome).toBe("erased");
+    expect(shared?.scope).toEqual({
+      // Deletion order — reverse catalog order — which is the order they were destroyed in. The
+      // record's own `scope.tables` is sorted, because `composeDeletionScope` sorts it.
+      tables: ["meta.operate_sequences", "meta.operate_entity_records"],
+      rowCount: 9,
+      storageBytes: 900,
+    });
+    expect(shared?.attestedBy).toContain(ALICE);
+  });
+
+  it("attests shared_tables as nothing to erase when the tenant held no shared rows", async () => {
     const h = harness();
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const shared = out.stored.attestations.find((a) => a.subsystem === "shared_tables");
+    expect(shared?.outcome).toBe("nothing_to_erase");
+    expect(shared?.scope).toBeUndefined();
+  });
+
+  it("completes a deletion whose only data was in the shared tables", async () => {
+    const h = harness(
+      { erased: false, alreadyAbsent: true, erasedRelations: [], rowCount: 0, storageBytes: 0 },
+      { sharedRows: SHARED_ROWS },
+    );
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    // Before the shared erasure existed this was a `scope_empty` abort: a tenant that never
+    // activated a manifest had nothing erasable at all, while 112 tables held its rows.
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.stored.record.scope.rowCount).toBe(9);
+    expect(out.erasedSharedTables.rowCount).toBe(9);
+  });
+
+  it("refuses when another required subsystem did not attest, and destroys nothing", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const err = await deleteTenantAtomically(
       h.conn,
       h.store,
       h.erase,
-      inputOf({ capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "erases", backups: "erases", search_indexes: "absent", caches: "absent" } }),
+      inputOf({ capabilities: { ...CAPABILITIES, object_storage: "erases", backups: "erases" } }),
     ).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DeletionPipelineAborted);
     const refusals = (err as DeletionPipelineAborted).refusals;
     expect(refusals.every((r) => r.stage === "assemble")).toBe(true);
     expect(refusals.map((r) => r.reason)).toContain("subsystem_unattested");
-    // The drop happened inside the transaction and must be undone: committing it would leave a
-    // destroyed schema with no record of its destruction.
+    // Destruction happened inside the transaction and must be undone: committing it would leave
+    // destroyed data with no record of its destruction.
     expect(h.sql()).toContain("ROLLBACK");
     expect(h.sql().some((s) => s === "COMMIT")).toBe(false);
   });
 
   it("accepts another subsystem that attested it found nothing", async () => {
-    const h = harness();
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const out = await deleteTenantAtomically(
       h.conn,
       h.store,
       h.erase,
       inputOf({
-        capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "erases" },
+        capabilities: { ...CAPABILITIES, caches: "erases" },
         attestations: [
           { subsystem: "caches", outcome: "nothing_to_erase", attestedBy: "cache-op", attestedAt: AT },
         ],
@@ -200,28 +353,51 @@ describe("deleteTenantAtomically", () => {
     );
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.stored.attestations).toHaveLength(2);
+    expect(out.stored.attestations).toHaveLength(3);
   });
 
-  it("returns an erase refusal rather than throwing, since nothing was dropped", async () => {
-    const h = harness({
-      erased: false,
-      refusals: [{ reason: "external_dependents", detail: "would also drop view public.x" }],
-      erasedRelations: [],
-      rowCount: 0,
-      storageBytes: 0,
-    });
+  it("returns a shared-table refusal rather than throwing, since nothing was destroyed", async () => {
+    const h = harness({}, { confined: ["operate_entity_records"] });
     const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
     expect(out.ok).toBe(false);
     if (out.ok) return;
     expect(out.refusals).toEqual([
-      { stage: "erase", reason: "external_dependents", detail: "would also drop view public.x" },
+      {
+        stage: "erase",
+        reason: "rls_would_confine_this_session",
+        detail: expect.stringContaining("meta.operate_entity_records") as unknown as string,
+      },
     ]);
+    // Not one destructive statement, and the tenant's own schema was not even trial-dropped.
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS"))).toBe(false);
+    expect(h.sql().some((s) => s.startsWith("DROP SCHEMA"))).toBe(false);
     expect(h.sql().some((s) => s.startsWith("INSERT INTO"))).toBe(false);
   });
 
-  it("rolls the drop back when the insert fails", async () => {
-    const h = harness({}, { insertThrows: true });
+  it("aborts on a schema-erase refusal, because the shared deletes already ran", async () => {
+    const h = harness(
+      {
+        erased: false,
+        refusals: [{ reason: "external_dependents", detail: "would also drop view public.x" }],
+        erasedRelations: [],
+        rowCount: 0,
+        storageBytes: 0,
+      },
+      { sharedRows: SHARED_ROWS },
+    );
+    const err = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf()).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(DeletionPipelineAborted);
+    expect((err as DeletionPipelineAborted).refusals).toEqual([
+      { stage: "erase", reason: "external_dependents", detail: "would also drop view public.x" },
+    ]);
+    expect(h.sql()).toContain("ROLLBACK");
+    expect(h.sql().some((s) => s.startsWith("INSERT INTO"))).toBe(false);
+  });
+
+  it("rolls everything back when the insert fails", async () => {
+    const h = harness({}, { insertThrows: true, sharedRows: SHARED_ROWS });
     await expect(deleteTenantAtomically(h.conn, h.store, h.erase, inputOf())).rejects.toThrow(
       /insert exploded/,
     );
@@ -230,29 +406,31 @@ describe("deleteTenantAtomically", () => {
     expect(h.sql().some((s) => s === "COMMIT")).toBe(false);
   });
 
-  it("rolls back when the erase itself throws", async () => {
-    const h = harness({}, { eraseThrows: true });
+  it("rolls back when the schema erase itself throws", async () => {
+    const h = harness({}, { eraseThrows: true, sharedRows: SHARED_ROWS });
     await expect(deleteTenantAtomically(h.conn, h.store, h.erase, inputOf())).rejects.toThrow(
       /drop exploded/,
     );
     expect(h.sql()).toContain("ROLLBACK");
   });
 
-  it("refuses four-eyes before dropping anything", async () => {
-    const h = harness();
-    const err = await deleteTenantAtomically(
+  it("refuses four-eyes before destroying anything", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
       h.conn,
       h.store,
       h.erase,
       inputOf({ approvedBy: ALICE }),
-    ).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(DeletionPipelineAborted);
-    expect((err as DeletionPipelineAborted).refusals.map((r) => r.reason)).toContain(
-      "four_eyes_violated",
     );
+    // The shared erasure checks it first, so it refuses rather than aborting — and nothing was
+    // deleted, which is what makes a return correct here.
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual(["four_eyes_violated"]);
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS"))).toBe(false);
   });
 
-  it("reports an already-absent schema as nothing erased, and still refuses an empty deletion", async () => {
+  it("still refuses a deletion with nothing to delete anywhere", async () => {
     const h = harness({
       erased: false,
       alreadyAbsent: true,
@@ -269,18 +447,20 @@ describe("deleteTenantAtomically", () => {
     expect((err as DeletionPipelineAborted).refusals.map((r) => r.reason)).toContain("scope_empty");
   });
 
-  it("stores the attestations beside the record", async () => {
-    const h = harness();
+  it("stores both performed attestations beside the record", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.stored.attestations).toHaveLength(1);
-    expect(out.stored.attestations[0]?.subsystem).toBe("tenant_schema");
-    expect(out.stored.attestations[0]?.attestedBy).toContain(ALICE);
+    expect(out.stored.attestations.map((a) => a.subsystem)).toEqual([
+      "tenant_schema",
+      "shared_tables",
+    ]);
+    expect(out.stored.attestations.every((a) => a.attestedBy.includes(ALICE))).toBe(true);
   });
 
-  it("reports what it destroyed, schema-qualified", async () => {
-    const h = harness();
+  it("reports what it destroyed on both sides, schema-qualified", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
     expect(out.ok).toBe(true);
     if (!out.ok) return;
@@ -291,16 +471,39 @@ describe("deleteTenantAtomically", () => {
       storageBytes: 65536,
       alreadyAbsent: false,
     });
+    expect(out.erasedSharedTables.schema).toBe("meta");
+    expect(out.erasedSharedTables.tables).toEqual([
+      "meta.operate_sequences",
+      "meta.operate_entity_records",
+    ]);
+    expect(out.erasedSharedTables.rowCount).toBe(9);
+    // Coverage, which the scope deliberately does not carry: 96 of the catalog's 112 tenant-scoped
+    // tables examined, 16 left by the retention set.
+    expect(out.erasedSharedTables.examinedTables).toHaveLength(96);
+    expect(out.erasedSharedTables.retainedTables).toHaveLength(RETAINED_SHARED_TABLES.length);
   });
 
-  it("declares its three stages", () => {
-    expect([...PIPELINE_REFUSAL_STAGES]).toEqual(["erase", "assemble", "store"]);
+  it("routes the shared erasure at the schema it is told to", async () => {
+    const h = harness({}, { sharedRows: { "platform.operate_entity_records": 4 } });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ schema: "platform" }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.erasedSharedTables.tables).toEqual(["platform.operate_entity_records"]);
+  });
+
+  it("declares its four stages", () => {
+    expect([...PIPELINE_REFUSAL_STAGES]).toEqual(["input", "erase", "assemble", "store"]);
   });
 });
 
 describe("isAnchoredByChain", () => {
   it("is false for a record whose anchors do not name its chain entry", async () => {
-    const h = harness();
+    const h = harness({}, { sharedRows: SHARED_ROWS });
     const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
     expect(out.ok).toBe(true);
     if (!out.ok) return;

@@ -901,3 +901,81 @@ describe("parseServeArgs — the reverse-direction audit cadence", () => {
     expect(() => parseServeArgs([...PG, "--deletion-audit-every-ticks", "1.5"])).toThrow();
   });
 });
+
+/**
+ * Per-class sensitive grants on the audit trail (ADR-0329).
+ *
+ * `--audit-read-sensitive-role` is wholesale — pii *and* phi — so a HIPAA deployment wanting
+ * support staff to read contact details had to expose patient records or redact everything.
+ */
+describe("parseServeArgs — --audit-read-sensitive-class", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg", "--audit-read-routes"];
+
+  it("is empty unless asked for", () => {
+    expect(parseServeArgs([...PG]).auditReadSensitiveClasses).toEqual({});
+  });
+
+  it("grants one class to one role", () => {
+    const o = parseServeArgs([...PG, "--audit-read-sensitive-class=pii=support"]);
+    expect(o.auditReadSensitiveClasses).toEqual({ pii: ["support"] });
+  });
+
+  it("accumulates roles for one class and keeps classes apart", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--audit-read-sensitive-class=pii=support",
+      "--audit-read-sensitive-class=pii=billing",
+      "--audit-read-sensitive-class",
+      "phi=clinician",
+    ]);
+    expect(o.auditReadSensitiveClasses).toEqual({
+      pii: ["support", "billing"],
+      phi: ["clinician"],
+    });
+  });
+
+  it("takes a class with NO role, which is how a class is withheld from everyone", () => {
+    // Not an error: naming a class makes it authoritative, so an empty list withholds it even from
+    // a wholesale `--audit-read-sensitive-role` grantee. That is the narrowing the flag exists for.
+    const o = parseServeArgs([
+      ...PG,
+      "--audit-read-sensitive-role=auditor",
+      "--audit-read-sensitive-class=phi=",
+    ]);
+    expect(o.auditReadSensitiveRoles).toEqual(["auditor"]);
+    expect(o.auditReadSensitiveClasses).toEqual({ phi: [] });
+  });
+
+  it("refuses a value with no '=' at all", () => {
+    expect(() => parseServeArgs([...PG, "--audit-read-sensitive-class=pii"])).toThrow(
+      /<class>=<role>/,
+    );
+    expect(() => parseServeArgs([...PG, "--audit-read-sensitive-class==support"])).toThrow();
+  });
+
+  it("refuses a class that is not a sensitive classification", () => {
+    // Checked against `SENSITIVE_DATA_CLASSIFICATIONS`, not a copy: a typo'd class would otherwise
+    // be accepted, apply to nothing, and leave the wholesale grant quietly reaching the class the
+    // operator meant to withhold — a narrowing that does not narrow.
+    expect(() => parseServeArgs([...PG, "--audit-read-sensitive-class=pll=support"])).toThrow(
+      /unknown sensitive class/,
+    );
+    // `public` is a real classification and deliberately not a sensitive one, so granting it is
+    // meaningless and is refused rather than silently ignored.
+    expect(() => parseServeArgs([...PG, "--audit-read-sensitive-class=public=support"])).toThrow(
+      /unknown sensitive class/,
+    );
+  });
+
+  it("names the accepted classes in the refusal, so the operator can fix it", () => {
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--audit-read-sensitive-class=nope=x"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    for (const cls of ["commercial_sensitive", "phi", "pii", "regulated"]) {
+      expect(message).toContain(cls);
+    }
+  });
+});

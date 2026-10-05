@@ -70,6 +70,13 @@ export const TOMBSTONE_COLUMNS = [
   "retained_data_reference",
   "invalidation_of_prior_tombstone_id",
   "attestations",
+  // ADR-0329. These two are load-bearing in a way the other columns are not: the proof version
+  // selects which domain tag the content manifest was hashed under, so a v2 row written and read
+  // back as v1 recomputes a *different* digest and `verifyStoredEvidence` reports `scope_tampered`
+  // on a perfectly honest proof. The pre-insert `verifyTombstoneHashes` in `assertWritable` passes,
+  // because the record is correct at that point — the forgery would be introduced by the read.
+  "proof_version",
+  "capability_declaration",
   "chain_entry_hash",
   "chain_sequence_number",
 ] as const;
@@ -295,7 +302,13 @@ export class PostgresTombstoneStore {
         // are cast. The same reasoning as the suppression store's cast map.
         if (c === "tenant_id") return `${n}::uuid`;
         if (c === "deleted_at") return `${n}::timestamptz`;
-        if (c === "scope" || c === "anchors" || c === "attestations") return `${n}::jsonb`;
+        if (
+          c === "scope" ||
+          c === "anchors" ||
+          c === "attestations" ||
+          c === "capability_declaration"
+        )
+          return `${n}::jsonb`;
         if (c === "chain_sequence_number") return `${n}::integer`;
         return n;
       }).join(", ");
@@ -319,6 +332,10 @@ export class PostgresTombstoneStore {
           stored.retainedDataReference ?? null,
           stored.invalidationOfPriorTombstoneId,
           jsonOf(attestations),
+          stored.proofVersion,
+          stored.capabilityDeclaration === undefined
+            ? null
+            : jsonOf(stored.capabilityDeclaration),
           entry.entryHash,
           entry.sequenceNumber,
         ],
@@ -506,6 +523,16 @@ export function rowToStoredTombstone(row: Record<string, unknown>): StoredTombst
   if (reason !== undefined) candidate["retainedReason"] = reason;
   const reference = textOrUndefined(row["retained_data_reference"]);
   if (reference !== undefined) candidate["retainedDataReference"] = reference;
+  // The version is read back **explicitly** rather than inferred from whether a declaration came
+  // with the row (ADR-0329): inference would read a *deleted* declaration as an older record, which
+  // is a tamper that covers its own tracks. A row written before this column existed reads `v1`
+  // from its column default, so the two agree.
+  const proofVersion = textOrUndefined(row["proof_version"]);
+  if (proofVersion !== undefined) candidate["proofVersion"] = proofVersion;
+  const declaration = parseJson(row["capability_declaration"]);
+  if (declaration !== null && declaration !== undefined) {
+    candidate["capabilityDeclaration"] = declaration;
+  }
 
   const record = TombstoneRecordSchema.parse(candidate);
   const attestations = parseJson(row["attestations"]);

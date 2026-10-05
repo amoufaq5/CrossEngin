@@ -1280,6 +1280,16 @@ describe("table column shapes", () => {
     // itself (ADR-0317).
     expect(col("attestations")?.type).toBe("JSONB");
     expect(col("attestations")?.notNull).toBe(true);
+    // ADR-0329. The version selects which domain tag the digest commits to, so it may not be NULL:
+    // a row whose version is unknown has a digest nothing can be checked against. `DEFAULT 'v1'`
+    // because every row written before this column existed was genuinely a v1 proof.
+    expect(col("proof_version")?.type).toBe("TEXT");
+    expect(col("proof_version")?.notNull).toBe(true);
+    expect(col("proof_version")?.default).toBe("'v1'");
+    expect(col("proof_version")?.check).toBe("proof_version IN ('v1', 'v2')");
+    // Nullable, and paired with the version by the contract: v2 must carry it, v1 must not.
+    expect(col("capability_declaration")?.type).toBe("JSONB");
+    expect(col("capability_declaration")?.notNull).toBeUndefined();
   });
 
   it("META_TENANT_TOMBSTONES is readable after its tenant is gone, by SELECT only", () => {

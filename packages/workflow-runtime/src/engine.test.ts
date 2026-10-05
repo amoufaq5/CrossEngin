@@ -18,7 +18,13 @@ import {
   activityRetryDelayMs,
   parseActivityBackoff,
 } from "./engine.js";
-import { projectActivities, projectInstance, projectTimers } from "./projection.js";
+import {
+  isInstanceCancellationRequested,
+  isInstanceCancelled,
+  projectActivities,
+  projectInstance,
+  projectTimers,
+} from "./projection.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000099";
@@ -99,6 +105,7 @@ function makeEngine(opts: {
   readonly definition?: WorkflowDefinition;
   readonly registry?: ActivityRegistry;
   readonly clock?: FixedClock;
+  readonly deferActivities?: boolean;
 } = {}) {
   const definition = opts.definition ?? definitionFixture();
   const log = new InMemoryEventLog();
@@ -111,6 +118,7 @@ function makeEngine(opts: {
     activityRegistry: registry,
     clock,
     idGenerator: ids,
+    ...(opts.deferActivities === undefined ? {} : { deferActivities: opts.deferActivities }),
   });
   return { engine, log, clock, definition, ids };
 }
@@ -613,49 +621,6 @@ describe("set_variable action", () => {
     const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
     expect(state.variables["status"]).toBe("checked");
     expect(state.status).toBe("completed");
-  });
-});
-
-describe("cancelInstance", () => {
-  it("emits instance_cancelled", async () => {
-    const { engine, definition } = makeEngine();
-    const state = await engine.startInstance({
-      definitionId: definition.id,
-      tenantId: TENANT,
-    });
-    await engine.cancelInstance({
-      instanceId: state.instanceId,
-      reason: "user requested",
-      cancelledByUserId: USER,
-    });
-    const finalState = await engine.getInstanceState(state.instanceId);
-    expect(finalState?.status).toBe("cancelled");
-    expect(finalState?.cancelledReason).toBe("user requested");
-    expect(finalState?.cancelledByUserId).toBe(USER);
-  });
-
-  it("rejects cancellation of a completed instance", async () => {
-    const { engine, definition } = makeEngine();
-    const state = await engine.startInstance({
-      definitionId: definition.id,
-      tenantId: TENANT,
-      correlationKey: "po-x",
-    });
-    await engine.submitSignal({
-      signalName: "approve",
-      correlationKey: "po-x",
-      tenantId: TENANT,
-    });
-    await expect(
-      engine.cancelInstance({ instanceId: state.instanceId, reason: "late" }),
-    ).rejects.toThrow(/terminal status/);
-  });
-
-  it("rejects cancellation of an unknown instance", async () => {
-    const { engine } = makeEngine();
-    await expect(
-      engine.cancelInstance({ instanceId: "wfi_nope0001", reason: "x" }),
-    ).rejects.toThrow(/unknown instance/);
   });
 });
 
@@ -1876,5 +1841,634 @@ describe("WorkflowActionError", () => {
       "child_depth_exceeded",
       "signal_depth_exceeded",
     ]);
+  });
+});
+
+describe("cancelInstance — the guarantee", () => {
+  /**
+   * A definition with a timer, a compensatable side-effect activity and a terminal state, so one
+   * fixture exercises every kind of outstanding work a cancellation has to answer for.
+   */
+  function sagaDef(
+    over: Partial<WorkflowDefinition> = {},
+  ): WorkflowDefinition {
+    return {
+      ...definitionFixture(),
+      compensationStrategy: "immediate_reverse_order",
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            {
+              kind: "schedule_activity",
+              parameters: {
+                activityKey: "charge_card",
+                kind: "http_call",
+                input: { amount: 100 },
+                compensationActivityKey: "refund_card",
+              },
+            },
+            { kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds: 600 } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "awaiting_approval",
+          kind: "waiting",
+          label: "Awaiting",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+        {
+          name: "approved",
+          kind: "terminal_success",
+          label: "Approved",
+          onEntryActions: [],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [
+        {
+          name: "charged",
+          fromState: "draft",
+          toState: "awaiting_approval",
+          trigger: { kind: "activity_completed", activityKey: "charge_card" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "approve",
+          fromState: "awaiting_approval",
+          toState: "approved",
+          trigger: { kind: "signal_received", signalName: "approve" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+        {
+          name: "timeout",
+          fromState: "awaiting_approval",
+          toState: "approved",
+          trigger: { kind: "timer_fired", timerName: "deadline" },
+          guards: [],
+          preTransitionActions: [],
+          postTransitionActions: [],
+        },
+      ],
+      initialState: "draft",
+      ...over,
+    };
+  }
+
+  function sideEffectRegistry(
+    refunds: string[] = [],
+  ): ActivityRegistry {
+    const r = createDefaultRegistry();
+    r.registerForKind("http_call", () => ({ status: "succeeded", output: { charged: true } }));
+    r.registerForActivity("wfd_def00001", "refund_card", (inv) => {
+      refunds.push(inv.instanceId);
+      return { status: "succeeded" };
+    });
+    return r;
+  }
+
+  const abandon = { disposition: "abandon" as const, reason: "buyer withdrew", requestedByUserId: USER };
+  const compensate = { disposition: "compensate" as const, reason: "buyer withdrew", requestedByUserId: USER };
+
+  it("records the fence first and the terminal event last", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.outcome).toBe("cancelled");
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds.indexOf("instance_cancellation_requested")).toBeGreaterThan(-1);
+    expect(kinds.indexOf("instance_cancellation_requested")).toBeLessThan(
+      kinds.indexOf("instance_cancelled"),
+    );
+    expect(kinds[kinds.length - 1]).toBe("instance_cancelled");
+  });
+
+  it("lands the instance cancelled with its reason and actor", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const final = await engine.getInstanceState(state.instanceId);
+    expect(final?.status).toBe("cancelled");
+    expect(final?.cancelledReason).toBe("buyer withdrew");
+    expect(final?.cancelledByUserId).toBe(USER);
+    expect(final?.cancellationDisposition).toBe("abandon");
+    expect(final?.cancellationRequestedAt).not.toBeNull();
+  });
+
+  it("cancels from every non-terminal status the map admits", async () => {
+    // created / running are reached by a definition that parks immediately; waiting_for_activity,
+    // waiting_for_timer and waiting_for_signal by the saga fixture at its three resting points.
+    const cases: readonly [string, WorkflowDefinition][] = [
+      ["waiting_for_signal", definitionFixture()],
+      ["waiting_for_timer", sagaDef()],
+    ];
+    for (const [label, def] of cases) {
+      const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry() });
+      const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+      const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+      expect(result.outcome, label).toBe("cancelled");
+      expect((await engine.getInstanceState(state.instanceId))?.status, label).toBe("cancelled");
+    }
+  });
+
+  it("refuses a completed instance as terminal, and appends nothing", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-x",
+    });
+    await engine.submitSignal({ signalName: "approve", correlationKey: "po-x", tenantId: TENANT });
+    const before = (await engine.listEvents(state.instanceId)).length;
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.outcome).toBe("refused_terminal");
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("completed");
+  });
+
+  it("refuses a failed instance as not cancellable, because the map sends it to compensating", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-y",
+    });
+    await engine.submitSignal({ signalName: "reject", correlationKey: "po-y", tenantId: TENANT });
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("failed");
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.outcome).toBe("refused_not_cancellable");
+  });
+
+  it("reports an unknown instance rather than throwing", async () => {
+    const { engine } = makeEngine();
+    const result = await engine.cancelInstance({ ...abandon, instanceId: "wfi_nope0001" });
+    expect(result.outcome).toBe("unknown_instance");
+  });
+
+  it("is idempotent: a second request appends nothing and reports already_requested", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const after = await engine.listEvents(state.instanceId);
+    const second = await engine.cancelInstance({
+      ...abandon,
+      reason: "a different reason",
+      instanceId: state.instanceId,
+    });
+    expect(second.outcome).toBe("already_requested");
+    expect((await engine.listEvents(state.instanceId)).length).toBe(after.length);
+    // The first request's reason stands, as `COALESCE`-stamping gives the job record.
+    expect((await engine.getInstanceState(state.instanceId))?.cancelledReason).toBe(
+      "buyer withdrew",
+    );
+  });
+
+  it("drops an unfired timer, and the drop is in the log with the schedule's name", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    expect(state.awaitingTimerNames).toEqual(["deadline"]);
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.cancelledTimerIds).toHaveLength(1);
+    const events = await engine.listEvents(state.instanceId);
+    const drop = events.find((e) => e.kind === "timer_cancelled");
+    expect(drop?.timerId).toBe(result.cancelledTimerIds[0]);
+    expect(drop?.payload["timerName"]).toBe("deadline");
+    expect(drop?.payload["cancelledBy"]).toBe("instance_cancellation");
+    expect(projectTimers(events).map((t) => t.status)).toEqual(["cancelled"]);
+    // The drop carries the name, so the instance stops being recorded as waiting on it.
+    expect((await engine.getInstanceState(state.instanceId))?.awaitingTimerNames).toEqual([]);
+  });
+
+  it("does not fire a due timer after cancellation", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+      clock,
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    clock.advance(3_600_000);
+    const tick = await engine.tickTimers(clock.now().getTime());
+    expect(tick.firedTimerIds).toEqual([]);
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("timer_fired");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("does not fire a due timer for an instance that is cancelled but was never requested", async () => {
+    // A `terminal_cancelled` state emits `instance_cancelled` with no request event, so the fence
+    // has to answer from the status too.
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = sagaDef();
+    const { engine, log } = makeEngine({ definition: def, registry: sideEffectRegistry(), clock });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const seq = (await log.latestSequence(state.instanceId))!;
+    await log.append({
+      id: "wfe_handwritten1",
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      sequenceNumber: seq + 1,
+      kind: "instance_cancelled",
+      occurredAt: clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: "terminal-state",
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: { reason: "terminal_cancelled state" },
+      correlationId: null,
+      causationEventId: null,
+    });
+    const projected = await engine.getInstanceState(state.instanceId);
+    expect(projected?.cancellationRequestedAt).toBeNull();
+    clock.advance(3_600_000);
+    expect((await engine.tickTimers(clock.now().getTime())).firedTimerIds).toEqual([]);
+  });
+
+  it("does not start a scheduled activity after cancellation, and records it at before_handler", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+      deferActivities: true,
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    const scheduledId = state.awaitingActivityIds[0]!;
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.beforeHandlerActivityIds).toEqual([scheduledId]);
+    const cancelled = (await engine.listEvents(state.instanceId)).find(
+      (e) => e.kind === "activity_cancelled",
+    );
+    expect(cancelled?.payload["checkpoint"]).toBe("before_handler");
+    expect(cancelled?.payload["signalDelivered"]).toBe(false);
+    // The deferred worker's entry point refuses it, and says so rather than reporting a phantom run.
+    expect(await engine.executeScheduledActivity(state.instanceId, scheduledId)).toEqual({
+      executed: false,
+    });
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("activity_started");
+  });
+
+  it("fences every driver entry point, so nothing advances a cancelled instance", async () => {
+    // `runStepLoop`'s own guard is defence in depth: the timer, signal and activity fences all sit
+    // above it, so no public entry point can reach the loop with a cancelled instance. What is
+    // observable — and what a cancellation that stopped only some of the three would break — is that
+    // invoking all of them appends nothing and moves nothing.
+    const def = sagaDef();
+    const { engine, clock } = makeEngine({
+      definition: def,
+      registry: sideEffectRegistry(),
+      deferActivities: true,
+    });
+    const state = await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "po-fence",
+    });
+    const scheduledId = state.awaitingActivityIds[0]!;
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const afterCancel = await engine.listEvents(state.instanceId);
+    const stateAfterCancel = await engine.getInstanceState(state.instanceId);
+
+    clock.advance(3_600_000);
+    await engine.tickTimers(clock.now().getTime());
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-fence",
+      tenantId: TENANT,
+    });
+    expect(await engine.executeScheduledActivity(state.instanceId, scheduledId)).toEqual({
+      executed: false,
+    });
+
+    expect(await engine.listEvents(state.instanceId)).toEqual(afterCancel);
+    expect(await engine.getInstanceState(state.instanceId)).toEqual(stateAfterCancel);
+  });
+
+  it("emits no instance_completed for a cancelled instance parked in a terminal state", async () => {
+    // The step-loop fence is checked *above* the terminal-state-kind emit for this case: a cancelled
+    // instance whose currentState is `terminal_success` must not then be reported as completed.
+    const def = sagaDef();
+    const { engine, log, clock } = makeEngine({
+      definition: def,
+      registry: sideEffectRegistry(),
+      deferActivities: true,
+    });
+    const state = await engine.startInstance({
+      definitionId: def.id,
+      tenantId: TENANT,
+      correlationKey: "po-terminal",
+    });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const seq = (await log.latestSequence(state.instanceId))!;
+    await log.append({
+      id: "wfe_handplaced1",
+      instanceId: state.instanceId,
+      tenantId: TENANT,
+      sequenceNumber: seq + 1,
+      kind: "state_transitioned",
+      occurredAt: clock.nowIso(),
+      actorPrincipalId: null,
+      actorSystemId: "test",
+      previousState: "draft",
+      newState: "approved",
+      activityId: null,
+      signalId: null,
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: { transitionName: "hand-placed" },
+      correlationId: null,
+      causationEventId: null,
+    });
+    const parked = await engine.getInstanceState(state.instanceId);
+    expect(parked?.currentState).toBe("approved");
+    // The seal keeps the status cancelled even though a state_transitioned followed it.
+    expect(parked?.status).toBe("cancelled");
+
+    clock.advance(3_600_000);
+    await engine.tickTimers(clock.now().getTime());
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-terminal",
+      tenantId: TENANT,
+    });
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("instance_completed");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("does not deliver a signal to a cancelled instance", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-sig",
+    });
+    await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    const delivery = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-sig",
+      tenantId: TENANT,
+    });
+    expect(delivery.matchedInstanceIds).toEqual([]);
+    const kinds = (await engine.listEvents(state.instanceId)).map((e) => e.kind);
+    expect(kinds).not.toContain("signal_received");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("tells an in-flight handler, and one that ignores the signal still lands cancelled", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let announce: ((id: string) => void) | undefined;
+    const entered = new Promise<string>((resolve) => {
+      announce = resolve;
+    });
+    let sawAbort = false;
+    const registry = createDefaultRegistry();
+    registry.registerForKind("http_call", async (inv) => {
+      announce?.(inv.instanceId);
+      await gate;
+      sawAbort = inv.signal.aborted;
+      // Deliberately ignores the signal and reports success anyway.
+      return { status: "succeeded", output: { charged: true } };
+    });
+    const def = sagaDef();
+    const { engine } = makeEngine({ definition: def, registry });
+
+    // Parked inside the handler, which is the only window in which `in_flight_activity`'s weaker
+    // guarantee is the one that applies.
+    const starting = engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const id = await entered;
+
+    const result = await engine.cancelInstance({ ...abandon, instanceId: id });
+    expect(result.outcome).toBe("cancelled");
+    expect(result.cooperativeAbortActivityIds).toHaveLength(1);
+    expect(result.signalDeliveredActivityIds).toEqual(result.cooperativeAbortActivityIds);
+
+    release?.();
+    await starting;
+    expect(sawAbort).toBe(true);
+
+    const events = await engine.listEvents(id);
+    const cancelled = events.find((e) => e.kind === "activity_cancelled");
+    expect(cancelled?.payload["checkpoint"]).toBe("cooperative_abort");
+    expect(cancelled?.payload["signalDelivered"]).toBe(true);
+    // The handler's report is a fact and is in the log; it moves nothing.
+    expect(events.map((e) => e.kind)).toContain("activity_completed");
+    const final = await engine.getInstanceState(id);
+    expect(final?.status).toBe("cancelled");
+    expect(final?.cancellationSignalledActivityIds).toEqual(result.cooperativeAbortActivityIds);
+    // And the activity record keeps `cancelled` while still carrying what the handler produced.
+    const activity = projectActivities(events).find(
+      (a) => a.id === result.cooperativeAbortActivityIds[0],
+    );
+    expect(activity?.status).toBe("cancelled");
+    expect(activity?.outputSha256).not.toBeNull();
+  });
+
+  it("runs the saga rollback when the request asks to compensate", async () => {
+    const refunds: string[] = [];
+    const def = sagaDef();
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry(refunds) });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    expect(state.currentState).toBe("awaiting_approval");
+    const result = await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("executed");
+    expect(result.compensatedActivityIds).toHaveLength(1);
+    expect(result.unreversedActivityIds).toEqual([]);
+    expect(refunds).toEqual([state.instanceId]);
+    const events = await engine.listEvents(state.instanceId);
+    expect(events.map((e) => e.kind)).toContain("activity_compensated");
+    // Not the compensating/compensated bracket: the instance ends `cancelled`, because that is what
+    // the caller asked for and `compensated` would be indistinguishable from unwinding a failure.
+    expect(events.map((e) => e.kind)).not.toContain("compensation_started");
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("cancelled");
+  });
+
+  it("leaves the side effect standing when the request abandons, and says which", async () => {
+    const refunds: string[] = [];
+    const def = sagaDef();
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry(refunds) });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...abandon, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("skipped_by_request");
+    expect(result.compensatedActivityIds).toEqual([]);
+    expect(result.unreversedActivityIds).toHaveLength(1);
+    expect(refunds).toEqual([]);
+    const final = (await engine.listEvents(state.instanceId)).at(-1);
+    expect(final?.payload["unreversedActivityIds"]).toEqual(result.unreversedActivityIds);
+    expect(final?.payload["compensationOutcome"]).toBe("skipped_by_request");
+  });
+
+  it("defers rather than rolls back under manual_review, and records that", async () => {
+    const refunds: string[] = [];
+    const def = sagaDef({ compensationStrategy: "manual_review" });
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry(refunds) });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("deferred_to_human");
+    expect(refunds).toEqual([]);
+    expect(result.unreversedActivityIds).toHaveLength(1);
+  });
+
+  it("reports unavailable when the definition declares no compensation", async () => {
+    const def = sagaDef({ compensationStrategy: "no_compensation" });
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry() });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const result = await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    expect(result.compensationOutcome).toBe("unavailable");
+    expect(result.unreversedActivityIds).toHaveLength(1);
+  });
+
+  it("refuses a request with no disposition", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await expect(
+      engine.cancelInstance({
+        instanceId: state.instanceId,
+        reason: "no disposition",
+        requestedByUserId: USER,
+      } as never),
+    ).rejects.toThrow(/disposition/);
+  });
+
+  it("answers from the log alone: a fresh fold of the events gives the same state", async () => {
+    const def = sagaDef();
+    const { engine } = makeEngine({ definition: def, registry: sideEffectRegistry() });
+    const state = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    await engine.cancelInstance({ ...compensate, instanceId: state.instanceId });
+    const events = await engine.listEvents(state.instanceId);
+    const refolded = projectInstance(events, def);
+    const live = await engine.getInstanceState(state.instanceId);
+    expect(refolded).toEqual(live);
+    expect(refolded?.status).toBe("cancelled");
+    expect(isInstanceCancelled(refolded!)).toBe(true);
+    expect(isInstanceCancellationRequested(refolded!)).toBe(true);
+    // And the whole history stays a dense, schema-valid, append-only log.
+    expect(isHistoryDense(events)).toBe(true);
+    for (const e of events) {
+      expect(() => WorkflowEventSchema.parse(e), e.kind).not.toThrow();
+    }
+  });
+
+  it("records the cancellation under the requesting system when no user asked", async () => {
+    const { engine, definition } = makeEngine({
+      definition: sagaDef(),
+      registry: sideEffectRegistry(),
+    });
+    const state = await engine.startInstance({ definitionId: definition.id, tenantId: TENANT });
+    await engine.cancelInstance({
+      instanceId: state.instanceId,
+      disposition: "abandon",
+      reason: "tenant deprovisioned",
+      requestedBySystem: "tenant-lifecycle",
+    });
+    const fence = (await engine.listEvents(state.instanceId)).find(
+      (e) => e.kind === "instance_cancellation_requested",
+    );
+    expect(fence?.actorSystemId).toBe("tenant-lifecycle");
+    expect((await engine.getInstanceState(state.instanceId))?.cancellationRequestedBy).toBe(
+      "tenant-lifecycle",
+    );
+  });
+
+  it("does not cascade to a child instance", async () => {
+    const childDef: WorkflowDefinition = {
+      ...definitionFixture(),
+      id: "wfd_child0001",
+      definitionKey: "child.flow",
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            { kind: "schedule_timer", parameters: { timerName: "child_deadline", relativeSeconds: 600 } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [],
+      initialState: "draft",
+    };
+    const parentDef: WorkflowDefinition = {
+      ...definitionFixture(),
+      states: [
+        {
+          name: "draft",
+          kind: "initial",
+          label: "Draft",
+          onEntryActions: [
+            { kind: "spawn_child_workflow", parameters: { definitionKey: "child.flow" } },
+          ],
+          onExitActions: [],
+          slaSeconds: null,
+        },
+      ],
+      transitions: [],
+      initialState: "draft",
+    };
+    const log = new InMemoryEventLog();
+    const engine = new WorkflowEngine({
+      eventLog: log,
+      definitions: new Map([
+        [parentDef.id, parentDef],
+        [childDef.id, childDef],
+      ]),
+      activityRegistry: createDefaultRegistry(),
+      clock: new FixedClock(new Date("2026-05-16T12:00:00.000Z")),
+      idGenerator: new CountingIdGenerator(),
+    });
+    const parent = await engine.startInstance({
+      definitionId: parentDef.id,
+      tenantId: TENANT,
+    });
+    const spawn = (await engine.listEvents(parent.instanceId)).find(
+      (e) => e.kind === "child_workflow_spawned",
+    );
+    const childId = spawn?.childInstanceId;
+    expect(childId).toBeDefined();
+    await engine.cancelInstance({ ...abandon, instanceId: parent.instanceId });
+    const child = await engine.getInstanceState(childId!);
+    expect(child?.status).not.toBe("cancelled");
+    expect(child?.cancellationRequestedAt).toBeNull();
+    // Cancelling it is a separate request, by its own id — and it then works.
+    expect(
+      (await engine.cancelInstance({ ...abandon, instanceId: childId! })).outcome,
+    ).toBe("cancelled");
   });
 });

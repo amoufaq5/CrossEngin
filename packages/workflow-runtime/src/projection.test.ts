@@ -1,7 +1,14 @@
 import type { WorkflowEvent } from "@crossengin/workflow-engine";
 import { describe, expect, it } from "vitest";
 
-import { projectActivities, projectInstance, projectSignals, projectTimers } from "./projection.js";
+import {
+  isInstanceCancellationRequested,
+  isInstanceCancelled,
+  projectActivities,
+  projectInstance,
+  projectSignals,
+  projectTimers,
+} from "./projection.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -386,5 +393,224 @@ describe("projectTimers", () => {
     expect(tims).toHaveLength(1);
     expect(tims[0]?.status).toBe("fired");
     expect(tims[0]?.fireAt).toBe("2026-05-17T00:00:00.000Z");
+  });
+});
+
+describe("projectInstance — cancellation", () => {
+  const CANCEL_REQUEST = { reason: "buyer withdrew", disposition: "abandon" };
+
+  it("leaves the cancellation fields null for an instance nobody cancelled", () => {
+    const p = projectInstance([startEvent()])!;
+    expect(p.cancellationRequestedAt).toBeNull();
+    expect(p.cancellationRequestedBy).toBeNull();
+    expect(p.cancellationDisposition).toBeNull();
+    expect(p.cancellationSignalledActivityIds).toEqual([]);
+    expect(isInstanceCancelled(p)).toBe(false);
+    expect(isInstanceCancellationRequested(p)).toBe(false);
+  });
+
+  it("records the request without moving the status off where the instance stood", () => {
+    const p = projectInstance([
+      startEvent(),
+      event({
+        kind: "instance_cancellation_requested",
+        sequenceNumber: 1,
+        occurredAt: "2026-05-16T12:30:00.000Z",
+        actorPrincipalId: "22222222-2222-2222-2222-222222222222",
+        payload: CANCEL_REQUEST,
+      }),
+    ])!;
+    expect(p.status).toBe("running");
+    expect(p.cancellationRequestedAt).toBe("2026-05-16T12:30:00.000Z");
+    expect(p.cancellationRequestedBy).toBe("22222222-2222-2222-2222-222222222222");
+    expect(p.cancellationDisposition).toBe("abandon");
+    // Already fenced, even though the status still says running.
+    expect(isInstanceCancellationRequested(p)).toBe(true);
+    expect(isInstanceCancelled(p)).toBe(false);
+  });
+
+  it("falls back to the requesting system when no principal asked", () => {
+    const p = projectInstance([
+      startEvent(),
+      event({
+        kind: "instance_cancellation_requested",
+        sequenceNumber: 1,
+        actorSystemId: "tenant-lifecycle",
+        payload: CANCEL_REQUEST,
+      }),
+    ])!;
+    expect(p.cancellationRequestedBy).toBe("tenant-lifecycle");
+  });
+
+  it("reads an unrecognised disposition as null rather than as either answer", () => {
+    const p = projectInstance([
+      startEvent(),
+      event({
+        kind: "instance_cancellation_requested",
+        sequenceNumber: 1,
+        payload: { reason: "r", disposition: "roll_back_everything" },
+      }),
+    ])!;
+    expect(p.cancellationDisposition).toBeNull();
+    // The fence does not depend on it, so a payload edit cannot unfence the instance.
+    expect(isInstanceCancellationRequested(p)).toBe(true);
+  });
+
+  it("fences an instance_cancelled that arrived with no request event", () => {
+    const p = projectInstance([
+      startEvent(),
+      event({ kind: "instance_cancelled", sequenceNumber: 1, payload: { reason: "terminal state" } }),
+    ])!;
+    expect(p.cancellationRequestedAt).toBeNull();
+    expect(isInstanceCancellationRequested(p)).toBe(true);
+    expect(isInstanceCancelled(p)).toBe(true);
+  });
+
+  it("collects the activities told to stop, and only those", () => {
+    const p = projectInstance([
+      startEvent(),
+      event({ kind: "activity_scheduled", sequenceNumber: 1, activityId: "wfa_00000001", payload: {} }),
+      event({ kind: "activity_scheduled", sequenceNumber: 2, activityId: "wfa_00000002", payload: {} }),
+      event({ kind: "activity_started", sequenceNumber: 3, activityId: "wfa_00000002" }),
+      event({ kind: "instance_cancellation_requested", sequenceNumber: 4, payload: CANCEL_REQUEST }),
+      event({
+        kind: "activity_cancelled",
+        sequenceNumber: 5,
+        activityId: "wfa_00000001",
+        payload: { checkpoint: "before_handler", signalDelivered: false },
+      }),
+      event({
+        kind: "activity_cancelled",
+        sequenceNumber: 6,
+        activityId: "wfa_00000002",
+        payload: { checkpoint: "cooperative_abort", signalDelivered: true },
+      }),
+    ])!;
+    expect(p.cancellationSignalledActivityIds).toEqual(["wfa_00000002"]);
+    // Both stop being awaited, whichever checkpoint they were cancelled at.
+    expect(p.awaitingActivityIds).toEqual([]);
+  });
+
+  it("seals the status: a late activity_completed does not resurrect the instance", () => {
+    const p = projectInstance([
+      startEvent(),
+      event({ kind: "activity_scheduled", sequenceNumber: 1, activityId: "wfa_00000001", payload: {} }),
+      event({ kind: "activity_started", sequenceNumber: 2, activityId: "wfa_00000001" }),
+      event({ kind: "instance_cancellation_requested", sequenceNumber: 3, payload: CANCEL_REQUEST }),
+      event({
+        kind: "activity_cancelled",
+        sequenceNumber: 4,
+        activityId: "wfa_00000001",
+        payload: { checkpoint: "cooperative_abort", signalDelivered: true },
+      }),
+      event({ kind: "instance_cancelled", sequenceNumber: 5, payload: CANCEL_REQUEST }),
+      event({
+        kind: "activity_completed",
+        sequenceNumber: 6,
+        activityId: "wfa_00000001",
+        payload: { outputSha256: "abc" },
+      }),
+    ])!;
+    expect(p.status).toBe("cancelled");
+    expect(p.sequenceCursor).toBe(6);
+  });
+
+  it("seals the status against every later status-moving event kind", () => {
+    const later: readonly WorkflowEvent[] = [
+      event({ kind: "state_transitioned", sequenceNumber: 2, previousState: "draft", newState: "next", payload: {} }),
+      event({ kind: "instance_completed", sequenceNumber: 3, payload: {} }),
+      event({ kind: "instance_resumed", sequenceNumber: 4, payload: {} }),
+      event({ kind: "instance_suspended", sequenceNumber: 5, payload: { reason: "r" } }),
+      event({ kind: "instance_failed", sequenceNumber: 6, payload: { errorCode: "E", errorMessage: "m" } }),
+      event({ kind: "compensation_started", sequenceNumber: 7, payload: {} }),
+      event({ kind: "compensation_completed", sequenceNumber: 8, payload: {} }),
+      event({ kind: "timer_scheduled", sequenceNumber: 9, timerId: "wft_00000001", payload: { timerName: "t" } }),
+      event({ kind: "activity_scheduled", sequenceNumber: 10, activityId: "wfa_00000009", payload: {} }),
+    ];
+    const p = projectInstance([
+      startEvent(),
+      event({ kind: "instance_cancelled", sequenceNumber: 1, payload: CANCEL_REQUEST }),
+      ...later,
+    ])!;
+    expect(p.status).toBe("cancelled");
+  });
+
+  it("re-folds to the same answer from the same log", () => {
+    const events = [
+      startEvent(),
+      event({ kind: "instance_cancellation_requested", sequenceNumber: 1, payload: CANCEL_REQUEST }),
+      event({ kind: "instance_cancelled", sequenceNumber: 2, payload: CANCEL_REQUEST }),
+    ];
+    expect(projectInstance(events)).toEqual(projectInstance([...events]));
+  });
+});
+
+describe("projectActivities — cancellation", () => {
+  it("marks an activity cancelled", () => {
+    const acts = projectActivities([
+      event({ kind: "activity_scheduled", sequenceNumber: 1, activityId: "wfa_00000001", payload: {} }),
+      event({
+        kind: "activity_cancelled",
+        sequenceNumber: 2,
+        activityId: "wfa_00000001",
+        payload: { checkpoint: "before_handler", signalDelivered: false },
+      }),
+    ]);
+    expect(acts[0]?.status).toBe("cancelled");
+  });
+
+  it("keeps a cancelled activity cancelled when its handler reports success anyway", () => {
+    // ADR-0315's promise verbatim: a handler which ignores the signal still lands as `cancelled`
+    // rather than `completed` — while the output it produced is still recorded.
+    const acts = projectActivities([
+      event({ kind: "activity_scheduled", sequenceNumber: 1, activityId: "wfa_00000001", payload: {} }),
+      event({ kind: "activity_started", sequenceNumber: 2, activityId: "wfa_00000001" }),
+      event({
+        kind: "activity_cancelled",
+        sequenceNumber: 3,
+        activityId: "wfa_00000001",
+        payload: { checkpoint: "cooperative_abort", signalDelivered: true },
+      }),
+      event({
+        kind: "activity_completed",
+        sequenceNumber: 4,
+        activityId: "wfa_00000001",
+        payload: { outputSha256: "deadbeef" },
+      }),
+    ]);
+    expect(acts[0]?.status).toBe("cancelled");
+    expect(acts[0]?.outputSha256).toBe("deadbeef");
+    expect(acts[0]?.completedAt).toBe("2026-05-16T12:00:00.000Z");
+  });
+
+  it("keeps a cancelled activity cancelled when its handler fails or times out instead", () => {
+    for (const kind of ["activity_failed", "activity_timed_out"] as const) {
+      const acts = projectActivities([
+        event({ kind: "activity_scheduled", sequenceNumber: 1, activityId: "wfa_00000001", payload: {} }),
+        event({ kind: "activity_started", sequenceNumber: 2, activityId: "wfa_00000001" }),
+        event({
+          kind: "activity_cancelled",
+          sequenceNumber: 3,
+          activityId: "wfa_00000001",
+          payload: { checkpoint: "cooperative_abort", signalDelivered: true },
+        }),
+        event({ kind, sequenceNumber: 4, activityId: "wfa_00000001", payload: { errorCode: "E", errorMessage: "m" } }),
+      ]);
+      expect(acts[0]?.status, kind).toBe("cancelled");
+    }
+  });
+
+  it("still lets a cancelled activity be compensated, which the saga planner depends on", () => {
+    const acts = projectActivities([
+      event({ kind: "activity_scheduled", sequenceNumber: 1, activityId: "wfa_00000001", payload: {} }),
+      event({
+        kind: "activity_cancelled",
+        sequenceNumber: 2,
+        activityId: "wfa_00000001",
+        payload: { checkpoint: "cooperative_abort", signalDelivered: true },
+      }),
+      event({ kind: "activity_compensated", sequenceNumber: 3, activityId: "wfa_00000001", payload: {} }),
+    ]);
+    expect(acts[0]?.status).toBe("compensated");
   });
 });

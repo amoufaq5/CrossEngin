@@ -1,13 +1,15 @@
-import type {
-  ActivityStatus,
-  SignalStatus,
-  TimerStatus,
-  WorkflowActivity,
-  WorkflowDefinition,
-  WorkflowEvent,
-  WorkflowInstance,
-  WorkflowSignal,
-  WorkflowTimer,
+import {
+  INSTANCE_CANCELLATION_DISPOSITIONS,
+  type ActivityStatus,
+  type InstanceCancellationDisposition,
+  type SignalStatus,
+  type TimerStatus,
+  type WorkflowActivity,
+  type WorkflowDefinition,
+  type WorkflowEvent,
+  type WorkflowInstance,
+  type WorkflowSignal,
+  type WorkflowTimer,
 } from "@crossengin/workflow-engine";
 
 export interface ProjectedInstance {
@@ -29,6 +31,19 @@ export interface ProjectedInstance {
   readonly cancelledAt: string | null;
   readonly cancelledByUserId: string | null;
   readonly cancelledReason: string | null;
+  /**
+   * When a cancellation was *requested*, which is the fence the driver reads — not the status.
+   * Adding a `cancelling` status would widen `INSTANCE_STATUSES`, and that enum is a CHECK
+   * constraint on `meta.workflow_instances.status`: no existing row can carry a new status, but an
+   * existing *constraint* would reject one, so widening it is not the additive change widening
+   * `EVENT_KINDS` is. A field, as in ADR-0315, where `cancel_requested_at` *is* the cancellation.
+   */
+  readonly cancellationRequestedAt: string | null;
+  readonly cancellationRequestedBy: string | null;
+  /** `null` also when the stored event's disposition is unreadable — never silently one of the two. */
+  readonly cancellationDisposition: InstanceCancellationDisposition | null;
+  /** Activities told to stop, i.e. cancelled at `cooperative_abort`. */
+  readonly cancellationSignalledActivityIds: readonly string[];
   readonly failedAt: string | null;
   readonly failureCode: string | null;
   readonly failureMessage: string | null;
@@ -41,6 +56,23 @@ export interface ProjectedInstance {
   readonly awaitingActivityIds: readonly string[];
   readonly awaitingSignalNames: readonly string[];
   readonly awaitingTimerNames: readonly string[];
+}
+
+/** Whether the log says this instance reached `cancelled`. Derived; never stored twice. */
+export function isInstanceCancelled(instance: ProjectedInstance): boolean {
+  return instance.status === "cancelled";
+}
+
+/**
+ * Whether a cancellation has begun — the fence every driver loop consults.
+ *
+ * `status === "cancelled"` is part of the answer and not a redundancy: an `instance_cancelled` can
+ * reach the log with no preceding request event, both from a definition's `terminal_cancelled` state
+ * and from any log written before this contract existed. Reading only the request field would let a
+ * cancelled instance's timers keep firing.
+ */
+export function isInstanceCancellationRequested(instance: ProjectedInstance): boolean {
+  return instance.cancellationRequestedAt !== null || instance.status === "cancelled";
 }
 
 interface MutableInstanceState {
@@ -62,6 +94,10 @@ interface MutableInstanceState {
   cancelledAt: string | null;
   cancelledByUserId: string | null;
   cancelledReason: string | null;
+  cancellationRequestedAt: string | null;
+  cancellationRequestedBy: string | null;
+  cancellationDisposition: InstanceCancellationDisposition | null;
+  cancellationSignalledActivityIds: Set<string>;
   failedAt: string | null;
   failureCode: string | null;
   failureMessage: string | null;
@@ -86,6 +122,31 @@ function asPlainObject(value: unknown): Record<string, unknown> {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+/**
+ * A stored disposition, or `null` when the payload does not carry one of the two. Deliberately not
+ * defaulted: `abandon` would skip a rollback nobody declined and `compensate` would run one nobody
+ * asked for, so an unreadable value stays unreadable. Nothing in the driver turns on it — the fence
+ * is `cancellationRequestedAt`, which no payload edit can make ambiguous.
+ */
+function asDisposition(value: unknown): InstanceCancellationDisposition | null {
+  return INSTANCE_CANCELLATION_DISPOSITIONS.find((d) => d === value) ?? null;
+}
+
+/**
+ * The one writer of `state.status` once the fold is under way, and the seal that makes a
+ * cancellation mean something.
+ *
+ * A cancellation promises that no further work is *started*, not that work already inside a handler
+ * stops (ADR-0315). So an in-flight activity may still report `activity_completed` *after*
+ * `instance_cancelled` — that report is a fact and belongs in the log. Letting it move the status
+ * would resurrect a cancelled instance from its own epilogue, which is the one thing a terminal
+ * event must prevent.
+ */
+function setStatus(state: MutableInstanceState, next: WorkflowInstance["status"]): void {
+  if (state.status === "cancelled") return;
+  state.status = next;
 }
 
 export function projectInstance(
@@ -120,6 +181,10 @@ export function projectInstance(
     cancelledAt: null,
     cancelledByUserId: null,
     cancelledReason: null,
+    cancellationRequestedAt: null,
+    cancellationRequestedBy: null,
+    cancellationDisposition: null,
+    cancellationSignalledActivityIds: new Set(),
     failedAt: null,
     failureCode: null,
     failureMessage: null,
@@ -202,37 +267,45 @@ function applyEvent(state: MutableInstanceState, event: WorkflowEvent): void {
     case "state_transitioned": {
       if (event.newState !== null) state.currentState = event.newState;
       if (state.status !== "compensating" && state.status !== "suspended") {
-        state.status = "running";
+        setStatus(state, "running");
       }
       return;
     }
     case "instance_completed": {
-      state.status = "completed";
+      setStatus(state, "completed");
       state.completedAt = event.occurredAt;
       return;
     }
     case "instance_failed": {
-      state.status = "failed";
+      setStatus(state, "failed");
       state.failedAt = event.occurredAt;
       state.failureCode = asString(event.payload["errorCode"]);
       state.failureMessage = asString(event.payload["errorMessage"]);
       return;
     }
+    case "instance_cancellation_requested": {
+      // The fence, and not a status change: the instance keeps standing where it stood until the
+      // finalizing event, because between the two an in-flight handler is still running.
+      state.cancellationRequestedAt = event.occurredAt;
+      state.cancellationRequestedBy = event.actorPrincipalId ?? event.actorSystemId;
+      state.cancellationDisposition = asDisposition(event.payload["disposition"]);
+      return;
+    }
     case "instance_cancelled": {
-      state.status = "cancelled";
+      setStatus(state, "cancelled");
       state.cancelledAt = event.occurredAt;
       state.cancelledByUserId = event.actorPrincipalId;
       state.cancelledReason = asString(event.payload["reason"]);
       return;
     }
     case "instance_suspended": {
-      state.status = "suspended";
+      setStatus(state, "suspended");
       state.suspendedAt = event.occurredAt;
       state.suspendedReason = asString(event.payload["reason"]);
       return;
     }
     case "instance_resumed": {
-      state.status = "running";
+      setStatus(state, "running");
       state.suspendedAt = null;
       state.suspendedReason = null;
       return;
@@ -240,12 +313,24 @@ function applyEvent(state: MutableInstanceState, event: WorkflowEvent): void {
     case "activity_scheduled": {
       if (event.activityId !== null) {
         state.awaitingActivityIds.add(event.activityId);
-        state.status = "waiting_for_activity";
+        setStatus(state, "waiting_for_activity");
       }
       return;
     }
     case "activity_started":
       return;
+    case "activity_cancelled": {
+      if (event.activityId !== null) {
+        state.awaitingActivityIds.delete(event.activityId);
+        if (asString(event.payload["checkpoint"]) === "cooperative_abort") {
+          state.cancellationSignalledActivityIds.add(event.activityId);
+        }
+      }
+      if (state.awaitingActivityIds.size === 0 && state.status === "waiting_for_activity") {
+        setStatus(state, "running");
+      }
+      return;
+    }
     case "activity_completed":
     case "activity_failed":
     case "activity_timed_out":
@@ -254,7 +339,7 @@ function applyEvent(state: MutableInstanceState, event: WorkflowEvent): void {
         state.awaitingActivityIds.delete(event.activityId);
       }
       if (state.awaitingActivityIds.size === 0 && state.status === "waiting_for_activity") {
-        state.status = "running";
+        setStatus(state, "running");
       }
       return;
     }
@@ -262,7 +347,7 @@ function applyEvent(state: MutableInstanceState, event: WorkflowEvent): void {
       const name = asString(event.payload["timerName"]);
       if (name !== null) {
         state.awaitingTimerNames.add(name);
-        state.status = "waiting_for_timer";
+        setStatus(state, "waiting_for_timer");
       }
       return;
     }
@@ -273,7 +358,7 @@ function applyEvent(state: MutableInstanceState, event: WorkflowEvent): void {
         state.awaitingTimerNames.delete(name);
       }
       if (state.awaitingTimerNames.size === 0 && state.status === "waiting_for_timer") {
-        state.status = "running";
+        setStatus(state, "running");
       }
       return;
     }
@@ -285,7 +370,7 @@ function applyEvent(state: MutableInstanceState, event: WorkflowEvent): void {
         state.awaitingSignalNames.delete(name);
       }
       if (state.awaitingSignalNames.size === 0 && state.status === "waiting_for_signal") {
-        state.status = "running";
+        setStatus(state, "running");
       }
       return;
     }
@@ -296,14 +381,14 @@ function applyEvent(state: MutableInstanceState, event: WorkflowEvent): void {
       return;
     }
     case "compensation_started": {
-      state.status = "compensating";
+      setStatus(state, "compensating");
       state.compensationStartedAt = event.occurredAt;
       return;
     }
     case "compensation_step_completed":
       return;
     case "compensation_completed": {
-      state.status = "compensated";
+      setStatus(state, "compensated");
       state.compensationCompletedAt = event.occurredAt;
       return;
     }
@@ -335,6 +420,10 @@ function freeze(state: MutableInstanceState): ProjectedInstance {
     cancelledAt: state.cancelledAt,
     cancelledByUserId: state.cancelledByUserId,
     cancelledReason: state.cancelledReason,
+    cancellationRequestedAt: state.cancellationRequestedAt,
+    cancellationRequestedBy: state.cancellationRequestedBy,
+    cancellationDisposition: state.cancellationDisposition,
+    cancellationSignalledActivityIds: [...state.cancellationSignalledActivityIds],
     failedAt: state.failedAt,
     failureCode: state.failureCode,
     failureMessage: state.failureMessage,
@@ -399,22 +488,32 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
     }
     const existing = byId.get(id);
     if (existing === undefined) continue;
+    // `cancelled` seals an activity exactly as it seals an instance, and for the reason ADR-0315
+    // states as its promise: "a handler which ignores the signal still lands as `cancelled` rather
+    // than `completed`, unless it genuinely finished first". A late report still records *what it
+    // produced* below — the status is sealed, the evidence is not suppressed.
+    const sealed = existing.status === "cancelled";
     if (event.kind === "activity_started") {
-      existing.status = "running";
+      if (!sealed) existing.status = "running";
       existing.startedAt = event.occurredAt;
     } else if (event.kind === "activity_completed") {
-      existing.status = "succeeded";
+      if (!sealed) existing.status = "succeeded";
       existing.completedAt = event.occurredAt;
       existing.outputSha256 = asString(event.payload["outputSha256"]);
     } else if (event.kind === "activity_failed") {
-      existing.status = "failed";
+      if (!sealed) existing.status = "failed";
       existing.completedAt = event.occurredAt;
       existing.errorCode = asString(event.payload["errorCode"]);
       existing.errorMessage = asString(event.payload["errorMessage"]);
     } else if (event.kind === "activity_timed_out") {
-      existing.status = "timed_out";
+      if (!sealed) existing.status = "timed_out";
       existing.completedAt = event.occurredAt;
+    } else if (event.kind === "activity_cancelled") {
+      existing.status = "cancelled";
     } else if (event.kind === "activity_compensated") {
+      // Not gated by the seal: compensating a cancelled activity is a legal onward move
+      // (`ACTIVITY_TRANSITIONS.cancelled` is empty, but the saga path records the undo of work that
+      // did happen) — and `listCompensatableActivities` keys off this event to stay idempotent.
       existing.status = "compensated";
     }
   }

@@ -19,6 +19,9 @@ const DEFAULT_SCHEDULER: IntervalScheduler = {
 export const DEFAULT_DELETION_EXECUTED_BY = "system:deletion-runner";
 export const DEFAULT_DELETION_APPROVED_BY = "system:retention-policy";
 
+/** Consecutive non-advancing sweep attempts that make a stall a condition rather than a blip. */
+export const DEFAULT_SWEEP_STALL_ATTEMPTS = 3;
+
 /** Structural mirror of `DeletionRunner`'s one method, so this file imports no `tenant-lifecycle-pg`. */
 export interface DeletionRunnerLike {
   runDue(limit?: number): Promise<
@@ -74,18 +77,69 @@ export interface TombstoneSweepProgress {
    * always throws — all three take pages without ever covering a row that was not covered before,
    * and a counter that incremented for them would read exactly like a healthy sweep.
    *
-   * A caller is entitled to conclude: if this has not changed across a window spanning several audit
-   * ticks (or if `lastAdvanceAt` is older than that), the sweep is covering no new ground, and
-   * `pagesSwept` says which kind — equal to this means pages are not coming back at all (no cadence,
-   * no store, or every page throwing), ahead of it means pages come back but the position does not
-   * move. A caller is **not** entitled to conclude that the rows are verifying: this measures motion
-   * across the table, not the verdicts, which are what `findingsThisLap` is for.
+   * `stall` below is that reading, drawn here so a caller does not have to: if this has not changed
+   * across several audit ticks the sweep is covering no new ground, and `pagesSwept` says which kind
+   * — equal to this means pages are not coming back at all, ahead of it means pages come back but the
+   * position does not move. A caller is **not** entitled to conclude that the rows are verifying:
+   * this measures motion across the table, not the verdicts, which are what `findingsThisLap` is for.
    */
   readonly pagesAdvanced: number;
   /** Pages taken, advancing or not. Present only to tell the two stall shapes apart; see above. */
   readonly pagesSwept: number;
   /** When a page last moved the sweep's position, ISO-8601, or null. */
   readonly lastAdvanceAt: string | null;
+  /**
+   * The conclusion, not the numbers (ADR-0329). Null means the sweep is covering ground, or has not
+   * yet been attempted often enough for an absence of motion to mean anything.
+   *
+   * Computed here rather than by a caller so there is one definition of "stalled": the callback below
+   * delivers this same value, and a surface asked "is it stalled right now?" between ticks reads it
+   * here without waiting for the next one.
+   */
+  readonly stall: TombstoneSweepStall | null;
+}
+
+/**
+ * The two ways a sweep stops covering the table, which `pagesAdvanced` / `pagesSwept` were built to
+ * separate (ADR-0328) and nothing read until ADR-0329.
+ *
+ * They are named rather than collapsed because the remedies share nothing. `no_pages` is a store or a
+ * connection: look at `onError`, which has the exception. `pinned_cursor` is the table: pages are
+ * arriving, so something about the row after `cursor` makes every page answer the same thing.
+ */
+export const SWEEP_STALL_KINDS = [
+  /** The sweep was attempted and no page came back — the store is unreachable or every page throws. */
+  "no_pages",
+  /** Pages come back and the sweep's position does not move past `cursor`. */
+  "pinned_cursor",
+] as const;
+export type SweepStallKind = (typeof SWEEP_STALL_KINDS)[number];
+
+/**
+ * A sweep that is not covering new ground, stated as a conclusion.
+ *
+ * Why this is worth a type of its own: the sweep is the only thing that verifies a tombstone the
+ * synchronous deletion route wrote, and `verifyStoredEvidence` is the only detector there is for a
+ * tampered scope (ADR-0323). So a stalled sweep means **no stored Article 17 proof is being
+ * verified** — and until this existed the log stayed quiet about it, because a sweep that examines
+ * nothing produces no findings and a sweep that throws produces an `onError` indistinguishable from
+ * a transient blip.
+ */
+export interface TombstoneSweepStall {
+  readonly kind: SweepStallKind;
+  /**
+   * Audit ticks on which the sweep was attempted since the last one that advanced.
+   *
+   * Counted in *attempts*, not in ticks or milliseconds: the sweep only runs on an audit tick, so a
+   * figure in either of those would have to be read against `auditEveryTicks` to mean anything, and
+   * an attempt is the unit in which a page either moves or does not.
+   */
+  readonly attemptsWithoutAdvance: number;
+  /** Of those attempts, how many returned a page. Zero is exactly what makes it `no_pages`. */
+  readonly pagesWithoutAdvance: number;
+  readonly lastAdvanceAt: string | null;
+  readonly cursor: string | null;
+  readonly detail: string;
 }
 
 /**
@@ -215,8 +269,38 @@ export interface DeletionSchedulerOptions {
     page: TombstoneSweepPage,
     progress: TombstoneSweepProgress,
   ) => void | Promise<void>;
+  /**
+   * The sweep has stopped covering the table (ADR-0329). Awaited, like `onEscalate`.
+   *
+   * **Its own callback rather than a field on `onTombstoneFindings`, because the half of the failure
+   * that matters most never reaches that callback at all**: a `no_pages` stall is a sweep that throws,
+   * and a throw means there is no page to report. The thing most likely to notice is the tick that is
+   * failing, so the news has to leave by a path that does not depend on a page having arrived.
+   *
+   * Handed to on **every** stalled audit tick, with `attemptsWithoutAdvance` growing. A stall is a
+   * standing condition, not an event: announced once it would read as resolved by the next morning.
+   * Deduping belongs to the sink, which already does it for the sweep's findings, and the growing
+   * figure is what lets it show the condition hardening rather than repeat one sentence.
+   */
+  readonly onSweepStall?: (stall: TombstoneSweepStall) => void | Promise<void>;
   /** Forwarded as-is, so the reconciler's own default governs when it is absent. */
   readonly auditLimit?: number;
+  /**
+   * How many consecutive sweep attempts may fail to advance before a stall is concluded. Default 3.
+   *
+   * **Not 1, although a healthy sweep advances on every single page.** It does — a cursor that moved
+   * advances, and the end of the table advances too, so one non-advancing page is already anomalous.
+   * But the sweep is *designed* to retry a failed page from the same place (ADR-0328), so a single
+   * dropped connection is the system working. Three consecutive attempts is the difference between a
+   * blip and a condition, and an alarm that fires on the blip is one an operator mutes.
+   *
+   * A non-positive, fractional or non-finite value reads as the **default**, not as off — the
+   * opposite of `auditEveryTicks` above, and deliberately. There, off is the status quo and the
+   * surprise is an expensive pass running every tick; here, off is precisely the silence ADR-0328
+   * named, so a malformed flag must not buy it. A deployment that does not want the alarm leaves
+   * `onSweepStall` unwired.
+   */
+  readonly stallAfterAttempts?: number;
   /**
    * Injected, because `lastLapCompletedAt` is a figure a regulator is shown and a test must not wait
    * on the wall clock. Same shape as every other clock option in this app (`() => Date`).
@@ -281,6 +365,21 @@ export class DeletionScheduler {
   private pagesSwept = 0;
   private pagesAdvanced = 0;
   private lastAdvanceAt: string | null = null;
+  /**
+   * Stall accounting (ADR-0329), both reset by an advance.
+   *
+   * `attemptsWithoutAdvance` is incremented **before** the page is awaited, so a sweep that throws
+   * every time still counts — that is the `no_pages` case, and a counter that only moved on success
+   * would be silent for exactly the failure it exists to report. `pagesWithoutAdvance` moves only on
+   * a page that came back, which is the whole of the distinction between the two kinds.
+   *
+   * Neither is incremented when the sweep is not wired or the audit cadence is off. A deployment
+   * whose reconciler offers no `auditTombstones` has no sweep to stall, and reporting one would cry
+   * wolf on every such deployment — the muted-alarm failure. That it has no sweep at all is a
+   * configuration fact, visible at boot, and not this detector's to raise.
+   */
+  private attemptsWithoutAdvance = 0;
+  private pagesWithoutAdvance = 0;
 
   constructor(private readonly opts: DeletionSchedulerOptions) {}
 
@@ -297,6 +396,35 @@ export class DeletionScheduler {
       pagesAdvanced: this.pagesAdvanced,
       pagesSwept: this.pagesSwept,
       lastAdvanceAt: this.lastAdvanceAt,
+      stall: this.stall(),
+    };
+  }
+
+  /**
+   * The conclusion, or null.
+   *
+   * **An idle sweep is not a stalled one, and the two look identical to a cursor check.** An empty
+   * tombstone table answers one short page per tick and so laps every tick, with a null cursor before
+   * and after; a table that fits in one page does the same. Both are working sweeps covering the whole
+   * table every time. `pagesAdvanced` is the counter that tells them apart from a pinned one, because
+   * the end of the table counts as motion (ADR-0328) — which is why this reads it rather than
+   * comparing cursors, and why `attemptsWithoutAdvance` stays 0 for both of those deployments
+   * forever.
+   */
+  private stall(): TombstoneSweepStall | null {
+    if (this.attemptsWithoutAdvance < this.stallAfterAttempts()) return null;
+    const attempts = this.attemptsWithoutAdvance.toString();
+    const detail =
+      this.pagesWithoutAdvance === 0
+        ? `${attempts} sweep attempts returned no page, so no stored Article 17 proof is being verified; the last exception is on onError`
+        : `${this.pagesWithoutAdvance.toString()} pages came back over ${attempts} attempts without moving past ${this.sweepCursor ?? "the start of the table"}, so the rows beyond it are never verified`;
+    return {
+      kind: this.pagesWithoutAdvance === 0 ? "no_pages" : "pinned_cursor",
+      attemptsWithoutAdvance: this.attemptsWithoutAdvance,
+      pagesWithoutAdvance: this.pagesWithoutAdvance,
+      lastAdvanceAt: this.lastAdvanceAt,
+      cursor: this.sweepCursor,
+      detail,
     };
   }
 
@@ -372,7 +500,21 @@ export class DeletionScheduler {
     } catch (err) {
       this.opts.onError?.(err);
     }
-    await this.sweepOnce();
+    // The sweep's own `try`, so the stall check below runs on a tick whose page threw — which is not
+    // a refinement but the whole of the `no_pages` case (ADR-0329). Before this, a sweep that threw
+    // every time left `auditOnce` through `runOnce`'s catch and the one surface that could have said
+    // "no proof is being verified" was never reached, on exactly the ticks it was true.
+    try {
+      await this.sweepOnce();
+    } catch (err) {
+      this.opts.onError?.(err);
+    }
+    try {
+      const stall = this.stall();
+      if (stall !== null) await this.opts.onSweepStall?.(stall);
+    } catch (err) {
+      this.opts.onError?.(err);
+    }
   }
 
   /**
@@ -395,6 +537,9 @@ export class DeletionScheduler {
     const reconciler = this.opts.reconciler;
     if (sweep === undefined || reconciler === undefined) return;
     const resumedFrom = this.sweepCursor;
+    // Before the await, and the only counter that is: an attempt that throws is still an attempt, and
+    // a `no_pages` stall is made of nothing else.
+    this.attemptsWithoutAdvance += 1;
     const page = await sweep.call(reconciler, {
       ...(this.opts.auditLimit !== undefined ? { limit: this.opts.auditLimit } : {}),
       ...(this.sweepCursor !== null ? { afterTombstoneId: this.sweepCursor } : {}),
@@ -406,6 +551,7 @@ export class DeletionScheduler {
     // never arrived is the "looks like it is running" failure this accounting exists to expose.
     const at = this.nowIso();
     this.pagesSwept += 1;
+    this.pagesWithoutAdvance += 1;
     this.examinedThisLap += page.examined;
     this.findingsThisLap += page.findings.length;
     // Null means the page did not fill, i.e. the end of the table — so the next lap starts over.
@@ -418,6 +564,10 @@ export class DeletionScheduler {
     if (lapCompleted || page.nextAfterTombstoneId !== resumedFrom) {
       this.pagesAdvanced += 1;
       this.lastAdvanceAt = at;
+      // Both, and here rather than in two places: motion is what clears a stall, and a counter left
+      // standing would keep the conclusion up over a sweep that has recovered.
+      this.attemptsWithoutAdvance = 0;
+      this.pagesWithoutAdvance = 0;
     }
     if (lapCompleted) {
       this.lapsCompleted += 1;
@@ -437,6 +587,11 @@ export class DeletionScheduler {
 
   private nowIso(): string {
     return (this.opts.clock ?? ((): Date => new Date()))().toISOString();
+  }
+
+  private stallAfterAttempts(): number {
+    const after = this.opts.stallAfterAttempts ?? DEFAULT_SWEEP_STALL_ATTEMPTS;
+    return Number.isInteger(after) && after > 0 ? after : DEFAULT_SWEEP_STALL_ATTEMPTS;
   }
 
   private auditEveryTicks(): number {

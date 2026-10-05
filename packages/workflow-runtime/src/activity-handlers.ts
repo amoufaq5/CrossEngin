@@ -10,6 +10,16 @@ export interface ActivityInvocation {
   readonly attemptNumber: number;
   readonly input: Record<string, unknown>;
   readonly variables: Readonly<Record<string, unknown>>;
+  /**
+   * Trips when this activity's instance is cancelled while the handler is running. A channel, not a
+   * kill (ADR-0315): the handler is still awaited and one that ignores the signal runs to
+   * completion — but it lands `cancelled` rather than `succeeded`.
+   *
+   * Required rather than optional on purpose. An optional signal is read as `inv.signal?.aborted`,
+   * which is `undefined` and therefore falsy wherever it was never supplied, so a handler that
+   * genuinely checks would silently never abort.
+   */
+  readonly signal: AbortSignal;
 }
 
 export type ActivityOutcome =

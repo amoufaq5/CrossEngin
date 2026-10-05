@@ -68,6 +68,17 @@ const OK_OUTCOME: DeletionOutcomeLike = {
     storageBytes: 65536,
     alreadyAbsent: false,
   },
+  // The second performed subsystem (ADR-0329): the tenant's rows in the platform's own shared
+  // `meta` tables. Reported separately rather than summed into `erased`, because the two are
+  // different claims over different scopes and the tombstone carries them as two attestations.
+  erasedSharedTables: {
+    schema: "meta",
+    tables: ["meta.operate_entity_records", "meta.events"],
+    rowCount: 8,
+    storageBytes: 4096,
+    examinedTables: ["meta.operate_entity_records", "meta.events", "meta.operate_sequences"],
+    retainedTables: ["meta.audit_log", "meta.tenant_tombstones"],
+  },
 };
 
 interface Harness {
@@ -207,6 +218,65 @@ describe("DeleteTenantInputSchema", () => {
     expect([...DELETABLE_TOMBSTONE_KINDS]).toEqual(["tenant_deletion", "data_subject_erasure"]);
     expect(DeleteTenantInputSchema.safeParse({ ...BODY, kind: "scheduled_purge" }).success).toBe(false);
   });
+
+  /**
+   * Attestations are parsed by the contract, not by a loose mirror of it (ADR-0329).
+   *
+   * The mirror took `subsystem: z.string().min(1)` and `outcome: z.string().min(1)`, so a typo
+   * reached `assembleTombstone` and came back as a refusal naming a subsystem that does not exist —
+   * a bad request reading as a platform bug. It fails closed either way; what changes is who is
+   * told, and what they can do about it.
+   */
+  const attested = (over: Record<string, unknown>): Record<string, unknown> => ({
+    ...BODY,
+    attestations: [
+      {
+        subsystem: "shared_tables",
+        outcome: "erased",
+        attestedBy: "system:deletion",
+        attestedAt: "2026-10-05T00:00:00.000Z",
+        ...over,
+      },
+    ],
+  });
+
+  it("refuses a misspelled subsystem at the edge rather than at the assembler", () => {
+    expect(DeleteTenantInputSchema.safeParse(attested({ subsystem: "objekt_storage" })).success).toBe(
+      false,
+    );
+  });
+
+  it("refuses a misspelled outcome, which used to read as a missing attestation", () => {
+    // `erazed` is not in `ATTESTATION_OUTCOMES`, so the subsystem would have been in scope and
+    // unsatisfied — indistinguishable from nobody attesting at all.
+    expect(DeleteTenantInputSchema.safeParse(attested({ outcome: "erazed" })).success).toBe(false);
+  });
+
+  it("refuses an `erased` attestation that reports nothing it destroyed", () => {
+    // The loose mirror accepted this, and it is the one shape ADR-0317 cares about most: an
+    // `erased` outcome with no figures is a claim with nothing behind it.
+    expect(DeleteTenantInputSchema.safeParse(attested({})).success).toBe(false);
+  });
+
+  it("accepts a well-formed attestation for a real subsystem", () => {
+    const parsed = DeleteTenantInputSchema.parse(
+      attested({ scope: { tables: ["meta.operate_entity_records"], rowCount: 9, storageBytes: 128 } }),
+    );
+    expect(parsed.attestations[0]?.subsystem).toBe("shared_tables");
+    expect(parsed.attestations[0]?.outcome).toBe("erased");
+  });
+
+  it("still refuses an unknown key inside an attestation", () => {
+    expect(DeleteTenantInputSchema.safeParse(attested({ rowCount: 9 })).success).toBe(false);
+  });
+
+  it("accepts a `nothing_to_erase` attestation with no figures, which is its whole point", () => {
+    const parsed = DeleteTenantInputSchema.parse(attested({ outcome: "nothing_to_erase" }));
+    expect(parsed.attestations[0]?.outcome).toBe("nothing_to_erase");
+    // ADR-0317's rule in the other direction: a `nothing_to_erase` that *could* carry figures
+    // would smuggle numbers into the proof.
+    expect(parsed.attestations[0]?.scope).toBeUndefined();
+  });
 });
 
 describe("the delete route", () => {
@@ -342,10 +412,35 @@ describe("the delete route", () => {
       operation: TENANT_DELETED_OPERATION,
       tombstoneId: TOMB,
       chainEntryHash: HASH,
-      rowCount: 26,
+      // 26 schema rows **plus** 8 shared-table rows (ADR-0329). The audit row has one figure and it
+      // means "rows this deletion destroyed", so reporting only the schema half understated it by
+      // every tenant-scoped row in the platform's own tables. The per-subsystem breakdown is in the
+      // tombstone's attestations, where a claim about which subsystem destroyed what belongs.
+      rowCount: 34,
       tenantRetired: true,
       approvedBy: APPROVER,
     });
+  });
+
+  it("returns both erasures separately, never summed, in the receipt", async () => {
+    const h = harness();
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(200);
+    const body = res.body as {
+      readonly erased: { readonly rowCount: number; readonly schema: string };
+      readonly erasedSharedTables: {
+        readonly rowCount: number;
+        readonly schema: string;
+        readonly retainedTables: readonly string[];
+      };
+    };
+    // Two scopes, two figures. A single total would make the receipt unable to say which erasure a
+    // number came from, which is the thing composing a scope from per-subsystem reports exists for.
+    expect(body.erased).toMatchObject({ schema: "t_abc", rowCount: 26 });
+    expect(body.erasedSharedTables).toMatchObject({ schema: "meta", rowCount: 8 });
+    // And the retention set is visible, because a reader of an Article 17 receipt needs to know
+    // what was deliberately left in place as much as what was destroyed.
+    expect(body.erasedSharedTables.retainedTables).toContain("meta.tenant_tombstones");
   });
 
   it("does not fail the request when the audit record cannot be written", async () => {

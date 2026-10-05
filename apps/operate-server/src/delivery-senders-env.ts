@@ -332,15 +332,25 @@ function buildTwilioVoice(
   }
 
   /*
-   * Twilio reports a call's real outcome only to a status callback — `CallStatus=completed` with a
-   * duration, and `AnsweredBy` when machine detection is on. Nothing consumes it: ADR-0310 gave
-   * voice no bounce-webhook source on purpose, because a busy line is not an invalid number the way
-   * a hard bounce is an invalid address. So a **carrier failure on a call produces no suppression**
-   * — the dispatch's retry ladder is the whole of the handling — and a missing callback URL is
-   * therefore not warned about here, unlike SMS's, where its absence means no bounce can ever
-   * arrive. That is a known open end, not something this wiring resolves.
+   * Twilio reports a call's real outcome only to a status callback — the terminal `CallStatus`, its
+   * `ErrorCode`, and `AnsweredBy` when machine detection is on. **Something consumes it now**
+   * (ADR-0329): `twilio_voice` is the bounce webhook's third source, so a permanently undialable
+   * number produces a real suppression, and this comment used to say the opposite because ADR-0310
+   * left voice with no source at all.
+   *
+   * So it warns, like SMS's does, and for the same reason: without a callback URL no voice bounce
+   * can ever arrive, and a channel that registers at boot and silently never suppresses is worse
+   * than one that was skipped. What the warning names is the **path segment**, because the source
+   * is declared by the URL the deployment configures rather than sniffed from the payload — posting
+   * a call callback to `/twilio` would have it parsed as a *messaging* callback.
    */
   const statusCallbackUrl = value(env, "TWILIO_VOICE_STATUS_CALLBACK_URL");
+  if (statusCallbackUrl === null) {
+    skipped.push(
+      "voice (Twilio): no TWILIO_VOICE_STATUS_CALLBACK_URL, so carrier failures will not reach " +
+        "/v1/notifications/bounces/twilio_voice",
+    );
+  }
   const language = value(env, "TWILIO_VOICE_LANGUAGE");
   // The endpoint override falls back to SMS's: Calls and Messages are the same `api.twilio.com`
   // host, so a deployment behind one egress proxy should configure it once. Inheriting it is safe

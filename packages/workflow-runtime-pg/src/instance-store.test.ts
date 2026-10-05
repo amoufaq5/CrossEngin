@@ -32,6 +32,13 @@ function fixtureProjection(overrides: Partial<ProjectedInstance> = {}): Projecte
     cancelledAt: null,
     cancelledByUserId: null,
     cancelledReason: null,
+    // ADR-0329's cancellation fence and its disposition. The fence is distinct from `cancelledAt`:
+    // it is set when the cancellation is *requested*, which is what stops a timer firing or a
+    // signal transitioning the instance in the window before `instance_cancelled` is appended.
+    cancellationRequestedAt: null,
+    cancellationRequestedBy: null,
+    cancellationDisposition: null,
+    cancellationSignalledActivityIds: [],
     failedAt: null,
     failureCode: null,
     failureMessage: null,
