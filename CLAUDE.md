@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 326 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 327 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 144 meta-schema tables, ~13,850 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~14,230 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -80,8 +80,15 @@ increment. See **What's actually left** at the bottom for the current open ends.
   `DELETE`'s `USING`; and `tenant_id IS NULL` *inside* the check, so the write elevation buys no access
   to any tenant's chain. `meta.forensic_chain_entries` and `_checkpoints` carry the same split on the
   same grant, since the chain anchors that trail and the two are one privilege.
-  **The same `ALL`-scope shape is still on 29 other tables** and is a real hole there, not a
-  theoretical one — see *What's actually left*.
+  **The same split now covers the other 29 tables that had the permissive shape** (ADR-0332), over
+  three more grants — `app.platform_record_write` (17 tables), `app.platform_config_write` (11) and
+  `app.platform_key_write` (1, `crypto_keys` alone, because that table holds the public keys a chain
+  entry's `signingKeyFingerprint` resolves against, so a session able to both append to the trail and
+  register a key could re-sign a rewritten chain and have it verify). **12** of them are mutable and
+  get an `UPDATE` arm too; the other **17** are append-only, so a platform row there is
+  immutable-by-RLS once written. `DELETE` is reachable by no policy on any of the 32. The one
+  remaining member of the class is `meta.audit_integrity_verdicts`, whose hole is differently shaped —
+  see *What's actually left*.
 - **Strict TypeScript.** No `any`. No `--no-verify`. Explicit return types on
   exported functions.
 
@@ -116,7 +123,7 @@ packages exist at only one layer, noted below where that is true.
 ### Substrate (the kernel itself)
 
 - **`kernel`** — the meta-schema and manifest compiler. Four areas: `bootstrap/`
-  (`META_TABLES`, the catalog of **144** platform Postgres tables, plus deterministic DDL
+  (`META_TABLES`, the catalog of **145** platform Postgres tables, plus deterministic DDL
   emit), `ddl/` (the DDL *vocabulary* — `resolvedFields`, field→Postgres types, built-in
   traits, column naming, default rendering, identifier quoting, structural entity diff;
   it does **not** emit entity tables, `operate-runtime-pg` does — ADR-0284),
@@ -288,6 +295,20 @@ packages exist at only one layer, noted below where that is true.
   cancelled instance's timers fire. The rollback emits `activity_compensated` per step and **not** the
   `compensation_started`/`_completed` bracket, which would end the instance `compensated` and so
   indistinguishable from unwinding a *failure*; it ends `cancelled` under both dispositions.
+  **`submitSignal` mints a signal id per match and returns `deliveries`** (ADR-0332) — with N matched
+  instances there is no single `signalId`, and the old shape appended one id to every instance, so
+  `meta.workflow_signals`' UNIQUE `signal_id` collapsed N deliveries to one row and the replayer
+  reported drift on healthy data. `deduplicated` returns **the first submit's deliveries**, never an
+  empty list, because telling a retrying webhook nothing matched is the one thing that is never true of
+  a duplicate. The idempotency key is written to the receipt event *and* the row, so dedup survives a
+  restart and reaches a second replica, and the unique constraint gains `instance_id` as a **fourth**
+  column — one delivery per instance is the natural key, and the old three-column form is its **left
+  prefix**, which is what the deduplicator reads, so the property making the fourth column free is
+  itself pinned by a test. The deduplicator is a **fast path and the log is the authority**: it reads
+  before the appends it guards, so each instance's own log is re-asked immediately before its receipt
+  is appended — without that second question two concurrent submits of one key both read "unseen", the
+  loser's row is refused, and the instance's projection can **never** be rebuilt because every later
+  `resyncInstance` re-hits the same conflict.
 - **`workflow-runtime-pg`** — persistence *and* distributed execution. `PostgresEventLog` +
   four projection stores + `ProjectingEventLog` (every append re-projects and upserts) +
   `buildPersistentEngine`, a replayer for drift repair, and the claim/lease layer that makes
@@ -851,7 +872,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   different channels, and the path segment is the deployment's declaration of which sender it
   configured — declared beats probed, ADR-0328's rule. The SMS reader also stopped failing open: an
   unknown `MessageStatus` is `payload_unrecognized`, not "not a failure", since the latter asserts
-  knowledge of a status it has never seen. **A push payload may not vary with the notification's content**
+  knowledge of a status it has never seen. The **`fax` verdict** suppresses on a *run* since ADR-0332 —
+  the parser still plans nothing from a single one, and the run is counted in
+  `meta.notification_fax_observations` by the server, so the pure module stays pure.
+  **A push payload may not vary with the notification's content**
   (ADR-0310): everything sent is either a notice the deployment declared at construction or an identifier
   already on the `SendRequest`, `pushPayloadViolations` checks that on every send, and `send` refuses
   without calling FCM — so a composer that reaches for tenant data is a failed delivery, not a
@@ -1037,7 +1061,12 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   chain, and with an `escalation` block declares a `sev1` incident + pages once per
   compromised episode, recording it as an anchored `audit.integrity_compromised` row and
   persisting the `IncidentRecord` in `meta.incidents` — cancelled on recovery unless a human
-  has triaged it; ADR-0287, ADR-0288, ADR-0289). The escalator declares through the same
+  has triaged it; ADR-0287, ADR-0288, ADR-0289). **`includePlatform` defaults to `true`** on both
+  `--integrity-proof-config` and `--checkpoint-config`, and the two are flipped together (ADR-0332):
+  one without the other would be wrong rather than merely partial, since the truncation check has no
+  witness without a checkpoint (ADR-0287) — and with platform-scope rows now reachable (ADR-0331),
+  defaulting them *out* of verification would mean the newest trail in the system was the one nothing
+  checked. The escalator declares through the same
   `IncidentDeclarer` the SLO loop uses (ADR-0297), with `CountingIncidentDeclarer` as both the offline
   default and the fallback that keeps the page going out when the record cannot be stored.
   **All three escalators now page over real transports and resolve their own alerts** (ADR-0326):
@@ -1157,6 +1186,15 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `--max-request-body-route <prefix>=<size>` gives ADR-0312's platform-wide cap a per-route form,
   matched by path **prefix** rather than by the gateway's route template — the limit has to be chosen
   before the body is read, and route matching happens after it.
+  **The fax run counter is opt-in** (`--bounce-fax-observations`, `--bounce-fax-suppress-after`,
+  `--bounce-fax-window-hours`, ADR-0332): a threshold below `MIN_FAX_SUPPRESSION_THRESHOLD` is
+  **refused rather than clamped**, because a threshold of 1 is the inference ADR-0302 forbids and
+  silently raising it would make the deployment believe something it did not ask for. It warns at boot
+  when `TWILIO_VOICE_MACHINE_DETECTION` is unset, since `AnsweredBy` arrives only then.
+  `--workflow-cancel-role` now refuses only under `--store memory` (ADR-0331), and the decimal wire
+  type is applied by `compileOperateServer` itself (ADR-0332) rather than by a flag — the decorator
+  needs both the store and the manifest, and that is the one place holding both, so no app wiring was
+  needed and the write effects are covered by the same seam as a client request.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -1192,21 +1230,28 @@ Recurring patterns enforced by zod `superRefine`:
 
 ## Meta-schema
 
-`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **144**
+`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **145**
 platform-level Postgres tables. Each new package adds tables there and updates
 `meta-schema.test.ts` (count, sorted expected-names list, column assertions).
 
 **A fresh database holds one more table than the catalog does**, and it is not a stale count:
-`information_schema` reports 145 `meta` base tables against `META_TABLES`' 144, because
+`information_schema` reports 146 `meta` base tables against `META_TABLES`' 145, because
 `_meta_migrations` is created by `kernel-pg`'s applier for its own per-statement hash bookkeeping and
 is deliberately not emitted from the catalog. Verified. Count the catalog, not the database.
 
-Two invariants the test suite enforces:
+Three invariants the test suite enforces:
 
 1. Every `tenant_id`-bearing table has RLS enabled.
 2. Foreign-key references resolve to a table declared **earlier** in
    `META_TABLES`. If a new FK points at a table declared later, move the target
    earlier rather than dropping the FK.
+3. **No policy predicate anywhere contains `IS NULL OR`** (ADR-0332). A platform read arm is
+   `SELECT`-scoped with `using` exactly `tenant_id IS NULL`; each read arm has exactly **one**
+   matching `INSERT` arm; and a write grant is always ANDed with `tenant_id IS NULL` and never
+   appears on a `SELECT` policy. That is a rule plus a count rather than a maintained list, because
+   a maintained list is what ADR-0288's `needsAuditEmitter` was and it was wrong three times —
+   `kernel-pg`'s canonical test matches `/_platform_(audit_)?(read|write|update)$/` and asserts
+   **78**, so a 30th table cannot land without the number moving.
 
 Append new tables to the bottom of the array in build order, not alphabetically —
 the expected-names test sorts independently.
@@ -1331,44 +1376,56 @@ opened them.
 
 **Load-bearing**
 
-- **29 tables let a tenant session write a platform-wide row** (ADR-0313, ADR-0331). The pattern is a
-  single `ALL`-scope policy whose predicate is
-  `tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID`,
-  and **not one of the 29 declares a `command`** — so on an `ALL` policy, where the `USING` expression
-  also serves as the `WITH CHECK`, `tenant_id IS NULL` satisfies it unconditionally. Demonstrated live
-  as a non-owner role on the forensic chain before it was fixed: a tenant session appended a
-  platform-scope entry (`INSERT 0 1`) and the next verification reported `integrity BROKEN, signatures
-  INVALID` — poisoning rather than forgery, but a tenant could make the platform chain read compromised
-  on demand. ADR-0313 fixed `meta.audit_log`'s read half and ADR-0331 fixed its write half plus the two
-  chain tables; the class was never swept. The list includes `crypto_keys`, `sso_providers`,
-  `feature_flag_kill_switches`, `notification_templates`, `certification_reports`,
-  `workflow_definitions`, `gateway_pipeline_executions` and the three SLO tables. **Reported rather
-  than swept because the correct split differs per table**: an append-only table wants `INSERT`-only,
-  while mutable platform configuration (`feature_flags`, `workflow_definitions`, the plan catalog) needs
-  an elevated `UPDATE` too, and an `INSERT`-only policy makes platform rows immutable-by-RLS — right for
-  the chain, wrong for a flag, and wrong *silently and fail-closed*. `meta.audit_integrity_verdicts` is
-  in this group although ADR-0313 named it, because splitting it means narrowing its *isolation* policy
-  from `ALL` to `SELECT`, a different and larger edit than adding two policies beside one.
-- **Splitting a permissive policy takes two passes, and the second is manual** (ADR-0331).
-  `planSchemaReconciliation` creates the new policies and **refuses to drop the old permissive one**,
-  because dropping a policy loosens access (ADR-0290's invariant) and `allowLoosening` reaches foreign
-  keys only. Permissive policies are **OR'd**, so until that `DROP` runs the split buys *nothing* — the
-  old predicate still satisfies every `WITH CHECK`. The plan hands over the exact SQL. Verified on the
-  two chain tables: `apply` landed six `create_policy` statements and reported two `policy_removed`
-  differences, and only after the hand-run `DROP`s did the live schema converge and the forgery matrix
-  come out right.
-- **One signal id is reused across every matched instance** (ADR-0331, found by Lane F outside its
-  lane). `engine.ts` generates `signalId` *outside* the match loop, then appends a `signal_received`
-  event carrying that id to each matched instance. `meta.workflow_signals.signal_id` is UNIQUE, so N
-  deliveries collapse to **one** row. Verified live: two instances on one correlation key produced two
-  events with one id and one signal row, attributed to whichever instance was projected last — the
-  first instance's delivery is invisible in the projection table. `WorkflowSignal.instanceId` is
-  singular and `matchSignalToInstance` returns one id, so the contract expects one signal per instance;
-  the engine should mint an id per match. Related: `submitSignal`'s idempotency is a process-local
-  `Set` and `input.idempotencyKey` is never written to the event payload or the row, so
-  `meta.workflow_signals`'s unique `(tenant_id, signal_name, idempotency_key)` index has never enforced
-  anything, dedup does not survive a restart, and a declared `exactly_once_idempotent` signal persists
-  with a NULL key — legal in SQL, but a row that cannot be re-parsed against `WorkflowSignalSchema`.
+- **The 29-table platform-write class is swept** (ADR-0313, ADR-0331, ADR-0332), and what is left of it
+  is narrower. Every one of the 29 single-`ALL`-policy tables now carries a split, on **two orthogonal
+  axes**: *shape* decides how many policies (**12 mutable** get four — isolation, `SELECT` read,
+  `INSERT` write, `UPDATE` write; **17 append-only** get three, so a platform row is
+  immutable-by-RLS once written), and *grant* decides who, over **four** GUCs —
+  `app.platform_audit_write` (3), `app.platform_record_write` (17), `app.platform_config_write` (11),
+  `app.platform_key_write` (1). `DELETE` is reachable by **no policy on any of them**: nothing deletes
+  a platform row (retirement is a status column in every one of these contracts), and the shared-table
+  erasure deletes `tenant_id = $1` only, which isolation still covers. The axes are orthogonal and
+  conflating them is the trap — `quota_definitions` is append-only in shape but sits on `config`
+  because a hard limit decides what the deployment permits, while `dr_failover_executions` is mutable
+  in shape but sits on `record`. Verified live as a non-owner role across a **12-case forgery matrix**,
+  all 12 unambiguous. What remains: **14 of the 29 have no store**, so their write arms are capability
+  with no caller; the grants are `PUBLIC`-scoped settings, so any session able to call `set_config` can
+  claim one (what the split buys is that claiming it is deliberate and transaction-local rather than
+  the default state of every tenant connection); **reads are still owner-dependent** in the seven
+  stores that set no scope, which is ADR-0331's `scopeFilter` lesson un-swept outside the chain; and
+  `meta.audit_integrity_verdicts` is **still open** because its hole is differently shaped — its `ALL`
+  policy ORs in the `app.platform_audit` *read* grant, so an elevated reader can forge a verdict, and
+  closing it means narrowing an isolation policy from `ALL` to `SELECT` rather than adding arms beside
+  one. `certification_reports` is the loudest member of the `record` group: a forged platform
+  certification report is a compliance claim, not telemetry.
+- **The split is reconcilable in one pass only because the isolation policy keeps its name**
+  (ADR-0331, ADR-0332). `planSchemaReconciliation` creates new policies and **refuses to drop an
+  existing one**, because dropping a policy loosens access (ADR-0290's invariant) and `allowLoosening`
+  reaches foreign keys only — and permissive policies are **OR'd**, so until the old `DROP` lands a
+  split buys *nothing*. So `feature_flags_tenant_or_platform` stays that name with a *narrowed*
+  predicate, which is `replace_policy` — one `DROP …; CREATE …;` statement. Measured: **99 steps, 0
+  unreconciled, zero manual SQL**, applied 100/100, re-plan clean. ADR-0331's two chain tables took the
+  rename path and needed hand-run drops; that is what the 29 avoided, multiplied by fourteen. The cost
+  is a policy whose name no longer describes it, and **there is no `renamedFrom` for a policy**.
+- **Two more workflow projection stores still cannot write a row against a real database**
+  (ADR-0331, ADR-0332). ADR-0331 fixed `PostgresSignalStore` — it named nine columns and omitted
+  `delivery_guarantee` and `source_system`, both NOT NULL with no default — and the same class is on
+  two siblings, verified against the live catalog: `PostgresTimerStore.upsert` omits **`kind`**, and
+  `PostgresActivityStore.upsert` omits **`label`, `max_attempts`, `retry_policy`, `timeout_seconds`,
+  `timeout_at` and `sequence_cursor`** — all NOT NULL with no default. So every `ProjectingEventLog`
+  append that schedules a timer or an activity throws on a real Postgres. Reported rather than fixed
+  because the signal store's lesson is that **the record is usually wrong, not the column**: a
+  guarantee must come from the definition that declared it and a `sourceSystem` from a recorded fact,
+  not from a fabricated default — so each omission needs the same question asked of the event, and
+  `retry_policy` and `timeout_seconds` in particular come from the activity's *definition*, which the
+  projection does not carry. The offline fakes assert SQL shape and cannot see a missing column.
+  `workflow-worker`'s three workers are not instantiated, which is why nothing has hit this yet.
+- **`PostgresDrFailoverStore` and `PostgresDrDrillStore` silently drop every update** (ADR-0332).
+  Both write `INSERT … ON CONFLICT (execution_id) DO NOTHING` on what the runtime uses as an upsert
+  path, so a failover's plan is stored and its *completion* is not — the row keeps the status it was
+  declared with forever, and `assessDrReadiness` scores drill recency off rows that never advance.
+  `DO NOTHING` is right for an idempotent *first* write and wrong for a state machine; the fix is a
+  `DO UPDATE` naming the mutable columns, which is the same shape `PostgresTimerStore` already has.
 - **An API key that names no principal is a `service_account`, and the id collision is unfixable**
   (ADR-0331). `buildPrincipalWiring` hardcoded `principalKind: "user"` for every API key while
   `parseApiKeySpec` defaulted the optional fourth field to one shared placeholder UUID — so a bare
@@ -1475,13 +1532,22 @@ opened them.
   configuration is still skipped rather than guessed, per ADR-0301, and a refusal costs that channel
   and never the boot — the live state for all four: `in_app, sms, voice_call, push_mobile`.
   ADR-0329 closed the other end: `twilio_voice` is the bounce webhook's third source, the sender asks
-  for one terminal callback instead of four, and a missing callback URL is warned about. What remains
-  is the **`fax` verdict**, which is named and deliberately suppresses nothing: `AnsweredBy` is a
-  detector's guess from a few hundred ms of audio, a false `fax` would permanently kill an engineer's
-  voice notifications, and ADR-0302's rule is that a safety record must never widen on an inference.
-  Closing it properly needs a consecutive-`fax` count, i.e. state a pure module does not hold. Also
-  still one platform-wide credential set per provider, so every tenant sends from one domain and calls
-  from one number.
+  for one terminal callback instead of four, and a missing callback URL is warned about. ADR-0332
+  closed the **`fax` verdict**: a *run* of consecutive `fax` answers can suppress, over
+  `meta.notification_fax_observations`, which is the state ADR-0329 said a pure module does not hold.
+  Opt-in and off by default, because ADR-0302's rule is that a safety record must never widen on an
+  inference and `AnsweredBy` is a detector's guess from a few hundred ms of audio; a threshold of 1 is
+  **refused by name**, and a single answered call **deletes** the run rather than decrementing it,
+  since an absent row and a run of zero are the same fact. The counter performs its rule in one
+  `ON CONFLICT … DO UPDATE` (a read-modify-write loses its race in the direction that *advances* a run,
+  which is the direction that writes a permanent block), requires `CallSid` because Twilio retries a
+  non-2xx callback and a counter has none of a suppression id's natural idempotency, and **warns at
+  boot when `TWILIO_VOICE_MACHINE_DETECTION` is unset** — `AnsweredBy` arrives only then, so a
+  threshold configured and structurally unreachable is the exact silence that increment was about. What
+  it leaves: a fax suppression can be imposed once per address and **never lifted automatically**, and
+  no route reads the observation row, so the evidence for a permanent block is only in a log line and
+  the suppression's `notes`. Also still one platform-wide credential set per provider, so every tenant
+  sends from one domain and calls from one number.
 - **Per-tenant column schemas are additive only** (ADR-0314). A removed field's column is never dropped,
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
@@ -1553,10 +1619,10 @@ opened them.
   recovery, with `absent` as its own outcome closing nothing — a deleted proof is not a verified one,
   and it is exactly the fact a naive "it stopped appearing" check reads as recovery — and the stall
   detector reads the cursor. **A stall escalates now** (ADR-0330), at `sev2` and keyed per surface.
-  What that leaves: a kind flip *within* one episode is recorded nowhere durable, since the title and
-  detail are written at declaration and an adoption writes nothing — so an episode that starts
-  `no_pages` and becomes `pinned_cursor` reads as `no_pages` on the incident forever (only the
-  undeduped log line carries the current kind). The recovery is **edge-triggered in process**, so a
+  ADR-0332 closed the kind flip: the episode's current kind is **read back off its incident's
+  timeline** rather than remembered in the process, so a flip is detected after a restart and by a
+  different replica, and a note lands once per actual change rather than once per tick. The recovery is
+  still **edge-triggered in process**, so a
   server that stalls, restarts, and then recovers never fires it and the `sev2` stays open for a human
   — the fail-closed direction, and the same limitation ADR-0326 accepted for the SLO resolve. And the
   stall incident cannot be turned off independently of tamper escalation: a deployment wanting one and
@@ -1679,8 +1745,9 @@ opened them.
   refused erasure leaves an operator to drop the collateral by hand; the refusal names it but does not
   hand over the SQL the way ADR-0290's `unreconciled` does (ADR-0316).
 - A tombstone-sweep **lap** is the coverage guarantee, so a tamper is found within one pass of the
-  table rather than at once (ADR-0327); `sweepProgress()` reports the lap and the stall, and a stall is
-  logged rather than escalated (ADR-0329).
+  table rather than at once (ADR-0327); `sweepProgress()` reports the lap and the stall, and a stall
+  declares a `sev2` keyed per surface (ADR-0330) whose current kind is read back off the incident
+  timeline (ADR-0332).
   A revoked FCM key can still 401 once before the cached token is discarded. The delete route parses
   `attestations` through the real `DeletionAttestationSchema` now rather than a loose mirror plus a cast
   (ADR-0329) — which immediately caught something the mirror accepted, an `erased` attestation reporting
@@ -1689,10 +1756,9 @@ opened them.
   should refuse. `.prettierrc.cjs` at the root re-exports the workspace config, so a bare
   `npx prettier --write` no longer reformats at width 80 — but **882** of `packages/*/src` are not
   Prettier-clean (the config existed since Phase 1 and was never applied), so there is deliberately no
-  `format:check` script. `FCM_TOKEN_ENDPOINT` and `FCM_BASE_URL` are not in `FCM_VARS`, so setting only
-  one of them is silent where every other half-configuration warns. **Both are in `FCM_VARS` now**
-  (ADR-0330), so an endpoint override with no `FCM_PROJECT_ID` warns like every other
-  half-configuration instead of skipping push in silence.
+  `format:check` script. `FCM_TOKEN_ENDPOINT` and `FCM_BASE_URL` are in `FCM_VARS` since ADR-0330, so
+  an endpoint override with no `FCM_PROJECT_ID` warns like every other half-configuration instead of
+  skipping push in silence.
 - **A retained claim is inside the signed bytes as of `crossengin.tombstone.content.v3`**
   (ADR-0330 found the gap, ADR-0331 closed it — see that ADR's addendum, which exists because the
   work shipped in its commit and its own text omitted it). `contentManifestSha256` used to commit only
@@ -1757,15 +1823,27 @@ opened them.
   affected; the damage landed where a record is hand-assembled from columns, and worst of all in the
   *dynamic* store that has no `StoredXRow` interface for a grep to find. `NUMERIC` and `INTERVAL` are
   deliberately **not** normalised — see the next entry.
-- **A `decimal` field's wire type is undecided, and the two stores disagree** (ADR-0331).
-  `NUMERIC` comes back as a string, so `ColumnMappedEntityStore` returns `price: "10.25"` where the
-  manifest says a number and `PostgresEntityStore` returns `10.25` — measured side by side, across 92
-  `decimal` fields in the packs. Not fixed, deliberately: converting a `NUMERIC(38,10)` to a JS number
-  is lossy by construction, which is *why* node-postgres returns a string, so this is a decision about
-  the contract rather than a normalisation. Nothing raises — Postgres parses `"11.25"` under `::NUMERIC`,
-  so the keyset cursor survives. `INTERVAL` is the third instance and unreached: a `duration` field maps
-  to it and nothing in the catalog or the seven packs declares one, so a keyset sort on one would put
-  `[object Object]` in the cursor the day somebody does. `readColumn` is the single place either lands.
+- **A `decimal` crosses the wire as a canonical decimal string, uniformly** (ADR-0331, ADR-0332) — the
+  exact text Postgres prints for `value::numeric(precision, scale)`, at every precision, through one
+  decorator (`withDecimalWireType`) applied in `compileOperateServer`, the single place holding both the
+  store and the manifest. That settled ADR-0331's undecided type: `NUMERIC` comes back from
+  node-postgres as a string, so `ColumnMappedEntityStore` returned `"10.25"` where
+  `PostgresEntityStore` returned `10.25`, across 92 `decimal` fields in the packs — and the cost was
+  not the mismatch but three `typeof x === "number"` *presence* tests in the write effects, which
+  answered false for every amount the typed store serves: **a partial credit note silently became a
+  full one**, in the document and the GL entry. String-everywhere rather than number-everywhere
+  because converting a `NUMERIC(38,10)` to a JS number is lossy by construction, which is *why*
+  node-postgres returns a string. Refusal is split by provenance — an over-scale literal from a client
+  is a 422 at validation, a computed value is quantised at the store boundary, since refusing there
+  would turn a correct tax computation into a 500. What it leaves: **arithmetic is still `double`
+  arithmetic** (`num()` and the reports' `readonly total: number`), so summing scale-2 amounts still
+  drifts; the JSONB store still sorts a decimal **lexicographically** (`document ->> 'f'` is TEXT
+  whichever way the JSON held it), and closing that needs a guarded cast because `'n/a'::numeric`
+  **raises** and would fail a whole query rather than one row; and an unparseable stored decimal now
+  makes its record and any page containing it unreadable, which is sharper than before and taken
+  deliberately. `INTERVAL` is the third instance and unreached: a `duration` field maps to it and
+  nothing in the catalog or the seven packs declares one, so a keyset sort on one would put
+  `[object Object]` in the cursor the day somebody does. `readColumn` is the single place it lands.
 - **A column-level `check` expression is compared now** (ADR-0330), which closes ADR-0329's hole and
   removes the two table-level workarounds it needed. The naming ambiguity that made it look like a
   parser problem is answered by `pg_constraint.conkey` on the probe's own row — Postgres's own parser,
@@ -1796,7 +1874,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 326 records; 247 Accepted, 79 Proposed (the
+title or status change cannot drift. 327 records; 248 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

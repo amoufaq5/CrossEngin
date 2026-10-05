@@ -375,44 +375,40 @@ describe("policy role canonicalization", () => {
   });
 
   /**
-   * Policies that deliberately narrow `command`. Enumerated rather than skipped by predicate, so
-   * adding one is a visible edit here.
+   * A policy is scoped to one command **iff its name says so**.
    *
-   * Three of them are read grants that must not also satisfy a write's WITH CHECK, which was the
-   * only reason to leave the `ALL` default until ADR-0331. The fourth is the other half of that
-   * same rule: a platform-scope **write** grant, `INSERT`-scoped precisely so it carries only a
-   * WITH CHECK and so cannot serve an UPDATE's or DELETE's USING.
+   * This was a hand-maintained list of eight until ADR-0332's 29-table split made it seventy-eight,
+   * at which point it became exactly the shape ADR-0288 is the standing lesson about: a fact with
+   * two copies, where a policy missing from one copy is invisible. The rule cannot go stale, and it
+   * asserts something the list did not — that the catalog's naming convention and its scoping are
+   * two statements of the same fact, so a policy *named* `_platform_read` cannot quietly be
+   * `ALL`-scope (which is the defect the split exists to close, since on an `ALL` policy the
+   * `USING` expression also serves as the `WITH CHECK`).
+   *
+   * `_platform_audit_read` / `_platform_audit_write` are ADR-0313's and ADR-0331's spelling on
+   * `meta.audit_log`, matched by the optional `audit_` group rather than renamed, because the names
+   * are what deployments already hold.
    */
-  const NARROWED_POLICIES: ReadonlySet<string> = new Set([
-    "audit_log_platform_audit_read",
-    "audit_log_platform_audit_write",
-    "tenant_tombstones_platform_audit_read",
-    "gdpr_deletion_requests_platform_audit_read",
-    "forensic_chain_entries_platform_read",
-    "forensic_chain_entries_platform_write",
-    "forensic_chain_checkpoints_platform_read",
-    "forensic_chain_checkpoints_platform_write",
-  ]);
+  const NARROWED_NAME = /_platform_(audit_)?(read|write|update)$/;
 
-  it("leaves every policy in the real catalog on the two defaults, bar the named exceptions", () => {
-    // The precondition for the catalog's tables reading as matching against a database built from it:
-    // a policy that declares neither field emits exactly as one that never could.
+  it("scopes a policy to one command iff its name says so, and never narrows `roles`", () => {
     let narrowed = 0;
     for (const t of META_TABLES) {
       for (const policy of t.rls?.policies ?? []) {
         // No policy anywhere narrows `roles`: a role list is resolved against `pg_authid`, and a
-        // catalog that named a role a deployment has not created would read as undetermined.
+        // catalog naming a role a deployment has not created would read as undetermined.
         expect([...declaredPolicyRoles(policy)]).toEqual(["PUBLIC"]);
-        if (NARROWED_POLICIES.has(policy.name)) {
+        if (NARROWED_NAME.test(policy.name)) {
           narrowed += 1;
-          expect(declaredPolicyCommand(policy)).not.toBe("ALL");
+          expect([policy.name, declaredPolicyCommand(policy)]).not.toEqual([policy.name, "ALL"]);
           continue;
         }
-        expect(declaredPolicyCommand(policy)).toBe("ALL");
+        expect([policy.name, declaredPolicyCommand(policy)]).toEqual([policy.name, "ALL"]);
       }
     }
-    // So the exception list cannot pass vacuously by naming a policy that no longer exists.
-    expect(narrowed).toBe(NARROWED_POLICIES.size);
+    // So the rule cannot pass vacuously on a catalog where nothing is narrowed: 8 from ADR-0313 and
+    // ADR-0331, plus 70 from the 29-table split (29 reads, 29 inserts, 12 updates).
+    expect(narrowed).toBe(78);
   });
 });
 

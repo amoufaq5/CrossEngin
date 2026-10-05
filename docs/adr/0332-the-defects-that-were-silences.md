@@ -17,6 +17,21 @@ increment took that as the brief and found something narrower and more uncomfort
 defect it turned up was a *silence* rather than a wrong answer. Something was not recorded, not
 compared, not searched, not delivered — and the surface reported success.
 
+### 0. Twenty-nine tables let any tenant session write a platform-wide row
+
+ADR-0313 found this shape on `meta.audit_log` and split that one table's policy. ADR-0331 extended
+the fix to the two forensic-chain tables and **counted the rest: 29**. Each carries a single
+`ALL`-scope policy whose predicate is
+`tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID`,
+and **not one declares a `command`** — so `tenant_id IS NULL` satisfies the `WITH CHECK`
+unconditionally, because on an `ALL`-scope policy the `USING` expression *is* the `WITH CHECK`.
+
+Demonstrated live as a non-owner role, with the permissive policy in place: three statements from a
+plain tenant session, three successes — `INSERT 0 1` of a platform-wide quota definition, `UPDATE 1`
+of the platform flag that gates JWT audience checking, and `DELETE 1` of it. The list includes
+`crypto_keys`, `sso_providers`, `feature_flag_kill_switches`, `notification_templates`,
+`certification_reports` and `workflow_definitions`.
+
 ### 1. One signal submit delivered N and stored one
 
 `WorkflowEngine.submitSignal` minted `signalId` **outside** the match loop and then appended a
@@ -87,6 +102,30 @@ is.
 **Where a surface reported success while recording nothing, make the silence impossible rather than
 documenting it.** Concretely:
 
+0. **The 29 policies are split, on two orthogonal axes.** *Shape* decides how many policies —
+   **12 mutable** tables get four (isolation, `SELECT` platform read, `INSERT` platform write,
+   `UPDATE` platform write) and **17 append-only** tables get three, so a platform row on an
+   append-only table is immutable-by-RLS once written. *Grant* decides who, over **four** GUCs:
+   `app.platform_audit_write` (3 tables, ADR-0331's, untouched), `app.platform_record_write` (17),
+   `app.platform_config_write` (11) and `app.platform_key_write` (1). `DELETE` is reachable by **no
+   policy on any of them**, because nothing in the codebase deletes a platform row — retirement is a
+   status column in every one of these contracts, and the GDPR shared-table erasure deletes
+   `tenant_id = $1` only, which the isolation policy still covers.
+
+   The axes are orthogonal and conflating them was the first wrong turn: `quota_definitions` is
+   append-only in *shape* but sits on `config`, because a hard limit decides what the deployment
+   permits; `dr_failover_executions` is mutable in shape but sits on `record`. One axis would have
+   forced one of those wrong.
+
+   **The narrowed isolation policy keeps its existing name.** `feature_flags_tenant_or_platform`
+   stays that, with a narrowed predicate — which is what makes the whole split reconcilable in one
+   pass: a policy under a known name with a changed definition is `replace_policy`, one
+   `DROP …; CREATE …;` statement. A *renamed* one would have been `create_policy` plus a
+   `policy_removed` refusal, and because permissive policies are **OR'd**, the split would have
+   bought *nothing* until 29 hand-run drops landed — ADR-0331's two-table trap multiplied by
+   fourteen. Measured: **99 steps, 0 unreconciled, zero manual SQL.** The cost is a policy whose name
+   no longer describes it, and there is no `renamedFrom` for a policy.
+
 1. **A signal id is minted per match**, and `submitSignal` returns `deliveries` rather than a single
    `signalId` — with N instances there is no such value. `deduplicated` returns **the first submit's
    deliveries**, not an empty list, because telling a retrying webhook that nothing matched is the one
@@ -125,6 +164,54 @@ documenting it.** Concretely:
    (ADR-0287).
 
 ## Alternatives considered
+
+- **Option A0: one platform-write grant for all 29 tables.**
+  - **Pros:** one setting to configure; no boundary to argue.
+  - **Cons:** the boundary test is "name a population that should hold one and not the other", and
+    three pairs answer it immediately. **`audit` vs `key`** is the sharpest and is why `crypto_keys`
+    gets a grant to itself: that table holds the public keys a chain entry's
+    `signingKeyFingerprint` resolves against, so a session able to *both* append to the trail and
+    register a key could re-sign a rewritten chain and have it verify — ADR-0313's rule exactly, a
+    grant over the record must not reach the thing that validates the record. **`config` vs
+    `record`** bites soonest: a DR drill scheduler that could also flip `gateway.strict_jwt_aud` is
+    an authentication bypass. And **`key` vs `record`** is why `meta.crypto_audit` is `record`, not
+    `key` — the population that may register a platform key is precisely the population whose
+    conduct those rows record.
+  - **Why not:** one grant would be a privilege nobody could scope, and 29 would be 29 things nobody
+    configures correctly. Four, grouped by what the privilege *is*, each answers a sentence an
+    operator can read.
+
+- **Option A1: rename the narrowed isolation policy to `<table>_tenant_isolation`.**
+  - **Pros:** the name would describe what the policy does, matching the three tables ADR-0331
+    split.
+  - **Cons:** a renamed policy is `create_policy` plus a `policy_removed` refusal, and
+    `allowLoosening` reaches foreign keys only. Permissive policies are OR'd, so an operator would
+    see "executed 99, failed 0" and believe the hole closed while every platform row stayed
+    forgeable, until 29 hand-run `DROP POLICY` statements landed.
+  - **Why not:** exactly the trap ADR-0331 documented on two tables, and it does not scale to
+    twenty-nine. A misleading name is cheaper than a migration nobody completes.
+
+- **Option A2: extend `allowLoosening` to reach policies**, so a rename could drop the old one.
+  - **Pros:** the symmetry with a foreign key is tempting for ADR-0290's own reason — neither drop
+    can fail against existing rows.
+  - **Cons:** a constraint is a rule *about* data; a policy *is* the access control. The failure
+    modes are not comparable — a wrongly dropped foreign key lets a bad row in, a wrongly dropped
+    policy lets every tenant read every other tenant.
+  - **Why not:** `replace_policy` already removes a policy only where it writes the replacement in
+    the same statement, and that invariant is worth more than the convenience. The split makes it
+    moot anyway.
+
+- **Option A3: drop the platform read arm on tables that have no platform writer.**
+  - **Pros:** 14 of the 29 have no store at all — declared and never written, the ADR-0300 class —
+    so an arm nothing claims is capability without a caller.
+  - **Cons:** `tenant_id` is nullable on all 29 and every corresponding contract declares
+    `tenantId: …nullable()`, so the platform arm is *intended* everywhere. `notification_templates`
+    is the closest case — both its stores refuse `tenantId === null` outright — yet its read path
+    resolves `(tenant_id = $1 OR tenant_id IS NULL)` and its own comment says a platform row is
+    "authored by an operator".
+  - **Why not:** it silently removes a documented intent. The arms are given instead, gated on a GUC
+    nothing sets — strictly narrower than today in every direction, and reversible by a deployment
+    that wants to seed as the owner.
 
 - **Option A: add `correlation_key` to the signal dedup key.**
   - **Pros:** would make `send_signal`'s literal `idempotencyKey` parameter "work" — many instances
@@ -204,7 +291,11 @@ documenting it.** Concretely:
 
 ## Consequences
 
-- **Positive.** A signal fan-out stores one row per delivery and the replayer stops reporting drift on
+- **Positive.** A tenant session can no longer write, change or remove a platform-wide row on any of
+  the 29 tables, and the write is reachable only by a session that sets the right one of four
+  transaction-local GUCs — verified live as a non-owner role across a 12-case forgery matrix, all 12
+  unambiguous. The `_platform_read` arm is preserved on every one of them, so no existing reader lost
+  access. A signal fan-out stores one row per delivery and the replayer stops reporting drift on
   healthy data. Dedup survives a restart and reaches a second replica. Two implementations of one
   `EntityStore` agree about what a `decimal` is, and two real mis-postings in the ledger are fixed.
   Four files are searchable, so a "find all callers" sweep no longer has blind spots it does not
@@ -221,7 +312,21 @@ documenting it.** Concretely:
   one. A fax suppression can be imposed once per address and never lifted automatically, and no route
   reads the observation row, so the evidence for a permanent block is only in a log line and the
   suppression's `notes`.
-- **Neutral.** `replace_unique_constraint` was marked `guarded`, claiming a re-check that is not in its
+  **Fourteen of the 29 tables have no store at all**, so their new write arms are capability with no
+  caller: a GUC nobody sets is no reachable write path, which is strictly tighter than what they had,
+  but it is also a grant waiting for a writer that may be wired by someone who never reads this ADR.
+  **The grants are not narrowed per tenant or per role** — all four are `PUBLIC`-scoped settings, so
+  any session that can call `set_config` can claim one; what the split buys is that claiming it is a
+  deliberate act recorded in the transaction rather than the default state of every tenant
+  connection. And **reads on these tables remain owner-dependent**: the seven stores that set no
+  scope before still set none, so they are correct as the owner (who bypasses RLS) and would see only
+  platform rows as a non-owner, which is ADR-0331's `scopeFilter` lesson un-swept outside the chain.
+- **Neutral.** `dr_failover_executions` is classified *mutable* in shape against a writer that is
+  INSERT-only in practice, so its `UPDATE` arm is unused today; the classification follows the
+  contract's state machine rather than the current store, which is the right side to be wrong on — the
+  store is the thing that will change. Relatedly, `PostgresDrFailoverStore` silently drops every
+  failover completion (`ON CONFLICT (execution_id) DO NOTHING` on what is an upsert path), which this
+  increment reports and does not fix. `replace_unique_constraint` was marked `guarded`, claiming a re-check that is not in its
   SQL; by `add_foreign_key`'s own rule it is not guarded, since a failure means the data already
   contradicts the catalog. What makes that failure safe is a different property, and it was measured
   rather than assumed: the `DROP` and `ADD` go out as **one string**, and node-postgres runs a
@@ -238,6 +343,17 @@ documenting it.** Concretely:
 
 ## Implementation notes
 
+- The policy split is enforced by the catalog's own test suite rather than by a maintained list.
+  `meta-schema.test.ts` asserts, over every table: a platform **read** arm is `SELECT`-scoped and its
+  `using` is exactly `tenant_id IS NULL`; each read arm has exactly **one** matching `INSERT` arm; a
+  write grant is always ANDed with `tenant_id IS NULL` and never appears on a `SELECT` policy; and the
+  string `IS NULL OR` appears in no policy predicate anywhere. The four grant names are spelled
+  **locally** in that test rather than imported, because importing them would invert the package
+  dependency. `kernel-pg`'s canonical test replaced its hand-kept `NARROWED_POLICIES` set with the
+  rule `/_platform_(audit_)?(read|write|update)$/` and one count — **78**, being ADR-0313's and
+  ADR-0331's 8 plus the split's 70 — so a 30th table cannot be added without the number moving. A
+  hand-maintained list is precisely what ADR-0288's `needsAuditEmitter` was, and it was wrong three
+  times.
 - `meta.workflow_signals`' constraint change is a **widening**, so it applies on a populated table:
   appending a column to a unique key cannot fail against existing rows. Verified live on both an empty
   and a populated table, and the *narrowing* direction verified to fail and roll back.
@@ -264,11 +380,21 @@ documenting it.** Concretely:
 | Should the JSONB store cast a `decimal` for ordering, and how is `'n/a'::numeric` guarded so one bad row does not fail a whole query? | Platform | 2026-12-15 |
 | Does the accounting core move to a decimal library, now that the wire type is exact and the arithmetic is not? | Platform | 2027-01-31 |
 | Should `SignalDefinition.idempotencyKey` be renamed `idempotencyKeyVariable` and actually read, given the rename needs a content-digest version bump? | Platform | 2026-12-31 |
+| Should the four write grants be narrowed from `PUBLIC` to a named role, so claiming one is an authorisation rather than a `set_config` call any session can make? | Platform | 2027-01-31 |
+| `certification_reports` is the loudest member of the `record` group — a forged platform certification report is a compliance claim, not telemetry. Does it want its own grant, separate from the other 16? | Platform | 2026-12-31 |
+| `meta.audit_integrity_verdicts` has a differently-shaped hole: its `ALL` policy ORs in the `app.platform_audit` **read** grant, so an elevated *reader* can forge a verdict. Splitting it means narrowing an isolation policy from `ALL` to `SELECT`, which is a larger edit than adding arms beside one. | Platform | 2026-11-30 |
+| Do the seven stores that set no tenant scope before a read on these tables get `scopeFilter` predicates, per ADR-0331's chain finding? They are correct only as the table owner. | Platform | 2026-12-31 |
+| `PostgresTimerStore` omits `kind` and `PostgresActivityStore` omits six NOT NULL no-default columns, so neither can write against a real database — ADR-0331's signal-store class on two siblings. Where does each omitted value legitimately come from? `retry_policy` and `timeout_seconds` are properties of the activity's *definition*, which the projection does not carry. | Platform | 2026-11-30 |
+| `PostgresDrFailoverStore` and `PostgresDrDrillStore` use `ON CONFLICT … DO NOTHING` on an upsert path, so a failover's completion is silently dropped and the row keeps its declared status forever. | Platform | 2026-11-30 |
 
 ## References
 
 - ADR-0331 — the increment that measured the node-postgres types and left the `decimal` wire type undecided; its addendum records `crossengin.tombstone.content.v3`.
-- ADR-0313 — the `ALL`-scope `USING`-as-`WITH CHECK` reasoning.
+- ADR-0313 — the `ALL`-scope `USING`-as-`WITH CHECK` reasoning, and the first table split.
+- ADR-0290 — dropping a policy is a loosening the reconciler refuses, which is why a renamed policy
+  would have needed 29 hand-run drops; ADR-0331 measured that trap on two tables.
+- ADR-0288 — a hand-maintained list of the things a feature touches, wrong three times; the reason the
+  split is asserted by a rule and a count rather than by a set.
 - ADR-0302 — a safety record must never widen on an inference; `DO NOTHING` on a suppression.
 - ADR-0289 — a row the contract forbids and a CHECK permits.
 - ADR-0287 — truncation detection needs a checkpoint witness, which is why `includePlatform` is one decision across two configs.

@@ -136,6 +136,141 @@ function uniqueConstraintName(column: ColumnDefinition | undefined): string | un
 }
 
 
+/**
+ * The isolation predicate every tenant-scoped policy carries. Spelled here rather than exported
+ * from the catalog: it is module-private there for a reason, and a test that imports it could not
+ * then catch the catalog changing it. "The two agree" is asserted over the whole catalog instead.
+ */
+const TENANT_ISOLATION_USING =
+  "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
+
+/**
+ * A table's platform read arm, which since ADR-0332 is a `SELECT`-scoped policy of its own rather
+ * than an `OR` inside the isolation one. Found by its predicate, not by its name, so a renamed
+ * policy still satisfies the assertions that use this.
+ */
+function platformReadOf(t: TableDefinition) {
+  return (t.rls?.policies ?? []).find((p) => (p.using ?? "").trim() === "tenant_id IS NULL");
+}
+
+/**
+ * The four grants an `INSERT`- or `UPDATE`-scoped platform policy may check (ADR-0332).
+ *
+ * Spelled here rather than imported from `@crossengin/kernel-pg`, which would invert the package
+ * dependency. The other direction is asserted in `kernel-pg`'s `connection.test.ts`, which reads
+ * the real catalog and refuses a GUC the vocabulary does not spell — both directions are wanted,
+ * because a name with two copies is exactly what ADR-0288 is the standing lesson about.
+ */
+const PLATFORM_WRITE_GRANTS_IN_CATALOG = [
+  "app.platform_audit_write",
+  "app.platform_record_write",
+  "app.platform_config_write",
+  "app.platform_key_write",
+] as const;
+
+interface PolicyClause {
+  readonly table: string;
+  readonly name: string;
+  readonly command: string;
+  readonly clause: string;
+}
+
+function policyClauses(): readonly PolicyClause[] {
+  return META_TABLES.flatMap((t) =>
+    (t.rls?.policies ?? []).flatMap((pol) =>
+      [pol.using, pol.check]
+        .filter((c): c is string => c !== undefined)
+        .map((clause) => ({ table: t.name, name: pol.name, command: pol.command ?? "ALL", clause })),
+    ),
+  );
+}
+
+function grantedClauses(): readonly PolicyClause[] {
+  return policyClauses().filter((c) =>
+    PLATFORM_WRITE_GRANTS_IN_CATALOG.some((g) => c.clause.includes(g)),
+  );
+}
+
+describe("the platform write grants", () => {
+  it("is checked by every one of the four, so none is declared with nothing behind it", () => {
+    const all = policyClauses()
+      .map((c) => c.clause)
+      .join(" ");
+    for (const guc of PLATFORM_WRITE_GRANTS_IN_CATALOG) expect(all).toContain(guc);
+  });
+
+  it("is checked only by INSERT- and UPDATE-scoped policies", () => {
+    // On an `ALL`-scope policy the `USING` expression also serves as the `WITH CHECK`, which is the
+    // defect this increment closes — and it would hand the grant a DELETE besides. Nothing in the
+    // catalog deletes a platform row (retirement is a status column in every one of these
+    // contracts), so `DELETE` is deliberately reachable by no policy at all.
+    for (const c of grantedClauses()) {
+      expect(`${c.table}.${c.name}: ${c.command}`).toMatch(/: (INSERT|UPDATE)$/);
+    }
+  });
+
+  it("is always ANDed with `tenant_id IS NULL` in the clause that checks it", () => {
+    // So holding a write elevation buys no access to any *tenant's* rows: the isolation policy is
+    // still the only route to one, and it still demands that tenant's context.
+    for (const c of grantedClauses()) {
+      expect(`${c.table}.${c.name}: ${c.clause}`).toContain("tenant_id IS NULL");
+    }
+  });
+
+  it("never appears on a SELECT policy", () => {
+    // ADR-0313's rule as a catalog-wide assertion: a grant that authorises a write must never also
+    // be a route to another tenant's rows. The cross-tenant *read* grant is `app.platform_audit`,
+    // which has no `_write` suffix and so is not in this list at all.
+    for (const c of policyClauses()) {
+      if (c.command !== "SELECT") continue;
+      for (const guc of PLATFORM_WRITE_GRANTS_IN_CATALOG) {
+        expect(`${c.table}.${c.name}: ${c.clause}`).not.toContain(guc);
+      }
+    }
+  });
+});
+
+describe("no table carries the permissive platform arm any more", () => {
+  const PERMISSIVE =
+    "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID";
+
+  it("is spelled by no policy in the catalog", () => {
+    // It was spelled by 29, and on every one `tenant_id IS NULL` satisfied the `WITH CHECK`
+    // unconditionally, so any tenant session could insert, update or delete a platform-wide row.
+    // Demonstrated live as a non-owner role before the split: an `INSERT 0 1` of a platform-wide
+    // quota definition, an `UPDATE 1` of the platform flag gating JWT audience checking, and a
+    // `DELETE 1` of it — three statements, three successes, from a plain tenant session.
+    const offenders = META_TABLES.flatMap((t) =>
+      (t.rls?.policies ?? [])
+        .filter((pol) => pol.using === PERMISSIVE || pol.check === PERMISSIVE)
+        .map((pol) => `${t.name}.${pol.name}`),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it("gives a platform read arm the SELECT scope and never a wider one", () => {
+    // The replacement shape, asserted as a rule rather than as a list of 29: a platform row stays
+    // readable by anyone (an integrity pass and a template resolver both need that) and is writable
+    // only under an elevation.
+    for (const t of META_TABLES) {
+      const arm = platformReadOf(t);
+      if (arm === undefined) continue;
+      expect(`${t.name}.${arm.name}`).toBe(`${t.name}.${arm.name}`);
+      expect(arm.command).toBe("SELECT");
+    }
+  });
+
+  it("pairs every platform read arm with exactly one INSERT arm", () => {
+    // A read arm with no write arm would be a table whose platform row nothing can create; a second
+    // write arm would be a second route to one. Both are findings rather than configurations.
+    for (const t of META_TABLES) {
+      if (platformReadOf(t) === undefined) continue;
+      const inserts = (t.rls?.policies ?? []).filter((pol) => pol.command === "INSERT");
+      expect(`${t.name}: ${inserts.length.toString()} INSERT arm(s)`).toBe(`${t.name}: 1 INSERT arm(s)`);
+    }
+  });
+});
+
 describe("META_TABLES", () => {
   it("contains 145 tables", () => {
     expect(META_TABLES).toHaveLength(145);
@@ -1152,7 +1287,12 @@ describe("table column shapes", () => {
 
   it("META_SLO_EVALUATIONS is platform-or-tenant scoped with RLS", () => {
     expect(META_SLO_EVALUATIONS.rls?.enabled).toBe(true);
-    expect(META_SLO_EVALUATIONS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
+    // ADR-0332: the platform arm is a SELECT-scoped policy of its own now, not an `OR` inside
+    // the isolation one. The old assertion pinned the defect: on an `ALL`-scope policy the
+    // `USING` also serves as the `WITH CHECK`, so `tenant_id IS NULL` let any tenant session
+    // write a platform-wide row.
+    expect(META_SLO_EVALUATIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_SLO_EVALUATIONS)?.command).toBe("SELECT");
   });
 
   it("META_SLO_ENFORCEMENT_ACTIONS constrains decision + cross-links incident/kill-switch/flag", () => {
@@ -1587,7 +1727,12 @@ describe("table column shapes", () => {
     expect(pct?.check).toContain("'p95'");
     const sev = META_SLO_LATENCY_EVALUATIONS.columns.find((c) => c.name === "worst_severity");
     expect(sev?.check).toContain("'sev2'");
-    expect(META_SLO_LATENCY_EVALUATIONS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
+    // ADR-0332: the platform arm is a SELECT-scoped policy of its own now, not an `OR` inside
+    // the isolation one. The old assertion pinned the defect: on an `ALL`-scope policy the
+    // `USING` also serves as the `WITH CHECK`, so `tenant_id IS NULL` let any tenant session
+    // write a platform-wide row.
+    expect(META_SLO_LATENCY_EVALUATIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_SLO_LATENCY_EVALUATIONS)?.command).toBe("SELECT");
   });
 
   it("META_OPERATE_ENTITY_RECORDS keys documents by (tenant, entity, record) with tenant RLS", () => {
@@ -1839,7 +1984,12 @@ describe("table column shapes", () => {
   it("META_SSO_PROVIDERS allows NULL tenant_id (platform-wide providers)", () => {
     const tenantId = META_SSO_PROVIDERS.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).not.toBe(true);
-    expect(META_SSO_PROVIDERS.rls?.policies?.[0]?.using).toContain("IS NULL OR");
+    // ADR-0332: the platform arm is a SELECT-scoped policy of its own now, not an `OR` inside
+    // the isolation one. The old assertion pinned the defect: on an `ALL`-scope policy the
+    // `USING` also serves as the `WITH CHECK`, so `tenant_id IS NULL` let any tenant session
+    // write a platform-wide row.
+    expect(META_SSO_PROVIDERS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_SSO_PROVIDERS)?.command).toBe("SELECT");
   });
 
   it("META_SSO_LOGINS check-constrains outcome to the 8 SSO outcomes", () => {
@@ -1893,9 +2043,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_NOTIFICATION_TEMPLATES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_NOTIFICATION_TEMPLATES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_NOTIFICATION_TEMPLATES)?.command).toBe("SELECT");
   });
 
   it("META_NOTIFICATION_PREFERENCES enforces (tenant, user, category, channel) uniqueness", () => {
@@ -1965,9 +2115,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_ACCESS_REVIEW_TEMPLATES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_ACCESS_REVIEW_TEMPLATES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_ACCESS_REVIEW_TEMPLATES)?.command).toBe("SELECT");
   });
 
   it("META_ACCESS_REVIEW_TEMPLATES framework enum covers SOC 2, ISO 27001, HIPAA, PCI, GDPR, CFR 21", () => {
@@ -2059,9 +2209,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_WORKFLOW_DEFINITIONS.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_WORKFLOW_DEFINITIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_WORKFLOW_DEFINITIONS)?.command).toBe("SELECT");
   });
 
   it("META_WORKFLOW_DEFINITIONS enforces (tenant, key, version) uniqueness", () => {
@@ -2167,9 +2317,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_LINEAGE_NODES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_LINEAGE_NODES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_LINEAGE_NODES)?.command).toBe("SELECT");
   });
 
   it("META_LINEAGE_NODES kind enum covers 14 node kinds", () => {
@@ -2278,9 +2428,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_RATE_LIMIT_POLICIES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_RATE_LIMIT_POLICIES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_RATE_LIMIT_POLICIES)?.command).toBe("SELECT");
   });
 
   it("META_RATE_LIMIT_POLICIES algorithm enum has 6 algorithms", () => {
@@ -2412,9 +2562,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_GATEWAY_PIPELINE_EXECUTIONS.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_GATEWAY_PIPELINE_EXECUTIONS.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_GATEWAY_PIPELINE_EXECUTIONS)?.command).toBe("SELECT");
   });
 
   it("META_GATEWAY_PIPELINE_EXECUTIONS final_stage enum covers 17 stages", () => {
@@ -2449,9 +2599,9 @@ describe("table column shapes", () => {
       (c) => c.name === "tenant_id",
     );
     expect(tenantId?.notNull).not.toBe(true);
-    expect(
-      META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using,
-    ).toContain("IS NULL OR");
+    // ADR-0332: a SELECT-scoped platform arm of its own, not an `OR` inside isolation.
+    expect(META_FEATURE_FLAG_TARGETING_RULES.rls?.policies?.[0]?.using).toBe(TENANT_ISOLATION_USING);
+    expect(platformReadOf(META_FEATURE_FLAG_TARGETING_RULES)?.command).toBe("SELECT");
   });
 
   it("META_FEATURE_FLAG_KILL_SWITCHES still does not restrict on flag deletion, and now only one thing blocks it", () => {

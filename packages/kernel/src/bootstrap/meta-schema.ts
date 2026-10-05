@@ -1505,8 +1505,23 @@ export const META_FEATURE_FLAGS: TableDefinition = {
         // platform-chain tamper verdict is the last thing to broadcast. Same nullable column, opposite
         // intent, so opposite policy.
         name: "feature_flags_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flags_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flags_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "feature_flags_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -3250,7 +3265,17 @@ export const META_COST_ATTRIBUTION: TableDefinition = {
     policies: [
       {
         name: "cost_attribution_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "cost_attribution_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "cost_attribution_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -3318,7 +3343,23 @@ export const META_COST_BUDGETS: TableDefinition = {
     policies: [
       {
         name: "cost_budgets_tenant_isolation",
-        using: "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "cost_budgets_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "cost_budgets_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "cost_budgets_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -5118,8 +5159,23 @@ export const META_SSO_PROVIDERS: TableDefinition = {
     policies: [
       {
         name: "sso_providers_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "sso_providers_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "sso_providers_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "sso_providers_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -5484,8 +5540,23 @@ export const META_NOTIFICATION_TEMPLATES: TableDefinition = {
     policies: [
       {
         name: "notification_templates_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "notification_templates_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "notification_templates_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "notification_templates_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -6110,8 +6181,23 @@ export const META_ACCESS_REVIEW_TEMPLATES: TableDefinition = {
     policies: [
       {
         name: "access_review_templates_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "access_review_templates_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "access_review_templates_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "access_review_templates_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -6888,8 +6974,23 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
     policies: [
       {
         name: "workflow_definitions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "workflow_definitions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "workflow_definitions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "workflow_definitions_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -7620,8 +7721,23 @@ export const META_LINEAGE_NODES: TableDefinition = {
     policies: [
       {
         name: "lineage_nodes_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "lineage_nodes_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "lineage_nodes_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+      },
+      {
+        name: "lineage_nodes_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -7740,8 +7856,17 @@ export const META_LINEAGE_EDGES: TableDefinition = {
     policies: [
       {
         name: "lineage_edges_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "lineage_edges_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "lineage_edges_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -7851,8 +7976,17 @@ export const META_PROVENANCE_RECORDS: TableDefinition = {
     policies: [
       {
         name: "provenance_records_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "provenance_records_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "provenance_records_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -8260,8 +8394,23 @@ export const META_RATE_LIMIT_POLICIES: TableDefinition = {
     policies: [
       {
         name: "rate_limit_policies_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "rate_limit_policies_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "rate_limit_policies_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "rate_limit_policies_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -8336,8 +8485,17 @@ export const META_QUOTA_DEFINITIONS: TableDefinition = {
     policies: [
       {
         name: "quota_definitions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "quota_definitions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "quota_definitions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -8542,8 +8700,17 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
     policies: [
       {
         name: "rate_limit_decisions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "rate_limit_decisions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "rate_limit_decisions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -8652,8 +8819,23 @@ export const META_RATE_LIMIT_EXCEPTIONS: TableDefinition = {
     policies: [
       {
         name: "rate_limit_exceptions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "rate_limit_exceptions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "rate_limit_exceptions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "rate_limit_exceptions_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -8727,8 +8909,17 @@ export const META_THROTTLE_EVENTS: TableDefinition = {
     policies: [
       {
         name: "throttle_events_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "throttle_events_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "throttle_events_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9031,8 +9222,17 @@ export const META_GATEWAY_PIPELINE_EXECUTIONS: TableDefinition = {
     policies: [
       {
         name: "gateway_pipeline_executions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "gateway_pipeline_executions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "gateway_pipeline_executions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9104,8 +9304,17 @@ export const META_FEATURE_FLAG_TARGETING_RULES: TableDefinition = {
     policies: [
       {
         name: "feature_flag_targeting_rules_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flag_targeting_rules_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flag_targeting_rules_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -9217,8 +9426,23 @@ export const META_FEATURE_FLAG_KILL_SWITCHES: TableDefinition = {
     policies: [
       {
         name: "feature_flag_kill_switches_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flag_kill_switches_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flag_kill_switches_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+      },
+      {
+        name: "feature_flag_kill_switches_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_config_write', true) = 'on'",
       },
     ],
   },
@@ -9316,8 +9540,17 @@ export const META_FEATURE_FLAG_EVALUATIONS: TableDefinition = {
     policies: [
       {
         name: "feature_flag_evaluations_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flag_evaluations_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flag_evaluations_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9421,8 +9654,17 @@ export const META_FEATURE_FLAG_CHANGES: TableDefinition = {
     policies: [
       {
         name: "feature_flag_changes_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "feature_flag_changes_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "feature_flag_changes_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9507,8 +9749,23 @@ export const META_CRYPTO_KEYS: TableDefinition = {
     policies: [
       {
         name: "crypto_keys_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "crypto_keys_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "crypto_keys_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'",
+      },
+      {
+        name: "crypto_keys_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_key_write', true) = 'on'",
       },
     ],
   },
@@ -9573,8 +9830,17 @@ export const META_CRYPTO_AUDIT: TableDefinition = {
     policies: [
       {
         name: "crypto_audit_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "crypto_audit_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "crypto_audit_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -9926,8 +10192,17 @@ export const META_SLO_EVALUATIONS: TableDefinition = {
     policies: [
       {
         name: "slo_evaluations_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "slo_evaluations_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "slo_evaluations_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10016,8 +10291,17 @@ export const META_SLO_ENFORCEMENT_ACTIONS: TableDefinition = {
     policies: [
       {
         name: "slo_enforcement_actions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "slo_enforcement_actions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "slo_enforcement_actions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10072,8 +10356,17 @@ export const META_SLO_LATENCY_EVALUATIONS: TableDefinition = {
     policies: [
       {
         name: "slo_latency_evaluations_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "slo_latency_evaluations_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "slo_latency_evaluations_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10270,8 +10563,23 @@ export const META_DR_FAILOVER_EXECUTIONS: TableDefinition = {
     policies: [
       {
         name: "dr_failover_executions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "dr_failover_executions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "dr_failover_executions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+      },
+      {
+        name: "dr_failover_executions_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10312,8 +10620,17 @@ export const META_DR_DRILL_EXECUTIONS: TableDefinition = {
     policies: [
       {
         name: "dr_drill_executions_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "dr_drill_executions_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "dr_drill_executions_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10354,8 +10671,17 @@ export const META_DR_READINESS_SNAPSHOTS: TableDefinition = {
     policies: [
       {
         name: "dr_readiness_snapshots_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "dr_readiness_snapshots_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "dr_readiness_snapshots_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
@@ -10455,8 +10781,17 @@ export const META_CERTIFICATION_REPORTS: TableDefinition = {
     policies: [
       {
         name: "certification_reports_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        name: "certification_reports_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        name: "certification_reports_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },
