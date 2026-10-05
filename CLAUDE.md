@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 327 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 328 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~14,230 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~14,600 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -36,13 +36,23 @@ type errors.
   platform console, AI onboarding, the notification stack, and a long run on GDPR
   Article 17 (ADR-0316 – ADR-0329): the erasure, its proof, the proof's reach, the
   audit of the proofs, and the alarm for what that audit finds.
-  The last three increments (ADR-0330, ADR-0331) have been **sweeps rather than features**: taking a
+  The last four increments (ADR-0330 – ADR-0333) have been **sweeps rather than features**: taking a
   defect that was found once and asking how many other members its class has. That turned up a
   column-level CHECK nobody compared across 765 of them, a `Date`-vs-string assumption in four stores
   (one of them breaking keyset pagination in production), 29 tables letting a tenant write a
   platform-wide row, a signal store that could never succeed against a real database, and a workflow
-  orchestration layer that was unreachable from the deployed binary. The recurring shape is that
-  **the honest fix usually sits one level up from where the pain was felt.**
+  orchestration layer that was unreachable from the deployed binary. ADR-0333 asked *why nothing
+  caught them* and found the answer in this file: the convention that Postgres modules are tested
+  against a fake connection recording `{sql, params}` draws the boundary at the SQL **string**, so
+  everything past it — does the column exist, does the policy permit it, does the row come back,
+  does anyone call this — was unverified by construction. Six defects were in that blind spot,
+  each one something **built, tested, and never connected to reality**: two stores that threw
+  against every real database, two that dropped every state transition, three workers that were
+  exported and never started, a verdict table nothing wrote, fourteen stores whose reads were
+  correct only as the table's owner, and a decimal sort that did not terminate. The recurring shape
+  is that **the honest fix usually sits one level up from where the pain was felt** — here, a
+  workspace test that reads the catalog and every store's SQL rather than a convention asking people
+  to be careful.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -833,6 +843,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   versus **0.09 ms** index scan — and this read runs on *every append*, to find the tail, against a
   table that only grows. A platform append also sets `app.platform_audit_write`, transaction-locally,
   for the `INSERT`-scoped policy that is now the only route to a platform-scope entry.
+  **`scopeFilter` is the idiom the rest of the repo copies** — ADR-0333 swept it into fourteen
+  store classes across seven packages, with a strict and an inclusive spelling chosen per table.
+  Six copies exist for want of a shared home; it belongs in `kernel-pg`'s `connection.ts`.
 - **`access-reviews`** — periodic attestation campaigns (SOC 2 / ISO 27001 / HIPAA / PCI /
   GDPR / 21 CFR Part 11): campaigns, scoped items, decisions with attestation kinds and
   four-eyes, exceptions with per-reason duration caps, templates, sealed evidence with
@@ -1356,6 +1369,15 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are two now:
+`typecheck-config.ts` (ADR-0307) and `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
+and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
+cannot — that every column a statement names exists, and that every `notNull`-with-no-default
+column is named by every `INSERT`. Both read the real workspace from disk rather than importing it,
+which is what keeps them unconditional: importing `@crossengin/kernel` would make the dependency
+graph cyclic, and reading `kernel/dist` would make the answer depend on whether someone ran
+`pnpm -r build`. A rule that is green only after a build is not a rule.
+
 Full workspace build + typecheck + test is several minutes; run it backgrounded
 into a log rather than blocking on it. There is **no top-level lint script** —
 ESLint has not been migrated to v9 flat config. Ignore lint unless asked.
@@ -1388,6 +1410,21 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   paths, helpers, and state-machine transitions. Postgres-backed modules are
   tested offline against a fake `PgConnection` that records `{sql, params}` —
   assert on the recorded SQL and bound parameters, never on a live database.
+  **Know what that boundary cannot see** (ADR-0333). It is drawn at the SQL
+  *string*, so a fake answers every statement and six separate defects lived
+  past it: a column that does not exist, a required column omitted, a policy that
+  refuses the statement, a read with no scope predicate, a row that comes back a
+  different type, and a module nothing calls. Three of those were found by hand
+  in three consecutive increments before anyone looked for the class. So a fake
+  is the *floor* and not the ceiling: a store's INSERT column list is now
+  asserted against `META_TABLES` (`packages/testing/src/strategy/pg-column-coverage.ts`
+  checks every statement in the workspace), a scoped read is asserted to carry
+  its predicate and to branch for both arms, and anything touching SQL, auth or
+  the request path is verified live as well — **as a non-owner role**, because a
+  table's owner bypasses RLS and testing as the owner proves nothing about it.
+  A fake that silently ignores a column is worse than no fake: `fakeCertificationPg`
+  ignored `tenant_id` entirely, so a store reading one scope and a store reading
+  every scope looked identical to it.
 - **Comments are rare and earn their place.** No JSDoc on every export. Comment
   a non-obvious invariant — why this order, why fail-closed here, why this
   outcome and not that one — not what the code plainly says.
@@ -1497,8 +1534,38 @@ opened them.
   the canonical report — changing any field yields a *different row*, so there is no stable handle to
   aim an `UPDATE` at, and an in-place edit would be ADR-0323's `scope_tampered` in the one table
   whose purpose is to be checkable against the chain.
-  **Reads are still owner-dependent** in the stores that set no scope, which is ADR-0331's
-  `scopeFilter` lesson un-swept outside the chain.
+- **The owner-dependent reads are swept, and "seven stores" was the package count** (ADR-0331,
+  ADR-0332, ADR-0333). A table's owner bypasses RLS and connecting as the owner is an ordinary
+  deployment, so a read leaning on RLS to confine it is correct as the owner and wrong as a
+  non-owner **in both directions**. Thirteen tables needed a predicate across **fourteen store
+  classes in seven packages**; fifteen of the platform-read tables have no store at all. Pre-fix,
+  owner and non-owner diverged on **11 of 12** probes, and the damage was a **wrong scalar** rather
+  than a long list: `latestForFramework("soc2_type2")` returned a tenant's *failing* SOC 2 report
+  and answered "is this platform certifiable" with `false` while the platform's own passing report
+  sat one row behind; `countBreachesSince` answered 3 where the scope's own count is 1, a 3× burn-rate
+  input on the path that pages; `loadForIncident` *threw* on healthy data; and
+  `summarize({tenantId: null})` typed its parameter `string | undefined`, so `null` reached
+  `tenant_id = NULL` and returned `{total: 0, successRate: 1}` — **asking for the platform scope
+  returned a confidently healthy empty answer.**
+  Two spellings, chosen per table on one rule: **the predicate reproduces what a non-owner would
+  have been shown, no wider and no narrower.** `scopeFilter` (strict `tenant_id = $n`) where a
+  scope's rows are a closed set; `scopeFilterWithPlatform` (`tenant_id = $n OR tenant_id IS NULL`)
+  where a platform row is *meant* to serve a tenant — a feature flag, a public key, a platform-wide
+  workflow definition. Strict everywhere would have made these stores owner-independent by
+  **destroying** documented behaviour rather than reproducing it, and the catalog says which is
+  which: `idx_workflow_definitions_platform_key_version … WHERE tenant_id IS NULL` is the platform
+  read arm written down, and the inclusive predicate plans as a **BitmapOr** over it.
+  **The measurement to keep**: `IS NOT DISTINCT FROM` — the one operator matching NULL to NULL, and
+  so the tempting single code path — *is* index-scanned with a **literal** NULL, because Postgres
+  constant-folds it; with a **bound parameter**, which is how a store issues it, it is a sequential
+  scan. Measured twice on 45k rows: 10.67 ms vs 0.73 ms, and 24.7 ms vs 1.7 ms. **The penalty is
+  invisible in a psql session and real in production.** Branch.
+  What remains: `scopeFilter` now lives in **six per-package copies** and belongs in `kernel-pg`'s
+  `connection.ts` beside `setPlatformWriteSql`, the only dependency all six share; and the
+  **write**-side analogue is open — `guardedWrite`, `release`, `markStatus`, `gatherForPublication`
+  and `rowIdOf` all `UPDATE … WHERE <unique id> = $n` with no scope, so as the owner a platform
+  write can land on a tenant's row. It needs a *caller* passing the wrong scope, where the reads
+  returned a wrong answer to a correct caller, and closing it changes what a zero-row update means.
 - **The split is reconcilable in one pass only because the isolation policy keeps its name**
   (ADR-0331, ADR-0332). `planSchemaReconciliation` creates new policies and **refuses to drop an
   existing one**, because dropping a policy loosens access (ADR-0290's invariant) and `allowLoosening`
@@ -1994,7 +2061,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 327 records; 248 Accepted, 79 Proposed (the
+title or status change cannot drift. 328 records; 249 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

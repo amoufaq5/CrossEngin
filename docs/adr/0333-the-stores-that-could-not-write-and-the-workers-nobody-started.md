@@ -1,10 +1,14 @@
-# 333. The stores that could not write, and the workers nobody started
+# ADR-0333: The stores that could not write, and the workers nobody started
 
-Date: 2026-10-05
-
-## Status
-
-Accepted
+| Field | Value |
+|---|---|
+| **Status** | Accepted |
+| **Date** | 2026-10-05 |
+| **Authors** | Platform |
+| **Reviewers** | Platform |
+| **Supersedes** | _N/A_ |
+| **Superseded by** | _N/A_ |
+| **Related** | ADR-0289, ADR-0290, ADR-0299, ADR-0300, ADR-0307, ADR-0313, ADR-0318, ADR-0321, ADR-0323, ADR-0327, ADR-0330, ADR-0331, ADR-0332 |
 
 ## Context
 
@@ -55,6 +59,16 @@ activity threw against a real database, while 356 tests passed. Exactly the clas
 Nothing had hit it because the three workers were not started, which is why these two defects and
 section 0 are one increment and not two: the queue had no consumer, so a store that could not write
 to it had no observer either.
+
+And there was a **third** defect on the same path, which only surfaced once the first two were
+fixed and the worker was actually mounted. `claimDueTimers` and `claimDueActivities` returned
+`RETURNING t.instance_id` — the **UUID** foreign key into `meta.workflow_instances` — while
+`buildTimerProcessor` hands that value to `fireDueTimersForInstance`, whose only lookup matches the
+**TEXT** `instance_id` (`wfi_…`). Measured: `fireDueTimersForInstance(<uuid>)` returned
+`{firedTimerIds: [], affectedInstanceIds: []}` **without raising**, leaving the timer `scheduled` —
+a worker that claims, fires nothing, releases, and does it again forever. So the stack had three
+independent faults between a due timer and its instance advancing, each invisible to the one above
+it, and none of them reachable until the layer that would have exercised them was connected.
 
 ### 2. Two DR stores silently dropped every state transition, and the readiness report believed them
 
@@ -394,7 +408,9 @@ returned one row of three, and `=0.5` and `[in]=9,100` returned nothing.
 
 ## Consequences
 
-- **Positive.** A due timer fires. An activity runs. Two stores that threw against every real
+- **Positive.** A due timer fires, verified end to end against a real cluster: publish a definition,
+  start an instance, one `runOnce()` → `{claimed: 1, succeeded: [timerId]}` → the timer `fired` with
+  `fire_count: 1` → the **instance `completed`**. That path had three independent faults in it. Two stores that threw against every real
   database now write, and each one checks its own column list against the catalog so the next
   omission is a test failure. A failover's completion is stored, so a DR readiness report stops
   scoring a deployment READY that missed every target it declared. The audit-integrity proof's
@@ -443,7 +459,42 @@ returned one row of three, and `=0.5` and `[in]=9,100` returned nothing.
 | A client decimal literal that `Number()` accepts and `parseDecimal` refuses is a **500, not a 422** — `POST` with `"0x10"` answers `write_failed / not_a_decimal (inbound)`, contradicting ADR-0332's own provenance split. Three-line fix (test with `parseDecimal`), not applied because it narrows an accepted input contract. | Platform | 2026-11-30 |
 | `scopeFilter` now exists in **six** per-package copies. It belongs in `kernel-pg`'s `connection.ts` beside `setPlatformWriteSql` and `isoInstant`, which is the only dependency all six share. Lifting it is a mechanical change across six packages and was not taken mid-increment. | Platform | 2026-12-31 |
 | The **write**-side analogue of the unscoped reads: `PostgresFeatureFlagStore.guardedWrite`, `PostgresKillSwitchStore.release`, `PostgresKeyRegistry.markStatus` and `definition-store`'s `gatherForPublication`/`rowIdOf` all `UPDATE … WHERE <unique id> = $n` with no scope, so as the owner a platform write can land on a tenant's row. It needs a *caller* passing the wrong scope, where the reads returned a wrong answer to a correct caller — and closing it changes what a zero-row update means. | Platform | 2026-12-31 |
+| **Cron timers do not recur.** `fireDueTimersForInstance` appends `timer_fired` and reschedules nothing, and `applyScheduleTimer` schedules *every* timer as `relative_after` regardless of its declared `kind` — so a `cron_schedule` definition gets a fire-once timer whose row honestly records the declared kind. The timer store now refuses (`cron_next_fire_unresolved`) rather than storing a recurring timer that has silently stopped recurring, which makes it loud at the first fire. Fixing it needs a cron evaluator the runtime does not have. | Platform | 2027-01-31 |
+| **An activity has no typed declaration site.** `label`, `timeoutSeconds` and a retry policy have nowhere in the contract to be declared; the engine reads them out of an untyped `parameters` bag. An `ActivityDefinitionSchema` is the natural answer and would change `definitionContentSha256`, refusing every republication of a stored definition — the same reason `SignalDefinition.idempotencyKey` survives as a documented misnomer. | Platform | 2027-01-31 |
+| `WorkflowDefinitionSchema` checks a `timer_fired` *trigger*'s name against `definition.timers` but not a `schedule_timer` *action*'s, so a definition that schedules `wait` while declaring `waiting` is accepted and refuses at the first schedule. One line in the `superRefine`. | Platform | 2026-11-30 |
 | 82 of 145 catalogued tables have no SQL anywhere in the workspace. That class — "declared in Phase 1, never written" — has been rediscovered one table at a time by ADR-0300, ‑0318, ‑0321, ‑0330, ‑0331 and twice here. It is now enumerable in one pass; should any of it be built, and should the rest be declared as deliberately storeless so the list is a decision rather than a backlog? | Platform | 2027-01-31 |
+
+## Verified
+
+- `pnpm -r build`, `pnpm -r typecheck`: **0 errors**. `pnpm -r test`: **14,589 passed across 685
+  files in 88 packages, 0 failures** (from 14,232).
+- Per package: `workflow-runtime-pg` 356 → **470**, `workflow-runtime` → **268**, `dr-runtime-pg`
+  71 → **133**, `operate-runtime` 445 → **473**, `operate-runtime-pg` 316 → **346**, `testing` →
+  **149**, `api-gateway-pg` 73 → **84**, `observability-runtime-pg` 119 → **133**,
+  `certification-runtime-pg` 17 → **23**, `feature-flags-pg` 109 → **119**, `crypto-pg` 34 → **40**,
+  `kernel` **679**, `kernel-pg` **545**, `operate-server` **2,981**.
+- Live, against throwaway clusters (one per lane plus the orchestrator's, all removed):
+  - the full bootstrap at **959/959** statements, 0 failed, re-plan clean;
+  - the **worker mount** — three refusals printed by name, the server boots, the drain reports;
+  - the **full timer e2e** — publish a definition, start an instance, one `runOnce()` →
+    `{claimed: 1, succeeded: [timerId]}` → timer `fired`, `fire_count: 1` → instance **`completed`**;
+  - both stored projection rows **re-parsed through their contracts**, not merely committed;
+  - the **DR lifecycle** before and after, including a refused backwards transition
+    (`illegal_transition`), a refused stale observation, and an admitted same-status refresh;
+  - the **DR scope** reads — unscoped `countSince` answered 3 for every scope, platform now 1 and
+    tenant 2, and `listRecent(platform, 1)` returns the platform's own row rather than the newest
+    tenant's;
+  - the **verdict rows** — three ticks, three rows, anchored at consecutive chain sequences, served
+    by the read route with `anchored: true`;
+  - the **90-case verdict forgery matrix** as a non-owner with `rolbypassrls = false`: twelve
+    forgeries from a read grant before, none after, and no elevation can `UPDATE` or `DELETE` a
+    platform verdict;
+  - the **pagination walk** that did not terminate, and its 7-of-7 replacement;
+  - the `IS NOT DISTINCT FROM` plan, measured twice: 10.67 ms vs 0.73 ms and 24.7 ms vs 1.7 ms.
+- The coverage scan replayed against real revisions finds every historical member of the class and
+  **nothing** in the working tree, with its vacuity floors asserted — the catalog parse returned 0
+  once, because `META_TABLES`' opening bracket was found inside `readonly TableDefinition[]`, which
+  only a count assertion caught.
 
 ## References
 
