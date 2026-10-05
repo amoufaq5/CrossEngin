@@ -74,6 +74,7 @@ import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./en
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
+import { decimalFieldIndexFromManifest, withDecimalWireType } from "./decimal-store.js";
 import { buildUiSchema, buildUiSchemaHandler } from "./ui-schema.js";
 
 export interface OperateRuntimeOptions {
@@ -513,8 +514,14 @@ export function compileOperateServer(
   const routes = new InMemoryRouteRegistry();
   const handlers = new HandlerRegistry();
   const roles = new Map<RoleName, RoleDefinition>(Object.entries(manifest.roles ?? {}));
+  // Every `decimal` field crossing the store carries the canonical wire form from here on. The
+  // wrap happens at compile time because this is the one place that holds both the store and the
+  // manifest that declares each field's precision and scale — so a deployment cannot forget it,
+  // and the write effects, which create journal lines through the store they are handed, are
+  // covered by the same seam as a client request.
+  const store = withDecimalWireType(options.store, decimalFieldIndexFromManifest(manifest));
   const ctx: HandlerContext = {
-    store: options.store,
+    store,
     permissions: manifest.permissions ?? {},
     roles,
     principalRoles: options.principalRoles,
@@ -547,7 +554,7 @@ export function compileOperateServer(
     // the status-only gate (read for GET, write otherwise).
     const handler =
       resolver !== undefined && spec.action === "create"
-        ? withRecordLimit(base, { resolver, store: options.store, entity: spec.entity })
+        ? withRecordLimit(base, { resolver, store, entity: spec.entity })
         : gate(base, spec.method === "GET" ? "read" : "write");
     handlers.register(spec.operationId, handler);
   }
@@ -608,7 +615,7 @@ export function compileOperateServer(
     routes.register(literalRoute("meta.usage.read", "GET", ["v1", "meta", "usage"]));
     handlers.register(
       "meta.usage.read",
-      buildUsageHandler({ resolver, store: options.store, entities: (manifest.entities ?? []).map((e) => e.name) }),
+      buildUsageHandler({ resolver, store, entities: (manifest.entities ?? []).map((e) => e.name) }),
     );
   }
 
@@ -660,7 +667,7 @@ export function compileOperateServer(
       "meta.aging.read",
       gate(
         buildAgingHandler({
-          store: options.store,
+          store,
           principalRoles: options.principalRoles,
           viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
           sections: agingSections,
@@ -679,7 +686,7 @@ export function compileOperateServer(
       "meta.whtReconciliation.read",
       gate(
         buildWhtReconciliationHandler({
-          store: options.store,
+          store,
           principalRoles: options.principalRoles,
           viewerRoles: new Set(options.financeRoles ?? DEFAULT_FINANCE_ROLES),
         }),

@@ -33,7 +33,7 @@ describe("processTimerBatch", () => {
     const processor: TimerProcessor = { process: async (t) => void processed.push(t.timerId) };
     const result = await processTimerBatch(claimerOf([timer("a"), timer("b")]), processor, OPTS);
     expect(processed).toEqual(["a", "b"]);
-    expect(result).toEqual({ claimed: 2, succeeded: ["a", "b"], failed: [] });
+    expect(result).toEqual({ claimed: 2, succeeded: ["a", "b"], failed: [], skipped: [] });
   });
 
   it("releases a timer whose processing throws, and records the failure", async () => {
@@ -58,6 +58,44 @@ describe("processTimerBatch", () => {
 
   it("reports an empty batch when nothing is claimed", async () => {
     const result = await processTimerBatch(claimerOf([]), { process: async () => undefined }, OPTS);
-    expect(result).toEqual({ claimed: 0, succeeded: [], failed: [] });
+    expect(result).toEqual({ claimed: 0, succeeded: [], failed: [], skipped: [] });
+  });
+  it("releases the rest of the batch when the worker stops mid-batch", async () => {
+    const released: string[] = [];
+    const processed: string[] = [];
+    let stopping = false;
+    const processor: TimerProcessor = {
+      process: async (t) => {
+        processed.push(t.timerId);
+        stopping = true; // the first fire is what the stop lands during
+      },
+    };
+    const result = await processTimerBatch(
+      claimerOf([timer("a"), timer("b"), timer("c")], released),
+      processor,
+      OPTS,
+      { shouldContinue: () => !stopping },
+    );
+    expect(processed).toEqual(["a"]);
+    expect(result.succeeded).toEqual(["a"]);
+    expect(result.skipped).toEqual([
+      { timerId: "b", reason: "worker_stopping" },
+      { timerId: "c", reason: "worker_stopping" },
+    ]);
+    // Released, not abandoned: another replica re-claims at once rather than after the lease.
+    expect(released).toEqual(["b", "c"]);
+  });
+
+  it("reports each skip through onSkipped with the claimed timer", async () => {
+    const seen: string[] = [];
+    const result = await processTimerBatch(
+      claimerOf([timer("a")]),
+      { process: async () => undefined },
+      OPTS,
+      { shouldContinue: () => false, onSkipped: (t, reason) => void seen.push(`${t.timerId}:${reason}`) },
+    );
+    expect(seen).toEqual(["a:worker_stopping"]);
+    expect(result.succeeded).toEqual([]);
+    expect(result.claimed).toBe(1);
   });
 });

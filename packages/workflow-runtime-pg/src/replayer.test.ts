@@ -128,7 +128,7 @@ function signalReceivedEvent(): WorkflowEvent {
     timerId: null,
     childInstanceId: null,
     variableName: null,
-    payload: { signalName: "approve", correlationKey: "po-1" },
+    payload: { signalName: "approve", correlationKey: "po-1", idempotencyKey: "evt-1" },
     correlationId: null,
     causationEventId: null,
   };
@@ -319,7 +319,8 @@ describe("WorkflowReplayer.resyncInstance", () => {
       u.sql.includes("INSERT INTO meta.workflow_signals"),
     );
     expect(insert?.params?.[5]).toBe("at_least_once");
-    expect(insert?.params?.[6]).toBe("procurement-gateway");
+    expect(insert?.params?.[6]).toBe("evt-1");
+    expect(insert?.params?.[7]).toBe("procurement-gateway");
   });
 
   it("refuses the resync, writing nothing, when the guarantee cannot be read", async () => {

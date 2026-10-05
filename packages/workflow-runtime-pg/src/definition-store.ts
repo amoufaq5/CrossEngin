@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { setPlatformWriteSql, type PgConnection } from "@crossengin/kernel-pg";
 import {
   DEFINITION_STATUSES,
   WorkflowDefinitionSchema,
@@ -22,6 +22,17 @@ const TABLE = "workflow_definitions";
 /** Mirrors `feature-flags-pg`'s helpers rather than importing them: this package has no edge to it. */
 export const SET_TENANT_CONTEXT_SQL =
   "SELECT set_config('app.current_tenant_id', $1, true)";
+
+/**
+ * The elevation a platform-wide definition write needs.
+ *
+ * `app.platform_config_write` rather than a grant of its own, because a published workflow
+ * definition is configuration in the same sense a feature flag is: it decides what the deployment
+ * *does*, and a forged platform-wide one gives every tenant without its own a state machine the
+ * platform did not author. The elevation reaches `INSERT` and `UPDATE` but never `DELETE` — the
+ * contract retires a definition through `DEFINITION_TRANSITIONS`, not by removing the row.
+ */
+export const SET_PLATFORM_CONFIG_WRITE_SQL = setPlatformWriteSql("config");
 
 const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
 
@@ -330,7 +341,7 @@ export class PostgresWorkflowDefinitionStore {
    */
   async publish(definition: WorkflowDefinition): Promise<DefinitionWriteResult> {
     const valid = WorkflowDefinitionSchema.parse(definition);
-    return this.scoped(valid.tenantId, async (tx) => {
+    return this.scopedWrite(valid.tenantId, async (tx) => {
       const stored = await this.gatherForPublication(tx, valid);
       const plan = planDefinitionPublication({ proposed: valid, stored });
       if (plan.decision === "refused" || plan.decision === "unchanged") {
@@ -586,6 +597,11 @@ export class PostgresWorkflowDefinitionStore {
     return row.id;
   }
 
+  /**
+   * A **read**'s scope: a tenant context, or nothing at all — the platform read policy is
+   * `SELECT`-scoped on `tenant_id IS NULL` and demands no grant, which is what this did before the
+   * policy split and what it keeps doing.
+   */
   private scoped<T>(
     tenantId: string | null,
     fn: (tx: PgConnection) => Promise<T>,
@@ -593,6 +609,26 @@ export class PostgresWorkflowDefinitionStore {
     if (tenantId !== null) assertTenantId(tenantId);
     return this.conn.transaction(async (tx) => {
       if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      return fn(tx);
+    });
+  }
+
+  /**
+   * A **write**'s scope: a tenant context, or the platform config-write elevation, never both.
+   *
+   * `publish` reads and then writes inside one transaction, so the elevation is claimed for the
+   * whole of it. That costs nothing a read could abuse — the read arm of the platform policy needs
+   * no grant either way — and it is the only arrangement in which the plan's premise and the
+   * statement that re-asserts it are under one scope.
+   */
+  private scopedWrite<T>(
+    tenantId: string | null,
+    fn: (tx: PgConnection) => Promise<T>,
+  ): Promise<T> {
+    if (tenantId !== null) assertTenantId(tenantId);
+    return this.conn.transaction(async (tx) => {
+      if (tenantId === null) await tx.query(SET_PLATFORM_CONFIG_WRITE_SQL);
+      else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
       return fn(tx);
     });
   }

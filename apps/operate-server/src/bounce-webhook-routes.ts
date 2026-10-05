@@ -1,8 +1,13 @@
 import {
   BOUNCE_WEBHOOK_SOURCES,
   handleBounceWebhook,
+  planFaxSuppression,
+  windowMsOf,
   type BounceWebhookRefusal,
   type BounceWebhookSource,
+  type FaxObservationDisposition,
+  type VoiceReachabilityObservation,
+  type VoiceReachabilitySignal,
 } from "@crossengin/notification-providers";
 import type { SuppressionRecord } from "@crossengin/notifications";
 
@@ -109,6 +114,38 @@ export interface BounceWebhookRecordedInfo {
   readonly duplicates: number;
 }
 
+/**
+ * The counter a voice reachability observation is applied to (ADR-0310's open `fax` verdict).
+ *
+ * Structural, like `SuppressionWriterLike`, so this module does not depend on the Postgres store and
+ * a test can hand it a recorder. The contract is the whole of what the route needs: count a fax
+ * verdict and report where the run stands, stamp a crossing, and delete a run outright when
+ * something answered that can hear speech.
+ */
+export interface FaxObservationCounterLike {
+  observe(
+    tenantId: string,
+    observation: VoiceReachabilityObservation,
+    at: Date,
+    windowHours: number,
+  ): Promise<{
+    readonly consecutiveCount: number;
+    readonly disposition: FaxObservationDisposition;
+    readonly suppressedAt: string | null;
+  }>;
+  markSuppressed(tenantId: string, address: string, at: Date): Promise<void>;
+  clearRun(tenantId: string, address: string): Promise<boolean>;
+}
+
+export interface BounceWebhookObservedInfo {
+  readonly tenantId: string;
+  readonly signal: VoiceReachabilitySignal;
+  readonly disposition: FaxObservationDisposition | "cleared" | "no_run";
+  readonly consecutiveCount: number;
+  /** True when this observation is the one that crossed the threshold. */
+  readonly suppressionPlanned: boolean;
+}
+
 export interface BounceWebhookRoutesContext {
   readonly store: SuppressionWriterLike;
   readonly secretForTenant: BounceWebhookSecretResolver;
@@ -116,8 +153,24 @@ export interface BounceWebhookRoutesContext {
   readonly toleranceSeconds?: number;
   readonly transientSuppressionHours?: number;
   readonly signatureHeaderName?: string;
+  /**
+   * Where a voice reachability observation is counted. Omitted ⇒ nothing counts, and a `fax` verdict
+   * is the refusal it has always been — so this is additive for every deployment that does not
+   * configure it.
+   */
+  readonly faxObservations?: FaxObservationCounterLike;
+  /**
+   * Consecutive `fax` verdicts before a suppression is planned. Omitted ⇒ **never**: the run is
+   * counted and reported and nothing is written. Opt-in because this is the one suppression in the
+   * stack derived from a detector's inference rather than from a provider's own verdict, which is
+   * `transientSuppressionHours`' precedent one source over. `planFaxSuppression` refuses a threshold
+   * below `MIN_FAX_SUPPRESSION_THRESHOLD` rather than clamping it.
+   */
+  readonly faxSuppressAfter?: number;
+  readonly faxObservationWindowHours?: number;
   readonly onRefusal?: (info: BounceWebhookRefusalInfo) => void;
   readonly onRecorded?: (info: BounceWebhookRecordedInfo) => void;
+  readonly onObserved?: (info: BounceWebhookObservedInfo) => void;
   readonly onError?: (err: unknown, target: BounceWebhookTarget) => void;
 }
 
@@ -199,6 +252,116 @@ function notify(ctx: BounceWebhookRoutesContext, info: BounceWebhookRefusalInfo)
     ctx.onRefusal?.(info);
   } catch {
     // An observer must not be able to turn a clean refusal into a 500.
+  }
+}
+
+/** An error an observer must not be able to turn into a different outcome. */
+function report(
+  ctx: BounceWebhookRoutesContext,
+  err: unknown,
+  target: BounceWebhookTarget,
+): void {
+  try {
+    ctx.onError?.(err, target);
+  } catch {
+    // As with `notify`: an observer cannot change the outcome.
+  }
+}
+
+/** What applying one voice reachability observation did. */
+interface ObservationApplication {
+  readonly observation: VoiceReachabilityObservation;
+  readonly disposition: FaxObservationDisposition | "cleared" | "no_run";
+  readonly consecutiveCount: number;
+  /** The record a crossed threshold justifies, or null — which is the normal answer. */
+  readonly suppression: SuppressionRecord | null;
+}
+
+/**
+ * Counts a `fax_detected`, or clears the run on a `voice_answered`, and plans only if a threshold
+ * was crossed.
+ *
+ * The two signals are not two shapes of one write and the asymmetry is the decision. A fax verdict
+ * *accumulates* — one is never enough, because `AnsweredBy` is a detector's guess — while a single
+ * answered call *refutes* the inference outright and deletes the run. Evidence for a block is
+ * required to be consistent and repeated; evidence against one is believed immediately. That is
+ * ADR-0302's rule about which direction a safety record may move on an inference, applied to the
+ * input of the record rather than to the record.
+ */
+async function applyObservation(
+  ctx: BounceWebhookRoutesContext,
+  tenantId: string,
+  observation: VoiceReachabilityObservation,
+  now: Date,
+): Promise<ObservationApplication> {
+  const counter = ctx.faxObservations;
+  if (counter === undefined) throw new Error("applyObservation called with no counter");
+  if (observation.signal === "voice_answered") {
+    const had = await counter.clearRun(tenantId, observation.address);
+    return {
+      observation,
+      disposition: had ? "cleared" : "no_run",
+      consecutiveCount: 0,
+      suppression: null,
+    };
+  }
+  const windowHours = windowMsOf(ctx.faxObservationWindowHours) / 3_600_000;
+  const run = await counter.observe(tenantId, observation, now, windowHours);
+  const suppression = planFaxSuppression({
+    tenantId,
+    observation,
+    consecutiveCount: run.consecutiveCount,
+    policy: {
+      consecutiveThreshold: ctx.faxSuppressAfter ?? null,
+      windowHours,
+    },
+    observedAt: now,
+  });
+  return {
+    observation,
+    disposition: run.disposition,
+    consecutiveCount: run.consecutiveCount,
+    suppression,
+  };
+}
+
+/**
+ * The observation as it travels back out.
+ *
+ * No address and no `CallSid`. The address is a telephone number, which is pii under this repo's
+ * classification rules and is the one field the rest of this module is careful never to return; the
+ * `CallSid` is the caller's own and they already have it. What is useful to whoever wired the edge
+ * up is the arithmetic: which signal, what it did to the run, how long the run is, and whether a
+ * threshold was crossed.
+ */
+function observationBody(
+  applied: ObservationApplication,
+  suppressed: boolean,
+): Record<string, unknown> {
+  return {
+    signal: applied.observation.signal,
+    disposition: applied.disposition,
+    consecutive: applied.consecutiveCount,
+    suppressed,
+  };
+}
+
+function announce(
+  ctx: BounceWebhookRoutesContext,
+  tenantId: string,
+  applied: ObservationApplication,
+  suppressed: boolean,
+): void {
+  try {
+    ctx.onObserved?.({
+      tenantId,
+      signal: applied.observation.signal,
+      disposition: applied.disposition,
+      consecutiveCount: applied.consecutiveCount,
+      suppressionPlanned: suppressed,
+    });
+  } catch {
+    // An observer must not be able to turn a recorded observation into a failure.
   }
 }
 
@@ -285,67 +448,172 @@ export async function handleBounceWebhookRequest(
     },
   );
 
+  /*
+   * The observation path, which runs *before* anything is written and only ever on a refusal.
+   *
+   * The ordering matters: a verdict that crosses a threshold has to be counted before the
+   * suppression it justifies can be planned, and the count is the only thing that makes the plan
+   * legitimate. An observation that cannot be stored therefore refuses the request rather than
+   * falling back to "no suppression": a run whose length is unknown is not a run.
+   */
   if (!planned.accepted) {
     const status = statusForRefusal(planned.refusal);
     if (status === 401) return unauthorized(ctx, planned.refusal, target);
-    notify(ctx, {
-      status,
-      reason: planned.refusal,
-      source: target.source,
-      tenantId: target.tenantId,
-    });
-    // `planned.reason` is the planner's own prose about shape — it names no address, by construction
-    // of that module — so it is safe to return and genuinely useful to whoever wired the edge up.
-    return { status, body: { error: planned.refusal, detail: planned.reason } };
-  }
-
-  let batch: SuppressionWriteBatch;
-  try {
-    batch = await ctx.store.writeAll(target.tenantId, planned.suppressions);
-  } catch (err) {
+    if (planned.observation === undefined || ctx.faxObservations === undefined) {
+      notify(ctx, {
+        status,
+        reason: planned.refusal,
+        source: target.source,
+        tenantId: target.tenantId,
+      });
+      // `planned.reason` is the planner's own prose about shape — it names no address, by
+      // construction of that module — so it is safe to return and genuinely useful to whoever wired
+      // the edge up.
+      return { status, body: { error: planned.refusal, detail: planned.reason } };
+    }
+    let observed: ObservationApplication;
     try {
-      ctx.onError?.(err, target);
-    } catch {
-      // As with `notify`: an observer cannot change the outcome.
+      observed = await applyObservation(ctx, target.tenantId, planned.observation, now);
+    } catch (err) {
+      report(ctx, err, target);
+      // A 5xx so the provider retries, which is safe *because* the counter's dedup key is the
+      // `CallSid`: a retried callback is recognised as the same call and does not advance the run.
+      // Answering the refusal's 422 instead would drop the evidence in silence, which is the
+      // failure this path exists to end.
+      return { status: 503, body: { error: "fax_observation_write_failed" } };
     }
-    // Both of these are a 5xx on purpose, so the provider retries: the write is idempotent, so a
-    // retry either records what this attempt failed to or reports it as already present. No
-    // `err.message` reaches the response — a Postgres constraint error carries the address.
-    if (err instanceof SuppressionWriteConflictError) {
-      return { status: 503, body: { error: "suppression_write_conflict" } };
+    const channel = observed.observation.channel;
+    if (observed.suppression === null) {
+      // Counted, nothing planned: the overwhelmingly common case, and the whole of what an answered
+      // call or a short run does.
+      announce(ctx, target.tenantId, observed, false);
+      return {
+        // 200 and not the refusal's 422, because something **was** durably recorded. A 2xx from
+        // this route means "verified and recorded"; it was 422 only while nothing here recorded
+        // anything, and every provider in scope retries a non-2xx indefinitely — so a 422 would
+        // have Twilio redeliver every answered call forever.
+        status: 200,
+        body: {
+          ok: true,
+          source: target.source,
+          channel,
+          recorded: 0,
+          duplicates: 0,
+          suppressions: [],
+          observation: observationBody(observed, false),
+        },
+      };
     }
-    return { status: 500, body: { error: "suppression_write_failed" } };
+    // The threshold was crossed. One planned record, through the same idempotent store a
+    // provider-reported bounce goes through — so re-crossing on a longer run presents the identical
+    // row and `applied_at` does not move.
+    const written = await writeSuppressions(ctx, target, [observed.suppression]);
+    if (!written.ok) return written.response;
+    /*
+     * Stamped **after** the suppression lands, and never before it.
+     *
+     * `suppressed_at` is the observation row's claim that this run produced a block, and a claim
+     * made before the write would survive a failed one — leaving a row saying an address was
+     * suppressed when it was not, which is the shape ADR-0317 refused for a deletion proof. A stamp
+     * that fails *after* a successful write is the harmless direction: the run keeps counting, the
+     * next verdict re-plans the identical row, and the store declines it.
+     */
+    try {
+      await ctx.faxObservations.markSuppressed(target.tenantId, observed.observation.address, now);
+    } catch (err) {
+      report(ctx, err, target);
+    }
+    announce(ctx, target.tenantId, observed, true);
+    recorded(ctx, target, channel, written.batch);
+    return {
+      status: 200,
+      body: {
+        ...responseBody(target.source, channel, "voice_fax_threshold", written.batch),
+        observation: observationBody(observed, true),
+      },
+    };
   }
 
-  const duplicates = batch.alreadyPresent + batch.addressAlreadySuppressed;
+  const written = await writeSuppressions(ctx, target, planned.suppressions);
+  if (!written.ok) return written.response;
+  recorded(ctx, target, planned.event.channel, written.batch);
+  return {
+    status: 200,
+    body: responseBody(
+      planned.event.source,
+      planned.event.channel,
+      planned.event.kind,
+      written.batch,
+    ),
+  };
+}
+
+type SuppressionWriteOutcome =
+  | { readonly ok: true; readonly batch: SuppressionWriteBatch }
+  | { readonly ok: false; readonly response: BounceWebhookHttpResponse };
+
+/**
+ * The one write path, shared by a provider-reported bounce and a crossed fax threshold.
+ *
+ * Shared rather than duplicated because the error mapping is the load-bearing part: both failures
+ * are a 5xx **on purpose**, so the provider retries — the write is idempotent, so a retry either
+ * records what this attempt failed to or reports it as already present. No `err.message` reaches the
+ * response; a Postgres constraint error carries the address.
+ */
+async function writeSuppressions(
+  ctx: BounceWebhookRoutesContext,
+  target: BounceWebhookTarget,
+  records: readonly SuppressionRecord[],
+): Promise<SuppressionWriteOutcome> {
+  try {
+    return { ok: true, batch: await ctx.store.writeAll(target.tenantId, records) };
+  } catch (err) {
+    report(ctx, err, target);
+    if (err instanceof SuppressionWriteConflictError) {
+      return { ok: false, response: { status: 503, body: { error: "suppression_write_conflict" } } };
+    }
+    return { ok: false, response: { status: 500, body: { error: "suppression_write_failed" } } };
+  }
+}
+
+function recorded(
+  ctx: BounceWebhookRoutesContext,
+  target: BounceWebhookTarget,
+  channel: string,
+  batch: SuppressionWriteBatch,
+): void {
   try {
     ctx.onRecorded?.({
       source: target.source,
       tenantId: target.tenantId,
-      channel: planned.event.channel,
+      channel,
       inserted: batch.inserted,
-      duplicates,
+      duplicates: batch.alreadyPresent + batch.addressAlreadySuppressed,
     });
   } catch {
     // Recording happened; an observer throwing must not turn it into a failure the provider retries.
   }
+}
 
+function responseBody(
+  source: BounceWebhookSource,
+  channel: string,
+  kind: string,
+  batch: SuppressionWriteBatch,
+): Record<string, unknown> {
   return {
-    status: 200,
-    body: {
-      ok: true,
-      source: planned.event.source,
-      channel: planned.event.channel,
-      kind: planned.event.kind,
-      recorded: batch.inserted,
-      duplicates,
-      // Ids only. A suppression's address is the one field that must not travel back out, and the id
-      // is a digest of it, not the thing itself.
-      suppressions: batch.results.map((r) => ({
-        suppressionId: r.suppressionId,
-        outcome: r.outcome,
-      })),
-    },
+    ok: true,
+    source,
+    channel,
+    kind,
+    recorded: batch.inserted,
+    duplicates: batch.alreadyPresent + batch.addressAlreadySuppressed,
+    // Ids only. A suppression's address is the one field that must not travel back out, and the id
+    // is a digest of it, not the thing itself.
+    suppressions: batch.results.map((r) => ({
+      suppressionId: r.suppressionId,
+      outcome: r.outcome,
+    })),
   };
 }
 

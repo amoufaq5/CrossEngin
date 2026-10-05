@@ -290,6 +290,93 @@ function tombstoneFindingTitle(
 }
 
 /** What the escalator did about one verdict or finding. */
+/*
+ * ---------------------------------------------------------------------------
+ * A kind flip inside one episode (ADR-0330's open end)
+ * ---------------------------------------------------------------------------
+ *
+ * One episode per surface is right and is not what this changes. A half-up database flips between
+ * `no_pages` and `pinned_cursor` from one tick to the next and that is one condition with one cause,
+ * so a second incident for the second kind would be the flap the single episode exists to absorb.
+ *
+ * What ADR-0330 left open is that the flip was then recorded **nowhere durable**. A title and a
+ * detail are written once, at declaration, and an adoption writes nothing at all — so an episode
+ * that began `no_pages` and became `pinned_cursor` reads as `no_pages` on the incident forever, and
+ * only the undeduped log line carries the current kind. The two kinds are not interchangeable to
+ * whoever picks the incident up: `no_pages` says the store is unreachable or every page throws,
+ * `pinned_cursor` says pages arrive and the position does not move. Being told the wrong one sends a
+ * responder to the wrong half of the system.
+ *
+ * So a flip appends a timeline note, which is `notePage`'s precedent (ADR-0327): the timeline has no
+ * tenant column to get wrong, it is append-only, it sits on the record a review actually opens, and
+ * an entry may be appended in **any** status. It is an `observation` and not a `severity_changed` or
+ * a `status_changed`, because nothing about the incident's lifecycle moved — the condition being
+ * observed reads differently, which is exactly what `observation` is for.
+ *
+ * **The previous kind is read from the timeline, not remembered.** `metadata.stallKind` on the
+ * declaration, and on each flip note, makes the episode's current kind a property of the record
+ * rather than of whichever replica declared it — so the flip is detected after a restart, by a
+ * different process, and a note is written at most once per actual change rather than once per tick.
+ * Remembering it in a field would be the in-process edge-trigger that ADR-0330 already had to accept
+ * for the *recovery*, in a place where it is avoidable.
+ */
+export interface StallKindFlip {
+  /**
+   * The kind the episode was carrying, or **null** when the record names none.
+   *
+   * Null is a real case and not a defect: an episode declared before `metadata.stallKind` existed
+   * has no recorded kind, so the first flip note for it states the current kind with no transition
+   * rather than inventing one it was flipped from. One note bootstraps the record, and every
+   * comparison after that has something to compare against.
+   */
+  readonly from: string | null;
+  readonly to: string;
+}
+
+/** The metadata key the episode's current stall kind lives under, on the record's own timeline. */
+export const STALL_KIND_METADATA_KEY = "stallKind";
+export const PREVIOUS_STALL_KIND_METADATA_KEY = "previousStallKind";
+
+/**
+ * The stall kind an open episode is currently carrying, read from the latest timeline entry that
+ * names one.
+ *
+ * Latest-wins rather than first-wins: the declaration sets it and each flip note replaces it, so the
+ * most recent entry carrying the key is the episode's present reading. The timeline is append-only
+ * (`assertAppendOnly`), so "latest" is stable and cannot be rewritten underneath a comparison.
+ */
+export function currentStallKindOf(record: IncidentRecord): string | null {
+  for (let i = record.timeline.length - 1; i >= 0; i--) {
+    const value = record.timeline[i]?.metadata[STALL_KIND_METADATA_KEY];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
+/** One timeline note this module asks its caller to append. */
+export interface EscalationTimelineNote {
+  readonly message: string;
+  readonly metadata: Record<string, unknown>;
+}
+
+export function stallKindFlipNote(
+  flip: StallKindFlip,
+  stall: EscalatableSweepStall,
+): EscalationTimelineNote {
+  const transition =
+    flip.from === null
+      ? `stall kind is ${flip.to} (the episode recorded none before now)`
+      : `stall kind ${flip.from} -> ${flip.to}`;
+  return {
+    message: `${transition}: ${stall.detail}`,
+    metadata: {
+      [STALL_KIND_METADATA_KEY]: flip.to,
+      [PREVIOUS_STALL_KIND_METADATA_KEY]: flip.from,
+      attemptsWithoutAdvance: stall.attemptsWithoutAdvance,
+    },
+  };
+}
+
 export const ESCALATION_ACTIONS = [
   /** A new incident was declared for this episode. */
   "declared",
@@ -337,6 +424,17 @@ export interface DeletionEscalationOutcome {
    */
   readonly audited: boolean;
   readonly detail: string | null;
+  /**
+   * The stall kind this pass found, when it differs from the one the open episode was carrying.
+   *
+   * Optional rather than a required `null`, which is the opposite of this family's usual preference
+   * for total shapes — because only one subject kind *has* a kind at all, and a required field would
+   * put `stallKindFlip: null` on every request and tombstone outcome, where it reads as "this
+   * finding's kind did not change" about a finding that has no kind. The thing ADR-0330 warned about
+   * an optional field — that it can be forgotten with the outcome unchanged — is harmless here:
+   * absent means no flip, which is both the safe answer and the answer for every other subject.
+   */
+  readonly stallKindFlip?: StallKindFlip;
 }
 
 /** The slice of a reconciliation result this reads. */
@@ -429,6 +527,22 @@ export interface DeletionEscalatorOptions {
    * resolve fans out over exactly the channels its trigger did. See `resolve`.
    */
   readonly resolvePage?: (page: PageDirective) => void | Promise<void>;
+  /**
+   * Appends an `observation` note to an open incident's timeline (ADR-0330's kind flip).
+   *
+   * A seam rather than a store, for `page`'s and `resolvePage`'s reason: this module decides *that*
+   * a note is owed and what it says, and the caller owns the write — which is also what keeps the
+   * decision testable without a database. Omitted ⇒ the flip is still detected and still reported on
+   * the outcome, it just leaves no durable record, which is where ADR-0330 left it.
+   *
+   * It must not throw. The caller's writer reports instead (`appendIncidentNote`), because by the
+   * time this runs the incident is durable and the page has gone out, so a failed note is a thinner
+   * record and not a failed escalation — ADR-0327's rule for `appendPagedNote`.
+   */
+  readonly note?: (
+    incidentId: string,
+    note: EscalationTimelineNote,
+  ) => void | Promise<void>;
   readonly clock?: () => Date;
   /**
    * The second argument is the **subject's** id — the request id for a request episode, the
@@ -608,6 +722,7 @@ export class DeletionEvidenceEscalator {
         stallKind: stall.kind,
         attemptsWithoutAdvance: stall.attemptsWithoutAdvance,
         cursor: stall.cursor,
+        stall,
       },
     );
   }
@@ -672,6 +787,8 @@ export class DeletionEvidenceEscalator {
       readonly stallKind?: string;
       readonly attemptsWithoutAdvance?: number;
       readonly cursor?: string | null;
+      /** Present iff this is a stall, and the source of a flip note's prose. */
+      readonly stall?: EscalatableSweepStall;
     },
   ): Promise<DeletionEscalationOutcome> {
     const key = episodeKeyFor(subject);
@@ -685,6 +802,12 @@ export class DeletionEvidenceEscalator {
       if (open !== null) {
         // Adopted, not re-declared. One tampered row examined every three seconds is one episode.
         // No audit row either: the declaration's row already stands, and one per tick would bury it.
+        //
+        // The one thing an adoption now does write is a **kind flip** (ADR-0330). It is not a per-tick
+        // write and so does not reopen the reason the adoption is silent: the previous kind is read
+        // off the record, so a note lands once per actual change and a stable episode adopts in
+        // silence however long it runs.
+        const flip = await this.noteKindFlip(open, about.stall);
         return {
           ...this.episode(subject),
           action: "adopted",
@@ -693,7 +816,13 @@ export class DeletionEvidenceEscalator {
           page: null,
           closeOut: null,
           audited: false,
-          detail: `already open as ${open.id}`,
+          detail:
+            flip === null
+              ? `already open as ${open.id}`
+              : `already open as ${open.id}; ${
+                  flip.from === null ? "stall kind" : `stall kind ${flip.from} ->`
+                } ${flip.to}`,
+          ...(flip === null ? {} : { stallKindFlip: flip }),
         };
       }
       const record = await this.opts.declarer.declare({
@@ -709,6 +838,12 @@ export class DeletionEvidenceEscalator {
         metadata: {
           surface: `deletion-evidence/${subject.kind}/${subject.id}`,
           autoDeclared: true,
+          // The episode's opening reading, so a later tick has something to compare against on the
+          // record rather than in this process. Absent for every subject that has no kind, which is
+          // what `currentStallKindOf` answers null for.
+          ...(about.stallKind === undefined
+            ? {}
+            : { [STALL_KIND_METADATA_KEY]: about.stallKind }),
         },
       } satisfies IncidentDeclarationRequest);
       const page = planPageDirective(this.opts.config.alertPolicy, severity, record.id);
@@ -755,6 +890,31 @@ export class DeletionEvidenceEscalator {
         detail: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  /**
+   * Compares the stall kind this pass found against the one the open record carries, and appends a
+   * note when they differ.
+   *
+   * Returns the flip it found even when no writer is wired, so the outcome reports the change
+   * either way — a caller's log line is then the current kind rather than the declaration's. A note
+   * that fails to write is swallowed through `onError` for `record`'s reason: the incident is
+   * already durable, and a thinner record must not become a `failed` pass the next tick re-declares.
+   */
+  private async noteKindFlip(
+    open: IncidentRecord,
+    stall: EscalatableSweepStall | undefined,
+  ): Promise<StallKindFlip | null> {
+    if (stall === undefined) return null;
+    const from = currentStallKindOf(open);
+    if (from === stall.kind) return null;
+    const flip: StallKindFlip = { from, to: stall.kind };
+    try {
+      await this.opts.note?.(open.id, stallKindFlipNote(flip, stall));
+    } catch (err) {
+      this.opts.onError?.(err, open.id);
+    }
+    return flip;
   }
 
   private async resolve(

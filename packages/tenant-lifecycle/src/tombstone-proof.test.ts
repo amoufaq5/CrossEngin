@@ -827,3 +827,56 @@ describe("a v3 record verifies and a tampered retention claim does not", () => {
     expect(forged.proofSha256).not.toBe(stored.proofSha256);
   });
 });
+
+/**
+ * `crossengin.tombstone.proof.v1` is unchanged by v2 and by v3, pinned rather than reasoned about.
+ *
+ * The argument the three content tags rest on is that the proof payload commits to
+ * `contentManifestSha256` and to nothing else version-specific, so a new content tag moves the
+ * content digest and the proof function stays where it is. That argument is cheap to state and the
+ * thing it protects is expensive: `proofSha256` is what the forensic chain entry commits to
+ * (ADR-0318), so a change here would not fail one test, it would detach **every** stored tombstone
+ * from its anchor at once.
+ *
+ * The three digests below were produced by running the pre-ADR-0331 proof module — the one at the
+ * ADR-0329 commit, which has no v3 in it — over each of the three content digests, including the v3
+ * one it cannot itself compute. So the pin is not "this is what the code does today"; it is the older
+ * implementation's own output, and that implementation never saw a v3 record.
+ */
+const PROOF_OVER_V1_CONTENT = "06b7e7d55b225e2e9c08b0f02bdfc6c72ece366fd2561b11fcb331046bb269be";
+const PROOF_OVER_V2_CONTENT = "1a8af4bb16173be652ca5f07fce00d9c8d279cde52aedce6b9a80397bf35e4d8";
+const PROOF_OVER_V3_CONTENT = "6c562ee3112fa244b637f630204ef35cec150e441368faaa0a38dc58d4d3d96c";
+
+/** The v3 digest for the pinned fixture, so v3's bytes are frozen the way v1's and v2's are. */
+const V3_FIXTURE_SHA = "25b1bdcfd340ebfb7a073cb2a5d252de51c576beb4c7098b9ceee6f21dcd7fbc";
+
+describe("the proof domain tag is shared by all three versions", () => {
+  it("produces the pre-change digest over a v1 content manifest", () => {
+    expect(computeProofSha256({ ...FIXTURE_BASE, contentManifestSha256: V1_FIXTURE_SHA })).toBe(
+      PROOF_OVER_V1_CONTENT,
+    );
+  });
+
+  it("produces the pre-change digest over a v2 content manifest", () => {
+    expect(computeProofSha256({ ...FIXTURE_BASE, contentManifestSha256: V2_FIXTURE_SHA })).toBe(
+      PROOF_OVER_V2_CONTENT,
+    );
+  });
+
+  it("produces the pre-change digest over a v3 content manifest", () => {
+    // The one case the pre-change module could not reach on its own, and the reason this block
+    // exists: handed a v3 content digest, the older proof function answered identically.
+    expect(
+      computeContentManifestSha256V3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM),
+    ).toBe(V3_FIXTURE_SHA);
+    expect(computeProofSha256({ ...FIXTURE_BASE, contentManifestSha256: V3_FIXTURE_SHA })).toBe(
+      PROOF_OVER_V3_CONTENT,
+    );
+  });
+
+  it("gives the three versions three different content digests for one scope", () => {
+    // What makes one proof tag safe for three content tags: the version is already distinguished
+    // upstream, so the proof payload never has to carry it.
+    expect(new Set([V1_FIXTURE_SHA, V2_FIXTURE_SHA, V3_FIXTURE_SHA]).size).toBe(3);
+  });
+});

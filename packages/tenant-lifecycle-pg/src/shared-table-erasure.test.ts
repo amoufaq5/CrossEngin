@@ -834,6 +834,40 @@ describe("sharedTableErasureAttestation", () => {
     expect(attestation.scope).toBeUndefined();
   });
 
+  it("refuses rather than name one of two obligations on the retained outcome", () => {
+    // Unreachable through `erase()` while both statutory entries are `tax_records_7y`, so the
+    // erasure is constructed directly — which is the point. The day a second obligation joins the
+    // set this path becomes live, and the failure it used to have was silent: `obligations[0]`
+    // builds a valid `retained` attestation, so `DeletionAttestationSchema` sees nothing wrong with
+    // it and the second obligation is simply absent from the signed claim.
+    const twoObligations: SharedTableErasure = {
+      tenantId: TENANT,
+      schema: "meta",
+      erased: false,
+      nothingToErase: true,
+      erasedTables: [],
+      rowCount: 0,
+      storageBytes: 0,
+      examinedTables: [],
+      retainedTables: ["meta.invoices", "meta.patients"],
+      platformRecordTables: [],
+      statutoryTables: ["meta.invoices", "meta.patients"],
+      statutoryRetained: [
+        { table: "meta.invoices", obligation: "tax_records_7y" },
+        { table: "meta.patients", obligation: "medical_records_10y" },
+      ],
+      refusals: [],
+      erasedAt: AT,
+    };
+    expect(sharedTableRetention(twoObligations)?.obligations).toEqual([
+      "medical_records_10y",
+      "tax_records_7y",
+    ]);
+    expect(() => sharedTableErasureAttestation(twoObligations, BY)).toThrow(
+      /more than one obligation/,
+    );
+  });
+
   it("reports nothing_to_erase when the tenant held nothing anywhere", async () => {
     const { out } = await erase();
     const attestation = sharedTableErasureAttestation(out, BY);

@@ -106,7 +106,7 @@ function receivedEvent(overrides: Partial<WorkflowEvent> = {}): WorkflowEvent {
     occurredAt: "2026-05-16T12:00:01.000Z",
     signalId: "wfs_sig00001",
     actorSystemId: "procurement-gateway",
-    payload: { signalName: "approve", correlationKey: "po-1" },
+    payload: { signalName: "approve", correlationKey: "po-1", idempotencyKey: "evt-1" },
     ...overrides,
   });
 }
@@ -123,12 +123,13 @@ function consumedEvent(): WorkflowEvent {
 }
 
 describe("SIGNAL_PROVENANCE_DEFECTS", () => {
-  it("names the four ways provenance cannot be read", () => {
+  it("names the five ways provenance cannot be read", () => {
     expect([...SIGNAL_PROVENANCE_DEFECTS]).toEqual([
       "definition_unavailable",
       "signal_undeclared",
       "receipt_event_absent",
       "source_system_unrecorded",
+      "idempotency_key_absent",
     ]);
   });
 
@@ -249,6 +250,70 @@ describe("resolveSignalProvenance", () => {
     }
   });
 
+  it("takes the idempotency key from the receipt, not from the definition", () => {
+    const provenance = resolveSignalProvenance({
+      signalId: "wfs_sig00001",
+      signalName: "approve",
+      // The definition's own `idempotencyKey` field says "approvalId"; the stored key is the
+      // submitter's, off the receipt. Were the two confused, this would read "approvalId".
+      definition: definition(),
+      receipt: receivedEvent(),
+    });
+    expect(provenance.idempotencyKey).toBe("evt-1");
+  });
+
+  it("permits a null key under a guarantee that does not require one", () => {
+    const def = definition({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    expect(
+      resolveSignalProvenance({
+        signalId: "wfs_sig00001",
+        signalName: "approve",
+        definition: def,
+        receipt: receivedEvent({ payload: { signalName: "approve", correlationKey: "po-1" } }),
+      }).idempotencyKey,
+    ).toBeNull();
+  });
+
+  it("refuses an exactly_once_idempotent receipt with no key — the row the CHECK would permit", () => {
+    try {
+      resolveSignalProvenance({
+        signalId: "wfs_sig00001",
+        signalName: "approve",
+        definition: definition(),
+        receipt: receivedEvent({ payload: { signalName: "approve", correlationKey: "po-1" } }),
+      });
+      expect.unreachable();
+    } catch (err) {
+      expect((err as SignalProvenanceUnresolved).defect).toBe("idempotency_key_absent");
+    }
+  });
+
+  it("treats an empty-string key as absent rather than storing it", () => {
+    try {
+      resolveSignalProvenance({
+        signalId: "wfs_sig00001",
+        signalName: "approve",
+        definition: definition(),
+        receipt: receivedEvent({
+          payload: { signalName: "approve", correlationKey: "po-1", idempotencyKey: "" },
+        }),
+      });
+      expect.unreachable();
+    } catch (err) {
+      expect((err as SignalProvenanceUnresolved).defect).toBe("idempotency_key_absent");
+    }
+  });
+
   it("names the signal and never the payload in the message", () => {
     const err = new SignalProvenanceUnresolved({
       defect: "signal_undeclared",
@@ -276,6 +341,7 @@ describe("projectPersistableSignals", () => {
       signalName: "approve",
       correlationKey: "po-1",
       deliveryGuarantee: "exactly_once_idempotent",
+      idempotencyKey: "evt-1",
       sourceSystem: "procurement-gateway",
       sourcePrincipalId: null,
       status: "matched_to_instance",

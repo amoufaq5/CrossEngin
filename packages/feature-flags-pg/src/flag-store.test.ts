@@ -13,7 +13,10 @@ import {
   flagUpdateAssignments,
   rowToFeatureFlag,
 } from "./flag-store.js";
-import { SET_TENANT_CONTEXT_SQL } from "./kill-switch-store.js";
+import {
+  SET_PLATFORM_CONFIG_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+} from "./kill-switch-store.js";
 import {
   type Captured,
   EMPTY,
@@ -24,6 +27,7 @@ import {
   T2,
   TENANT,
   mockConnection,
+  written,
   respondTo,
 } from "./test-fakes.js";
 
@@ -167,17 +171,47 @@ describe("insert", () => {
   it("inserts the full column list with matching placeholders", async () => {
     const capture: Captured[] = [];
     await new PostgresFeatureFlagStore(mockConnection(capture)).insert(flag());
-    expect(capture[0]?.sql).toContain(`INSERT INTO meta.feature_flags (${FEATURE_FLAG_COLUMNS})`);
-    expect(capture[0]?.sql).toContain(`$${FEATURE_FLAG_COLUMN_NAMES.length})`);
-    expect(capture[0]?.params).toHaveLength(FEATURE_FLAG_PARAM_COUNT);
-    expect(capture[0]?.params?.[0]).toBe(FLAG_ID);
+    expect(capture[1]?.sql).toContain(`INSERT INTO meta.feature_flags (${FEATURE_FLAG_COLUMNS})`);
+    expect(capture[1]?.sql).toContain(`$${FEATURE_FLAG_COLUMN_NAMES.length})`);
+    expect(capture[1]?.params).toHaveLength(FEATURE_FLAG_PARAM_COUNT);
+    expect(capture[1]?.params?.[0]).toBe(FLAG_ID);
     const environments = FEATURE_FLAG_COLUMN_NAMES.indexOf("environments");
-    expect(capture[0]?.params?.[environments]).toBe('["staging","production"]');
+    expect(capture[1]?.params?.[environments]).toBe('["staging","production"]');
   });
 
-  it("sets no tenant context for a platform-wide flag, so RLS exposes the null-tenant rows", async () => {
+  it("claims the platform config-write elevation, and sets no tenant context, for a platform-wide flag", async () => {
+    // It used to set nothing at all, which read as "RLS exposes the null-tenant rows". That was
+    // true of the read — and the same `tenant_id IS NULL` arm satisfied the one `ALL`-scope
+    // policy's `WITH CHECK`, so any tenant session could insert, update or delete a platform-wide
+    // flag. The write arm is its own `INSERT`-scoped policy on this setting now.
     const capture: Captured[] = [];
     await new PostgresFeatureFlagStore(mockConnection(capture)).insert(flag());
+    expect(capture).toHaveLength(2);
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_CONFIG_WRITE_SQL);
+    expect(capture[1]?.sql).toContain("INSERT INTO");
+  });
+
+  it("claims the elevation on a platform-wide update and transition too", async () => {
+    // `meta.feature_flags` is the mutable half of the split: a platform-wide flag is paused and
+    // archived in normal operation, so an `INSERT`-only platform arm would have made every
+    // platform row immutable-by-RLS — fail-closed and silent.
+    for (const write of [
+      (s: PostgresFeatureFlagStore) => s.update(flag({ updatedAt: T2 }), T1),
+      (s: PostgresFeatureFlagStore) => s.transition(flag({ status: "paused", updatedAt: T2 }), T1),
+    ]) {
+      const capture: Captured[] = [];
+      await write(new PostgresFeatureFlagStore(mockConnection(capture)));
+      expect(capture[0]?.sql).toBe(SET_PLATFORM_CONFIG_WRITE_SQL);
+      expect(capture[1]?.sql).toContain("UPDATE meta.feature_flags");
+    }
+  });
+
+  it("claims nothing at all on a platform-wide read", async () => {
+    // The platform read policy is `SELECT`-scoped on `tenant_id IS NULL` and demands no grant, so a
+    // read needs no elevation — and claiming one it does not need would leave the privilege set for
+    // every later statement in the same transaction.
+    const capture: Captured[] = [];
+    await new PostgresFeatureFlagStore(mockConnection(capture)).load(FLAG_ID);
     expect(capture).toHaveLength(1);
     expect(capture[0]?.sql).not.toContain("set_config");
   });
@@ -209,12 +243,12 @@ describe("update", () => {
       flag({ updatedAt: T2 }),
       T1,
     );
-    expect(capture[0]?.sql).toContain(`SET ${flagUpdateAssignments()}`);
-    expect(capture[0]?.sql).toContain(
+    expect(written(capture).sql).toContain(`SET ${flagUpdateAssignments()}`);
+    expect(written(capture).sql).toContain(
       `WHERE flag_id = $1 AND updated_at = $${FEATURE_FLAG_PARAM_COUNT + 1}`,
     );
-    expect(capture[0]?.params).toHaveLength(FEATURE_FLAG_PARAM_COUNT + 1);
-    expect(capture[0]?.params?.[FEATURE_FLAG_PARAM_COUNT]).toBe(T1);
+    expect(written(capture).params).toHaveLength(FEATURE_FLAG_PARAM_COUNT + 1);
+    expect(written(capture).params?.[FEATURE_FLAG_PARAM_COUNT]).toBe(T1);
   });
 
   it("refuses a write whose updatedAt does not advance past the guard", async () => {
@@ -259,7 +293,7 @@ describe("transition", () => {
       flag({ status: "active", updatedAt: T2 }),
       T1,
     );
-    expect(capture[0]?.sql).toContain(
+    expect(written(capture).sql).toContain(
       `updated_at = $${FEATURE_FLAG_PARAM_COUNT + 1} AND status IN ('draft', 'paused')`,
     );
   });
@@ -267,7 +301,7 @@ describe("transition", () => {
   it("lets every non-terminal status reach archived", async () => {
     const capture: Captured[] = [];
     await new PostgresFeatureFlagStore(mockConnection(capture)).transition(archivedFlag(), T1);
-    expect(capture[0]?.sql).toContain("AND status IN ('draft', 'active', 'paused')");
+    expect(written(capture).sql).toContain("AND status IN ('draft', 'active', 'paused')");
   });
 
   it("refuses a target no status can transition to", async () => {

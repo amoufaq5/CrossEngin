@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { setPlatformWriteSql, type PgConnection } from "@crossengin/kernel-pg";
 import {
   KILL_SWITCH_STATUSES,
   canTransitionKillSwitch,
@@ -22,6 +22,18 @@ const UPDATE_ASSIGNMENTS = killSwitchUpdateAssignments();
 
 export const SET_TENANT_CONTEXT_SQL =
   "SELECT set_config('app.current_tenant_id', $1, true)";
+
+/**
+ * The elevation a platform-wide write needs on `meta.feature_flags` and
+ * `meta.feature_flag_kill_switches`, shared by both stores in this package because both tables
+ * answer the same question — *may this session change what the deployment does?*
+ *
+ * Until the policy split, a platform write needed nothing: the single `ALL`-scope policy's `USING`
+ * also served as its `WITH CHECK`, and `tenant_id IS NULL` satisfied that unconditionally, so any
+ * tenant session could arm a platform-wide kill switch or flip a platform-wide flag. The split
+ * leaves the tenant arm exactly where it was and puts the platform arm behind this setting.
+ */
+export const SET_PLATFORM_CONFIG_WRITE_SQL = setPlatformWriteSql("config");
 
 const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
 
@@ -86,7 +98,7 @@ export class PostgresKillSwitchStore {
 
   async record(killSwitch: KillSwitch): Promise<void> {
     const values = killSwitchRowValues(killSwitch);
-    await this.scoped(killSwitch.tenantId, (tx) =>
+    await this.scopedWrite(killSwitch.tenantId, (tx) =>
       tx.query(
         `INSERT INTO ${this.schema}.${TABLE} (${KILL_SWITCH_COLUMNS})
          VALUES (${PLACEHOLDERS})`,
@@ -180,7 +192,7 @@ export class PostgresKillSwitchStore {
       );
     }
     const values = killSwitchRowValues(killSwitch);
-    const result = await this.scoped(killSwitch.tenantId, (tx) =>
+    const result = await this.scopedWrite(killSwitch.tenantId, (tx) =>
       tx.query(
         `UPDATE ${this.schema}.${TABLE} SET ${UPDATE_ASSIGNMENTS}
          WHERE kill_switch_id = $1 AND status IN (${RELEASABLE_FROM_SQL})`,
@@ -192,6 +204,15 @@ export class PostgresKillSwitchStore {
     }
   }
 
+  /**
+   * A **read**'s scope: a tenant context, or nothing at all.
+   *
+   * Nothing, for the platform scope, because the platform *read* policy is `SELECT`-scoped on
+   * `tenant_id IS NULL` and demands no grant — a platform row is readable by anyone, which is the
+   * behaviour this had before the policy split and the behaviour it keeps. A read deliberately does
+   * not claim the write elevation: it does not need it, and a privilege claimed for no reason is
+   * one a future statement in the same transaction inherits.
+   */
   private scoped<T>(
     tenantId: string | null,
     fn: (tx: PgConnection) => Promise<T>,
@@ -199,6 +220,24 @@ export class PostgresKillSwitchStore {
     if (tenantId !== null) assertTenantId(tenantId);
     return this.conn.transaction(async (tx) => {
       if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      return fn(tx);
+    });
+  }
+
+  /**
+   * A **write**'s scope, where the two arms are mutually exclusive by construction: a tenant
+   * context, or the platform write elevation, never both. Granting both would give one transaction
+   * a `WITH CHECK` satisfiable by a tenant row *and* a platform row, which is the shape the policy
+   * split exists to take apart.
+   */
+  private scopedWrite<T>(
+    tenantId: string | null,
+    fn: (tx: PgConnection) => Promise<T>,
+  ): Promise<T> {
+    if (tenantId !== null) assertTenantId(tenantId);
+    return this.conn.transaction(async (tx) => {
+      if (tenantId === null) await tx.query(SET_PLATFORM_CONFIG_WRITE_SQL);
+      else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
       return fn(tx);
     });
   }

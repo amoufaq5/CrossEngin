@@ -1,4 +1,5 @@
 export * from "./bounce-webhook.js";
+export * from "./fax-observation.js";
 export * from "./email-ses.js";
 export * from "./push-fcm.js";
 export * from "./sms-twilio.js";

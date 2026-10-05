@@ -97,3 +97,54 @@ describe("buildValidationPlans", () => {
     expect(rules.find((r) => r.name === "seq")?.serverManaged).toBe(true);
   });
 });
+
+describe("decimal precision", () => {
+  const plan = buildValidationPlans({
+    entities: [
+      {
+        name: "Invoice",
+        fields: [
+          { name: "total", type: { kind: "decimal", precision: 16, scale: 2 }, required: true },
+          { name: "rate", type: { kind: "decimal", precision: 5, scale: 4 } },
+          { name: "qty", type: { kind: "integer" } },
+        ],
+      },
+    ],
+  } as unknown as Manifest).get("Invoice")!;
+
+  it("carries the declaration onto the rule", () => {
+    expect(plan.find((r) => r.name === "total")).toMatchObject({ decimal: { precision: 16, scale: 2 } });
+    expect(plan.find((r) => r.name === "qty")?.decimal).toBeUndefined();
+  });
+
+  it("accepts a literal that fits, as a number or a string", () => {
+    expect(validateBody(plan, { total: 12345.67 }, "update")).toEqual([]);
+    expect(validateBody(plan, { total: "12345.67" }, "update")).toEqual([]);
+  });
+
+  it("refuses more decimal places than the field holds, rather than rounding them away", () => {
+    const errors = validateBody(plan, { total: "12345.6789" }, "update");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ field: "total", code: "precision" });
+    expect(errors[0]?.message).toContain("2 decimal place(s)");
+  });
+
+  it("does not count trailing zeros as excess precision", () => {
+    expect(validateBody(plan, { total: "12345.6700" }, "update")).toEqual([]);
+  });
+
+  it("refuses an integer part wider than the declaration", () => {
+    const errors = validateBody(plan, { rate: "12.5" }, "update");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ field: "rate", code: "precision" });
+    expect(errors[0]?.message).toContain("1 digit(s)");
+  });
+
+  it("reports a non-numeric value as a type error, not a precision one", () => {
+    expect(validateBody(plan, { total: "ten" }, "update").map((e) => e.code)).toEqual(["type"]);
+  });
+
+  it("leaves an integer field alone", () => {
+    expect(validateBody(plan, { qty: 3 }, "update")).toEqual([]);
+  });
+});

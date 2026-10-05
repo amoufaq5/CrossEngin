@@ -10,13 +10,20 @@ import {
 import { CountingIdGenerator, FixedClock } from "./clock.js";
 import { InMemoryEventLog } from "./event-log.js";
 import {
+  InMemorySignalDeduplicator,
   MAX_CHILD_WORKFLOW_DEPTH,
   MAX_SIGNAL_DISPATCH_DEPTH,
+  SignalIdempotencyRequired,
   WORKFLOW_ACTION_FAILURES,
   WorkflowActionError,
   WorkflowEngine,
   activityRetryDelayMs,
   parseActivityBackoff,
+  priorReceiptSignalId,
+  signalIdempotencyCacheKey,
+  type SignalDeduplicator,
+  type SignalDelivery,
+  type SignalIdempotency,
 } from "./engine.js";
 import {
   isInstanceCancellationRequested,
@@ -106,6 +113,7 @@ function makeEngine(opts: {
   readonly registry?: ActivityRegistry;
   readonly clock?: FixedClock;
   readonly deferActivities?: boolean;
+  readonly signalDeduplicator?: SignalDeduplicator;
 } = {}) {
   const definition = opts.definition ?? definitionFixture();
   const log = new InMemoryEventLog();
@@ -119,6 +127,9 @@ function makeEngine(opts: {
     clock,
     idGenerator: ids,
     ...(opts.deferActivities === undefined ? {} : { deferActivities: opts.deferActivities }),
+    ...(opts.signalDeduplicator === undefined
+      ? {}
+      : { signalDeduplicator: opts.signalDeduplicator }),
   });
   return { engine, log, clock, definition, ids };
 }
@@ -277,6 +288,383 @@ describe("submitSignal", () => {
     expect(second.deduplicated).toBe(true);
   });
 
+  it("mints a signal id per matched instance, not one for the fan-out", async () => {
+    const { engine, definition } = makeEngine();
+    const a = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-fan",
+    });
+    const b = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-fan",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-fan",
+      tenantId: TENANT,
+    });
+    expect(result.deliveries.map((d) => d.instanceId)).toEqual([a.instanceId, b.instanceId]);
+    const ids = result.deliveries.map((d) => d.signalId);
+    expect(new Set(ids).size).toBe(2);
+    // The log has to agree, because `meta.workflow_signals.signal_id` is UNIQUE and the row is
+    // projected from these events: one id across both would be one row for two deliveries.
+    for (const delivery of result.deliveries) {
+      const received = (await engine.listEvents(delivery.instanceId)).filter(
+        (e) => e.kind === "signal_received",
+      );
+      expect(received.map((e) => e.signalId)).toEqual([delivery.signalId]);
+    }
+  });
+
+  it("reports matchedInstanceIds as the deliveries' instances, in order", async () => {
+    const { engine, definition } = makeEngine();
+    const a = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-fan2",
+    });
+    const b = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-fan2",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-fan2",
+      tenantId: TENANT,
+    });
+    expect(result.matchedInstanceIds).toEqual([a.instanceId, b.instanceId]);
+    expect(result.matchedInstanceIds).toEqual(result.deliveries.map((d) => d.instanceId));
+  });
+
+  it("records the submitted idempotency key on the receipt event", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-k",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-k",
+      tenantId: TENANT,
+      idempotencyKey: "evt-7",
+    });
+    const receipt = (await engine.listEvents(state.instanceId)).find(
+      (e) => e.kind === "signal_received",
+    );
+    expect(receipt?.payload["idempotencyKey"]).toBe("evt-7");
+  });
+
+  it("records a null key on the receipt rather than omitting the field", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-nk",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-nk",
+      tenantId: TENANT,
+    });
+    const receipt = (await engine.listEvents(state.instanceId)).find(
+      (e) => e.kind === "signal_received",
+    );
+    expect(receipt?.payload).toHaveProperty("idempotencyKey", null);
+  });
+
+  it("a duplicate returns the deliveries the first submit made", async () => {
+    const { engine, definition } = makeEngine();
+    const a = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-dup",
+    });
+    const b = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-dup",
+    });
+    const first = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-dup",
+      tenantId: TENANT,
+      idempotencyKey: "evt-dup",
+    });
+    const second = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-dup",
+      tenantId: TENANT,
+      idempotencyKey: "evt-dup",
+    });
+    expect(second.deduplicated).toBe(true);
+    expect(second.deliveries).toEqual(first.deliveries);
+    expect(second.matchedInstanceIds).toEqual([a.instanceId, b.instanceId]);
+  });
+
+  it("appends nothing on a duplicate", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-dup2",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-dup2",
+      tenantId: TENANT,
+      idempotencyKey: "evt-d2",
+    });
+    const before = (await engine.listEvents(state.instanceId)).length;
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-dup2",
+      tenantId: TENANT,
+      idempotencyKey: "evt-d2",
+    });
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before);
+  });
+
+  it("asks the injected deduplicator, and a prior answer short-circuits delivery", async () => {
+    const prior: SignalDelivery[] = [{ instanceId: "wfi_elsewhere", signalId: "wfs_elsewhere" }];
+    const asked: SignalIdempotency[] = [];
+    const dedup: SignalDeduplicator = {
+      async lookup(key) {
+        asked.push(key);
+        return prior;
+      },
+      async remember() {
+        throw new Error("a duplicate must not be remembered again");
+      },
+    };
+    const { engine, definition } = makeEngine({ signalDeduplicator: dedup });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-inj",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-inj",
+      tenantId: TENANT,
+      idempotencyKey: "evt-inj",
+    });
+    expect(asked).toEqual([
+      { tenantId: TENANT, signalName: "approve", idempotencyKey: "evt-inj" },
+    ]);
+    expect(result).toEqual({
+      deduplicated: true,
+      deliveries: prior,
+      matchedInstanceIds: ["wfi_elsewhere"],
+    });
+    // Untouched: the short-circuit is before the match loop.
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("waiting_for_signal");
+  });
+
+  it("never consults the deduplicator when no key was submitted", async () => {
+    let asked = 0;
+    const dedup: SignalDeduplicator = {
+      async lookup() {
+        asked += 1;
+        return null;
+      },
+      async remember() {
+        asked += 1;
+      },
+    };
+    const { engine, definition } = makeEngine({ signalDeduplicator: dedup });
+    await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-nokey",
+    });
+    await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-nokey",
+      tenantId: TENANT,
+    });
+    expect(asked).toBe(0);
+  });
+
+  it("remembers the deliveries it made, so the second submit can report them", async () => {
+    const remembered: Array<{ key: SignalIdempotency; deliveries: readonly SignalDelivery[] }> = [];
+    const dedup: SignalDeduplicator = {
+      async lookup() {
+        return null;
+      },
+      async remember(key, deliveries) {
+        remembered.push({ key, deliveries });
+      },
+    };
+    const { engine, definition } = makeEngine({ signalDeduplicator: dedup });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-rem",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-rem",
+      tenantId: TENANT,
+      idempotencyKey: "evt-rem",
+    });
+    expect(remembered).toHaveLength(1);
+    expect(remembered[0]?.deliveries).toEqual(result.deliveries);
+    expect(remembered[0]?.deliveries.map((d) => d.instanceId)).toEqual([state.instanceId]);
+  });
+
+  it("a stale deduplicator cannot make the instance receive one key twice", async () => {
+    // Both concurrent submits of one key read "unseen" — which is exactly what a deduplicator
+    // reading before the appends it guards will do. The instance's own log is what catches it.
+    const blind: SignalDeduplicator = {
+      async lookup() {
+        return null;
+      },
+      async remember() {
+        return;
+      },
+    };
+    const { engine, definition } = makeEngine({ signalDeduplicator: blind });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-race",
+    });
+    // A signal name no transition names, so the instance stays `waiting_for_signal` and is still
+    // a candidate on the second submit — which is what a real race looks like. A terminating
+    // signal is already covered by the status check.
+    const first = await engine.submitSignal({
+      signalName: "nosuchsignal",
+      correlationKey: "po-race",
+      tenantId: TENANT,
+      idempotencyKey: "evt-race",
+    });
+    const before = (await engine.listEvents(state.instanceId)).length;
+    const second = await engine.submitSignal({
+      signalName: "nosuchsignal",
+      correlationKey: "po-race",
+      tenantId: TENANT,
+      idempotencyKey: "evt-race",
+    });
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before);
+    expect(second.deduplicated).toBe(true);
+    expect(second.deliveries).toEqual(first.deliveries);
+  });
+
+  it("delivers a second, different key to the same instance", async () => {
+    const { engine, definition } = makeEngine();
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-two",
+    });
+    await engine.submitSignal({
+      signalName: "nosuchsignal",
+      correlationKey: "po-two",
+      tenantId: TENANT,
+      idempotencyKey: "evt-1",
+    });
+    const second = await engine.submitSignal({
+      signalName: "nosuchsignal",
+      correlationKey: "po-two",
+      tenantId: TENANT,
+      idempotencyKey: "evt-2",
+    });
+    // Two distinct keys are two distinct deliveries, so the guard must not collapse them.
+    expect(second.deduplicated).toBe(false);
+    const receipts = (await engine.listEvents(state.instanceId)).filter(
+      (e) => e.kind === "signal_received",
+    );
+    expect(receipts).toHaveLength(2);
+    expect(new Set(receipts.map((e) => e.signalId)).size).toBe(2);
+  });
+
+  it("refuses an exactly_once_idempotent signal submitted with no key, appending nothing", async () => {
+    const definition = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "exactly_once_idempotent",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const { engine } = makeEngine({ definition });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-req",
+    });
+    const before = (await engine.listEvents(state.instanceId)).length;
+    await expect(
+      engine.submitSignal({
+        signalName: "approve",
+        correlationKey: "po-req",
+        tenantId: TENANT,
+      }),
+    ).rejects.toThrow(SignalIdempotencyRequired);
+    expect((await engine.listEvents(state.instanceId)).length).toBe(before);
+    expect((await engine.getInstanceState(state.instanceId))?.status).toBe("waiting_for_signal");
+  });
+
+  it("delivers that same signal once a key is supplied", async () => {
+    const definition = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "exactly_once_idempotent",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const { engine } = makeEngine({ definition });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-ok",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-ok",
+      tenantId: TENANT,
+      idempotencyKey: "evt-ok",
+    });
+    expect(result.matchedInstanceIds).toEqual([state.instanceId]);
+  });
+
+  it("does not demand a key for a weaker declared guarantee", async () => {
+    const definition = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const { engine } = makeEngine({ definition });
+    const state = await engine.startInstance({
+      definitionId: definition.id,
+      tenantId: TENANT,
+      correlationKey: "po-weak",
+    });
+    const result = await engine.submitSignal({
+      signalName: "approve",
+      correlationKey: "po-weak",
+      tenantId: TENANT,
+    });
+    expect(result.matchedInstanceIds).toEqual([state.instanceId]);
+  });
+
   it("rejects a transition into rejected (terminal_failure) emits instance_failed", async () => {
     const { engine, definition } = makeEngine();
     const state = await engine.startInstance({
@@ -292,6 +680,160 @@ describe("submitSignal", () => {
     const finalState = await engine.getInstanceState(state.instanceId);
     expect(finalState?.status).toBe("failed");
     expect(finalState?.currentState).toBe("rejected");
+  });
+});
+
+describe("priorReceiptSignalId", () => {
+  function receipt(overrides: Partial<WorkflowEvent>): WorkflowEvent {
+    return {
+      id: "wfe_e1",
+      instanceId: "wfi_a",
+      tenantId: TENANT,
+      sequenceNumber: 1,
+      kind: "signal_received",
+      occurredAt: "2026-05-16T12:00:00.000Z",
+      actorPrincipalId: null,
+      actorSystemId: "s",
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: "wfs_a",
+      timerId: null,
+      childInstanceId: null,
+      variableName: null,
+      payload: { signalName: "approve", correlationKey: "po-1", idempotencyKey: "evt-1" },
+      correlationId: null,
+      causationEventId: null,
+      ...overrides,
+    };
+  }
+
+  it("finds the id of a receipt matching both name and key", () => {
+    expect(priorReceiptSignalId([receipt({})], "approve", "evt-1")).toBe("wfs_a");
+  });
+
+  it("is null for a different key", () => {
+    expect(priorReceiptSignalId([receipt({})], "approve", "evt-2")).toBeNull();
+  });
+
+  it("is null for a different signal name under the same key", () => {
+    expect(priorReceiptSignalId([receipt({})], "reject", "evt-1")).toBeNull();
+  });
+
+  it("is null for a receipt that recorded no key", () => {
+    const e = receipt({ payload: { signalName: "approve", correlationKey: "po-1" } });
+    expect(priorReceiptSignalId([e], "approve", "evt-1")).toBeNull();
+  });
+
+  it("ignores events of other kinds carrying the same signal id", () => {
+    const consumed = receipt({ kind: "signal_consumed", payload: { signalName: "approve" } });
+    expect(priorReceiptSignalId([consumed], "approve", "evt-1")).toBeNull();
+  });
+
+  it("takes the first matching receipt when a log holds two", () => {
+    expect(
+      priorReceiptSignalId(
+        [receipt({}), receipt({ id: "wfe_e2", signalId: "wfs_b", sequenceNumber: 2 })],
+        "approve",
+        "evt-1",
+      ),
+    ).toBe("wfs_a");
+  });
+});
+
+describe("signalIdempotencyCacheKey", () => {
+  it("joins the three fields of the unique key", () => {
+    expect(
+      signalIdempotencyCacheKey({
+        tenantId: TENANT,
+        signalName: "approve",
+        idempotencyKey: "evt-1",
+      }),
+    ).toBe(`${TENANT}|approve|evt-1`);
+  });
+
+  it("separates one tenant's key from another's", () => {
+    const a = signalIdempotencyCacheKey({
+      tenantId: TENANT,
+      signalName: "approve",
+      idempotencyKey: "evt-1",
+    });
+    const b = signalIdempotencyCacheKey({
+      tenantId: "00000000-0000-4000-8000-000000000002",
+      signalName: "approve",
+      idempotencyKey: "evt-1",
+    });
+    expect(a).not.toBe(b);
+  });
+
+  it("separates two signal names sharing a key", () => {
+    const a = signalIdempotencyCacheKey({
+      tenantId: TENANT,
+      signalName: "approve",
+      idempotencyKey: "evt-1",
+    });
+    const b = signalIdempotencyCacheKey({
+      tenantId: TENANT,
+      signalName: "reject",
+      idempotencyKey: "evt-1",
+    });
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("InMemorySignalDeduplicator", () => {
+  const key: SignalIdempotency = {
+    tenantId: TENANT,
+    signalName: "approve",
+    idempotencyKey: "evt-1",
+  };
+
+  it("answers null for an unseen key", async () => {
+    expect(await new InMemorySignalDeduplicator().lookup(key)).toBeNull();
+  });
+
+  it("returns what it was told to remember", async () => {
+    const dedup = new InMemorySignalDeduplicator();
+    const deliveries: SignalDelivery[] = [{ instanceId: "wfi_a", signalId: "wfs_a" }];
+    await dedup.remember(key, deliveries);
+    expect(await dedup.lookup(key)).toEqual(deliveries);
+  });
+
+  it("does not remember a submit that delivered nothing", async () => {
+    const dedup = new InMemorySignalDeduplicator();
+    await dedup.remember(key, []);
+    // The persistent deduplicator has no row to find for such a submit, and the two must agree —
+    // so "no instance matched" stays retryable here too.
+    expect(await dedup.lookup(key)).toBeNull();
+  });
+
+  it("keeps two tenants' identical keys apart", async () => {
+    const dedup = new InMemorySignalDeduplicator();
+    await dedup.remember(key, [{ instanceId: "wfi_a", signalId: "wfs_a" }]);
+    expect(
+      await dedup.lookup({ ...key, tenantId: "00000000-0000-4000-8000-000000000002" }),
+    ).toBeNull();
+  });
+
+  it("keeps two signal names' identical keys apart", async () => {
+    const dedup = new InMemorySignalDeduplicator();
+    await dedup.remember(key, [{ instanceId: "wfi_a", signalId: "wfs_a" }]);
+    expect(await dedup.lookup({ ...key, signalName: "reject" })).toBeNull();
+  });
+});
+
+describe("SignalIdempotencyRequired", () => {
+  it("names the signal, the instance and the definition that declared the guarantee", () => {
+    const err = new SignalIdempotencyRequired({
+      signalName: "approve",
+      instanceId: "wfi_inst0001",
+      definitionId: "wfd_def00001",
+    });
+    expect(err.name).toBe("SignalIdempotencyRequired");
+    expect(err.message).toContain("approve");
+    expect(err.message).toContain("wfi_inst0001");
+    expect(err.message).toContain("wfd_def00001");
+    expect(err.signalName).toBe("approve");
   });
 });
 
@@ -1798,6 +2340,68 @@ describe("send_signal action", () => {
     await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
     expect((await engine.getInstanceState(first.instanceId))?.status).toBe("completed");
     expect((await engine.getInstanceState(second.instanceId))?.status).toBe("completed");
+  });
+
+  it("carries an idempotencyKey parameter through to the receipt", async () => {
+    const receiver = definitionFixture();
+    const sender = senderDef({
+      signalName: "approve",
+      correlationKey: "po-1",
+      idempotencyKey: "internal-1",
+    });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    const receipt = (await engine.listEvents(waiting.instanceId)).find(
+      (e) => e.kind === "signal_received",
+    );
+    expect(receipt?.payload["idempotencyKey"]).toBe("internal-1");
+  });
+
+  it("can address an exactly_once_idempotent signal, which it could not without the parameter", async () => {
+    const receiver = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "exactly_once_idempotent",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const sender = senderDef({
+      signalName: "approve",
+      correlationKey: "po-1",
+      idempotencyKey: "internal-2",
+    });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    await engine.startInstance({ definitionId: sender.id, tenantId: TENANT });
+    expect((await engine.getInstanceState(waiting.instanceId))?.status).toBe("completed");
+  });
+
+  it("refuses an exactly_once_idempotent target when the action names no key", async () => {
+    const receiver = definitionFixture({
+      signals: [
+        {
+          name: "approve",
+          correlationVariable: "poNumber",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "exactly_once_idempotent",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const sender = senderDef({ signalName: "approve", correlationKey: "po-1" });
+    const { engine } = makeMultiEngine([receiver, sender]);
+    const waiting = await startReceiver(engine, receiver, "po-1");
+    await expect(
+      engine.startInstance({ definitionId: sender.id, tenantId: TENANT }),
+    ).rejects.toThrow(SignalIdempotencyRequired);
+    expect((await engine.getInstanceState(waiting.instanceId))?.status).toBe(
+      "waiting_for_signal",
+    );
   });
 
   it("replays sender and receiver identically in a second engine", async () => {

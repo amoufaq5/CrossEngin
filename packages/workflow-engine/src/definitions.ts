@@ -281,6 +281,25 @@ export const SignalDefinitionSchema = z.object({
     "at_least_once",
     "exactly_once_idempotent",
   ]),
+  /**
+   * **A source path, not a key value, and read by nothing today.**
+   *
+   * The shape says so three times over: it is `max(80)` where `WorkflowSignal.idempotencyKey` —
+   * the stored value — is `max(120)`, it carries no regex, and it is `max(80)` with no pattern
+   * exactly like `correlationVariable` beside it, which is undeniably a variable name. So this
+   * field declares *where a submitter's key may be found*, the way `correlationVariable` declares
+   * where the correlation key is found; `.nullable()` then means "the submitter supplies it out of
+   * band", which is what every caller actually does.
+   *
+   * Nothing extracts it. The key a signal is stored under comes from the submission —
+   * `SubmitSignalInput.idempotencyKey`, which the gateway reads off the `Idempotency-Key` header —
+   * and `resolveSignalProvenance` reads it back off the `signal_received` event. Either reading of
+   * this field leaves that true, which is why the ambiguity never blocked persisting the key.
+   *
+   * It is **not** renamed to `idempotencyKeyVariable`, which is the honest name: the field is part
+   * of `definitionContentSha256`, so renaming it changes the digest of every stored definition and
+   * refuses every republication of one. Left as a documented misnomer.
+   */
   idempotencyKey: z.string().max(80).nullable(),
 });
 export type SignalDefinition = z.infer<typeof SignalDefinitionSchema>;

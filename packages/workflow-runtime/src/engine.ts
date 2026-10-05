@@ -89,6 +89,27 @@ export class WorkflowActionError extends Error {
   }
 }
 
+/**
+ * The signal id this instance already received under `(signalName, idempotencyKey)`, or `null`.
+ *
+ * Read from the instance's own history, which is the only authority that cannot be stale: a
+ * deduplicator's read happens before the appends it is meant to prevent, so two concurrent submits
+ * of one key can both get past it.
+ */
+export function priorReceiptSignalId(
+  events: readonly WorkflowEvent[],
+  signalName: string,
+  idempotencyKey: string,
+): string | null {
+  for (const event of events) {
+    if (event.kind !== "signal_received" || event.signalId === null) continue;
+    if (event.payload["signalName"] !== signalName) continue;
+    if (event.payload["idempotencyKey"] !== idempotencyKey) continue;
+    return event.signalId;
+  }
+  return null;
+}
+
 /** A non-empty string action parameter, or `null` when absent or of another type. */
 function stringParam(action: StateAction, key: string): string | null {
   const value = action.parameters[key];
@@ -188,6 +209,11 @@ export interface EngineOptions {
   readonly guardEvaluator?: GuardEvaluator;
   readonly systemActorId?: string;
   /**
+   * Who answers a duplicate submit. Defaults to `InMemorySignalDeduplicator`, which is correct for
+   * one process; `buildPersistentEngine` supplies the one that reads the signal table.
+   */
+  readonly signalDeduplicator?: SignalDeduplicator;
+  /**
    * When true, `schedule_activity` records the activity as `scheduled` (persisting its input) but
    * does NOT run the handler inline — a distributed worker claims + executes it later via
    * `executeScheduledActivity`. Default false (activities run inline, as before).
@@ -214,10 +240,107 @@ export interface SubmitSignalInput {
   readonly sourceSystem?: string;
 }
 
+/**
+ * One instance's copy of a submitted signal.
+ *
+ * This pair is what the contract calls a `WorkflowSignal`: `instanceId` is singular there and
+ * `matchSignalToInstance` returns one id, so a submit that fans out to N instances is N signals and
+ * not one signal seen N times. `meta.workflow_signals.signal_id` is UNIQUE, so minting one id for
+ * the whole fan-out collapsed the N rows into one — attributed to whichever instance was projected
+ * last, with every earlier delivery invisible in the projection table.
+ */
+export interface SignalDelivery {
+  readonly instanceId: string;
+  readonly signalId: string;
+}
+
+/** The three fields `meta.workflow_signals`' unique key is on, as one value. */
+export interface SignalIdempotency {
+  readonly tenantId: string;
+  readonly signalName: string;
+  readonly idempotencyKey: string;
+}
+
+/**
+ * Who answers "has this idempotency key already been accepted, and what did it deliver?".
+ *
+ * A seam rather than a field because the honest answer lives wherever the signals do: in this
+ * package that is process memory, and in `workflow-runtime-pg` it is the `(tenant_id, signal_name,
+ * idempotency_key)` unique key on `meta.workflow_signals` — which is the only answer that survives
+ * a restart or reaches a second replica. `lookup` distinguishes **unseen** (`null`) from **seen and
+ * delivered nothing** (`[]`), and `remember` is a no-op for a deduplicator whose ledger is the rows
+ * the projection already writes.
+ */
+export interface SignalDeduplicator {
+  lookup(key: SignalIdempotency): Promise<readonly SignalDelivery[] | null>;
+  remember(key: SignalIdempotency, deliveries: readonly SignalDelivery[]): Promise<void>;
+}
+
+/** `tenantId|signalName|idempotencyKey`, the key both deduplicators agree on. */
+export function signalIdempotencyCacheKey(key: SignalIdempotency): string {
+  return `${key.tenantId}|${key.signalName}|${key.idempotencyKey}`;
+}
+
+/**
+ * The offline deduplicator: correct for one process and for nothing else, which is why it is a
+ * default rather than the mechanism.
+ *
+ * **A submit that matched no instance is not remembered.** The persistent deduplicator cannot
+ * remember one — nothing was written, so there is no row to find — and the two must agree, because
+ * the pure engine's tests are the contract. The reading that makes them agree is also the right
+ * one: "no instance matched" is not a delivery, and a retry once an instance exists should deliver.
+ */
+export class InMemorySignalDeduplicator implements SignalDeduplicator {
+  private readonly seen: Map<string, readonly SignalDelivery[]> = new Map();
+
+  async lookup(key: SignalIdempotency): Promise<readonly SignalDelivery[] | null> {
+    return this.seen.get(signalIdempotencyCacheKey(key)) ?? null;
+  }
+
+  async remember(
+    key: SignalIdempotency,
+    deliveries: readonly SignalDelivery[],
+  ): Promise<void> {
+    if (deliveries.length === 0) return;
+    this.seen.set(signalIdempotencyCacheKey(key), deliveries);
+  }
+}
+
+/**
+ * A signal whose definition promises `exactly_once_idempotent` and whose submission carried no key.
+ *
+ * Refused before the `signal_received` event is appended, not after: the stored row would satisfy
+ * every CHECK on `meta.workflow_signals` — `idempotency_key` is nullable — and fail
+ * `WorkflowSignalSchema`, whose `superRefine` requires the key for that guarantee. That is an
+ * ADR-0289-class row, and the only place it can be stopped for good is where it is submitted.
+ */
+export class SignalIdempotencyRequired extends Error {
+  readonly signalName: string;
+  readonly instanceId: string;
+  readonly definitionId: string;
+
+  constructor(input: {
+    readonly signalName: string;
+    readonly instanceId: string;
+    readonly definitionId: string;
+  }) {
+    super(
+      `signal ${input.signalName} is declared exactly_once_idempotent by definition ${input.definitionId}; ` +
+        `submitting it to instance ${input.instanceId} requires an idempotencyKey`,
+    );
+    this.name = "SignalIdempotencyRequired";
+    this.signalName = input.signalName;
+    this.instanceId = input.instanceId;
+    this.definitionId = input.definitionId;
+  }
+}
+
 export interface SubmitSignalResult {
   readonly deduplicated: boolean;
+  /** One entry per instance the signal reached, each with its own signal id. */
+  readonly deliveries: readonly SignalDelivery[];
+  /** `deliveries` projected to instance ids, in delivery order. */
   readonly matchedInstanceIds: readonly string[];
-  readonly signalId: string | null;
 }
 
 export interface TickTimersResult {
@@ -241,7 +364,7 @@ export class WorkflowEngine {
   private readonly guardEvaluator: GuardEvaluator;
   private readonly systemActorId: string;
   private readonly deferActivities: boolean;
-  private readonly seenSignalIdempotency: Set<string> = new Set();
+  private readonly signalDedup: SignalDeduplicator;
   private readonly instanceTenant: Map<string, string> = new Map();
   private readonly instanceCorrelation: Map<string, string> = new Map();
   /**
@@ -262,6 +385,7 @@ export class WorkflowEngine {
     this.ids = opts.idGenerator ?? new RandomIdGenerator();
     this.guardEvaluator = opts.guardEvaluator ?? defaultGuardEvaluator;
     this.systemActorId = opts.systemActorId ?? "workflow-engine";
+    this.signalDedup = opts.signalDeduplicator ?? new InMemorySignalDeduplicator();
     this.deferActivities = opts.deferActivities ?? false;
   }
 
@@ -336,17 +460,46 @@ export class WorkflowEngine {
     return state;
   }
 
+  /**
+   * Delivers one submitted signal to every instance correlated to it.
+   *
+   * **The signal id is minted per delivery**, inside the loop. One id for the fan-out made N
+   * deliveries one row (see `SignalDelivery`), which is why the result reports `deliveries` rather
+   * than a single `signalId`: with N instances there is no such thing.
+   *
+   * **Dedup is asked, not assumed, and asked twice.** A `SignalDeduplicator` answers whether this
+   * key has already been accepted anywhere, and a duplicate returns *the deliveries it originally
+   * produced* instead of an empty match list — a caller retrying a webhook wants the instances it
+   * already reached, and the old answer gave it nothing to hold. Then each instance's **own log**
+   * is asked again before its receipt is appended, because the first answer can be stale: two
+   * concurrent submits of one key both read "unseen", and without this the loser would append a
+   * second receipt whose row the unique key refuses — leaving an instance whose projection can
+   * never be rebuilt. The log is the authority, the deduplicator is the fast path.
+   *
+   * `deduplicated` therefore means **this submit delivered nothing new**, which both paths satisfy.
+   */
   async submitSignal(input: SubmitSignalInput): Promise<SubmitSignalResult> {
-    if (input.idempotencyKey !== undefined) {
-      const key = `${input.tenantId}|${input.signalName}|${input.idempotencyKey}`;
-      if (this.seenSignalIdempotency.has(key)) {
-        return { deduplicated: true, matchedInstanceIds: [], signalId: null };
+    const idempotency: SignalIdempotency | null =
+      input.idempotencyKey === undefined
+        ? null
+        : {
+            tenantId: input.tenantId,
+            signalName: input.signalName,
+            idempotencyKey: input.idempotencyKey,
+          };
+    if (idempotency !== null) {
+      const prior = await this.signalDedup.lookup(idempotency);
+      if (prior !== null) {
+        return {
+          deduplicated: true,
+          deliveries: prior,
+          matchedInstanceIds: prior.map((d) => d.instanceId),
+        };
       }
-      this.seenSignalIdempotency.add(key);
     }
 
-    const signalId = this.ids.generate("wfs");
-    const matched: string[] = [];
+    const deliveries: SignalDelivery[] = [];
+    let appended = 0;
     // Snapshot the registry: delivering a signal can run a `spawn_child_workflow` action, which
     // registers the child mid-loop — a live Map iteration would then deliver this same signal to an
     // instance that did not exist when it was submitted.
@@ -363,7 +516,27 @@ export class WorkflowEngine {
       if (state.status !== "running" && state.status !== "waiting_for_signal") continue;
       const definition = this.definitions.get(state.definitionId);
       if (definition === undefined) continue;
+      // Before this instance's own append, so the refusal is what stops the unparseable row rather
+      // than something downstream noticing it after the fact.
+      this.assertIdempotencyKeyStorable(
+        definition,
+        input.signalName,
+        instanceId,
+        idempotency,
+      );
+      if (idempotency !== null) {
+        const already = priorReceiptSignalId(
+          await this.eventLog.listByInstance(instanceId),
+          input.signalName,
+          idempotency.idempotencyKey,
+        );
+        if (already !== null) {
+          deliveries.push({ instanceId, signalId: already });
+          continue;
+        }
+      }
 
+      const signalId = this.ids.generate("wfs");
       const nextSeq = (await this.eventLog.latestSequence(instanceId)) ?? -1;
       const occurredAt = this.clock.nowIso();
       await this.appendEvent({
@@ -385,6 +558,10 @@ export class WorkflowEngine {
           signalName: input.signalName,
           correlationKey: input.correlationKey,
           payload: input.payload ?? {},
+          // On the receipt because the key is a fact of *arrival*, like the source system beside
+          // it: `resolveSignalProvenance` reads both off this event, so the stored row carries the
+          // key the submitter sent and the unique index finally enforces something.
+          idempotencyKey: idempotency?.idempotencyKey ?? null,
         },
         correlationId: input.correlationKey,
         causationEventId: null,
@@ -422,10 +599,40 @@ export class WorkflowEngine {
       });
 
       await this.runStepLoop(instanceId, definition);
-      matched.push(instanceId);
+      deliveries.push({ instanceId, signalId });
+      appended += 1;
     }
 
-    return { deduplicated: false, matchedInstanceIds: matched, signalId };
+    if (idempotency !== null) await this.signalDedup.remember(idempotency, deliveries);
+    return {
+      deduplicated: deliveries.length > 0 && appended === 0,
+      deliveries,
+      matchedInstanceIds: deliveries.map((d) => d.instanceId),
+    };
+  }
+
+  /**
+   * Refuses a submission the signal table could only store as a row the contract forbids.
+   *
+   * The guarantee is the *definition's*, never the submitter's, so this reads it off the declared
+   * `SignalDefinition` — and an undeclared signal is left alone, because
+   * `WorkflowDefinitionSchema` already refuses a `signal_received` transition naming one, so
+   * nothing can be delivered under a name the definition does not hold.
+   */
+  private assertIdempotencyKeyStorable(
+    definition: WorkflowDefinition,
+    signalName: string,
+    instanceId: string,
+    idempotency: SignalIdempotency | null,
+  ): void {
+    if (idempotency !== null) return;
+    const declared = definition.signals.find((s) => s.name === signalName);
+    if (declared?.deliveryGuarantee !== "exactly_once_idempotent") return;
+    throw new SignalIdempotencyRequired({
+      signalName,
+      instanceId,
+      definitionId: definition.id,
+    });
   }
 
   async tickTimers(nowMs: number): Promise<TickTimersResult> {
@@ -1137,6 +1344,13 @@ export class WorkflowEngine {
         detail: `signal dispatch is already ${this.signalDispatchDepth.toString()} deep (limit ${MAX_SIGNAL_DISPATCH_DEPTH.toString()}); signal ${signalName} is part of a cycle`,
       });
     }
+    // An internal dispatch can carry a key too, and must be able to: a target signal declared
+    // `exactly_once_idempotent` is refused without one, so without this parameter a workflow could
+    // address every signal in the catalog except the ones with the strongest guarantee. It is read
+    // from `parameters` rather than synthesised, because a key the engine invents is either a
+    // nonce (which deduplicates nothing) or a function of the send site (which deduplicates two
+    // legitimately distinct sends into one).
+    const idempotencyKey = stringParam(action, "idempotencyKey");
     this.signalDispatchDepth += 1;
     try {
       await this.submitSignal({
@@ -1145,6 +1359,7 @@ export class WorkflowEngine {
         tenantId,
         payload: recordParam(action, "payload"),
         sourceSystem: this.systemActorId,
+        ...(idempotencyKey !== null ? { idempotencyKey } : {}),
       });
     } finally {
       this.signalDispatchDepth -= 1;

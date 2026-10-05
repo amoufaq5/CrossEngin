@@ -1,3 +1,4 @@
+import { parseDecimal } from "./decimal.js";
 import type { EntityRecord, ListFilter } from "./store.js";
 import type { WriteGuardInput } from "./write-guards.js";
 
@@ -62,6 +63,24 @@ const DEFAULTS = {
 function num(v: unknown): number {
   const n = typeof v === "number" ? v : Number(v);
   return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * A field's value as a number when it holds one at all, else null — the distinction `num` cannot
+ * make, because an absent amount and a zero amount are the same to it.
+ *
+ * It accepts a numeral string as well as a JS number, which is load-bearing rather than
+ * defensive: a `decimal` field crosses the store as its canonical wire string, so the
+ * `typeof v === "number"` guards this replaces answered **false** for every amount the typed
+ * store served. A partial credit note silently became a full one, and a line's flat tax rate
+ * silently became "no flat rate" — a wrong posting, not merely a wrong type.
+ */
+function optionalNum(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const parsed = parseDecimal(v);
+  if (parsed === null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 }
 
 function swapAmount(a: unknown, b: unknown): boolean {
@@ -272,9 +291,9 @@ export function invoiceVoidCreditNoteEffect(config: InvoiceCreditNoteConfig = {}
     // the credit note is for that amount (single summary line); otherwise the
     // full invoice is credited (every line mirrored).
     const total = num(original[c.totalField]);
-    const requested = original[c.creditAmountField];
-    const isPartial = typeof requested === "number" && requested > 0 && requested < total;
-    const amount = isPartial ? (requested as number) : total;
+    const requested = optionalNum(original[c.creditAmountField]);
+    const isPartial = requested !== null && requested > 0 && requested < total;
+    const amount = isPartial ? requested : total;
     if (isPartial) {
       creditNote[c.totalField] = amount;
       creditNote[c.subtotalField] = amount;
@@ -405,8 +424,8 @@ export function creditNoteGlPostingEffect(config: CreditNoteGlConfig = {}): Writ
     const originalId = input.id;
     if (originalId === null) return;
     const total = num(original[c.totalField]);
-    const requested = original[c.creditAmountField];
-    const amount = typeof requested === "number" && requested > 0 && requested < total ? requested : total;
+    const requested = optionalNum(original[c.creditAmountField]);
+    const amount = requested !== null && requested > 0 && requested < total ? requested : total;
     if (amount <= 0) return;
 
     const now = c.clock?.now() ?? new Date();
@@ -968,11 +987,10 @@ export function recognitionGlPostingEffect(config: RecognitionGlConfig): WriteEf
         const breakdown = computeLineTaxBreakdown(
           lineRows.map((r) => {
             const codeId = r[tc.taxCodeField];
-            const flat = r[tc.flatRateField];
             return {
               net: num(r[tc.netField]),
               taxCodeId: typeof codeId === "string" && codeId.length > 0 ? codeId : null,
-              flatRatePct: typeof flat === "number" ? flat : null,
+              flatRatePct: optionalNum(r[tc.flatRateField]),
             };
           }),
           rateByCode,

@@ -20,8 +20,8 @@ function buildEngine(): SignalSubmitter & { calls: number } {
       calls += 1;
       return {
         deduplicated: false,
+        deliveries: [{ instanceId: "wfi_inst0001", signalId: "wfs_sig00001" }],
         matchedInstanceIds: ["wfi_inst0001"],
-        signalId: "wfs_sig00001",
       };
     }) as SignalSubmitter["submitSignal"],
     get calls() {
@@ -141,6 +141,11 @@ describe("createSignalBridgeHandler — success", () => {
     expect(body["ok"]).toBe(true);
     expect(body["outcome"]).toBe("advanced");
     expect(body["matchedInstanceIds"]).toEqual(["wfi_inst0001"]);
+    // The body reports a delivery per instance, which is what replaced the single `signalId`.
+    expect(body["deliveries"]).toEqual([
+      { instanceId: "wfi_inst0001", signalId: "wfs_sig00001" },
+    ]);
+    expect(body).not.toHaveProperty("signalId");
     expect(engine.calls).toBe(1);
   });
 
@@ -149,7 +154,7 @@ describe("createSignalBridgeHandler — success", () => {
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
         captured.push(input);
-        return { deduplicated: true, matchedInstanceIds: [], signalId: null };
+        return { deduplicated: true, deliveries: [], matchedInstanceIds: [] };
       }),
     };
     const bridge = buildBridge({ engine });
@@ -169,7 +174,11 @@ describe("createSignalBridgeHandler — success", () => {
     const engine: SignalSubmitter = {
       submitSignal: vi.fn(async (input) => {
         captured.push(input);
-        return { deduplicated: false, matchedInstanceIds: ["wfi_x"], signalId: "wfs_y" };
+        return {
+          deduplicated: false,
+          deliveries: [{ instanceId: "wfi_x", signalId: "wfs_y" }],
+          matchedInstanceIds: ["wfi_x"],
+        };
       }),
     };
     const bridge = buildBridge({ engine });

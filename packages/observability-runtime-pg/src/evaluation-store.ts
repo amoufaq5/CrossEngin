@@ -1,5 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  scopedWrite,
   SloEvaluationRecordSchema,
   type SloEvaluationRecord,
 } from "./records.js";
@@ -16,25 +17,28 @@ export class PostgresSloEvaluationStore {
 
   async record(record: SloEvaluationRecord): Promise<void> {
     const valid = SloEvaluationRecordSchema.parse(record);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (
-         evaluation_id, tenant_id, slo_id, surface, breached,
-         worst_severity, worst_threshold_id, target, evaluations, evaluated_at
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-       ON CONFLICT (evaluation_id) DO NOTHING`,
-      [
-        valid.evaluationId,
-        valid.tenantId,
-        valid.sloId,
-        valid.surface,
-        valid.breached,
-        valid.worstSeverity,
-        valid.worstThresholdId,
-        valid.target,
-        JSON.stringify(valid.evaluations),
-        valid.evaluatedAt,
-      ],
+    await scopedWrite(this.conn, valid.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (
+           evaluation_id, tenant_id, slo_id, surface, breached,
+           worst_severity, worst_threshold_id, target, evaluations, evaluated_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+         ON CONFLICT (evaluation_id) DO NOTHING`,
+        [
+          valid.evaluationId,
+          valid.tenantId,
+          valid.sloId,
+          valid.surface,
+          valid.breached,
+          valid.worstSeverity,
+          valid.worstThresholdId,
+          valid.target,
+          JSON.stringify(valid.evaluations),
+          valid.evaluatedAt,
+        ],
+    
+      ),
     );
   }
 

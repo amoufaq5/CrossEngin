@@ -541,4 +541,37 @@ describe("tombstoneReceipt", () => {
     const receipt = tombstoneReceipt(storedOf({ retainedReason: "retained under tax_records_7y" }));
     expect(receipt["retainedReason"]).toContain("tax_records_7y");
   });
+
+  it("names the proof version, defaulting to v1 rather than inferring one", () => {
+    // Read, never inferred from whether a claim is attached: an inference would read a *deleted*
+    // declaration as an older record, the tamper that covers its own tracks (ADR-0329).
+    expect(tombstoneReceipt(storedOf())["proofVersion"]).toBe("v1");
+    expect(tombstoneReceipt(storedOf({ proofVersion: "v3" }))["proofVersion"]).toBe("v3");
+  });
+
+  it("carries what a caller needs to recompute the digest itself", () => {
+    // ADR-0320's whole argument for a receipt is that a bare "deleted" would be ADR-0317's defect in
+    // response form. Without these a holder cannot reconstruct v2 or v3 bytes, so the digests in the
+    // receipt are unverifiable figures rather than a proof — which regressed at v2 and got one field
+    // worse at v3.
+    const receipt = tombstoneReceipt(
+      storedOf({
+        proofVersion: "v3",
+        capabilityDeclaration: { tenant_schema: "erases", shared_tables: "erases" },
+        retainedObligations: ["tax_records_7y"],
+        retainedDataReference: "meta.invoices, meta.tenant_credits",
+      }),
+    );
+    expect(receipt["capabilityDeclaration"]).toMatchObject({ shared_tables: "erases" });
+    expect(receipt["retainedObligations"]).toEqual(["tax_records_7y"]);
+    expect(receipt["retainedDataReference"]).toContain("meta.invoices");
+  });
+
+  it("emits an EMPTY obligation list, because that is the signed claim that nothing was kept", () => {
+    // The one distinction v3 exists to make. Omitting the key on `[]` would put the pre-v3
+    // "cannot say" back into the response.
+    const receipt = tombstoneReceipt(storedOf({ proofVersion: "v3", retainedObligations: [] }));
+    expect(receipt).toHaveProperty("retainedObligations");
+    expect(receipt["retainedObligations"]).toEqual([]);
+  });
 });

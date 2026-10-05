@@ -1,5 +1,7 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
 
+import { decimalPrecisionExceeded, decimalScaleExceeded, type DecimalSpec } from "./decimal.js";
+
 /** One field's validation rule, distilled from the manifest field schema. */
 export interface FieldRule {
   readonly name: string;
@@ -7,13 +9,15 @@ export interface FieldRule {
   readonly kind: string;
   readonly enumValues?: readonly string[];
   readonly maxLength?: number;
+  /** A `decimal` field's declared precision/scale, so an over-precise literal can be refused. */
+  readonly decimal?: DecimalSpec;
   /** Server-managed (e.g. a sequence default) — never client-validated. */
   readonly serverManaged: boolean;
 }
 
 export type EntityValidationPlan = readonly FieldRule[];
 
-export type FieldErrorCode = "required" | "type" | "enum" | "maxLength";
+export type FieldErrorCode = "required" | "type" | "enum" | "maxLength" | "precision";
 
 export interface FieldError {
   readonly field: string;
@@ -26,7 +30,13 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 interface FieldLike {
   readonly name: string;
   readonly required?: boolean;
-  readonly type?: { readonly kind?: string; readonly values?: readonly string[]; readonly maxLength?: number };
+  readonly type?: {
+    readonly kind?: string;
+    readonly values?: readonly string[];
+    readonly maxLength?: number;
+    readonly precision?: number;
+    readonly scale?: number;
+  };
   readonly default?: { readonly kind?: string };
 }
 interface EntityLike {
@@ -44,6 +54,9 @@ export function buildValidationPlans(manifest: Manifest): ReadonlyMap<string, En
       kind: f.type?.kind ?? "text",
       ...(f.type?.values !== undefined ? { enumValues: f.type.values } : {}),
       ...(f.type?.maxLength !== undefined ? { maxLength: f.type.maxLength } : {}),
+      ...(f.type?.kind === "decimal" && f.type.precision !== undefined && f.type.scale !== undefined
+        ? { decimal: { precision: f.type.precision, scale: f.type.scale } }
+        : {}),
       serverManaged: f.default?.kind === "sequence",
     }));
     out.set(e.name, rules);
@@ -63,6 +76,28 @@ function checkType(rule: FieldRule, value: unknown): FieldError | null {
       if (!Number.isFinite(n)) return { field: rule.name, code: "type", message: `${rule.name} must be a number` };
       if (rule.kind === "integer" && !Number.isInteger(n)) {
         return { field: rule.name, code: "type", message: `${rule.name} must be a whole number` };
+      }
+      // A client literal carrying more precision than the field holds is refused, not rounded.
+      // `NUMERIC(16, 2)` silently rounds 12345.6789 to 12345.68 on the typed store while the
+      // JSONB store kept all four digits, so the two stores disagreed about a value both had
+      // accepted. Quantising at the store boundary makes them agree; refusing here is what keeps
+      // the loss from being silent, because the client is the one who can still correct it.
+      if (rule.decimal !== undefined) {
+        if (decimalPrecisionExceeded(value, rule.decimal)) {
+          const whole = rule.decimal.precision - rule.decimal.scale;
+          return {
+            field: rule.name,
+            code: "precision",
+            message: `${rule.name} must have at most ${whole} digit(s) before the decimal point`,
+          };
+        }
+        if (decimalScaleExceeded(value, rule.decimal)) {
+          return {
+            field: rule.name,
+            code: "precision",
+            message: `${rule.name} must have at most ${rule.decimal.scale} decimal place(s)`,
+          };
+        }
       }
       return null;
     }

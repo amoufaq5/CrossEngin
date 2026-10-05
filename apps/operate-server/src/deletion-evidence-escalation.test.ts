@@ -22,15 +22,20 @@ import {
   SWEEP_EPISODE_PREFIX,
   TOMBSTONE_EPISODE_PREFIX,
   TOMBSTONE_SWEEP_SURFACE,
+  PREVIOUS_STALL_KIND_METADATA_KEY,
+  STALL_KIND_METADATA_KEY,
+  currentStallKindOf,
   deletionEvidenceKey,
   deletionEvidenceSweepKey,
   deletionEvidenceTombstoneKey,
   episodeKeyFor,
   escalationAuditEntity,
   severityForDefects,
+  stallKindFlipNote,
   tombstoneFindingSubject,
   type EscalatableFinding,
   type EscalatableSweepStall,
+  type EscalationTimelineNote,
   type EscalatableTombstoneFinding,
   type EscalatableVerdict,
 } from "./deletion-evidence-escalation.js";
@@ -72,8 +77,33 @@ function configOf(over: Record<string, unknown> = {}) {
   });
 }
 
-function incidentOf(id = INC, severity = "sev1"): IncidentRecord {
-  return { id, severity, status: "declared" } as unknown as IncidentRecord;
+/**
+ * A stored incident, with the `declared` timeline entry a real store would have.
+ *
+ * The timeline is not decoration: `currentStallKindOf` reads the episode's present stall kind off
+ * it, which is what makes a kind flip detectable after a restart rather than only in the process
+ * that declared it. This used to be `{ id, severity, status } as unknown as IncidentRecord`, which
+ * typechecked and threw the moment anything touched a fourth field — the cast is what let it.
+ */
+function incidentOf(
+  id = INC,
+  severity = "sev1",
+  metadata: Record<string, unknown> = {},
+): IncidentRecord {
+  return {
+    id,
+    severity,
+    status: "declared",
+    timeline: [
+      {
+        occurredAt: AT,
+        actorUserId: "system:deletion-evidence",
+        kind: "declared",
+        message: "declared",
+        metadata,
+      },
+    ],
+  } as unknown as IncidentRecord;
 }
 
 function verdictOf(over: Partial<EscalatableVerdict> = {}): EscalatableVerdict {
@@ -1289,7 +1319,7 @@ describe("onSweepStall (ADR-0329)", () => {
       declarer: {
         declare: async (request): Promise<IncidentRecord> => {
           declared.push(request);
-          open = incidentOf(INC, "sev2");
+          open = incidentOf(INC, "sev2", request.metadata ?? {});
           return open;
         },
         findOpen: async (key): Promise<IncidentRecord | null> => {
@@ -1314,6 +1344,237 @@ describe("onSweepStall (ADR-0329)", () => {
     ]);
     expect(declared).toHaveLength(1);
     expect(new Set(asked).size).toBe(1);
+  });
+
+  describe("a kind flip inside one episode (ADR-0330)", () => {
+    /** The declarer a flip needs: one that remembers what it declared, as a store would. */
+    function flipHarness(): {
+      readonly escalator: DeletionEvidenceEscalator;
+      readonly notes: Array<{ incidentId: string; note: EscalationTimelineNote }>;
+      readonly declared: IncidentDeclarationRequest[];
+      readonly errors: unknown[];
+      /** Replaces the stored record with one carrying the notes written so far, as a store would. */
+      readonly reload: () => void;
+    } {
+      const notes: Array<{ incidentId: string; note: EscalationTimelineNote }> = [];
+      const declared: IncidentDeclarationRequest[] = [];
+      const errors: unknown[] = [];
+      let open: IncidentRecord | null = null;
+      const rebuild = (): void => {
+        if (declared.length === 0) return;
+        const timeline = [
+          {
+            occurredAt: AT,
+            actorUserId: "system:deletion-evidence",
+            kind: "declared",
+            message: "declared",
+            metadata: declared[0]?.metadata ?? {},
+          },
+          ...notes.map((n) => ({
+            occurredAt: AT,
+            actorUserId: "system:deletion-evidence",
+            kind: "observation",
+            message: n.note.message,
+            metadata: n.note.metadata,
+          })),
+        ];
+        open = { id: INC, severity: "sev2", status: "declared", timeline } as unknown as IncidentRecord;
+      };
+      const escalator = new DeletionEvidenceEscalator({
+        declarer: {
+          declare: async (request): Promise<IncidentRecord> => {
+            declared.push(request);
+            rebuild();
+            return open as IncidentRecord;
+          },
+          findOpen: async (): Promise<IncidentRecord | null> => open,
+          closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+        },
+        config: configOf(),
+        clock: () => new Date(AT),
+        note: (incidentId, note) => {
+          notes.push({ incidentId, note });
+          rebuild();
+        },
+        onError: (err) => errors.push(err),
+      });
+      return { escalator, notes, declared, errors, reload: rebuild };
+    }
+
+    it("puts the opening kind on the declaration, so a later tick has something to compare to", async () => {
+      const h = harness();
+      await h.escalator.onSweepStall(STALL);
+      expect(h.declared[0]?.metadata?.[STALL_KIND_METADATA_KEY]).toBe("pinned_cursor");
+    });
+
+    it("puts no stall kind on a request or tombstone declaration", async () => {
+      const h = harness();
+      await h.escalator.onVerdict(verdictOf());
+      expect(h.declared[0]?.metadata?.[STALL_KIND_METADATA_KEY]).toBeUndefined();
+    });
+
+    it("notes a flip on the incident's own timeline, once", async () => {
+      const h = flipHarness();
+      await h.escalator.onSweepStall(STALL);
+      expect(h.notes).toHaveLength(0);
+      const flipped = await h.escalator.onSweepStall({ ...STALL, kind: "no_pages" });
+      expect(flipped.action).toBe("adopted");
+      expect(flipped.stallKindFlip).toEqual({ from: "pinned_cursor", to: "no_pages" });
+      expect(h.notes).toHaveLength(1);
+      expect(h.notes[0]?.incidentId).toBe(INC);
+      expect(h.notes[0]?.note.message).toContain("stall kind pinned_cursor -> no_pages");
+      expect(h.notes[0]?.note.metadata[STALL_KIND_METADATA_KEY]).toBe("no_pages");
+      expect(h.notes[0]?.note.metadata[PREVIOUS_STALL_KIND_METADATA_KEY]).toBe("pinned_cursor");
+      // One incident still, and still no audit row per tick.
+      expect(h.declared).toHaveLength(1);
+      expect(flipped.audited).toBe(false);
+    });
+
+    it("writes nothing while the kind is stable, however many ticks run", async () => {
+      const h = flipHarness();
+      await h.escalator.onSweepStall(STALL);
+      for (let i = 0; i < 20; i++) {
+        const outcome = await h.escalator.onSweepStall(STALL);
+        expect(outcome.stallKindFlip).toBeUndefined();
+      }
+      // This is the reason the adoption is silent, and the reason a flip note does not reopen it:
+      // the previous kind is read off the record, so a note lands per *change*, not per tick.
+      expect(h.notes).toHaveLength(0);
+    });
+
+    it("notes each real change and nothing in between", async () => {
+      const h = flipHarness();
+      await h.escalator.onSweepStall(STALL);
+      await h.escalator.onSweepStall({ ...STALL, kind: "no_pages" });
+      await h.escalator.onSweepStall({ ...STALL, kind: "no_pages" });
+      await h.escalator.onSweepStall({ ...STALL, kind: "pinned_cursor" });
+      expect(h.notes.map((n) => n.note.metadata[STALL_KIND_METADATA_KEY])).toEqual([
+        "no_pages",
+        "pinned_cursor",
+      ]);
+    });
+
+    it("reads the previous kind off the record, so a restart still detects the flip", async () => {
+      // The flip harness's declarer answers from the stored record and keeps no process state, which
+      // is the whole point: a different replica adopting this episode compares against the same
+      // timeline. A remembered field would make the flip invisible after a restart, which is the
+      // limitation ADR-0330 had to accept for the *recovery*.
+      const h = flipHarness();
+      await h.escalator.onSweepStall(STALL);
+      const fresh = new DeletionEvidenceEscalator({
+        declarer: {
+          declare: async (): Promise<IncidentRecord> => {
+            throw new Error("should not declare");
+          },
+          findOpen: async (): Promise<IncidentRecord | null> =>
+            ({
+              id: INC,
+              severity: "sev2",
+              status: "declared",
+              timeline: [
+                {
+                  occurredAt: AT,
+                  actorUserId: "system:deletion-evidence",
+                  kind: "declared",
+                  message: "declared",
+                  metadata: { [STALL_KIND_METADATA_KEY]: "pinned_cursor" },
+                },
+              ],
+            }) as unknown as IncidentRecord,
+          closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+        },
+        config: configOf(),
+        clock: () => new Date(AT),
+      });
+      const outcome = await fresh.onSweepStall({ ...STALL, kind: "no_pages" });
+      expect(outcome.stallKindFlip).toEqual({ from: "pinned_cursor", to: "no_pages" });
+    });
+
+    it("bootstraps an episode declared before the kind was recorded, with from: null", async () => {
+      const escalator = new DeletionEvidenceEscalator({
+        declarer: {
+          declare: async (): Promise<IncidentRecord> => {
+            throw new Error("should not declare");
+          },
+          // An episode from before `metadata.stallKind` existed. Stating a transition it was flipped
+          // *from* would be inventing one; one note bootstraps the record instead.
+          findOpen: async (): Promise<IncidentRecord | null> => incidentOf(INC, "sev2"),
+          closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+        },
+        config: configOf(),
+        clock: () => new Date(AT),
+      });
+      const outcome = await escalator.onSweepStall(STALL);
+      expect(outcome.stallKindFlip).toEqual({ from: null, to: "pinned_cursor" });
+      expect(stallKindFlipNote({ from: null, to: "pinned_cursor" }, STALL).message).toContain(
+        "the episode recorded none before now",
+      );
+    });
+
+    it("reports the flip even with no writer wired", async () => {
+      const h = harness({ open: incidentOf(INC, "sev2", { [STALL_KIND_METADATA_KEY]: "no_pages" }) });
+      const outcome = await h.escalator.onSweepStall(STALL);
+      expect(outcome.stallKindFlip).toEqual({ from: "no_pages", to: "pinned_cursor" });
+      expect(outcome.detail).toContain("stall kind no_pages -> pinned_cursor");
+    });
+
+    it("a note that cannot be written does not fail the pass", async () => {
+      const errors: unknown[] = [];
+      const escalator = new DeletionEvidenceEscalator({
+        declarer: {
+          declare: async (): Promise<IncidentRecord> => {
+            throw new Error("should not declare");
+          },
+          findOpen: async (): Promise<IncidentRecord | null> =>
+            incidentOf(INC, "sev2", { [STALL_KIND_METADATA_KEY]: "no_pages" }),
+          closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+        },
+        config: configOf(),
+        clock: () => new Date(AT),
+        note: () => {
+          throw new Error("timeline unreachable");
+        },
+        onError: (err) => errors.push(err),
+      });
+      const outcome = await escalator.onSweepStall(STALL);
+      // The incident is already durable and the page has gone out: a thinner record must not become
+      // a `failed` pass the next tick re-declares.
+      expect(outcome.action).toBe("adopted");
+      expect(outcome.stallKindFlip).toEqual({ from: "no_pages", to: "pinned_cursor" });
+      expect(errors).toHaveLength(1);
+    });
+
+    it("asks for no note on a request or tombstone adoption", async () => {
+      const notes: unknown[] = [];
+      const h = harness(
+        { open: incidentOf() },
+        configOf(),
+      );
+      // `harness` wires no `note` seam, so the assertion that matters is the outcome's own shape:
+      // a subject with no kind reports no flip, rather than reporting one from null.
+      const outcome = await h.escalator.onVerdict(verdictOf());
+      expect(outcome.action).toBe("adopted");
+      expect(outcome.stallKindFlip).toBeUndefined();
+      expect(notes).toHaveLength(0);
+    });
+
+    it("currentStallKindOf prefers the latest entry that names one", () => {
+      const record = {
+        timeline: [
+          { metadata: { [STALL_KIND_METADATA_KEY]: "no_pages" } },
+          { metadata: { unrelated: 1 } },
+          { metadata: { [STALL_KIND_METADATA_KEY]: "pinned_cursor" } },
+          { metadata: {} },
+        ],
+      } as unknown as IncidentRecord;
+      expect(currentStallKindOf(record)).toBe("pinned_cursor");
+      expect(currentStallKindOf({ timeline: [] } as unknown as IncidentRecord)).toBeNull();
+      expect(
+        currentStallKindOf({
+          timeline: [{ metadata: { [STALL_KIND_METADATA_KEY]: "" } }],
+        } as unknown as IncidentRecord),
+      ).toBeNull();
+    });
   });
 
   it("takes a named surface, so a second sweep is a second episode", async () => {

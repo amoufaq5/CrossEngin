@@ -8,7 +8,11 @@ import {
   type KeyRegistryRecord,
   type KeyRegistryStatus,
 } from "./records.js";
-import { assertTenantId, SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
+import {
+  assertTenantId,
+  SET_PLATFORM_KEY_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+} from "./tenant-context.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const TABLE = "crypto_keys";
@@ -53,7 +57,7 @@ export class PostgresKeyRegistry {
 
   async register(record: KeyRegistryRecord): Promise<void> {
     const valid = KeyRegistryRecordSchema.parse(record);
-    await this.scoped(valid.tenantId, (tx) =>
+    await this.scopedWrite(valid.tenantId, (tx) =>
       tx.query(
         `INSERT INTO ${this.schema}.${TABLE}
           (key_id, tenant_id, algorithm, purpose, public_key_base64,
@@ -153,7 +157,7 @@ export class PostgresKeyRegistry {
     if (!(KEY_STATUSES as readonly string[]).includes(status)) {
       throw new Error(`invalid key status: ${JSON.stringify(status)}`);
     }
-    await this.scoped(tenantId, (tx) =>
+    await this.scopedWrite(tenantId, (tx) =>
       tx.query(
         `UPDATE ${this.schema}.${TABLE} SET status = $1 WHERE key_id = $2`,
         [status, keyId],
@@ -169,6 +173,13 @@ export class PostgresKeyRegistry {
     await this.markStatus(keyId, "rotating", tenantId);
   }
 
+  /**
+   * A **read**'s scope: a tenant context, or nothing at all.
+   *
+   * Nothing, for the platform scope, because the platform read policy is `SELECT`-scoped on
+   * `tenant_id IS NULL` and demands no grant — a public key is readable by anyone, which is the
+   * point of a public key. A read does not claim the write elevation because it does not need it.
+   */
   private scoped<T>(
     tenantId: string | null,
     fn: (tx: PgConnection) => Promise<T>,
@@ -176,6 +187,27 @@ export class PostgresKeyRegistry {
     if (tenantId !== null) assertTenantId(tenantId);
     return this.conn.transaction(async (tx) => {
       if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      return fn(tx);
+    });
+  }
+
+  /**
+   * A **write**'s scope: a tenant context, or the platform key-write elevation, never both.
+   *
+   * `register` is an upsert (`ON CONFLICT (key_id) DO UPDATE`), so a platform registration needs the
+   * `UPDATE`-scoped platform policy as well as the `INSERT`-scoped one — which is why
+   * `meta.crypto_keys` carries four policies rather than three. `registerAuditChainKey` re-registers
+   * the platform chain's key on every boot under a deterministic `key_id`, so that upsert path is
+   * the ordinary one rather than an edge case.
+   */
+  private scopedWrite<T>(
+    tenantId: string | null,
+    fn: (tx: PgConnection) => Promise<T>,
+  ): Promise<T> {
+    if (tenantId !== null) assertTenantId(tenantId);
+    return this.conn.transaction(async (tx) => {
+      if (tenantId === null) await tx.query(SET_PLATFORM_KEY_WRITE_SQL);
+      else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
       return fn(tx);
     });
   }

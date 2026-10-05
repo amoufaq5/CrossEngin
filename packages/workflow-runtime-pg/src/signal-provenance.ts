@@ -18,6 +18,7 @@ export const SIGNAL_PROVENANCE_DEFECTS = [
   "signal_undeclared",
   "receipt_event_absent",
   "source_system_unrecorded",
+  "idempotency_key_absent",
 ] as const;
 export type SignalProvenanceDefect = (typeof SIGNAL_PROVENANCE_DEFECTS)[number];
 
@@ -58,6 +59,18 @@ export interface SignalProvenance {
   readonly deliveryGuarantee: SignalDeliveryGuarantee;
   readonly sourceSystem: string;
   readonly sourcePrincipalId: string | null;
+  /**
+   * The submitter's key, read off the receipt beside the source system — a fact of arrival, not a
+   * value chosen here. `null` is legal under the two weaker guarantees and refused under
+   * `exactly_once_idempotent`, because the column is nullable and the contract is not.
+   */
+  readonly idempotencyKey: string | null;
+}
+
+/** The receipt's `idempotencyKey`, or `null` for a log written before the engine recorded it. */
+function recordedIdempotencyKey(receipt: WorkflowEvent): string | null {
+  const value = receipt.payload["idempotencyKey"];
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function receiptEvents(
@@ -114,10 +127,25 @@ export function resolveSignalProvenance(input: {
       detail: "the signal_received event carries no actorSystemId",
     });
   }
+  const idempotencyKey = recordedIdempotencyKey(input.receipt);
+  // The last line of defence for the row `WorkflowSignalSchema` forbids and the CHECK permits.
+  // `WorkflowEngine.submitSignal` refuses this before the receipt is even appended; this catches a
+  // log written by an older build, where the key was never recorded at all — a resync of which
+  // would otherwise quietly rewrite the same unparseable row.
+  if (declared.deliveryGuarantee === "exactly_once_idempotent" && idempotencyKey === null) {
+    throw new SignalProvenanceUnresolved({
+      defect: "idempotency_key_absent",
+      signalId,
+      signalName,
+      detail:
+        "the definition declares exactly_once_idempotent but the signal_received event records no idempotencyKey",
+    });
+  }
   return {
     deliveryGuarantee: declared.deliveryGuarantee,
     sourceSystem: input.receipt.actorSystemId,
     sourcePrincipalId: input.receipt.actorPrincipalId,
+    idempotencyKey,
   };
 }
 
@@ -145,6 +173,7 @@ export function projectPersistableSignals(
       signalName: s.signalName,
       correlationKey: s.correlationKey,
       deliveryGuarantee: provenance.deliveryGuarantee,
+      idempotencyKey: provenance.idempotencyKey,
       sourceSystem: provenance.sourceSystem,
       sourcePrincipalId: provenance.sourcePrincipalId,
       status: s.status,

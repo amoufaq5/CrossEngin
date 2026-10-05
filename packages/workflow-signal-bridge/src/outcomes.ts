@@ -30,10 +30,22 @@ export const BRIDGE_CLIENT_ERROR_KINDS: ReadonlySet<BridgeOutcomeKind> = new Set
   "correlation_missing",
 ]);
 
+/** One instance the signal reached, with the signal id recorded for *that* instance. */
+export interface BridgeSignalDelivery {
+  readonly instanceId: string;
+  readonly signalId: string;
+}
+
 export interface BridgeOutcome {
   readonly kind: BridgeOutcomeKind;
   readonly reason: string;
-  readonly signalId: string | null;
+  /**
+   * Replaces the single `signalId` this carried. A submit that correlates to N instances records N
+   * signals — one per instance, each with its own id — so one id was either a lie about the other
+   * N-1 or an arbitrary pick among them. A caller that wants the pre-fan-out handle has the
+   * `Idempotency-Key` it sent, which is now stored on every one of these rows.
+   */
+  readonly deliveries: readonly BridgeSignalDelivery[];
   readonly matchedInstanceIds: readonly string[];
   readonly deduplicated: boolean;
 }

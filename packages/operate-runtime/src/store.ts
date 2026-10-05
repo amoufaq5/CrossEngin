@@ -1,3 +1,5 @@
+import { compareDecimalText } from "./decimal.js";
+
 export type EntityRecord = Record<string, unknown>;
 
 export interface ListSort {
@@ -123,8 +125,21 @@ export function decodeCursor(cursor: string | null): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+/**
+ * Orders two field values. Two numbers compare numerically; two **decimal numerals** compare
+ * numerically too, and exactly — a `decimal` field arrives here as its canonical wire string
+ * (see `decimal.ts`), and a `localeCompare` would put `"9.50"` after `"10.25"`, so this store's
+ * sort would disagree with the typed store's `ORDER BY` on the very field the wire type was
+ * unified for. The rule is "both sides are bare numerals" rather than "the field is declared
+ * decimal" because this comparator is handed values, not declarations; the cost is that a *text*
+ * field holding bare numerals also sorts numerically here, where the SQL stores sort it as text.
+ */
 function compareValues(a: unknown, b: unknown): number {
   if (typeof a === "number" && typeof b === "number") return a - b;
+  if (typeof a === "string" && typeof b === "string") {
+    const exact = compareDecimalText(a, b);
+    if (exact !== null) return exact;
+  }
   return String(a ?? "").localeCompare(String(b ?? ""));
 }
 
@@ -137,17 +152,29 @@ function coerceLike(value: string, sample: unknown): unknown {
   return value;
 }
 
+/**
+ * Equality for a filter value against a record value. Two bare numerals compare as numbers, so
+ * `?amount=10.25` matches a scale-3 field's canonical `"10.250"` — which is what the SQL stores
+ * do, since they compare a decimal filter on the native `NUMERIC` type. Without it, padding a
+ * decimal to its declared scale would stop an `eq` filter matching the value a client typed.
+ */
+function equalsValue(recordValue: unknown, filterValue: string): boolean {
+  const text = String(recordValue ?? "");
+  if (text === filterValue) return true;
+  return compareDecimalText(text, filterValue) === 0;
+}
+
 /** Evaluates one typed filter against a record (pure; mirrors the SQL the stores emit). */
 export function matchesFilter(record: EntityRecord, filter: ListFilter): boolean {
   const rv = record[filter.field];
   const op = filter.op ?? "eq";
   if (op === "in") {
     const arr = Array.isArray(filter.value) ? filter.value : [filter.value as string];
-    return arr.some((v) => String(rv ?? "") === v);
+    return arr.some((v) => equalsValue(rv, v));
   }
   const fv = Array.isArray(filter.value) ? (filter.value[0] ?? "") : (filter.value as string);
-  if (op === "eq") return String(rv ?? "") === fv;
-  if (op === "ne") return String(rv ?? "") !== fv;
+  if (op === "eq") return equalsValue(rv, fv);
+  if (op === "ne") return !equalsValue(rv, fv);
   if (op === "contains") return String(rv ?? "").toLowerCase().includes(fv.toLowerCase());
   const cmp = compareValues(rv, coerceLike(fv, rv));
   if (op === "gt") return cmp > 0;
@@ -243,7 +270,7 @@ export class InMemoryEntityStore implements EntityStore {
   private readonly records: Map<string, Map<string, EntityRecord>> = new Map();
 
   private bucket(tenantId: string, entity: string): Map<string, EntityRecord> {
-    const key = `${tenantId} ${entity}`;
+    const key = `${tenantId}\u0000${entity}`;
     let b = this.records.get(key);
     if (b === undefined) {
       b = new Map();

@@ -14,7 +14,7 @@ import {
 } from "./id-mapping.js";
 import { PostgresInstanceStore } from "./instance-store.js";
 import { projectPersistableSignals } from "./signal-provenance.js";
-import { PostgresSignalStore } from "./signal-store.js";
+import { PostgresSignalDeduplicator, PostgresSignalStore } from "./signal-store.js";
 import { PostgresTimerStore, type TimerProjection } from "./timer-store.js";
 
 export interface ProjectingEventLogOptions {
@@ -145,6 +145,11 @@ export interface PersistentStores {
   readonly instanceStore: PostgresInstanceStore;
   readonly activityStore: PostgresActivityStore;
   readonly signalStore: PostgresSignalStore;
+  /**
+   * Beside the store rather than inside it: the store writes one row, while this answers a question
+   * about the whole table — which is `WorkflowEngine`'s to ask, not `ProjectingEventLog`'s.
+   */
+  readonly signalDeduplicator: PostgresSignalDeduplicator;
   readonly timerStore: PostgresTimerStore;
 }
 
@@ -162,6 +167,7 @@ export function buildPersistentStores(input: BuildPersistentStoresInput): Persis
     }),
     activityStore: new PostgresActivityStore({ conn: input.conn, instanceResolver }),
     signalStore: new PostgresSignalStore({ conn: input.conn, instanceResolver }),
+    signalDeduplicator: new PostgresSignalDeduplicator(input.conn),
     timerStore: new PostgresTimerStore({ conn: input.conn, instanceResolver }),
   };
 }

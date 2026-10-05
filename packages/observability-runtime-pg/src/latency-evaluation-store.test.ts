@@ -3,6 +3,19 @@ import { describe, expect, it, vi } from "vitest";
 import { PostgresSloLatencyEvaluationStore } from "./latency-evaluation-store.js";
 import type { SloLatencyEvaluationRecord } from "./records.js";
 
+/**
+ * The statement under test, found by what it *is* rather than by where it sits.
+ *
+ * `scopedWrite` issues a session setting before the write, so every positional `capture[0]` in a
+ * write test would otherwise have had to shift by one — and would shift again the next time a
+ * statement joins the transaction. Asserting on the session setting itself is a separate test.
+ */
+function written(capture: readonly Captured[]): Captured {
+  const found = capture.find((c) => !c.sql.includes("set_config"));
+  if (found === undefined) throw new Error("no statement other than the session setting was issued");
+  return found;
+}
+
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
 function mockConnection(
@@ -14,7 +27,11 @@ function mockConnection(
       if (capture !== undefined) capture.push({ sql, params });
       return result;
     }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    // `scopedWrite` runs its write inside a transaction, so a fake whose `transaction` returns
+    // undefined silently drops the statement under test.
+    transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      fn(mockConnection(capture, result)),
+    ) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
@@ -44,15 +61,15 @@ describe("PostgresSloLatencyEvaluationStore.record", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloLatencyEvaluationStore(mockConnection(capture));
     await store.record(fixture());
-    expect(capture[0]?.sql).toContain("INSERT INTO meta.slo_latency_evaluations");
-    expect(capture[0]?.sql).toContain("ON CONFLICT (evaluation_id) DO NOTHING");
+    expect(written(capture).sql).toContain("INSERT INTO meta.slo_latency_evaluations");
+    expect(written(capture).sql).toContain("ON CONFLICT (evaluation_id) DO NOTHING");
   });
 
   it("serializes breaches to a JSON string", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloLatencyEvaluationStore(mockConnection(capture));
     await store.record(fixture());
-    const breachesParam = capture[0]?.params?.[9] as string;
+    const breachesParam = written(capture).params?.[9] as string;
     expect(typeof breachesParam).toBe("string");
     expect(JSON.parse(breachesParam)).toHaveLength(1);
   });
@@ -61,8 +78,8 @@ describe("PostgresSloLatencyEvaluationStore.record", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloLatencyEvaluationStore(mockConnection(capture));
     await store.record(fixture());
-    expect(capture[0]?.params?.[7]).toBe("p95");
-    expect(capture[0]?.params?.[8]).toBe(30);
+    expect(written(capture).params?.[7]).toBe("p95");
+    expect(written(capture).params?.[8]).toBe(30);
   });
 
   it("rejects a malformed evaluation id", async () => {

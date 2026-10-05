@@ -819,10 +819,16 @@ export function sharedTableRetention(erasure: SharedTableErasure): {
  *
  * The third case is why `retained` keeps its singular obligation and this function can still reach
  * it: with nothing destroyed there is no scope to carry, and `retained` is the contract's shape for
- * that. It needs one obligation, so a census spanning more than one has nowhere to put the rest —
- * refused by `DeletionAttestationSchema` rather than silently narrowed here, because quietly
- * dropping an obligation from a proof is the class of defect this whole module is about. With the
- * current set that cannot arise: both entries are `tax_records_7y`.
+ * that. It takes exactly one obligation, so a census spanning two has nowhere to put the second —
+ * and that is **refused here**, loudly, rather than narrowed. ADR-0330 recorded the expectation that
+ * `DeletionAttestationSchema` would catch it; it cannot, and the distinction matters. The schema
+ * checks the object it is handed, and an attestation built from `obligations[0]` is a perfectly valid
+ * `retained` attestation — the second obligation is not rejected, it was never written down. So the
+ * proof would name one lawful basis for data held under two, with every digest verifying over it.
+ * Quietly dropping a reason from a proof is the defect this whole module exists to prevent, so the
+ * one shape that could do it throws instead. Unreachable with the current set, where both entries
+ * are `tax_records_7y`; reachable the day a second obligation joins, which is exactly when nobody
+ * will be looking.
  */
 export function sharedTableErasureAttestation(
   erasure: SharedTableErasure,
@@ -833,14 +839,15 @@ export function sharedTableErasureAttestation(
   const base = { subsystem: "shared_tables" as const, attestedBy, attestedAt: erasure.erasedAt };
   if (!erasure.erased) {
     if (retention === null) return { ...base, outcome: "nothing_to_erase" };
-    return {
-      ...base,
-      outcome: "retained",
-      // Deliberately `[0]` and not a join: `retentionObligation` is one enum value, and a second
-      // obligation here must fail validation rather than disappear.
-      retentionObligation: retention.obligations[0],
-      retainedDataReference: retention.dataReference,
-    };
+    const only = retention.obligations[0];
+    if (only === undefined || retention.obligations.length > 1) {
+      throw new Error(
+        "shared_tables erased nothing and is retaining data under more than one obligation" +
+          ` (${retention.obligations.join(", ")}); the 'retained' outcome names exactly one, and` +
+          " naming one of two would sign a proof that under-reports why the data is still there",
+      );
+    }
+    return { ...base, outcome: "retained", retentionObligation: only, retainedDataReference: retention.dataReference };
   }
   // Exactly the three fields `SUBSYSTEM_SCOPE_FIELDS.shared_tables` names, and notably not
   // `schemas`: the shared schema is not this tenant's and is not going anywhere.

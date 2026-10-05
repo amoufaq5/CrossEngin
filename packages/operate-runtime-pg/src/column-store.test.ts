@@ -4,7 +4,7 @@ import { encodeKeyset } from "@crossengin/operate-runtime";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import { ColumnMappedEntityStore } from "./column-store.js";
+import { ColumnMappedEntityStore, decimalSpecFromSqlType } from "./column-store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -117,26 +117,27 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
     const insert = cap.calls.find((c) => c.sql.includes("INSERT INTO"))!;
     expect(insert.sql).toContain('"tenant_app"."widget"');
     expect(insert.sql).toContain('"owner_id"'); // reference field → _id column
-    expect(insert.params).toEqual([TENANT, "w1", "S1", 9.5, "acct-1"]);
-    expect(created).toEqual({ id: "w1", sku: "S1", price: 9.5, owner: "acct-1" });
+    // `price` is `decimal(12, 2)`: bound and echoed as its canonical wire string.
+    expect(insert.params).toEqual([TENANT, "w1", "S1", "9.50", "acct-1"]);
+    expect(created).toEqual({ id: "w1", sku: "S1", price: "9.50", owner: "acct-1" });
   });
 
   it("get maps columns back to fields (owner_id → owner), nulls omitted", async () => {
-    const cap = capturePg([{ id: "w1", sku: "S1", price: 9.5, status: null, owner_id: "acct-1" }]);
+    const cap = capturePg([{ id: "w1", sku: "S1", price: "9.50", status: null, owner_id: "acct-1" }]);
     const record = await store(cap).get(TENANT, "Widget", "w1");
-    expect(record).toEqual({ id: "w1", sku: "S1", price: 9.5, owner: "acct-1" });
+    expect(record).toEqual({ id: "w1", sku: "S1", price: "9.50", owner: "acct-1" });
     const select = cap.calls.find((c) => c.sql.includes("SELECT"))!;
     expect(select.params).toEqual([TENANT, "w1"]);
   });
 
   it("update SETs only patched columns + updated_at and returns the merged row", async () => {
-    const cap = capturePg([{ id: "w1", sku: "S1", price: 12, owner_id: null }]);
+    const cap = capturePg([{ id: "w1", sku: "S1", price: "12.00", owner_id: null }]);
     const updated = await store(cap).update(TENANT, "Widget", "w1", { price: 12 });
     const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
     expect(upd.sql).toContain('"price" = $3');
     expect(upd.sql).toContain('"updated_at" = now()');
     expect(upd.sql).toContain("RETURNING");
-    expect(updated).toMatchObject({ id: "w1", price: 12 });
+    expect(updated).toMatchObject({ id: "w1", price: "12.00" });
   });
 
   it("remove reports whether a row was deleted", async () => {
@@ -520,10 +521,76 @@ describe("ColumnMappedEntityStore — a DATE column", () => {
     expect(record?.["on_day"]).toBe("2026-02-02");
   });
 
-  it("leaves a non-temporal column untouched", async () => {
-    // A `NUMERIC` still arrives as a string and is deliberately not rewritten here; see the ADR.
+  it("leaves a non-temporal, non-numeric column untouched", async () => {
     const cap = capturePg([{ id: "s1", on_day: null }]);
     const record = await shiftStore(cap).get(TENANT, "Shift", "s1");
     expect(record).toEqual({ id: "s1" });
+  });
+});
+
+describe("ColumnMappedEntityStore — decimal wire type", () => {
+  it("recovers a column's declaration from the NUMERIC type the kernel emitted", () => {
+    expect(decimalSpecFromSqlType("NUMERIC(12, 2)")).toEqual({ precision: 12, scale: 2 });
+    expect(decimalSpecFromSqlType("NUMERIC(20, 10)")).toEqual({ precision: 20, scale: 10 });
+    expect(decimalSpecFromSqlType("NUMERIC(12, 2)[]")).toEqual({ precision: 12, scale: 2 });
+    for (const other of ["TEXT", "INTEGER", "TIMESTAMPTZ", "NUMERIC", "VARCHAR(320)"]) {
+      expect(decimalSpecFromSqlType(other)).toBeNull();
+    }
+  });
+
+  it("serves the string node-postgres returns, at the declared scale", async () => {
+    const cap = capturePg([{ id: "w1", price: "10.25" }]);
+    expect((await store(cap).get(TENANT, "Widget", "w1"))?.["price"]).toBe("10.25");
+  });
+
+  it("pads a value Postgres rendered at a shorter scale", async () => {
+    // Reachable through an encrypted decimal column, which decrypts to whatever text was stored
+    // rather than to Postgres's own numeric rendering.
+    const cap = capturePg([{ id: "w1", price: "10.2" }]);
+    expect((await store(cap).get(TENANT, "Widget", "w1"))?.["price"]).toBe("10.20");
+  });
+
+  it("keeps a value no double holds", async () => {
+    const cap = capturePg([{ id: "w1", price: "9007199254740993.01" }]);
+    expect((await store(cap).get(TENANT, "Widget", "w1"))?.["price"]).toBe("9007199254740993.01");
+  });
+
+  it("echoes a create at the wire type, so create and get cannot disagree", async () => {
+    const cap = capturePg();
+    const created = await store(cap).create(TENANT, "Widget", { id: "w1", sku: "S", price: 10.25 });
+    expect(created["price"]).toBe("10.25");
+    // The bound parameter is the canonical string; Postgres parses it under the column's type.
+    const insert = cap.calls.find((c) => c.sql.startsWith("INSERT"))!;
+    expect(insert.params).toContain("10.25");
+  });
+
+  it("leaves a value it cannot read as a decimal exactly as it found it", async () => {
+    const cap = capturePg([{ id: "w1", price: "not-a-number" }]);
+    expect((await store(cap).get(TENANT, "Widget", "w1"))?.["price"]).toBe("not-a-number");
+  });
+
+  it("puts the canonical form in the keyset cursor, cast on the next page's seek", async () => {
+    const cap = capturePg([
+      { id: "w1", price: "9.50" },
+      { id: "w2", price: "10.25" },
+    ]);
+    const page = await store(cap).listPage(TENANT, "Widget", {
+      limit: 1,
+      cursor: null,
+      sort: [{ field: "price", direction: "asc" }],
+      filters: [],
+    });
+    expect(page.records.map((r) => r["price"])).toEqual(["9.50"]);
+    expect(page.nextCursor).not.toBeNull();
+    const cap2 = capturePg([{ id: "w2", price: "10.25" }]);
+    await store(cap2).listPage(TENANT, "Widget", {
+      limit: 1,
+      cursor: page.nextCursor,
+      sort: [{ field: "price", direction: "asc" }],
+      filters: [],
+    });
+    const sel = cap2.calls.find((c) => c.sql.includes("SELECT"))!;
+    expect(sel.sql).toContain('"price" > $2::NUMERIC(12, 2)');
+    expect(sel.params).toContain("9.50");
   });
 });

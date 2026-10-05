@@ -16,6 +16,7 @@ import {
   entityBySlug,
   fieldErrorMap,
   parseValidationErrors,
+  postsAsNumber,
   slugForEntityName,
   useSchema,
   viewerRoles,
@@ -714,7 +715,7 @@ function CreateForm({
       for (const f of editable) {
         const v = values[f.name];
         if (v === undefined || v === "") continue;
-        payload[f.name] = f.input === "number" ? Number(v) : v;
+        payload[f.name] = postsAsNumber(f) ? Number(v) : v;
       }
       await createRecord(entity.slug, payload);
       invalidateReferenceCache(entity.slug);

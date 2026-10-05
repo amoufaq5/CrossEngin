@@ -1683,7 +1683,9 @@ Options:
   --checkpoint-config <file>  JSON checkpoint config ({schema?, intervalMs?, checkpointedBy?, tenants?,
                        includePlatform?, allTenants?, tenantStatuses?}) — periodically anchors a chain
                        checkpoint per tenant (allTenants: every active tenant from the live registry,
-                       tenantStatuses: which statuses to include) so verifying a long chain stays bounded
+                       tenantStatuses: which statuses to include) so verifying a long chain stays bounded.
+                       includePlatform defaults to TRUE and is paired with the integrity proof's: the
+                       proof's truncation check has no witness without a checkpoint
                        (needs --store pg + --audit-chain-config)
   --integrity-proof-config <file>  JSON integrity-proof config ({schema?, intervalMs?, verifiedBy?,
                        tenants?, includePlatform?, allTenants?, tenantStatuses?, auditRowLimit?,
@@ -1692,7 +1694,9 @@ Options:
                        the chain's own links + signatures), checks for chain truncation against the
                        latest checkpoint, and appends the verdict to the chain as a security_event.
                        With escalation ({severity?, category?, declaredBy?, alertPolicy}) a
-                       compromised verdict declares an incident and pages once per episode
+                       compromised verdict declares an incident and pages once per episode.
+                       includePlatform defaults to TRUE: three escalators write platform-scope rows,
+                       so leaving it off meant writing rows nothing verified
                        (needs --store pg + --audit-chain-config)
   --audit-sampling-refresh-ms <n>  Refresh interval (ms, >=1000) for live per-tenant audit sampling read
                        from meta.operate_tenant_settings (overrides the config map without a redeploy);

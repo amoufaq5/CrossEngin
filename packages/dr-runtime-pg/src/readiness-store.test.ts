@@ -4,6 +4,19 @@ import { PostgresDrReadinessStore } from "./readiness-store.js";
 import { readinessSnapshotRecordFrom } from "./records.js";
 import { mockConnection, type Captured } from "./test-fakes.js";
 
+/**
+ * The statement under test, found by what it *is* rather than by where it sits.
+ *
+ * `scopedWrite` issues a session setting before the write, so every positional `capture[0]` in a
+ * write test would otherwise have had to shift by one — and would shift again the next time a
+ * statement joins the transaction. Asserting on the session setting itself is a separate test.
+ */
+function written(capture: readonly Captured[]): Captured {
+  const found = capture.find((c) => !c.sql.includes("set_config"));
+  if (found === undefined) throw new Error("no statement other than the session setting was issued");
+  return found;
+}
+
 const NOW = "2026-06-02T12:00:00.000Z";
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -21,20 +34,20 @@ describe("PostgresDrReadinessStore.record", () => {
     const capture: Captured[] = [];
     const store = new PostgresDrReadinessStore(mockConnection(capture));
     await store.record(record());
-    expect(capture[0]?.sql).toContain("INSERT INTO meta.dr_readiness_snapshots");
-    expect(capture[0]?.sql).toContain("ON CONFLICT (snapshot_id) DO NOTHING");
-    expect(capture[0]?.sql).toContain("$12::jsonb");
-    expect(capture[0]?.params?.[0]).toBe("drr_snap0001");
-    expect(capture[0]?.params?.[1]).toBe(TENANT);
-    expect(capture[0]?.params?.[2]).toBe(true);
-    expect(capture[0]?.params?.[3]).toBe(0);
+    expect(written(capture).sql).toContain("INSERT INTO meta.dr_readiness_snapshots");
+    expect(written(capture).sql).toContain("ON CONFLICT (snapshot_id) DO NOTHING");
+    expect(written(capture).sql).toContain("$12::jsonb");
+    expect(written(capture).params?.[0]).toBe("drr_snap0001");
+    expect(written(capture).params?.[1]).toBe(TENANT);
+    expect(written(capture).params?.[2]).toBe(true);
+    expect(written(capture).params?.[3]).toBe(0);
   });
 
   it("serializes the full report as a json string", async () => {
     const capture: Captured[] = [];
     const store = new PostgresDrReadinessStore(mockConnection(capture));
     await store.record(record());
-    const raw = capture[0]?.params?.[11];
+    const raw = written(capture).params?.[11];
     expect(typeof raw).toBe("string");
     expect(JSON.parse(raw as string).ready).toBe(true);
   });

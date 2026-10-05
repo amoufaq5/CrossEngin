@@ -1,11 +1,25 @@
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
+import { PLATFORM_WRITE_GRANTS, type PgConnection, type PgQueryResult } from "@crossengin/kernel-pg";
+
+/** Thrown where Postgres raises `new row violates row-level security policy`. */
+export class FakeRlsViolation extends Error {
+  constructor(readonly detail: string) {
+    super(`new row violates row-level security policy for table "crypto_keys": ${detail}`);
+    this.name = "FakeRlsViolation";
+  }
+}
 
 /**
  * In-memory fake of `meta.crypto_keys` with RLS-like scoping. Rows are keyed by `key_id`. Each
- * transaction starts with a null (platform) tenant context; a `set_config('app.current_tenant_id', …)`
- * scopes subsequent statements. RLS visibility models the table's platform-or-tenant policy:
- * `tenant_id IS NULL OR tenant_id = <context>`. Enough to exercise upsert, keyed/filtered reads,
- * and status updates offline.
+ * transaction starts with no scope at all; `set_config('app.current_tenant_id', …)` scopes it to a
+ * tenant and `set_config('app.platform_key_write', 'on', …)` claims the platform write elevation.
+ *
+ * **It models the four policies the table carries, not the one it used to.** Reads follow
+ * `tenant_id IS NULL OR tenant_id = <context>`, which is unchanged: the platform read arm is
+ * `SELECT`-scoped and needs no grant. Writes do not. A platform-scope INSERT or UPDATE raises
+ * unless the elevation is held, and a *tenant*-scope write raises unless that tenant's context is
+ * set — including when the elevation is. That second rule is what makes the fake worth having:
+ * holding the platform grant must buy no access to a tenant's keys, and a fake that let it through
+ * would have reported the store correct while the live policy refused it.
  */
 export function fakeCryptoKeysPg(): PgConnection {
   const rows = new Map<string, Record<string, unknown>>();
@@ -17,6 +31,24 @@ export function fakeCryptoKeysPg(): PgConnection {
 
   function makeClient(): PgConnection {
     let currentTenant: string | null = null;
+    let platformWrite = false;
+
+    /** `WITH CHECK` for whichever of the three write policies could match this row. */
+    function assertWritable(tenantId: string | null): void {
+      if (tenantId === null) {
+        if (!platformWrite) {
+          throw new FakeRlsViolation(
+            `a platform-scope row needs ${PLATFORM_WRITE_GRANTS.key}`,
+          );
+        }
+        return;
+      }
+      if (tenantId !== currentTenant) {
+        throw new FakeRlsViolation(
+          `tenant ${tenantId} is not the session's scope (${String(currentTenant)})`,
+        );
+      }
+    }
 
     const query = async (
       sql: string,
@@ -24,6 +56,10 @@ export function fakeCryptoKeysPg(): PgConnection {
     ): Promise<PgQueryResult> => {
       const p = params ?? [];
 
+      if (sql.includes(PLATFORM_WRITE_GRANTS.key)) {
+        platformWrite = true;
+        return { rows: [], rowCount: 0 };
+      }
       if (sql.includes("set_config")) {
         currentTenant = (p[0] as string | null) ?? null;
         return { rows: [], rowCount: 0 };
@@ -42,6 +78,7 @@ export function fakeCryptoKeysPg(): PgConnection {
           status: p[7],
           created_at: p[8],
         };
+        assertWritable((incoming.tenant_id ?? null) as string | null);
         const existing = rows.get(keyId);
         if (existing === undefined) {
           rows.set(keyId, incoming);
@@ -63,7 +100,10 @@ export function fakeCryptoKeysPg(): PgConnection {
         if (statusIdx === null || keyIdIdx === null) return { rows: [], rowCount: 0 };
         const keyId = p[keyIdIdx] as string;
         const row = rows.get(keyId);
-        if (row === undefined || !visible(row, currentTenant)) {
+        // An UPDATE whose row no policy reaches matches zero rows; it does not raise. Only the
+        // `WITH CHECK` on the row it would *write* raises, and the statement never changes
+        // `tenant_id`, so the two predicates are the same one here.
+        if (row === undefined || !writable(row, currentTenant, platformWrite)) {
           return { rows: [], rowCount: 0 };
         }
         row.status = p[statusIdx];
@@ -128,4 +168,17 @@ export function fakeCryptoKeysPg(): PgConnection {
 function visible(row: Record<string, unknown>, currentTenant: string | null): boolean {
   const tenantId = (row["tenant_id"] ?? null) as string | null;
   return tenantId === null || tenantId === currentTenant;
+}
+
+/**
+ * Which existing rows a write reaches — strictly narrower than `visible`, which is the whole point
+ * of the split: a platform row is readable by anyone and writable only under the elevation.
+ */
+function writable(
+  row: Record<string, unknown>,
+  currentTenant: string | null,
+  platformWrite: boolean,
+): boolean {
+  const tenantId = (row["tenant_id"] ?? null) as string | null;
+  return tenantId === null ? platformWrite : tenantId === currentTenant;
 }

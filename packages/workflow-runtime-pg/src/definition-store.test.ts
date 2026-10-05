@@ -12,6 +12,7 @@ import {
   WORKFLOW_DEFINITION_COLUMN_NAMES,
   WORKFLOW_DEFINITION_JSONB_COLUMNS,
   WORKFLOW_DEFINITION_PARAM_COUNT,
+  SET_PLATFORM_CONFIG_WRITE_SQL,
   WorkflowDefinitionConflictError,
   assertTenantId,
   definitionPlaceholders,
@@ -289,13 +290,31 @@ describe("PostgresWorkflowDefinitionStore.publish", () => {
     expect(capture[0]?.params).toEqual([TENANT]);
   });
 
-  it("sets no tenant context for a platform-wide write, which isolation would hide", async () => {
+  it("claims the platform config-write elevation, and no tenant context, for a platform-wide write", async () => {
+    // It used to set nothing at all, on the reasoning that tenant isolation would hide the very row
+    // being written. That is still true — and the `tenant_id IS NULL` arm of the one `ALL`-scope
+    // policy also satisfied its `WITH CHECK`, so any tenant session could publish a platform-wide
+    // definition every tenant without its own would then run. The write arm is its own policy on
+    // this setting now; the read arm still needs no grant.
     const capture: Recorded[] = [];
     const conn = mockConnection(
       (sql) => (sql.includes("INSERT") ? { rows: [{ id: ROW_UUID }], rowCount: 1 } : EMPTY),
       capture,
     );
     await new PostgresWorkflowDefinitionStore(conn).publish(definition({ tenantId: null }));
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_PLATFORM_CONFIG_WRITE_SQL);
+    expect(settings[0]?.sql).toContain("app.platform_config_write");
+    expect(capture.some((c) => c.sql.includes("app.current_tenant_id"))).toBe(false);
+  });
+
+  it("claims nothing at all on a platform-wide read", async () => {
+    // The platform read policy is `SELECT`-scoped on `tenant_id IS NULL` and needs no grant, so a
+    // read claims no elevation — the behaviour it had before the split.
+    const capture: Recorded[] = [];
+    const conn = mockConnection(() => EMPTY, capture);
+    await new PostgresWorkflowDefinitionStore(conn).loadById("wfd_missing00000001");
     expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 

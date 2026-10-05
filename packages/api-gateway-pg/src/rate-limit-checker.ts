@@ -5,6 +5,8 @@ import type {
 } from "@crossengin/api-gateway-runtime";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
+import { scopedWrite } from "./pipeline-execution-store.js";
+
 const SCHEMA = "meta";
 const DECISIONS_TABLE = "rate_limit_decisions";
 
@@ -119,29 +121,32 @@ export class PostgresRateLimitChecker implements RateLimitChecker {
       : input.decision.quotaExceeded === true
         ? "denied_quota_exceeded"
         : "denied_rate_limit_exceeded";
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${DECISIONS_TABLE} (
-         decision_id, tenant_id, policy_id, quota_definition_id, scope_key,
-         principal_id, api_key_prefix, route, decided_at, outcome,
-         cost_units, limit_total, remaining_after, reset_at,
-         retry_after_seconds, soft_throttle_delay_ms,
-         applied_headers, problem_details, bypass_reason
-       )
-       VALUES ($1, $2, NULL, NULL, $3, $4, NULL, $5, $6, $7, 1, $8, $9, $10, $11, NULL, NULL, NULL, NULL)
-       ON CONFLICT (decision_id) DO NOTHING`,
-      [
-        input.decisionId,
-        input.tenantId,
-        input.scopeKey,
-        input.principalId,
-        input.routeOperationId,
-        input.decidedAtIso,
-        outcome,
-        input.decision.limit,
-        input.decision.remaining,
-        input.decision.resetAt,
-        input.decision.allowed ? null : input.decision.retryAfterSeconds,
-      ],
+    await scopedWrite(this.conn, input.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${DECISIONS_TABLE} (
+           decision_id, tenant_id, policy_id, quota_definition_id, scope_key,
+           principal_id, api_key_prefix, route, decided_at, outcome,
+           cost_units, limit_total, remaining_after, reset_at,
+           retry_after_seconds, soft_throttle_delay_ms,
+           applied_headers, problem_details, bypass_reason
+         )
+         VALUES ($1, $2, NULL, NULL, $3, $4, NULL, $5, $6, $7, 1, $8, $9, $10, $11, NULL, NULL, NULL, NULL)
+         ON CONFLICT (decision_id) DO NOTHING`,
+        [
+          input.decisionId,
+          input.tenantId,
+          input.scopeKey,
+          input.principalId,
+          input.routeOperationId,
+          input.decidedAtIso,
+          outcome,
+          input.decision.limit,
+          input.decision.remaining,
+          input.decision.resetAt,
+          input.decision.allowed ? null : input.decision.retryAfterSeconds,
+        ],
+    
+      ),
     );
   }
 }

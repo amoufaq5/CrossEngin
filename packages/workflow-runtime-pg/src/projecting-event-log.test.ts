@@ -127,7 +127,7 @@ function signalReceivedEvent(): WorkflowEvent {
     timerId: null,
     childInstanceId: null,
     variableName: null,
-    payload: { signalName: "approve", correlationKey: "po-1" },
+    payload: { signalName: "approve", correlationKey: "po-1", idempotencyKey: "evt-1" },
     correlationId: null,
     causationEventId: null,
   };
@@ -273,7 +273,9 @@ describe("ProjectingEventLog.append — subsequent events", () => {
     // The two NOT NULL columns with no default: without them the INSERT could never commit, which
     // is why every submitSignal against a real database threw.
     expect(signalInsert?.params?.[5]).toBe("at_least_once");
-    expect(signalInsert?.params?.[6]).toBe("inbox-webhook");
+    expect(signalInsert?.params?.[7]).toBe("inbox-webhook");
+    // And the column the table's unique index is on, which nothing had ever bound.
+    expect(signalInsert?.params?.[6]).toBe("evt-1");
   });
 
   it("refuses a signal whose definition is not in the map", async () => {

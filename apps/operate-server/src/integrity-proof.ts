@@ -28,8 +28,24 @@ export const IntegrityProofConfigSchema = z
     /** Actor recorded on the verdict chain entry. */
     verifiedBy: z.string().min(1).default("operate-server"),
     tenants: z.array(z.string().uuid()).default([]),
-    /** Also prove the platform chain — both halves now, since it has audit rows (ADR-0331). */
-    includePlatform: z.boolean().default(false),
+    /**
+     * Also prove the platform chain — both halves, since ADR-0331 gave it audit rows.
+     *
+     * **Defaults to `true` as of ADR-0332**, together with `--checkpoint-config`'s, and the pairing
+     * is the whole decision. Three escalators write platform-scope rows now, so a deployment that
+     * did not opt in was writing rows **nothing verified** — ADR-0327's "built, correct, and read by
+     * nothing" in a new place, and in the one table where the integrity proof is the only detector
+     * there is.
+     *
+     * Flipping *one* of the two would be wrong rather than merely partial: ADR-0287 established that
+     * tail removal is invisible to hash links, so the truncation check needs a checkpoint witness,
+     * and proving a scope that is never checkpointed leaves that half silently unwitnessed. Flipping
+     * both is safe because an empty chain answers `skipped_empty` rather than erroring, so a
+     * deployment with no platform rows pays one cheap query per pass and hears nothing.
+     *
+     * An explicit `false` is still honoured; what changed is what silence means.
+     */
+    includePlatform: z.boolean().default(true),
     allTenants: z.boolean().default(false),
     tenantStatuses: z.array(z.string().min(1)).nonempty().optional(),
     /** How many of the most recent audit rows to prove per pass (the store clamps at 500). */

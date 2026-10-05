@@ -243,6 +243,9 @@ importers:
       '@crossengin/workflow-runtime-pg':
         specifier: workspace:*
         version: link:../../packages/workflow-runtime-pg
+      '@crossengin/workflow-worker':
+        specifier: workspace:*
+        version: link:../../packages/workflow-worker
       zod:
         specifier: ^3.23.0
         version: 3.25.76

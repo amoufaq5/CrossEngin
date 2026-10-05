@@ -35,7 +35,11 @@ function mockConnection(
       if (capture !== undefined) capture.push({ sql, params });
       return { rows: [], rowCount: 1 };
     }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    // `scopedWrite` runs its write inside a transaction, so a fake whose `transaction` returns
+    // undefined silently drops the statement under test.
+    transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      fn(mockConnection(capture)),
+    ) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };

@@ -39,7 +39,7 @@ type errors.
   The last three increments (ADR-0330, ADR-0331) have been **sweeps rather than features**: taking a
   defect that was found once and asking how many other members its class has. That turned up a
   column-level CHECK nobody compared across 765 of them, a `Date`-vs-string assumption in four stores
-  (one of them breaking keyset pagination in production), 28 tables letting a tenant write a
+  (one of them breaking keyset pagination in production), 29 tables letting a tenant write a
   platform-wide row, a signal store that could never succeed against a real database, and a workflow
   orchestration layer that was unreachable from the deployed binary. The recurring shape is that
   **the honest fix usually sits one level up from where the pain was felt.**
@@ -80,7 +80,7 @@ increment. See **What's actually left** at the bottom for the current open ends.
   `DELETE`'s `USING`; and `tenant_id IS NULL` *inside* the check, so the write elevation buys no access
   to any tenant's chain. `meta.forensic_chain_entries` and `_checkpoints` carry the same split on the
   same grant, since the chain anchors that trail and the two are one privilege.
-  **The same `ALL`-scope shape is still on 28 other tables** and is a real hole there, not a
+  **The same `ALL`-scope shape is still on 29 other tables** and is a real hole there, not a
   theoretical one — see *What's actually left*.
 - **Strict TypeScript.** No `any`. No `--no-verify`. Explicit return types on
   exported functions.
@@ -1196,6 +1196,11 @@ Recurring patterns enforced by zod `superRefine`:
 platform-level Postgres tables. Each new package adds tables there and updates
 `meta-schema.test.ts` (count, sorted expected-names list, column assertions).
 
+**A fresh database holds one more table than the catalog does**, and it is not a stale count:
+`information_schema` reports 145 `meta` base tables against `META_TABLES`' 144, because
+`_meta_migrations` is created by `kernel-pg`'s applier for its own per-statement hash bookkeeping and
+is deliberately not emitted from the catalog. Verified. Count the catalog, not the database.
+
 Two invariants the test suite enforces:
 
 1. Every `tenant_id`-bearing table has RLS enabled.
@@ -1326,10 +1331,10 @@ opened them.
 
 **Load-bearing**
 
-- **28 tables let a tenant session write a platform-wide row** (ADR-0313, ADR-0331). The pattern is a
+- **29 tables let a tenant session write a platform-wide row** (ADR-0313, ADR-0331). The pattern is a
   single `ALL`-scope policy whose predicate is
   `tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID`,
-  and **not one of the 28 declares a `command`** — so on an `ALL` policy, where the `USING` expression
+  and **not one of the 29 declares a `command`** — so on an `ALL` policy, where the `USING` expression
   also serves as the `WITH CHECK`, `tenant_id IS NULL` satisfies it unconditionally. Demonstrated live
   as a non-owner role on the forensic chain before it was fixed: a tenant session appended a
   platform-scope entry (`INSERT 0 1`) and the next verification reported `integrity BROKEN, signatures
@@ -1688,19 +1693,35 @@ opened them.
   one of them is silent where every other half-configuration warns. **Both are in `FCM_VARS` now**
   (ADR-0330), so an endpoint override with no `FCM_PROJECT_ID` warns like every other
   half-configuration instead of skipping push in silence.
-- **A retained claim is outside the signed bytes** (ADR-0330), which is the new load-bearing gap and
-  the same class as ADR-0323's `scope_tampered` in a third place. `contentManifestSha256` commits to
-  the composed `DeletionScope`; `retainedReason` / `retainedDataReference` are on the record and in
-  **neither** digest, and never were — so a stored `erased_and_retained` proof can have its retention
-  prose edited with both digests byte-identical. The adoption guarantee is the other side of the same
-  coin and was measured: restating an existing erasure under the new outcome reproduces both v1
-  digests **exactly**, pinned against digests computed from the pre-change `dist/`. Closing it means a
-  `crossengin.tombstone.content.v3` carrying the retention claim, the way ADR-0329's v2 carried the
-  capability declaration. Until then the honest reading is that the proof names what was *destroyed*
-  cryptographically and what was *kept* on the record's face. Relatedly, `retainedDataReference`
-  carries no per-table obligation pairing (the erasure's own report does), and the pure `retained`
-  outcome can carry only one obligation — reachable the day a second joins the statutory set, where it
-  becomes a visible refusal rather than a silent narrowing.
+- **A retained claim is inside the signed bytes as of `crossengin.tombstone.content.v3`**
+  (ADR-0330 found the gap, ADR-0331 closed it — see that ADR's addendum, which exists because the
+  work shipped in its commit and its own text omitted it). `contentManifestSha256` used to commit only
+  to the composed `DeletionScope`, so `retainedReason` / `retainedDataReference` /
+  `retainedObligations` were in **neither** digest and a stored proof's retention prose could be
+  edited with both digests and the chain entry byte-identical — ADR-0323's `scope_tampered` in a third
+  place, on the one sentence a regulator reads. v3 carries
+  `retentionClaim: {obligations, retainedReason, retainedDataReference}` with **explicit `null`**
+  rather than an omitted key (`canonicalStringify` drops `undefined`, which would render the empty
+  claim and a *stripped* claim identically) and **no figure of any kind**, since a `DeletionScope`'s
+  numbers mean "destroyed". `crossengin.tombstone.proof.v1` is unchanged for all three versions.
+  "Nothing retained" and "retention not covered" are separated in three agreeing places: the bytes
+  (`{"obligations":[],null,null}` is a *signed* assertion no v1/v2 digest can express), storage
+  (`retained_obligations` nullable with **no default** — `NULL` is "not covered", `'[]'` is "signed as
+  nothing kept"), and the reader (`readRetentionClaim`'s `unknown_not_in_proof` arm carries no list at
+  all, so there is no empty array to mistake).
+  What it leaves: **v1 and v2 records on file are permanently unprotected** in this respect — nothing
+  can retrofit them, and re-signing them under v3 would forge the one alarm the chain cannot raise.
+  `tombstoneMatchesAttestations` deliberately does not compare the prose (wording and array-order
+  dependence would false-positive into a `sev1` page), so for these fields **the v3 digest is the only
+  detector**. And the claim is signed while the **per-table obligation pairing** is not:
+  `sharedTableRetention` flattens to a list of obligations plus one `dataReference` string, so a proof
+  naming two obligations over three tables does not say which is under which — closing that needs a
+  structured `retainedData: [{table, obligation}]`, i.e. a **v4** tag, and it is vacuous today because
+  both statutory entries share one obligation. ADR-0330's expectation that a second obligation on the
+  pure `retained` outcome would be "refused by `DeletionAttestationSchema`" was **wrong**:
+  `retention.obligations[0]` builds a valid attestation, so the second was never written down rather
+  than rejected, and the proof would have named one lawful basis for data held under two. That is a
+  loud refusal in `sharedTableErasureAttestation` now.
 - **`meta.invoices` is the platform's billing *of* the tenant, not the tenant's own books**
   (ADR-0330). The tenant's ERP invoices live in their own schema and `operate_entity_records`, both of
   which are erased — so a tenant with a seven-year obligation over *their* sales invoices gets no

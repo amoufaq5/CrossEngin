@@ -113,3 +113,16 @@ export function killSwitchRow(record: KillSwitch): Record<string, unknown> {
   });
   return row;
 }
+
+/**
+ * The statement under test, found by what it *is* rather than by where it sits.
+ *
+ * A platform-wide write now issues the config-write elevation first, so a positional `capture[0]`
+ * in a write test would have had to shift by one — and would shift again the next time a statement
+ * joins the transaction. The elevation itself has its own tests.
+ */
+export function written(capture: readonly Captured[]): Captured {
+  const found = capture.find((c) => !c.sql.includes("set_config"));
+  if (found === undefined) throw new Error("no statement other than the session setting was issued");
+  return found;
+}

@@ -1,6 +1,7 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   DrFailoverExecutionRecordSchema,
+  scopedWrite,
   type DrFailoverExecutionRecord,
 } from "./records.js";
 
@@ -20,28 +21,31 @@ export class PostgresDrFailoverStore {
 
   async record(record: DrFailoverExecutionRecord): Promise<void> {
     const valid = DrFailoverExecutionRecordSchema.parse(record);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16)
-       ON CONFLICT (execution_id) DO NOTHING`,
-      [
-        valid.executionId,
-        valid.tenantId,
-        valid.tier,
-        valid.trigger,
-        valid.status,
-        valid.fromRegion,
-        valid.toRegion,
-        valid.triggeredAt,
-        valid.completedAt,
-        valid.actualRpoSeconds,
-        valid.actualRtoSeconds,
-        valid.rpoBreached,
-        valid.rtoBreached,
-        valid.incidentTicketId,
-        JSON.stringify(valid.record),
-        valid.recordedAt,
-      ],
+    await scopedWrite(this.conn, valid.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16)
+         ON CONFLICT (execution_id) DO NOTHING`,
+        [
+          valid.executionId,
+          valid.tenantId,
+          valid.tier,
+          valid.trigger,
+          valid.status,
+          valid.fromRegion,
+          valid.toRegion,
+          valid.triggeredAt,
+          valid.completedAt,
+          valid.actualRpoSeconds,
+          valid.actualRtoSeconds,
+          valid.rpoBreached,
+          valid.rtoBreached,
+          valid.incidentTicketId,
+          JSON.stringify(valid.record),
+          valid.recordedAt,
+        ],
+    
+      ),
     );
   }
 

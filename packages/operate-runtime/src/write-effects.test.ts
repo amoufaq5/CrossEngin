@@ -1130,3 +1130,131 @@ describe("whtCertificateClearingEffect", () => {
     expect((await store.list(TENANT, "JournalEntry")).length).toBe(0);
   });
 });
+
+// A `decimal` field crosses the store as its canonical wire string. Three effect sites used to
+// ask `typeof v === "number"`, which answered false for every amount the typed store served —
+// so these are regressions against a wrong *posting*, not against a wrong type.
+describe("amounts that arrive as wire decimals", () => {
+  const credit = invoiceVoidCreditNoteEffect({ clock });
+  const creditGl = creditNoteGlPostingEffect({ clock });
+
+  const voidIt = (
+    store: InMemoryEntityStore,
+    id: string,
+    before: Record<string, unknown>,
+  ): WriteEffectInput => ({
+    operation: "transition",
+    entity: "Invoice",
+    tenantId: TENANT,
+    id,
+    before,
+    after: { ...before, state: "void" },
+    store,
+  });
+
+  async function issuedWithStringCreditAmount(): Promise<{
+    store: InMemoryEntityStore;
+    id: string;
+    inv: Record<string, unknown>;
+  }> {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-WIRE-1",
+      state: "sent",
+      document_type: "invoice",
+      currency: "EUR",
+      subtotal: "100.00",
+      tax_total: "5.00",
+      total: "105.00",
+      credit_amount: "40.00",
+    });
+    return { store, id: String(inv.id), inv };
+  }
+
+  it("issues a PARTIAL credit note for a string credit_amount (was silently crediting the full total)", async () => {
+    const { store, id, inv } = await issuedWithStringCreditAmount();
+    await credit(voidIt(store, id, inv));
+    const cn = (await store.list(TENANT, "Invoice")).find((i) => i.document_type === "credit_note")!;
+    // Asserted through `Number` deliberately: an effect still *computes* in doubles and writes
+    // whatever it computed, and the partial branch writes a number where the full branch copies
+    // the source string. The store boundary is what makes the stored value canonical, so these
+    // tests run against a bare store and see the effect's own output.
+    expect(Number(cn.total)).toBe(40);
+    expect(cn.notes).toBe("Partial credit note for INV-WIRE-1");
+  });
+
+  it("posts the GL entry for the string partial amount, not the full total", async () => {
+    const { store, id, inv } = await issuedWithStringCreditAmount();
+    await creditGl(voidIt(store, id, inv));
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(40);
+    expect(lines.reduce((s, l) => s + Number(l.credit), 0)).toBe(40);
+  });
+
+  it("still credits the full total when the string credit_amount is at or above it", async () => {
+    const store = new InMemoryEntityStore();
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-WIRE-2",
+      state: "sent",
+      document_type: "invoice",
+      total: "105.00",
+      credit_amount: "999.00",
+    });
+    await credit(voidIt(store, String(inv.id), inv));
+    const cn = (await store.list(TENANT, "Invoice")).find((i) => i.document_type === "credit_note")!;
+    expect(Number(cn.total)).toBe(105);
+    expect(cn.notes).toBe("Credit note for INV-WIRE-2");
+  });
+
+  it("honours a line's flat tax rate given as a wire decimal (was read as 'no flat rate')", async () => {
+    const effect = recognitionGlPostingEffect({
+      entity: "Invoice",
+      triggerState: "sent",
+      controlSide: "debit",
+      numberField: "invoice_number",
+      controlAccountRef: "ar",
+      netAccountRef: "revenue",
+      taxAccountRef: "tax_payable",
+      controlDescription: "AR",
+      netDescription: "Revenue",
+      taxDescription: "Tax payable",
+      taxLines: { entity: "InvoiceLine", refField: "invoice_id", netField: "line_total" },
+      clock,
+    });
+    const store = new InMemoryEntityStore();
+    // No tax code; the split can only come from the line's own flat rate: 200 @ 10% = 20.
+    const inv = await store.create(TENANT, "Invoice", {
+      invoice_number: "INV-WIRE-3",
+      state: "draft",
+      document_type: "invoice",
+      subtotal: "200.00",
+      tax_total: "20.00",
+      total: "220.00",
+    });
+    const invId = String(inv.id);
+    await store.create(TENANT, "InvoiceLine", {
+      invoice_id: invId,
+      line_total: "200.00",
+      tax_rate_pct: "10.000",
+    });
+    await effect({
+      operation: "transition",
+      entity: "Invoice",
+      tenantId: TENANT,
+      id: invId,
+      before: inv,
+      after: { ...inv, state: "sent" },
+      store,
+    });
+    const entry = (await store.list(TENANT, "JournalEntry"))[0]!;
+    const lines = (await store.list(TENANT, "JournalLine")).filter((l) => l.journal_entry_id === entry.id);
+    expect(lines.find((l) => l.ledger_account_id === "revenue")!.credit).toBe(200);
+    expect(
+      lines.filter((l) => l.ledger_account_id === "tax_payable").reduce((s, l) => s + Number(l.credit), 0),
+    ).toBe(20);
+    expect(lines.reduce((s, l) => s + Number(l.debit), 0)).toBe(
+      lines.reduce((s, l) => s + Number(l.credit), 0),
+    );
+  });
+});

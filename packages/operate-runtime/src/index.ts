@@ -1,5 +1,7 @@
 export * from "./slugs.js";
 export * from "./store.js";
+export * from "./decimal.js";
+export * from "./decimal-store.js";
 export * from "./list-query.js";
 export * from "./operations.js";
 export * from "./association.js";

@@ -1,6 +1,7 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   DrReadinessSnapshotRecordSchema,
+  scopedWrite,
   type DrReadinessSnapshotRecord,
 } from "./records.js";
 
@@ -20,25 +21,28 @@ export class PostgresDrReadinessStore {
 
   async record(record: DrReadinessSnapshotRecord): Promise<void> {
     const valid = DrReadinessSnapshotRecordSchema.parse(record);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
-       ON CONFLICT (snapshot_id) DO NOTHING`,
-      [
-        valid.snapshotId,
-        valid.tenantId,
-        valid.ready,
-        valid.totalIssues,
-        valid.overdueDrills,
-        valid.staleRunbooks,
-        valid.expiredBackups,
-        valid.unverifiedBackups,
-        valid.replicationViolations,
-        valid.failoverBreaches,
-        valid.drillBreaches,
-        JSON.stringify(valid.report),
-        valid.generatedAt,
-      ],
+    await scopedWrite(this.conn, valid.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)
+         ON CONFLICT (snapshot_id) DO NOTHING`,
+        [
+          valid.snapshotId,
+          valid.tenantId,
+          valid.ready,
+          valid.totalIssues,
+          valid.overdueDrills,
+          valid.staleRunbooks,
+          valid.expiredBackups,
+          valid.unverifiedBackups,
+          valid.replicationViolations,
+          valid.failoverBreaches,
+          valid.drillBreaches,
+          JSON.stringify(valid.report),
+          valid.generatedAt,
+        ],
+    
+      ),
     );
   }
 

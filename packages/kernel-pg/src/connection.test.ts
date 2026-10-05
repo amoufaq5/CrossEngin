@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { META_TABLES } from "@crossengin/kernel/bootstrap";
 
 import { rowsResult } from "./node-pg.js";
 
 import {
+  PLATFORM_WRITE_GRANTS,
   isoCalendarDate,
   isoInstant,
   looksLikeProductionDatabase,
   parsePgEnvConfig,
   requireIsoInstant,
+  setPlatformWriteSql,
+  type PlatformWriteGrant,
 } from "./connection.js";
 
 describe("parsePgEnvConfig", () => {
@@ -215,5 +219,120 @@ describe("isoCalendarDate", () => {
     expect(isoCalendarDate(null)).toBeNull();
     expect(isoCalendarDate(undefined)).toBeNull();
     expect(isoCalendarDate(new Date("nope"))).toBe("Invalid Date");
+  });
+});
+
+/** Every policy in the catalog, with the table it sits on. */
+function allPolicies(): readonly { readonly table: string; readonly policy: (typeof META_TABLES)[number]["rls"] extends
+  | { readonly policies?: readonly (infer P)[] }
+  | undefined
+  ? P
+  : never }[] {
+  return META_TABLES.flatMap((t) =>
+    (t.rls?.policies ?? []).map((policy) => ({ table: t.name, policy })),
+  );
+}
+
+describe("PLATFORM_WRITE_GRANTS", () => {
+  it("spells four grants, all under the app.platform_ prefix", () => {
+    expect(Object.keys(PLATFORM_WRITE_GRANTS).sort()).toEqual([
+      "audit",
+      "config",
+      "key",
+      "record",
+    ]);
+    for (const guc of Object.values(PLATFORM_WRITE_GRANTS)) {
+      expect(guc.startsWith("app.platform_")).toBe(true);
+      expect(guc.endsWith("_write")).toBe(true);
+    }
+  });
+
+  it("gives each grant a distinct setting, so one cannot stand in for another", () => {
+    const names = Object.values(PLATFORM_WRITE_GRANTS);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("holds every `app.platform_*_write` setting the real catalog checks", () => {
+    // Two copies of a GUC name — one in a policy predicate, one in the writer that sets it — is
+    // exactly the arrangement ADR-0288's hand-maintained flag list failed at, and a mismatch has no
+    // symptom beyond a write that silently matches no policy. So the catalog is read rather than
+    // trusted: a predicate naming a write grant this vocabulary does not spell fails here.
+    //
+    // The converse — that every grant spelled here is checked by some policy — belongs with the
+    // catalog and is asserted in `meta-schema.test.ts`, because a grant can legitimately be
+    // declared one increment before the tables that check it.
+    const known: readonly string[] = Object.values(PLATFORM_WRITE_GRANTS);
+    const referenced = new Set<string>();
+    for (const { policy } of allPolicies()) {
+      for (const clause of [policy.using ?? "", policy.check ?? ""]) {
+        for (const m of clause.matchAll(/app\.platform_[a-z_]*_write/g)) referenced.add(m[0]);
+      }
+    }
+    expect([...referenced].sort().filter((guc) => !known.includes(guc))).toEqual([]);
+    // And it is not vacuous: ADR-0331's grant is in the catalog today.
+    expect(referenced.has(PLATFORM_WRITE_GRANTS.audit)).toBe(true);
+  });
+
+  it("is checked by no SELECT policy anywhere", () => {
+    // ADR-0313's rule, as an assertion over the whole catalog: a grant that authorises a write must
+    // never also be a route to another tenant's rows. The read elevation is `app.platform_audit`,
+    // which has no `_write` suffix and so is not in this vocabulary at all.
+    const grants = Object.values(PLATFORM_WRITE_GRANTS);
+    for (const { table, policy } of allPolicies()) {
+      if (policy.command !== "SELECT") continue;
+      for (const guc of grants) {
+        expect(`${table}: ${policy.using ?? ""}`).not.toContain(guc);
+      }
+    }
+  });
+
+  it("is checked only by INSERT- and UPDATE-scoped policies, never by an ALL-scope one", () => {
+    // An `ALL`-scope policy's `USING` also serves as its `WITH CHECK`, which is the whole defect:
+    // it would let the grant reach a DELETE as well, and nothing in the catalog deletes a platform
+    // row. `DELETE` is reachable by no policy at all.
+    const grants: readonly string[] = Object.values(PLATFORM_WRITE_GRANTS);
+    for (const { table, policy } of allPolicies()) {
+      const text = `${policy.using ?? ""} ${policy.check ?? ""}`;
+      if (!grants.some((guc) => text.includes(guc))) continue;
+      expect([`${table}`, policy.command]).toEqual([`${table}`, expect.stringMatching(/^(INSERT|UPDATE)$/)]);
+    }
+  });
+
+  it("is always paired with `tenant_id IS NULL` in the clause that checks it", () => {
+    // So holding a write elevation buys no access to any *tenant's* rows: the isolation policy
+    // stays the only route to one and it still demands that tenant's context.
+    const grants: readonly string[] = Object.values(PLATFORM_WRITE_GRANTS);
+    for (const { table, policy } of allPolicies()) {
+      for (const clause of [policy.using, policy.check]) {
+        if (clause === undefined) continue;
+        if (!grants.some((guc) => clause.includes(guc))) continue;
+        expect(`${table}: ${clause}`).toContain("tenant_id IS NULL");
+      }
+    }
+  });
+});
+
+describe("setPlatformWriteSql", () => {
+  it("names the grant and sets it to 'on'", () => {
+    for (const grant of Object.keys(PLATFORM_WRITE_GRANTS) as PlatformWriteGrant[]) {
+      const sql = setPlatformWriteSql(grant);
+      expect(sql).toContain(PLATFORM_WRITE_GRANTS[grant]);
+      expect(sql).toContain("'on'");
+    }
+  });
+
+  it("is transaction-local, never a session-wide SET", () => {
+    // `set_config(..., true)` — the third argument is `is_local`. A session-wide `SET` would leave
+    // the elevation on a pooled connection for whoever is handed it next.
+    for (const grant of Object.keys(PLATFORM_WRITE_GRANTS) as PlatformWriteGrant[]) {
+      expect(setPlatformWriteSql(grant)).toBe(
+        `SELECT set_config('${PLATFORM_WRITE_GRANTS[grant]}', 'on', true)`,
+      );
+      expect(setPlatformWriteSql(grant).startsWith("SET ")).toBe(false);
+    }
+  });
+
+  it("binds no parameters, so a caller cannot pass a grant name through it", () => {
+    expect(setPlatformWriteSql("record")).not.toContain("$1");
   });
 });

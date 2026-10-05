@@ -28,6 +28,7 @@ import {
   entityBySlug,
   fieldErrorMap,
   parseValidationErrors,
+  postsAsNumber,
   reverseReferences,
   slugForEntityName,
   useSchema,
@@ -124,7 +125,7 @@ function RecordDetail({ entity, id }: { entity: UiEntitySchema; id: string }) {
         if (f.input === "boolean") {
           if ((next === true) !== (prev === true)) patch[f.name] = next === true;
         } else if (String(next ?? "") !== prevStr) {
-          patch[f.name] = next === "" ? null : f.input === "number" ? Number(next) : next;
+          patch[f.name] = next === "" ? null : postsAsNumber(f) ? Number(next) : next;
         }
       }
       if (Object.keys(patch).length > 0) {

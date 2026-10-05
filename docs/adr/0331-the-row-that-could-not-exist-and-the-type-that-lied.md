@@ -133,10 +133,10 @@ Concretely:
    transaction-locally. These two are fixed rather than reported because their hole was
    *demonstrated* and their answer is unambiguous: both tables are append-only, so
    `INSERT`-only is exactly right.
-3. **The remaining 28 tables are reported, not swept.** The correct split differs per table:
+3. **The remaining 29 tables are reported, not swept.** The correct split differs per table:
    an append-only table wants `INSERT`-only, while mutable platform configuration
    (`feature_flags`, `workflow_definitions`, the plan catalog) needs an elevated `UPDATE`
-   too, and landing 28 unverified policy changes that govern who may write platform
+   too, and landing 29 unverified policy changes that govern who may write platform
    configuration would be worse than naming the class. `meta.audit_integrity_verdicts` is
    left in this group deliberately although ADR-0313 named it: splitting it means narrowing
    its *isolation* policy from `ALL` to `SELECT`, which is a different and more consequential
@@ -288,7 +288,7 @@ Concretely:
   four-eyes enforced at three layers — contract, a SQL `UPDATE` predicate, and now a table
   CHECK. A tenant's notification read state is recordable over HTTP for the first time since
   ADR-0309 declared the tables. `apply` distinguishes "it ran" from "it is done".
-- **Negative.** 30 tables keep the policy shape whose exploit was demonstrated on the
+- **Negative.** 29 tables keep the policy shape whose exploit was demonstrated on the
   thirty-first. `proveScopeIntegrity`'s platform half runs only when `--integrity-proof-config`
   sets `includePlatform: true`, which still defaults to `false`, so a deployment that does not
   opt in writes platform rows that nothing verifies — and flipping that default without the
@@ -344,7 +344,7 @@ Concretely:
 
 | Question | Owner | Deadline |
 |---|---|---|
-| Which of the remaining 30 `tenant_id IS NULL OR …` policies want `INSERT`-only and which need an elevated `UPDATE`? | Platform | 2026-11-30 |
+| Which of the remaining 29 `tenant_id IS NULL OR …` policies want `INSERT`-only and which need an elevated `UPDATE`? | Platform | 2026-11-30 |
 | Should `includePlatform` default to `true` on both `--integrity-proof-config` and `--checkpoint-config`, together? | Platform | 2026-11-15 |
 | Is a `decimal` field's wire type a number or a string, given `NUMERIC(38,10)` cannot be both exact and a JS number? | Platform | 2026-12-15 |
 | Should an audit read that crosses tenants stay filed in the reader's own tenant now that platform scope exists? | Platform | 2026-11-30 |
@@ -358,3 +358,70 @@ Concretely:
 - ADR-0328 — "a default is applied to silence", applied to `readThroughAt` and to the API-key principal.
 - RFC 9110 §10.2.3 — `Retry-After`, both forms (ADR-0327's retry, unchanged here).
 - PostgreSQL: `CREATE POLICY` (`USING` refused on `FOR INSERT`; `ALL`-scope `USING` also serving as `WITH CHECK`), `pg_policy.polcmd`, partial unique indexes, and `node-postgres` type parsing.
+
+## Addendum (2026-10-05): the retention claim entered the signed bytes here, and this document omitted it
+
+`crossengin.tombstone.content.v3` shipped in **this** increment's commit — 1,533 lines across ten
+files in `tenant-lifecycle` and `tenant-lifecycle-pg` — and the text above does not mention it. The
+omission was mine: the lane that built it reported the meta-schema column it needed, I landed that
+column, and I then wrote this ADR from the other strands. CLAUDE.md consequently went on describing
+the gap as open in the same commit that closed it, which is exactly the shape-versus-history drift
+that file warns about. Recorded here rather than in a later ADR because the decision belongs with
+the code that carries it.
+
+**The defect.** ADR-0330 added the `erased_and_retained` outcome, so a subsystem could say it
+destroyed some data and lawfully kept the rest. But `contentManifestSha256` committed only to the
+composed `DeletionScope`: `retainedReason`, `retainedDataReference` and `retainedObligations` were on
+the record and in **neither** digest. A stored proof's retention prose could be edited with both
+digests and the chain entry byte-identical — ADR-0323's `scope_tampered` in a third place, and on the
+one sentence a regulator reads ("we lawfully retained your invoices under a seven-year obligation").
+
+**The decision.** A third domain tag, `crossengin.tombstone.content.v3\n`, carrying
+`retentionClaim: { obligations, retainedReason, retainedDataReference }` — sorted and deduped, with
+**explicit `null`** rather than an omitted key, because `canonicalStringify` drops `undefined` and an
+omitted key would render the empty claim and a claim with its prose *stripped* identically. The
+retained side carries **no figure of any kind**: a `DeletionScope`'s numbers mean "this was
+destroyed", so a number beside them would be read into that total.
+`crossengin.tombstone.proof.v1` is unchanged for all three versions, since the proof payload commits
+to `contentManifestSha256`, which is version-bound by its own tag — so the chain transitively
+witnesses the claim without the proof's own bytes moving. A verifier reads `proofVersion` and
+**never infers** it from whether a claim is attached: `DECLARATION_BEARING_PROOF_VERSIONS` and
+`RETENTION_BEARING_PROOF_VERSIONS` are membership lists rather than a `>= "v2"` ordering test, and
+`contentManifestSubjectOf` pairs version↔payload in **both** directions, because an inference would
+read a *deleted* claim as an older record — the tamper that covers its own tracks (ADR-0329's rule).
+v3 is the default for every capabilities-path assembly, not only for retentions, since a conditional
+version would express "nothing retained" by the absence of a tag.
+
+**"Nothing retained" versus "retention not covered"** are separated in three places that must agree.
+In the bytes, a v3 record always carries `retentionClaim`, and `{"obligations":[], null, null}` is a
+*signed assertion* that nothing was kept — a sentence no v1 or v2 digest can express. In storage,
+`retained_obligations` is nullable with **no default**: `NULL` means "these bytes do not cover a
+claim", `'[]'::jsonb` means "signed as nothing kept", and a `DEFAULT '[]'` would make every pre-v3
+row read back as a signed empty claim (ADR-0328). In the reader, `readRetentionClaim` is a two-state
+union whose `unknown_not_in_proof` arm carries **no list at all**, so there is no empty array for a
+caller to mistake for "nothing retained".
+
+**Verified.** v1 and v2 bytes are byte-identical across the change, proved by transpiling
+`tombstone-proof.ts` from ADR-0329's commit and running the *old* algorithm: v1 content
+`7e7f8974…94383`, v2 content `979750b9…be2f07`, and the proof tag over each of the three content
+digests — including the v3 one the old code cannot compute — all matching the new implementation.
+The same cross-check ran against the database, recomputing both digests of live v1 and v2 rows.
+Live, the tamper is reproduced and closed in one transcript: editing a v3 record's retention prose
+flips `contentManifestOk` to false while `proofSha256`, `chain_entry_hash` and the chain's own
+`verify()` stay untouched, and **the same edit on v1 and v2 rows leaves both digests verifying** —
+which is the defect, demonstrated rather than asserted. Note that `tombstoneMatchesAttestations`
+deliberately does not compare the prose (wording and array-order dependence would false-positive
+into a `sev1` page), so for these fields the v3 digest is the *only* detector.
+
+**What it leaves.** v1 and v2 records on file are permanently unprotected in this respect; nothing
+can retrofit them, and re-signing them under v3 would forge the one alarm the chain cannot raise.
+The claim is signed but the **per-table obligation pairing** is not: `sharedTableRetention` flattens
+to a list of obligations plus one `dataReference` string, so a proof naming two obligations over
+three tables does not say which table is under which. The erasure's own report has the pairing and
+the attestation contract has nowhere to put it; closing that means a structured
+`retainedData: [{table, obligation}]`, i.e. a **v4** tag, and it is vacuous today because both
+statutory entries share one obligation. Also found while verifying this: ADR-0330's expectation that
+a second obligation on the pure `retained` outcome would be "refused by `DeletionAttestationSchema`"
+is **wrong** — `retention.obligations[0]` builds a perfectly valid attestation, so the second
+obligation was never written down rather than rejected, and the proof would name one lawful basis for
+data held under two. That is now a loud refusal in `sharedTableErasureAttestation`.

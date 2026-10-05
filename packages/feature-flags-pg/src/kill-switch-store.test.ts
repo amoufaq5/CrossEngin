@@ -9,6 +9,7 @@ import {
   KILL_SWITCH_PARAM_COUNT,
   KillSwitchNotFoundError,
   PostgresKillSwitchStore,
+  SET_PLATFORM_CONFIG_WRITE_SQL,
   SET_TENANT_CONTEXT_SQL,
   assertTenantId,
 } from "./kill-switch-store.js";
@@ -22,6 +23,7 @@ import {
   killSwitch,
   killSwitchRow,
   mockConnection,
+  written,
   releasedKillSwitch,
   respondTo,
 } from "./test-fakes.js";
@@ -70,29 +72,60 @@ describe("record", () => {
   it("inserts the full column list with matching placeholders", async () => {
     const capture: Captured[] = [];
     await new PostgresKillSwitchStore(mockConnection(capture)).record(killSwitch());
-    expect(capture[0]?.sql).toContain(
+    expect(written(capture).sql).toContain(
       `INSERT INTO meta.feature_flag_kill_switches (${KILL_SWITCH_COLUMNS})`,
     );
-    expect(capture[0]?.sql).toContain(`$${KILL_SWITCH_COLUMN_NAMES.length})`);
+    expect(written(capture).sql).toContain(`$${KILL_SWITCH_COLUMN_NAMES.length})`);
   });
 
   it("binds one parameter per column", async () => {
     const capture: Captured[] = [];
     await new PostgresKillSwitchStore(mockConnection(capture)).record(killSwitch());
-    expect(capture[0]?.params).toHaveLength(KILL_SWITCH_PARAM_COUNT);
+    expect(written(capture).params).toHaveLength(KILL_SWITCH_PARAM_COUNT);
   });
 
   it("binds the kill switch id first", async () => {
     const capture: Captured[] = [];
     await new PostgresKillSwitchStore(mockConnection(capture)).record(killSwitch());
-    expect(capture[0]?.params?.[0]).toBe(KILL_SWITCH_ID);
+    expect(written(capture).params?.[0]).toBe(KILL_SWITCH_ID);
   });
 
-  it("sets no tenant context for a platform-wide switch, so RLS exposes the null-tenant rows", async () => {
+  it("claims the platform config-write elevation, and sets no tenant context, for a platform-wide switch", async () => {
+    // It used to set nothing at all. That read as "RLS exposes the null-tenant rows", which was
+    // true — and the same `tenant_id IS NULL` arm that exposed them to a reader satisfied the
+    // `WITH CHECK` of the one `ALL`-scope policy, so any tenant session could arm a platform-wide
+    // kill switch. The write arm is a separate `INSERT`-scoped policy on this setting now.
     const capture: Captured[] = [];
     await new PostgresKillSwitchStore(mockConnection(capture)).record(killSwitch());
-    expect(capture).toHaveLength(1);
-    expect(capture[0]?.sql).not.toContain("set_config");
+    expect(capture).toHaveLength(2);
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_CONFIG_WRITE_SQL);
+    expect(capture[0]?.sql).toContain("app.platform_config_write");
+    expect(capture[0]?.params).toBeUndefined();
+    expect(capture[1]?.sql).toContain("INSERT INTO");
+  });
+
+  it("never claims the elevation and a tenant context in one transaction", async () => {
+    // Both at once would give one transaction a predicate satisfiable by a tenant row and a
+    // platform row, which is the shape the split exists to take apart.
+    for (const tenantId of [null, TENANT]) {
+      const capture: Captured[] = [];
+      await new PostgresKillSwitchStore(mockConnection(capture)).record(killSwitch({ tenantId }));
+      const settings = capture.filter((c) => c.sql.includes("set_config"));
+      expect(settings).toHaveLength(1);
+    }
+  });
+
+  it("claims the elevation transaction-locally, never session-wide", async () => {
+    // `set_config(..., true)` — the third argument is `is_local`. A session-wide `SET` on a pooled
+    // connection would carry the elevation into the next caller's work.
+    expect(SET_PLATFORM_CONFIG_WRITE_SQL).toContain(", true)");
+    expect(SET_PLATFORM_CONFIG_WRITE_SQL.startsWith("SET ")).toBe(false);
+  });
+
+  it("does not reuse the cross-tenant read grant as the write grant", async () => {
+    // ADR-0313's hole arriving from the other direction: a grant that authorises reading the
+    // platform's rows must not authorise writing them.
+    expect(SET_PLATFORM_CONFIG_WRITE_SQL).not.toContain("app.platform_audit");
   });
 
   it("sets the tenant context before inserting a tenant-scoped switch", async () => {
@@ -253,16 +286,16 @@ describe("release", () => {
   it("updates every non-key column and matches on the id", async () => {
     const capture: Captured[] = [];
     await new PostgresKillSwitchStore(mockConnection(capture)).release(releasedKillSwitch());
-    expect(capture[0]?.sql).toContain(`SET ${killSwitchUpdateAssignments()}`);
-    expect(capture[0]?.sql).toContain("WHERE kill_switch_id = $1");
-    expect(capture[0]?.params?.[0]).toBe(KILL_SWITCH_ID);
-    expect(capture[0]?.params).toHaveLength(KILL_SWITCH_PARAM_COUNT);
+    expect(written(capture).sql).toContain(`SET ${killSwitchUpdateAssignments()}`);
+    expect(written(capture).sql).toContain("WHERE kill_switch_id = $1");
+    expect(written(capture).params?.[0]).toBe(KILL_SWITCH_ID);
+    expect(written(capture).params).toHaveLength(KILL_SWITCH_PARAM_COUNT);
   });
 
   it("guards on the only status the transition map lets a release leave", async () => {
     const capture: Captured[] = [];
     await new PostgresKillSwitchStore(mockConnection(capture)).release(releasedKillSwitch());
-    expect(capture[0]?.sql).toContain("AND status IN ('triggered_active')");
+    expect(written(capture).sql).toContain("AND status IN ('triggered_active')");
   });
 
   it("treats a zero-row update as a failure, never a success", async () => {

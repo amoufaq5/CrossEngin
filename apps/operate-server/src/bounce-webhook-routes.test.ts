@@ -1,5 +1,6 @@
 import { signWebhookPayload } from "@crossengin/crypto";
 import type { PgConnection } from "@crossengin/kernel-pg";
+import { applyFaxObservation } from "@crossengin/notification-providers";
 import type { SuppressionRecord } from "@crossengin/notifications";
 import { describe, expect, it } from "vitest";
 
@@ -12,7 +13,9 @@ import {
   parseBounceWebhookTarget,
   type BounceWebhookHttpRequest,
   type BounceWebhookRefusalInfo,
+  type BounceWebhookObservedInfo,
   type BounceWebhookRoutesContext,
+  type FaxObservationCounterLike,
   type SuppressionWriterLike,
 } from "./bounce-webhook-routes.js";
 import {
@@ -713,5 +716,374 @@ describe("bounce-webhook-routes — node adapter", () => {
     );
     expect(response?.status).toBe(401);
     expect(rows).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The voice reachability counter (ADR-0310's open `fax` verdict)
+// ---------------------------------------------------------------------------
+
+const VOICE_NUMBER = "+15551230001";
+
+function voiceCallback(fields: Record<string, string>): string {
+  return new URLSearchParams({
+    CallStatus: "completed",
+    To: VOICE_NUMBER,
+    From: "+15559990000",
+    ...fields,
+  }).toString();
+}
+
+/**
+ * An in-memory counter with the store's rules, so the route's own decisions are what is under test.
+ * The SQL that implements these is proven in `fax-observation-store.test.ts`, and the live test
+ * proves the two agree.
+ */
+function recordingCounter(): {
+  counter: FaxObservationCounterLike;
+  runs: Map<string, { count: number; lastSid: string | null; suppressedAt: string | null }>;
+  cleared: string[];
+} {
+  const runs = new Map<
+    string,
+    { count: number; lastSid: string | null; suppressedAt: string | null }
+  >();
+  const cleared: string[] = [];
+  return {
+    runs,
+    cleared,
+    counter: {
+      observe: async (tenantId, observation, at, windowHours) => {
+        const key = `${tenantId}|${observation.address}`;
+        const existing = runs.get(key) ?? null;
+        const outcome = applyFaxObservation({
+          existing:
+            existing === null
+              ? null
+              : {
+                  consecutiveCount: existing.count,
+                  lastObservedAt: at.toISOString(),
+                  lastCallSid: existing.lastSid,
+                },
+          observedAt: at,
+          callSid: observation.callSid,
+          windowHours,
+        });
+        runs.set(key, {
+          count: outcome.consecutiveCount,
+          lastSid: observation.callSid,
+          suppressedAt: existing?.suppressedAt ?? null,
+        });
+        return {
+          consecutiveCount: outcome.consecutiveCount,
+          disposition: outcome.disposition,
+          suppressedAt: existing?.suppressedAt ?? null,
+        };
+      },
+      markSuppressed: async (tenantId, address, at) => {
+        const key = `${tenantId}|${address}`;
+        const run = runs.get(key);
+        if (run !== undefined && run.suppressedAt === null) {
+          runs.set(key, { ...run, suppressedAt: at.toISOString() });
+        }
+      },
+      clearRun: async (tenantId, address) => {
+        const key = `${tenantId}|${address}`;
+        const had = runs.has(key);
+        if (had) cleared.push(address);
+        runs.delete(key);
+        return had;
+      },
+    },
+  };
+}
+
+function throwingCounter(): FaxObservationCounterLike {
+  return {
+    observe: async () => {
+      throw new Error("db down");
+    },
+    markSuppressed: async () => undefined,
+    clearRun: async () => false,
+  };
+}
+
+async function postVoice(
+  ctx: BounceWebhookRoutesContext,
+  body: string,
+): Promise<Awaited<ReturnType<typeof handleBounceWebhookRequest>>> {
+  return handleBounceWebhookRequest(
+    {
+      method: "POST",
+      path: `${BOUNCE_WEBHOOK_PATH_PREFIX}/${TENANT_A}/twilio_voice`,
+      headers: { [DEFAULT_BOUNCE_SIGNATURE_HEADER]: sign(SECRET_A, body) },
+      rawBody: body,
+    },
+    ctx,
+  );
+}
+
+describe("fax observations", () => {
+  function context(
+    over: Partial<BounceWebhookRoutesContext> = {},
+  ): {
+    ctx: BounceWebhookRoutesContext;
+    writer: ReturnType<typeof recordingWriter>;
+    counter: ReturnType<typeof recordingCounter>;
+    observed: BounceWebhookObservedInfo[];
+  } {
+    const writer = recordingWriter();
+    const counter = recordingCounter();
+    const observed: BounceWebhookObservedInfo[] = [];
+    return {
+      writer,
+      counter,
+      observed,
+      ctx: {
+        store: writer.writer,
+        secretForTenant: (t) => (t === TENANT_A ? SECRET_A : null),
+        clock: () => NOW,
+        faxObservations: counter.counter,
+        onObserved: (info) => observed.push(info),
+        ...over,
+      },
+    };
+  }
+
+  it("behaves exactly as before when no counter is configured", async () => {
+    const writer = recordingWriter();
+    const response = await postVoice(
+      {
+        store: writer.writer,
+        secretForTenant: () => SECRET_A,
+        clock: () => NOW,
+      },
+      voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }),
+    );
+    expect(response.status).toBe(422);
+    expect(response.body["error"]).toBe("event_not_suppressible");
+    expect(writer.rows).toHaveLength(0);
+  });
+
+  it("counts a fax verdict, writes nothing, and answers 200 so Twilio stops retrying", async () => {
+    const { ctx, writer, observed } = context();
+    const response = await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }));
+    // 200 and not 422: something was durably recorded. Twilio retries a non-2xx indefinitely, so a
+    // 422 here would have every answered call redelivered forever.
+    expect(response.status).toBe(200);
+    expect(response.body["recorded"]).toBe(0);
+    expect(response.body["observation"]).toEqual({
+      signal: "fax_detected",
+      disposition: "started",
+      consecutive: 1,
+      suppressed: false,
+    });
+    expect(writer.rows).toHaveLength(0);
+    expect(observed).toEqual([
+      {
+        tenantId: TENANT_A,
+        signal: "fax_detected",
+        disposition: "started",
+        consecutiveCount: 1,
+        suppressionPlanned: false,
+      },
+    ]);
+  });
+
+  it("never returns the number or the CallSid", async () => {
+    const { ctx } = context();
+    const response = await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }));
+    const serialized = JSON.stringify(response.body);
+    expect(serialized).not.toContain(VOICE_NUMBER);
+    expect(serialized).not.toContain("CA1");
+  });
+
+  it("counts but never suppresses with no threshold configured, which is the default", async () => {
+    const { ctx, writer } = context();
+    for (const sid of ["CA1", "CA2", "CA3", "CA4", "CA5"]) {
+      const response = await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: sid }));
+      expect(response.status).toBe(200);
+      expect(response.body["observation"]).toMatchObject({ suppressed: false });
+    }
+    expect(writer.rows).toHaveLength(0);
+  });
+
+  it("suppresses exactly at the threshold, and not before", async () => {
+    const { ctx, writer, observed } = context({ faxSuppressAfter: 3 });
+    for (const sid of ["CA1", "CA2"]) {
+      await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: sid }));
+    }
+    expect(writer.rows).toHaveLength(0);
+    const crossing = await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA3" }));
+    expect(crossing.status).toBe(200);
+    expect(crossing.body["kind"]).toBe("voice_fax_threshold");
+    expect(crossing.body["recorded"]).toBe(1);
+    expect(writer.rows).toHaveLength(1);
+    const row = writer.rows[0];
+    expect(row?.channel).toBe("voice_call");
+    expect(row?.reason).toBe("hard_bounce");
+    expect(row?.recipientAddress).toBe(VOICE_NUMBER);
+    expect(row?.appliedBy).toBe("provider:twilio_voice");
+    expect(row?.notes).toContain("consecutive=3");
+    expect(observed.at(-1)?.suppressionPlanned).toBe(true);
+  });
+
+  it("stamps the crossing only after the suppression lands", async () => {
+    const { ctx, counter } = context({ faxSuppressAfter: 2 });
+    await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }));
+    expect(counter.runs.get(`${TENANT_A}|${VOICE_NUMBER}`)?.suppressedAt).toBeNull();
+    await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA2" }));
+    expect(counter.runs.get(`${TENANT_A}|${VOICE_NUMBER}`)?.suppressedAt).toBe(NOW.toISOString());
+  });
+
+  it("does not stamp a crossing whose suppression write failed", async () => {
+    const { counter } = context();
+    const ctx: BounceWebhookRoutesContext = {
+      store: throwingWriter(new Error("nope")),
+      secretForTenant: () => SECRET_A,
+      clock: () => NOW,
+      faxObservations: counter.counter,
+      faxSuppressAfter: 2,
+    };
+    await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }));
+    const response = await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA2" }));
+    expect(response.status).toBe(500);
+    // A `suppressed_at` written before the suppression would say an address was blocked when it was
+    // not — ADR-0317's shape.
+    expect(counter.runs.get(`${TENANT_A}|${VOICE_NUMBER}`)?.suppressedAt).toBeNull();
+  });
+
+  it("re-crossing presents the identical row, which the store declines", async () => {
+    const { ctx, writer } = context({ faxSuppressAfter: 2 });
+    for (const sid of ["CA1", "CA2"]) {
+      await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: sid }));
+    }
+    const again = await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA3" }));
+    expect(again.body["recorded"]).toBe(0);
+    expect(again.body["duplicates"]).toBe(1);
+    expect(writer.rows).toHaveLength(1);
+  });
+
+  it("does not advance on a retried callback", async () => {
+    // Twilio retries a callback that did not answer 2xx, and a count has no idempotency of its own.
+    const { ctx, writer } = context({ faxSuppressAfter: 3 });
+    for (let i = 0; i < 5; i++) {
+      const response = await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }));
+      expect(response.body["observation"]).toMatchObject({ consecutive: 1 });
+    }
+    expect(writer.rows).toHaveLength(0);
+  });
+
+  it.each(["human", "machine_start", "machine_end_beep"])(
+    "resets the run when %s answers",
+    async (verdict) => {
+      const { ctx, writer, counter } = context({ faxSuppressAfter: 3 });
+      await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }));
+      await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA2" }));
+      const answered = await postVoice(ctx, voiceCallback({ AnsweredBy: verdict, CallSid: "CA3" }));
+      expect(answered.status).toBe(200);
+      expect(answered.body["observation"]).toEqual({
+        signal: "voice_answered",
+        disposition: "cleared",
+        consecutive: 0,
+        suppressed: false,
+      });
+      expect(counter.cleared).toEqual([VOICE_NUMBER]);
+      // And the run really is gone: the next two fax verdicts are a run of two, not of four.
+      await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA4" }));
+      const second = await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA5" }));
+      expect(second.body["observation"]).toMatchObject({ consecutive: 2 });
+      expect(writer.rows).toHaveLength(0);
+    },
+  );
+
+  it("reports a reset that undid nothing distinctly from one that did", async () => {
+    const { ctx } = context();
+    const response = await postVoice(ctx, voiceCallback({ AnsweredBy: "human", CallSid: "CA1" }));
+    expect(response.body["observation"]).toMatchObject({ disposition: "no_run" });
+  });
+
+  it("leaves the run alone for an unknown verdict", async () => {
+    const { ctx, counter } = context({ faxSuppressAfter: 3 });
+    await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }));
+    const unknown = await postVoice(ctx, voiceCallback({ AnsweredBy: "unknown", CallSid: "CA2" }));
+    // The detector declined, which is not evidence either way — so neither advance nor reset.
+    expect(unknown.status).toBe(422);
+    expect(unknown.body["observation"]).toBeUndefined();
+    expect(counter.runs.get(`${TENANT_A}|${VOICE_NUMBER}`)?.count).toBe(1);
+  });
+
+  it.each(["busy", "no-answer"])("leaves the run alone on %s", async (status) => {
+    const { ctx, counter } = context({ faxSuppressAfter: 3 });
+    await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }));
+    const unanswered = await postVoice(
+      ctx,
+      voiceCallback({ CallStatus: status, AnsweredBy: "fax", CallSid: "CA2" }),
+    );
+    expect(unanswered.status).toBe(422);
+    expect(counter.runs.get(`${TENANT_A}|${VOICE_NUMBER}`)?.count).toBe(1);
+  });
+
+  it("refuses a threshold below the minimum rather than suppressing on one sample", async () => {
+    const { ctx, writer } = context({ faxSuppressAfter: 1 });
+    for (const sid of ["CA1", "CA2", "CA3"]) {
+      await postVoice(ctx, voiceCallback({ AnsweredBy: "fax", CallSid: sid }));
+    }
+    expect(writer.rows).toHaveLength(0);
+  });
+
+  it("refuses the request when the observation cannot be stored", async () => {
+    const writer = recordingWriter();
+    const errors: unknown[] = [];
+    const response = await postVoice(
+      {
+        store: writer.writer,
+        secretForTenant: () => SECRET_A,
+        clock: () => NOW,
+        faxObservations: throwingCounter(),
+        faxSuppressAfter: 2,
+        onError: (err) => errors.push(err),
+      },
+      voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" }),
+    );
+    // A run whose length is unknown is not a run, and a 503 has the provider retry — which is safe
+    // because the counter's dedup key is the CallSid.
+    expect(response.status).toBe(503);
+    expect(response.body["error"]).toBe("fax_observation_write_failed");
+    expect(errors).toHaveLength(1);
+    expect(writer.rows).toHaveLength(0);
+  });
+
+  it("counts nothing from an unverified body", async () => {
+    const { ctx, counter } = context({ faxSuppressAfter: 2 });
+    const body = voiceCallback({ AnsweredBy: "fax", CallSid: "CA1" });
+    const response = await handleBounceWebhookRequest(
+      {
+        method: "POST",
+        path: `${BOUNCE_WEBHOOK_PATH_PREFIX}/${TENANT_A}/twilio_voice`,
+        headers: { [DEFAULT_BOUNCE_SIGNATURE_HEADER]: sign(SECRET_B, body) },
+        rawBody: body,
+      },
+      ctx,
+    );
+    expect(response.status).toBe(401);
+    // A counter fed by an unverified POST is a counter an anonymous caller walks to the threshold.
+    expect(counter.runs.size).toBe(0);
+  });
+
+  it("keeps a provider-reported voice failure on its own path", async () => {
+    const { ctx, writer, counter } = context({ faxSuppressAfter: 2 });
+    const body = new URLSearchParams({
+      CallStatus: "failed",
+      ErrorCode: "13224",
+      To: VOICE_NUMBER,
+      CallSid: "CA9",
+    }).toString();
+    const response = await postVoice(ctx, body);
+    expect(response.status).toBe(200);
+    expect(response.body["kind"]).toBe("voice_failure");
+    expect(writer.rows).toHaveLength(1);
+    // A carrier verdict needs no run behind it, so nothing was counted.
+    expect(counter.runs.size).toBe(0);
   });
 });

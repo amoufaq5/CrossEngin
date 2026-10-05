@@ -1,5 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  scopedWrite,
   SloEnforcementActionRecordSchema,
   type SloEnforcementActionRecord,
 } from "./records.js";
@@ -52,11 +53,14 @@ export class PostgresSloEnforcementActionStore {
 
   async record(record: SloEnforcementActionRecord): Promise<void> {
     const valid = SloEnforcementActionRecordSchema.parse(record);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMN_LIST})
-       VALUES (${PLACEHOLDER_LIST})
-       ON CONFLICT (action_id) DO NOTHING`,
-      COLUMN_BINDINGS.map((binding) => binding.bind(valid)),
+    await scopedWrite(this.conn, valid.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMN_LIST})
+         VALUES (${PLACEHOLDER_LIST})
+         ON CONFLICT (action_id) DO NOTHING`,
+        COLUMN_BINDINGS.map((binding) => binding.bind(valid)),
+    
+      ),
     );
   }
 

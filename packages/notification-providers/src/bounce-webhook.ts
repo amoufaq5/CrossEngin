@@ -119,6 +119,51 @@ export interface BounceWebhookRequest {
   readonly now: Date;
 }
 
+/*
+ * What one callback says about whether a *spoken* notice can land on a number, when it says anything
+ * at all (ADR-0310's open `fax` verdict).
+ *
+ * This is a second output of the same parse and not a second kind of acceptance, which is the
+ * distinction that keeps the module's invariant intact: `accepted: true` still means — and only
+ * means — that suppressions were planned. A reachability signal plans nothing. It is evidence to be
+ * *counted* somewhere durable, and the count is what a threshold can then be crossed by, so the
+ * signal rides on the refusal that already describes the callback.
+ *
+ * Two members, because the count needs both directions. A `fax_detected` advances it; a
+ * `voice_answered` refutes the inference outright and must therefore be able to reset it. There is
+ * deliberately no third member for `unknown`: the detector declining to answer is not evidence
+ * either way, and a signal for it would have to mean "leave the count alone", which is what emitting
+ * nothing already means.
+ */
+export const VOICE_REACHABILITY_SIGNALS = [
+  /** `AnsweredBy=fax`: the number answered, and no spoken notice can be heard on it. */
+  "fax_detected",
+  /** `AnsweredBy=human` / `machine_start` / `machine_end_beep`: something that can hear speech. */
+  "voice_answered",
+] as const;
+export type VoiceReachabilitySignal = (typeof VOICE_REACHABILITY_SIGNALS)[number];
+
+export interface VoiceReachabilityObservation {
+  readonly signal: VoiceReachabilitySignal;
+  readonly channel: "voice_call";
+  /**
+   * The destination, already normalised by `normalizeRecipientAddress`. Normalised **here** rather
+   * than by whatever counts it, for `planSuppression`'s reason one layer on: the counter's key and
+   * the suppression the count eventually justifies have to be the same string, or the threshold is
+   * crossed for one spelling and the row written for another.
+   */
+  readonly address: string;
+  /**
+   * The `CallSid`, and never null — a callback that does not name its call is refused rather than
+   * counted. A count has no idempotency of its own: `suppressionIdFor` makes a replayed *bounce*
+   * plan the identical row, and nothing makes a replayed *observation* a no-op. Twilio retries a
+   * non-2xx callback, so without a per-call handle to compare against, one call's retries would walk
+   * a number to the threshold on their own. Advancing is the unsafe direction, so a callback we
+   * cannot place against a call is not evidence.
+   */
+  readonly callSid: string;
+}
+
 export type BounceWebhookResult =
   | {
       readonly accepted: true;
@@ -130,13 +175,27 @@ export type BounceWebhookResult =
       readonly accepted: false;
       readonly refusal: BounceWebhookRefusal;
       readonly reason: string;
+      /**
+       * Present when the callback was understood and says something about the destination's voice
+       * reachability. Nothing was planned, so the refusal stands as the answer to "was a suppression
+       * written"; a caller that counts observations reads this and may cross a threshold of its own.
+       * A caller that does not is unaffected, which is why this is an added field rather than a new
+       * variant.
+       */
+      readonly observation?: VoiceReachabilityObservation;
     };
 
 function refuse(
   refusal: BounceWebhookRefusal,
   reason: string,
+  observation?: VoiceReachabilityObservation,
 ): BounceWebhookResult {
-  return { accepted: false, refusal, reason };
+  return {
+    accepted: false,
+    refusal,
+    reason,
+    ...(observation !== undefined ? { observation } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -613,7 +672,13 @@ export const TWILIO_SUPPRESSION_REASONS: Readonly<
 
 export type TwilioRecognition =
   | { readonly ok: true; readonly event: RecognizedBounceEvent; readonly reason: SuppressionReason }
-  | { readonly ok: false; readonly refusal: BounceWebhookRefusal; readonly reason: string };
+  | {
+      readonly ok: false;
+      readonly refusal: BounceWebhookRefusal;
+      readonly reason: string;
+      /** Only ever set by the voice recognizer; see `VoiceReachabilityObservation`. */
+      readonly observation?: VoiceReachabilityObservation;
+    };
 
 /** A Twilio status callback is a form-encoded POST body, not JSON. */
 export function recognizeTwilioStatusCallback(body: string): TwilioRecognition {
@@ -843,15 +908,18 @@ export type TwilioAnsweredBy = (typeof TWILIO_ANSWERED_BY_VALUES)[number];
  * `voice_call` — and because the suppression table is unique per (tenant, **channel**, address),
  * that would leave the same number's SMS and email untouched, so it is not even a wide row.
  *
- * It still does not suppress, because `AnsweredBy` is a *detector's guess*, not a carrier's
- * verdict. Machine detection decides from a few hundred milliseconds of audio; a false `fax` on an
- * on-call engineer's handset would permanently stop their voice notifications, and ADR-0302's rule
- * is explicit that a safety record must never widen on an inference — suppressing an address that
- * did not fail "is not a safer error than failing to suppress one that did; it is a silent outage."
- * One heuristic sample is short of evidence. What would close the gap is the same thing a transient
- * bounce needs: a count of consecutive `fax` verdicts for one number, which needs state this module
- * does not hold. Until then it is a refusal whose reason names the verdict, so an operator can see
- * the wasted calls and fix the directory entry.
+ * **One `fax` verdict still suppresses nothing**, because `AnsweredBy` is a *detector's guess*, not
+ * a carrier's verdict. Machine detection decides from a few hundred milliseconds of audio; a false
+ * `fax` on an on-call engineer's handset would stop their voice notifications, and ADR-0302's rule is
+ * explicit that a safety record must never widen on an inference — suppressing an address that did
+ * not fail "is not a safer error than failing to suppress one that did; it is a silent outage."
+ *
+ * What changed is that the gap now has a floor under it. The verdict leaves here as a
+ * `VoiceReachabilityObservation` riding on the refusal: `fax_detected` for this one, `voice_answered`
+ * for the three above it, nothing for `unknown`. A caller holding durable state counts those —
+ * `fax-observation.ts` is the pure arithmetic and the threshold — and only a *run* of them, inside a
+ * window, with no answered call between, is ever evidence enough to plan a row. This module still
+ * writes nothing and still plans nothing from one sample; it has stopped throwing the sample away.
  */
 export const VOICE_ANSWERED_BY_VERDICTS: Readonly<
   Record<TwilioAnsweredBy, string>
@@ -953,14 +1021,17 @@ export function recognizeTwilioVoiceStatusCallback(
   }
   if (VOICE_PROGRESS_STATUSES.has(status) || status === "completed") {
     const answeredBy = params.get("AnsweredBy");
-    const verdict =
-      answeredBy !== null && isTwilioAnsweredBy(answeredBy)
-        ? `; AnsweredBy=${answeredBy}: ${VOICE_ANSWERED_BY_VERDICTS[answeredBy]}`
-        : "";
+    const known = answeredBy !== null && isTwilioAnsweredBy(answeredBy);
+    const verdict = known
+      ? `; AnsweredBy=${answeredBy}: ${VOICE_ANSWERED_BY_VERDICTS[answeredBy]}`
+      : "";
     return {
       ok: false,
       refusal: "event_not_suppressible",
       reason: `CallStatus ${status} reports no failure${verdict}`,
+      ...(known
+        ? observationFor(answeredBy, params.get("To"), params.get("CallSid"))
+        : {}),
     };
   }
 
@@ -1029,6 +1100,61 @@ export function recognizeTwilioVoiceStatusCallback(
 
 function isTwilioAnsweredBy(value: string): value is TwilioAnsweredBy {
   return (TWILIO_ANSWERED_BY_VALUES as readonly string[]).includes(value);
+}
+
+/**
+ * Which machine-detection verdicts the counter is allowed to hear, and as what.
+ *
+ * A **total** map over `TwilioAnsweredBy`, so a sixth verdict Twilio invents is a compile error
+ * rather than a value that falls into whichever branch an `if`-chain ended on — the shape ADR-0330
+ * used for `DESIGN_SHAPE_RETRIABILITY`, and for the same reason: the two mistakes here are not
+ * symmetric. A new verdict silently read as `fax_detected` walks a working number toward a
+ * suppression; read as `null` it is ignored, which is what "we have not been told what this means"
+ * should cost.
+ *
+ * `unknown` is `null` and not a third signal. The detector declining to answer is the same non-answer
+ * SES gives as `Undetermined`, and the three ways to treat it are: advance the count (asserting a
+ * fax from silence), reset it (discarding evidence that was actually collected), or leave it
+ * (neither). The third is the only one that does not invent a fact.
+ */
+const VOICE_REACHABILITY_BY_VERDICT: Readonly<
+  Record<TwilioAnsweredBy, VoiceReachabilitySignal | null>
+> = {
+  human: "voice_answered",
+  machine_start: "voice_answered",
+  machine_end_beep: "voice_answered",
+  fax: "fax_detected",
+  unknown: null,
+};
+
+/**
+ * Builds the observation a known `AnsweredBy` carries, or nothing.
+ *
+ * It re-applies both of the `failed` branch's guards on purpose. The `isE164` check is there for the
+ * identical live reason — the serving recipient directory hands `voice_call` the user's email
+ * address today, and a `fax` verdict recorded against one would eventually cross a threshold and
+ * write a permanent row about a mailbox. The `CallSid` requirement is the counter's only dedup key;
+ * see `VoiceReachabilityObservation`.
+ *
+ * Returned as a spreadable fragment rather than `T | null` so the single call site cannot forget the
+ * conditional spread and attach `observation: undefined` to a result whose field is optional.
+ */
+function observationFor(
+  verdict: TwilioAnsweredBy,
+  to: string | null,
+  callSid: string | null,
+): { readonly observation?: VoiceReachabilityObservation } {
+  const signal = VOICE_REACHABILITY_BY_VERDICT[verdict];
+  if (signal === null) return {};
+  if (to === null || to.length === 0 || to.length > MAX_RECIPIENT_ADDRESS_LENGTH) return {};
+  if (callSid === null || callSid.length === 0) return {};
+  // Normalised *before* the E.164 check, so the string checked is the string carried and the string
+  // a suppression is eventually keyed on. (The `failed` branch below checks the raw `To` instead,
+  // which is tighter than it needs to be — a punctuated number is refused — but fails closed, so it
+  // is left as it is rather than changed here.)
+  const address = normalizeRecipientAddress("voice_call", to);
+  if (!isE164(address)) return {};
+  return { observation: { signal, channel: "voice_call", address, callSid } };
 }
 
 // ---------------------------------------------------------------------------
@@ -1119,7 +1245,12 @@ export function handleBounceWebhook(
        * rather than a destination — see `TWILIO_VOICE_TRANSIENT_CODES`.
        */
       const recognized = recognizeTwilioVoiceStatusCallback(request.body);
-      if (!recognized.ok) return refuse(recognized.refusal, recognized.reason);
+      if (!recognized.ok) {
+        // The one refusal that carries something out with it. Everything else about the refusal is
+        // unchanged — the caller still sees `accepted: false` and still writes no suppression from
+        // it — so a deployment that counts nothing behaves exactly as it did.
+        return refuse(recognized.refusal, recognized.reason, recognized.observation);
+      }
       return planAll(request, recognized.event, recognized.reason, null);
     }
   }

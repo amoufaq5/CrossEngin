@@ -6,6 +6,19 @@ import {
 } from "./enforcement-action-store.js";
 import type { SloEnforcementActionRecord } from "./records.js";
 
+/**
+ * The statement under test, found by what it *is* rather than by where it sits.
+ *
+ * `scopedWrite` issues a session setting before the write, so every positional `capture[0]` in a
+ * write test would otherwise have had to shift by one — and would shift again the next time a
+ * statement joins the transaction. Asserting on the session setting itself is a separate test.
+ */
+function written(capture: readonly Captured[]): Captured {
+  const found = capture.find((c) => !c.sql.includes("set_config"));
+  if (found === undefined) throw new Error("no statement other than the session setting was issued");
+  return found;
+}
+
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
 /**
@@ -30,7 +43,11 @@ function mockConnection(
       if (capture !== undefined) capture.push({ sql, params });
       return result;
     }) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    // `scopedWrite` runs its write inside a transaction, so a fake whose `transaction` returns
+    // undefined silently drops the statement under test.
+    transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      fn(mockConnection(capture, result)),
+    ) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
@@ -110,9 +127,9 @@ describe("PostgresSloEnforcementActionStore.record", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloEnforcementActionStore(mockConnection(capture));
     await store.record(fixture());
-    expect(capture[0]?.sql).toContain("INSERT INTO meta.slo_enforcement_actions");
-    expect(capture[0]?.sql).toContain("ON CONFLICT (action_id) DO NOTHING");
-    const insert = capture[0];
+    expect(written(capture).sql).toContain("INSERT INTO meta.slo_enforcement_actions");
+    expect(written(capture).sql).toContain("ON CONFLICT (action_id) DO NOTHING");
+    const insert = written(capture);
     if (insert === undefined) throw new Error("no statement recorded");
     expect(bound(insert, "signal")).toBe("availability");
     expect(bound(insert, "incident_id")).toBe("INC-2026-0001");
@@ -123,17 +140,17 @@ describe("PostgresSloEnforcementActionStore.record", () => {
     const store = new PostgresSloEnforcementActionStore(mockConnection(capture));
     await store.record(fixture());
     const count = SLO_ENFORCEMENT_ACTION_COLUMNS.length;
-    expect(capture[0]?.params).toHaveLength(count);
-    expect(capture[0]?.sql).toContain(`$${count}`);
-    expect(capture[0]?.sql).not.toContain(`$${count + 1}`);
+    expect(written(capture).params).toHaveLength(count);
+    expect(written(capture).sql).toContain(`$${count}`);
+    expect(written(capture).sql).not.toContain(`$${count + 1}`);
   });
 
   it("writes the close-out column", async () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloEnforcementActionStore(mockConnection(capture));
     await store.record(recoveredFixture({ closeOut: "human_owned" }));
-    expect(capture[0]?.sql).toContain("close_out");
-    const insert = capture[0];
+    expect(written(capture).sql).toContain("close_out");
+    const insert = written(capture);
     if (insert === undefined) throw new Error("no statement recorded");
     expect(bound(insert, "close_out")).toBe("human_owned");
   });
@@ -142,7 +159,7 @@ describe("PostgresSloEnforcementActionStore.record", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     const store = new PostgresSloEnforcementActionStore(mockConnection(capture));
     await store.record(fixture());
-    const insert = capture[0];
+    const insert = written(capture);
     if (insert === undefined) throw new Error("no statement recorded");
     expect(bound(insert, "close_out")).toBeNull();
   });

@@ -19,7 +19,16 @@ export const CheckpointConfigSchema = z
     intervalMs: z.number().int().positive().default(3_600_000),
     checkpointedBy: z.string().min(1).default("operate-server"),
     tenants: z.array(z.string().uuid()).default([]),
-    includePlatform: z.boolean().default(false),
+    /**
+     * Also checkpoint the platform chain.
+     *
+     * **Defaults to `true` as of ADR-0332**, and it is flipped in the same change as
+     * `--integrity-proof-config`'s because the two are one decision: the proof's truncation check
+     * has no witness without a checkpoint (ADR-0287), so proving a scope nobody checkpoints leaves
+     * that half silently unwitnessed. The platform chain holds only escalation rows, so the extra
+     * checkpoint is cheap.
+     */
+    includePlatform: z.boolean().default(true),
     /** Checkpoint every active tenant from the live tenant registry instead of the static `tenants` list. */
     allTenants: z.boolean().default(false),
     /** With `allTenants`, which tenant statuses to include (passed to the live source; default `['active']`). */

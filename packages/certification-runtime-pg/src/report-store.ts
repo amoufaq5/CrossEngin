@@ -2,6 +2,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import type { ComplianceFramework } from "@crossengin/certification-runtime";
 import {
   CertificationReportRecordSchema,
+  scopedWrite,
   type CertificationReportRecord,
 } from "./records.js";
 
@@ -21,23 +22,26 @@ export class PostgresCertificationReportStore {
 
   async record(record: CertificationReportRecord): Promise<void> {
     const valid = CertificationReportRecordSchema.parse(record);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
-       ON CONFLICT (report_id) DO NOTHING`,
-      [
-        valid.reportId,
-        valid.tenantId,
-        valid.framework,
-        valid.certifiable,
-        valid.controlsTotal,
-        valid.controlsSatisfied,
-        valid.controlsDeficient,
-        valid.controlsNotAssessed,
-        valid.sealedSha256,
-        JSON.stringify(valid.report),
-        valid.generatedAt,
-      ],
+    await scopedWrite(this.conn, valid.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+         ON CONFLICT (report_id) DO NOTHING`,
+        [
+          valid.reportId,
+          valid.tenantId,
+          valid.framework,
+          valid.certifiable,
+          valid.controlsTotal,
+          valid.controlsSatisfied,
+          valid.controlsDeficient,
+          valid.controlsNotAssessed,
+          valid.sealedSha256,
+          JSON.stringify(valid.report),
+          valid.generatedAt,
+        ],
+    
+      ),
     );
   }
 

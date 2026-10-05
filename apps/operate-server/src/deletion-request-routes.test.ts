@@ -692,7 +692,10 @@ describe("unproven", () => {
   it("records the audit against the reader's own tenant", async () => {
     const h = harness();
     await call(h.ctx, UNPROVEN, { principal: principal({ tenantId: TENANT }) });
-    // meta.audit_log.tenant_id is NOT NULL and the findings may span several tenants or none.
+    // The findings may span several tenants or none. ADR-0331 made a platform-scope row
+    // expressible, so the old mechanical reason (`tenant_id` was NOT NULL) has expired — but
+    // the decision has not: this record is about a *person*, and filing it in their tenant's
+    // trail is what makes the read accountable to the people whose data it touched.
     expect(h.events[0]?.tenantId).toBe(TENANT);
   });
 
@@ -851,8 +854,9 @@ describe("the tombstone sweep (ADR-0327)", () => {
   it("refuses a reader whose tenant cannot be resolved, rather than sweeping unaudited", async () => {
     const h = harness();
     const res = await call(h.ctx, SWEEP, { principal: principal({ tenantId: null }) });
-    // ADR-0313's rule: the findings span tenants or none, `meta.audit_log.tenant_id` is NOT NULL, and
-    // an unrecordable privileged read is refused rather than served.
+    // ADR-0313's rule: an unrecordable privileged read is refused rather than served. Still a
+    // refusal now that a platform-scope row exists (ADR-0331), and deliberately so — handing
+    // this reader one would admit an *unattributable* privileged read, which is worse.
     expect(res.status).toBe(503);
     expect(res.body["error"]).toBe("audit_unrecordable");
     expect(h.sweepCalls).toEqual([]);

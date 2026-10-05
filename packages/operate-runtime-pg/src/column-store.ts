@@ -11,6 +11,8 @@ import {
 import {
   encodeKeyset,
   keysetOf,
+  toDecimalWire,
+  type DecimalSpec,
   type EntityRecord,
   type EntityStore,
   type ListPage,
@@ -232,7 +234,10 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       if (v === undefined) continue;
       columns.push(quoteIdent(mapping.column));
       placeholders.push(this.writePlaceholder(mapping, v, values));
-      stored[mapping.field] = v;
+      // The echo goes through the same reader a SELECT does. `create` does not round-trip the
+      // row, so returning `v` verbatim made this store disagree with *itself*: a create answered
+      // `price: 10.25` and the following `get` answered `"10.25"`.
+      stored[mapping.field] = readColumn(mapping, v);
     }
     await tx.query(
       `INSERT INTO ${qualified} (${columns.join(", ")}) VALUES (${placeholders.join(", ")})`,
@@ -529,13 +534,29 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
    * `pgp_sym_encrypt(…::text, keyRef)`; a plaintext column binds the raw value.
    */
   private writePlaceholder(mapping: ColumnMapping, value: unknown, params: unknown[]): string {
+    // Bound through the same reader the echo uses, so the value this store claims to have stored
+    // and the value it actually bound are one value — for an encrypted decimal column that is the
+    // only thing that keeps the ciphertext's text form canonical, since nothing casts it back
+    // through `numeric` on the way out.
+    const bound = readColumn(mapping, value);
     if (mapping.encryptAtRest) {
-      params.push(String(value));
+      params.push(String(bound));
       return pgpSymEncryptExpr(`$${params.length.toString()}::text`, this.keyRef);
     }
-    params.push(value);
+    params.push(bound);
     return `$${params.length.toString()}`;
   }
+}
+
+/**
+ * A column's `decimal` declaration recovered from the `NUMERIC(p, s)` the kernel's
+ * `fieldTypeToPostgresType` emitted for it. The plan already carries the only thing needed, so
+ * this store learns a field's precision and scale without a second pass over the manifest — and
+ * cannot disagree with the DDL it applied, because it is reading that DDL's own type string.
+ */
+export function decimalSpecFromSqlType(sqlType: string): DecimalSpec | null {
+  const m = /^NUMERIC\((\d+),\s*(\d+)\)(\[\])?$/.exec(sqlType);
+  return m === null ? null : { precision: Number(m[1]), scale: Number(m[2]) };
 }
 
 /**
@@ -565,6 +586,8 @@ const TEMPORAL_READERS: ReadonlyMap<string, (value: unknown) => string | null> =
  */
 function readColumn(mapping: ColumnMapping, value: unknown): unknown {
   const isArray = mapping.sqlType.endsWith("[]");
+  const decimal = decimalSpecFromSqlType(mapping.sqlType);
+  if (decimal !== null) return convertDecimal(value, decimal, isArray);
   const reader = TEMPORAL_READERS.get(isArray ? mapping.sqlType.slice(0, -2) : mapping.sqlType);
   if (reader === undefined) return value;
   // Only a `Date` is rewritten. Text that is already a timestamp is left exactly as the write put
@@ -573,6 +596,25 @@ function readColumn(mapping: ColumnMapping, value: unknown): unknown {
   // text it was stored as.
   const read = (element: unknown): unknown => (element instanceof Date ? reader(element) : element);
   return isArray && Array.isArray(value) ? value.map(read) : read(value);
+}
+
+/**
+ * A `NUMERIC` column's value as the wire type holds it.
+ *
+ * node-postgres already hands back a string, and for a constrained `NUMERIC(p, s)` that string is
+ * the canonical form — so on the read path this is almost always the identity. It runs anyway for
+ * the two cases where it is not: an **encrypted** decimal column decrypts to whatever text was
+ * stored rather than to Postgres's own rendering, and a `write` echoes the caller's value back
+ * without a round trip (see `writeDecimal`). One function on both paths, so one store cannot
+ * disagree with itself about what it just stored.
+ */
+function convertDecimal(value: unknown, spec: DecimalSpec, isArray: boolean): unknown {
+  const one = (element: unknown): unknown => {
+    if (element === null || element === undefined) return element;
+    const converted = toDecimalWire(element, spec);
+    return converted.ok ? converted.wire : element;
+  };
+  return isArray && Array.isArray(value) ? value.map(one) : one(value);
 }
 
 /** Reconstructs an `EntityRecord` from a DB row, mapping each column back to its field (nulls omitted). */

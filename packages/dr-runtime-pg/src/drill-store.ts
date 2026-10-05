@@ -1,6 +1,7 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   DrDrillExecutionRecordSchema,
+  scopedWrite,
   type DrDrillExecutionRecord,
 } from "./records.js";
 
@@ -19,24 +20,27 @@ export class PostgresDrDrillStore {
 
   async record(record: DrDrillExecutionRecord): Promise<void> {
     const valid = DrDrillExecutionRecordSchema.parse(record);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
-       ON CONFLICT (execution_id) DO NOTHING`,
-      [
-        valid.executionId,
-        valid.tenantId,
-        valid.kind,
-        valid.tier,
-        valid.outcome,
-        valid.passing,
-        valid.rpoBreached,
-        valid.rtoBreached,
-        valid.scheduledFor,
-        valid.executedAt,
-        JSON.stringify(valid.record),
-        valid.recordedAt,
-      ],
+    await scopedWrite(this.conn, valid.tenantId, (tx) =>
+      tx.query(
+        `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+         ON CONFLICT (execution_id) DO NOTHING`,
+        [
+          valid.executionId,
+          valid.tenantId,
+          valid.kind,
+          valid.tier,
+          valid.outcome,
+          valid.passing,
+          valid.rpoBreached,
+          valid.rtoBreached,
+          valid.scheduledFor,
+          valid.executedAt,
+          JSON.stringify(valid.record),
+          valid.recordedAt,
+        ],
+    
+      ),
     );
   }
 

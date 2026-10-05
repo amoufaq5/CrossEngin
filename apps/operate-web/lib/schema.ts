@@ -25,6 +25,18 @@ export interface UiFieldSchema {
   readonly readOnly?: boolean;
   /** The server auto-fills this on create — a required-but-defaulted field needs no client input. */
   readonly defaulted?: boolean;
+  /**
+   * Present iff the field is a `decimal`. Its value travels as a canonical decimal **string**:
+   * the control is still numeric, but the draft text must be posted verbatim — `Number()` here
+   * would discard precision the server kept (more than half the shipped catalog's decimal fields
+   * declare more digits than a double holds).
+   */
+  readonly decimal?: { readonly precision: number; readonly scale: number };
+}
+
+/** Whether a form may hand this field's draft text to `Number()` before posting it. */
+export function postsAsNumber(field: UiFieldSchema): boolean {
+  return field.input === "number" && field.decimal === undefined;
 }
 
 export interface UiTransitionSchema {

@@ -80,6 +80,20 @@ export interface StoredTombstoneLike {
     readonly proofSha256: string;
     readonly anchors: readonly { readonly kind: string; readonly reference: string }[];
     readonly retainedReason?: string;
+    /**
+     * What a v2/v3 receipt needs to be **independently verifiable**, which is the whole point of
+     * ADR-0320's receipt: a bare "deleted" would be ADR-0317's defect in response form.
+     *
+     * Without these a caller holding the receipt cannot recompute `contentManifestSha256` at all —
+     * absent `proofVersion` they cannot even choose the domain tag, and absent the declaration and
+     * the obligations they cannot reconstruct v2 or v3 bytes. The receipt regressed at v2 and was one
+     * field further away at v3. It also shipped `retainedReason` without `retainedDataReference`, so
+     * it said *why* data survived and not *where*.
+     */
+    readonly proofVersion?: string;
+    readonly capabilityDeclaration?: Readonly<Record<string, string>>;
+    readonly retainedObligations?: readonly string[];
+    readonly retainedDataReference?: string;
   };
   readonly attestations: readonly AttestationLike[];
   readonly chainEntryHash: string | null;
@@ -259,6 +273,10 @@ export function newTombstoneId(uuid: string): string {
 /** The receipt a caller needs to establish later what was destroyed. */
 export function tombstoneReceipt(stored: StoredTombstoneLike): Record<string, unknown> {
   return {
+    // Read from the record, never inferred from whether a claim is attached: an inference would read
+    // a *deleted* declaration as an older record, which is the tamper that covers its own tracks
+    // (ADR-0329). `v1` is the honest default for a row written before the field existed.
+    proofVersion: stored.record.proofVersion ?? "v1",
     tombstoneId: stored.record.id,
     kind: stored.record.kind,
     deletedAt: stored.record.deletedAt,
@@ -271,6 +289,18 @@ export function tombstoneReceipt(stored: StoredTombstoneLike): Record<string, un
     attestedBy: stored.attestations.map((a) => `${a.subsystem}:${a.attestedBy}`),
     ...(stored.record.retainedReason !== undefined
       ? { retainedReason: stored.record.retainedReason }
+      : {}),
+    ...(stored.record.capabilityDeclaration !== undefined
+      ? { capabilityDeclaration: stored.record.capabilityDeclaration }
+      : {}),
+    // `[]` is the signed claim that nothing was kept, so this key is emitted whenever the bytes
+    // cover a claim at all. Omitting it on an empty list would be the pre-v3 "cannot say" again, in
+    // a new place — and it is the one distinction v3 exists to make.
+    ...(stored.record.retainedObligations !== undefined
+      ? { retainedObligations: stored.record.retainedObligations }
+      : {}),
+    ...(stored.record.retainedDataReference !== undefined
+      ? { retainedDataReference: stored.record.retainedDataReference }
       : {}),
   };
 }

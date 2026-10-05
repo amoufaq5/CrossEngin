@@ -209,7 +209,14 @@ describe("parseCheckpointConfig", () => {
     expect(cfg.intervalMs).toBe(3_600_000);
     expect(cfg.checkpointedBy).toBe("operate-server");
     expect(cfg.tenants).toEqual([]);
-    expect(cfg.includePlatform).toBe(false);
+    // ADR-0332, flipped in the same change as the integrity proof's: the proof's truncation check
+    // has no witness without a checkpoint (ADR-0287), so proving a scope nobody checkpoints leaves
+    // that half silently unwitnessed. One decision across two configs.
+    expect(cfg.includePlatform).toBe(true);
+  });
+
+  it("still honours an explicit false", () => {
+    expect(parseCheckpointConfig({ includePlatform: false }).includePlatform).toBe(false);
   });
 
   it("rejects unknown keys (strict)", () => {

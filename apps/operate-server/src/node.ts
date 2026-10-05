@@ -974,8 +974,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.warn(`[paging] not wired: ${skipped}`);
   }
   // A page is now written down as well as sent (ADR-0326). `tenantIdFor` is the deployment's answer
-  // to "whose row is this": `meta.audit_log.tenant_id` is NOT NULL, so a page for a platform-scope
-  // incident cannot leave a row and the recorder reports that rather than inventing a tenant.
+  // to "whose row is this" — and since ADR-0331 a platform-scope page *can* leave a row, because
+  // `meta.audit_log.tenant_id` is nullable and NULL means platform scope. What the recorder still
+  // will not do is invent a tenant: a resolver that throws, or answers blank, stays unrecorded,
+  // because only a resolved `null` is a positive statement that this page is about the deployment.
   const pageRecorder =
     conn === undefined || auditEmitter === null
       ? null
@@ -992,10 +994,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (report.undelivered) console.error(text);
       else console.info(text);
     };
-  // The incident's own timeline, which is the *other* place a page is written down — and the only
-  // one that works for a platform-scope page (ADR-0327). `meta.audit_log.tenant_id` is NOT NULL, so
-  // the SLO loop's pages can never leave an audit row; `meta.incidents.timeline` has no tenant
-  // column, is append-only, and sits on the record an incident review actually opens.
+  // The incident's own timeline, which is the *other* place a page is written down (ADR-0327). It
+  // was the only one that worked for a platform-scope page while `meta.audit_log.tenant_id` was NOT
+  // NULL; ADR-0331 made that row possible, so the two are now a pair rather than a substitute. The
+  // timeline keeps its job either way: it has no tenant column to get wrong, it is append-only, it
+  // sits on the record an incident review actually opens, and it is what still lands when the audit
+  // emitter itself is unreachable — which is the condition a compromise finding escalates for.
   const pagedNoteStore = conn === undefined ? null : new PostgresIncidentStore(conn);
   /**
    * Appends the page to its incident's timeline.
@@ -1292,10 +1296,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             },
           },
           recordRead: async (event): Promise<void> => {
-            // A cross-tenant read names no single tenant, so it is recorded against the *reader's*
-            // own: `meta.audit_log.tenant_id` is NOT NULL, and an unrecordable read is a refused
-            // one. A reader with no resolvable tenant at all therefore cannot read — which is the
-            // same fail-closed direction the grant resolution already takes.
+            // A cross-tenant read names no single tenant and is recorded against the **reader's**
+            // own. ADR-0313 gave a mechanical reason for that — `meta.audit_log.tenant_id` was NOT
+            // NULL — and ADR-0331 made it nullable, so the mechanical reason has expired while the
+            // decision has not.
+            //
+            // The real justification: this record is about a **person**, and that person belongs to
+            // a tenant. Filing it in their tenant's trail is what makes the read accountable to the
+            // people whose data it touched — their own `GET /v1/audit/entries` shows that somebody
+            // holding a platform grant read across them. Moving it to platform scope would put it
+            // behind `app.platform_audit`, readable only by the same population that performed the
+            // read, which removes the one reader the record exists for. Platform scope is the right
+            // home for a fact about the *deployment*; a privileged human's read is not one.
+            //
+            // So a reader with no resolvable tenant still cannot read, and must **not** be handed a
+            // platform row instead now that one is expressible: that would admit an *unattributable*
+            // privileged read, which is worse than refusing one.
             const tenantId = event.tenantId ?? event.readerTenantId;
             if (tenantId === null) {
               throw new Error("audit read has no tenant to record against");

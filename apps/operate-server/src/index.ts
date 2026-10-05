@@ -73,5 +73,8 @@ export * from "./notification-template-routes.js";
 export * from "./notification-template-store.js";
 export * from "./read-state-store.js";
 export * from "./read-state-routes.js";
+export * from "./fax-observation-store.js";
+export * from "./incident-note.js";
+export * from "./workflow-workers.js";
 export * from "./cli.js";
 export * from "./node.js";

@@ -4,6 +4,19 @@ import { PostgresDrDrillStore } from "./drill-store.js";
 import { drillExecutionRecordFrom } from "./records.js";
 import { mockConnection, type Captured } from "./test-fakes.js";
 
+/**
+ * The statement under test, found by what it *is* rather than by where it sits.
+ *
+ * `scopedWrite` issues a session setting before the write, so every positional `capture[0]` in a
+ * write test would otherwise have had to shift by one — and would shift again the next time a
+ * statement joins the transaction. Asserting on the session setting itself is a separate test.
+ */
+function written(capture: readonly Captured[]): Captured {
+  const found = capture.find((c) => !c.sql.includes("set_config"));
+  if (found === undefined) throw new Error("no statement other than the session setting was issued");
+  return found;
+}
+
 const NOW = "2026-06-02T12:00:00.000Z";
 const LATER = "2026-06-02T12:30:00.000Z";
 const DUE = "2026-09-02T12:00:00.000Z";
@@ -40,21 +53,21 @@ describe("PostgresDrDrillStore.record", () => {
     const capture: Captured[] = [];
     const store = new PostgresDrDrillStore(mockConnection(capture));
     await store.record(record());
-    expect(capture[0]?.sql).toContain("INSERT INTO meta.dr_drill_executions");
-    expect(capture[0]?.sql).toContain("ON CONFLICT (execution_id) DO NOTHING");
-    expect(capture[0]?.sql).toContain("$11::jsonb");
-    expect(capture[0]?.params?.[0]).toBe("drl_00000001");
-    expect(capture[0]?.params?.[1]).toBe(TENANT);
-    expect(capture[0]?.params?.[2]).toBe("restore_test");
-    expect(capture[0]?.params?.[4]).toBe("passed");
-    expect(capture[0]?.params?.[5]).toBe(true);
+    expect(written(capture).sql).toContain("INSERT INTO meta.dr_drill_executions");
+    expect(written(capture).sql).toContain("ON CONFLICT (execution_id) DO NOTHING");
+    expect(written(capture).sql).toContain("$11::jsonb");
+    expect(written(capture).params?.[0]).toBe("drl_00000001");
+    expect(written(capture).params?.[1]).toBe(TENANT);
+    expect(written(capture).params?.[2]).toBe("restore_test");
+    expect(written(capture).params?.[4]).toBe("passed");
+    expect(written(capture).params?.[5]).toBe(true);
   });
 
   it("serializes the full record as a json string", async () => {
     const capture: Captured[] = [];
     const store = new PostgresDrDrillStore(mockConnection(capture));
     await store.record(record());
-    const raw = capture[0]?.params?.[10];
+    const raw = written(capture).params?.[10];
     expect(typeof raw).toBe("string");
     expect(JSON.parse(raw as string).id).toBe("drl_00000001");
   });

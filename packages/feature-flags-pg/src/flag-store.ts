@@ -7,7 +7,11 @@ import {
   type FlagStatus,
 } from "@crossengin/feature-flags";
 
-import { SET_TENANT_CONTEXT_SQL, assertTenantId } from "./kill-switch-store.js";
+import {
+  SET_PLATFORM_CONFIG_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+  assertTenantId,
+} from "./kill-switch-store.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const TABLE = "feature_flags";
@@ -290,7 +294,7 @@ export class PostgresFeatureFlagStore {
 
   async insert(flag: FlagDefinition): Promise<void> {
     const values = flagRowValues(flag);
-    await this.scoped(flag.tenantId, (tx) =>
+    await this.scopedWrite(flag.tenantId, (tx) =>
       tx.query(
         `INSERT INTO ${this.schema}.${TABLE} (${FEATURE_FLAG_COLUMNS})
          VALUES (${this.placeholders})`,
@@ -435,7 +439,7 @@ export class PostgresFeatureFlagStore {
     extra: string,
   ): Promise<void> {
     const values = flagRowValues(flag);
-    const result = await this.scoped(flag.tenantId, (tx) =>
+    const result = await this.scopedWrite(flag.tenantId, (tx) =>
       tx.query(
         `UPDATE ${this.schema}.${TABLE} SET ${this.updateAssignments}
          WHERE flag_id = $1 AND updated_at = $${this.guardParam}${extra}`,
@@ -447,6 +451,7 @@ export class PostgresFeatureFlagStore {
     }
   }
 
+  /** A read's scope: a tenant context, or nothing — `PostgresKillSwitchStore.scoped`'s reasoning. */
   private scoped<T>(
     tenantId: string | null,
     fn: (tx: PgConnection) => Promise<T>,
@@ -454,6 +459,19 @@ export class PostgresFeatureFlagStore {
     if (tenantId !== null) assertTenantId(tenantId);
     return this.conn.transaction(async (tx) => {
       if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      return fn(tx);
+    });
+  }
+
+  /** A write's scope: a tenant context, or the platform config-write elevation, never both. */
+  private scopedWrite<T>(
+    tenantId: string | null,
+    fn: (tx: PgConnection) => Promise<T>,
+  ): Promise<T> {
+    if (tenantId !== null) assertTenantId(tenantId);
+    return this.conn.transaction(async (tx) => {
+      if (tenantId === null) await tx.query(SET_PLATFORM_CONFIG_WRITE_SQL);
+      else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
       return fn(tx);
     });
   }

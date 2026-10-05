@@ -83,6 +83,7 @@
     "@crossengin/tenant-lifecycle-pg": "workspace:*",
     "@crossengin/types": "workspace:*",
     "@crossengin/workflow-runtime-pg": "workspace:*",
+    "@crossengin/workflow-worker": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

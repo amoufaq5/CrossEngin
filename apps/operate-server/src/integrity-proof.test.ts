@@ -104,10 +104,17 @@ describe("IntegrityProofConfigSchema", () => {
       auditRowLimit: 500,
       fromCheckpoint: true,
       recordVerdict: true,
-      includePlatform: false,
+      // ADR-0332 flipped this, together with the checkpoint config's. Three escalators write
+      // platform-scope rows, so `false` meant writing rows nothing verified — in the one table
+      // where this proof is the only detector there is.
+      includePlatform: true,
       allTenants: false,
       tenants: [],
     });
+  });
+
+  it("still honours an explicit false, so what changed is only what silence means", () => {
+    expect(parseIntegrityProofConfig({ includePlatform: false }).includePlatform).toBe(false);
   });
 
   it("rejects an unknown key rather than ignoring a typo", () => {
@@ -157,15 +164,18 @@ describe("IntegrityProofConfigSchema", () => {
 });
 
 describe("integrityConfigScopes", () => {
-  it("is the tenant list, with the platform chain only when opted in", () => {
+  it("is the tenant list plus the platform chain, which is now the default", () => {
+    // ADR-0332. The platform scope is included unless a deployment says otherwise, because the
+    // three escalators that write it would otherwise be writing rows nothing verifies.
     expect(integrityConfigScopes(parseIntegrityProofConfig({ tenants: [TENANT_A] }))).toEqual([
       TENANT_A,
+      null,
     ]);
     expect(
       integrityConfigScopes(
-        parseIntegrityProofConfig({ tenants: [TENANT_A], includePlatform: true }),
+        parseIntegrityProofConfig({ tenants: [TENANT_A], includePlatform: false }),
       ),
-    ).toEqual([TENANT_A, null]);
+    ).toEqual([TENANT_A]);
   });
 });
 
