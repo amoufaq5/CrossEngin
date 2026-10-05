@@ -40,6 +40,8 @@ import type { PruneOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
+  routeBodyLimitFor,
+  type RouteBodyLimit,
   RequestBodyTooLargeError,
   readLimitedBody,
   resolveMaxRequestBodyBytes,
@@ -311,13 +313,27 @@ export interface DispatchTarget {
 export function createNodeRequestListener(
   server: DispatchTarget,
   maxRequestBodyBytes?: number | null,
+  /**
+   * Per-route overrides (ADR-0331), chosen by longest matching path prefix.
+   *
+   * The URL is the *only* thing available before the body is read, which is what bounds this: a
+   * **per-tenant** limit is not expressible here and is deliberately not attempted. The tenant
+   * comes from the credential, and resolving one means verifying a JWT — which is a pipeline stage
+   * inside the gateway, after the body. Doing it here would put a second verification path in
+   * front of the first, to pick a buffer size.
+   */
+  routeBodyLimits: readonly RouteBodyLimit[] = [],
 ): (req: NodeReqLike, res: NodeResLike) => Promise<void> {
   // Resolved once, at build time, rather than per request: an out-of-band limit must fail the boot,
-  // not every request after it.
+  // not every request after it. Each override is range-checked the same way, for the same reason.
   const limit = resolveMaxRequestBodyBytes(maxRequestBodyBytes);
+  const overrides = routeBodyLimits.map((o) => ({
+    prefix: o.prefix,
+    bytes: resolveMaxRequestBodyBytes(o.bytes),
+  }));
   return async (req, res) => {
     try {
-      const body = await readLimitedBody(req, limit);
+      const body = await readLimitedBody(req, routeBodyLimitFor(req.url ?? "/", overrides, limit));
       const raw: RawHttpRequest = {
         method: req.method ?? "GET",
         url: req.url ?? "/",
@@ -2447,7 +2463,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   auditPolicy?.refresher.start();
   metering?.flushScheduler?.start();
   stripeUsageSync?.scheduler.start();
-  const listener = createNodeRequestListener(dispatchTarget, options.maxRequestBodyBytes);
+  const listener = createNodeRequestListener(
+    dispatchTarget,
+    options.maxRequestBodyBytes,
+    options.maxRequestBodyRoutes,
+  );
   const server = createServer((req, res) => {
     void listener(req as unknown as NodeReqLike, res as unknown as NodeResLike);
   });

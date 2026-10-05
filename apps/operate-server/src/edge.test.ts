@@ -53,6 +53,42 @@ describe("fetchToRaw", () => {
     expect(JSON.parse(new TextDecoder().decode(body!))).toEqual({ a: 1 });
   });
 
+  it("applies a per-route override, parsing the path out of an absolute URL", async () => {
+    // ADR-0331, and the step the Node path does not need: `request.url` here is absolute, so a
+    // prefix like `/v1/products` would never match it directly.
+    const body = new Uint8Array(4096).fill(0x61);
+    const request = new Request("https://api.example.com/v1/products", {
+      method: "POST",
+      headers: { "x-api-key": "k", "content-type": "application/json" },
+      body,
+    });
+    const out = await fetchToRaw(request, 2048, [{ prefix: "/v1/products", bytes: 1024 * 1024 }]);
+    expect(out.body?.byteLength).toBe(4096);
+  });
+
+  it("does not let an override loosen a route it did not name", async () => {
+    const request = new Request("https://api.example.com/v1/orders", {
+      method: "POST",
+      headers: { "x-api-key": "k", "content-type": "application/json" },
+      body: new Uint8Array(4096),
+    });
+    await expect(
+      fetchToRaw(request, 2048, [{ prefix: "/v1/products", bytes: 1024 * 1024 }]),
+    ).rejects.toThrow(/too large|exceeds|limit/i);
+  });
+
+  it("cannot have its limit widened by a query string", async () => {
+    // The path comes from a URL parse, so a query cannot smuggle another route's prefix in.
+    const request = new Request("https://api.example.com/v1/orders?x=/v1/products", {
+      method: "POST",
+      headers: { "x-api-key": "k", "content-type": "application/json" },
+      body: new Uint8Array(4096),
+    });
+    await expect(
+      fetchToRaw(request, 2048, [{ prefix: "/v1/products", bytes: 1024 * 1024 }]),
+    ).rejects.toThrow(/too large|exceeds|limit/i);
+  });
+
   it("refuses a body over the cap instead of buffering it", async () => {
     // This path called `request.arrayBuffer()` with no limit, so the 10 MiB control existed only on
     // the Node listener — and the edge is the surface actually exposed to the internet.

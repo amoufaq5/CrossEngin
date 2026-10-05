@@ -83,6 +83,69 @@ describe("createNodeRequestListener", () => {
     expect(parsed.status).toBe(413);
   });
 
+  it("applies a per-route override, bounding the read before dispatch", async () => {
+    // ADR-0331. The default is deliberately tiny here, which is the posture the feature exists to
+    // enable: one platform-wide number has to be the largest legitimate body in the deployment,
+    // and that figure then applies to every cheap endpoint.
+    const listener = createNodeRequestListener(httpServer(), 2048, [
+      { prefix: "/v1/products", bytes: 1024 * 1024 },
+    ]);
+    const res = mockRes();
+    const body = new TextEncoder().encode(
+      JSON.stringify({ sku: "S1", name: "A".repeat(4000), unit_price: 2, unit_cost: 1, status: "active", category: "grocery" }),
+    );
+    await listener(
+      mockReq({
+        method: "POST",
+        url: "/v1/products",
+        headers: { "x-api-key": "key-manager", "content-type": "application/json" },
+        body,
+      }),
+      res,
+    );
+    // Over the 2 KiB default, under the route's 1 MiB — so it is read, not refused.
+    expect(body.byteLength).toBeGreaterThan(2048);
+    expect(res.status).not.toBe(413);
+  });
+
+  it("still refuses a route the override does not cover", async () => {
+    // The other half: an override must not loosen anything it did not name.
+    const listener = createNodeRequestListener(httpServer(), 2048, [
+      { prefix: "/v1/products", bytes: 1024 * 1024 },
+    ]);
+    const res = mockRes();
+    const chunk = new Uint8Array(4096);
+    await listener(
+      mockReq({
+        method: "POST",
+        url: "/v1/orders",
+        headers: { "x-api-key": "key-manager", "content-type": "application/json" },
+        body: chunk,
+      }),
+      res,
+    );
+    expect(res.status).toBe(413);
+  });
+
+  it("cannot have its limit widened by a query string", async () => {
+    // The matcher cuts the query before matching, so appending one cannot select another route's
+    // allowance — nor make a non-matching path match.
+    const listener = createNodeRequestListener(httpServer(), 2048, [
+      { prefix: "/v1/products", bytes: 1024 * 1024 },
+    ]);
+    const res = mockRes();
+    await listener(
+      mockReq({
+        method: "POST",
+        url: "/v1/orders?x=/v1/products",
+        headers: { "x-api-key": "key-manager", "content-type": "application/json" },
+        body: new Uint8Array(4096),
+      }),
+      res,
+    );
+    expect(res.status).toBe(413);
+  });
+
   it("collects a POST body and creates a record", async () => {
     const listener = createNodeRequestListener(httpServer());
     const res = mockRes();

@@ -1184,7 +1184,32 @@ export const META_TENANT_CREDITS: TableDefinition = {
     },
     { name: "reason", type: "TEXT", notNull: true },
     { name: "expires_at", type: "TIMESTAMPTZ" },
-    { name: "issued_by", type: "UUID", notNull: true, references: USER_FK },
+    {
+      /**
+       * TEXT and unreferenced, structured rather than free text — ADR-0318's fix for
+       * `tenant_tombstones.executed_by`, applied to the table ADR-0330 found carrying the same
+       * defect.
+       *
+       * It referenced `meta.users` with `ON DELETE RESTRICT`, which makes a user undeletable
+       * *because* a credit names them as its issuer. That is latent rather than live today — this
+       * table has no writer, and `meta.users` has no `tenant_id` so a tenant deletion does not
+       * reach it — but ADR-0330 made `meta.tenant_credits` a **statutorily retained** table, so the
+       * row now deliberately outlives the deletion that would otherwise have taken it. A retention
+       * that makes a person undeletable is the defect ADR-0318 removed from a proof, and keeping it
+       * here would mean the obligation to retain a credit note silently became an obligation to
+       * retain its issuer.
+       *
+       * Structured so the rule stays checkable: an `sla_credit` raised by a breach handler has no
+       * human in it at all, while a `manual_adjustment` must name one — and free text would let
+       * `system:slo` satisfy that. The same `user:` / `system:` / `provider:` vocabulary
+       * `notification_suppressions.applied_by` uses (ADR-0302), one spelling for one idea.
+       */
+      name: "issued_by",
+      type: "TEXT",
+      notNull: true,
+      check:
+        "issued_by ~ '^(user:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|system:[a-z][a-z0-9_-]{0,62}|provider:[a-z][a-z0-9_-]{0,62})$'",
+    },
     { name: "issued_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "applied_to_invoice_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
   ],
@@ -1192,6 +1217,10 @@ export const META_TENANT_CREDITS: TableDefinition = {
   indexes: [
     { name: "idx_tenant_credits_tenant_remaining", columns: ["tenant_id", "remaining_cents"] },
     { name: "idx_tenant_credits_kind", columns: ["kind"] },
+    // Kept although its reader is gone: it existed to make `ON DELETE RESTRICT` cheap on the
+    // `meta.users` reference ADR-0331 removed. The same call ADR-0296 made for six others —
+    // dropping it from the catalog would have it reported as undeclared on every drift check
+    // until somebody dropped it from every database.
     { name: "idx_tenant_credits_issued_by", columns: ["issued_by"] },
   ],
   rls: {

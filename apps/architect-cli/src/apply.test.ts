@@ -211,6 +211,20 @@ describe("applyJsonPayload", () => {
     expect(payload.plan.schema).toBe("meta");
   });
 
+  it("defaults `remaining` to null, so an old caller cannot read it as converged", () => {
+    // ADR-0331. The field answers "is it done", and absent must not read as yes — a caller that
+    // never passes it has not re-planned and knows nothing either way.
+    const payload = applyJsonPayload(reportWithTwoFailures(), EMPTY_PLAN);
+    expect(payload.remaining).toBeNull();
+  });
+
+  it("carries the post-pass plan as the convergence claim", () => {
+    // `statements: []` is the only shape that means "the schema now matches the catalog".
+    // "executed N, failed 0" is a different claim and an operator reads it as if it were this one.
+    const payload = applyJsonPayload(reportWithTwoFailures(), EMPTY_PLAN, EMPTY_PLAN);
+    expect(payload.remaining?.statements).toEqual([]);
+  });
+
   it("carries no failures for a clean run", () => {
     const payload = applyJsonPayload(
       {

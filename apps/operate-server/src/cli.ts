@@ -10,7 +10,7 @@ import {
 } from "./deletion-scheduler.js";
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
-import { parseRequestBodyLimit } from "./request-body-limit.js";
+import { parseRequestBodyLimit, parseRouteBodyLimits } from "./request-body-limit.js";
 
 export type StoreKind = "memory" | "pg" | "pg-columns";
 
@@ -223,6 +223,17 @@ export interface ServeOptions {
   readonly deletionRunnerBatchSize: number | null;
   /** Maximum buffered request body, as bytes or a size like 25mb (default 10mb, floor 1kb, ceiling 1gb). */
   readonly maxRequestBodyBytes: number | null;
+  /**
+   * Per-route body-size overrides as `<path-prefix>=<size>` (repeatable), longest prefix winning.
+   *
+   * ADR-0312 left "a per-route or per-tenant request-body limit is unaddressed". The cost of one
+   * number is that it must be the **largest legitimate body in the deployment**, which then applies
+   * to every cheap endpoint — so the real point of this is that `--max-request-body` can finally be
+   * set *small*, with the few large routes named. A **per-tenant** limit is deliberately not here:
+   * the tenant comes from the credential and resolving one means verifying a JWT, which is a
+   * gateway pipeline stage running after the body is read (ADR-0331).
+   */
+  readonly maxRequestBodyRoutes: readonly { readonly prefix: string; readonly bytes: number }[];
   readonly defaultScheme: "http" | "https";
   readonly help: boolean;
   readonly version: boolean;
@@ -347,6 +358,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let deletionRunnerApprovedBy: string | null = null;
   let deletionRunnerBatchSize: number | null = null;
   let maxRequestBodyBytes: number | null = null;
+  const maxRequestBodyRouteSpecs: string[] = [];
   let help = false;
   let version = false;
 
@@ -826,6 +838,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       }
       deletionRunnerBatchSize = n;
       i += consumed();
+    } else if (
+      arg === "--max-request-body-route" ||
+      arg.startsWith("--max-request-body-route=")
+    ) {
+      maxRequestBodyRouteSpecs.push(takeValue(arg, next, "--max-request-body-route"));
+      i += consumed();
     } else if (arg === "--max-request-body" || arg.startsWith("--max-request-body=")) {
       const raw = takeValue(arg, next, "--max-request-body");
       const parsed = parseRequestBodyLimit(raw);
@@ -935,6 +953,14 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   }
   if (emitEntityEvents && store === "memory") {
     throw new CliUsageError("--emit-entity-events requires a Postgres store (--store pg or pg-columns)");
+  }
+  // Refused at parse time, not at the first request: a spec that cannot match, or a duplicated
+  // prefix where an operator believes both are in force, is a limit nobody configured (ADR-0331).
+  const parsedRouteLimits = parseRouteBodyLimits(maxRequestBodyRouteSpecs);
+  if (!parsedRouteLimits.ok) {
+    throw new CliUsageError(
+      `invalid --max-request-body-route: ${parsedRouteLimits.reasons.join("; ")}`,
+    );
   }
   if (eventPrefix !== null && !emitEntityEvents) {
     throw new CliUsageError("--event-prefix requires --emit-entity-events");
@@ -1128,6 +1154,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionRunnerApprovedBy,
     deletionRunnerBatchSize,
     maxRequestBodyBytes,
+    maxRequestBodyRoutes: parsedRouteLimits.limits,
     defaultScheme,
     help,
     version,
@@ -1513,6 +1540,11 @@ Options:
                        system:retention-policy). Must differ from the executor
   --deletion-runner-batch-size <n>  Requests the runner may take per tick (1..100, default 5).
                        Each one is a whole tenant's data, and they run serially
+  --max-request-body-route <prefix>=<size>  Per-route override, longest path prefix winning
+                       (repeatable). Lets --max-request-body be set small, with the few routes that
+                       legitimately take a large body named. Per-*tenant* is not expressible here:
+                       the tenant comes from the credential and the limit is chosen before the body
+                       is read
   --max-request-body <size>  Largest buffered request body — bytes or a size like 25mb (default
                        10mb, floor 1kb, ceiling 1gb). Not disableable; out-of-band values are
                        refused at boot rather than clamped

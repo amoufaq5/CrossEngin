@@ -93,12 +93,38 @@ export async function runApply(
       stopOnFailure: false,
     });
     const report = await applier.apply();
+    // Re-plan after a clean apply, because "executed 3, failed 0" is not the same claim as "the
+    // schema now matches the catalog" and an operator reads it as if it were (ADR-0331).
+    //
+    // A plan converges in one pass almost always, but not always: a step can only be planned
+    // against the schema as it was *before* the pass, so a declared CHECK on a column whose type
+    // is also changing is deferred to the next plan rather than ordered after the `ALTER` — which
+    // is the safe choice, since the plan's invariant is that every step in it is expected to
+    // succeed, and ordering it would be guessing at a dependency this planner does not model.
+    // Found live: a two-pass case reported `failed: 0` with the CHECK still missing.
+    //
+    // Only on a clean apply. After a failure the remaining difference is obviously the failure's,
+    // and a second message would bury the first.
+    const converged =
+      report.preconditions.ok && report.failed === 0
+        ? await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
+            ...(allowLoosening ? { allowLoosening: true } : {}),
+          })
+        : null;
     if (command.format === "json") {
-      printJson(ctx.io, applyJsonPayload(report, plan));
+      printJson(ctx.io, applyJsonPayload(report, plan, converged));
     } else {
       printSuccess(ctx.io, formatApplyReport(report));
       if (plan.unreconciled.length > 0) {
         printSuccess(ctx.io, formatReconciliationPlan(plan));
+      }
+      if (converged !== null && converged.statements.length > 0) {
+        printSuccess(
+          ctx.io,
+          `  ${converged.statements.length.toString()} statement(s) still to apply —` +
+            " run apply again. A step is planned against the schema as it was before this pass," +
+            " so a change that depends on one of them lands on the next.",
+        );
       }
     }
     if (!report.preconditions.ok || report.failed > 0) return 1;
@@ -119,13 +145,24 @@ export interface ApplyJsonPayload {
    * and error without walking 800 outcome entries to find them.
    */
   readonly failures: readonly ApplyStatementRecord[];
+  /**
+   * The plan as it stands **after** this pass, so a machine consumer can tell "it ran" from "it is
+   * done" (ADR-0331). `null` when the apply did not finish cleanly — the remaining difference is
+   * then obviously the failure's, and re-planning would only describe it a second way.
+   *
+   * `remaining.statements.length === 0` is the convergence claim. Anything else means another
+   * `apply` is needed, which happens when a step could only be planned against the schema as it
+   * was before this pass.
+   */
+  readonly remaining: ReconciliationPlan | null;
 }
 
 export function applyJsonPayload(
   report: ApplyReport,
   plan: ReconciliationPlan,
+  remaining: ReconciliationPlan | null = null,
 ): ApplyJsonPayload {
-  return { report, plan, failures: applyFailures(report) };
+  return { report, plan, failures: applyFailures(report), remaining };
 }
 
 function emitDryRun(io: IoStreams, command: ParsedCommand): number {

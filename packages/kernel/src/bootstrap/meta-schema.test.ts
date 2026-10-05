@@ -1295,6 +1295,27 @@ describe("table column shapes", () => {
     expect(col("capability_declaration")?.notNull).toBeUndefined();
   });
 
+  it("META_TENANT_CREDITS names its issuer without making that issuer undeletable", () => {
+    const col = META_TENANT_CREDITS.columns.find((c) => c.name === "issued_by");
+    // ADR-0331, applying ADR-0318's fix to the table ADR-0330 found carrying the same defect. It
+    // referenced `meta.users` with `ON DELETE RESTRICT`, so a credit made its issuer undeletable —
+    // latent until ADR-0330 made this table statutorily *retained*, which is exactly when the row
+    // starts outliving the deletion that would have taken it.
+    expect(col?.type).toBe("TEXT");
+    expect(col?.references).toBeUndefined();
+    expect(col?.notNull).toBe(true);
+    // Structured, not free text: an `sla_credit` from a breach handler has no human in it while a
+    // `manual_adjustment` must name one, and free text would let `system:slo` satisfy that. Same
+    // vocabulary as `notification_suppressions.applied_by` (ADR-0302) — one spelling for one idea.
+    expect(col?.check).toContain("user:");
+    expect(col?.check).toContain("system:");
+    expect(col?.check).toContain("provider:");
+    // NOT NULL here where the suppression column is nullable: nothing has ever written this table,
+    // so there are no pre-existing rows an actor requirement would retroactively invalidate — the
+    // one reason ADR-0302 left its own column nullable.
+    expect(col?.check).not.toContain("IS NULL");
+  });
+
   it("META_ARCHITECT_ESTIMATE_INFLATION cannot hold a factor that deflates an estimate", () => {
     const col = (n: string) =>
       META_ARCHITECT_ESTIMATE_INFLATION.columns.find((c) => c.name === n);

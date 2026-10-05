@@ -979,6 +979,57 @@ describe("parseServeArgs — --audit-read-sensitive-class", () => {
     }
   });
 
+  it("parses per-route body limits, longest prefix independent of argv order", () => {
+    const out = parseServeArgs([
+      ...PG,
+      "--max-request-body",
+      "64kb",
+      "--max-request-body-route=/v1/platform/manifests=8mb",
+      "--max-request-body-route",
+      "/v1/platform=256kb",
+    ]);
+    // The point of the feature: the default can finally be *small*, with the large routes named.
+    expect(out.maxRequestBodyBytes).toBe(64 * 1024);
+    expect(out.maxRequestBodyRoutes).toHaveLength(2);
+  });
+
+  it("refuses a per-route spec that could never match", () => {
+    // A relative prefix matches no request URL, so the operator would believe a limit was in force
+    // and none would be.
+    expect(() =>
+      parseServeArgs([...PG, "--max-request-body-route=v1/platform=2mb"]),
+    ).toThrow(CliUsageError);
+  });
+
+  it("refuses a duplicated prefix rather than letting one silently win", () => {
+    expect(() =>
+      parseServeArgs([
+        ...PG,
+        "--max-request-body-route=/v1/a=2mb",
+        "--max-request-body-route=/v1/a=3mb",
+      ]),
+    ).toThrow(CliUsageError);
+  });
+
+  it("names every bad spec in one refusal, so an operator fixes them in one pass", () => {
+    let message = "";
+    try {
+      parseServeArgs([
+        ...PG,
+        "--max-request-body-route=nope",
+        "--max-request-body-route=/v1/b=notasize",
+      ]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("nope");
+    expect(message).toContain("/v1/b");
+  });
+
+  it("defaults to no overrides, which is every deployment today", () => {
+    expect(parseServeArgs([...PG]).maxRequestBodyRoutes).toEqual([]);
+  });
+
   it("refuses --workflow-cancel-role rather than mounting a route that cannot work", () => {
     // ADR-0330. The route, its tests and its fence columns exist; what is missing is upstream of
     // all of it — this server instantiates no WorkflowEngine because `meta.workflow_definitions`
