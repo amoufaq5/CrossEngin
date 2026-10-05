@@ -112,10 +112,17 @@ documenting it.** Concretely:
    status column in every one of these contracts, and the GDPR shared-table erasure deletes
    `tenant_id = $1` only, which the isolation policy still covers.
 
-   The axes are orthogonal and conflating them was the first wrong turn: `quota_definitions` is
-   append-only in *shape* but sits on `config`, because a hard limit decides what the deployment
-   permits; `dr_failover_executions` is mutable in shape but sits on `record`. One axis would have
-   forced one of those wrong.
+   The axes are orthogonal and conflating them was the first wrong turn: `quota_definitions` and
+   `feature_flag_targeting_rules` are append-only in *shape* but sit on `config`, because a hard
+   limit and a targeting rule each decide what the deployment permits; `dr_failover_executions` is
+   mutable in shape but sits on `record`. One axis would have forced one of those wrong.
+
+   **The grants are `PUBLIC`-scoped settings rather than role-narrowed, and that is forced.** A
+   policy's `roles` list would have to name roles the catalog cannot know a deployment created —
+   which is why no policy anywhere in `META_TABLES` narrows `roles`. What the split buys is therefore
+   not an authorisation but a *declaration*: claiming a grant is a deliberate, transaction-local act
+   by a session that knows which privilege it is exercising, rather than the ambient default of every
+   tenant connection.
 
    **The narrowed isolation policy keeps its existing name.** `feature_flags_tenant_or_platform`
    stays that, with a narrowed predicate — which is what makes the whole split reconcilable in one
@@ -123,8 +130,14 @@ documenting it.** Concretely:
    `DROP …; CREATE …;` statement. A *renamed* one would have been `create_policy` plus a
    `policy_removed` refusal, and because permissive policies are **OR'd**, the split would have
    bought *nothing* until 29 hand-run drops landed — ADR-0331's two-table trap multiplied by
-   fourteen. Measured: **99 steps, 0 unreconciled, zero manual SQL.** The cost is a policy whose name
-   no longer describes it, and there is no `renamedFrom` for a policy.
+   fourteen. Measured twice: **99 steps, 0 unreconciled, zero manual SQL** against an
+   already-migrated database, and **958 of 958 statements executed, 0 failed** on a fresh cluster
+   taking the full bootstrap, with the immediate re-plan reporting *nothing to do* in both cases. The
+   cost is a policy whose name no longer describes it, and there is no `renamedFrom` for a policy.
+
+   The arithmetic that confirms the shape axis landed is the live policy census:
+   **`ALL 114`, `SELECT 34`, `INSERT 32`, `UPDATE 12`** — twelve `UPDATE` arms and twelve mutable
+   tables, so no append-only table gained one and no mutable table was left without.
 
 1. **A signal id is minted per match**, and `submitSignal` returns `deliveries` rather than a single
    `signalId` — with N instances there is no such value. `deduplicated` returns **the first submit's
@@ -293,11 +306,16 @@ documenting it.** Concretely:
 
 - **Positive.** A tenant session can no longer write, change or remove a platform-wide row on any of
   the 29 tables, and the write is reachable only by a session that sets the right one of four
-  transaction-local GUCs — verified live as a non-owner role across a 12-case forgery matrix, all 12
-  unambiguous. The `_platform_read` arm is preserved on every one of them, so no existing reader lost
+  transaction-local GUCs — verified live as a non-owner role across a **44-case forgery matrix**, all
+  44 unambiguous, plus 13 cases driven through the real stores including a raw tenant-session forgery
+  refused. The `_platform_read` arm is preserved on every one of them, so no existing reader lost
   access. A signal fan-out stores one row per delivery and the replayer stops reporting drift on
   healthy data. Dedup survives a restart and reaches a second replica. Two implementations of one
   `EntityStore` agree about what a `decimal` is, and two real mis-postings in the ledger are fixed.
+  `PostgresFeatureFlagStore` can round-trip a flag at all — `FEATURE_FLAG_COLUMN_NAMES` said
+  `default_value` where ADR-0308's rename machinery had moved the column to `default_value_json`, so
+  every write failed against a real database while every offline test passed, and the list is now
+  asserted against `META_TABLES` rather than maintained beside it.
   Four files are searchable, so a "find all callers" sweep no longer has blind spots it does not
   report. A number that is a fax machine can stop consuming voice notifications. A stall episode says
   which kind it currently is. Platform-scope rows are verified by default.

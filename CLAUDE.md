@@ -767,6 +767,12 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   conditionally, because a kill switch may be platform-wide or tenant-scoped; `loadForIncident` throws
   on two rows rather than picking one, and the active predicate uses the database clock so a drifted
   worker cannot serve a lapsed override as live.
+  **`FEATURE_FLAG_COLUMN_NAMES` has to name what the catalog declares, and a test now asserts that**
+  (ADR-0332): the list said `default_value`, which ADR-0308's rename machinery had moved to
+  `default_value_json` — so `PostgresFeatureFlagStore` could not round-trip a single flag against any
+  real database while every offline test passed, since a fake connection asserts SQL *shape* and
+  cannot know a column does not exist. The same class as ADR-0331's signal store, and the reason the
+  assertion is against `META_TABLES` rather than a second copy of the names.
 - **`deploy`** — apps × 4 environments × 4 strategies, artifact kinds, migration records,
   release channels, on-prem/BYOC packaging (Helm/Terraform).
 - **`edge`** — region routing strategies, per-route latency budgets and percentiles,
@@ -1387,11 +1393,18 @@ opened them.
   erasure deletes `tenant_id = $1` only, which isolation still covers. The axes are orthogonal and
   conflating them is the trap — `quota_definitions` is append-only in shape but sits on `config`
   because a hard limit decides what the deployment permits, while `dr_failover_executions` is mutable
-  in shape but sits on `record`. Verified live as a non-owner role across a **12-case forgery matrix**,
-  all 12 unambiguous. What remains: **14 of the 29 have no store**, so their write arms are capability
+  in shape but sits on `record`; `feature_flag_targeting_rules` is the second append-only-but-`config`
+  case. Verified live as a non-owner role across a **44-case forgery matrix**, all 44 unambiguous,
+  plus 13 cases through the real stores, and a fresh-cluster bootstrap of **958/958** statements whose
+  re-plan came back clean. The arithmetic that confirms the shape axis is the live policy census —
+  `ALL 114`, `SELECT 34`, `INSERT 32`, **`UPDATE 12`** — twelve `UPDATE` arms for twelve mutable
+  tables. What remains: **14 of the 29 have no store**, so their write arms are capability
   with no caller; the grants are `PUBLIC`-scoped settings, so any session able to call `set_config` can
-  claim one (what the split buys is that claiming it is deliberate and transaction-local rather than
-  the default state of every tenant connection); **reads are still owner-dependent** in the seven
+  claim one — and that is **forced**, because a policy's `roles` list would have to name roles the
+  catalog cannot know a deployment created, which is why no policy in `META_TABLES` narrows `roles` at
+  all. So what the split buys is a *declaration* rather than an authorisation: claiming a grant is a
+  deliberate, transaction-local act naming which privilege is being exercised, instead of the ambient
+  default of every tenant connection. **Reads are still owner-dependent** in the seven
   stores that set no scope, which is ADR-0331's `scopeFilter` lesson un-swept outside the chain; and
   `meta.audit_integrity_verdicts` is **still open** because its hole is differently shaped — its `ALL`
   policy ORs in the `app.platform_audit` *read* grant, so an elevated reader can forge a verdict, and
