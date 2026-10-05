@@ -131,14 +131,15 @@ describe("evidence sources", () => {
   });
 
   it("drReadinessSource yields nothing when no snapshot exists", async () => {
-    const src = drReadinessSource({ latest: async () => null });
+    const src = drReadinessSource({ latest: async () => null }, null);
     expect(await src.collect("soc2_type2", AT)).toEqual([]);
   });
 
   it("drReadinessSource maps the latest snapshot", async () => {
-    const src = drReadinessSource({
-      latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 } } }),
-    });
+    const src = drReadinessSource(
+      { latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 } } }) },
+      null,
+    );
     const [ev] = await src.collect("soc2_type2", AT);
     expect(ev?.sourceKind).toBe("dr_readiness");
     expect(ev?.satisfied).toBe(true);
@@ -252,9 +253,10 @@ describe("buildCertificationLifecycle", () => {
   it("certifies + persists one sealed report per framework", async () => {
     const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
     const conn = fakeConn(captured);
-    const drSource = drReadinessSource({
-      latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 } } }),
-    });
+    const drSource = drReadinessSource(
+      { latest: async () => ({ report: { ready: true, counts: { totalIssues: 0 } } }) },
+      null,
+    );
     const arSource = accessReviewSource({
       latestSealed: async (fw) => ({
         framework: fw,

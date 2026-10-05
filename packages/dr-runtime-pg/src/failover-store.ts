@@ -4,6 +4,12 @@ import {
   scopedWrite,
   type DrFailoverExecutionRecord,
 } from "./records.js";
+import {
+  excludedSetClause,
+  failoverUpsertGuard,
+  refuseUnlessWritten,
+} from "./upsert-guard.js";
+import { scopeFilter, type DrReadScope } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "dr_failover_executions";
@@ -12,6 +18,37 @@ const COLUMNS = `execution_id, tenant_id, tier, trigger, status, from_region,
   to_region, triggered_at, completed_at, actual_rpo_seconds, actual_rto_seconds,
   rpo_breached, rto_breached, incident_ticket_id, record, recorded_at`;
 
+/**
+ * The columns a legal failover transition may move, and nothing else.
+ *
+ * Derived by walking `FAILOVER_TRANSITIONS` and asking the executor what each edge changes:
+ * `startFailover` moves the status, `completeFailover` the status plus `completed_at` and the two
+ * actuals, `failFailover` the status plus `completed_at`, `abortFailover` and `revertFailover` the
+ * status (and, in the record, `revertedAt`/`revertedToFailoverId`, which have no column of their
+ * own). `rpo_breached`/`rto_breached` are derived from the actuals, so they move when the actuals
+ * do; `record` is the whole record, which every edge rewrites, and which is the column
+ * `assessDrReadiness` actually reads. `recorded_at` is when *this* row was observed.
+ *
+ * Everything else is immutable by construction and deliberately absent: `execution_id` is the
+ * conflict key, `tenant_id` is the scope, `tier`/`trigger`/`from_region`/`to_region` are the
+ * declaration, `triggered_at` is when it was declared — and `incident_ticket_id` is immutable
+ * because **no transition in the map writes it**. `planFailover` is its only producer, and the
+ * schema demands one for `primary_outage`/`regional_failure`, triggers that cannot change either.
+ * Including any of them would let a late or replayed write rewrite history, which is the opposite
+ * defect from the one `DO NOTHING` caused. `failover-store.test.ts` re-derives this list from the
+ * contract and fails if it ever gains a member the state machine cannot move.
+ */
+export const FAILOVER_MUTABLE_COLUMNS = Object.freeze([
+  "status",
+  "completed_at",
+  "actual_rpo_seconds",
+  "actual_rto_seconds",
+  "rpo_breached",
+  "rto_breached",
+  "record",
+  "recorded_at",
+] as const);
+
 export class PostgresDrFailoverStore {
   private readonly conn: PgConnection;
 
@@ -19,13 +56,22 @@ export class PostgresDrFailoverStore {
     this.conn = conn;
   }
 
+  /**
+   * Writes one observation of a failover, advancing the row when the contract permits it.
+   *
+   * Throws `DrExecutionWriteRefusedError` rather than reporting success for a write that moved
+   * nothing — a refused `DO UPDATE` and the old `DO NOTHING` are the same `INSERT 0 0`, and only the
+   * throw tells them apart.
+   */
   async record(record: DrFailoverExecutionRecord): Promise<void> {
     const valid = DrFailoverExecutionRecordSchema.parse(record);
-    await scopedWrite(this.conn, valid.tenantId, (tx) =>
-      tx.query(
+    await scopedWrite(this.conn, valid.tenantId, async (tx) => {
+      const result = await tx.query(
         `INSERT INTO ${SCHEMA}.${TABLE} (${COLUMNS})
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16)
-         ON CONFLICT (execution_id) DO NOTHING`,
+         ON CONFLICT (execution_id) DO UPDATE
+           SET ${excludedSetClause(FAILOVER_MUTABLE_COLUMNS)}
+           WHERE ${failoverUpsertGuard(TABLE)}`,
         [
           valid.executionId,
           valid.tenantId,
@@ -44,26 +90,47 @@ export class PostgresDrFailoverStore {
           JSON.stringify(valid.record),
           valid.recordedAt,
         ],
-    
-      ),
-    );
+      );
+      await refuseUnlessWritten(tx, result.rowCount, {
+        schema: SCHEMA,
+        table: TABLE,
+        executionId: valid.executionId,
+        recordedAt: valid.recordedAt,
+        stateColumn: "status",
+      });
+    });
   }
 
-  async listRecent(limit = 100): Promise<readonly DrFailoverExecutionRecord[]> {
+  /**
+   * `scope` is required and first, which is the point of it: this read used to take a limit alone,
+   * so as the table's owner — who bypasses RLS — it returned every tenant's failovers, newest
+   * first, and the limit could crowd out the scope the caller meant entirely. `dr-readiness.ts`
+   * feeds the result straight into `assessDrReadiness`, so a deployment scored its DR readiness
+   * off other tenants' failovers.
+   */
+  async listRecent(
+    scope: DrReadScope,
+    limit = 100,
+  ): Promise<readonly DrFailoverExecutionRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
+    const filter = scopeFilter(scope);
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
+       WHERE ${filter.sql}
        ORDER BY recorded_at DESC
-       LIMIT $1`,
-      [limit],
+       LIMIT $${String(filter.params.length + 1)}`,
+      [...filter.params, limit],
     );
     return result.rows.map((row) => rowToRecord(row));
   }
 
-  async countSince(since: Date): Promise<number> {
+  /** Measured answering 3 where the scope's own count was 1 — a wrong scalar, not a long list. */
+  async countSince(scope: DrReadScope, since: Date): Promise<number> {
+    const filter = scopeFilter(scope);
     const result = await this.conn.query<{ count: string }>(
-      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE} WHERE recorded_at >= $1`,
-      [since.toISOString()],
+      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE}` +
+        ` WHERE ${filter.sql} AND recorded_at >= $${String(filter.params.length + 1)}`,
+      [...filter.params, since.toISOString()],
     );
     const row = result.rows[0];
     if (row === undefined) return 0;

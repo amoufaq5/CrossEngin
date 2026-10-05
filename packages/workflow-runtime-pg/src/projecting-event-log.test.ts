@@ -55,7 +55,18 @@ function fixtureDefinition(): WorkflowDefinition {
       },
     ],
     variables: [],
-    timers: [],
+    // Declared for the same reason as the signal below: a timer's `kind` lives only on its
+    // `TimerDefinition`, so a timer the definition does not declare cannot be persisted.
+    timers: [
+      {
+        name: "deadline",
+        kind: "relative_after",
+        relativeSeconds: 86_400,
+        absoluteTimestampVariable: null,
+        cronExpression: null,
+        timezone: "UTC",
+      },
+    ],
     // Declared, because `WorkflowDefinitionSchema` refuses a `signal_received` transition naming an
     // undeclared signal — and because the declaration is where the delivery guarantee lives.
     signals: [
@@ -249,7 +260,9 @@ describe("ProjectingEventLog.append — subsequent events", () => {
       timerId: null,
       childInstanceId: null,
       variableName: null,
-      payload: { kind: "http_call", definitionActivityKey: "charge" },
+      // `maxAttempts` as the engine records it: a retry ceiling is a decision the definition made,
+      // and `activity-provenance.ts` refuses rather than assuming one attempt.
+      payload: { kind: "http_call", definitionActivityKey: "charge", maxAttempts: 3 },
       correlationId: null,
       causationEventId: null,
     });

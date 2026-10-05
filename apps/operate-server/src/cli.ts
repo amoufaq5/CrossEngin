@@ -94,6 +94,19 @@ export interface ServeOptions {
    * reversing handlers over real GL postings (ADR-0329). Fail-closed on empty, like job-cancel.
    */
   readonly workflowCancelRoles: readonly string[];
+  /**
+   * Mount the three durable workers (timer / activity / job) that drive the workflow queues. The
+   * engine has been present since ADR-0331 and nothing polled it, so a due timer never fired and
+   * `--schedule-ms` enqueued job runs that nothing drained.
+   */
+  readonly workflowWorkers: boolean;
+  /** Path to a `WorkflowWorkerConfig` JSON (batch limit, lease, poll cadence, drain budget). */
+  readonly workflowWorkerConfig: string | null;
+  /**
+   * Leave a scheduled activity at rest for the activity worker instead of running its handler
+   * inline. Only meaningful with `--workflow-workers`, and refused without it — see the refusal.
+   */
+  readonly workflowDeferActivities: boolean;
   /** Path to a marketplace pack-catalog JSON ({packs:[...]}) — enables the /v1/admin/packs routes (needs pg). */
   readonly packCatalogFile: string | null;
   /** Enable the third-party authoring routes (/v1/authoring/packs — submit/review/publish pack versions). Needs pg. */
@@ -332,6 +345,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let enableJobInvoke = false;
   const jobInvokeRoles: string[] = [];
   const workflowCancelRoles: string[] = [];
+  let workflowWorkers = false;
+  let workflowWorkerConfig: string | null = null;
+  let workflowDeferActivities = false;
   const jobInvokeActionRoles: string[] = [];
   let packCatalogFile: string | null = null;
   let marketplaceAuthoring = false;
@@ -562,6 +578,13 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--workflow-cancel-role" || arg.startsWith("--workflow-cancel-role=")) {
       workflowCancelRoles.push(takeValue(arg, next, "--workflow-cancel-role"));
       i += consumed();
+    } else if (arg === "--workflow-workers") {
+      workflowWorkers = true;
+    } else if (arg === "--workflow-worker-config" || arg.startsWith("--workflow-worker-config=")) {
+      workflowWorkerConfig = takeValue(arg, next, "--workflow-worker-config");
+      i += consumed();
+    } else if (arg === "--workflow-defer-activities") {
+      workflowDeferActivities = true;
     } else if (arg === "--job-invoke-action-role" || arg.startsWith("--job-invoke-action-role=")) {
       jobInvokeActionRoles.push(takeValue(arg, next, "--job-invoke-action-role"));
       i += consumed();
@@ -1128,6 +1151,37 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         " into meta.workflow_instances, neither of which the memory store has.",
     );
   }
+  // The workers claim from meta.workflow_timers / _activities / _job_runs, so the same refusal as
+  // the cancellation route and for the same reason — three poll loops against tables that do not
+  // exist is worse than no workers, because each claim throws on a cadence rather than once.
+  if (workflowWorkers && store === "memory") {
+    throw new CliUsageError(
+      "--workflow-workers requires a Postgres store (--store pg or pg-columns): the workers claim" +
+        " from meta.workflow_timers, meta.workflow_activities and meta.job_runs, none of which the" +
+        " memory store has.",
+    );
+  }
+  // A tuning block for a fleet that is not mounted is read, validated and then ignored, which is
+  // the silence this family of flags keeps producing. Refused rather than warned, because the
+  // operator who passed it believes they changed a lease or a batch size.
+  if (workflowWorkerConfig !== null && !workflowWorkers) {
+    throw new CliUsageError(
+      "--workflow-worker-config has no effect without --workflow-workers: it tunes the worker" +
+        " fleet, and no worker is mounted.",
+    );
+  }
+  // The load-bearing refusal of the three. `deferActivities` makes the engine leave a scheduled
+  // activity at rest *for a worker to claim*; with no worker claiming, every activity is scheduled
+  // and never runs, so an instance stalls at its first activity with no error anywhere — strictly
+  // worse than both alternatives. Mounting the workers is the only thing that makes deferral mean
+  // anything, so it is required rather than assumed.
+  if (workflowDeferActivities && !workflowWorkers) {
+    throw new CliUsageError(
+      "--workflow-defer-activities requires --workflow-workers: deferring leaves every scheduled" +
+        " activity at rest for a worker to claim, so with no worker mounted each instance stalls" +
+        " at its first activity and nothing reports it.",
+    );
+  }
   for (const spec of jobInvokeActionRoles) {
     const idx = spec.indexOf(":");
     if (idx <= 0 || idx === spec.length - 1) {
@@ -1215,6 +1269,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     enableJobInvoke,
     jobInvokeRoles,
     workflowCancelRoles,
+    workflowWorkers,
+    workflowWorkerConfig,
+    workflowDeferActivities,
     jobInvokeActionRoles,
     packCatalogFile,
     marketplaceAuthoring,
@@ -1596,6 +1653,20 @@ Options:
                        --enable-job-invoke). Omit to allow any authenticated tenant principal
   --job-invoke-action-role <action:role>  Per-action role override (repeatable); an action
                        listed here uses its own roles instead of --job-invoke-role
+  --workflow-cancel-role <r>  Role permitted to cancel a workflow instance (repeatable). Mounts the
+                       engine over meta.workflow_definitions. Fail-closed on empty. Needs --store pg
+  --workflow-workers   Mount the three durable workers that DRIVE the workflow queues — timer,
+                       activity and job. Without them the engine is present and nothing polls it,
+                       so a due timer never fires and --schedule-ms enqueues runs nothing drains.
+                       Each worker refuses for a named reason it prints (no_definitions,
+                       activities_run_inline, no_job_handlers). Needs --store pg|pg-columns
+  --workflow-worker-config <file>  WorkflowWorkerConfig JSON: batchLimit (1-200, default 20),
+                       leaseMs (>=1000, default 30000), idlePollMs — the latency a due timer pays —
+                       activePollMs, drainTimeoutMs, noticeIntervalMs (repeat-notice collapse
+                       window). The renewal heartbeat is derived at leaseMs/3, not configured
+  --workflow-defer-activities  Leave a scheduled activity at rest for the activity worker instead
+                       of running its handler inline. REQUIRES --workflow-workers: with no worker
+                       claiming, every instance stalls at its first activity and nothing says so
   --pack-catalog <file>  Marketplace pack-catalog JSON ({packs:[...]}) — enables the admin pack
                        routes GET /v1/admin/packs, POST /v1/admin/packs/install,
                        POST /v1/admin/packs/{id}/uninstall (needs --store pg|pg-columns)

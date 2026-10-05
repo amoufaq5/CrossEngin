@@ -11,6 +11,7 @@ import {
   SET_PLATFORM_CONFIG_WRITE_SQL,
   SET_TENANT_CONTEXT_SQL,
   assertTenantId,
+  scopeFilterWithPlatform,
 } from "./kill-switch-store.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -342,11 +343,12 @@ export class PostgresFeatureFlagStore {
     flagId: string,
     tenantId: string | null = null,
   ): Promise<FlagDefinition | null> {
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${FEATURE_FLAG_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE flag_id = $1`,
-        [flagId],
+         WHERE flag_id = $1 AND ${scope.sql}`,
+        [flagId, ...scope.params],
       );
       const row = result.rows[0];
       return row === undefined ? null : rowToFeatureFlag(row);
@@ -364,16 +366,22 @@ export class PostgresFeatureFlagStore {
    * NULLs as distinct by default, so it would permit two platform-wide flags on one key — the one
    * collision that matters most. Expressing it properly needs `UNIQUE NULLS NOT DISTINCT`, which
    * the DDL vocabulary has no spelling for.
+   *
+   * At most one row *in the table* can answer, and the scope predicate is still required: table-wide
+   * uniqueness says which row holds a key, never which scope asked. As the owner, `loadByKey(key,
+   * null)` answered a platform lookup with a tenant's flag — the uniqueness is exactly what makes
+   * that single wrong row look like a correct answer.
    */
   async loadByKey(
     key: string,
     tenantId: string | null = null,
   ): Promise<FlagDefinition | null> {
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${FEATURE_FLAG_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE key = $1`,
-        [key],
+         WHERE key = $1 AND ${scope.sql}`,
+        [key, ...scope.params],
       );
       const row = result.rows[0];
       return row === undefined ? null : rowToFeatureFlag(row);
@@ -411,13 +419,14 @@ export class PostgresFeatureFlagStore {
     tenantId: string | null,
   ): Promise<readonly FlagDefinition[]> {
     if (limit <= 0) throw new Error("limit must be positive");
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${FEATURE_FLAG_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE environments @> $1::jsonb${extra}
+         WHERE environments @> $1::jsonb AND ${scope.sql}${extra}
          ORDER BY created_at DESC
-         LIMIT $2`,
-        [JSON.stringify([environment]), limit],
+         LIMIT $${String(2 + scope.params.length)}`,
+        [JSON.stringify([environment]), ...scope.params, limit],
       );
       return result.rows.map((row) => rowToFeatureFlag(row));
     });

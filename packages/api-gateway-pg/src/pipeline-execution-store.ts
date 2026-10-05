@@ -28,6 +28,82 @@ export const SET_PLATFORM_RECORD_WRITE_SQL = setPlatformWriteSql("record");
 
 const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
 
+function assertTenantId(tenantId: string): void {
+  if (!TENANT_ID_RE.test(tenantId)) {
+    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
+  }
+}
+
+/** A `tenant_id` predicate and the parameters it binds, for one scope. */
+export interface ScopeFilter {
+  readonly sql: string;
+  readonly params: readonly unknown[];
+}
+
+/**
+ * The `tenant_id` predicate a scoped read must carry, **beside** RLS rather than instead of it.
+ *
+ * Both tables this package reads are `tenant_id`-nullable with a `SELECT`-scoped platform read arm,
+ * and **a table's owner bypasses its policies** (ADR-0331) — so a read with no predicate answers
+ * from every scope in a deployment that connects as the owner, and from the platform's alone in one
+ * that does not. Measured live on this schema with three tenant executions beside one platform one:
+ * `countSince` answered **4** as the owner and **1** as a non-owner, for the same call. An aggregate
+ * is the sharp case, because the caller receives a plausible scalar rather than a long list.
+ *
+ * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
+ * matching NULL to NULL and the one that would give a single code path: ADR-0331 measured it at
+ * 16 ms sequential scan against 45k entries where `tenant_id = $1` is a 0.09 ms index scan, because
+ * it is not an indexable operator. `tenant_id IS NULL` is indexable, so both arms keep
+ * `idx_gateway_pipeline_tenant_started` / `idx_rate_limit_decisions_tenant_decided`.
+ *
+ * Verbatim from `forensics-pg`'s `scopeFilter`; it belongs in `kernel-pg` beside
+ * `setPlatformWriteSql`, which this module already imports, and lives here only because the rest
+ * of this package's scope plumbing does.
+ */
+export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
+  // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`.
+  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
+  assertTenantId(tenantId);
+  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
+}
+
+/**
+ * The scope an *optionally*-scoped read names: a tenant id, the platform scope (`null`), or every
+ * scope (`undefined`).
+ *
+ * The third member exists only for the replayer, whose `tenantId?: string` has always meant "every
+ * scope" when absent — a deliberately cross-scope diagnostic, and the one read here whose answer is
+ * *meant* to span tenants. What it could not express before was the platform scope: `undefined` was
+ * "all" and there was no way to say "the deployment's own rows". `null` says it now.
+ */
+export type ReadScope = string | null | undefined;
+
+/** `null` when the scope is every scope, so a caller can omit the predicate rather than write TRUE. */
+export function optionalScopeFilter(scope: ReadScope, firstParam = 1): ScopeFilter | null {
+  if (scope === undefined) return null;
+  return scopeFilter(scope, firstParam);
+}
+
+/**
+ * A **read**'s scope: a tenant context, or nothing at all.
+ *
+ * Nothing for the platform scope, because the platform read arm is `SELECT`-scoped on
+ * `tenant_id IS NULL` and demands no grant. A read deliberately does not claim the write elevation
+ * — it does not need it, and a privilege claimed for no reason is one the next statement in the
+ * same transaction inherits. Mirrors `PostgresKeyRegistry.scoped`.
+ */
+export async function scopedRead<T>(
+  conn: PgConnection,
+  tenantId: ReadScope,
+  fn: (tx: PgConnection) => Promise<T>,
+): Promise<T> {
+  if (typeof tenantId === "string") assertTenantId(tenantId);
+  return conn.transaction(async (tx) => {
+    if (typeof tenantId === "string") await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+    return fn(tx);
+  });
+}
+
 /** A tenant context, or the platform record-write elevation, never both. */
 // `async` rather than returning `conn.transaction(...)` directly, so a rejected tenant id arrives
 // as a rejection like every other failure here. A synchronous throw out of a `Promise`-returning
@@ -37,9 +113,7 @@ export async function scopedWrite<T>(
   tenantId: string | null,
   fn: (tx: PgConnection) => Promise<T>,
 ): Promise<T> {
-  if (tenantId !== null && !TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
+  if (tenantId !== null) assertTenantId(tenantId);
   return conn.transaction(async (tx) => {
     if (tenantId === null) await tx.query(SET_PLATFORM_RECORD_WRITE_SQL);
     else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
@@ -92,10 +166,22 @@ export class PostgresPipelineExecutionStore {
     );
   }
 
-  async countSince(since: Date): Promise<number> {
-    const result = await this.conn.query<{ count: string }>(
-      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE} WHERE started_at >= $1`,
-      [since.toISOString()],
+  /**
+   * How many executions one scope recorded since `since`.
+   *
+   * `tenantId` defaults to the platform scope, which is what a non-owner connection with no tenant
+   * context has always been given — the default makes the owner agree with it rather than changing
+   * what either was asked for. A count is not a list: a caller cannot inspect a scalar and notice
+   * that three of its four are another scope's.
+   */
+  async countSince(since: Date, tenantId: string | null = null): Promise<number> {
+    const scope = scopeFilter(tenantId, 2);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<{ count: string }>(
+        `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE}
+         WHERE started_at >= $1 AND ${scope.sql}`,
+        [since.toISOString(), ...scope.params],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return 0;

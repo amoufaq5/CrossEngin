@@ -10632,6 +10632,21 @@ export const META_DR_DRILL_EXECUTIONS: TableDefinition = {
         command: "INSERT",
         check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
+      // ADR-0332 classified this table append-only by reading its store, which was INSERT-only —
+      // the exact mistake it said it had avoided for `dr_failover_executions` by following the
+      // contract's state machine instead. `DrillExecutor.recordDrillResult` amends an existing
+      // record under the same id, so the record is mutable in the same way a failover's is; the
+      // absent `DRILL_TRANSITIONS` map does not make it immutable, it only leaves which amendments
+      // are legal to the store. Measured as a non-owner before this arm existed: the platform-scope
+      // upsert raised `new row violates row-level security policy (USING expression)`, so a drill
+      // result for the readiness default (`tenantId: null`) could be written once and never
+      // completed.
+      {
+        name: "dr_drill_executions_platform_update",
+        command: "UPDATE",
+        using: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
+      },
     ],
   },
 };
@@ -11218,18 +11233,66 @@ export const META_AUDIT_INTEGRITY_VERDICTS: TableDefinition = {
     enabled: true,
     policies: [
       {
+        // The name is kept although it no longer describes the policy — `feature_flags_tenant_or
+        // _platform`'s situation exactly, and for its reason: `planSchemaReconciliation` refuses to
+        // drop a policy (dropping one loosens access, and `allowLoosening` reaches foreign keys
+        // only), so a *renamed* policy needs a hand-run `DROP` in every deployment while a narrowed
+        // predicate under the same name is one `replace_policy` statement. Measured live from the
+        // shipped catalog: 1 replace + 2 creates, 0 unreconciled, applied 3/3, re-plan clean. There
+        // is no `renamedFrom` for a policy.
+        //
+        // Isolation stays `ALL`-scope rather than narrowing to the 29-table shape, and that is not
+        // a shortcut: a tenant-scope verdict is written under that tenant's context, and the write
+        // grants are `PUBLIC`-scoped settings, so a write arm not ANDed with `tenant_id IS NULL`
+        // would be a cross-tenant insert route for any session able to call `set_config`.
+        //
+        // `NULLIF(…, '')` is still load-bearing with the platform read moved out: a
+        // transaction-local `set_config` leaves the GUC *defined* at `''` once the transaction
+        // ends, and `''::UUID` raises, so a pooled connection that has served a tenant would fail
+        // here without the guard.
         name: "audit_integrity_verdicts_tenant_or_platform_audit",
-        // `NULLIF(…, '')` rather than the shared `TENANT_ISOLATION_USING`, and the reason is
-        // measured: a transaction-local `set_config` leaves the custom GUC *defined* in the session
-        // after the transaction ends, holding `''` rather than reverting to NULL. So on a pooled
-        // connection that previously served a tenant, `current_setting(…, true)::UUID` is
-        // `''::UUID`, which raises — and Postgres does not guarantee short-circuit evaluation of
-        // `OR`, so putting the flag first would not save it. That is precisely the platform-audit
-        // path, which sets no tenant: without the NULLIF, reading platform verdicts fails on any
-        // reused connection. With it, the comparison is NULL and the row is simply filtered out.
-        using:
-          "tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID" +
-          " OR current_setting('app.platform_audit', true) = 'on'",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        // ADR-0313's split, finally applied to the table ADR-0313 named and did not reach. Until
+        // this, the isolation policy above ORed the read flag into its `USING` — and on an
+        // `ALL`-scope policy the `USING` expression also serves as the `WITH CHECK`, so a session
+        // holding only the cross-tenant **read** grant could insert a forged `verified` verdict at
+        // any scope, flip a stored `compromised` one to `verified`, or delete it outright. Observed
+        // live as a non-owner across a 90-case matrix: twelve successful forgeries from a read
+        // grant (insert, update and delete at two tenant scopes and platform scope), all refused
+        // afterwards.
+        //
+        // The read stays gated on the flag rather than becoming the 29-table `tenant_id IS NULL`
+        // arm, because a platform-chain tamper verdict is the one row that must not be visible to
+        // every tenant's gateway. Same nullable column as `feature_flags`, opposite intent, so
+        // opposite policy.
+        name: "audit_integrity_verdicts_platform_audit_read",
+        command: "SELECT",
+        using: "current_setting('app.platform_audit', true) = 'on'",
+      },
+      {
+        // The only route to a platform-scope verdict, on the **record** grant and deliberately not
+        // on `app.platform_audit_write` — ADR-0332's sharpest rule read in the direction it has to
+        // be read here: a grant over the record must not reach the thing that validates the record.
+        // `audit` appends to `meta.audit_log` and the two chain tables; a verdict is the recorded
+        // claim that those appends verify, and it names the chain entry it was committed to, so one
+        // grant carrying both would let the appender certify its own appends and make the lie
+        // self-consistent. The same argument put `meta.crypto_audit` on `record` rather than `key`,
+        // and this table is already in `PLATFORM_RECORD_TABLES`.
+        //
+        // No fifth grant: the verdict writer anchors every verdict in the chain, so it holds
+        // `audit` necessarily, and a grant never held alone is a declaration with nobody to make it.
+        //
+        // `INSERT`-scoped with no `UPDATE` arm, because `verdict_id` is `aiv_` + the sha256 of the
+        // canonical report: changing any field yields a *different row*, so there is no stable
+        // handle to aim an `UPDATE` at, and an in-place edit would be ADR-0323's `scope_tampered`
+        // in the one table whose purpose is to be checkable against the chain. `DELETE` is
+        // reachable by no policy, which matters more here than on the other 31 — deleting a
+        // `compromised` verdict leaves no mismatch for anything to detect.
+        name: "audit_integrity_verdicts_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_record_write', true) = 'on'",
       },
     ],
   },

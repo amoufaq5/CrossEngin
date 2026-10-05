@@ -161,7 +161,9 @@ describe("ColumnMappedEntityStore.listPage — typed sort + safe filter", () => 
       filters: [{ field: "status", value: "active" }],
     });
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
-    expect(sel.sql).toContain('ORDER BY "price" DESC, "id" ASC');
+    // `NULLS LAST` on a numeric column in *both* directions: Postgres's default would put them
+    // first descending, and a keyset cursor component cannot say which end of the order it is at.
+    expect(sel.sql).toContain('ORDER BY "price" DESC NULLS LAST, "id" ASC');
     expect(sel.sql).toContain('"status" = $2::TEXT'); // value cast to the column type
     expect(sel.sql).toContain("LIMIT $3");
     expect(sel.sql).not.toContain("OFFSET");

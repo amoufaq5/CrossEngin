@@ -121,9 +121,23 @@ export function fakeCryptoKeysPg(): PgConnection {
         if (fpIdx !== null) {
           visibleRows = visibleRows.filter((r) => r["fingerprint_sha256"] === p[fpIdx]);
         }
-        const tenantIdx = paramIndex(sql, "tenant_id");
-        if (tenantIdx !== null) {
-          visibleRows = visibleRows.filter((r) => (r["tenant_id"] ?? null) === p[tenantIdx]);
+        // The scope predicate the store carries beside RLS, in its two spellings. The inclusive
+        // form has to be matched *first*: `(tenant_id = $2 OR tenant_id IS NULL)` contains the
+        // strict form as a substring, so reading it as the strict one would drop the platform rows
+        // the OR exists to keep — the fake asserting a shape it had misread.
+        const inclusive = sql.match(/\(\s*tenant_id\s*=\s*\$(\d+)\s+OR\s+tenant_id IS NULL\s*\)/);
+        if (inclusive !== null) {
+          const idx = Number(inclusive[1]) - 1;
+          visibleRows = visibleRows.filter(
+            (r) => (r["tenant_id"] ?? null) === p[idx] || (r["tenant_id"] ?? null) === null,
+          );
+        } else if (/(^|\s|\()tenant_id IS NULL/.test(sql)) {
+          visibleRows = visibleRows.filter((r) => (r["tenant_id"] ?? null) === null);
+        } else {
+          const tenantIdx = paramIndex(sql, "tenant_id");
+          if (tenantIdx !== null) {
+            visibleRows = visibleRows.filter((r) => (r["tenant_id"] ?? null) === p[tenantIdx]);
+          }
         }
         const algoIdx = paramIndex(sql, "algorithm");
         if (algoIdx !== null) {

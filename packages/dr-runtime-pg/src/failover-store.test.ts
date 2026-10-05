@@ -1,14 +1,24 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_DR_TIERS,
+  FAILOVER_STATUSES,
+  FAILOVER_TRANSITIONS,
   FailoverRecordSchema,
   type FailoverRecord,
+  type FailoverStatus,
 } from "@crossengin/dr";
-import { PostgresDrFailoverStore } from "./failover-store.js";
+import { FailoverExecutor } from "@crossengin/dr-runtime";
 import {
+  FAILOVER_MUTABLE_COLUMNS,
+  PostgresDrFailoverStore,
+} from "./failover-store.js";
+import {
+  DrFailoverExecutionRecordSchema,
   SET_PLATFORM_RECORD_WRITE_SQL,
   SET_TENANT_CONTEXT_SQL,
   failoverExecutionRecordFrom,
   scopedWrite,
+  type DrFailoverExecutionRecord,
 } from "./records.js";
 import { mockConnection, type Captured } from "./test-fakes.js";
 
@@ -58,12 +68,13 @@ function record() {
 }
 
 describe("PostgresDrFailoverStore.record", () => {
-  it("issues an INSERT ... ON CONFLICT DO NOTHING with bound params", async () => {
+  it("issues an INSERT ... ON CONFLICT DO UPDATE with bound params", async () => {
     const capture: Captured[] = [];
     const store = new PostgresDrFailoverStore(mockConnection(capture));
     await store.record(record());
     expect(written(capture).sql).toContain("INSERT INTO meta.dr_failover_executions");
-    expect(written(capture).sql).toContain("ON CONFLICT (execution_id) DO NOTHING");
+    expect(written(capture).sql).toContain("ON CONFLICT (execution_id) DO UPDATE");
+    expect(written(capture).sql).not.toContain("DO NOTHING");
     expect(written(capture).sql).toContain("$15::jsonb");
     expect(written(capture).params?.[0]).toBe("fov_00000001");
     expect(written(capture).params?.[1]).toBe(TENANT);
@@ -85,6 +96,138 @@ describe("PostgresDrFailoverStore.record", () => {
     const store = new PostgresDrFailoverStore(mockConnection());
     const bad = { ...record(), executionId: "bad-id" };
     await expect(store.record(bad)).rejects.toThrow();
+  });
+
+  it("throws rather than reporting success when the write moved nothing", async () => {
+    // A refused `DO UPDATE` is `INSERT 0 0`, which is byte-identical to the `DO NOTHING` this
+    // replaces. Without the throw the fix would reproduce the defect it exists to close.
+    const conn = mockConnection(undefined, {
+      rows: [{ state: "reverted", recorded_at: LATER }],
+      rowCount: 0,
+    });
+    await expect(new PostgresDrFailoverStore(conn).record(record())).rejects.toMatchObject({
+      name: "DrExecutionWriteRefusedError",
+    });
+  });
+});
+
+/**
+ * The `SET` list, re-derived from the contract rather than restated.
+ *
+ * Walk `FAILOVER_TRANSITIONS` from the status `planFailover` produces, apply the executor method for
+ * each edge, and diff the *execution records* either side of it. The union of the fields any legal
+ * transition changes is, by construction, exactly what an upsert may move — and anything outside it
+ * is history a late or replayed write must not be able to rewrite.
+ */
+describe("FAILOVER_MUTABLE_COLUMNS is derived from the state machine", () => {
+  const NEXT: Readonly<
+    Record<FailoverStatus, ((ex: FailoverExecutor, r: FailoverRecord) => FailoverRecord) | null>
+  > = {
+    // `queued` is `planFailover`'s output and no edge leads to it, so there is nothing to apply.
+    queued: null,
+    in_progress: (ex, r) => ex.startFailover(r, { startedAt: LATER }),
+    // Breaching both targets on purpose: a compliant completion leaves `rpo_breached` false on both
+    // sides of the diff, and the derivation would then fail to name a column that really does move.
+    succeeded: (ex, r) =>
+      ex.completeFailover(r, {
+        actualRpoSeconds: 90,
+        actualRtoSeconds: 1200,
+        completedAt: LATER,
+      }),
+    failed: (ex, r) => ex.failFailover(r, { completedAt: LATER }),
+    aborted: (ex, r) => ex.abortFailover(r, { notes: "stood down" }),
+    reverted: (ex, r) =>
+      ex.revertFailover(r, { revertedToFailoverId: "fov_00000002", revertedAt: LATER }),
+  };
+
+  const SPEC = DEFAULT_DR_TIERS["tier_1_business_critical"];
+  const ex = new FailoverExecutor();
+
+  function rowFor(r: FailoverRecord, recordedAt: string): DrFailoverExecutionRecord {
+    const verdict = ex.failoverTierVerdict(r, SPEC);
+    return failoverExecutionRecordFrom(r, {
+      tenantId: TENANT,
+      recordedAt,
+      verdict: { rpoBreached: verdict.rpoBreached, rtoBreached: verdict.rtoBreached },
+    });
+  }
+
+  function changedKeys(
+    before: DrFailoverExecutionRecord,
+    after: DrFailoverExecutionRecord,
+  ): readonly string[] {
+    return (Object.keys(before) as (keyof DrFailoverExecutionRecord)[])
+      .filter((k) => JSON.stringify(before[k]) !== JSON.stringify(after[k]))
+      .map((k) => String(k));
+  }
+
+  function snake(key: string): string {
+    return key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+  }
+
+  /** Every field any legal transition changes, over every reachable edge. */
+  function contractMutableKeys(): ReadonlySet<string> {
+    const planned = failover({ status: "queued", startedAt: null, completedAt: null, durationSeconds: null, actualRpoSeconds: null, actualRtoSeconds: null });
+    const reached = new Map<FailoverStatus, FailoverRecord>([["queued", planned]]);
+    const mutable = new Set<string>();
+    const queue: FailoverStatus[] = ["queued"];
+    let walked = 0;
+    while (queue.length > 0) {
+      const from = queue.shift() as FailoverStatus;
+      const record = reached.get(from) as FailoverRecord;
+      for (const to of FAILOVER_TRANSITIONS[from]) {
+        const apply = NEXT[to];
+        if (apply === null) throw new Error(`no executor method for the edge ${from} -> ${to}`);
+        const after = apply(ex, record);
+        walked += 1;
+        for (const k of changedKeys(rowFor(record, NOW), rowFor(after, LATER))) mutable.add(k);
+        if (!reached.has(to)) {
+          reached.set(to, after);
+          queue.push(to);
+        }
+      }
+    }
+    // Every edge in the map was walked, so the union cannot be short by an unreached transition.
+    const edges = FAILOVER_STATUSES.reduce((n, s) => n + FAILOVER_TRANSITIONS[s].length, 0);
+    expect(walked).toBe(edges);
+    return mutable;
+  }
+
+  it("names exactly the columns a legal transition moves", () => {
+    const derived = [...contractMutableKeys()].map(snake).sort();
+    expect([...FAILOVER_MUTABLE_COLUMNS].sort()).toEqual(derived);
+  });
+
+  it("names no column the state machine cannot move", () => {
+    const mutable = new Set([...contractMutableKeys()].map(snake));
+    const immutable = Object.keys(DrFailoverExecutionRecordSchema.shape)
+      .map(snake)
+      .filter((c) => !mutable.has(c));
+    // The declaration, the scope and the conflict key — plus `incident_ticket_id`, which is
+    // immutable because no edge in the map writes it: `planFailover` is its only producer and the
+    // triggers that require it cannot change either.
+    expect(immutable.sort()).toEqual([
+      "execution_id",
+      "from_region",
+      "incident_ticket_id",
+      "tenant_id",
+      "tier",
+      "to_region",
+      "triggered_at",
+      "trigger",
+    ].sort());
+    for (const c of immutable) {
+      expect([...FAILOVER_MUTABLE_COLUMNS]).not.toContain(c);
+    }
+  });
+
+  it("puts exactly those columns in the issued SET list and no others", async () => {
+    const capture: Captured[] = [];
+    await new PostgresDrFailoverStore(mockConnection(capture)).record(record());
+    const sql = written(capture).sql;
+    const setClause = sql.slice(sql.indexOf("SET "), sql.indexOf("WHERE "));
+    const assigned = [...setClause.matchAll(/(\w+) = EXCLUDED\.\1/g)].map((m) => m[1] as string);
+    expect(assigned.sort()).toEqual([...FAILOVER_MUTABLE_COLUMNS].sort());
   });
 });
 
@@ -113,7 +256,7 @@ describe("PostgresDrFailoverStore.listRecent", () => {
     const store = new PostgresDrFailoverStore(
       mockConnection(capture, { rows: [dbRow], rowCount: 1 }),
     );
-    const rows = await store.listRecent(25);
+    const rows = await store.listRecent(null, 25);
     expect(capture[0]?.sql).toContain("ORDER BY recorded_at DESC");
     expect(capture[0]?.params?.[0]).toBe(25);
     expect(rows).toHaveLength(1);
@@ -130,13 +273,13 @@ describe("PostgresDrFailoverStore.listRecent", () => {
         rowCount: 1,
       }),
     );
-    const rows = await store.listRecent();
+    const rows = await store.listRecent(null);
     expect(rows[0]?.record.id).toBe("fov_00000001");
   });
 
   it("rejects a non-positive limit", async () => {
     const store = new PostgresDrFailoverStore(mockConnection());
-    await expect(store.listRecent(0)).rejects.toThrow();
+    await expect(store.listRecent(null, 0)).rejects.toThrow();
   });
 });
 
@@ -145,14 +288,14 @@ describe("PostgresDrFailoverStore.countSince", () => {
     const store = new PostgresDrFailoverStore(
       mockConnection(undefined, { rows: [{ count: "7" }], rowCount: 1 }),
     );
-    expect(await store.countSince(new Date(NOW))).toBe(7);
+    expect(await store.countSince(null, new Date(NOW))).toBe(7);
   });
 
   it("returns 0 when there are no rows", async () => {
     const store = new PostgresDrFailoverStore(
       mockConnection(undefined, { rows: [], rowCount: 0 }),
     );
-    expect(await store.countSince(new Date(NOW))).toBe(0);
+    expect(await store.countSince(null, new Date(NOW))).toBe(0);
   });
 });
 
@@ -185,7 +328,7 @@ describe("the platform write arm", () => {
     // The platform read policy is `SELECT`-scoped on `tenant_id IS NULL` and demands no grant, so a
     // read behaves exactly as it did before the split.
     const capture: Captured[] = [];
-    await new PostgresDrFailoverStore(mockConnection(capture)).listRecent(5);
+    await new PostgresDrFailoverStore(mockConnection(capture)).listRecent(null, 5);
     expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 

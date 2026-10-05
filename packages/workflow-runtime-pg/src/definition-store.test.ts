@@ -19,6 +19,8 @@ import {
   definitionRowValues,
   definitionUpdateAssignments,
   rowToWorkflowDefinition,
+  scopeFilter,
+  scopeFilterWithPlatform,
   summarizeDefinition,
 } from "./definition-store.js";
 import { WorkflowDefinitionIdResolver } from "./id-mapping.js";
@@ -617,5 +619,174 @@ describe("schema option", () => {
     const conn = mockConnection(() => EMPTY, capture);
     await new PostgresWorkflowDefinitionStore(conn, { schema: "other" }).loadById("wfd_abcdef01");
     expect(capture.at(-1)?.sql).toContain("FROM other.workflow_definitions");
+  });
+});
+
+/**
+ * **The reads were owner-dependent, and these are the assertions that can see it.**
+ *
+ * A table's owner bypasses its policies (ADR-0331), and connecting as the owner is an ordinary
+ * deployment — so a read that leans on RLS is right as a non-owner and wrong as the owner. Every
+ * one of this file's other 47 tests passed both before and after the predicates were added, which
+ * is the same blindness that let `PostgresTimerStore` omit a NOT NULL column: a fake connection
+ * asserts the SQL it was handed.
+ */
+describe("scopeFilter / scopeFilterWithPlatform", () => {
+  it("asks for the platform scope as IS NULL, because tenant_id = NULL is never true", () => {
+    expect(scopeFilter(null)).toEqual({ sql: "tenant_id IS NULL", params: [] });
+    expect(scopeFilterWithPlatform(null)).toEqual({ sql: "tenant_id IS NULL", params: [] });
+  });
+
+  it("keeps the platform's rows in a tenant's answer, which the table's policy grants", () => {
+    expect(scopeFilterWithPlatform(TENANT)).toEqual({
+      sql: "(tenant_id = $1 OR tenant_id IS NULL)",
+      params: [TENANT],
+    });
+  });
+
+  it("offers the strict arm too, and it is not what this store uses", () => {
+    expect(scopeFilter(TENANT)).toEqual({ sql: "tenant_id = $1", params: [TENANT] });
+  });
+
+  it("binds at the placeholder index the query needs", () => {
+    expect(scopeFilterWithPlatform(TENANT, 3).sql).toBe("(tenant_id = $3 OR tenant_id IS NULL)");
+    expect(scopeFilter(TENANT, 7).sql).toBe("tenant_id = $7");
+  });
+
+  it("branches rather than using IS NOT DISTINCT FROM, which a bound parameter seq-scans", () => {
+    for (const filter of [
+      scopeFilter(null),
+      scopeFilter(TENANT),
+      scopeFilterWithPlatform(null),
+      scopeFilterWithPlatform(TENANT),
+    ]) {
+      expect(filter.sql).not.toContain("IS NOT DISTINCT FROM");
+    }
+  });
+
+  it("refuses a tenant id that is not one", () => {
+    expect(() => scopeFilter("'; DROP TABLE x --")).toThrow(/invalid tenantId/);
+    expect(() => scopeFilterWithPlatform("'; DROP TABLE x --")).toThrow(/invalid tenantId/);
+  });
+});
+
+describe("read scoping", () => {
+  function capturing(rows: readonly Record<string, unknown>[] = []): {
+    conn: PgConnection;
+    capture: Recorded[];
+  } {
+    const capture: Recorded[] = [];
+    const conn = mockConnection(() => ({ rows, rowCount: rows.length }), capture);
+    return { conn, capture };
+  }
+
+  const selects = (capture: Recorded[]): Recorded[] =>
+    capture.filter((r) => r.sql.includes("SELECT") && !r.sql.includes("set_config"));
+
+  it("loadById carries the predicate and binds the tenant", async () => {
+    const { conn, capture } = capturing();
+    await new PostgresWorkflowDefinitionStore(conn).loadById("wfd_abcdef01", TENANT);
+    const [read] = selects(capture);
+    expect(read?.sql).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+    expect(read?.params).toEqual(["wfd_abcdef01", TENANT]);
+  });
+
+  it("loadById for the platform scope asks for IS NULL and binds no tenant", async () => {
+    const { conn, capture } = capturing();
+    await new PostgresWorkflowDefinitionStore(conn).loadById("wfd_abcdef01");
+    const [read] = selects(capture);
+    expect(read?.sql).toContain("tenant_id IS NULL");
+    expect(read?.params).toEqual(["wfd_abcdef01"]);
+  });
+
+  it("loadByKeyVersion no longer lets NULLS LAST answer a platform read with a tenant's row", async () => {
+    // The tie-break is right for a tenant and backwards for the platform, where it ranks a tenant's
+    // row *first*. What fixes it is the predicate: a platform read has no tenant rows to prefer.
+    const { conn, capture } = capturing();
+    await new PostgresWorkflowDefinitionStore(conn).loadByKeyVersion("purchase.approval", "1.0.0");
+    const [read] = selects(capture);
+    expect(read?.sql).toContain("tenant_id IS NULL");
+    expect(read?.sql).toContain("ORDER BY tenant_id NULLS LAST");
+    expect(read?.params).toEqual(["purchase.approval", "1.0.0"]);
+  });
+
+  it("loadByKeyVersion binds the scope after its two own parameters", async () => {
+    const { conn, capture } = capturing();
+    await new PostgresWorkflowDefinitionStore(conn).loadByKeyVersion(
+      "purchase.approval",
+      "1.0.0",
+      TENANT,
+    );
+    const [read] = selects(capture);
+    expect(read?.sql).toContain("(tenant_id = $3 OR tenant_id IS NULL)");
+    expect(read?.params).toEqual(["purchase.approval", "1.0.0", TENANT]);
+  });
+
+  it("listByKey carries the predicate", async () => {
+    const { conn, capture } = capturing();
+    await new PostgresWorkflowDefinitionStore(conn).listByKey("purchase.approval", TENANT);
+    const [read] = selects(capture);
+    expect(read?.sql).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+    expect(read?.params).toEqual(["purchase.approval", TENANT]);
+  });
+
+  it("loadEngineDefinitions has a WHERE at all, which it did not", async () => {
+    // The worst of the five: unscoped, this loaded every tenant's definitions into one map keyed by
+    // definitionId — inflating the count the worker supervisor's no_definitions refusal reads, and
+    // letting the row limit crowd out the very definition an instance's timer resolves.
+    const { conn, capture } = capturing();
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ tenantId: TENANT });
+    const [read] = selects(capture);
+    expect(read?.sql).toContain("WHERE (tenant_id = $1 OR tenant_id IS NULL)");
+    expect(read?.params).toEqual([TENANT, DEFAULT_DEFINITION_LOAD_LIMIT + 1]);
+  });
+
+  it("loadEngineDefinitions renumbers its LIMIT around the scope's parameter", async () => {
+    const { conn, capture } = capturing();
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ tenantId: TENANT });
+    expect(selects(capture)[0]?.sql).toContain("LIMIT $2");
+  });
+
+  it("loadEngineDefinitions for the platform scope binds the limit at $1", async () => {
+    const { conn, capture } = capturing();
+    await new PostgresWorkflowDefinitionStore(conn).loadEngineDefinitions({ limit: 5 });
+    const [read] = selects(capture);
+    expect(read?.sql).toContain("WHERE tenant_id IS NULL");
+    expect(read?.sql).toContain("LIMIT $1");
+    expect(read?.params).toEqual([6]);
+  });
+
+  it("every SELECT a read issues carries a tenant_id predicate", async () => {
+    const { conn, capture } = capturing();
+    const store = new PostgresWorkflowDefinitionStore(conn);
+    await store.loadById("wfd_abcdef01", TENANT);
+    await store.loadByKeyVersion("purchase.approval", "1.0.0", TENANT);
+    await store.listByKey("purchase.approval", TENANT);
+    await store.loadEngineDefinitions({ tenantId: TENANT });
+    const reads = selects(capture);
+    expect(reads.length).toBe(4);
+    for (const read of reads) {
+      expect(read.sql).toMatch(/tenant_id = \$\d+ OR tenant_id IS NULL/);
+    }
+  });
+
+  it("the write path's own lookups are scoped too", async () => {
+    // `gatherForPublication` and `rowIdOf` run inside `publish`, so as the owner a platform publish
+    // could match a tenant's row. Both carry the publishing scope's predicate now.
+    const capture: Recorded[] = [];
+    const conn = mockConnection(
+      (sql) =>
+        sql.includes("INSERT INTO")
+          ? { rows: [{ id: ROW_UUID }], rowCount: 1 }
+          : { rows: [], rowCount: 0 },
+      capture,
+    );
+    await new PostgresWorkflowDefinitionStore(conn).publish(definition());
+    const reads = selects(capture);
+    expect(reads.length).toBeGreaterThan(0);
+    for (const read of reads) {
+      expect(read.sql).toContain("tenant_id = $");
+      expect(read.params).toContain(TENANT);
+    }
   });
 });

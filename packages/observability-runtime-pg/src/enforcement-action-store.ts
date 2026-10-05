@@ -1,6 +1,8 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  scopedRead,
   scopedWrite,
+  scopeFilter,
   SloEnforcementActionRecordSchema,
   type SloEnforcementActionRecord,
 } from "./records.js";
@@ -64,35 +66,66 @@ export class PostgresSloEnforcementActionStore {
     );
   }
 
+  /**
+   * One scope's enforcement history for an incident, oldest first.
+   *
+   * An incident id is not a scope either. `SloEnforcementReplayer.verifyIncident` checks this list
+   * for a duplicate open and a page with no channels, so another scope's actions on the same id do
+   * not merely lengthen the list — they *invent drift*. Observed live as the owner: one platform
+   * `breach_opened` and one tenant `breach_opened` on `INC-2026-0001` read as a duplicate open.
+   */
   async listForIncident(
     incidentId: string,
+    tenantId: string | null = null,
   ): Promise<readonly SloEnforcementActionRecord[]> {
-    const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT ${COLUMN_LIST}
-       FROM ${SCHEMA}.${TABLE}
-       WHERE incident_id = $1
-       ORDER BY occurred_at ASC`,
-      [incidentId],
+    const scope = scopeFilter(tenantId, 2);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<Record<string, unknown>>(
+        `SELECT ${COLUMN_LIST}
+         FROM ${SCHEMA}.${TABLE}
+         WHERE incident_id = $1 AND ${scope.sql}
+         ORDER BY occurred_at ASC`,
+        [incidentId, ...scope.params],
+      ),
     );
     return result.rows.map((row) => rowToRecord(row));
   }
 
-  async listRecent(limit = 100): Promise<readonly SloEnforcementActionRecord[]> {
+  /**
+   * The newest actions in one scope.
+   *
+   * A `LIMIT` over an unscoped read is the costly half: another scope's rows displace the asked-for
+   * ones rather than joining them. Observed live as the owner with two newer tenant rows beside one
+   * platform row, `listRecent(2)` returned both tenant rows and none of the platform's, so
+   * `summarizeRecent`'s `pagedRatio` came back 0 for a page that had in fact paged.
+   */
+  async listRecent(
+    limit = 100,
+    tenantId: string | null = null,
+  ): Promise<readonly SloEnforcementActionRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
-    const result = await this.conn.query<Record<string, unknown>>(
-      `SELECT ${COLUMN_LIST}
-       FROM ${SCHEMA}.${TABLE}
-       ORDER BY occurred_at DESC
-       LIMIT $1`,
-      [limit],
+    const scope = scopeFilter(tenantId, 1);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<Record<string, unknown>>(
+        `SELECT ${COLUMN_LIST}
+         FROM ${SCHEMA}.${TABLE}
+         WHERE ${scope.sql}
+         ORDER BY occurred_at DESC
+         LIMIT $${String(1 + scope.params.length)}`,
+        [...scope.params, limit],
+      ),
     );
     return result.rows.map((row) => rowToRecord(row));
   }
 
-  async countSince(since: Date): Promise<number> {
-    const result = await this.conn.query<{ count: string }>(
-      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE} WHERE occurred_at >= $1`,
-      [since.toISOString()],
+  async countSince(since: Date, tenantId: string | null = null): Promise<number> {
+    const scope = scopeFilter(tenantId, 2);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<{ count: string }>(
+        `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE}
+         WHERE occurred_at >= $1 AND ${scope.sql}`,
+        [since.toISOString(), ...scope.params],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return 0;

@@ -126,18 +126,36 @@ export class SloEnforcementReplayer {
     this.store = store;
   }
 
-  async verifyIncident(incidentId: string): Promise<readonly DriftIssue[]> {
-    const actions = await this.store.listForIncident(incidentId);
+  /**
+   * Every method here takes the scope it verifies, defaulting to the platform's.
+   *
+   * A drift verdict is a judgement over a *set*, so a set drawn from two scopes is not merely
+   * longer — it reports drift that is not there (two scopes' `breach_opened` on one incident id
+   * read as a duplicate open) and hides drift that is (another scope's rows displacing this one's
+   * under the `LIMIT`). The scope belongs on the question, not on how the connection happens to be
+   * authenticated.
+   */
+  async verifyIncident(
+    incidentId: string,
+    tenantId: string | null = null,
+  ): Promise<readonly DriftIssue[]> {
+    const actions = await this.store.listForIncident(incidentId, tenantId);
     return verifyEnforcementHistory(actions);
   }
 
-  async verifyRecent(limit = 100): Promise<readonly DriftIssue[]> {
-    const actions = await this.store.listRecent(limit);
+  async verifyRecent(
+    limit = 100,
+    tenantId: string | null = null,
+  ): Promise<readonly DriftIssue[]> {
+    const actions = await this.store.listRecent(limit, tenantId);
     return verifyEnforcementHistory(actions);
   }
 
-  async summarizeRecent(limit = 100): Promise<EnforcementSummary> {
-    const actions = await this.store.listRecent(limit);
+  async summarizeRecent(
+    limit = 100,
+    tenantId: string | null = null,
+  ): Promise<EnforcementSummary> {
+    const actions = await this.store.listRecent(limit, tenantId);
     return summarizeEnforcement(actions);
   }
 }

@@ -97,6 +97,110 @@ function drillExec(
   });
 }
 
+/**
+ * The detector for the failure mode the upsert introduces.
+ *
+ * While these rows could only be inserted, both halves of a row — the projection columns and the
+ * `record` JSONB they are copied from — always came from one write and could not diverge. A partial
+ * `SET` list makes that reachable: a projection column outside `FAILOVER_MUTABLE_COLUMNS`, or a
+ * record whose field moved while its column did not, leaves a row that answers one way to
+ * `WHERE status = …` and another to `assessDrReadiness`, which reads `record`. That is the shape the
+ * dropped-transition defect had — one stale half, believed by one reader.
+ */
+describe("projection_disagrees_with_record", () => {
+  it("is silent when the two halves agree, which they do on every write the stores issue", () => {
+    expect(verifyFailoverExecutionShape(failoverExec())).toHaveLength(0);
+    expect(verifyDrillExecutionShape(drillExec())).toHaveLength(0);
+  });
+
+  it("catches a failover status column that moved while its record did not", () => {
+    // Exactly what a `SET` list missing `record` would leave behind.
+    const issues = verifyFailoverExecutionShape(
+      failoverExec({
+        status: "aborted",
+        record: embeddedFailover({ status: "queued" }),
+      }),
+    );
+    expect(issues.map((i) => i.kind)).toContain("projection_disagrees_with_record");
+    expect(issues.find((i) => i.kind === "projection_disagrees_with_record")?.detail).toContain(
+      "'status'",
+    );
+  });
+
+  it("catches a record that advanced while its projection did not", () => {
+    // And the reverse: a `SET` list carrying `record` and missing `completed_at`.
+    const issues = verifyFailoverExecutionShape(
+      failoverExec({
+        status: "succeeded",
+        completedAt: null,
+        actualRpoSeconds: 30,
+        actualRtoSeconds: 300,
+        record: embeddedFailover({
+          status: "succeeded",
+          completedAt: LATER,
+          actualRpoSeconds: 30,
+          actualRtoSeconds: 300,
+        }),
+      }),
+    );
+    expect(issues.map((i) => i.kind)).toContain("projection_disagrees_with_record");
+  });
+
+  it("does not report an undefined incidentTicketId against a null column", () => {
+    // The record leaves it `undefined` where the row holds `null`; that is a representation, not a
+    // disagreement, and reporting it would fire on every healthy row — the false alarm ADR-0332
+    // named as the thing that teaches an operator to ignore a detector.
+    expect(failoverExec().record.incidentTicketId).toBeUndefined();
+    expect(verifyFailoverExecutionShape(failoverExec())).toHaveLength(0);
+  });
+
+  it("catches a drill outcome and a scheduled_for that disagree with the record", () => {
+    const issues = verifyDrillExecutionShape(
+      drillExec({
+        outcome: "passed",
+        executedAt: LATER,
+        scheduledFor: NOW,
+        record: embeddedDrill({
+          outcome: "passed",
+          executedAt: LATER,
+          executedBy: "operator-1",
+          measuredRpoSeconds: 10,
+          measuredRtoSeconds: 100,
+          scheduledFor: "2026-05-02T12:00:00.000Z",
+        }),
+      }),
+    );
+    const divergent = issues.filter((i) => i.kind === "projection_disagrees_with_record");
+    expect(divergent).toHaveLength(1);
+    expect(divergent[0]?.detail).toContain("'scheduled_for'");
+  });
+
+  it("names every disagreeing column rather than stopping at the first", () => {
+    const issues = verifyFailoverExecutionShape(
+      failoverExec({
+        status: "aborted",
+        tier: "tier_3_recoverable",
+        record: embeddedFailover({ status: "queued", tier: "tier_1_business_critical" }),
+      }),
+    );
+    expect(issues.filter((i) => i.kind === "projection_disagrees_with_record")).toHaveLength(2);
+  });
+
+  it("could not have caught the dropped transition it was added alongside", () => {
+    // A row left behind by `DO NOTHING` is a perfectly consistent *plan* row: both halves come from
+    // the plan write and agree with each other. The replayer was not silently right about that bug;
+    // every one of its checks is intra-row, so it was structurally unable to see it.
+    const planRowLeftBehind = failoverExec({
+      status: "queued",
+      completedAt: null,
+      actualRpoSeconds: null,
+      actualRtoSeconds: null,
+      record: embeddedFailover({ status: "queued" }),
+    });
+    expect(verifyFailoverExecutionShape(planRowLeftBehind)).toHaveLength(0);
+  });
+});
+
 describe("verifyFailoverExecutionShape", () => {
   it("passes a clean queued record", () => {
     expect(verifyFailoverExecutionShape(failoverExec())).toHaveLength(0);
@@ -212,7 +316,7 @@ describe("DrReplayer", () => {
       }),
     );
     const replayer = new DrReplayer(failoverStore, drillStore);
-    const issues = await replayer.bulkVerify();
+    const issues = await replayer.bulkVerify(null);
     const kinds = issues.map((i) => i.kind);
     expect(kinds).toContain("outage_without_incident_ticket");
     expect(kinds).toContain("executed_without_timestamp");
@@ -226,7 +330,7 @@ describe("DrReplayer", () => {
       mockConnection(undefined, { rows: [], rowCount: 0 }),
     );
     const replayer = new DrReplayer(failoverStore, drillStore);
-    const summary = await replayer.summarize();
+    const summary = await replayer.summarize(null);
     expect(summary).toEqual({ failovers: 0, drills: 0, issues: 0 });
   });
 });

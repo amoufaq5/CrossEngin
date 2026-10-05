@@ -131,3 +131,45 @@ describe("the platform write arm", () => {
     expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 });
+
+describe("the scope predicate a read carries beside RLS", () => {
+  const SINCE = new Date("2026-01-01T00:00:00.000Z");
+
+  it("asks for the platform scope by name on the latency signal too", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloLatencyEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "catalog-latency",
+      SINCE,
+    );
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id IS NULL");
+    expect(read.sql).not.toContain("tenant_id = $");
+  });
+
+  it("branches to equality for a tenant, and never to IS NOT DISTINCT FROM", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloLatencyEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "catalog-latency",
+      SINCE,
+      TENANT,
+    );
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id = $3");
+    expect(read.sql).not.toContain("IS NOT DISTINCT FROM");
+    expect(read.params).toEqual(["catalog-latency", SINCE.toISOString(), TENANT]);
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+  });
+
+  it("refuses an implausible tenantId before issuing anything", async () => {
+    const capture: Captured[] = [];
+    await expect(
+      new PostgresSloLatencyEvaluationStore(mockConnection(capture)).countBreachesSince(
+        "catalog-latency",
+        SINCE,
+        "not a uuid at all",
+      ),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
+  });
+});

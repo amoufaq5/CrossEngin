@@ -407,8 +407,16 @@ describe("policy role canonicalization", () => {
       }
     }
     // So the rule cannot pass vacuously on a catalog where nothing is narrowed: 8 from ADR-0313 and
-    // ADR-0331, plus 70 from the 29-table split (29 reads, 29 inserts, 12 updates).
-    expect(narrowed).toBe(78);
+    // ADR-0331, plus 71 from the 29-table split (29 reads, 29 inserts, 13 updates), plus 2 for
+    // `meta.audit_integrity_verdicts` — the last member of that class, whose single `ALL` policy
+    // ORed in the cross-tenant *read* grant and so let an elevated reader forge, flip or delete a
+    // verdict at any scope. Append-only, so a read arm and an `INSERT` arm and no `UPDATE`.
+    //
+    // The 13th `UPDATE` arm is `dr_drill_executions`, which ADR-0332 classified append-only by
+    // reading its INSERT-only store rather than its contract — the one place that increment applied
+    // its own shape axis the way it said it had not. A drill result is an amendment to an existing
+    // record, so the arm is required for the store to be able to complete one.
+    expect(narrowed).toBe(81);
   });
 });
 

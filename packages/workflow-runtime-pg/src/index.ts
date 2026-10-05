@@ -1,4 +1,5 @@
 export * from "./activity-claim.js";
+export * from "./activity-provenance.js";
 export * from "./activity-store.js";
 export * from "./activity-worker.js";
 export * from "./job-cancellation.js";
@@ -15,8 +16,10 @@ export * from "./instance-store.js";
 export * from "./persistent-engine.js";
 export * from "./projecting-event-log.js";
 export * from "./replayer.js";
+export * from "./required-columns.js";
 export * from "./signal-provenance.js";
 export * from "./signal-store.js";
 export * from "./timer-claim.js";
+export * from "./timer-provenance.js";
 export * from "./timer-store.js";
 export * from "./timer-worker.js";

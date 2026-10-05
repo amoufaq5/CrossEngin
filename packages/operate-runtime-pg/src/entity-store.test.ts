@@ -1,5 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { EntityRecord } from "@crossengin/operate-runtime";
+import type { EntityRecord, ListValueType } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
 import { PostgresEntityStore } from "./entity-store.js";
@@ -443,6 +443,98 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
     expect(last.sql).not.toContain("DROP");
     expect(last.sql).not.toContain("DELETE");
     expect(last.params).toEqual([TENANT, "Product", 11]);
+  });
+});
+
+describe("PostgresEntityStore.listPage — declared numeric fields", () => {
+  /** What `withListValueTypes` attaches from a manifest declaring `price` a `decimal`. */
+  const numeric = new Map<string, ListValueType>([["price", "numeric"]]);
+
+  it("orders a declared numeric field through a guarded cast, NULLS LAST", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "price", direction: "asc" }],
+      filters: [],
+      valueTypes: numeric,
+    });
+    expect(last.sql).toContain("ORDER BY (CASE WHEN length(document ->> 'price')");
+    expect(last.sql).toContain("THEN (document ->> 'price')::numeric ELSE NULL END) ASC NULLS LAST");
+    // the cast is guarded, not bare: one row holding 'n/a' must not fail every page of the entity
+    expect(last.sql).not.toContain("ORDER BY (document ->> 'price')::numeric");
+  });
+
+  it("keeps the text ORDER BY for a field the manifest does not declare numeric", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "name", direction: "asc" }],
+      filters: [],
+      valueTypes: numeric,
+    });
+    expect(last.sql).toContain("ORDER BY document ->> 'name' ASC, record_id ASC");
+    expect(last.sql).not.toContain("CASE WHEN");
+  });
+
+  it("falls back to a text comparison with no declared types at all", async () => {
+    // A store used without a manifest — an admin query, a test — behaves exactly as before.
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "price", direction: "asc" }],
+      filters: [],
+    });
+    expect(last.sql).toContain("ORDER BY document ->> 'price' ASC, record_id ASC");
+  });
+
+  it("binds a numeric filter with a numeric cast", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "price", op: "gte", value: "0.5" }],
+      valueTypes: numeric,
+    });
+    expect(last.sql).toContain("$3::numeric");
+    expect(last.params).toEqual([TENANT, "Product", "0.5", 11]);
+  });
+
+  it("answers a non-numeric comparand with a constant instead of a value that would raise", async () => {
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "price", op: "eq", value: "n/a" }],
+      valueTypes: numeric,
+    });
+    expect(last.sql).toContain("AND FALSE");
+    expect(last.params).toEqual([TENANT, "Product", 11]);
+  });
+
+  it("keeps the guarded expression away from the field name interpolation guard", async () => {
+    // The numeric path builds three copies of `document ->> 'field'`, so the identifier check
+    // has to hold for all of them: an unsafe name is still dropped entirely.
+    const { conn, last } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    await store.listPage(TENANT, "Product", {
+      limit: 10,
+      cursor: null,
+      sort: [{ field: "price'; DROP TABLE x; --", direction: "asc" }],
+      filters: [],
+      valueTypes: new Map<string, ListValueType>([["price'; DROP TABLE x; --", "numeric"]]),
+    });
+    expect(last.sql).not.toContain("DROP");
+    expect(last.sql).toContain("ORDER BY record_id ASC");
   });
 });
 

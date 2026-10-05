@@ -1,4 +1,4 @@
-import type { WorkflowEvent } from "@crossengin/workflow-engine";
+import { ACTIVITY_KINDS, type WorkflowEvent } from "@crossengin/workflow-engine";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -350,6 +350,84 @@ describe("projectActivities", () => {
     expect(acts[0]?.status).toBe("failed");
     expect(acts[0]?.errorCode).toBe("503");
   });
+
+  it("reads the recorded retry ceiling rather than defaulting it", () => {
+    const acts = projectActivities([
+      event({
+        kind: "activity_scheduled",
+        sequenceNumber: 1,
+        activityId: "wfa_act00003",
+        payload: { kind: "http_call", maxAttempts: 4 },
+      }),
+    ]);
+    expect(acts[0]?.maxAttempts).toBe(4);
+  });
+
+  it("answers null for a ceiling the log never recorded", () => {
+    const acts = projectActivities([
+      event({
+        kind: "activity_scheduled",
+        sequenceNumber: 1,
+        activityId: "wfa_act00003",
+        payload: { kind: "http_call" },
+      }),
+    ]);
+    expect(acts[0]?.maxAttempts).toBeNull();
+  });
+
+  it("answers null for a ceiling of zero or a non-number", () => {
+    for (const maxAttempts of [0, -3, "4", null]) {
+      const acts = projectActivities([
+        event({
+          kind: "activity_scheduled",
+          sequenceNumber: 1,
+          activityId: "wfa_act00003",
+          payload: { kind: "http_call", maxAttempts },
+        }),
+      ]);
+      expect(acts[0]?.maxAttempts).toBeNull();
+    }
+  });
+
+  it("narrows an unrecognised kind to null instead of casting it through", () => {
+    const acts = projectActivities([
+      event({
+        kind: "activity_scheduled",
+        sequenceNumber: 1,
+        activityId: "wfa_act00004",
+        payload: { kind: "http", definitionActivityKey: "post_invoice" },
+      }),
+    ]);
+    expect(acts[0]?.kind).toBeNull();
+  });
+
+  it("accepts every ACTIVITY_KINDS member", () => {
+    for (const kind of ACTIVITY_KINDS) {
+      const acts = projectActivities([
+        event({
+          kind: "activity_scheduled",
+          sequenceNumber: 1,
+          activityId: "wfa_act00005",
+          payload: { kind },
+        }),
+      ]);
+      expect(acts[0]?.kind).toBe(kind);
+    }
+  });
+
+  it("records the scheduling event's sequence number as the cursor", () => {
+    const acts = projectActivities([
+      startEvent(),
+      event({
+        kind: "activity_scheduled",
+        sequenceNumber: 7,
+        activityId: "wfa_act00006",
+        payload: { kind: "db_write", maxAttempts: 1 },
+      }),
+      event({ kind: "activity_started", sequenceNumber: 8, activityId: "wfa_act00006" }),
+    ]);
+    expect(acts[0]?.sequenceCursor).toBe(7);
+  });
 });
 
 describe("projectSignals", () => {
@@ -393,6 +471,79 @@ describe("projectTimers", () => {
     expect(tims).toHaveLength(1);
     expect(tims[0]?.status).toBe("fired");
     expect(tims[0]?.fireAt).toBe("2026-05-17T00:00:00.000Z");
+  });
+
+  it("starts fireCount at zero for a scheduled timer", () => {
+    const tims = projectTimers([
+      event({
+        kind: "timer_scheduled",
+        sequenceNumber: 1,
+        timerId: "wft_tim00002",
+        payload: { timerName: "deadline", fireAt: "2026-05-17T00:00:00.000Z" },
+      }),
+    ]);
+    expect(tims[0]?.fireCount).toBe(0);
+  });
+
+  it("counts one fire, which is what a fired timer's contract requires", () => {
+    const tims = projectTimers([
+      event({
+        kind: "timer_scheduled",
+        sequenceNumber: 1,
+        timerId: "wft_tim00003",
+        payload: { timerName: "deadline", fireAt: "2026-05-17T00:00:00.000Z" },
+      }),
+      event({
+        kind: "timer_fired",
+        sequenceNumber: 2,
+        timerId: "wft_tim00003",
+        payload: { timerName: "deadline" },
+      }),
+    ]);
+    expect(tims[0]?.fireCount).toBe(1);
+  });
+
+  it("counts every fire, so a recurring timer is not reported as firing once", () => {
+    const tims = projectTimers([
+      event({
+        kind: "timer_scheduled",
+        sequenceNumber: 1,
+        timerId: "wft_tim00004",
+        payload: { timerName: "nightly", fireAt: "2026-05-17T00:00:00.000Z" },
+      }),
+      event({
+        kind: "timer_fired",
+        sequenceNumber: 2,
+        timerId: "wft_tim00004",
+        payload: { timerName: "nightly" },
+      }),
+      event({
+        kind: "timer_fired",
+        sequenceNumber: 3,
+        timerId: "wft_tim00004",
+        payload: { timerName: "nightly" },
+      }),
+    ]);
+    expect(tims[0]?.fireCount).toBe(2);
+  });
+
+  it("leaves fireCount at zero for a cancelled timer", () => {
+    const tims = projectTimers([
+      event({
+        kind: "timer_scheduled",
+        sequenceNumber: 1,
+        timerId: "wft_tim00005",
+        payload: { timerName: "deadline", fireAt: "2026-05-17T00:00:00.000Z" },
+      }),
+      event({
+        kind: "timer_cancelled",
+        sequenceNumber: 2,
+        timerId: "wft_tim00005",
+        payload: { timerName: "deadline" },
+      }),
+    ]);
+    expect(tims[0]?.status).toBe("cancelled");
+    expect(tims[0]?.fireCount).toBe(0);
   });
 });
 

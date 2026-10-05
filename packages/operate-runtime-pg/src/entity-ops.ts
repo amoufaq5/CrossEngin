@@ -5,9 +5,10 @@ import {
   type EntityRecord,
   type ListPage,
   type ListQuery,
+  type ListValueType,
 } from "@crossengin/operate-runtime";
 
-import { buildListSql, type ListSqlAdapter } from "./list-sql.js";
+import { buildListSql, guardedNumericCast, type ListSqlAdapter } from "./list-sql.js";
 import { mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
 
 const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -40,9 +41,21 @@ export async function listPageOp(
   query: ListQuery,
 ): Promise<ListPage> {
   const params: unknown[] = [tenantId, entity];
+  // `document ->> 'f'` is TEXT whichever way the JSON held the value, so a field the manifest
+  // declares numeric is compared through a guarded cast rather than byte-wise — otherwise
+  // `"100.00"` sorts before `"9.00"` and `"10"` before `"9"`, and the keyset cursor built from
+  // that order skips and repeats rows. A field with no declared type (an admin query, a store
+  // used without a manifest) keeps the text comparison it had.
+  const valueTypes = query.valueTypes;
+  const valueTypeOf = (field: string): ListValueType => valueTypes?.get(field) ?? "text";
   const adapter: ListSqlAdapter = {
-    columnExpr: (field) => (FIELD_RE.test(field) ? `document ->> '${field}'` : null),
-    castSuffix: () => "",
+    columnExpr: (field) => {
+      if (!FIELD_RE.test(field)) return null;
+      const json = `document ->> '${field}'`;
+      return valueTypeOf(field) === "numeric" ? `(${guardedNumericCast(json)})` : json;
+    },
+    castSuffix: (field) => (valueTypeOf(field) === "numeric" ? "::numeric" : ""),
+    valueType: valueTypeOf,
     idExpr: "record_id",
   };
   const { where, orderBy } = buildListSql(query, adapter, [`tenant_id = $1`, `entity = $2`], params);

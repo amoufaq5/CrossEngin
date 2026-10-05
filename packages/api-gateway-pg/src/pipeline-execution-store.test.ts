@@ -202,3 +202,54 @@ describe("the platform write arm", () => {
     expect(capture).toEqual([]);
   });
 });
+
+describe("the scope predicate a read carries beside RLS", () => {
+  const SINCE = new Date("2026-05-16T00:00:00.000Z");
+
+  it("asks for the platform scope by name, not by the absence of a predicate", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresPipelineExecutionStore(mockConnection(capture)).countSince(SINCE);
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id IS NULL");
+    expect(read.sql).not.toContain("tenant_id = $");
+    expect(read.params).toEqual([SINCE.toISOString()]);
+  });
+
+  it("branches to equality for a tenant, binding the id", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresPipelineExecutionStore(mockConnection(capture)).countSince(SINCE, TENANT);
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id = $2");
+    expect(read.sql).not.toContain("tenant_id IS NULL");
+    expect(read.sql).not.toContain("IS NOT DISTINCT FROM");
+    expect(read.params).toEqual([SINCE.toISOString(), TENANT]);
+  });
+
+  it("sets the tenant's RLS context, and claims no write elevation either way", async () => {
+    const tenantCapture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresPipelineExecutionStore(mockConnection(tenantCapture)).countSince(
+      SINCE,
+      TENANT,
+    );
+    const settings = tenantCapture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+    expect(settings[0]?.params).toEqual([TENANT]);
+
+    const platformCapture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresPipelineExecutionStore(mockConnection(platformCapture)).countSince(SINCE);
+    expect(platformCapture.some((c) => c.sql.includes(SET_PLATFORM_RECORD_WRITE_SQL))).toBe(false);
+    expect(platformCapture.some((c) => c.sql.includes("set_config"))).toBe(false);
+  });
+
+  it("refuses an implausible tenantId before issuing anything", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await expect(
+      new PostgresPipelineExecutionStore(mockConnection(capture)).countSince(
+        SINCE,
+        "'; DROP TABLE meta.tenants --",
+      ),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
+  });
+});

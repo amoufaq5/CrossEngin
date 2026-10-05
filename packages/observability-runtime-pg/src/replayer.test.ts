@@ -250,3 +250,38 @@ describe("SloEnforcementReplayer", () => {
     expect(issues.map((i) => i.kind)).toEqual(["recovered_close_out_failed"]);
   });
 });
+
+describe("SloEnforcementReplayer passes the scope down to the store", () => {
+  /** A stub that remembers which scope it was asked for. */
+  function recordingStore(asked: (string | null | undefined)[]): PostgresSloEnforcementActionStore {
+    return {
+      listForIncident: async (_id: string, tenantId?: string | null) => {
+        asked.push(tenantId);
+        return [];
+      },
+      listRecent: async (_limit?: number, tenantId?: string | null) => {
+        asked.push(tenantId);
+        return [];
+      },
+    } as unknown as PostgresSloEnforcementActionStore;
+  }
+
+  it("defaults to the platform scope rather than to whatever RLS happens to allow", async () => {
+    const asked: (string | null | undefined)[] = [];
+    const replayer = new SloEnforcementReplayer(recordingStore(asked));
+    await replayer.verifyIncident("INC-2026-0001");
+    await replayer.verifyRecent();
+    await replayer.summarizeRecent();
+    expect(asked).toEqual([null, null, null]);
+  });
+
+  it("forwards a named tenant, so a drift verdict is a judgement over one scope's set", async () => {
+    const asked: (string | null | undefined)[] = [];
+    const tenant = "00000000-0000-4000-8000-000000000001";
+    const replayer = new SloEnforcementReplayer(recordingStore(asked));
+    await replayer.verifyIncident("INC-2026-0001", tenant);
+    await replayer.verifyRecent(50, tenant);
+    await replayer.summarizeRecent(50, tenant);
+    expect(asked).toEqual([tenant, tenant, tenant]);
+  });
+});

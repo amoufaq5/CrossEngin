@@ -17,6 +17,10 @@ import {
   verifyChainFull,
   type ChainVerificationReport,
 } from "./chain-verify.js";
+import {
+  PostgresIntegrityVerdictStore,
+  integrityVerdictInputFor,
+} from "./integrity-verdict-store.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
@@ -472,6 +476,12 @@ export function buildIntegrityProofLifecycle(
   const checkpoints = new PostgresChainCheckpointStore(conn, { schema: config.schema });
   // A reader, not the anchoring emitter: this verifies what was written, and must never write.
   const audit = new PostgresAuditEmitter(conn, { schema: config.schema });
+  // Built only when the verdict is being recorded, so a pass that records nothing allocates
+  // nothing — and, more to the point, so there is no store sitting here that nothing calls, which
+  // is the state this whole table was in.
+  const verdicts = config.recordVerdict
+    ? new PostgresIntegrityVerdictStore(conn, { schema: config.schema })
+    : null;
   const scopes: IntegrityScopeSource = opts.tenants ?? (() => integrityConfigScopes(config));
   const now = opts.now ?? ((): Date => new Date());
 
@@ -496,6 +506,50 @@ export function buildIntegrityProofLifecycle(
               recordedAt: report.verifiedAt,
               payload: integrityVerdictPayload(report),
             });
+            // And the queryable row, which until ADR-0333 nothing wrote: `record()` and
+            // `integrityVerdictInputFor` were called by nothing but their own unit test, so
+            // `meta.audit_integrity_verdicts` was empty in every deployment and every
+            // `--audit-verdict-routes` answer was "no verifications" — for a table that exists to
+            // make "show me last month's verifications" answerable. The chain entry above was the
+            // whole of what `recordVerdict` recorded.
+            //
+            // Under the same flag rather than a new one, because `recordVerdict` already means
+            // "record the verdict": a second flag would let a deployment turn recording on and
+            // still get no record, which is the silence this increment is about.
+            //
+            // The anchor comes from the entry just appended, and both halves of it — ADR-0318's
+            // rule that half an anchor is worse than none, which `record()` enforces. The entry
+            // hash was always on the returned `ChainedLogEntry`; this callback discarded it and
+            // returned only the sequence, so the seam was never missing, just unread.
+            if (verdicts !== null) {
+              try {
+                await verdicts.record(
+                  integrityVerdictInputFor(report, {
+                    chainEntryHash: entry.entryHash,
+                    chainSequenceNumber: entry.sequenceNumber,
+                  }),
+                );
+              } catch (err) {
+                // Reported, never thrown: the chain entry has committed, so the verification *is*
+                // recorded where tamper-evidence lives. Raising here would turn a successful
+                // verification into a failed pass and skip the next scope, losing the anchored
+                // entry's value to protect a projection of it. Same shape as `appendPagedNote`
+                // (ADR-0327) — the durable half has landed, so the convenience half must not be
+                // able to undo it.
+                //
+                // Named here as well as handed to `opts.onError`, because that callback is shared by
+                // every failure in a pass and logs the error alone: "pass error: …" does not say
+                // that the *verification succeeded* and only its queryable projection was lost,
+                // which is the one distinction an operator reading this line needs. It is also
+                // optional on the seam, so a caller that omits it would otherwise get silence.
+                console.warn(
+                  `[integrity-proof] scope=${report.scope ?? "platform"} verified, but its` +
+                    ` queryable verdict row could not be written (the chain entry is committed and` +
+                    ` is the record of record): ${String(err)}`,
+                );
+                opts.onError?.(err);
+              }
+            }
             return entry.sequenceNumber;
           },
         }

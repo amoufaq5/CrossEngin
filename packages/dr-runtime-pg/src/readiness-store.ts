@@ -4,6 +4,7 @@ import {
   scopedWrite,
   type DrReadinessSnapshotRecord,
 } from "./records.js";
+import { scopeFilter, type DrReadScope } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "dr_readiness_snapshots";
@@ -19,6 +20,22 @@ export class PostgresDrReadinessStore {
     this.conn = conn;
   }
 
+  /**
+   * **`DO NOTHING` is correct here and is deliberately not swept with the other two.**
+   *
+   * The failover and drill stores wrote `DO NOTHING` on an *upsert* path — the executor hands them
+   * the same `execution_id` again with a changed state — so every transition after the first was
+   * dropped in silence. A readiness snapshot is not that: it is a measurement at a moment, there is
+   * no runtime method that takes a report and returns a changed one under the same id, and
+   * `readinessSnapshotRecordFrom` mints a fresh `drr_…` per assessment. The only way to reach this
+   * conflict at all is for a caller to pass the *same* explicit `snapshotId` twice, which says
+   * "write this snapshot once" — exactly the idempotent first write `DO NOTHING` is for. Widening it
+   * to a `DO UPDATE` would let a later assessment rewrite an earlier verdict under its id, and a
+   * readiness verdict is what a SOC 2 auditor reads.
+   *
+   * The catalog agrees: `meta.dr_readiness_snapshots` carries three RLS policies, with no `UPDATE`
+   * arm, so a platform-scope snapshot is immutable-by-RLS once written.
+   */
   async record(record: DrReadinessSnapshotRecord): Promise<void> {
     const valid = DrReadinessSnapshotRecordSchema.parse(record);
     await scopedWrite(this.conn, valid.tenantId, (tx) =>
@@ -46,22 +63,35 @@ export class PostgresDrReadinessStore {
     );
   }
 
-  async listRecent(limit = 100): Promise<readonly DrReadinessSnapshotRecord[]> {
+  async listRecent(
+    scope: DrReadScope,
+    limit = 100,
+  ): Promise<readonly DrReadinessSnapshotRecord[]> {
     if (limit <= 0) throw new Error("limit must be positive");
+    const filter = scopeFilter(scope);
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
+       WHERE ${filter.sql}
        ORDER BY generated_at DESC
-       LIMIT $1`,
-      [limit],
+       LIMIT $${String(filter.params.length + 1)}`,
+      [...filter.params, limit],
     );
     return result.rows.map((row) => rowToRecord(row));
   }
 
-  async latest(): Promise<DrReadinessSnapshotRecord | null> {
+  /**
+   * The sharpest of the three unscoped reads, because it answers with exactly one row and no
+   * caller can tell it chose the wrong one: `ORDER BY generated_at DESC LIMIT 1` with no predicate
+   * returned **whichever tenant's snapshot was newest** as the platform's readiness. Observed live.
+   */
+  async latest(scope: DrReadScope): Promise<DrReadinessSnapshotRecord | null> {
+    const filter = scopeFilter(scope);
     const result = await this.conn.query<Record<string, unknown>>(
       `SELECT ${COLUMNS} FROM ${SCHEMA}.${TABLE}
+       WHERE ${filter.sql}
        ORDER BY generated_at DESC
        LIMIT 1`,
+      [...filter.params],
     );
     const row = result.rows[0];
     if (row === undefined) return null;

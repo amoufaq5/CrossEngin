@@ -309,3 +309,66 @@ describe("the platform write arm", () => {
     expect(SET_PLATFORM_RECORD_WRITE_SQL).not.toContain("app.platform_config_write");
   });
 });
+
+describe("the scope predicate every read carries beside RLS", () => {
+  const SINCE = new Date("2026-01-01T00:00:00.000Z");
+
+  it("scopes listForIncident, so two scopes on one incident id cannot read as a duplicate open", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloEnforcementActionStore(mockConnection(capture)).listForIncident(
+      "INC-2026-0001",
+    );
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id IS NULL");
+    expect(read.params).toEqual(["INC-2026-0001"]);
+  });
+
+  it("scopes listRecent before the LIMIT, so another scope cannot displace this one's page", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloEnforcementActionStore(mockConnection(capture)).listRecent(25);
+    const platform = written(capture);
+    expect(platform.sql).toContain("WHERE tenant_id IS NULL");
+    expect(platform.sql).toContain("LIMIT $1");
+    expect(platform.params).toEqual([25]);
+
+    const tenantCapture: Captured[] = [];
+    await new PostgresSloEnforcementActionStore(mockConnection(tenantCapture)).listRecent(
+      25,
+      TENANT,
+    );
+    const tenant = written(tenantCapture);
+    expect(tenant.sql).toContain("WHERE tenant_id = $1");
+    expect(tenant.sql).toContain("LIMIT $2");
+    // The order is load-bearing: the scope narrows the set the LIMIT is taken from.
+    expect(tenant.params).toEqual([TENANT, 25]);
+  });
+
+  it("scopes countSince, the read whose wrongness is a scalar", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloEnforcementActionStore(mockConnection(capture)).countSince(SINCE);
+    expect(written(capture).sql).toContain("tenant_id IS NULL");
+
+    const tenantCapture: Captured[] = [];
+    await new PostgresSloEnforcementActionStore(mockConnection(tenantCapture)).countSince(
+      SINCE,
+      TENANT,
+    );
+    const tenant = written(tenantCapture);
+    expect(tenant.sql).toContain("tenant_id = $2");
+    expect(tenant.params).toEqual([SINCE.toISOString(), TENANT]);
+  });
+
+  it("never spells a scope as IS NOT DISTINCT FROM, on any read", async () => {
+    const capture: Captured[] = [];
+    const store = new PostgresSloEnforcementActionStore(mockConnection(capture));
+    await store.listForIncident("INC-2026-0001", TENANT);
+    await store.listRecent(5, TENANT);
+    await store.countSince(SINCE, TENANT);
+    const reads = capture.filter((c) => !c.sql.includes("set_config"));
+    expect(reads).toHaveLength(3);
+    for (const read of reads) {
+      expect(read.sql).not.toContain("IS NOT DISTINCT FROM");
+      expect(read.sql).toContain("tenant_id = $");
+    }
+  });
+});

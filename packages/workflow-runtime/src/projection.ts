@@ -1,10 +1,11 @@
 import {
+  ACTIVITY_KINDS,
   INSTANCE_CANCELLATION_DISPOSITIONS,
+  type ActivityKind,
   type ActivityStatus,
   type InstanceCancellationDisposition,
   type SignalStatus,
   type TimerStatus,
-  type WorkflowActivity,
   type WorkflowDefinition,
   type WorkflowEvent,
   type WorkflowInstance,
@@ -443,10 +444,27 @@ interface MutableActivity {
   id: string;
   instanceId: string;
   tenantId: string;
-  kind: WorkflowActivity["kind"];
+  /**
+   * `null` when the scheduling event's payload carries no recognised `ACTIVITY_KINDS` member.
+   *
+   * It used to be a cast — `event.payload["kind"] as WorkflowActivity["kind"]` — which typed an
+   * arbitrary string as one of ten and let it straight through to a column whose CHECK enumerates
+   * exactly those ten. The engine reads `kind` out of a `schedule_activity` action's untyped
+   * `parameters` bag with no validation, so a definition declaring `http` rather than `http_call`
+   * produced a row the database refuses. Narrowed rather than defaulted: the kind decides whether a
+   * failed activity needs a compensation key (`SIDE_EFFECT_ACTIVITY_KINDS`), so substituting
+   * `transformation` for an unreadable value turns a side effect into one nothing will ever undo.
+   */
+  kind: ActivityKind | null;
   definitionActivityKey: string;
   status: ActivityStatus;
   attemptNumber: number;
+  /**
+   * The declared retry ceiling, as the scheduling event recorded it. `null` means the payload
+   * carries none — a log written before the engine recorded it — and is never defaulted here,
+   * because `max_attempts` is what `claimDueActivities` hands a worker as its licence to retry.
+   */
+  maxAttempts: number | null;
   scheduledAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -454,6 +472,28 @@ interface MutableActivity {
   errorMessage: string | null;
   inputSha256: string | null;
   outputSha256: string | null;
+  /**
+   * The log position of this activity's `activity_scheduled` event — where it entered its
+   * instance's history — and deliberately *not* the position of the latest event about it.
+   *
+   * `meta.workflow_activities` indexes `(instance_id, sequence_cursor)`, which is an ordering
+   * index: `ORDER BY sequence_cursor` has to reproduce the order the activities were scheduled in.
+   * The scheduling position is the only candidate that never moves, so the index stays stable and
+   * two activities cannot swap places as they complete out of order.
+   */
+  sequenceCursor: number;
+}
+
+/** A recognised `ActivityKind`, or `null`. Never widened by a cast. */
+function asActivityKind(value: unknown): ActivityKind | null {
+  return ACTIVITY_KINDS.find((k) => k === value) ?? null;
+}
+
+/** A recorded positive-integer count, or `null` when the payload holds no number. */
+function asPositiveInt(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const floored = Math.floor(value);
+  return floored >= 1 ? floored : null;
 }
 
 export function projectActivities(events: readonly WorkflowEvent[]): readonly MutableActivity[] {
@@ -466,7 +506,7 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
         id,
         instanceId: event.instanceId,
         tenantId: event.tenantId,
-        kind: (event.payload["kind"] as WorkflowActivity["kind"]) ?? "transformation",
+        kind: asActivityKind(event.payload["kind"]),
         definitionActivityKey:
           (asString(event.payload["definitionActivityKey"], "activity") ?? "activity"),
         status: "scheduled",
@@ -474,6 +514,7 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
           typeof event.payload["attemptNumber"] === "number"
             ? (event.payload["attemptNumber"] as number)
             : 1,
+        maxAttempts: asPositiveInt(event.payload["maxAttempts"]),
         // A retry backoff persists an `availableAt` so the projected scheduled_at defers the claim;
         // absent ⇒ due at the schedule instant.
         scheduledAt: asString(event.payload["availableAt"], event.occurredAt) ?? event.occurredAt,
@@ -483,6 +524,7 @@ export function projectActivities(events: readonly WorkflowEvent[]): readonly Mu
         errorMessage: null,
         inputSha256: asString(event.payload["inputSha256"]),
         outputSha256: null,
+        sequenceCursor: event.sequenceNumber,
       });
       continue;
     }
@@ -572,6 +614,15 @@ interface MutableTimer {
   fireAt: string;
   firedAt: string | null;
   cancelledAt: string | null;
+  /**
+   * How many `timer_fired` events the log holds for this timer — a count, not a flag.
+   *
+   * `WorkflowTimerSchema` requires `fireCount >= 1` for a `fired` timer and forbids `> 1` for any
+   * non-cron kind, so the figure is load-bearing and `meta.workflow_timers.fire_count` defaults to
+   * `0`. Nothing wrote it, so every fired timer row was a row its own contract forbids and the
+   * column's `BETWEEN 0 AND 1000000` CHECK permits — ADR-0289's class.
+   */
+  fireCount: number;
 }
 
 export function projectTimers(events: readonly WorkflowEvent[]): readonly MutableTimer[] {
@@ -590,6 +641,7 @@ export function projectTimers(events: readonly WorkflowEvent[]): readonly Mutabl
         fireAt: asString(event.payload["fireAt"], event.occurredAt) ?? event.occurredAt,
         firedAt: null,
         cancelledAt: null,
+        fireCount: 0,
       });
       continue;
     }
@@ -598,6 +650,9 @@ export function projectTimers(events: readonly WorkflowEvent[]): readonly Mutabl
     if (event.kind === "timer_fired") {
       existing.status = "fired";
       existing.firedAt = event.occurredAt;
+      // Counted, not set to 1: a cron timer may fire repeatedly, and `firedAt` already answers
+      // "when last" — so incrementing is the only reading that stays true of both kinds.
+      existing.fireCount += 1;
     } else if (event.kind === "timer_cancelled") {
       existing.status = "cancelled";
       existing.cancelledAt = event.occurredAt;

@@ -75,6 +75,7 @@ import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
 import { decimalFieldIndexFromManifest, withDecimalWireType } from "./decimal-store.js";
+import { listValueTypesForManifest, withListValueTypes } from "./list-value-types.js";
 import { buildUiSchema, buildUiSchemaHandler } from "./ui-schema.js";
 
 export interface OperateRuntimeOptions {
@@ -519,7 +520,17 @@ export function compileOperateServer(
   // manifest that declares each field's precision and scale — so a deployment cannot forget it,
   // and the write effects, which create journal lines through the store they are handed, are
   // covered by the same seam as a client request.
-  const store = withDecimalWireType(options.store, decimalFieldIndexFromManifest(manifest));
+  //
+  // `withListValueTypes` rides the same seam for the same reason, and goes **inside**: it adds
+  // nothing to a record, only per-field comparison types to a list query, so the wire-type
+  // decorator's record mapping still runs over whatever page comes back. Without it a
+  // text-holding store orders a `decimal` or an `integer` lexicographically, and since the keyset
+  // cursor is built from that ordering, a list does not merely come back in the wrong order — it
+  // skips and repeats rows at page boundaries.
+  const store = withDecimalWireType(
+    withListValueTypes(options.store, listValueTypesForManifest(manifest)),
+    decimalFieldIndexFromManifest(manifest),
+  );
   const ctx: HandlerContext = {
     store,
     permissions: manifest.permissions ?? {},

@@ -8,6 +8,18 @@ const DEFAULT_LIMIT = 20;
 /** A timer claimed by a worker for firing — the fields a worker needs to advance the instance. */
 export interface ClaimedTimer {
   readonly timerId: string;
+  /**
+   * The instance's **`wfi_…` id**, not `meta.workflow_timers.instance_id`'s UUID.
+   *
+   * It used to be the UUID, and that made the whole worker a silent no-op. A processor calls
+   * `engine.fireDueTimersForInstance(timer.instanceId, …)`, whose only lookup is
+   * `WorkflowInstanceIdResolver` — `SELECT id FROM meta.workflow_instances WHERE instance_id = $1`,
+   * matching the TEXT column. A UUID matches no row, so the resolver answered `null`, the event log
+   * returned no events, `projectInstance([])` returned `null`, and `fireDueTimersForInstance`
+   * returned `{firedTimerIds: []}` without raising. The timer stayed `scheduled` and was re-claimed
+   * on every poll: a loop that claims, does nothing, releases, and never fires. Verified live — the
+   * resolver answers `null` for the claimed value and the instance's UUID for its text id.
+   */
   readonly instanceId: string;
   readonly tenantId: string;
   readonly timerName: string;
@@ -30,6 +42,7 @@ export interface ClaimDueTimersOptions {
 
 interface ClaimRow {
   readonly timer_id: unknown;
+  /** `meta.workflow_instances.instance_id`, joined in — see `ClaimedTimer.instanceId`. */
   readonly instance_id: unknown;
   readonly tenant_id: unknown;
   readonly timer_name: unknown;
@@ -76,9 +89,9 @@ export async function claimDueTimers(
      )
      UPDATE ${schema}.workflow_timers t
         SET claimed_by = $3, claim_expires_at = $4::timestamptz
-       FROM due
-      WHERE t.id = due.id
-     RETURNING t.timer_id, t.instance_id, t.tenant_id, t.timer_name, t.fire_at,
+       FROM due, ${schema}.workflow_instances i
+      WHERE t.id = due.id AND i.id = t.instance_id
+     RETURNING t.timer_id, i.instance_id, t.tenant_id, t.timer_name, t.fire_at,
                t.transition_to_trigger, t.claim_expires_at`,
     [options.now, limit, options.workerId, claimExpiresAt],
   );

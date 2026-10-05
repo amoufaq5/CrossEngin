@@ -1,5 +1,5 @@
 import { sha256 } from "@crossengin/crypto";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { type PgConnection, setPlatformWriteSql } from "@crossengin/kernel-pg";
 import { withTenantContext } from "@crossengin/operate-runtime-pg";
 import { z } from "zod";
 
@@ -38,16 +38,45 @@ const MAX_LIMIT = 200;
 const VERDICT_ID_HEX_LENGTH = 32;
 
 /**
- * Elevates the transaction to the cross-tenant audit-read scope the RLS policy on
- * `meta.audit_integrity_verdicts` recognizes
- * (`... OR current_setting('app.platform_audit', true) = 'on'`).
+ * Elevates the transaction to the cross-tenant audit-read scope, which since the split is the
+ * `SELECT`-scoped `audit_integrity_verdicts_platform_audit_read` policy and nothing else.
  *
  * A **different** flag from `app.platform_review`: reading every tenant's integrity verdicts is
  * not the same privilege as reviewing design proposals, and one grant must not carry the other.
  * The `true` third argument makes the setting transaction-local, so the elevation is released
  * with the transaction and can never leak onto a pooled connection.
+ *
+ * It no longer authorises a write. Until the split it did, because the single `ALL`-scope policy
+ * ORed this flag into its `USING` and an `ALL` policy's `USING` also serves as its `WITH CHECK` —
+ * so a session holding only this read grant could insert a forged `verified` verdict at any scope,
+ * flip a stored `compromised` one, or delete it. Verified live as a non-owner role before and
+ * after: twelve successful forgeries became twelve refusals.
  */
 const SET_PLATFORM_AUDIT_SQL = "SELECT set_config('app.platform_audit', 'on', true)";
+
+/**
+ * The elevation a **platform-scope** verdict write needs, which is two settings and not one.
+ *
+ * `app.platform_record_write` satisfies the `INSERT`-scoped policy's `WITH CHECK`. It is the
+ * *record* grant rather than `app.platform_audit_write`, and that is the load-bearing choice: the
+ * population that may append to the tamper-evident trail must not also be able to certify that
+ * trail verified, which is the rule that put `meta.crypto_audit` on `record` rather than on `key`
+ * (ADR-0332) — the audit *of* a privileged subsystem does not belong to the privilege it audits.
+ *
+ * `app.platform_audit` is set **beside** it, and only here, because `record` writes
+ * `INSERT … ON CONFLICT (verdict_id) DO NOTHING RETURNING …`: measured against a live cluster as a
+ * non-owner role, *both* that `ON CONFLICT` and that `RETURNING` require the new row to be visible
+ * under a `SELECT` policy, and each fails with the identical `new row violates row-level security
+ * policy` a genuine scope refusal gives — so holding the write grant alone would make an
+ * authorised writer indistinguishable from an unauthorised one. The plain `INSERT` without either
+ * clause succeeds on the write grant alone, which is why `PostgresAuditEmitter` (ADR-0331) can
+ * keep the two apart and this cannot: it reports back which row stands, and an idempotent
+ * content-addressed write has to read to know that.
+ *
+ * Both are transaction-local, so no pooled connection carries either out of the write that needed
+ * it, and the read elevation is never set on the tenant-scoped path.
+ */
+const SET_PLATFORM_VERDICT_WRITE_SQL = setPlatformWriteSql("record");
 
 /**
  * The chain's committed projection of one verdict, stored verbatim in `report`.
@@ -427,6 +456,24 @@ export async function withPlatformAudit<T>(
   });
 }
 
+/**
+ * Runs `fn` under the two settings a platform-scope verdict write needs, in that order: the write
+ * grant the `INSERT` policy checks, then the read grant its `RETURNING` needs.
+ *
+ * Deliberately **not** exported, and deliberately not reachable from the read paths: a read that
+ * could claim the write grant would be the hole this split closes, arriving from the other side.
+ */
+async function withPlatformVerdictWrite<T>(
+  conn: PgConnection,
+  fn: (tx: PgConnection) => Promise<T>,
+): Promise<T> {
+  return conn.transaction(async (tx) => {
+    await tx.query(SET_PLATFORM_VERDICT_WRITE_SQL);
+    await tx.query(SET_PLATFORM_AUDIT_SQL);
+    return fn(tx);
+  });
+}
+
 export interface PostgresIntegrityVerdictStoreOptions {
   readonly schema?: string;
 }
@@ -499,9 +546,11 @@ export class PostgresIntegrityVerdictStore {
    * Stores one verdict. Idempotent on `verdict_id`, which is content-addressed, so a pass replayed
    * after a crash between the chain append and this insert cannot produce a second row.
    *
-   * A platform-scope verdict (`tenant_id IS NULL`) can only be written under the elevation: the
-   * policy's `tenant_id = current_setting(...)` is never true for NULL, so the insert's WITH CHECK
-   * would refuse it inside a tenant context.
+   * A platform-scope verdict (`tenant_id IS NULL`) can only be written under the write elevation:
+   * the isolation policy's `tenant_id = current_setting(...)` is never true for NULL, so the
+   * insert's `WITH CHECK` refuses it inside a tenant context, and the `SELECT`-scoped read grant
+   * no longer serves as one. A tenant-scope verdict still goes through the isolation policy under
+   * that tenant's context, which is the only route to a tenant row and is unchanged.
    */
   async record(input: IntegrityVerdictInput): Promise<IntegrityVerdictWriteResult> {
     if (!VERDICT_ID_RE.test(input.verdictId)) {
@@ -557,7 +606,7 @@ export class PostgresIntegrityVerdictStore {
     };
 
     return scope === null
-      ? withPlatformAudit(this.conn, run)
+      ? withPlatformVerdictWrite(this.conn, run)
       : withTenantContext(this.conn, scope, run);
   }
 

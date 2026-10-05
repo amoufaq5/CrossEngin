@@ -44,6 +44,87 @@ function throwUnless(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+/** A `tenant_id` predicate and the parameters it binds, for one scope. */
+export interface ScopeFilter {
+  readonly sql: string;
+  readonly params: readonly unknown[];
+}
+
+/**
+ * Builds this transaction's scope predicate at a given placeholder index.
+ *
+ * A factory rather than a prebuilt `ScopeFilter`, because the index is a property of the *query*,
+ * not of the scope: `loadEngineDefinitions` binds the predicate at `$1` and `loadByKeyVersion` at
+ * `$3`. Handing every query one filter would make the caller renumber it, which is exactly the kind
+ * of restating this sweep is removing.
+ */
+export type ScopeFactory = (firstParam: number) => ScopeFilter;
+
+/**
+ * The `tenant_id` predicate every read here must carry, **beside** RLS rather than instead of it.
+ *
+ * **A table's owner bypasses its policies** (ADR-0331), and connecting as the owner is an ordinary
+ * deployment — so a read that leans on RLS to confine it is right as a non-owner and wrong as the
+ * owner, which is the worse of the two because it is the one nobody notices. On this table the
+ * consequence was sharp in two directions. `loadByKeyVersion` ordered `tenant_id NULLS LAST` and
+ * took the first row: the right tie-break for a *tenant* read, where its own row should beat the
+ * platform's, and exactly backwards for a *platform* read, where it ranks a tenant's row first. And
+ * `loadEngineDefinitions` carried no predicate at all, so as the owner it loaded every tenant's
+ * definitions into one map keyed by `definitionId` — inflating the `definitionCount` that the worker
+ * supervisor's `no_definitions` refusal reads, and letting the row limit crowd the platform's
+ * definitions out of the map an instance's timer resolves its definition from.
+ *
+ * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
+ * matching NULL to NULL and so the one that would give a single code path. Measured on this table
+ * at 45,003 rows, both spellings returning the same 901 platform rows: `IS NOT DISTINCT FROM` with
+ * a *bound parameter* — which is how a store issues it — plans a **Seq Scan at 24.7 ms**, against
+ * **1.7 ms** for `tenant_id IS NULL` on `idx_workflow_definitions_platform_key_version`. With a
+ * *literal* NULL Postgres constant-folds it and the cost vanishes, which is exactly why the penalty
+ * is invisible in psql and real in production.
+ *
+ * Verbatim from `crypto-pg`/`forensics-pg`; one idiom across the sweep, not a third spelling.
+ */
+export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
+  // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`.
+  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
+  assertTenantId(tenantId);
+  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
+}
+
+/**
+ * `scopeFilter` with the platform's rows kept in a tenant's answer — **the form every read in this
+ * store wants**, and the one the table's own policy grants.
+ *
+ * The rule for choosing between the two is Lane E's: **the predicate reproduces what a non-owner
+ * would have been shown, no wider and no narrower.** `meta.workflow_definitions` does not carry
+ * plain `TENANT_ISOLATION_USING` — it carries the isolation policy plus a platform read arm — so a
+ * non-owner tenant session is shown its own rows *and* the platform's. That is not an accident to
+ * be tightened away: a deployment-wide definition with no tenant of its own is precisely how a
+ * tenant without its own gets a state machine, and the strict arm would have made this store
+ * owner-independent by destroying that rather than by reproducing it.
+ *
+ * For the platform scope the two functions agree on `tenant_id IS NULL`, and that is the arm the
+ * defect was in: the platform read was the one answering with a tenant's row.
+ *
+ * Still indexable, and verified so here rather than assumed: Postgres plans the disjunction as a
+ * **BitmapOr** over `idx_workflow_definitions_tenant_key` and the partial
+ * `idx_workflow_definitions_platform_key_version (… ) WHERE tenant_id IS NULL`, because each arm is
+ * an indexable operator on its own. That partial index is the platform arm written down in the
+ * catalog, which is the clearest sign the two-arm reading is the intended one. It is also the
+ * property `IS NOT DISTINCT FROM` lacks.
+ */
+export function scopeFilterWithPlatform(
+  tenantId: string | null,
+  firstParam = 1,
+): ScopeFilter {
+  if (tenantId === null) return scopeFilter(null, firstParam);
+  assertTenantId(tenantId);
+  return {
+    sql: `(tenant_id = $${String(firstParam)} OR tenant_id IS NULL)`,
+    params: [tenantId],
+  };
+}
+
 /**
  * The columns of `meta.workflow_definitions` in the order `definitionRowValues` supplies them.
  * Every statement derives its column list, placeholders and UPDATE assignments from this one array,
@@ -341,12 +422,12 @@ export class PostgresWorkflowDefinitionStore {
    */
   async publish(definition: WorkflowDefinition): Promise<DefinitionWriteResult> {
     const valid = WorkflowDefinitionSchema.parse(definition);
-    return this.scopedWrite(valid.tenantId, async (tx) => {
-      const stored = await this.gatherForPublication(tx, valid);
+    return this.scopedWrite(valid.tenantId, async (tx, scopeOf) => {
+      const stored = await this.gatherForPublication(tx, valid, scopeOf);
       const plan = planDefinitionPublication({ proposed: valid, stored });
       if (plan.decision === "refused" || plan.decision === "unchanged") {
         const rowId =
-          plan.decision === "unchanged" ? await this.rowIdOf(tx, valid.id) : null;
+          plan.decision === "unchanged" ? await this.rowIdOf(tx, valid.id, scopeOf) : null;
         return {
           decision: plan.decision,
           refusal: plan.refusal,
@@ -374,11 +455,12 @@ export class PostgresWorkflowDefinitionStore {
     definitionId: string,
     tenantId: string | null = null,
   ): Promise<WorkflowDefinition | null> {
-    return this.scoped(tenantId, async (tx) => {
+    return this.scoped(tenantId, async (tx, scopeOf) => {
+      const scope = scopeOf(2);
       const result = await tx.query<Record<string, unknown>>(
         `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE definition_id = $1`,
-        [definitionId],
+         WHERE definition_id = $1 AND ${scope.sql}`,
+        [definitionId, ...scope.params],
       );
       return this.firstDefinition(result.rows);
     });
@@ -389,12 +471,13 @@ export class PostgresWorkflowDefinitionStore {
     version: string,
     tenantId: string | null = null,
   ): Promise<WorkflowDefinition | null> {
-    return this.scoped(tenantId, async (tx) => {
+    return this.scoped(tenantId, async (tx, scopeOf) => {
+      const scope = scopeOf(3);
       const result = await tx.query<Record<string, unknown>>(
         `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE definition_key = $1 AND version = $2
+         WHERE definition_key = $1 AND version = $2 AND ${scope.sql}
          ORDER BY tenant_id NULLS LAST`,
-        [definitionKey, version],
+        [definitionKey, version, ...scope.params],
       );
       return this.firstDefinition(result.rows);
     });
@@ -408,12 +491,19 @@ export class PostgresWorkflowDefinitionStore {
    * Postgres returned first. The tenant's own row wins, which is the only reading under which a
    * tenant's definition means anything — and `planDefinitionPublication` refuses to create that
    * ambiguity in the first place.
+   *
+   * That tie-break was never the defect, and it is worth being exact about why: it is right for a
+   * tenant read and backwards for a platform one, where it ranks a tenant's row *first*. What makes
+   * it right in both directions now is the `scopeFilter` beside it — a platform read is
+   * `tenant_id IS NULL`, so there are no tenant rows left for the ordering to prefer.
    */
   async listByKey(
     definitionKey: string,
     tenantId: string | null = null,
   ): Promise<readonly StoredDefinitionSummary[]> {
-    return this.scoped(tenantId, (tx) => this.summariesForKey(tx, definitionKey));
+    return this.scoped(tenantId, (tx, scopeOf) =>
+      this.summariesForKey(tx, definitionKey, scopeOf),
+    );
   }
 
   /**
@@ -442,12 +532,14 @@ export class PostgresWorkflowDefinitionStore {
   ): Promise<ReadonlyMap<string, WorkflowDefinition>> {
     const limit = options.limit ?? DEFAULT_DEFINITION_LOAD_LIMIT;
     throwUnless(limit > 0, "limit must be positive");
-    return this.scoped(options.tenantId ?? null, async (tx) => {
+    return this.scoped(options.tenantId ?? null, async (tx, scopeOf) => {
+      const scope = scopeOf(1);
       const result = await tx.query<Record<string, unknown>>(
         `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
+         WHERE ${scope.sql}
          ORDER BY definition_key, version
-         LIMIT $1`,
-        [limit + 1],
+         LIMIT $${String(scope.params.length + 1)}`,
+        [...scope.params, limit + 1],
       );
       if (result.rows.length > limit) {
         throw new Error(
@@ -484,12 +576,14 @@ export class PostgresWorkflowDefinitionStore {
   private async summariesForKey(
     tx: PgConnection,
     definitionKey: string,
+    scopeOf: ScopeFactory,
   ): Promise<readonly StoredDefinitionSummary[]> {
+    const scope = scopeOf(2);
     const result = await tx.query<Record<string, unknown>>(
       `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
-       WHERE definition_key = $1
+       WHERE definition_key = $1 AND ${scope.sql}
        ORDER BY tenant_id NULLS LAST, version`,
-      [definitionKey],
+      [definitionKey, ...scope.params],
     );
     return result.rows.map((row) => summarizeDefinition(rowToWorkflowDefinition(row)));
   }
@@ -506,23 +600,36 @@ export class PostgresWorkflowDefinitionStore {
   private async gatherForPublication(
     tx: PgConnection,
     proposed: WorkflowDefinition,
+    scopeOf: ScopeFactory,
   ): Promise<readonly StoredDefinitionSummary[]> {
-    const byKey = await this.summariesForKey(tx, proposed.definitionKey);
+    const byKey = await this.summariesForKey(tx, proposed.definitionKey, scopeOf);
     if (byKey.some((s) => s.id === proposed.id)) return byKey;
+    // Scoped like every other read, and that narrows `definition_id_reused` to the scope doing the
+    // publishing. It is the right narrowing: the rule reproduces what a non-owner would see, and a
+    // non-owner platform session cannot see a tenant's rows. A cross-scope id collision is still
+    // caught, one step later and loudly — `loadEngineDefinitions` raises "two rows claim workflow
+    // definition id …", because the map a tenant's engine loads holds both scopes' rows and keys
+    // by that id.
+    const scope = scopeOf(2);
     const result = await tx.query<Record<string, unknown>>(
       `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
-       WHERE definition_id = $1`,
-      [proposed.id],
+       WHERE definition_id = $1 AND ${scope.sql}`,
+      [proposed.id, ...scope.params],
     );
     const row = result.rows[0];
     if (row === undefined) return byKey;
     return [...byKey, summarizeDefinition(rowToWorkflowDefinition(row))];
   }
 
-  private async rowIdOf(tx: PgConnection, definitionId: string): Promise<string | null> {
+  private async rowIdOf(
+    tx: PgConnection,
+    definitionId: string,
+    scopeOf: ScopeFactory,
+  ): Promise<string | null> {
+    const scope = scopeOf(2);
     const result = await tx.query<{ id: string }>(
-      `SELECT id FROM ${this.schema}.${TABLE} WHERE definition_id = $1`,
-      [definitionId],
+      `SELECT id FROM ${this.schema}.${TABLE} WHERE definition_id = $1 AND ${scope.sql}`,
+      [definitionId, ...scope.params],
     );
     const row = result.rows[0];
     if (row === undefined) return null;
@@ -604,12 +711,15 @@ export class PostgresWorkflowDefinitionStore {
    */
   private scoped<T>(
     tenantId: string | null,
-    fn: (tx: PgConnection) => Promise<T>,
+    fn: (tx: PgConnection, scopeOf: ScopeFactory) => Promise<T>,
   ): Promise<T> {
     if (tenantId !== null) assertTenantId(tenantId);
+    // The predicate every query inside gets, handed down rather than recomputed from a field, so a
+    // read cannot be issued under one scope and filtered by another.
+    const scopeOf: ScopeFactory = (firstParam) => scopeFilterWithPlatform(tenantId, firstParam);
     return this.conn.transaction(async (tx) => {
       if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
-      return fn(tx);
+      return fn(tx, scopeOf);
     });
   }
 
@@ -623,13 +733,14 @@ export class PostgresWorkflowDefinitionStore {
    */
   private scopedWrite<T>(
     tenantId: string | null,
-    fn: (tx: PgConnection) => Promise<T>,
+    fn: (tx: PgConnection, scopeOf: ScopeFactory) => Promise<T>,
   ): Promise<T> {
     if (tenantId !== null) assertTenantId(tenantId);
+    const scopeOf: ScopeFactory = (firstParam) => scopeFilterWithPlatform(tenantId, firstParam);
     return this.conn.transaction(async (tx) => {
       if (tenantId === null) await tx.query(SET_PLATFORM_CONFIG_WRITE_SQL);
       else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
-      return fn(tx);
+      return fn(tx, scopeOf);
     });
   }
 }

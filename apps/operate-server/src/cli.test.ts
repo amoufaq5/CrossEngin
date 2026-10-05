@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { CliUsageError, parsePruneArgs, parseServeArgs, parseVerifyChainArgs } from "./cli.js";
+import {
+  CliUsageError,
+  helpText,
+  parsePruneArgs,
+  parseServeArgs,
+  parseVerifyChainArgs,
+} from "./cli.js";
 
 describe("parseServeArgs", () => {
   it("parses a pack + port + repeated api-keys", () => {
@@ -1170,5 +1176,101 @@ describe("parseServeArgs — per-route body limits", () => {
 
   it("boots fine without it", () => {
     expect(parseServeArgs([...PG]).workflowCancelRoles).toEqual([]);
+  });
+});
+
+describe("--workflow-workers", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("mounts the three workers that drive the queues", () => {
+    // ADR-0331 made the engine mountable and nothing polled it, so a due timer never fired. The
+    // workers and their supervisor already existed, tested, exported, and unreachable from the
+    // binary — which is the same silence in a new place.
+    const o = parseServeArgs([...PG, "--workflow-workers"]);
+    expect(o.workflowWorkers).toBe(true);
+    expect(o.workflowDeferActivities).toBe(false);
+    expect(o.workflowWorkerConfig).toBeNull();
+  });
+
+  it("defaults off, so no existing deployment starts claiming", () => {
+    expect(parseServeArgs([...PG]).workflowWorkers).toBe(false);
+  });
+
+  it("refuses the memory store, which has none of the three claim tables", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--workflow-workers"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    // Names the tables rather than the flag, so the reason is the data. Three poll loops against
+    // tables that do not exist throw on a cadence rather than once, which is why this refuses.
+    expect(message).toContain("meta.workflow_timers");
+    expect(message).toContain("meta.workflow_activities");
+    expect(message).toContain("meta.job_runs");
+  });
+
+  it("refuses a config for a fleet that is not mounted", () => {
+    // A tuning block read, validated and then ignored is the silence this whole family of flags
+    // keeps producing. The operator who passed it believes they changed a lease.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--workflow-worker-config", "/tmp/nope.json"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("--workflow-worker-config has no effect");
+    expect(message).toContain("--workflow-workers");
+  });
+
+  it("refuses deferral without the workers, which is the load-bearing one", () => {
+    // `deferActivities` is a biconditional and its own contract says so. Deferring with no worker
+    // claiming leaves every scheduled activity at rest, so the instance stalls at its first
+    // activity and nothing anywhere reports it — strictly worse than both alternatives.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--workflow-defer-activities"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("--workflow-defer-activities requires --workflow-workers");
+    expect(message).toContain("stalls");
+  });
+
+  it("accepts the pair, which is the only configuration deferral is correct in", () => {
+    const o = parseServeArgs([...PG, "--workflow-workers", "--workflow-defer-activities"]);
+    expect(o.workflowWorkers).toBe(true);
+    expect(o.workflowDeferActivities).toBe(true);
+  });
+
+  it("takes a config path in both spellings", () => {
+    expect(
+      parseServeArgs([...PG, "--workflow-workers", "--workflow-worker-config", "/tmp/w.json"])
+        .workflowWorkerConfig,
+    ).toBe("/tmp/w.json");
+    expect(
+      parseServeArgs([...PG, "--workflow-workers", "--workflow-worker-config=/tmp/w.json"])
+        .workflowWorkerConfig,
+    ).toBe("/tmp/w.json");
+  });
+
+  it("documents all four flags in the help text", () => {
+    // `--workflow-cancel-role` had shipped with no help entry at all, which this adds alongside —
+    // a flag that exists and is undocumented is reachable only by reading cli.ts.
+    for (const flag of [
+      "--workflow-cancel-role",
+      "--workflow-workers",
+      "--workflow-worker-config",
+      "--workflow-defer-activities",
+    ]) {
+      expect(helpText).toContain(flag);
+    }
+    // And the help says what the workers are *for*, since the reason they matter is that nothing
+    // polled the queues before — and that each one refuses by name rather than polling uselessly.
+    expect(helpText).toContain("a due timer never fires");
+    for (const refusal of ["no_definitions", "activities_run_inline", "no_job_handlers"]) {
+      expect(helpText).toContain(refusal);
+    }
   });
 });

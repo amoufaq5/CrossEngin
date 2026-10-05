@@ -14,11 +14,21 @@ import {
  * `signingKeyFingerprint` to the registered public key, so historical audit-chain signatures can be
  * verified against the platform key registry rather than a locally-held key. Returns `null` for an
  * unknown fingerprint (verification then reports it as an unresolved key).
+ *
+ * `tenantId` is the scope of the **chain being verified**, and it is now passed rather than left to
+ * whatever the connection's role happens to see. `getByFingerprint` carries a scope predicate beside
+ * RLS, and its tenant arm is `tenant_id = $n OR tenant_id IS NULL` — so a tenant's chain resolves
+ * against that tenant's keys and the platform's, while a platform chain resolves against the
+ * platform's alone. Unscoped, as the table's owner, a platform entry could be verified by a key any
+ * tenant had registered, which is the forgery route `app.platform_key_write` exists to close.
  */
-export function keyRegistryResolver(registry: PostgresKeyRegistry): PublicKeyResolver {
+export function keyRegistryResolver(
+  registry: PostgresKeyRegistry,
+  tenantId: string | null,
+): PublicKeyResolver {
   return {
     resolveByFingerprint: async (fingerprint) =>
-      (await registry.getByFingerprint(fingerprint))?.publicKeyBase64 ?? null,
+      (await registry.getByFingerprint(fingerprint, tenantId))?.publicKeyBase64 ?? null,
   };
 }
 
@@ -32,7 +42,7 @@ export function verifyChainSignaturesAgainstRegistry(
   registry: PostgresKeyRegistry,
   tenantId: string | null,
 ): Promise<ChainSignatureVerdict> {
-  return verifyStoredChainSignatures(reader, tenantId, keyRegistryResolver(registry));
+  return verifyStoredChainSignatures(reader, tenantId, keyRegistryResolver(registry, tenantId));
 }
 
 export interface ChainVerificationReport {
@@ -88,7 +98,7 @@ export async function verifyChainFromCheckpoint(
   const fromSequence = checkpoint.sequenceNumber + 1;
   const suffix = await reader.loadFrom(tenantId, fromSequence);
   const integrity = verifyChainSuffix(suffix, { fromSequence, priorRootHash: checkpoint.rootHash });
-  const signatures = await verifyChainSignatures(suffix, keyRegistryResolver(registry));
+  const signatures = await verifyChainSignatures(suffix, keyRegistryResolver(registry, tenantId));
   return {
     tenantId,
     ok: integrity.valid && signatures.valid,

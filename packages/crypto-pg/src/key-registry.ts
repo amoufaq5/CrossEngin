@@ -10,6 +10,8 @@ import {
 } from "./records.js";
 import {
   assertTenantId,
+  scopeFilter,
+  scopeFilterWithPlatform,
   SET_PLATFORM_KEY_WRITE_SQL,
   SET_TENANT_CONTEXT_SQL,
 } from "./tenant-context.js";
@@ -40,7 +42,13 @@ export interface ListKeyRegistryFilter {
  *
  * The table is platform-or-tenant RLS. A tenant-scoped read/write runs inside a transaction that first
  * sets the tenant's RLS context (bound param, never interpolated); a platform read/write (`tenantId` null)
- * runs with no context, so RLS exposes only `tenant_id IS NULL` rows.
+ * runs with no context.
+ *
+ * Every read also carries its own `scopeFilterWithPlatform` predicate. The sentence that used to
+ * stand here —
+ * "a platform read runs with no context, so RLS exposes only `tenant_id IS NULL` rows" — is false
+ * for the deployment that connects as the table's owner, which bypasses the policies entirely. The
+ * predicate is beside RLS, not instead of it: RLS is still what confines a non-owner.
  */
 export class PostgresKeyRegistry {
   private readonly schema: string;
@@ -87,10 +95,12 @@ export class PostgresKeyRegistry {
     keyId: string,
     tenantId: string | null = null,
   ): Promise<KeyRegistryRecord | null> {
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
-        `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE} WHERE key_id = $1`,
-        [keyId],
+        `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE}
+         WHERE key_id = $1 AND ${scope.sql}`,
+        [keyId, ...scope.params],
       );
       const row = result.rows[0];
       return row === undefined ? null : rowToKeyRegistryRecord(row);
@@ -101,10 +111,12 @@ export class PostgresKeyRegistry {
     fingerprint: string,
     tenantId: string | null = null,
   ): Promise<KeyRegistryRecord | null> {
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
-        `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE} WHERE fingerprint_sha256 = $1`,
-        [fingerprint],
+        `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE}
+         WHERE fingerprint_sha256 = $1 AND ${scope.sql}`,
+        [fingerprint, ...scope.params],
       );
       const row = result.rows[0];
       return row === undefined ? null : rowToKeyRegistryRecord(row);
@@ -122,10 +134,18 @@ export class PostgresKeyRegistry {
   ): Promise<readonly KeyRegistryRecord[]> {
     const conditions: string[] = [];
     const params: unknown[] = [];
-    if (typeof filter.tenantId === "string") {
-      params.push(filter.tenantId);
-      conditions.push(`tenant_id = $${params.length}`);
-    }
+    // An absent `tenantId` already meant the platform scope — `scoped(filter.tenantId ?? null)`
+    // says so — but only a *named* tenant produced a predicate, so the platform arm relied on RLS
+    // and answered every scope as the owner. The branch is unconditional now: one of the two arms
+    // is always written.
+    const tenantId = filter.tenantId ?? null;
+    // Strict here, inclusive on the point lookups above, and the difference is the repo's own: a
+    // lookup by key id or fingerprint resolves an *identity* and a platform public key is a
+    // legitimate answer to it, while `listKeys({tenantId})` is a filter and means "this tenant's
+    // keys". Its tenant arm was already strict and stays so; only the platform arm was missing.
+    const scope = scopeFilter(tenantId, params.length + 1);
+    params.push(...scope.params);
+    conditions.push(scope.sql);
     if (filter.algorithm !== undefined) {
       params.push(filter.algorithm);
       conditions.push(`algorithm = $${params.length}`);
@@ -138,8 +158,8 @@ export class PostgresKeyRegistry {
       params.push(filter.status);
       conditions.push(`status = $${params.length}`);
     }
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    return this.scoped(filter.tenantId ?? null, async (tx) => {
+    const where = `WHERE ${conditions.join(" AND ")}`;
+    return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${READ_COLUMNS} FROM ${this.schema}.${TABLE} ${where}
          ORDER BY created_at DESC, key_id ASC`,

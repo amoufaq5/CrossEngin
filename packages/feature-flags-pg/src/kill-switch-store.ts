@@ -43,6 +43,77 @@ export function assertTenantId(tenantId: string): void {
   }
 }
 
+/** A `tenant_id` predicate and the parameters it binds, for one scope. */
+export interface ScopeFilter {
+  readonly sql: string;
+  readonly params: readonly unknown[];
+}
+
+/**
+ * The `tenant_id` predicate a scoped read must carry, **beside** RLS rather than instead of it.
+ *
+ * RLS alone is not enough for the ordinary reason ADR-0331 measured on the forensic chain: **a
+ * table's owner bypasses its policies**, and a deployment that connects as the owner is a normal
+ * deployment. Both tables here are `tenant_id`-nullable with a `SELECT`-scoped platform read arm,
+ * so a read that names the platform scope and carries no predicate answers from whichever scope
+ * the row happens to be in. Observed live on this schema as the owner: `load("ff_tenantflag…",
+ * null)` returned a *tenant's* flag for a platform lookup, and `loadForIncident(…, null)` saw a
+ * tenant's switch beside the platform's and **threw** "this needs a human" on healthy data.
+ *
+ * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, which is the
+ * one operator matching NULL to NULL and would give a single code path: ADR-0331 measured it at
+ * 16 ms sequential scan against 45k entries where `tenant_id = $1` is a 0.09 ms index scan, because
+ * it is not an indexable operator. `tenant_id IS NULL` is indexable, so both arms keep
+ * `idx_feature_flags_tenant` / `idx_feature_flag_kill_switches_tenant`.
+ *
+ * This is a verbatim copy of `forensics-pg`'s `scopeFilter`. It belongs in `kernel-pg` beside
+ * `setPlatformWriteSql` — the one module every store here already depends on — and lives per
+ * package only because that is where the rest of this scope plumbing already lives.
+ *
+ * `firstParam` is the 1-based position the predicate's own parameter takes, so a caller that
+ * already binds values can place this anywhere in its list.
+ */
+export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
+  // `tenant_id = NULL` is never true, so the platform scope cannot ride along as a bound parameter
+  // and has to be asked for as `IS NULL`.
+  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
+  assertTenantId(tenantId);
+  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
+}
+
+/**
+ * `scopeFilter` with the platform's rows kept in a tenant's answer, which is the predicate **both
+ * tables in this package want**.
+ *
+ * The strict form is right where a scope's rows are a closed set — a hash chain, a tenant's own
+ * certification report — and wrong here: `meta.feature_flags`' own catalog comment says a
+ * platform-wide flag is *meant* to be evaluated by every tenant's gateway, and a kill switch over a
+ * platform-wide flag is the same fact. So a tenant's read legitimately spans its own rows and the
+ * platform's, and narrowing it would make this store owner-independent by destroying the behaviour
+ * rather than by reproducing it.
+ *
+ * The rule: **the predicate reproduces what a non-owner would have been shown, no wider and no
+ * narrower.** For a tenant that is `tenant_id = $n OR tenant_id IS NULL` — the isolation policy
+ * OR'd with the `SELECT`-scoped platform read arm, which is how Postgres combines two permissive
+ * policies. For the platform scope the two functions agree on `tenant_id IS NULL`, and that is the
+ * arm the defect was in: the platform read is the one that was answering with a tenant's row.
+ *
+ * Still indexable — Postgres plans the disjunction as a BitmapOr over `idx_feature_flags_tenant`,
+ * because each arm is an indexable operator on its own. That is precisely the property
+ * `tenant_id IS NOT DISTINCT FROM $1` lacks.
+ */
+export function scopeFilterWithPlatform(
+  tenantId: string | null,
+  firstParam = 1,
+): ScopeFilter {
+  if (tenantId === null) return scopeFilter(null, firstParam);
+  assertTenantId(tenantId);
+  return {
+    sql: `(tenant_id = $${String(firstParam)} OR tenant_id IS NULL)`,
+    params: [tenantId],
+  };
+}
+
 /**
  * The statuses a release may legally leave, read off `KILL_SWITCH_TRANSITIONS` rather than retyped.
  * Quoting is safe because the values come from the contract's frozen status tuple, never a caller.
@@ -124,14 +195,21 @@ export class PostgresKillSwitchStore {
     incidentId: string,
     tenantId: string | null = null,
   ): Promise<KillSwitch | null> {
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${KILL_SWITCH_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE related_incident_id = $1 AND ${ACTIVE_PREDICATE}
+         WHERE related_incident_id = $1 AND ${scope.sql} AND ${ACTIVE_PREDICATE}
          ORDER BY armed_at DESC
          LIMIT 2`,
-        [incidentId],
+        [incidentId, ...scope.params],
       );
+      // Two rows now means two switches an incident id can legitimately reach, which is the fault
+      // this refuses. Without the predicate the owner saw **every** tenant's switch here: one
+      // platform and one tenant switch on `INC-2026-0001` refused a healthy episode, verified live,
+      // and the two-row guard turned the missing scope into a false "this needs a human". The
+      // inclusive arm cannot resurrect that, because `INC-YYYY-NNNN` ids come from one sequence, so
+      // a platform episode and a tenant episode never share one.
       if (result.rows.length > 1) {
         throw new Error(
           `more than one active kill switch for incident '${incidentId}' — ` +
@@ -147,11 +225,12 @@ export class PostgresKillSwitchStore {
     killSwitchId: string,
     tenantId: string | null = null,
   ): Promise<KillSwitch | null> {
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${KILL_SWITCH_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE kill_switch_id = $1`,
-        [killSwitchId],
+         WHERE kill_switch_id = $1 AND ${scope.sql}`,
+        [killSwitchId, ...scope.params],
       );
       const row = result.rows[0];
       return row === undefined ? null : rowToKillSwitch(row);
@@ -164,13 +243,17 @@ export class PostgresKillSwitchStore {
     tenantId: string | null = null,
   ): Promise<readonly KillSwitch[]> {
     if (limit <= 0) throw new Error("limit must be positive");
+    // The scope goes before the LIMIT's parameter, not after it: a `LIMIT` over an unscoped read is
+    // the sharper half of this defect, since another scope's rows do not merely join the answer —
+    // they displace the asked-for ones and the caller cannot tell.
+    const scope = scopeFilterWithPlatform(tenantId, 2);
     return this.scoped(tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT ${KILL_SWITCH_COLUMNS} FROM ${this.schema}.${TABLE}
-         WHERE flag_id = $1 AND ${ACTIVE_PREDICATE}
+         WHERE flag_id = $1 AND ${scope.sql} AND ${ACTIVE_PREDICATE}
          ORDER BY armed_at DESC
-         LIMIT $2`,
-        [flagId, limit],
+         LIMIT $${String(2 + scope.params.length)}`,
+        [flagId, ...scope.params, limit],
       );
       return result.rows.map((row) => rowToKillSwitch(row));
     });

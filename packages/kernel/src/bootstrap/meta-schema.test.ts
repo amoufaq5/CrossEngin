@@ -1393,16 +1393,47 @@ describe("table column shapes", () => {
     for (const col of [hash, seq, digest]) expect(col?.notNull).toBeUndefined();
   });
 
-  it("META_AUDIT_INTEGRITY_VERDICTS confines a tenant and gates the platform read", () => {
+  it("META_AUDIT_INTEGRITY_VERDICTS confines a tenant and gates the platform read separately", () => {
+    // Three policies rather than one, which is ADR-0313's split arriving at the table ADR-0313
+    // named. The isolation arm must not carry the read grant: on an `ALL`-scope policy the `USING`
+    // expression also serves as the `WITH CHECK`, so a session holding only the cross-tenant read
+    // could forge a `verified` verdict for any tenant, flip a `compromised` one, or delete it.
+    // Twelve such forgeries succeeded live as a non-owner role before the split and none after.
+    const policies = META_AUDIT_INTEGRITY_VERDICTS.rls?.policies ?? [];
+    expect(META_AUDIT_INTEGRITY_VERDICTS.rls?.enabled).toBe(true);
+    expect(policies).toHaveLength(3);
+
+    const isolation = policies[0];
+    expect(isolation?.command).toBeUndefined();
+    expect(isolation?.using).toBe(TENANT_ISOLATION_USING);
     // Not the `feature_flag_kill_switches` `IS NULL OR …` shape: that would show a platform-chain
     // tamper finding to every tenant session. Plain isolation is false for a NULL tenant, so a
-    // platform verdict is invisible without the explicit opt-in — and the flag is its own, because
-    // reading every tenant's verdicts is not the same privilege as reviewing design proposals.
-    const policy = META_AUDIT_INTEGRITY_VERDICTS.rls?.policies?.[0];
-    expect(META_AUDIT_INTEGRITY_VERDICTS.rls?.enabled).toBe(true);
-    expect(policy?.using).not.toContain("tenant_id IS NULL");
-    expect(policy?.using).toContain("app.platform_audit");
-    expect(policy?.using).not.toContain("app.platform_review");
+    // platform verdict is invisible without the explicit opt-in.
+    expect(isolation?.using).not.toContain("tenant_id IS NULL");
+    expect(isolation?.using).not.toContain("app.platform_audit");
+
+    // The read is gated on its own flag — not `app.platform_review`, because reading every
+    // tenant's verdicts is not the same privilege as reviewing design proposals — and it is
+    // `SELECT`-scoped, so it carries no `WITH CHECK` and cannot authorise a write.
+    const read = policies[1];
+    expect(read?.command).toBe("SELECT");
+    expect(read?.using).toContain("app.platform_audit");
+    expect(read?.using).not.toContain("app.platform_review");
+    expect(read?.check).toBeUndefined();
+
+    // The write is on the **record** grant, never the audit one: a grant over the record must not
+    // reach the thing that validates the record, which is why `meta.crypto_audit` is `record` and
+    // not `key`. A verdict is the platform's record of a verification, and the population that may
+    // append to the trail must not also be able to certify that trail verified.
+    const write = policies[2];
+    expect(write?.command).toBe("INSERT");
+    expect(write?.check).toContain("app.platform_record_write");
+    expect(write?.check).toContain("tenant_id IS NULL");
+    expect(write?.check).not.toContain("app.platform_audit_write");
+    // Append-only: no `UPDATE` arm and no `DELETE` arm, so a platform verdict is immutable by
+    // policy once written. `verdict_id` is `aiv_` + the sha256 of the canonical report, so changing
+    // any field yields a different row and there is no stable handle to aim an `UPDATE` at.
+    expect(policies.map((p) => p.command ?? "ALL")).toEqual(["ALL", "SELECT", "INSERT"]);
   });
 
   it("META_TENANT_TOMBSTONES outlives the users and the tenant it names", () => {

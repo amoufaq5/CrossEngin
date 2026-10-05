@@ -1,6 +1,8 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  scopedRead,
   scopedWrite,
+  scopeFilter,
   SloLatencyEvaluationRecordSchema,
   type SloLatencyEvaluationRecord,
 } from "./records.js";
@@ -44,11 +46,19 @@ export class PostgresSloLatencyEvaluationStore {
     );
   }
 
-  async countBreachesSince(sloId: string, since: Date): Promise<number> {
-    const result = await this.conn.query<{ count: string }>(
-      `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE}
-       WHERE slo_id = $1 AND breached = true AND evaluated_at >= $2`,
-      [sloId, since.toISOString()],
+  /** `PostgresSloEvaluationStore.countBreachesSince`'s reasoning, on the latency signal. */
+  async countBreachesSince(
+    sloId: string,
+    since: Date,
+    tenantId: string | null = null,
+  ): Promise<number> {
+    const scope = scopeFilter(tenantId, 3);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<{ count: string }>(
+        `SELECT COUNT(*)::TEXT AS count FROM ${SCHEMA}.${TABLE}
+         WHERE slo_id = $1 AND breached = true AND evaluated_at >= $2 AND ${scope.sql}`,
+        [sloId, since.toISOString(), ...scope.params],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return 0;

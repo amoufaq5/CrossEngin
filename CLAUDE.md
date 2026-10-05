@@ -757,6 +757,36 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   replication lag, drill recency and runbook staleness into a breach report.
 - **`dr-runtime-pg`** — persists failovers, drills and readiness reports; wraps the runtime
   and ships a replayer.
+  **An upsert is guarded, and a refused write throws** (ADR-0333). The failover and drill stores
+  wrote `ON CONFLICT (execution_id) DO NOTHING` on what the runtime uses as an upsert path, so a
+  failover's plan was stored and its *completion* was not — and `assessDrReadiness`, fed the stale
+  `record` JSONB, scored a deployment that breached **both** its RPO and RTO targets as
+  `ready: true` with zero breaches. The `SET` list is **derived** by walking `FAILOVER_TRANSITIONS`
+  and `DRILL_OUTCOMES` and diffing the executor's records either side of each edge, with the
+  immutable complement asserted absent; `incident_ticket_id` is excluded because no edge writes it
+  and a replayed write setting one would be a late rewrite of *why* the failover happened. Two guard
+  clauses, because a bare `DO UPDATE` is the same defect inverted: the status is checked against the
+  transition map (with the same-status case admitted explicitly, since `canTransitionFailover(s, s)`
+  is false for every status and re-recording one state is a refresh of an observation), and
+  `EXCLUDED.recorded_at >= table.recorded_at` refuses a stale write — a refusal rather than
+  ADR-0330's per-column `GREATEST`, because the whole row is one observation and a `GREATEST` would
+  leave older content stamped with a newer time. **The refusal throws**, which is what keeps the fix
+  from reproducing the bug: `INSERT 0 0` from a refused `DO UPDATE` is byte-identical to the old
+  `DO NOTHING`. `PostgresDrReadinessStore` deliberately keeps `DO NOTHING` — a snapshot is a
+  measurement at a moment and its id is minted per assessment, so the conflict means "write this
+  once" — pinned by a test so nobody "completes the sweep". The replayer was **structurally unable**
+  to see any of it (all its issue kinds are intra-row, and a row left by `DO NOTHING` is a perfectly
+  consistent *plan* row), so it false-*negatived* where ADR-0330's workflow replayer
+  false-positived; it gained `projection_disagrees_with_record`, because a partial `SET` list makes
+  that divergence reachable for the first time.
+  **And every read names its scope** (ADR-0333): `listRecent`, `countSince` and `latest` took no
+  scope argument at all, so as the table's owner — who bypasses RLS — they answered from whichever
+  scope held the newest row. `latest()` returned another tenant's snapshot as the platform's
+  readiness, and `dr-readiness.ts` scored drill *cadence* off other tenants' drills. The scope is a
+  **required first parameter with no default**, because the defect was a read that could not name
+  one and a default would let a caller go on not naming one; `scopeFilter` is strict here rather
+  than `crypto-pg`'s inclusive form, since a platform drill is not evidence about a tenant's
+  disaster recovery. Both call sites already had `config.tenantId` and passed it to everything else.
 - **`feature-flags`** — 7 flag kinds, 10 targeting rule kinds with FNV-1a sticky percentage
   bucketing, a 9-stage rollout ramp state machine, 8-trigger kill switches with strict
   separation of duties, 17 evaluation reasons, and a 23-kind append-only change audit.
@@ -1072,7 +1102,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   one without the other would be wrong rather than merely partial, since the truncation check has no
   witness without a checkpoint (ADR-0287) — and with platform-scope rows now reachable (ADR-0331),
   defaulting them *out* of verification would mean the newest trail in the system was the one nothing
-  checked. The escalator declares through the same
+  checked. **The verdict row is written now** (ADR-0333): `recordVerdict` appended a chain entry and
+  never touched `meta.audit_integrity_verdicts`, so the store's `record()` was called by nothing but
+  its own unit test, the table was empty in every deployment, and every `--audit-verdict-routes`
+  answer was truthfully "no verifications" about a verification that had run every hour. Both halves
+  of the anchor come from the entry just appended (ADR-0318: half an anchor is worse than none) —
+  the seam was never missing, the callback discarded `entryHash` and returned only the sequence. The
+  write is **reported, never thrown**: the chain entry has committed, so raising would turn a
+  successful verification into a failed pass to protect a projection of it. Under the same flag
+  rather than a new one, because a second flag would let a deployment turn recording on and still
+  get no record — and `recordVerdict` defaults to **true**, so this is a default-on behaviour change
+  rather than an opt-in. Verified live end to end: three ticks, three rows, anchored at consecutive
+  chain sequences, served by the read route with `anchored: true`.
+  The escalator declares through the same
   `IncidentDeclarer` the SLO loop uses (ADR-0297), with `CountingIncidentDeclarer` as both the offline
   default and the fallback that keeps the page going out when the record cannot be stored.
   **All three escalators now page over real transports and resolve their own alerts** (ADR-0326):
@@ -1179,8 +1221,34 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `surveyManifestWorkflows` names every manifest workflow no published definition serves, since under
   the authored model the cost of an absent definition is an *absent* workflow rather than a wrong one.
   **Entity lifecycle transitions remain a different mechanism** (`operate-runtime`'s lifecycle
-  handlers) and are unaffected. Still unmounted: `workflow-worker`'s three workers, so timers and
-  activities are not *driven* by this binary even though the engine is now present.
+  handlers) and are unaffected.
+  **`--workflow-workers` mounts the three workers that drive the queues** (ADR-0333) — timer,
+  activity and job — which is what makes a due timer actually fire. `workflow-workers.ts` had
+  existed since ADR-0331's increment with tests, a refusal taxonomy, a drain budget and an
+  `index.ts` export, and `node.ts` never called it: the module was as unreachable as the engine it
+  supervises. The engine is built **once** for both the cancellation route and the supervisor,
+  because `WorkflowWorkerSupervisorInput` requires exactly that — two engines over one connection
+  would each hold their own definition map and their own inline-vs-deferred activity policy, so a
+  cancellation and a timer fire could disagree about the same instance. Each worker **refuses by
+  name** rather than polling uselessly: `no_definitions` (every claim would be released unadvanced
+  and re-claimed — a hot loop making no progress), `activities_run_inline`, `no_job_handlers`.
+  `--workflow-defer-activities` is **refused without** `--workflow-workers`, which is the
+  load-bearing refusal: `deferActivities` is a biconditional and its own contract says so — inline,
+  a row is `scheduled` only between the `activity_scheduled` and `activity_started` appends, so a
+  worker can claim it inside that window and run the handler a second time (the duplicate append
+  collides on the log's unique key, so the *log* survives and the side effects have happened twice);
+  deferred with nothing claiming, every instance stalls at its first activity and nothing reports
+  it. Both directions are closed — the CLI refuses one, the supervisor the other. `workerId` is
+  `hostname():pid`, because that value lands in `claimed_by` and its job is to let an operator
+  answer "which process holds this lease" from the row alone. Verified live: the three refusals
+  print, the server boots, and the drain reports on shutdown.
+  **`--schedule-ms` warns when nothing drains its queue**, which is the sentence that should have
+  existed since the scheduler was written: its own comment said it enqueues "so the distributed
+  worker fleet runs them" and there was no fleet, so every deployment using it has been accumulating
+  `pending` rows in `meta.job_runs` indefinitely and the manifest's scheduled jobs have **never run
+  in this binary**. The job worker is still refused — nothing here registers a job handler, and
+  passing an engine would finalize every claimed run `failed` with `handler_not_found` where leaving
+  them `pending` is recoverable.
   **Per-viewer notification read state is reachable over HTTP** (`--read-state-routes`, ADR-0331),
   closing ADR-0309's tables-with-no-writer: mark one notice read, move a read-through watermark, read
   an unread count. The viewer is **always the credential** and a body naming one is *refused* rather
@@ -1404,13 +1472,33 @@ opened them.
   catalog cannot know a deployment created, which is why no policy in `META_TABLES` narrows `roles` at
   all. So what the split buys is a *declaration* rather than an authorisation: claiming a grant is a
   deliberate, transaction-local act naming which privilege is being exercised, instead of the ambient
-  default of every tenant connection. **Reads are still owner-dependent** in the seven
-  stores that set no scope, which is ADR-0331's `scopeFilter` lesson un-swept outside the chain; and
-  `meta.audit_integrity_verdicts` is **still open** because its hole is differently shaped — its `ALL`
-  policy ORs in the `app.platform_audit` *read* grant, so an elevated reader can forge a verdict, and
-  closing it means narrowing an isolation policy from `ALL` to `SELECT` rather than adding arms beside
-  one. `certification_reports` is the loudest member of the `record` group: a forged platform
-  certification report is a compliance claim, not telemetry.
+  default of every tenant connection. `certification_reports` is the loudest member of the `record`
+  group: a forged platform certification report is a compliance claim, not telemetry.
+- **`meta.audit_integrity_verdicts` is split too, and the reasoning that looked hard was wrong both
+  ways** (ADR-0313, ADR-0332, ADR-0333). Its `ALL` policy ORed in the `app.platform_audit` *read*
+  grant, so — the `USING` serving as the `WITH CHECK` — a session holding only the cross-tenant read
+  could forge a `verified` verdict at any scope, flip a stored `compromised` one, or delete it.
+  Twelve such forgeries succeeded live as a non-owner across a 90-case matrix, and none after.
+  ADR-0332 recorded this as needing an isolation policy narrowed from `ALL` to `SELECT`, "a different
+  and larger edit than adding arms beside one". **Both halves of that were false.** A command change
+  under one name *is* a `replace_policy` — `diff.ts` pushes a `"command"` reason and `reconcile.ts`
+  turns it into one `DROP …; CREATE …;`, measured at 4 steps / 0 unreconciled — so it was never the
+  harder edit. And the narrowing is not wanted anyway: isolation must stay `ALL`, because a
+  tenant-scope verdict is written under that tenant's context and the write grants are
+  `PUBLIC`-scoped settings, so a write arm not ANDed with `tenant_id IS NULL` would be a cross-tenant
+  insert route for anyone able to call `set_config`. So it is three arms beside one after all —
+  isolation `ALL`, the read `SELECT`-scoped on `app.platform_audit` (gated on the flag, **not** on
+  `tenant_id IS NULL`, because a platform-chain tamper verdict is the one row that must not be
+  visible to every tenant's gateway), and the write `INSERT`-scoped on `app.platform_record_write`.
+  The **record** grant and not the audit one, which is ADR-0332's rule read in the direction it has
+  to be read here: a grant over the record must not reach the thing that validates the record, since
+  a verdict names the chain entry it was committed to and one grant carrying both would let the
+  appender certify its own appends. No `UPDATE` arm, because `verdict_id` is `aiv_` + the sha256 of
+  the canonical report — changing any field yields a *different row*, so there is no stable handle to
+  aim an `UPDATE` at, and an in-place edit would be ADR-0323's `scope_tampered` in the one table
+  whose purpose is to be checkable against the chain.
+  **Reads are still owner-dependent** in the stores that set no scope, which is ADR-0331's
+  `scopeFilter` lesson un-swept outside the chain.
 - **The split is reconcilable in one pass only because the isolation policy keeps its name**
   (ADR-0331, ADR-0332). `planSchemaReconciliation` creates new policies and **refuses to drop an
   existing one**, because dropping a policy loosens access (ADR-0290's invariant) and `allowLoosening`
@@ -1420,25 +1508,28 @@ opened them.
   unreconciled, zero manual SQL**, applied 100/100, re-plan clean. ADR-0331's two chain tables took the
   rename path and needed hand-run drops; that is what the 29 avoided, multiplied by fourteen. The cost
   is a policy whose name no longer describes it, and **there is no `renamedFrom` for a policy**.
-- **Two more workflow projection stores still cannot write a row against a real database**
-  (ADR-0331, ADR-0332). ADR-0331 fixed `PostgresSignalStore` — it named nine columns and omitted
-  `delivery_guarantee` and `source_system`, both NOT NULL with no default — and the same class is on
-  two siblings, verified against the live catalog: `PostgresTimerStore.upsert` omits **`kind`**, and
-  `PostgresActivityStore.upsert` omits **`label`, `max_attempts`, `retry_policy`, `timeout_seconds`,
-  `timeout_at` and `sequence_cursor`** — all NOT NULL with no default. So every `ProjectingEventLog`
-  append that schedules a timer or an activity throws on a real Postgres. Reported rather than fixed
-  because the signal store's lesson is that **the record is usually wrong, not the column**: a
-  guarantee must come from the definition that declared it and a `sourceSystem` from a recorded fact,
-  not from a fabricated default — so each omission needs the same question asked of the event, and
-  `retry_policy` and `timeout_seconds` in particular come from the activity's *definition*, which the
-  projection does not carry. The offline fakes assert SQL shape and cannot see a missing column.
-  `workflow-worker`'s three workers are not instantiated, which is why nothing has hit this yet.
-- **`PostgresDrFailoverStore` and `PostgresDrDrillStore` silently drop every update** (ADR-0332).
-  Both write `INSERT … ON CONFLICT (execution_id) DO NOTHING` on what the runtime uses as an upsert
-  path, so a failover's plan is stored and its *completion* is not — the row keeps the status it was
-  declared with forever, and `assessDrReadiness` scores drill recency off rows that never advance.
-  `DO NOTHING` is right for an idempotent *first* write and wrong for a state machine; the fix is a
-  `DO UPDATE` naming the mutable columns, which is the same shape `PostgresTimerStore` already has.
+- **A store that cannot write, or that drops every update, is now a test failure rather than a
+  discovery** (ADR-0333). `packages/testing/src/strategy/pg-column-coverage.ts` reads `META_TABLES`
+  and every store's SQL **as text** and asserts that each column an `INSERT`/`UPDATE`/`DO UPDATE`/
+  `SELECT` names exists, and that each `notNull`-with-no-default column is named by every `INSERT`.
+  Modelled on `typecheck-config.ts`: a rule enforced mechanically with its exemptions spelled out as
+  lines. As text rather than by importing `@crossengin/kernel`, for two reasons that are both about
+  not being conditional — kernel devDepends on `@crossengin/testing`, so an import would make the
+  graph cyclic, and reading `kernel/dist` would make the result depend on whether someone ran
+  `pnpm -r build`, which is the conditional green this file exists to abolish. It also checks the
+  **second axis**: a table with a platform `INSERT` arm, against which some module emits an
+  `UPDATE`, must have a platform `UPDATE` arm — mutability read from the existence of a writer, not
+  from the store's shape, which is the inversion ADR-0332 got wrong. **An unparsed statement is
+  reported, not skipped**, which is the property that matters: a scan with a silent "could not read"
+  bucket would be the next member of this class. Coverage: 851 files, 220 statements, 63 of 145
+  tables, 25 unresolved all accounted for by 19 declared gap lines. Replayed against history it
+  finds every known member (`kind`; the activity store's six; the signal store's two; the flag
+  store's `default_value`, **plus three `SELECT` sites a hand search had missed**); against the
+  working tree it finds **nothing**, which after three accidental discoveries is the result.
+  What it leaves: 82 tables have no SQL at all, so coverage is of what exists; twelve `SET` clauses
+  rendered by a helper function are declared gaps, hand-verified once (resolving them means
+  evaluating arbitrary functions); and `WHERE`/`RETURNING` columns are deliberately not checked,
+  because `$n`, casts, aliases and `EXCLUDED.x` produce both misses and wrong hits without a parser.
 - **An API key that names no principal is a `service_account`, and the id collision is unfixable**
   (ADR-0331). `buildPrincipalWiring` hardcoded `principalKind: "user"` for every API key while
   `parseApiKeySpec` defaulted the optional fourth field to one shared placeholder UUID — so a bare
@@ -1745,9 +1836,10 @@ opened them.
   catalog is `entityLifecycle` (19 in core, 1 in healthcare, zero orchestration or scheduled) so a
   compiler had zero valid inputs, the other two kinds carry `z.unknown()`, and `createdBy` plus
   `publishedBy !== createdBy` would have needed two fabricated constants differing from each other.
-  `workflow-worker`'s three workers are **still not instantiated**, so the engine is present but
-  timers and activities are not *driven* by this binary. Entity lifecycle transitions are a different
-  mechanism and work. An in-flight activity is only `signalled`, and `signalDelivered` is `false`
+  `workflow-worker`'s three workers are mounted behind `--workflow-workers` since ADR-0333, so a
+  due timer fires and a deferred activity runs; the **job** worker still refuses
+  (`no_job_handlers`), because nothing in this process registers a handler. Entity lifecycle
+  transitions are a different mechanism and work. An in-flight activity is only `signalled`, and `signalDelivered` is `false`
   when its handler belongs to another process: nothing propagates the abort across a process boundary.
   A `child_instance` is `not_cascaded` by design, and side effects with no compensation key are
   reported by neither disposition. `ESTIMATED_CHARS_PER_TOKEN` under-counts for CJK,
@@ -1850,13 +1942,28 @@ opened them.
   is a 422 at validation, a computed value is quantised at the store boundary, since refusing there
   would turn a correct tax computation into a 500. What it leaves: **arithmetic is still `double`
   arithmetic** (`num()` and the reports' `readonly total: number`), so summing scale-2 amounts still
-  drifts; the JSONB store still sorts a decimal **lexicographically** (`document ->> 'f'` is TEXT
-  whichever way the JSON held it), and closing that needs a guarded cast because `'n/a'::numeric`
-  **raises** and would fail a whole query rather than one row; and an unparseable stored decimal now
+  drifts; and an unparseable stored decimal now
   makes its record and any page containing it unreadable, which is sharper than before and taken
   deliberately. `INTERVAL` is the third instance and unreached: a `duration` field maps to it and
   nothing in the catalog or the seven packs declares one, so a keyset sort on one would put
   `[object Object]` in the cursor the day somebody does. `readColumn` is the single place it lands.
+  **And a `decimal` sorts and filters as a number** (ADR-0333), through a guarded cast, which closed
+  something worse than mis-ordering: a row written by a pre-ADR-0332 client as the JSON *number*
+  `10.50` is printed by Postgres as `10.50` while the cursor renders `String(10.5)` = `"10.5"`, and
+  `'10.50' > '10.5'` is lexicographically true — so **the row re-qualified as coming after itself on
+  every page, forever**, and a `limit 1` walk returned 11 rows, skipped 5 of 8 and did not
+  terminate. `integer` had it too, with ten fields. The value types travel **on the query, not on
+  the store**, because `operate-server`'s per-tenant JSONB fallback is one shared instance serving
+  several tenants' own manifests, where A's `Invoice.amount` and B's are different types with the
+  same name (ADR-0314) — an index on the instance would be one tenant's answer applied to all. The
+  guard is **one pattern with two consumers** (a `RegExp` and a SQL literal), wider than the wire
+  form because a row served as a figure must not be ordered as unknown, and narrower than `numeric`
+  because `NaN`/`Infinity` cast but are not figures. `pg_input_is_valid` **would** be the right guard
+  (ADR-0330's "ask Postgres rather than imitate its parser") and cannot be used: it arrived in PG 16
+  and `MIN_POSTGRES_MAJOR` is 14, so a tripwire test asserts `MIN_POSTGRES_MAJOR < 16` and raising
+  the floor is the moment to swap. `NULLS LAST` in both directions with the keyset encoding the same
+  rule, because Postgres's default moves the tail with the direction and a cursor component cannot
+  say which end it is at.
 - **A column-level `check` expression is compared now** (ADR-0330), which closes ADR-0329's hole and
   removes the two table-level workarounds it needed. The naming ambiguity that made it look like a
   parser problem is answered by `pg_constraint.conkey` on the probe's own row — Postgres's own parser,

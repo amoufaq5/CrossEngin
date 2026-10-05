@@ -266,7 +266,7 @@ describe("WorkflowReplayer.resyncInstance", () => {
         timerId: null,
         childInstanceId: null,
         variableName: null,
-        payload: { kind: "http_call", definitionActivityKey: "charge" },
+        payload: { kind: "http_call", definitionActivityKey: "charge", maxAttempts: 3 },
         correlationId: null,
         causationEventId: null,
       },
@@ -279,6 +279,47 @@ describe("WorkflowReplayer.resyncInstance", () => {
       u.sql.includes("INSERT INTO meta.workflow_activities"),
     );
     expect(inserts.length).toBe(1);
+  });
+
+  it("writes nothing at all when any child projection refuses", async () => {
+    // The whole point of resolving all three before the first write: a refusal part-way through
+    // would leave a half-resynced instance behind, from the one tool whose job is to make the
+    // projections agree with the log. An activity with no recorded retry ceiling is the cheapest
+    // refusal to provoke, and the instance upsert must not have happened.
+    const events = [
+      startedEvent(),
+      {
+        id: "wfe_event0002",
+        instanceId: "wfi_inst0001",
+        tenantId: TENANT,
+        sequenceNumber: 1,
+        kind: "activity_scheduled" as const,
+        occurredAt: "2026-05-16T12:00:01.000Z",
+        actorPrincipalId: null,
+        actorSystemId: "engine",
+        previousState: null,
+        newState: null,
+        activityId: "wfa_act00001",
+        signalId: null,
+        timerId: null,
+        childInstanceId: null,
+        variableName: null,
+        payload: { kind: "http_call", definitionActivityKey: "charge" },
+        correlationId: null,
+        causationEventId: null,
+      },
+    ];
+    const state = emptyState(events);
+    const replayer = buildReplayer(state);
+    await expect(replayer.resyncInstance("wfi_inst0001")).rejects.toThrow(
+      /max_attempts_unrecorded/,
+    );
+    expect(state.updates.filter((u) => u.sql.includes("UPDATE meta.workflow_instances"))).toEqual(
+      [],
+    );
+    expect(
+      state.updates.filter((u) => u.sql.includes("INSERT INTO meta.workflow_activities")),
+    ).toEqual([]);
   });
 
   it("upserts signals when signal events exist", async () => {
@@ -439,7 +480,7 @@ describe("WorkflowReplayer.verifyInstance", () => {
         timerId: null,
         childInstanceId: null,
         variableName: null,
-        payload: { kind: "http_call", definitionActivityKey: "charge" },
+        payload: { kind: "http_call", definitionActivityKey: "charge", maxAttempts: 3 },
         correlationId: null,
         causationEventId: null,
       },
@@ -515,7 +556,7 @@ describe("WorkflowReplayer.verifyInstance", () => {
         timerId: null,
         childInstanceId: null,
         variableName: null,
-        payload: { kind: "http_call", definitionActivityKey: "charge" },
+        payload: { kind: "http_call", definitionActivityKey: "charge", maxAttempts: 3 },
         correlationId: null,
         causationEventId: null,
       },
@@ -574,7 +615,7 @@ function signalledActivityEvents(
       sequenceNumber: firstSequence,
       kind: "activity_scheduled" as const,
       activityId,
-      payload: { kind: "http_call", definitionActivityKey: "charge" },
+      payload: { kind: "http_call", definitionActivityKey: "charge", maxAttempts: 3 },
     },
     {
       ...base,

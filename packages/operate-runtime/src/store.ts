@@ -8,6 +8,26 @@ export interface ListSort {
 }
 
 /**
+ * How a field's values must be **compared and ordered**, independent of how a backend happens to
+ * spell them.
+ *
+ * It exists because one of the two Postgres stores holds every field as text. `document ->> 'f'`
+ * is TEXT whichever way the JSON held the value, so without a declared comparison type a
+ * `decimal` or an `integer` sorts lexicographically — `"100.00"` before `"9.00"`, `"10"` before
+ * `"9"` — while `ColumnMappedEntityStore`, whose columns are real `NUMERIC`/`INTEGER`, sorts the
+ * same field numerically. Two implementations of one `EntityStore` then disagree about row
+ * *order*, which ADR-0331 established surfaces as a production pagination failure rather than as a
+ * test failure: the keyset cursor is built from the ordering, so a disagreement does not merely
+ * reorder a page, it skips and repeats rows at every page boundary.
+ *
+ * Only two members, and that is the whole vocabulary a text-holding store needs: a field's values
+ * either compare as numbers or as text. `boolean`, `date`, `datetime` and `time` are deliberately
+ * `text` — see `FIELD_LIST_VALUE_TYPES`, which records per field kind why.
+ */
+export const LIST_VALUE_TYPES = ["text", "numeric"] as const;
+export type ListValueType = (typeof LIST_VALUE_TYPES)[number];
+
+/**
  * Comparison operators a list filter can use. `in` takes an array of values;
  * `contains` is a case-insensitive substring match (typeahead search).
  */
@@ -45,6 +65,20 @@ export interface ListQuery {
    * a store that ignores it is correct (just less efficient).
    */
   readonly fields?: readonly string[];
+  /**
+   * Per-field comparison types for the fields this query orders or filters on, absent entries
+   * meaning `text`. A store MAY use it to compare and order a field on its declared type instead
+   * of on however the storage spells it; a store whose columns already carry the type (the column
+   * store) is correct either way.
+   *
+   * It travels with the *query* rather than sitting on the store because one `PostgresEntityStore`
+   * instance serves **several tenants' manifests** — `operate-server`'s per-tenant JSONB fallback
+   * is a single shared store, and two tenants author independently, so tenant A's `Invoice.amount`
+   * and tenant B's are different types with the same name (ADR-0314). A field-type index held on
+   * the instance would be one tenant's answer applied to every tenant. `withListValueTypes`
+   * attaches it per call, from the manifest the gateway was compiled with.
+   */
+  readonly valueTypes?: ReadonlyMap<string, ListValueType>;
 }
 
 export interface ListPage {

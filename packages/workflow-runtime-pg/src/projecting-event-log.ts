@@ -1,13 +1,9 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { ActivityKind, ActivityStatus, WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
-import {
-  type EventLog,
-  projectActivities,
-  projectInstance,
-  projectTimers,
-} from "@crossengin/workflow-runtime";
+import { type EventLog, projectInstance } from "@crossengin/workflow-runtime";
 
-import { PostgresActivityStore, type ActivityProjection } from "./activity-store.js";
+import { projectPersistableActivities } from "./activity-provenance.js";
+import { PostgresActivityStore } from "./activity-store.js";
 import {
   WorkflowDefinitionIdResolver,
   WorkflowInstanceIdResolver,
@@ -15,7 +11,8 @@ import {
 import { PostgresInstanceStore } from "./instance-store.js";
 import { projectPersistableSignals } from "./signal-provenance.js";
 import { PostgresSignalDeduplicator, PostgresSignalStore } from "./signal-store.js";
-import { PostgresTimerStore, type TimerProjection } from "./timer-store.js";
+import { projectPersistableTimers } from "./timer-provenance.js";
+import { PostgresTimerStore } from "./timer-store.js";
 
 export interface ProjectingEventLogOptions {
   readonly inner: EventLog;
@@ -104,31 +101,26 @@ export class ProjectingEventLog implements EventLog {
       }
     }
 
-    const activities = projectActivities(events);
-    await this.activityStore.upsertMany(activities as readonly ActivityProjection[]);
+    // All three child projections refuse rather than persist a row whose required columns cannot be
+    // answered from the log plus the definition. That aborts the append, which is the loud outcome:
+    // the alternative is a row claiming a guarantee nobody promised, a schedule nobody declared, or
+    // a retry ceiling nobody chose — in the very tables those facts are read back from. The casts
+    // these three lines used to carry are gone with them: `ActivityProjection` is no longer
+    // structurally satisfied by what the pure fold produces, so the type system now holds the gap
+    // open instead of letting a cast close it.
+    const activities = projectPersistableActivities(events, definition);
+    if (activities.length > 0) {
+      await this.activityStore.upsertMany(activities);
+    }
 
-    // Refuses rather than persisting a signal whose declared delivery guarantee cannot be read off
-    // the definition. That aborts `submitSignal`, which is the loud outcome: the alternative is a
-    // row claiming a guarantee nobody promised, in the table the guarantee is read back from.
     const signals = projectPersistableSignals(events, definition);
     if (signals.length > 0) {
       await this.signalStore.upsertMany(signals);
     }
 
-    const timers = projectTimers(events);
+    const timers = projectPersistableTimers(events, definition);
     if (timers.length > 0) {
-      const projections: TimerProjection[] = timers.map((t) => ({
-        id: t.id,
-        instanceId: t.instanceId,
-        tenantId: t.tenantId,
-        timerName: t.timerName,
-        status: t.status,
-        scheduledAt: t.scheduledAt,
-        fireAt: t.fireAt,
-        firedAt: t.firedAt,
-        cancelledAt: t.cancelledAt,
-      }));
-      await this.timerStore.upsertMany(projections);
+      await this.timerStore.upsertMany(timers);
     }
   }
 }

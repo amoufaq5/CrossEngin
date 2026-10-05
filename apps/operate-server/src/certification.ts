@@ -104,17 +104,28 @@ export function encryptionCoverageSource(
 }
 
 export interface DrReadinessSnapshotProvider {
-  latest(): Promise<{ readonly report: DrReadinessLike } | null>;
+  latest(scope: string | null): Promise<{ readonly report: DrReadinessLike } | null>;
 }
 
-/** The most recent persisted DR-readiness snapshot (the dr-readiness lifecycle is the producer). */
+/**
+ * The most recent persisted DR-readiness snapshot (the dr-readiness lifecycle is the producer).
+ *
+ * `scope` is threaded through because the store's `latest()` took none: it was
+ * `ORDER BY generated_at DESC LIMIT 1` with no predicate, and **a table's owner bypasses RLS**, so
+ * it answered with whichever tenant's snapshot was newest. That is a wrong answer anywhere, but
+ * here it is a wrong answer *inside a SOC 2 evidence pack* — this source's output is sealed into a
+ * certification report as the deployment's disaster-recovery evidence. Every other source in
+ * `defaultLiveSources` already took `config.tenantId`; this was the one that did not, so the scope
+ * was in hand the whole time and the store had nowhere to receive it.
+ */
 export function drReadinessSource(
   provider: DrReadinessSnapshotProvider,
+  scope: string | null,
   controlId = "resilience.dr_readiness",
 ): EvidenceSource {
   return {
     async collect(_framework, at) {
-      const latest = await provider.latest();
+      const latest = await provider.latest(scope);
       if (latest === null) return [];
       return [evidenceFromDrReadiness(controlId, latest.report, at)];
     },
@@ -388,7 +399,7 @@ export function defaultLiveSources(
     encryptionCoverageSource(new EncryptionApplier(conn), config.schema),
   ];
   if (config.drReadiness) {
-    sources.push(drReadinessSource(new PostgresDrReadinessStore(conn)));
+    sources.push(drReadinessSource(new PostgresDrReadinessStore(conn), config.tenantId));
   }
   if (config.accessReviews) {
     sources.push(

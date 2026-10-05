@@ -316,3 +316,85 @@ describe("the platform write arm, against the policy-shaped fake", () => {
     expect((await registry.getByKeyId(platformKey.keyId))?.status).toBe("active");
   });
 });
+
+describe("the scope predicate every read carries beside RLS", () => {
+  type Captured = { sql: string; params: readonly unknown[] | undefined };
+
+  function read(capture: readonly Captured[]): Captured {
+    const found = capture.find((c) => c.sql.includes("FROM meta.crypto_keys"));
+    if (found === undefined) throw new Error("no read was issued");
+    return found;
+  }
+
+  function where(captured: Captured): string {
+    const at = captured.sql.indexOf("WHERE");
+    if (at < 0) throw new Error(`read carried no WHERE clause: ${captured.sql}`);
+    return captured.sql.slice(at);
+  }
+
+  it("asks for the platform scope by name on a fingerprint lookup", async () => {
+    // The read `apps/operate-server`'s `chain-verify.ts` makes with no tenant id, to resolve the
+    // public key a platform chain entry's signature verifies under. Unscoped, it answered with a
+    // *tenant's* key as the owner — which hands back the forgery route `app.platform_key_write`
+    // exists to close.
+    const capture: Captured[] = [];
+    await new PostgresKeyRegistry(recordingPg(capture)).getByFingerprint("a".repeat(64));
+    expect(where(read(capture))).toContain("tenant_id IS NULL");
+    expect(where(read(capture))).not.toContain("tenant_id = $");
+  });
+
+  it("keeps the platform's keys in a tenant's point lookup, which is the point of a public key", async () => {
+    const capture: Captured[] = [];
+    await new PostgresKeyRegistry(recordingPg(capture)).getByKeyId("key_ed25519_X", TENANT);
+    expect(where(read(capture))).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+    expect(read(capture).params).toEqual(["key_ed25519_X", TENANT]);
+  });
+
+  it("keeps listKeys strict, because a filter by tenant means that tenant's keys", async () => {
+    // The two spellings in one store, and the distinction is the repo's own: a lookup by identity
+    // may answer with a platform key, a list filtered by tenant may not. `listActive({tenantId})`
+    // has a test pinning that, and its tenant arm was already strict — only the platform arm was
+    // missing.
+    const capture: Captured[] = [];
+    await new PostgresKeyRegistry(recordingPg(capture)).listActive({ tenantId: TENANT });
+    expect(where(read(capture))).toContain("tenant_id = $1");
+    expect(where(read(capture))).not.toContain("OR tenant_id IS NULL");
+
+    const platform: Captured[] = [];
+    await new PostgresKeyRegistry(recordingPg(platform)).listActive({});
+    expect(where(read(platform))).toContain("tenant_id IS NULL");
+  });
+
+  it("sets the tenant's RLS context beside the predicate, and claims no write elevation", async () => {
+    const capture: Captured[] = [];
+    await new PostgresKeyRegistry(recordingPg(capture)).getByKeyId("key_ed25519_X", TENANT);
+    expect(capture[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+    expect(capture[0]?.params).toEqual([TENANT]);
+    expect(capture.some((c) => c.sql === SET_PLATFORM_KEY_WRITE_SQL)).toBe(false);
+  });
+
+  it("never spells a scope as IS NOT DISTINCT FROM, which is unindexable", async () => {
+    const capture: Captured[] = [];
+    const registry = new PostgresKeyRegistry(recordingPg(capture));
+    await registry.getByKeyId("key_ed25519_X", TENANT);
+    await registry.getByFingerprint("b".repeat(64), TENANT);
+    await registry.listKeys({ tenantId: TENANT });
+    const reads = capture.filter((c) => c.sql.includes("FROM meta.crypto_keys"));
+    expect(reads).toHaveLength(3);
+    for (const r of reads) {
+      expect(r.sql).not.toContain("IS NOT DISTINCT FROM");
+      expect(where(r)).toContain("tenant_id = $");
+    }
+  });
+
+  it("refuses an implausible tenantId before issuing anything", async () => {
+    const capture: Captured[] = [];
+    await expect(
+      new PostgresKeyRegistry(recordingPg(capture)).getByKeyId(
+        "key_ed25519_X",
+        "'; DROP TABLE meta.tenants --",
+      ),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
+  });
+});

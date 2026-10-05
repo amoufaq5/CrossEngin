@@ -7,6 +7,13 @@ import {
 } from "@crossengin/api-gateway";
 import { requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
 
+import {
+  optionalScopeFilter,
+  scopeFilter,
+  scopedRead,
+  type ReadScope,
+} from "./pipeline-execution-store.js";
+
 const SCHEMA = "meta";
 const EXECUTIONS_TABLE = "gateway_pipeline_executions";
 const DECISIONS_TABLE = "rate_limit_decisions";
@@ -199,17 +206,31 @@ export class GatewayReplayer {
     this.conn = opts.conn;
   }
 
-  async getExecution(requestId: string): Promise<PipelineExecution | null> {
-    const result = await this.conn.query<ExecutionRow>(
-      `SELECT request_id, tenant_id, started_at, completed_at, total_duration_ms,
-              final_stage, final_outcome, final_response_status, stages,
-              auth_outcome, route_match_outcome, idempotency_outcome,
-              principal_id, route_operation_id, resolved_api_version,
-              correlation_id, rate_limit_decision_id, bytes_in, bytes_out
-         FROM ${SCHEMA}.${EXECUTIONS_TABLE}
-        WHERE request_id = $1
-        LIMIT 1`,
-      [requestId],
+  /**
+   * One execution by request id, within `scope`.
+   *
+   * `scope` is `undefined` by default — every scope — because that is what this has always meant
+   * here and what `bulkVerify` depends on: it collects ids across scopes and asks for each in turn,
+   * so defaulting to the platform scope would report every tenant execution as `hasExecution:
+   * false`. Pass `null` to ask for the platform's own rows, which was not expressible before.
+   */
+  async getExecution(
+    requestId: string,
+    scope: ReadScope = undefined,
+  ): Promise<PipelineExecution | null> {
+    const filter = optionalScopeFilter(scope, 2);
+    const result = await scopedRead(this.conn, scope, (tx) =>
+      tx.query<ExecutionRow>(
+        `SELECT request_id, tenant_id, started_at, completed_at, total_duration_ms,
+                final_stage, final_outcome, final_response_status, stages,
+                auth_outcome, route_match_outcome, idempotency_outcome,
+                principal_id, route_operation_id, resolved_api_version,
+                correlation_id, rate_limit_decision_id, bytes_in, bytes_out
+           FROM ${SCHEMA}.${EXECUTIONS_TABLE}
+          WHERE request_id = $1${filter === null ? "" : ` AND ${filter.sql}`}
+          LIMIT 1`,
+        [requestId, ...(filter?.params ?? [])],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return null;
@@ -242,14 +263,24 @@ export class GatewayReplayer {
     };
   }
 
-  async verifyExecution(requestId: string): Promise<ExecutionVerifyReport> {
-    const execution = await this.getExecution(requestId);
+  async verifyExecution(
+    requestId: string,
+    scope: ReadScope = undefined,
+  ): Promise<ExecutionVerifyReport> {
+    const execution = await this.getExecution(requestId, scope);
     if (execution === null) {
       return { requestId, hasExecution: false, drifted: false, issues: [] };
     }
     const issues = [...verifyPipelineExecutionShape(execution)];
     if (execution.rateLimitDecisionId !== null) {
-      const found = await this.rateLimitDecisionExists(execution.rateLimitDecisionId);
+      // The decision's scope comes from the execution that names it, not from the caller: a
+      // gateway writes both rows in one request, so the execution's own `tenant_id` is a recorded
+      // fact about where its decision is. Unscoped, the owner found a *tenant's* decision for a
+      // platform execution and reported no drift, and a non-owner found none at all.
+      const found = await this.rateLimitDecisionExists(
+        execution.rateLimitDecisionId,
+        execution.tenantId,
+      );
       if (!found) {
         issues.push({
           code: "rate_limit_decision_not_found",
@@ -265,9 +296,18 @@ export class GatewayReplayer {
     };
   }
 
+  /**
+   * Recent request ids within `tenantId`'s scope, newest first.
+   *
+   * `tenantId` widens from `string | undefined` to `ReadScope`: a tenant id, `null` for the platform
+   * scope, or absent for every scope. Absent keeps its meaning, so no existing caller changes — but
+   * `null` was previously inexpressible, and under a `LIMIT` that was the expensive half. Another
+   * scope's rows do not merely join this page, they *displace* the asked-for ones, and the caller
+   * sees a short page rather than a wrong one.
+   */
   async listRecentExecutions(opts: {
     readonly since?: Date;
-    readonly tenantId?: string;
+    readonly tenantId?: ReadScope;
     readonly limit?: number;
     readonly offset?: number;
   } = {}): Promise<readonly string[]> {
@@ -279,25 +319,28 @@ export class GatewayReplayer {
       params.push(opts.since.toISOString());
       filters.push(`started_at >= $${params.length.toString()}`);
     }
-    if (opts.tenantId !== undefined) {
-      params.push(opts.tenantId);
-      filters.push(`tenant_id = $${params.length.toString()}`);
+    const scope = optionalScopeFilter(opts.tenantId, params.length + 1);
+    if (scope !== null) {
+      params.push(...scope.params);
+      filters.push(scope.sql);
     }
     const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
     params.push(limit);
     params.push(offset);
-    const result = await this.conn.query<{ request_id: string }>(
-      `SELECT request_id FROM ${SCHEMA}.${EXECUTIONS_TABLE} ${where}
-        ORDER BY started_at DESC
-        LIMIT $${(params.length - 1).toString()} OFFSET $${params.length.toString()}`,
-      params,
+    const result = await scopedRead(this.conn, opts.tenantId, (tx) =>
+      tx.query<{ request_id: string }>(
+        `SELECT request_id FROM ${SCHEMA}.${EXECUTIONS_TABLE} ${where}
+          ORDER BY started_at DESC
+          LIMIT $${(params.length - 1).toString()} OFFSET $${params.length.toString()}`,
+        params,
+      ),
     );
     return result.rows.map((r) => r.request_id);
   }
 
   async bulkVerify(opts: {
     readonly since?: Date;
-    readonly tenantId?: string;
+    readonly tenantId?: ReadScope;
     readonly batchSize?: number;
     readonly maxExecutions?: number;
   } = {}): Promise<readonly ExecutionVerifyReport[]> {
@@ -317,7 +360,7 @@ export class GatewayReplayer {
       if (ids.length === 0) break;
       for (const id of ids) {
         if (reports.length >= max) break;
-        reports.push(await this.verifyExecution(id));
+        reports.push(await this.verifyExecution(id, opts.tenantId));
       }
       if (ids.length < limit) break;
       offset += ids.length;
@@ -325,9 +368,18 @@ export class GatewayReplayer {
     return reports;
   }
 
+  /**
+   * Outcome counts and latency percentiles for one scope.
+   *
+   * Every number this returns is an aggregate, so an unasked-for scope does not show up as an extra
+   * row — it moves `successRate` and `p95LatencyMs`. Measured live with three passing tenant
+   * executions beside one 900 ms platform error: as the owner `summarize({})` answered
+   * `successRate: 0.75, p95: 900`; as a non-owner, `successRate: 0, p95: 900`. Both are honest
+   * answers to "every scope you can see", and neither is the platform's.
+   */
   async summarize(opts: {
     readonly since?: Date;
-    readonly tenantId?: string;
+    readonly tenantId?: ReadScope;
   } = {}): Promise<ExecutionSummary> {
     const filters: string[] = [];
     const params: unknown[] = [];
@@ -335,18 +387,21 @@ export class GatewayReplayer {
       params.push(opts.since.toISOString());
       filters.push(`started_at >= $${params.length.toString()}`);
     }
-    if (opts.tenantId !== undefined) {
-      params.push(opts.tenantId);
-      filters.push(`tenant_id = $${params.length.toString()}`);
+    const scope = optionalScopeFilter(opts.tenantId, params.length + 1);
+    if (scope !== null) {
+      params.push(...scope.params);
+      filters.push(scope.sql);
     }
     const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : "";
-    const result = await this.conn.query<{
-      final_outcome: string;
-      total_duration_ms: number;
-    }>(
-      `SELECT final_outcome, total_duration_ms
-         FROM ${SCHEMA}.${EXECUTIONS_TABLE} ${where}`,
-      params,
+    const result = await scopedRead(this.conn, opts.tenantId, (tx) =>
+      tx.query<{
+        final_outcome: string;
+        total_duration_ms: number;
+      }>(
+        `SELECT final_outcome, total_duration_ms
+           FROM ${SCHEMA}.${EXECUTIONS_TABLE} ${where}`,
+        params,
+      ),
     );
     const rows = result.rows;
     if (rows.length === 0) {
@@ -402,13 +457,19 @@ export class GatewayReplayer {
     };
   }
 
-  private async rateLimitDecisionExists(decisionId: string): Promise<boolean> {
-    const result = await this.conn.query<{ exists_count: string }>(
-      `SELECT COUNT(*)::TEXT AS exists_count
-         FROM ${SCHEMA}.${DECISIONS_TABLE}
-        WHERE decision_id = $1
-        LIMIT 1`,
-      [decisionId],
+  private async rateLimitDecisionExists(
+    decisionId: string,
+    tenantId: string | null,
+  ): Promise<boolean> {
+    const scope = scopeFilter(tenantId, 2);
+    const result = await scopedRead(this.conn, tenantId, (tx) =>
+      tx.query<{ exists_count: string }>(
+        `SELECT COUNT(*)::TEXT AS exists_count
+           FROM ${SCHEMA}.${DECISIONS_TABLE}
+          WHERE decision_id = $1 AND ${scope.sql}
+          LIMIT 1`,
+        [decisionId, ...scope.params],
+      ),
     );
     const row = result.rows[0];
     if (row === undefined) return false;

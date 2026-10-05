@@ -30,7 +30,7 @@ describe("PostgresCertificationReportStore", () => {
     const store = new PostgresCertificationReportStore(fakeCertificationPg());
     const report = reportAt("2026-06-01T00:00:00.000Z", "soc2_type2");
     await store.record(certificationReportRecordFrom(report));
-    const fetched = await store.getByReportId(report.reportId);
+    const fetched = await store.getByReportId(report.reportId, TENANT);
     expect(fetched).not.toBeNull();
     expect(fetched?.framework).toBe("soc2_type2");
     expect(fetched?.report).toEqual(report);
@@ -48,7 +48,7 @@ describe("PostgresCertificationReportStore", () => {
     );
     await store.record(rec);
     await store.record(rec);
-    expect(await store.listRecent()).toHaveLength(1);
+    expect(await store.listRecent(100, TENANT)).toHaveLength(1);
   });
 
   it("lists recent newest-first and filters by framework", async () => {
@@ -65,17 +65,17 @@ describe("PostgresCertificationReportStore", () => {
       certificationReportRecordFrom(reportAt("2026-08-01T00:00:00.000Z", "soc2_type2")),
     );
 
-    const recent = await store.listRecent();
+    const recent = await store.listRecent(100, TENANT);
     expect(recent).toHaveLength(3);
     expect(recent[0]?.generatedAt).toBe("2026-08-01T00:00:00.000Z");
 
-    const soc2 = await store.listByFramework("soc2_type2");
+    const soc2 = await store.listByFramework("soc2_type2", 100, TENANT);
     expect(soc2).toHaveLength(2);
     expect(soc2.every((r) => r.framework === "soc2_type2")).toBe(true);
 
-    const latestHipaa = await store.latestForFramework("hipaa_security_rule");
+    const latestHipaa = await store.latestForFramework("hipaa_security_rule", TENANT);
     expect(latestHipaa?.generatedAt).toBe("2026-07-01T00:00:00.000Z");
-    expect(await store.latestForFramework("pci_dss_v4")).toBeNull();
+    expect(await store.latestForFramework("pci_dss_v4", TENANT)).toBeNull();
   });
 
   it("rejects a non-positive limit", async () => {
@@ -151,6 +151,113 @@ describe("the platform write arm", () => {
     const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
     await expect(
       scopedWrite(recordingPg(capture), "'; DROP TABLE meta.tenants --", async () => undefined),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
+  });
+});
+
+describe("the scope predicate every read carries beside RLS", () => {
+  type Captured = { sql: string; params: readonly unknown[] | undefined };
+
+  function recordingPg(capture: Captured[]): PgConnection {
+    const conn: PgConnection = {
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        capture.push({ sql, params });
+        return { rows: [], rowCount: 0 };
+      }) as PgConnection["query"],
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>) =>
+        fn(conn)) as PgConnection["transaction"],
+      withAdvisoryLock: (async <T,>(_k: bigint, fn: () => Promise<T>) =>
+        fn()) as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+    return conn;
+  }
+
+  function read(capture: readonly Captured[]): Captured {
+    const found = capture.find((c) => c.sql.includes("FROM meta.certification_reports"));
+    if (found === undefined) throw new Error("no read was issued");
+    return found;
+  }
+
+  function where(captured: Captured): string {
+    const at = captured.sql.indexOf("WHERE");
+    if (at < 0) throw new Error(`read carried no WHERE clause: ${captured.sql}`);
+    return captured.sql.slice(at);
+  }
+
+  it("scopes latestForFramework, the read whose wrongness is a compliance claim", async () => {
+    // Observed live as the owner, with a tenant's failing SOC 2 report newer than the platform's
+    // passing one: `latestForFramework("soc2_type2")` returned the tenant's, `certifiable: false`.
+    // One `ORDER BY … LIMIT 1` over two scopes inverted the answer, with no error and no empty
+    // result.
+    const capture: Captured[] = [];
+    await new PostgresCertificationReportStore(recordingPg(capture)).latestForFramework(
+      "soc2_type2",
+    );
+    expect(where(read(capture))).toContain("tenant_id IS NULL");
+    expect(where(read(capture))).not.toContain("tenant_id = $");
+    expect(read(capture).params).toEqual(["soc2_type2"]);
+  });
+
+  it("branches to equality for a tenant, and sets that tenant's RLS context", async () => {
+    const capture: Captured[] = [];
+    await new PostgresCertificationReportStore(recordingPg(capture)).latestForFramework(
+      "soc2_type2",
+      TENANT,
+    );
+    expect(where(read(capture))).toContain("tenant_id = $2");
+    expect(read(capture).params).toEqual(["soc2_type2", TENANT]);
+    expect(capture[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+    expect(capture.some((c) => c.sql === SET_PLATFORM_RECORD_WRITE_SQL)).toBe(false);
+  });
+
+  it("scopes getByReportId, whose table-wide unique id is what hid the defect", async () => {
+    const capture: Captured[] = [];
+    await new PostgresCertificationReportStore(recordingPg(capture)).getByReportId("cert_abc12345");
+    expect(where(read(capture))).toContain("tenant_id IS NULL");
+  });
+
+  it("scopes both lists before their LIMIT, so another scope cannot displace the page", async () => {
+    const recent: Captured[] = [];
+    await new PostgresCertificationReportStore(recordingPg(recent)).listRecent(10, TENANT);
+    expect(where(read(recent))).toContain("tenant_id = $1");
+    expect(read(recent).sql).toContain("LIMIT $2");
+    expect(read(recent).params).toEqual([TENANT, 10]);
+
+    const byFramework: Captured[] = [];
+    await new PostgresCertificationReportStore(recordingPg(byFramework)).listByFramework(
+      "soc2_type2",
+      10,
+      TENANT,
+    );
+    expect(where(read(byFramework))).toContain("tenant_id = $2");
+    expect(read(byFramework).sql).toContain("LIMIT $3");
+    expect(read(byFramework).params).toEqual(["soc2_type2", TENANT, 10]);
+  });
+
+  it("never spells a scope as IS NOT DISTINCT FROM, on any of the four reads", async () => {
+    const capture: Captured[] = [];
+    const store = new PostgresCertificationReportStore(recordingPg(capture));
+    await store.getByReportId("cert_abc12345", TENANT);
+    await store.listRecent(10, TENANT);
+    await store.listByFramework("soc2_type2", 10, TENANT);
+    await store.latestForFramework("soc2_type2", TENANT);
+    const reads = capture.filter((c) => c.sql.includes("FROM meta.certification_reports"));
+    expect(reads).toHaveLength(4);
+    for (const r of reads) {
+      expect(r.sql).not.toContain("IS NOT DISTINCT FROM");
+      expect(where(r)).toContain("tenant_id = $");
+    }
+  });
+
+  it("refuses an implausible tenantId before issuing anything", async () => {
+    const capture: Captured[] = [];
+    await expect(
+      new PostgresCertificationReportStore(recordingPg(capture)).latestForFramework(
+        "soc2_type2",
+        "'; DROP TABLE meta.tenants --",
+      ),
     ).rejects.toThrow(/invalid tenantId/);
     expect(capture).toEqual([]);
   });

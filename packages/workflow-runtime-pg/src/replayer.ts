@@ -8,7 +8,8 @@ import {
   projectTimers,
 } from "@crossengin/workflow-runtime";
 
-import { type ActivityProjection, PostgresActivityStore } from "./activity-store.js";
+import { projectPersistableActivities } from "./activity-provenance.js";
+import { PostgresActivityStore } from "./activity-store.js";
 import { PostgresEventLog } from "./event-log.js";
 import {
   WorkflowDefinitionIdResolver,
@@ -22,7 +23,8 @@ import {
 } from "./instance-store.js";
 import { projectPersistableSignals } from "./signal-provenance.js";
 import { PostgresSignalStore } from "./signal-store.js";
-import { PostgresTimerStore, type TimerProjection } from "./timer-store.js";
+import { projectPersistableTimers } from "./timer-provenance.js";
+import { PostgresTimerStore } from "./timer-store.js";
 
 const SCHEMA = "meta";
 
@@ -171,29 +173,21 @@ export class WorkflowReplayer {
     }
     const definition = this.resolveDefinitionFor(events);
     const projection = projectInstance(events, definition);
-    // Resolved before the first write: this is the one projection that can refuse, and a refusal
-    // that has already upserted the instance and its activities leaves a half-resynced instance
-    // for a tool whose whole job is to make the projections agree with the log.
+    // **All three resolved before the first write.** Each can refuse, and a refusal that has
+    // already upserted the instance leaves a half-resynced instance behind — from the one tool
+    // whose whole job is to make the projections agree with the log. So the whole resync is
+    // computed first and written second: either every projection is persistable, or none is
+    // written. (ADR-0331 established this for signals alone, when they were the only refuser.)
     const signals = projectPersistableSignals(events, definition);
+    const activities = projectPersistableActivities(events, definition);
+    const timers = projectPersistableTimers(events, definition);
     let instanceUpserted = false;
     if (projection !== null) {
       await this.instanceStore.upsertProjection(projection);
       instanceUpserted = true;
     }
-    const activities = projectActivities(events) as readonly ActivityProjection[];
     await this.activityStore.upsertMany(activities);
     await this.signalStore.upsertMany(signals);
-    const timers = projectTimers(events).map((t): TimerProjection => ({
-      id: t.id,
-      instanceId: t.instanceId,
-      tenantId: t.tenantId,
-      timerName: t.timerName,
-      status: t.status,
-      scheduledAt: t.scheduledAt,
-      fireAt: t.fireAt,
-      firedAt: t.firedAt,
-      cancelledAt: t.cancelledAt,
-    }));
     await this.timerStore.upsertMany(timers);
     return {
       instanceId,
@@ -228,12 +222,12 @@ export class WorkflowReplayer {
       ? { instanceMissing: storedInstance !== null, fields: [] as DriftField[] }
       : compareInstanceProjection(expected, storedInstance);
 
+    // `projectActivities`, not `projectPersistableActivities` — the same choice, and for the same
+    // reason, as the signals below: a read-only report must stay answerable when the definition map
+    // is incomplete, and it compares only the two fields a resync can repair.
     const expectedActivities = projectActivities(events);
     const storedActivities = await this.fetchActivityRows(instanceId);
-    const activityDrift = compareActivityProjections(
-      expectedActivities as readonly ActivityProjection[],
-      storedActivities,
-    );
+    const activityDrift = compareActivityProjections(expectedActivities, storedActivities);
 
     // `projectSignals`, not `projectPersistableSignals`: this is the read-only report, and it
     // compares the two fields a resync can actually repair. Provenance — the delivery guarantee,
@@ -510,8 +504,15 @@ function sequenceEqual(a: readonly string[], b: readonly string[]): boolean {
   return a.every((value, index) => value === b[index]);
 }
 
+/** Takes the three fields it actually compares, so neither projection shape has to be asserted. */
+interface ComparableActivity {
+  readonly id: string;
+  readonly status: string;
+  readonly definitionActivityKey: string;
+}
+
 function compareActivityProjections(
-  expected: readonly ActivityProjection[],
+  expected: readonly ComparableActivity[],
   stored: readonly StoredActivityRow[],
 ): ChildEntityDrift {
   const expectedById = new Map(expected.map((e) => [e.id, e] as const));

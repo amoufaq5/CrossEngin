@@ -330,3 +330,85 @@ describe("KILL_SWITCH_PARAM_COUNT", () => {
     expect(KILL_SWITCH_PARAM_COUNT).toBe(KILL_SWITCH_COLUMN_NAMES.length);
   });
 });
+
+describe("the scope predicate every read carries beside RLS", () => {
+  function read(capture: readonly Captured[]): Captured {
+    const found = capture.find((c) => c.sql.includes("FROM meta.feature_flag_kill_switches"));
+    if (found === undefined) throw new Error("no read was issued");
+    return found;
+  }
+
+  function where(captured: Captured): string {
+    const at = captured.sql.indexOf("WHERE");
+    if (at < 0) throw new Error(`read carried no WHERE clause: ${captured.sql}`);
+    return captured.sql.slice(at);
+  }
+
+  it("scopes loadForIncident, whose two-row guard turned the missing predicate into a false alarm", async () => {
+    // Observed live as the owner: one platform switch and one tenant switch on `INC-2026-0001`
+    // made this refuse a healthy episode with "this needs a human".
+    const capture: Captured[] = [];
+    await new PostgresKillSwitchStore(mockConnection(capture, () => EMPTY)).loadForIncident(
+      INCIDENT_ID,
+    );
+    expect(where(read(capture))).toContain("tenant_id IS NULL");
+    expect(read(capture).params).toEqual([INCIDENT_ID]);
+  });
+
+  it("keeps the platform's switches in a tenant's answer, matching what a non-owner was shown", async () => {
+    const capture: Captured[] = [];
+    await new PostgresKillSwitchStore(mockConnection(capture, () => EMPTY)).loadForIncident(
+      INCIDENT_ID,
+      TENANT,
+    );
+    expect(where(read(capture))).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+    expect(read(capture).params).toEqual([INCIDENT_ID, TENANT]);
+  });
+
+  it("scopes load by kill switch id", async () => {
+    const platform: Captured[] = [];
+    await new PostgresKillSwitchStore(mockConnection(platform, () => EMPTY)).load(KILL_SWITCH_ID);
+    expect(where(read(platform))).toContain("tenant_id IS NULL");
+
+    const tenant: Captured[] = [];
+    await new PostgresKillSwitchStore(mockConnection(tenant, () => EMPTY)).load(
+      KILL_SWITCH_ID,
+      TENANT,
+    );
+    expect(where(read(tenant))).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+  });
+
+  it("scopes listActiveForFlag before its LIMIT", async () => {
+    const platform: Captured[] = [];
+    await new PostgresKillSwitchStore(mockConnection(platform, () => EMPTY)).listActiveForFlag(
+      FLAG_ID,
+      7,
+    );
+    expect(where(read(platform))).toContain("tenant_id IS NULL");
+    expect(read(platform).sql).toContain("LIMIT $2");
+    expect(read(platform).params).toEqual([FLAG_ID, 7]);
+
+    const tenant: Captured[] = [];
+    await new PostgresKillSwitchStore(mockConnection(tenant, () => EMPTY)).listActiveForFlag(
+      FLAG_ID,
+      7,
+      TENANT,
+    );
+    expect(read(tenant).sql).toContain("LIMIT $3");
+    expect(read(tenant).params).toEqual([FLAG_ID, TENANT, 7]);
+  });
+
+  it("never spells a scope as IS NOT DISTINCT FROM", async () => {
+    const capture: Captured[] = [];
+    const store = new PostgresKillSwitchStore(mockConnection(capture, () => EMPTY));
+    await store.loadForIncident(INCIDENT_ID, TENANT);
+    await store.load(KILL_SWITCH_ID, TENANT);
+    await store.listActiveForFlag(FLAG_ID, 7, TENANT);
+    const reads = capture.filter((c) => c.sql.includes("FROM meta.feature_flag_kill_switches"));
+    expect(reads).toHaveLength(3);
+    for (const r of reads) {
+      expect(r.sql).not.toContain("IS NOT DISTINCT FROM");
+      expect(where(r)).toContain("tenant_id = $2");
+    }
+  });
+});

@@ -177,3 +177,70 @@ describe("the platform write arm", () => {
     }
   });
 });
+
+describe("the scope predicate a read carries beside RLS", () => {
+  const SINCE = new Date("2026-01-01T00:00:00.000Z");
+
+  it("asks for the platform scope by name, not by the absence of a predicate", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "orders-availability",
+      SINCE,
+    );
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id IS NULL");
+    expect(read.sql).not.toContain("tenant_id = $");
+    expect(read.params).toEqual(["orders-availability", SINCE.toISOString()]);
+  });
+
+  it("branches to equality for a tenant, binding the id rather than interpolating it", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "orders-availability",
+      SINCE,
+      TENANT,
+    );
+    const read = written(capture);
+    expect(read.sql).toContain("tenant_id = $3");
+    expect(read.sql).not.toContain("tenant_id IS NULL");
+    // Deliberately not `IS NOT DISTINCT FROM`: it matches NULL to NULL and would give one code
+    // path, but ADR-0331 measured it unindexable — 16 ms sequential scan where equality is a
+    // 0.09 ms index scan on 45k rows.
+    expect(read.sql).not.toContain("IS NOT DISTINCT FROM");
+    expect(read.params).toEqual(["orders-availability", SINCE.toISOString(), TENANT]);
+  });
+
+  it("sets the tenant's RLS context too, so the predicate is beside RLS and not instead of it", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "orders-availability",
+      SINCE,
+      TENANT,
+    );
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+    expect(settings[0]?.params).toEqual([TENANT]);
+  });
+
+  it("claims no write elevation on a platform read, which needs no grant", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "orders-availability",
+      SINCE,
+    );
+    expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
+  });
+
+  it("refuses a tenantId that is not a plausible RLS context before issuing anything", async () => {
+    const capture: Captured[] = [];
+    await expect(
+      new PostgresSloEvaluationStore(mockConnection(capture)).countBreachesSince(
+        "orders-availability",
+        SINCE,
+        "'; DROP TABLE meta.tenants --",
+      ),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
+  });
+});

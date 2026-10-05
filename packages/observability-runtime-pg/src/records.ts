@@ -267,9 +267,8 @@ export function latencyEvaluationRecordFromVerdict(
  * because the split now demands a grant, and the tenant one because nothing ever supplied a context
  * for a row the store had always been able to write as the owner.
  *
- * Reads are deliberately left unwrapped. They behave the same before and after the split — the
- * platform read policy is `SELECT`-scoped on `tenant_id IS NULL` and demands no grant — so scoping
- * them is a separate change about owner-independence, not part of closing this hole.
+ * Reads were left unwrapped when this comment was written, on the ground that scoping them is "a
+ * separate change about owner-independence". That change is `scopeFilter` + `scopedRead` below.
  */
 export const SET_TENANT_CONTEXT_SQL =
   "SELECT set_config('app.current_tenant_id', $1, true)";
@@ -277,6 +276,64 @@ export const SET_TENANT_CONTEXT_SQL =
 export const SET_PLATFORM_RECORD_WRITE_SQL = setPlatformWriteSql("record");
 
 const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
+
+function assertTenantId(tenantId: string): void {
+  if (!TENANT_ID_RE.test(tenantId)) {
+    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
+  }
+}
+
+/** A `tenant_id` predicate and the parameters it binds, for one scope. */
+export interface ScopeFilter {
+  readonly sql: string;
+  readonly params: readonly unknown[];
+}
+
+/**
+ * The `tenant_id` predicate a scoped read must carry, **beside** RLS rather than instead of it.
+ *
+ * All three tables here are `tenant_id`-nullable with a `SELECT`-scoped platform read arm, and **a
+ * table's owner bypasses its policies** (ADR-0331), so an unscoped read answers from every scope in
+ * a deployment that connects as the owner and from the platform's alone in one that does not. These
+ * reads are nearly all aggregates, which is the sharp case — the caller gets a plausible scalar, not
+ * a visibly long list. Measured live with two tenant breach rows beside one platform row on the same
+ * `slo_id`: `countBreachesSince` answered **3** as the owner and **1** as a non-owner, so a burn-rate
+ * input driving an incident declaration was off by a factor of three in the direction that pages.
+ *
+ * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
+ * matching NULL to NULL: ADR-0331 measured it at 16 ms sequential scan against 45k entries where
+ * `tenant_id = $1` is a 0.09 ms index scan, because it is not indexable. `tenant_id IS NULL` is, so
+ * both arms keep `idx_slo_evaluations_tenant_at` and its siblings.
+ *
+ * Verbatim from `forensics-pg`'s `scopeFilter`; it belongs in `kernel-pg` beside
+ * `setPlatformWriteSql`, which this module already imports.
+ */
+export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
+  // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`.
+  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
+  assertTenantId(tenantId);
+  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
+}
+
+/**
+ * A **read**'s scope: a tenant context, or nothing at all.
+ *
+ * Nothing for the platform scope, because the platform read arm is `SELECT`-scoped on
+ * `tenant_id IS NULL` and demands no grant. A read does not claim the write elevation: it does not
+ * need it, and a privilege claimed for no reason is one the next statement in the same transaction
+ * inherits.
+ */
+export async function scopedRead<T>(
+  conn: PgConnection,
+  tenantId: string | null,
+  fn: (tx: PgConnection) => Promise<T>,
+): Promise<T> {
+  if (tenantId !== null) assertTenantId(tenantId);
+  return conn.transaction(async (tx) => {
+    if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+    return fn(tx);
+  });
+}
 
 // `async` rather than returning `conn.transaction(...)` directly, so a rejected tenant id arrives
 // as a rejection like every other failure here. A synchronous throw out of a `Promise`-returning
@@ -286,9 +343,7 @@ export async function scopedWrite<T>(
   tenantId: string | null,
   fn: (tx: PgConnection) => Promise<T>,
 ): Promise<T> {
-  if (tenantId !== null && !TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
+  if (tenantId !== null) assertTenantId(tenantId);
   return conn.transaction(async (tx) => {
     if (tenantId === null) await tx.query(SET_PLATFORM_RECORD_WRITE_SQL);
     else await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);

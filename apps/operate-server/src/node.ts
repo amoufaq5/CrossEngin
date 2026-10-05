@@ -1,5 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { readFile } from "node:fs/promises";
+import { hostname } from "node:os";
 
 import type { PipelineExecution } from "@crossengin/api-gateway";
 import { StripeClient } from "@crossengin/billing-stripe";
@@ -97,6 +98,7 @@ import {
   buildPersistentEngine,
   requestJobCancellation,
   surveyManifestWorkflows,
+  type PersistentEngineBundle,
 } from "@crossengin/workflow-runtime-pg";
 import {
   DeletionReconciler,
@@ -157,6 +159,12 @@ import { PostgresFaxObservationStore } from "./fax-observation-store.js";
 import { appendIncidentNote } from "./incident-note.js";
 import { PostgresReadStateStore } from "./read-state-store.js";
 import { buildWorkflowCancellationRoutes } from "./workflow-cancellation-routes.js";
+import {
+  buildWorkflowWorkerSupervisor,
+  consoleWorkflowWorkerEvents,
+  parseWorkflowWorkerConfig,
+  type WorkflowWorkerSupervisor,
+} from "./workflow-workers.js";
 import { PostgresAuditReadStore } from "./audit-read-store.js";
 import { buildNotificationTemplateRoutes } from "./notification-template-routes.js";
 import { PostgresNotificationTemplateStore } from "./notification-template-store.js";
@@ -1376,9 +1384,15 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     }
   }
 
-  if (options.workflowCancelRoles.length > 0) {
+  // One engine for both surfaces, because `WorkflowWorkerSupervisorInput` requires exactly that:
+  // "the same engine the cancellation route holds: one process, one view of the log". Two engines
+  // over one connection would each hold their own definition map and their own inline-vs-deferred
+  // activity policy, so a cancellation and a timer fire could disagree about the same instance.
+  let workflowEngine: PersistentEngineBundle | null = null;
+  let workflowDefinitionCount = 0;
+  if (options.workflowCancelRoles.length > 0 || options.workflowWorkers) {
     if (conn === undefined) {
-      console.warn("[workflow] --workflow-cancel-role requires a Postgres store; skipping");
+      console.warn("[workflow] the workflow engine requires a Postgres store; skipping");
     } else {
       // Loaded with no tenant filter, because the engine's map is keyed by `definitionId`, which is
       // unique table-wide: an instance's definition is determined by the id on its `instance_started`
@@ -1397,24 +1411,39 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       if (definitions.size === 0) {
         console.warn(
           "[workflow] no workflow definitions loaded: every cancellation will report an unknown" +
-            " instance. meta.workflow_definitions may be empty, or this connection's role may see" +
-            " only platform-wide rows under RLS",
+            " instance, and every worker will refuse to start. meta.workflow_definitions may be" +
+            " empty, or this connection's role may see only platform-wide rows under RLS",
         );
       } else {
         console.log(`[workflow] ${definitions.size.toString()} definition(s) loaded`);
       }
-      const bundle = buildPersistentEngine({ conn, definitions });
-      extraRouteList.push(
-        ...buildWorkflowCancellationRoutes({
-          canceller: bundle.engine,
-          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
-          allowedRoles: new Set(options.workflowCancelRoles),
-          onDecided: (result, tenantId, instanceId) =>
-            console.log(
-              `[workflow] cancel ${instanceId} (tenant ${tenantId}): ${result.outcome}`,
-            ),
-        }),
-      );
+      // `deferActivities` is a biconditional, not a preference, and its own contract says so: a
+      // deployment that runs the activity worker must defer, and one that does not must not —
+      // inline, the row is `scheduled` only between the `activity_scheduled` and `activity_started`
+      // appends, so a worker polling the same database can claim it inside that window and run the
+      // handler a second time. Both directions are closed: the CLI refuses deferral without the
+      // workers, and the supervisor refuses the activity worker without deferral
+      // (`activities_run_inline`).
+      const bundle = buildPersistentEngine({
+        conn,
+        definitions,
+        ...(options.workflowDeferActivities ? { deferActivities: true } : {}),
+      });
+      workflowEngine = bundle;
+      workflowDefinitionCount = definitions.size;
+      if (options.workflowCancelRoles.length > 0) {
+        extraRouteList.push(
+          ...buildWorkflowCancellationRoutes({
+            canceller: bundle.engine,
+            principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+            allowedRoles: new Set(options.workflowCancelRoles),
+            onDecided: (result, tenantId, instanceId) =>
+              console.log(
+                `[workflow] cancel ${instanceId} (tenant ${tenantId}): ${result.outcome}`,
+              ),
+          }),
+        );
+      }
       // A manifest workflow the engine cannot serve is the defect this survey exists to name. Under
       // the authored model the cost of an absent definition is an *absent* workflow rather than a
       // wrong one, so it has to be said rather than inferred from nothing happening.
@@ -2115,6 +2144,46 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       intervalMs: options.scheduleMs,
       ...schemaOpt,
     });
+    // Said at boot, because the comment above has been describing a fleet that did not exist: the
+    // scheduler's enqueue is idempotent and durable, so with nothing claiming, `meta.job_runs`
+    // accumulates `pending` rows indefinitely and the manifest's scheduled jobs have never run in
+    // this binary. --workflow-workers is what drains it — and even then the job worker refuses
+    // while no job handler is registered in this process, which is still the case.
+    if (!options.workflowWorkers) {
+      console.warn(
+        "[jobs] --schedule-ms enqueues job runs into meta.job_runs, and no worker in this process" +
+          " claims them: they will stay pending. Mount --workflow-workers to drain the queue",
+      );
+    }
+  }
+  // The three durable workers that drive the workflow queues. The engine has been mountable since
+  // ADR-0331 and nothing polled it, so this is the half that makes a due timer actually fire. Each
+  // worker refuses for a named reason rather than polling uselessly; the supervisor prints which.
+  let workflowWorkers: WorkflowWorkerSupervisor | null = null;
+  if (options.workflowWorkers && conn !== undefined && workflowEngine !== null) {
+    const workerConfig =
+      options.workflowWorkerConfig !== null
+        ? parseWorkflowWorkerConfig(
+            JSON.parse(await readFile(options.workflowWorkerConfig, "utf8")) as unknown,
+          )
+        : undefined;
+    // hostname:pid, because this value lands in `claimed_by` and its job is to let an operator
+    // answer "which process is holding this lease" from the row alone. A random id would be unique
+    // too and would answer nothing.
+    const workerId = `${hostname()}:${process.pid.toString()}`;
+    workflowWorkers = buildWorkflowWorkerSupervisor({
+      conn,
+      engine: workflowEngine.engine,
+      workerId,
+      definitionCount: workflowDefinitionCount,
+      activitiesDeferred: options.workflowDeferActivities,
+      // No job engine: nothing in this process registers a job handler, so the supervisor reports
+      // `no_job_handlers` and leaves enqueued runs `pending`, which is recoverable. Passing one
+      // would finalize every claimed run `failed` with handler_not_found, which is not.
+      ...schemaOpt,
+      ...(workerConfig !== undefined ? { config: workerConfig } : {}),
+      events: consoleWorkflowWorkerEvents(),
+    });
   }
   // In-process dangling-link prune sweep: periodically prune every active tenant's orphaned m2m
   // association links from the JSONB store. Enabled by --prune-links-ms over the JSONB pg store
@@ -2688,6 +2757,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   poller?.start();
   manifestPoller?.start();
   jobScheduler?.start();
+  workflowWorkers?.start();
   pruneScheduler?.start();
   deletionScheduler?.start();
   deliveryScheduler?.start();
@@ -2731,8 +2801,25 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         auditPolicy?.refresher.stop();
         metering?.flushScheduler?.stop();
         stripeUsageSync?.scheduler.stop();
-        // Drain any queued audit-chain appends before closing, so no request's entry is lost on shutdown.
-        void (auditChain?.observer.drain() ?? Promise.resolve()).finally(() => {
+        // Hand every claimed timer, activity and job run back before the process goes away, so
+        // another replica picks them up immediately instead of waiting out the lease. Reported
+        // rather than silent: past the drain budget the in-flight item is abandoned to its lease,
+        // which is the design — but a shutdown that left work leased is exactly what an operator
+        // needs in the log when the next replica looks idle for 30 seconds.
+        // Awaited and not reported here: the supervisor's own `onDrained` event already names each
+        // worker, whether it stopped, and how many claims it released — and words the budget-elapsed
+        // case better than a second line at this call site did. Logging it twice was the first thing
+        // the live boot showed, including a dangling "drained: " with an empty detail when all three
+        // workers had refused and there was nothing to drain.
+        const workersDrained: Promise<unknown> =
+          workflowWorkers?.drain() ?? Promise.resolve(undefined);
+        // Both drains, not one after the other: they touch different things (the chain's append
+        // queue and the claim tables) and a shutdown should not pay for them serially.
+        // Drain any queued audit-chain appends too, so no request's entry is lost on shutdown.
+        void Promise.all([
+          auditChain?.observer.drain() ?? Promise.resolve(),
+          workersDrained,
+        ]).finally(() => {
           server.close((err) => (err ? reject(err) : resolve()));
         });
       }),

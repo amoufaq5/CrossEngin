@@ -45,7 +45,11 @@ interface FakeDb {
   readonly conn: PgConnection;
   readonly captured: Captured[];
   /** The settings the last transaction carried, captured when it ended. */
-  readonly settings: { tenant: string | null; platformAudit: boolean }[];
+  readonly settings: {
+    tenant: string | null;
+    platformAudit: boolean;
+    platformRecordWrite: boolean;
+  }[];
   seed(overrides?: Record<string, unknown>): Record<string, unknown>;
 }
 
@@ -137,23 +141,45 @@ function rowFor(stored: StoredIntegrityReport, overrides: Record<string, unknown
 }
 
 /**
- * A scripted fake modelling `meta.audit_integrity_verdicts` under its RLS policy: a row is visible
- * when it belongs to the transaction's `app.current_tenant_id`, OR when `app.platform_audit` has
- * been elevated to 'on'. A NULL `tenant_id` therefore matches NEITHER arm of plain tenant
- * isolation — exactly what `tenant_id = current_setting(...)` does in Postgres — so a platform
- * verdict is only ever visible under the elevation.
+ * A scripted fake modelling `meta.audit_integrity_verdicts` under its **three** RLS policies, which
+ * since the split are not one.
+ *
+ * Reading: a row is visible when it belongs to the transaction's `app.current_tenant_id` (the
+ * `ALL`-scope isolation policy) or when `app.platform_audit` is 'on' (the `SELECT`-scoped read
+ * arm). A NULL `tenant_id` matches neither arm of plain tenant isolation — exactly what
+ * `tenant_id = current_setting(...)` does in Postgres — so a platform verdict is only ever visible
+ * under the read elevation.
+ *
+ * Writing: a tenant-scope row goes through the isolation policy's `WITH CHECK`, and a platform-scope
+ * row needs `app.platform_record_write` — the `INSERT`-scoped arm — and **not** the read grant,
+ * which is the whole point of the split. The read grant is modelled as insufficient on purpose: it
+ * used to be sufficient, because the single `ALL` policy's `USING` served as its `WITH CHECK`.
+ *
+ * The visibility requirement on a write is modelled too, because it was measured rather than
+ * assumed: `INSERT … ON CONFLICT … RETURNING` needs the new row to pass a `SELECT` policy, so a
+ * platform-scope `record()` holding only the write grant fails with the same message a scope
+ * refusal gives.
  */
 function fakeVerdictDb(): FakeDb {
   const captured: Captured[] = [];
-  const settings: { tenant: string | null; platformAudit: boolean }[] = [];
+  const settings: {
+    tenant: string | null;
+    platformAudit: boolean;
+    platformRecordWrite: boolean;
+  }[] = [];
   const rows = new Map<string, Record<string, unknown>>();
   let currentTenant: string | null = null;
   let platformAudit = false;
+  let platformRecordWrite = false;
 
   const visible = (): Record<string, unknown>[] =>
     [...rows.values()].filter(
       (r) => platformAudit || (r["tenant_id"] !== null && r["tenant_id"] === currentTenant),
     );
+
+  /** The `WITH CHECK` of whichever policy could admit this row, and nothing wider. */
+  const mayInsert = (scope: unknown): boolean =>
+    scope === null ? platformRecordWrite : scope === currentTenant;
 
   const seed = (overrides: Record<string, unknown> = {}): Record<string, unknown> => {
     const stored = storedIntegrityReportFor(reportFor());
@@ -178,15 +204,21 @@ function fakeVerdictDb(): FakeDb {
     const p = params ?? [];
     captured.push({ sql, params: p });
     if (sql.includes("set_config")) {
-      if (sql.includes("app.platform_audit")) platformAudit = true;
+      if (sql.includes("app.platform_record_write")) platformRecordWrite = true;
+      else if (sql.includes("app.platform_audit")) platformAudit = true;
       else currentTenant = String(p[0]);
       return { rows: [], rowCount: 0 };
     }
     if (sql.startsWith("INSERT INTO")) {
       const verdictId = String(p[0]);
-      // The policy's WITH CHECK: a NULL tenant row is only writable under the elevation.
       const scope = p[1];
-      if (scope === null && !platformAudit) return { rows: [], rowCount: 0 };
+      // The `WITH CHECK` of the one policy that could admit this row. A platform-scope row needs
+      // the write grant; the read grant no longer authorises it.
+      if (!mayInsert(scope)) {
+        throw new Error(
+          'new row violates row-level security policy for table "audit_integrity_verdicts"',
+        );
+      }
       if (rows.has(verdictId)) return { rows: [], rowCount: 0 };
       const stored = JSON.parse(String(p[10])) as StoredIntegrityReport;
       rows.set(verdictId, {
@@ -269,9 +301,10 @@ function fakeVerdictDb(): FakeDb {
       try {
         return await fn(tx);
       } finally {
-        settings.push({ tenant: currentTenant, platformAudit });
+        settings.push({ tenant: currentTenant, platformAudit, platformRecordWrite });
         currentTenant = null;
         platformAudit = false;
+        platformRecordWrite = false;
       }
     }) as PgConnection["transaction"],
     withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
@@ -438,7 +471,11 @@ describe("integrity-verdict-store — RLS path", () => {
     await store.list({ scope: { kind: "tenant", tenantId: TENANT_A } });
     expect(db.captured.some((c) => c.sql.includes("app.platform_audit"))).toBe(false);
     expect(db.captured[0]?.sql).toContain("app.current_tenant_id");
-    expect(db.settings[0]).toEqual({ tenant: TENANT_A, platformAudit: false });
+    expect(db.settings[0]).toEqual({
+      tenant: TENANT_A,
+      platformAudit: false,
+      platformRecordWrite: false,
+    });
   });
 
   it("a cross-tenant read sets the platform flag and no tenant context", async () => {
@@ -447,7 +484,11 @@ describe("integrity-verdict-store — RLS path", () => {
     const store = new PostgresIntegrityVerdictStore(db.conn);
     await store.list({ scope: { kind: "all" } });
     expect(db.captured[0]?.sql).toBe(SET_PLATFORM_AUDIT_SQL);
-    expect(db.settings[0]).toEqual({ tenant: null, platformAudit: true });
+    expect(db.settings[0]).toEqual({
+      tenant: null,
+      platformAudit: true,
+      platformRecordWrite: false,
+    });
   });
 
   it("releases both settings when the transaction ends, so nothing leaks onto the pool", async () => {
@@ -457,9 +498,60 @@ describe("integrity-verdict-store — RLS path", () => {
     await store.list({ scope: { kind: "all" } });
     await store.list({ scope: { kind: "tenant", tenantId: TENANT_A } });
     expect(db.settings).toEqual([
-      { tenant: null, platformAudit: true },
-      { tenant: TENANT_A, platformAudit: false },
+      { tenant: null, platformAudit: true, platformRecordWrite: false },
+      { tenant: TENANT_A, platformAudit: false, platformRecordWrite: false },
     ]);
+  });
+
+  it("a platform-scope write claims the record grant first and the read grant beside it", async () => {
+    // Two settings, not one, and in this order. The `INSERT`-scoped policy checks the write grant;
+    // the `RETURNING` and the `ON CONFLICT` need the row to pass a `SELECT` policy, which is the
+    // read grant's job — measured against a live cluster, where holding only the write grant
+    // fails with the *same* message a scope refusal gives.
+    const db = fakeVerdictDb();
+    const store = new PostgresIntegrityVerdictStore(db.conn);
+    const platform = reportFor({ scope: null, anchors: null });
+    await store.record(integrityVerdictInputFor(platform, anchorAt("d".repeat(64), 9)));
+    expect(db.captured[0]?.sql).toBe("SELECT set_config('app.platform_record_write', 'on', true)");
+    expect(db.captured[1]?.sql).toBe(SET_PLATFORM_AUDIT_SQL);
+    expect(db.settings[0]).toEqual({
+      tenant: null,
+      platformAudit: true,
+      platformRecordWrite: true,
+    });
+  });
+
+  it("a tenant-scope write claims neither platform grant, only that tenant's context", async () => {
+    // The isolation policy is still the only route to a tenant row, and it still demands the
+    // tenant's context: a write elevation buys nothing here.
+    const db = fakeVerdictDb();
+    const store = new PostgresIntegrityVerdictStore(db.conn);
+    await store.record(integrityVerdictInputFor(reportFor(), anchorAt("e".repeat(64), 10)));
+    expect(db.captured.some((c) => c.sql.includes("app.platform_record_write"))).toBe(false);
+    expect(db.captured.some((c) => c.sql.includes("app.platform_audit"))).toBe(false);
+    expect(db.settings[0]).toEqual({
+      tenant: TENANT_A,
+      platformAudit: false,
+      platformRecordWrite: false,
+    });
+  });
+
+  it("refuses a platform-scope insert made under the read grant alone", async () => {
+    // The defect this split closes, asserted from the policy's side: before it, the single
+    // `ALL`-scope policy ORed the read grant into its `USING`, which on an `ALL` policy is also the
+    // `WITH CHECK` — so a session holding only `app.platform_audit` could forge a `verified`
+    // verdict at any scope. Twelve such forgeries succeeded live as a non-owner role before, and
+    // none does after.
+    const db = fakeVerdictDb();
+    const platform = storedIntegrityReportFor(reportFor({ scope: null, anchors: null }));
+    await expect(
+      withPlatformAudit(db.conn, (tx) =>
+        tx.query(
+          "INSERT INTO meta.audit_integrity_verdicts (verdict_id, tenant_id) VALUES ($1, $2)",
+          [integrityVerdictIdFor(platform), null],
+        ),
+      ),
+    ).rejects.toThrow(/violates row-level security policy/);
   });
 
   it("binds the tenant id as a WHERE predicate too, not relying on RLS alone", async () => {
@@ -516,13 +608,15 @@ describe("integrity-verdict-store — record", () => {
     expect(db.captured[0]?.sql).toContain("app.current_tenant_id");
   });
 
-  it("writes a platform verdict under the elevation, since NULL fails tenant isolation", async () => {
+  it("writes a platform verdict under the write elevation, since NULL fails tenant isolation", async () => {
     const db = fakeVerdictDb();
     const store = new PostgresIntegrityVerdictStore(db.conn);
     const result = await store.record(
       integrityVerdictInputFor(reportFor({ scope: null, anchors: null }), anchorAt("d".repeat(64), 6)),
     );
-    expect(db.captured[0]?.sql).toBe(SET_PLATFORM_AUDIT_SQL);
+    // The *write* grant leads now: the read grant it used to rely on is `SELECT`-scoped and so
+    // cannot serve an insert's `WITH CHECK`.
+    expect(db.captured[0]?.sql).toBe("SELECT set_config('app.platform_record_write', 'on', true)");
     expect(result.record.scope).toBeNull();
     expect(result.record.anchorsChecked).toBe(0);
   });

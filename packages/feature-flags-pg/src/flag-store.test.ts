@@ -422,7 +422,11 @@ describe("listActiveForEnvironment", () => {
       mockConnection(capture, () => EMPTY),
     ).listActiveForEnvironment("production", 10, TENANT);
     expect(capture[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
-    expect(capture[1]?.params).toEqual(['["production"]', 10]);
+    // The tenant context *and* the predicate beside it: the context is what confines a non-owner,
+    // the predicate is what confines the owner, and the limit now rides on $3.
+    expect(capture[1]?.sql).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+    expect(capture[1]?.sql).toContain("LIMIT $3");
+    expect(capture[1]?.params).toEqual(['["production"]', TENANT, 10]);
   });
 });
 
@@ -464,5 +468,86 @@ describe("refusing a hand-edited row on the way out", () => {
   it("refuses an expiry that precedes creation", () => {
     const row = { ...flagRow(flag()), expires_at: "2020-01-01T00:00:00.000Z" };
     expect(() => rowToFeatureFlag(row)).toThrow(/expiresAt must be after createdAt/);
+  });
+});
+
+describe("the scope predicate every read carries beside RLS", () => {
+  /** The read under test, found by what it is rather than by where it sits. */
+  function read(capture: readonly Captured[]): Captured {
+    const found = capture.find((c) => c.sql.includes("FROM meta.feature_flags"));
+    if (found === undefined) throw new Error("no read was issued");
+    return found;
+  }
+
+  /** The predicate, separated from the projection — `tenant_id` is a selected column too. */
+  function where(captured: Captured): string {
+    const at = captured.sql.indexOf("WHERE");
+    if (at < 0) throw new Error(`read carried no WHERE clause: ${captured.sql}`);
+    return captured.sql.slice(at);
+  }
+
+  it("asks for the platform scope by name on load, which answered with a tenant's flag as the owner", async () => {
+    const capture: Captured[] = [];
+    await new PostgresFeatureFlagStore(mockConnection(capture, () => EMPTY)).load(FLAG_ID);
+    expect(where(read(capture))).toContain("tenant_id IS NULL");
+    expect(where(read(capture))).not.toContain("tenant_id = $");
+  });
+
+  it("keeps the platform's flags in a tenant's answer, because that is what a non-owner was shown", async () => {
+    // `meta.feature_flags`' own catalog comment: a platform-wide flag is *meant* to be evaluated by
+    // every tenant's gateway. So the tenant arm reproduces the isolation policy OR'd with the
+    // `SELECT`-scoped platform read arm, rather than narrowing it.
+    const capture: Captured[] = [];
+    await new PostgresFeatureFlagStore(mockConnection(capture, () => EMPTY)).load(FLAG_ID, TENANT);
+    expect(where(read(capture))).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+    expect(read(capture).params).toEqual([FLAG_ID, TENANT]);
+  });
+
+  it("scopes loadByKey, whose table-wide unique key is exactly what hid the defect", async () => {
+    const platform: Captured[] = [];
+    await new PostgresFeatureFlagStore(mockConnection(platform, () => EMPTY)).loadByKey(
+      "gateway.strict_jwt_aud",
+    );
+    expect(where(read(platform))).toContain("tenant_id IS NULL");
+
+    const tenant: Captured[] = [];
+    await new PostgresFeatureFlagStore(mockConnection(tenant, () => EMPTY)).loadByKey(
+      "gateway.strict_jwt_aud",
+      TENANT,
+    );
+    expect(where(read(tenant))).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+  });
+
+  it("scopes the environment list before its LIMIT, so another scope cannot displace the page", async () => {
+    const platform: Captured[] = [];
+    await new PostgresFeatureFlagStore(
+      mockConnection(platform, () => EMPTY),
+    ).listForEnvironment("production", 5);
+    expect(where(read(platform))).toContain("tenant_id IS NULL");
+    expect(read(platform).sql).toContain("LIMIT $2");
+    expect(read(platform).params).toEqual(['["production"]', 5]);
+
+    const tenant: Captured[] = [];
+    await new PostgresFeatureFlagStore(
+      mockConnection(tenant, () => EMPTY),
+    ).listForEnvironment("production", 5, TENANT);
+    expect(where(read(tenant))).toContain("(tenant_id = $2 OR tenant_id IS NULL)");
+    expect(read(tenant).sql).toContain("LIMIT $3");
+    expect(read(tenant).params).toEqual(['["production"]', TENANT, 5]);
+  });
+
+  it("never spells a scope as IS NOT DISTINCT FROM, which is unindexable", async () => {
+    const capture: Captured[] = [];
+    const store = new PostgresFeatureFlagStore(mockConnection(capture, () => EMPTY));
+    await store.load(FLAG_ID, TENANT);
+    await store.loadByKey("a.b", TENANT);
+    await store.listForEnvironment("production", 5, TENANT);
+    await store.listActiveForEnvironment("production", 5, TENANT);
+    const reads = capture.filter((c) => c.sql.includes("FROM meta.feature_flags"));
+    expect(reads).toHaveLength(4);
+    for (const r of reads) {
+      expect(r.sql).not.toContain("IS NOT DISTINCT FROM");
+      expect(where(r)).toContain("tenant_id");
+    }
   });
 });

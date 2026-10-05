@@ -17,6 +17,7 @@ import {
   type EntityStore,
   type ListPage,
   type ListQuery,
+  type ListValueType,
   type TransactionalEntityStore,
 } from "@crossengin/operate-runtime";
 
@@ -170,6 +171,12 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
         const m = idx.get(field);
         return m === undefined ? "" : `::${m.sqlType}`;
       },
+      // Derived from the column's own type rather than from `query.valueTypes`, because the
+      // column *is* the declaration here — but answered at all so the two stores order one field
+      // the same way. It is what puts this store's NULLs last in both directions, matching the
+      // JSONB store's stated placement, and what keeps a cursor whose component is `''` from
+      // binding `''::NUMERIC(p, s)`, which raises.
+      valueType: (field) => numericColumnValueType(idx.get(field)),
       idExpr: quoteIdent("id"),
     };
     const { where, orderBy } = buildListSql(query, adapter, [`${quoteIdent("tenant_id")} = $1`], params);
@@ -557,6 +564,24 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
 export function decimalSpecFromSqlType(sqlType: string): DecimalSpec | null {
   const m = /^NUMERIC\((\d+),\s*(\d+)\)(\[\])?$/.exec(sqlType);
   return m === null ? null : { precision: Number(m[1]), scale: Number(m[2]) };
+}
+
+/** The scalar SQL types the kernel emits whose values compare as numbers. */
+const NUMERIC_SQL_BASES: ReadonlySet<string> = new Set(["INTEGER", "BIGINT", "SMALLINT"]);
+
+/**
+ * A column's comparison type, read off the SQL type the kernel emitted for it.
+ *
+ * An **array** column is `text` even when its element type is numeric: the keyset cursor renders
+ * a value with `String()`, so an array's cursor component is already not a value Postgres can
+ * compare back, and claiming `numeric` would only add a NULL-placement change to an ordering that
+ * is wrong for a different reason.
+ */
+function numericColumnValueType(mapping: ColumnMapping | undefined): ListValueType {
+  if (mapping === undefined || mapping.sqlType.endsWith("[]")) return "text";
+  return NUMERIC_SQL_BASES.has(mapping.sqlType) || decimalSpecFromSqlType(mapping.sqlType) !== null
+    ? "numeric"
+    : "text";
 }
 
 /**

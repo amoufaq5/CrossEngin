@@ -1,0 +1,790 @@
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { describe, expect, it } from "vitest";
+
+import {
+  assignmentTargets,
+  auditPgColumnCoverage,
+  auditPlatformWriteArms,
+  auditScanGaps,
+  clauseOf,
+  CatalogTableSchema,
+  collectImportedNames,
+  collectModuleBindings,
+  emptyBindings,
+  extractSqlStatements,
+  foldStringConcatenations,
+  formatPgColumnViolations,
+  formatScanGaps,
+  formatUnresolvedStatements,
+  isRequiredColumn,
+  normalizeSource,
+  parseCatalogSource,
+  PG_COLUMN_VIOLATION_KINDS,
+  PG_SCAN_EXEMPT_PACKAGE_DIRS,
+  PG_SCAN_GAPS,
+  PLATFORM_WRITE_ARM_EXEMPT_TABLES,
+  platformInsertArm,
+  platformUpdateArm,
+  formatPlatformWriteArmFindings,
+  PG_STATEMENT_EXEMPTIONS,
+  PgScanGapSchema,
+  PgStatementExemptionSchema,
+  resolveBindings,
+  SQL_STATEMENT_KINDS,
+  SqlStatementSchema,
+  stripComments,
+  substituteBindings,
+  UNRESOLVED_KINDS,
+  UnresolvedStatementSchema,
+  type CatalogTable,
+  type ModuleBindings,
+  type SqlStatement,
+  type StatementTarget,
+  type UnresolvedStatement,
+} from "./pg-column-coverage.js";
+
+/* ------------------------------------------------------------------ fixtures */
+
+const TIMERS: CatalogTable = CatalogTableSchema.parse({
+  schema: "meta",
+  name: "widgets",
+  columns: [
+    { name: "id", notNull: true, hasDefault: true },
+    { name: "widget_id", notNull: true, hasDefault: false },
+    { name: "kind", notNull: true, hasDefault: false },
+    { name: "status", notNull: true, hasDefault: true },
+    { name: "note", notNull: false, hasDefault: false },
+  ],
+});
+
+function statement(over: Partial<SqlStatement> = {}): SqlStatement {
+  return SqlStatementSchema.parse({
+    file: "packages/x/src/store.ts",
+    line: 7,
+    kind: "insert",
+    schema: "meta",
+    table: "widgets",
+    columns: ["widget_id", "kind"],
+    ...over,
+  });
+}
+
+/* ---------------------------------------------------------------- the schemas */
+
+describe("the declared shape", () => {
+  it("names four statement kinds and three violation kinds", () => {
+    expect([...SQL_STATEMENT_KINDS]).toEqual(["insert", "conflict_update", "update", "select"]);
+    expect([...PG_COLUMN_VIOLATION_KINDS]).toEqual([
+      "unknown_column",
+      "missing_required_column",
+      "unknown_table",
+    ]);
+  });
+
+  it("exempts only the directory holding this scanner", () => {
+    expect([...PG_SCAN_EXEMPT_PACKAGE_DIRS]).toEqual(["packages/testing"]);
+  });
+
+  it("judges every statement it can read", () => {
+    // An empty statement-exemption list is the claim; a line added here needs a reason in the diff.
+    expect(PG_STATEMENT_EXEMPTIONS).toEqual([]);
+  });
+
+  it("every declared gap parses and carries a reason", () => {
+    for (const gap of PG_SCAN_GAPS) {
+      expect(() => PgScanGapSchema.parse(gap)).not.toThrow();
+      expect(gap.reason.length).toBeGreaterThan(20);
+    }
+  });
+
+  it("refuses an exemption with no reason and one that suspends nothing", () => {
+    expect(() =>
+      PgStatementExemptionSchema.parse({
+        file: "a",
+        table: "b",
+        kind: "insert",
+        suspends: ["unknown_column"],
+        reason: "",
+      }),
+    ).toThrow();
+    expect(() =>
+      PgStatementExemptionSchema.parse({
+        file: "a",
+        table: "b",
+        kind: "insert",
+        suspends: [],
+        reason: "x",
+      }),
+    ).toThrow();
+  });
+
+  it("a column is required only when NOT NULL and defaultless", () => {
+    expect(isRequiredColumn({ name: "a", notNull: true, hasDefault: false })).toBe(true);
+    expect(isRequiredColumn({ name: "a", notNull: true, hasDefault: true })).toBe(false);
+    expect(isRequiredColumn({ name: "a", notNull: false, hasDefault: false })).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ the rule */
+
+describe("auditPgColumnCoverage", () => {
+  it("passes an INSERT that names every required column", () => {
+    expect(auditPgColumnCoverage([TIMERS], [statement()])).toEqual([]);
+  });
+
+  it("reports a column the catalog does not declare", () => {
+    const v = auditPgColumnCoverage([TIMERS], [statement({ columns: ["widget_id", "kind", "colour"] })]);
+    expect(v.map((x) => x.kind)).toEqual(["unknown_column"]);
+    expect(v[0]?.columns).toEqual(["colour"]);
+  });
+
+  it("reports an INSERT that omits a NOT NULL column with no default", () => {
+    const v = auditPgColumnCoverage([TIMERS], [statement({ columns: ["widget_id"] })]);
+    expect(v.map((x) => x.kind)).toEqual(["missing_required_column"]);
+    expect(v[0]?.columns).toEqual(["kind"]);
+    expect(v[0]?.detail).toContain("cannot succeed against a real database");
+  });
+
+  it("does not report an omitted column that has a default, or a nullable one", () => {
+    expect(auditPgColumnCoverage([TIMERS], [statement({ columns: ["widget_id", "kind"] })])).toEqual([]);
+  });
+
+  it("holds only INSERTs to the required-column rule", () => {
+    for (const kind of ["update", "conflict_update", "select"] as const) {
+      expect(auditPgColumnCoverage([TIMERS], [statement({ kind, columns: ["note"] })])).toEqual([]);
+    }
+  });
+
+  it("still checks an UPDATE, a conflict clause and a SELECT for unknown columns", () => {
+    for (const kind of ["update", "conflict_update", "select"] as const) {
+      const v = auditPgColumnCoverage([TIMERS], [statement({ kind, columns: ["colour"] })]);
+      expect(v.map((x) => x.kind)).toEqual(["unknown_column"]);
+    }
+  });
+
+  it("reports an unknown table in a schema the catalog declares", () => {
+    const v = auditPgColumnCoverage([TIMERS], [statement({ table: "gadgets" })]);
+    expect(v.map((x) => x.kind)).toEqual(["unknown_table"]);
+  });
+
+  it("says nothing about a schema the catalog does not describe", () => {
+    // `pg_catalog`, `information_schema` and a tenant's own schema are ordinary targets; calling
+    // them unknown tables would bury every real finding under dozens of them.
+    expect(auditPgColumnCoverage([TIMERS], [statement({ schema: "pg_catalog", table: "pg_class" })])).toEqual(
+      [],
+    );
+  });
+
+  it("does not stack column findings on top of an unknown table", () => {
+    const v = auditPgColumnCoverage([TIMERS], [statement({ table: "gadgets", columns: ["nope"] })]);
+    expect(v).toHaveLength(1);
+  });
+
+  it("honours a narrow exemption and only the rules it suspends", () => {
+    const exempt = [
+      {
+        file: "packages/x/src/store.ts",
+        table: "widgets",
+        kind: "insert" as const,
+        suspends: ["missing_required_column" as const],
+        reason: "the column list is rendered from an array checked elsewhere",
+      },
+    ];
+    const stmt = statement({ columns: ["colour"] });
+    expect(auditPgColumnCoverage([TIMERS], [stmt], exempt).map((v) => v.kind)).toEqual([
+      "unknown_column",
+    ]);
+  });
+
+  it("formats one line per violation with file and line", () => {
+    const text = formatPgColumnViolations(
+      auditPgColumnCoverage([TIMERS], [statement({ columns: ["widget_id"] })]),
+    );
+    expect(text).toContain("packages/x/src/store.ts:7 [missing_required_column]");
+  });
+
+  it("every violation kind is reachable", () => {
+    const reached = new Set(
+      [
+        statement({ columns: ["colour"] }),
+        statement({ columns: ["widget_id"] }),
+        statement({ table: "gadgets" }),
+      ].flatMap((s) => auditPgColumnCoverage([TIMERS], [s]).map((v) => v.kind)),
+    );
+    expect([...reached].sort()).toEqual([...PG_COLUMN_VIOLATION_KINDS].sort());
+  });
+});
+
+/* ------------------------------------------------------------ text machinery */
+
+describe("stripComments", () => {
+  it("removes both comment forms and preserves every newline", () => {
+    const source = 'const a = 1; // name: "x"\n/* notNull\n true */\nconst b = 2;\n';
+    const stripped = stripComments(source);
+    expect(stripped).not.toContain("notNull");
+    expect(stripped).not.toContain('name: "x"');
+    expect(stripped.split("\n")).toHaveLength(source.split("\n").length);
+  });
+
+  it("leaves a `//` inside a string alone", () => {
+    expect(stripComments('const a = "http://x";')).toBe('const a = "http://x";');
+  });
+});
+
+describe("foldStringConcatenations", () => {
+  it("joins adjacent literals and keeps the separator's newlines", () => {
+    const folded = foldStringConcatenations('const q = "INSERT INTO t (a," +\n  " b)";');
+    expect(folded).toContain("INSERT INTO t (a,");
+    expect(folded).toContain("b)");
+    expect(folded.split("\n")).toHaveLength(2);
+  });
+
+  it("refuses a fold that would break the delimiter", () => {
+    const source = `const q = 'a' + "it's";`;
+    expect(foldStringConcatenations(source)).toBe(source);
+  });
+
+  it("leaves a dynamic concatenation unresolved", () => {
+    expect(foldStringConcatenations('const q = "a" + n;')).toBe('const q = "a" + n;');
+  });
+});
+
+describe("collectModuleBindings", () => {
+  const bind = (code: string): ModuleBindings =>
+    resolveBindings(collectModuleBindings(normalizeSource(code)), new Set());
+
+  it("reads a module const", () => {
+    expect(bind('const TABLE = "widgets";').strings.get("TABLE")).toBe("widgets");
+  });
+
+  it("reads a `??` default, literal or named", () => {
+    expect(bind('const s = opts.schema ?? "meta";').strings.get("s")).toBe("meta");
+    expect(bind('const D = "meta";\nconst s = opts.schema ?? D;').strings.get("s")).toBe("meta");
+  });
+
+  it("reads a parameter property and a getter", () => {
+    expect(bind('class S { private readonly schema = "meta"; }').strings.get("this.schema")).toBe("meta");
+    expect(
+      bind('const T = "widgets";\nclass S { private get table(): string { return `meta.${T}`; } }')
+        .strings.get("this.table"),
+    ).toBe("meta.widgets");
+  });
+
+  it("follows an alias through a constructor", () => {
+    const code = 'const T = "widgets";\nclass S { constructor(o) { const schema = o.schema ?? "meta"; this.schema = schema; this.table = `${this.schema}.${T}`; } }';
+    expect(bind(code).strings.get("this.table")).toBe("meta.widgets");
+  });
+
+  it("reads an array, frozen or bare, and its join", () => {
+    expect(bind('const C = Object.freeze(["a", "b"]);').arrays.get("C")).toEqual(["a", "b"]);
+    expect(bind('const C = ["a", "b"];\nconst L = C.join(", ");').strings.get("L")).toBe("a, b");
+  });
+
+  it("evaluates a map over object literals", () => {
+    const code = 'const B = [{ column: "a", bind: (r) => r.a }, { column: "b", bind: (r) => r.b }];\nconst C = B.map((e) => e.column);';
+    expect(bind(code).arrays.get("C")).toEqual(["a", "b"]);
+  });
+
+  it("marks a name bound twice to different values ambiguous rather than picking one", () => {
+    const bindings = bind('const T = "a";\nfunction f() { const T = "b"; }');
+    expect(bindings.ambiguous.has("T")).toBe(true);
+    expect(substituteBindings("${T}", bindings)).toBeNull();
+  });
+
+  it("does not invent a value for an undefaulted parameter", () => {
+    // `entity-ops.ts` takes a tenant's own table as an argument; guessing would turn a genuinely
+    // dynamic statement into a confident wrong finding.
+    expect(bind("function f(table: string) {}").strings.has("table")).toBe(false);
+  });
+});
+
+describe("collectImportedNames and the fallback", () => {
+  it("reads a named import, type-only and aliased", () => {
+    const names = collectImportedNames(
+      'import { A, type B, C as D } from "./x.js";\nimport type { E } from "./y.js";',
+    );
+    expect([...names].sort()).toEqual(["A", "B", "D", "E"]);
+  });
+
+  it("consults a sibling's binding only for a name the module imported", () => {
+    const fallback = resolveBindings(collectModuleBindings('const SHARED = "a, b";\nconst OTHER = "x";'), new Set());
+    const own = collectModuleBindings('import { SHARED } from "./records.js";');
+    const resolved = resolveBindings(own, collectImportedNames('import { SHARED } from "./records.js";'), fallback);
+    expect(resolved.strings.get("SHARED")).toBe("a, b");
+    expect(resolved.strings.has("OTHER")).toBe(false);
+  });
+});
+
+describe("substituteBindings", () => {
+  const bindings = resolveBindings(
+    collectModuleBindings('const SCHEMA = "meta";\nconst C = ["a", "b"];'),
+    new Set(),
+  );
+
+  it("resolves a name and a join", () => {
+    expect(substituteBindings("${SCHEMA}.t", bindings)).toBe("meta.t");
+    expect(substituteBindings("${C.join(', ')}", bindings)).toBe("a, b");
+  });
+
+  it("refuses rather than resolving an unknown expression to nothing", () => {
+    // A `${conditions.join(" AND ")}` resolving to "" would read as a statement with no predicate.
+    expect(substituteBindings("${conditions.join(' AND ')}", bindings)).toBeNull();
+    expect(substituteBindings("${nope}", bindings)).toBeNull();
+  });
+});
+
+describe("clauseOf and assignmentTargets", () => {
+  it("stops a SET clause at the first clause keyword", () => {
+    expect(clauseOf(" a = $1, b = $2 WHERE id = $3").trim()).toBe("a = $1, b = $2");
+    expect(clauseOf(" a = $1 RETURNING *").trim()).toBe("a = $1");
+  });
+
+  it("stops at the end of the template literal", () => {
+    expect(clauseOf(" a = $1`,\n [x])").trim()).toBe("a = $1");
+  });
+
+  it("splits on top-level commas only", () => {
+    expect(assignmentTargets("a = coalesce(x, y), b = $1").map((s) => s.trim())).toEqual(["a", "b"]);
+  });
+});
+
+/* ------------------------------------------------------- end-to-end extraction */
+
+describe("extractSqlStatements", () => {
+  const SOURCE = `
+const SCHEMA = "meta";
+const TABLE = "widgets";
+const COLS = ["widget_id", "kind"];
+export class Store {
+  async upsert(): Promise<void> {
+    await this.conn.query(
+      \`INSERT INTO \${SCHEMA}.\${TABLE} (\${COLS.join(", ")})
+       VALUES ($1, $2)
+       ON CONFLICT (widget_id) DO UPDATE
+         SET kind = EXCLUDED.kind, note = EXCLUDED.note\`,
+      [a, b],
+    );
+    await this.conn.query(\`UPDATE \${SCHEMA}.\${TABLE} SET note = $2 WHERE widget_id = $1\`, [a, b]);
+    await this.conn.query(\`SELECT widget_id, kind FROM \${SCHEMA}.\${TABLE} WHERE widget_id = $1\`, [a]);
+  }
+}
+`;
+
+  it("reads the insert, its conflict clause, the update and the select", () => {
+    const { statements, unresolved } = extractSqlStatements("f.ts", SOURCE);
+    expect(unresolved).toEqual([]);
+    expect(statements.map((s) => `${s.kind}:${s.columns.join("|")}`)).toEqual([
+      "insert:widget_id|kind",
+      "conflict_update:kind|note",
+      "select:widget_id|kind",
+      "update:note",
+    ]);
+    for (const s of statements) expect(`${s.schema}.${s.table}`).toBe("meta.widgets");
+  });
+
+  it("reports a target it cannot resolve rather than skipping it", () => {
+    const { statements, unresolved } = extractSqlStatements(
+      "f.ts",
+      "const q = `INSERT INTO ${t} (a) VALUES ($1)`;",
+    );
+    expect(statements).toEqual([]);
+    expect(unresolved.map((u) => u.kind)).toEqual(["unresolved_target"]);
+    expect(formatUnresolvedStatements(unresolved)).toContain("f.ts:1");
+  });
+
+  it("reports a column list it cannot resolve rather than skipping it", () => {
+    const { unresolved } = extractSqlStatements(
+      "f.ts",
+      'const q = `INSERT INTO meta.widgets (${cols}) VALUES ($1)`;',
+    );
+    expect(unresolved.map((u) => u.kind)).toEqual(["unresolved_columns"]);
+  });
+
+  it("silently skips a SELECT with an expression, an alias or a star", () => {
+    // A read is a bonus check held to a stricter admission rule: reporting `count(*)` as a gap
+    // would make the unresolved bucket unreadable, and an unreadable bucket is the next silence.
+    for (const sql of [
+      "SELECT count(*) FROM meta.widgets",
+      "SELECT w.kind FROM meta.widgets w",
+      "SELECT * FROM meta.widgets",
+      "SELECT kind, now() FROM meta.widgets",
+    ]) {
+      const { statements, unresolved } = extractSqlStatements("f.ts", `const q = \`${sql}\`;`);
+      expect(statements.filter((s) => s.kind === "select")).toEqual([]);
+      expect(unresolved).toEqual([]);
+    }
+  });
+
+  it("does not attribute one statement's conflict clause to another's table", () => {
+    const source = [
+      'const q1 = `INSERT INTO meta.alpha (a) VALUES ($1)`;',
+      'const q2 = `INSERT INTO meta.beta (b) VALUES ($1) ON CONFLICT (b) DO UPDATE SET b = EXCLUDED.b`;',
+    ].join("\n");
+    const { statements } = extractSqlStatements("f.ts", source);
+    const conflict = statements.find((s) => s.kind === "conflict_update");
+    expect(conflict?.table).toBe("beta");
+  });
+
+  it("sees through a literal NUL byte", () => {
+    // ADR-0332 found four source files invisible to ripgrep because they held one, discovered only
+    // because a grep for a symbol returned nothing from the file defining it. This scan reads bytes
+    // rather than lines, so a NUL is not a hiding place — pinned, so nobody has to find out twice.
+    const { statements } = extractSqlStatements(
+      "f.ts",
+      'const SCHEMA = "meta";\u0000\nconst q = `INSERT INTO ${SCHEMA}.widgets (a) VALUES ($1)`;',
+    );
+    expect(statements.map((s) => s.table)).toEqual(["widgets"]);
+  });
+
+  it("names the original file's line after comments and folds", () => {
+    const source = [
+      "// a comment",
+      "/* a block",
+      "   comment */",
+      'const q =\n  "INSERT INTO meta.widgets (a," +\n  " b) VALUES ($1, $2)";',
+    ].join("\n");
+    const { statements } = extractSqlStatements("f.ts", source);
+    expect(statements[0]?.line).toBe(5);
+  });
+});
+
+/* ---------------------------------------------------------------- scan gaps */
+
+describe("auditScanGaps", () => {
+  const entry = (over: Partial<UnresolvedStatement> = {}): UnresolvedStatement =>
+    UnresolvedStatementSchema.parse({
+      file: "packages/x/src/store.ts",
+      line: 3,
+      kind: "unresolved_columns",
+      snippet: "UPDATE on meta.widgets: unresolved interpolation in `${UPDATE_ASSIGNMENTS}`",
+      ...over,
+    });
+
+  const gap = {
+    file: "packages/x/src/store.ts",
+    expression: "UPDATE_ASSIGNMENTS",
+    reason: "rendered from an array this file's INSERT names in full",
+  };
+
+  it("accounts for a declared gap and reports an undeclared one", () => {
+    expect(auditScanGaps([entry()], [gap]).undeclared).toEqual([]);
+    const other = entry({ snippet: "UPDATE on meta.widgets: unresolved interpolation in `${other}`" });
+    expect(auditScanGaps([other], [gap]).undeclared).toHaveLength(1);
+  });
+
+  it("matches on file as well as expression", () => {
+    expect(auditScanGaps([entry({ file: "packages/y/src/store.ts" })], [gap]).undeclared).toHaveLength(1);
+  });
+
+  it("reports a gap nothing matched, because a stale exemption is a hole", () => {
+    expect(auditScanGaps([], [gap]).unused).toEqual([gap]);
+    expect(formatScanGaps([gap])).toContain("UPDATE_ASSIGNMENTS");
+  });
+
+  it("every unresolved kind is declared", () => {
+    expect([...UNRESOLVED_KINDS]).toEqual([
+      "unresolved_target",
+      "unresolved_columns",
+      "unterminated_statement",
+      "unreadable_file",
+    ]);
+  });
+});
+
+describe("auditPlatformWriteArms", () => {
+  const withPolicies = (policies: readonly string[]): CatalogTable =>
+    CatalogTableSchema.parse({
+      schema: "meta",
+      name: "widgets",
+      columns: [{ name: "tenant_id", notNull: false, hasDefault: false }],
+      policies: policies.map((command, i) => ({
+        name: `p${i.toString()}`,
+        command,
+        using: command === "INSERT" ? null : "tenant_id IS NULL",
+        check: command === "INSERT" ? "tenant_id IS NULL AND current_setting('x', true) = 'on'" : null,
+      })),
+    });
+
+  const update = (kind: "update" | "conflict_update" | "insert"): StatementTarget => ({
+    file: "packages/x/src/store.ts",
+    line: 4,
+    kind,
+    schema: "meta",
+    table: "widgets",
+  });
+
+  it("reports a platform-writable table a store updates with no UPDATE arm", () => {
+    const findings = auditPlatformWriteArms(
+      [withPolicies(["ALL", "SELECT", "INSERT"])],
+      [update("conflict_update")],
+    );
+    expect(findings.map((f) => f.table)).toEqual(["meta.widgets"]);
+    expect(findings[0]?.writers).toEqual(["packages/x/src/store.ts"]);
+    expect(formatPlatformWriteArmFindings(findings)).toContain("row-level security policy");
+  });
+
+  it("passes once the arm exists", () => {
+    expect(
+      auditPlatformWriteArms(
+        [withPolicies(["ALL", "SELECT", "INSERT", "UPDATE"])],
+        [update("conflict_update")],
+      ),
+    ).toEqual([]);
+  });
+
+  it("says nothing about a table nothing updates", () => {
+    // Append-only by contract as well as by catalog: there is no disagreement to report.
+    expect(
+      auditPlatformWriteArms([withPolicies(["ALL", "SELECT", "INSERT"])], [update("insert")]),
+    ).toEqual([]);
+  });
+
+  it("says nothing about a table with no platform INSERT arm", () => {
+    // Outside ADR-0332's split entirely, so nothing there was ever classified; the `ALL`-scope
+    // isolation policy's USING serves the UPDATE for a tenant-scoped writer.
+    expect(
+      auditPlatformWriteArms([withPolicies(["ALL"])], [update("update")]),
+    ).toEqual([]);
+  });
+
+  it("honours a table exemption", () => {
+    expect(
+      auditPlatformWriteArms(
+        [withPolicies(["ALL", "SELECT", "INSERT"])],
+        [update("update")],
+        ["meta.widgets"],
+      ),
+    ).toEqual([]);
+    expect(PLATFORM_WRITE_ARM_EXEMPT_TABLES).toEqual([]);
+  });
+});
+
+/* ------------------------------------------------------------ the real workspace */
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+const CATALOG_PATH = "packages/kernel/src/bootstrap/meta-schema.ts";
+
+function sourceFilesUnder(dir: string, out: string[]): void {
+  for (const entry of readdirSync(dir)) {
+    const absolute = join(dir, entry);
+    if (statSync(absolute).isDirectory()) sourceFilesUnder(absolute, out);
+    else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) out.push(absolute);
+  }
+}
+
+/** The workspace roots `pnpm-workspace.yaml` declares, read rather than hardcoded. */
+function workspaceRoots(): readonly string[] {
+  const yaml = readFileSync(join(REPO_ROOT, "pnpm-workspace.yaml"), "utf8");
+  const globs = [...yaml.matchAll(/^\s*-\s*['"]?([^'"\n]+?)['"]?\s*$/gm)].map((m) => m[1] ?? "");
+  const roots: string[] = [];
+  for (const glob of globs) {
+    expect(glob.endsWith("/*"), `unhandled workspace glob '${glob}'`).toBe(true);
+    const root = glob.slice(0, -2);
+    if (existsSync(join(REPO_ROOT, root))) roots.push(root);
+  }
+  return roots;
+}
+
+/**
+ * Bindings merged across one package's `src/`, used only as a fallback for names a module imports.
+ *
+ * Per package rather than per workspace, because `TABLE` means something different in every store
+ * file and merging the lot would make it ambiguous everywhere — which would turn this scan into one
+ * that finds nothing while passing.
+ */
+function mergeBindings(all: readonly ModuleBindings[]): ModuleBindings {
+  const strings = new Map<string, string>();
+  const arrays = new Map<string, readonly string[]>();
+  const ambiguous = new Set<string>();
+  for (const bindings of all) {
+    for (const [key, value] of bindings.strings) {
+      const prior = strings.get(key);
+      if (prior !== undefined && prior !== value) ambiguous.add(key);
+      else strings.set(key, value);
+    }
+    for (const [key, value] of bindings.arrays) {
+      const prior = arrays.get(key);
+      if (prior !== undefined && prior.join("\u0000") !== value.join("\u0000")) ambiguous.add(key);
+      else arrays.set(key, value);
+    }
+    for (const key of bindings.ambiguous) ambiguous.add(key);
+  }
+  return { strings, arrays, ambiguous };
+}
+
+interface WorkspaceScan {
+  readonly files: number;
+  readonly statements: readonly SqlStatement[];
+  readonly unresolved: readonly UnresolvedStatement[];
+  readonly targets: readonly StatementTarget[];
+}
+
+function scanWorkspace(): WorkspaceScan {
+  const exempt = new Set(PG_SCAN_EXEMPT_PACKAGE_DIRS);
+  const statements: SqlStatement[] = [];
+  const unresolved: UnresolvedStatement[] = [];
+  const targets: StatementTarget[] = [];
+  let files = 0;
+
+  for (const root of workspaceRoots()) {
+    for (const entry of readdirSync(join(REPO_ROOT, root))) {
+      const dir = `${root}/${entry}`;
+      if (exempt.has(dir)) continue;
+      const src = join(REPO_ROOT, dir, "src");
+      if (!existsSync(src) || !statSync(src).isDirectory()) continue;
+
+      const absolute: string[] = [];
+      sourceFilesUnder(src, absolute);
+      const texts = new Map<string, string>();
+      for (const file of absolute) {
+        const relative = file.slice(REPO_ROOT.length + 1);
+        try {
+          texts.set(relative, readFileSync(file, "utf8"));
+        } catch (error) {
+          unresolved.push(
+            UnresolvedStatementSchema.parse({
+              file: relative,
+              line: 0,
+              kind: "unreadable_file",
+              snippet: `could not be read as text: ${String(error)}`,
+            }),
+          );
+        }
+      }
+      const fallback = mergeBindings(
+        [...texts.values()].map((text) => collectModuleBindings(normalizeSource(text))),
+      );
+      for (const [relative, text] of texts) {
+        files += 1;
+        const extracted = extractSqlStatements(relative, text, fallback);
+        statements.push(...extracted.statements);
+        unresolved.push(...extracted.unresolved);
+        targets.push(...extracted.targets);
+      }
+    }
+  }
+
+  return { files, statements, unresolved, targets };
+}
+
+describe("the real workspace", () => {
+  const catalog = parseCatalogSource(readFileSync(join(REPO_ROOT, CATALOG_PATH), "utf8"));
+  const scan = scanWorkspace();
+  const metaStatements = scan.statements.filter((s) => s.schema === "meta");
+
+  it("read the catalog, rather than silently reading nothing", () => {
+    // Every assertion below is vacuous if the catalog came back empty — which it did, once, because
+    // `META_TABLES`' opening bracket was found in `readonly TableDefinition[]`. So the shape of the
+    // catalog is asserted before it is used for anything.
+    expect(catalog.length).toBeGreaterThanOrEqual(145);
+    const timers = catalog.find((t) => t.name === "workflow_timers");
+    expect(timers?.columns.map((c) => c.name)).toContain("kind");
+    expect(timers?.columns.find((c) => c.name === "kind")).toEqual({
+      name: "kind",
+      notNull: true,
+      hasDefault: false,
+    });
+    // A column with a default is not required; one that is a primary-key member is, said or not.
+    const tenants = catalog.find((t) => t.name === "tenants");
+    expect(tenants?.columns.find((c) => c.name === "id")?.hasDefault).toBe(true);
+    const required = tenants?.columns.filter((c) => isRequiredColumn(c)).map((c) => c.name) ?? [];
+    expect(required).toContain("slug");
+    expect(required).toContain("schema_name");
+    // `id` has `uuid_generate_v7()` and `status` has `'active'`: a default makes a NOT NULL column
+    // optional in an INSERT, which is the distinction a restated list keeps getting wrong.
+    expect(required).not.toContain("id");
+    expect(required).not.toContain("status");
+  });
+
+  it("scanned the workspace, rather than silently finding nothing", () => {
+    // The failure mode this file exists to prevent is a check that passes because its extraction
+    // reached nothing. So the coverage is asserted as a floor, and a drop in it fails here.
+    expect(scan.files).toBeGreaterThanOrEqual(700);
+    expect(metaStatements.length).toBeGreaterThanOrEqual(200);
+    expect(new Set(metaStatements.map((s) => s.table)).size).toBeGreaterThanOrEqual(60);
+    expect(metaStatements.filter((s) => s.kind === "insert").length).toBeGreaterThanOrEqual(45);
+    const files = new Set(scan.statements.map((s) => s.file));
+    expect(files).toContain("packages/workflow-runtime-pg/src/timer-store.ts");
+    expect(files).toContain("packages/feature-flags-pg/src/flag-store.ts");
+    expect(files).toContain("apps/operate-server/src/audit-log-store.ts");
+  });
+
+  it("every statement it could not read is a declared gap (ADR-0332)", () => {
+    // The loud unknown bucket. A statement this scan cannot parse must be *named*, with the reason
+    // it cannot be parsed, or it is the next silence rather than the end of this one.
+    const { undeclared } = auditScanGaps(scan.unresolved);
+    expect(formatUnresolvedStatements(undeclared)).toBe("");
+  });
+
+  it("every declared gap still describes a real statement", () => {
+    // A gap nothing matches is a hole waiting for a statement of that shape, exactly as the
+    // typecheck rule asserts its exempt directories still exist.
+    const { unused } = auditScanGaps(scan.unresolved);
+    expect(formatScanGaps(unused)).toBe("");
+  });
+
+  it("no statement names a column the catalog does not declare, or omits one it requires", () => {
+    const violations = auditPgColumnCoverage(catalog, scan.statements, PG_STATEMENT_EXEMPTIONS);
+    expect(formatPgColumnViolations(violations)).toBe("");
+  });
+
+  it("would catch the defect it was written for", () => {
+    // The scan finding nothing is indistinguishable from the scan being broken, so one real
+    // statement is mutated and the rule is asked about it: `meta.workflow_timers` without `kind` is
+    // the live defect this increment found by hand.
+    const timers = scan.statements.find(
+      (s) => s.table === "workflow_timers" && s.kind === "insert",
+    );
+    expect(timers).toBeDefined();
+    const withoutKind = SqlStatementSchema.parse({
+      ...timers,
+      columns: timers?.columns.filter((c) => c !== "kind"),
+    });
+    const violations = auditPgColumnCoverage(catalog, [withoutKind]);
+    expect(violations.map((v) => v.kind)).toEqual(["missing_required_column"]);
+    expect(violations[0]?.columns).toEqual(["kind"]);
+
+    const renamed = SqlStatementSchema.parse({ ...timers, columns: ["timer_id", "knid"] });
+    expect(auditPgColumnCoverage(catalog, [renamed]).map((v) => v.kind)).toEqual([
+      "unknown_column",
+      "missing_required_column",
+    ]);
+  });
+
+  it("every platform-writable table a store updates has an UPDATE arm (ADR-0332)", () => {
+    // The second axis of the same class: a fake `PgConnection` answers every statement, so it is
+    // blind to the policy for exactly the reason it is blind to a missing column. Lane C of this
+    // increment found `meta.dr_drill_executions` classified append-only from its INSERT-only store
+    // rather than from its contract, and a platform-scope upsert was refused by RLS.
+    const findings = auditPlatformWriteArms(
+      catalog,
+      scan.targets,
+      PLATFORM_WRITE_ARM_EXEMPT_TABLES,
+    );
+    expect(formatPlatformWriteArmFindings(findings)).toBe("");
+  });
+
+  it("reads the policy arms it reasons about, rather than finding none", () => {
+    // Without this the rule above passes vacuously whenever the policy parse breaks.
+    const flags = catalog.find((t) => t.name === "feature_flags");
+    expect(new Set(flags?.policies.map((p) => p.command))).toEqual(
+      new Set(["ALL", "SELECT", "INSERT", "UPDATE"]),
+    );
+    expect(platformInsertArm(flags ?? ({} as never))?.name).toBe("feature_flags_platform_write");
+    expect(platformUpdateArm(flags ?? ({} as never))?.name).toBe("feature_flags_platform_update");
+    const split = catalog.filter((t) => platformInsertArm(t) !== undefined);
+    expect(split.length).toBeGreaterThanOrEqual(30);
+    expect(split.filter((t) => platformUpdateArm(t) !== undefined).length).toBeGreaterThanOrEqual(12);
+    // A table with no platform arm at all is outside the rule, and most of the catalog is.
+    expect(catalog.filter((t) => platformInsertArm(t) === undefined).length).toBeGreaterThan(100);
+  });
+
+  it("defaults to no fallback bindings", () => {
+    expect(emptyBindings().strings.size).toBe(0);
+    expect(emptyBindings().arrays.size).toBe(0);
+    expect(emptyBindings().ambiguous.size).toBe(0);
+  });
+});

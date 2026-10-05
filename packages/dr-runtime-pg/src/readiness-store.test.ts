@@ -24,6 +24,10 @@ function written(capture: readonly Captured[]): Captured {
 const NOW = "2026-06-02T12:00:00.000Z";
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
+function report() {
+  return assessDrReadiness({});
+}
+
 function record(snapshotId = "drr_snap0001") {
   const report = assessDrReadiness({});
   return readinessSnapshotRecordFrom(report, {
@@ -45,6 +49,28 @@ describe("PostgresDrReadinessStore.record", () => {
     expect(written(capture).params?.[1]).toBe(TENANT);
     expect(written(capture).params?.[2]).toBe(true);
     expect(written(capture).params?.[3]).toBe(0);
+  });
+
+  it("keeps DO NOTHING deliberately, and is not the upsert the other two stores needed", async () => {
+    // The failover and drill stores wrote `DO NOTHING` on a path the executor uses as an upsert, so
+    // every transition after the first was dropped in silence. A readiness snapshot is not that
+    // shape: no runtime method takes a report and returns a changed one under the same id, and
+    // `readinessSnapshotRecordFrom` mints a fresh `drr_…` per assessment — so the only way to reach
+    // this conflict is a caller repeating an explicit id, which means "write this once".
+    //
+    // The catalog agrees: `meta.dr_readiness_snapshots` has no `UPDATE` policy arm, so a
+    // platform-scope snapshot is immutable-by-RLS once written. A later assessment rewriting an
+    // earlier verdict under its id is the thing this must not become.
+    const capture: Captured[] = [];
+    await new PostgresDrReadinessStore(mockConnection(capture)).record(record());
+    expect(written(capture).sql).toContain("DO NOTHING");
+    expect(written(capture).sql).not.toContain("DO UPDATE");
+  });
+
+  it("mints a different snapshot id per assessment, so the conflict is unreachable by default", () => {
+    const a = readinessSnapshotRecordFrom(report(), { tenantId: TENANT, generatedAt: NOW });
+    const b = readinessSnapshotRecordFrom(report(), { tenantId: TENANT, generatedAt: NOW });
+    expect(a.snapshotId).not.toBe(b.snapshotId);
   });
 
   it("serializes the full report as a json string", async () => {
@@ -85,7 +111,7 @@ describe("PostgresDrReadinessStore.listRecent / latest", () => {
     const store = new PostgresDrReadinessStore(
       mockConnection(capture, { rows: [dbRow], rowCount: 1 }),
     );
-    const rows = await store.listRecent(5);
+    const rows = await store.listRecent(null, 5);
     expect(capture[0]?.sql).toContain("ORDER BY generated_at DESC");
     expect(capture[0]?.params?.[0]).toBe(5);
     expect(rows[0]?.snapshotId).toBe("drr_snap0001");
@@ -96,7 +122,7 @@ describe("PostgresDrReadinessStore.listRecent / latest", () => {
     const store = new PostgresDrReadinessStore(
       mockConnection(undefined, { rows: [dbRow], rowCount: 1 }),
     );
-    const row = await store.latest();
+    const row = await store.latest(null);
     expect(row?.snapshotId).toBe("drr_snap0001");
     expect(row?.ready).toBe(true);
   });
@@ -105,7 +131,7 @@ describe("PostgresDrReadinessStore.listRecent / latest", () => {
     const store = new PostgresDrReadinessStore(
       mockConnection(undefined, { rows: [], rowCount: 0 }),
     );
-    expect(await store.latest()).toBeNull();
+    expect(await store.latest(null)).toBeNull();
   });
 
   it("parses a json string report column", async () => {
@@ -115,13 +141,13 @@ describe("PostgresDrReadinessStore.listRecent / latest", () => {
         rowCount: 1,
       }),
     );
-    const row = await store.latest();
+    const row = await store.latest(null);
     expect(row?.report.ready).toBe(true);
   });
 
   it("rejects a non-positive listRecent limit", async () => {
     const store = new PostgresDrReadinessStore(mockConnection());
-    await expect(store.listRecent(0)).rejects.toThrow();
+    await expect(store.listRecent(null, 0)).rejects.toThrow();
   });
 });
 
@@ -144,7 +170,7 @@ describe("the platform write arm", () => {
 
   it("claims nothing at all on a read, which the split left unchanged", async () => {
     const capture: Captured[] = [];
-    await new PostgresDrReadinessStore(mockConnection(capture)).listRecent(5);
+    await new PostgresDrReadinessStore(mockConnection(capture)).listRecent(null, 5);
     expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 });

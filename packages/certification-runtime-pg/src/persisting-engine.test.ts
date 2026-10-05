@@ -30,7 +30,7 @@ describe("buildPersistentCertificationEngine", () => {
     expect(report.certifiable).toBe(true);
     expect(verifyCertificationReportSeal(report)).toBe(true);
 
-    const stored = await pe.store.getByReportId(report.reportId);
+    const stored = await pe.store.getByReportId(report.reportId, TENANT);
     expect(stored).not.toBeNull();
     expect(stored?.tenantId).toBe(TENANT);
     expect(stored?.framework).toBe("soc2_type2");
@@ -46,7 +46,7 @@ describe("buildPersistentCertificationEngine", () => {
     );
     expect(reports).toHaveLength(2);
 
-    const persisted = await pe.store.listRecent();
+    const persisted = await pe.store.listRecent(100, TENANT);
     expect(persisted).toHaveLength(2);
     expect(new Set(persisted.map((r) => r.framework))).toEqual(
       new Set(["soc2_type2", "hipaa_security_rule"]),
@@ -59,7 +59,7 @@ describe("buildPersistentCertificationEngine", () => {
     const report = await pe.certify("hipaa_security_rule", []);
     expect(report.certifiable).toBe(false);
 
-    const stored = await pe.store.latestForFramework("hipaa_security_rule");
+    const stored = await pe.store.latestForFramework("hipaa_security_rule", TENANT);
     expect(stored?.certifiable).toBe(false);
     expect(stored?.controlsNotAssessed).toBe(4);
   });
