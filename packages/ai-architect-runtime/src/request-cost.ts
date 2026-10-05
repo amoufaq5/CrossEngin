@@ -1,12 +1,6 @@
 import type { ProviderPricing } from "@crossengin/ai-providers";
 
-/**
- * Characters per token, used to turn a prompt's length into an input-token count.
- * Deliberately pessimistic for English prose + JSON (real tokenizers average nearer
- * 3.7) because the number feeds a ceiling: over-counting delays a request, while
- * under-counting admits one that should have been refused.
- */
-export const ESTIMATED_CHARS_PER_TOKEN = 3.5;
+import { ESTIMATED_CHARS_PER_TOKEN, estimateTokensFromScript } from "./script-tokens.js";
 
 export function estimateTokensFromChars(chars: number): number {
   if (chars <= 0) return 0;
@@ -23,6 +17,13 @@ export interface RequestCostEstimateInput {
   readonly pricing: ProviderPricing;
   /** Total characters of everything the request will send (system + history + user). */
   readonly promptChars: number;
+  /**
+   * The prompt's actual text, which lets the input side be priced per script rather than at
+   * one ratio for every language (`scriptTokenProfile`). Optional because a caller may only
+   * hold a length; when both are given the estimate is the **greater** of the two, so passing
+   * the text can only ever raise the figure and never lower the one `promptChars` produced.
+   */
+  readonly promptText?: readonly string[];
   /** The request's `maxTokens`. Absent means the caller declared no output ceiling. */
   readonly maxOutputTokens?: number;
   readonly cachedInputTokens?: number;
@@ -74,8 +75,21 @@ function priceTokens(
   );
 }
 
+/**
+ * The input-token count, taking the worse of the two readings when both are available. A
+ * script-aware scan is the better estimate for CJK and for anything outside the BMP, and a
+ * character count is the better one for a prompt the caller only measured — so the maximum is
+ * the composition that cannot be worse than either, which is the only composition a ceiling's
+ * input may use.
+ */
+export function estimateInputTokens(input: RequestCostEstimateInput): number {
+  const fromChars = estimateTokensFromChars(input.promptChars);
+  if (input.promptText === undefined) return fromChars;
+  return Math.max(fromChars, estimateTokensFromScript(input.promptText));
+}
+
 export function estimateRequestCost(input: RequestCostEstimateInput): RequestCostEstimate {
-  const inputTokens = estimateTokensFromChars(input.promptChars);
+  const inputTokens = estimateInputTokens(input);
   const inflation = input.inflation !== undefined && input.inflation > 1 ? input.inflation : 1;
 
   if (input.maxOutputTokens === undefined) {
@@ -151,7 +165,10 @@ export function admitRequestCost(
  * What to do once a request's real cost is known. An estimate is not a guarantee, so
  * the three outcomes are deliberately different in kind:
  *
- * - `within_estimate` — nothing to do.
+ * - `within_estimate` — nothing to *do*, but it still carries `ratio`. A durable inflation
+ *   factor relaxes only when a new observation arrives, and an observation under the estimate
+ *   is the only kind that is evidence the estimator has stopped being optimistic. Omitting it
+ *   here would leave the stored correction with nothing to ever bring it back down.
  * - `over_estimate` — the estimator was optimistic but the ceiling held. The actual
  *   cost is still charged in full (clamping it to the estimate would make the monthly
  *   ceiling under-count, which is the one direction that must never happen), and
@@ -161,7 +178,12 @@ export function admitRequestCost(
  *   what remains is to stop guessing, which is why the caller seals the session.
  */
 export type CostOverrunVerdict =
-  | { readonly kind: "within_estimate"; readonly actualDollars: number }
+  | {
+      readonly kind: "within_estimate";
+      readonly actualDollars: number;
+      readonly estimatedDollars?: number;
+      readonly ratio?: number;
+    }
   | {
       readonly kind: "over_estimate";
       readonly actualDollars: number;
@@ -200,7 +222,12 @@ export function reconcileRequestCost(input: {
       ...(ratio !== undefined ? { ratio } : {}),
     };
   }
-  return { kind: "within_estimate", actualDollars };
+  return {
+    kind: "within_estimate",
+    actualDollars,
+    estimatedDollars,
+    ...(ratio !== undefined ? { ratio } : {}),
+  };
 }
 
 export type StreamMeterVerdict = "continue" | "abort";

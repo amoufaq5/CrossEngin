@@ -283,6 +283,29 @@ export interface DeletionSchedulerOptions {
    * figure is what lets it show the condition hardening rather than repeat one sentence.
    */
   readonly onSweepStall?: (stall: TombstoneSweepStall) => void | Promise<void>;
+  /**
+   * The sweep is covering ground again, after a stall was reported (ADR-0329). Awaited.
+   *
+   * **Edge-triggered, and only after a stall was actually announced** — a deployment that has never
+   * stalled never hears from this, so a sink may treat every call as a real transition rather than
+   * having to remember whether it was ever told the opposite.
+   *
+   * **And the transition is conclusive, which is unusual in this family.** Elsewhere an absence is
+   * only an inference — ADR-0322 will not apply `never_committed` because "not committed" and "not
+   * committed yet" are indistinguishable. Here the stall lifting is not an absence of bad news: it
+   * is reset in exactly one place, the branch below that a page takes *after* it moved the cursor or
+   * reached the end of the table. So a recovery is positive evidence that a page came back and
+   * covered ground, which is precisely what the stall claimed was not happening.
+   *
+   * Given the whole progress rather than a bare signal, because the useful part is the evidence —
+   * `lastAdvanceAt`, the cursor, the lap — and a sink that only logged "recovered" would say less
+   * than the stall line it is answering.
+   *
+   * Retried on the next audit tick if it throws, for the reason the escalation is: the condition is
+   * re-derived from state that is still there, and a resolution lost to a transport blip would leave
+   * an alert up for a sweep that is working.
+   */
+  readonly onSweepRecovered?: (progress: TombstoneSweepProgress) => void | Promise<void>;
   /** Forwarded as-is, so the reconciler's own default governs when it is absent. */
   readonly auditLimit?: number;
   /**
@@ -380,6 +403,16 @@ export class DeletionScheduler {
    */
   private attemptsWithoutAdvance = 0;
   private pagesWithoutAdvance = 0;
+  /**
+   * Whether a stall has been announced and not yet answered — the edge `onSweepRecovered` fires on.
+   *
+   * On the instance and untouched by `start()`/`stop()`, for the reason `ticks` is: a scheduler
+   * restarted around a config reload has not stopped stalling, and a flag that reset there would
+   * swallow the recovery for a condition that was announced before the reload. Cleared only after
+   * the sink has accepted the recovery, so a throwing sink is retried on the next audit tick rather
+   * than leaving an alert up for a sweep that is working.
+   */
+  private stallReported = false;
 
   constructor(private readonly opts: DeletionSchedulerOptions) {}
 
@@ -511,7 +544,19 @@ export class DeletionScheduler {
     }
     try {
       const stall = this.stall();
-      if (stall !== null) await this.opts.onSweepStall?.(stall);
+      if (stall !== null) {
+        // Set *before* the await, so a sink that throws on the way out still leaves the edge armed:
+        // the recovery is what closes an incident, and losing it would strand one open for a sweep
+        // that recovered. The cost of arming it on a failed announcement is a recovery for an
+        // episode nothing opened, which every resolution here answers `none` to.
+        this.stallReported = true;
+        await this.opts.onSweepStall?.(stall);
+      } else if (this.stallReported) {
+        await this.opts.onSweepRecovered?.(this.sweepProgress());
+        // After, and only on success — the opposite order from above, and for the mirrored reason: a
+        // recovery that did not land must be re-offered on the next audit tick.
+        this.stallReported = false;
+      }
     } catch (err) {
       this.opts.onError?.(err);
     }

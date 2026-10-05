@@ -936,13 +936,43 @@ describe("designManifest — diagnosable failure classification (ADR-0280)", () 
   });
 
   it("tells a fenced model to drop the fence specifically", async () => {
+    // The payload inside the fence is *malformed*, not a well-formed object answering another
+    // question. That distinction became load-bearing in ADR-0330: `object_not_manifest` — a JSON
+    // object with none of the manifest's keys — is now `wrong_question` and is not retried at all,
+    // so a fenced `{"reply":"no"}` would never reach a corrective. Broken syntax inside a fence
+    // still is a delivery problem, which is what this test is about.
     const { provider, requests } = mockProvider([
-      textTurn('```json\n{"reply": "no"}\n```'),
+      textTurn('```json\n{"entities": [,]}\n```'),
       textTurn(VALID_JSON),
     ]);
     await designManifest({ provider, description: "desc" });
     const corrective = requests[1]?.messages.filter((m) => m.role === "user").at(-1);
     expect(corrective?.content).toContain("code fence");
+  });
+
+  it("does not ask again when the model answered a different question", async () => {
+    // ADR-0330. The loop used to retry **every** non-manifest shape, which is the blind retry
+    // ADR-0311 warned about: a well-formed object or array that is not a manifest is the model
+    // answering something else, and asking again buys the same wrong answer for another paid call.
+    const { provider, requests } = mockProvider([
+      textTurn('{"reply": "no"}'),
+      textTurn(VALID_JSON),
+    ]);
+    const out = await designManifest({ provider, description: "desc" });
+    expect(out.ok).toBe(false);
+    // One call, not two: the second turn was never asked for.
+    expect(requests).toHaveLength(1);
+  });
+
+  it("still asks again when the failure was only in the delivery", async () => {
+    // The other side of the same line, so the change is a narrowing and not a blanket stop.
+    const { provider, requests } = mockProvider([
+      textTurn("not json at all"),
+      textTurn(VALID_JSON),
+    ]);
+    const out = await designManifest({ provider, description: "desc" });
+    expect(out.ok).toBe(true);
+    expect(requests).toHaveLength(2);
   });
 
   it("tells a truncating model to produce a smaller manifest", async () => {

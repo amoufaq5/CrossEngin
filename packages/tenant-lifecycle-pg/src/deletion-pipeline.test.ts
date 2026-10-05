@@ -57,6 +57,12 @@ function harness(
     readonly sharedRows?: Readonly<Record<string, number>>;
     /** Bare names the shared probe reports `row_security_active` for. */
     readonly confined?: readonly string[];
+    /**
+     * Qualified table → rows a `count(*)` still sees. Drives both passes: the confirm-absence check
+     * over the erasable tables (where a non-zero throws) and the statutory census (where a non-zero
+     * is the retention being claimed).
+     */
+    readonly remaining?: Readonly<Record<string, number>>;
   } = {},
 ): Harness {
   const calls: { sql: string; params: readonly unknown[] }[] = [];
@@ -79,7 +85,7 @@ function harness(
         return { rows: [{ n, bytes: n * 100 }], rowCount: 1 };
       }
       if (sql.startsWith("SELECT count(*) AS n FROM")) {
-        return { rows: [{ n: 0 }], rowCount: 1 };
+        return { rows: [{ n: opts.remaining?.[relationOf(sql)] ?? 0 }], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
     }) as PgConnection["query"],
@@ -477,9 +483,10 @@ describe("deleteTenantAtomically", () => {
       "meta.operate_entity_records",
     ]);
     expect(out.erasedSharedTables.rowCount).toBe(9);
-    // Coverage, which the scope deliberately does not carry: 96 of the catalog's 112 tenant-scoped
-    // tables examined, 16 left by the retention set.
-    expect(out.erasedSharedTables.examinedTables).toHaveLength(96);
+    // Coverage, which the scope deliberately does not carry: 95 of the catalog's 113 tenant-scoped
+    // tables examined, 18 left — 16 as the platform's record of the deletion and 2 under a statutory
+    // obligation.
+    expect(out.erasedSharedTables.examinedTables).toHaveLength(95);
     expect(out.erasedSharedTables.retainedTables).toHaveLength(RETAINED_SHARED_TABLES.length);
   });
 
@@ -494,6 +501,77 @@ describe("deleteTenantAtomically", () => {
     expect(out.ok).toBe(true);
     if (!out.ok) return;
     expect(out.erasedSharedTables.tables).toEqual(["platform.operate_entity_records"]);
+  });
+
+  /**
+   * The combined claim reaching the stored proof: `shared_tables` destroys most of the catalog's
+   * tenant-scoped tables and lawfully keeps the statutory ones, and since the fourth outcome exists
+   * the tombstone says both in one attestation with one provenance.
+   */
+  it("attests erased_and_retained when the statutory tables still hold rows", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, remaining: { "meta.invoices": 3 } });
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const shared = out.stored.attestations.find((a) => a.subsystem === "shared_tables");
+    expect(shared?.outcome).toBe("erased_and_retained");
+    expect(shared?.retainedObligations).toEqual(["tax_records_7y"]);
+    expect(shared?.retainedDataReference).toBe("meta.invoices");
+    // The figures are still only what was destroyed, and the record's scope still verifies.
+    expect(shared?.scope?.rowCount).toBe(9);
+    expect(verifyTombstoneHashes(out.stored.record)).toEqual({
+      contentManifestOk: true,
+      proofOk: true,
+    });
+  });
+
+  it("derives the record's retention prose from that attestation rather than a caller", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, remaining: { "meta.invoices": 3 } });
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.stored.record.retainedReason).toBe(
+      "retained under legal obligation — shared_tables: tax_records_7y",
+    );
+    expect(out.stored.record.retainedDataReference).toBe("meta.invoices");
+  });
+
+  it("attests plain erased when the tenant held nothing under an obligation", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const shared = out.stored.attestations.find((a) => a.subsystem === "shared_tables");
+    expect(shared?.outcome).toBe("erased");
+    expect(out.stored.record.retainedReason).toBeUndefined();
+  });
+
+  it("reports the lawful retention on the outcome, as obligations and a pointer", async () => {
+    const h = harness(
+      {},
+      { sharedRows: SHARED_ROWS, remaining: { "meta.invoices": 3, "meta.tenant_credits": 1 } },
+    );
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.erasedSharedTables.statutoryRetained).toEqual({
+      obligations: ["tax_records_7y"],
+      dataReference: "meta.invoices, meta.tenant_credits",
+    });
+    // No count: the figures in a proof describe what was destroyed, and the 200 body obeys the
+    // same rule the attestation does.
+    expect(Object.keys(out.erasedSharedTables.statutoryRetained ?? {}).sort()).toEqual([
+      "dataReference",
+      "obligations",
+    ]);
+  });
+
+  it("reports null rather than an empty retention when nothing is kept", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.erasedSharedTables.statutoryRetained).toBeNull();
   });
 
   it("declares its four stages", () => {

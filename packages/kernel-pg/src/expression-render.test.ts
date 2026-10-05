@@ -40,10 +40,13 @@ function probeConnection(
   };
 }
 
-function rendering(def: string): (sql: string) => PgQueryResult {
+function rendering(
+  def: string,
+  cols: readonly string[] | null = [],
+): (sql: string) => PgQueryResult {
   return (sql) =>
     sql.includes("pg_get_constraintdef")
-      ? { rows: [{ def }], rowCount: 1 }
+      ? { rows: [{ def, cols }], rowCount: 1 }
       : { rows: [], rowCount: 0 };
 }
 
@@ -182,6 +185,49 @@ describe("renderExpressions", () => {
     const conn = probeConnection([], () => ({ rows: [], rowCount: 0 }));
     const out = await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }]);
     expect(out.byRequest.get(expressionKey("widgets", "a = 1"))).toBeNull();
+  });
+
+  it("reads the probe's conkey back as the expression's column set", async () => {
+    // Verified live: a `NOT VALID` probe carries a populated `conkey`, which is how a column-level
+    // CHECK's Postgres-given name is known rather than guessed (ADR-0330).
+    const conn = probeConnection([], rendering("CHECK ((d <= a)) NOT VALID", ["d", "a"]));
+    const out = await renderExpressions(conn, "meta", [{ table: "widgets", expr: "d <= a" }]);
+    expect(out.columnsByRequest?.get(expressionKey("widgets", "d <= a"))).toEqual(["d", "a"]);
+  });
+
+  it("asks for conkey as text, so the driver does not hand back a raw name[] literal", async () => {
+    const capture: Captured[] = [];
+    const conn = probeConnection(capture, rendering("CHECK ((a = 1)) NOT VALID", ["a"]));
+    await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }]);
+    const read = capture.find((c) => c.sql.includes("pg_get_constraintdef"));
+    expect(read?.sql).toContain("a.attname::text");
+    expect(read?.sql).toContain("unnest(conkey)");
+  });
+
+  it("reports an expression over no column at all as an empty set, not as unknown", async () => {
+    const conn = probeConnection([], rendering("CHECK ((1 = 1)) NOT VALID", []));
+    const out = await renderExpressions(conn, "meta", [{ table: "widgets", expr: "1 = 1" }]);
+    expect(out.columnsByRequest?.get(expressionKey("widgets", "1 = 1"))).toEqual([]);
+  });
+
+  it("reports the column set as unknown when the probe could not be applied", async () => {
+    const conn = probeConnection([], (sql) => {
+      if (sql.includes("ADD CONSTRAINT")) throw new Error('column "nope" does not exist');
+      return { rows: [], rowCount: 0 };
+    });
+    const out = await renderExpressions(conn, "meta", [{ table: "widgets", expr: "nope = 1" }]);
+    expect(out.columnsByRequest?.get(expressionKey("widgets", "nope = 1"))).toBeNull();
+  });
+
+  it("reports the column set as unknown when the row carried no conkey column", async () => {
+    const conn = probeConnection([], (sql) =>
+      sql.includes("pg_get_constraintdef")
+        ? { rows: [{ def: "CHECK ((a = 1)) NOT VALID" }], rowCount: 1 }
+        : { rows: [], rowCount: 0 },
+    );
+    const out = await renderExpressions(conn, "meta", [{ table: "widgets", expr: "a = 1" }]);
+    expect(out.byRequest.get(expressionKey("widgets", "a = 1"))).toBe("(a = 1)");
+    expect(out.columnsByRequest?.get(expressionKey("widgets", "a = 1"))).toBeNull();
   });
 
   it("refuses an unsafe schema or table identifier", async () => {

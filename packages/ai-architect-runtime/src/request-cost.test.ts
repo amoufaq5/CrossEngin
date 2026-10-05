@@ -2,14 +2,15 @@ import type { ProviderPricing } from "@crossengin/ai-providers";
 import { describe, expect, it } from "vitest";
 
 import {
-  ESTIMATED_CHARS_PER_TOKEN,
   StreamCostMeter,
   admitRequestCost,
+  estimateInputTokens,
   estimateRequestCost,
   estimateTokensFromChars,
   estimateTokensFromText,
   reconcileRequestCost,
 } from "./request-cost.js";
+import { ESTIMATED_CHARS_PER_TOKEN } from "./script-tokens.js";
 
 const PAID: ProviderPricing = { inputPerMillionTokens: 3, outputPerMillionTokens: 15 };
 const PAID_CACHED: ProviderPricing = {
@@ -37,7 +38,83 @@ describe("token estimation", () => {
   });
 });
 
+describe("estimateInputTokens", () => {
+  it("falls back to the character count when no text is supplied", () => {
+    expect(estimateInputTokens({ pricing: PAID, promptChars: 3500 })).toBe(1000);
+  });
+
+  it("prices a CJK prompt above its character count, which the single ratio under-counted", () => {
+    const text = "你好世界";
+    const charsOnly = estimateInputTokens({ pricing: PAID, promptChars: text.length });
+    const scriptAware = estimateInputTokens({
+      pricing: PAID,
+      promptChars: text.length,
+      promptText: [text],
+    });
+    expect(scriptAware).toBeGreaterThan(charsOnly);
+    expect(scriptAware).toBe(6);
+  });
+
+  it("takes the greater of the two readings, so supplying text can never lower the figure", () => {
+    const withText = estimateInputTokens({
+      pricing: PAID,
+      promptChars: 35_000,
+      promptText: ["hi"],
+    });
+    expect(withText).toBe(10_000);
+  });
+
+  it("prices an emoji above a naive .length, where surrogate pairs go wrong", () => {
+    const text = "🙂";
+    expect(
+      estimateInputTokens({ pricing: PAID, promptChars: text.length, promptText: [text] }),
+    ).toBe(2);
+    expect(estimateInputTokens({ pricing: PAID, promptChars: text.length })).toBe(1);
+  });
+
+  it("leaves a Latin prompt priced exactly as before", () => {
+    const text = "a".repeat(3500);
+    expect(
+      estimateInputTokens({ pricing: PAID, promptChars: text.length, promptText: [text] }),
+    ).toBe(1000);
+  });
+});
+
 describe("estimateRequestCost", () => {
+  it("carries the script-aware input count into the dollar figure", () => {
+    const latin = estimateRequestCost({
+      pricing: PAID,
+      promptChars: 4,
+      promptText: ["abcd"],
+      maxOutputTokens: 0,
+    });
+    const cjk = estimateRequestCost({
+      pricing: PAID,
+      promptChars: 4,
+      promptText: ["你好世界"],
+      maxOutputTokens: 0,
+    });
+    if (latin.kind !== "bounded" || cjk.kind !== "bounded") throw new Error("bounded");
+    expect(cjk.inputTokens).toBeGreaterThan(latin.inputTokens);
+    expect(cjk.dollars).toBeGreaterThan(latin.dollars);
+  });
+
+  it("refuses a CJK prompt a ceiling would have admitted on its character count alone", () => {
+    const text = "汉".repeat(40_000);
+    const ceiling = { maxDollars: 0.04 };
+    expect(admitRequestCost(ceiling, { pricing: PAID, promptChars: text.length, maxOutputTokens: 0 }).outcome).toBe(
+      "admit",
+    );
+    expect(
+      admitRequestCost(ceiling, {
+        pricing: PAID,
+        promptChars: text.length,
+        promptText: [text],
+        maxOutputTokens: 0,
+      }).outcome,
+    ).toBe("refuse");
+  });
+
   it("prices input chars plus the declared maxTokens as the worst case", () => {
     const e = estimateRequestCost({ pricing: PAID, promptChars: 3500, maxOutputTokens: 1000 });
     expect(e.kind).toBe("bounded");
@@ -168,6 +245,18 @@ describe("reconcileRequestCost", () => {
       actualDollars: 1.4,
     });
     expect(v.kind).toBe("over_ceiling");
+  });
+
+  it("carries the ratio on within_estimate too, since only that can relax a stored factor", () => {
+    const v = reconcileRequestCost({
+      ceiling: { maxDollars: 1 },
+      estimatedDollars: 0.5,
+      actualDollars: 0.25,
+    });
+    expect(v.kind).toBe("within_estimate");
+    if (v.kind !== "within_estimate") return;
+    expect(v.ratio).toBeCloseTo(0.5, 10);
+    expect(v.estimatedDollars).toBe(0.5);
   });
 
   it("omits the ratio when the estimate was zero (a pricing bug, not estimator drift)", () => {

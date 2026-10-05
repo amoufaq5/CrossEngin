@@ -406,6 +406,13 @@ export function makeObjectName(
  * accounted for instead of reported. It never invents drift, which is the direction that matters —
  * the alternative reports every correct cross-column column check as undeclared. A table-level
  * constraint declared here always carries a name, so it is never the ambiguous case.
+ *
+ * **This is now the fallback, not the first answer** (ADR-0330). `diffColumnChecks` asks the probe's
+ * `conkey` which spelling each column check really takes and reports the live rows it matched, so
+ * the diff uses *those* names and reaches this set only when a check went unexamined — with no
+ * renderings supplied, or with a column the plan has yet to add. Keep the over-approximation for
+ * exactly that case: there, an unclaimed row may well be the check nobody looked at, and ADR-0292's
+ * rule is that unknown must not read as drift.
  */
 export function expectedCheckConstraintNames(table: TableDefinition): ReadonlySet<string> {
   const names = new Set<string>();

@@ -386,6 +386,22 @@ describe("mobile push from the environment (ADR-0327)", () => {
     expect(skips[0]).toContain("partial configuration is ignored rather than guessed");
   });
 
+  it("warns when only an endpoint override is set, which used to be silent", () => {
+    // These two were the only `FCM_*` variables absent from the evidence list, so setting an
+    // override and forgetting `FCM_PROJECT_ID` skipped push without saying anything — the one
+    // half-configuration in this file that did not announce itself.
+    for (const name of ["FCM_TOKEN_ENDPOINT", "FCM_BASE_URL"]) {
+      const skips = fcmSkips({ [name]: "https://proxy.internal.example" });
+      expect(skips, name).toHaveLength(1);
+      expect(skips[0], name).toContain("needs FCM_PROJECT_ID");
+    }
+  });
+
+  it("still says nothing when no FCM variable is set at all", () => {
+    // The other half of that rule: a deployment that wants no push is the default, not an error.
+    expect(fcmSkips({})).toEqual([]);
+  });
+
   it("refuses the private key half on its own", () => {
     const skips = fcmSkips({
       FCM_PROJECT_ID: "crossengin-prod",

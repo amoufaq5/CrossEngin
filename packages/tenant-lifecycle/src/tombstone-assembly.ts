@@ -41,6 +41,21 @@ import {
  * mentioned it and refused nothing — and every deletion in practice omitted four of the six. The
  * required list is now derived from `DeletionCapabilities`, which a deployment declares once and
  * totally: silence is not a disposition there either.
+ *
+ * `erased_and_retained` is the fourth outcome, and it exists because the alternative was a lie. A
+ * subsystem could attest exactly one disposition, so `shared_tables` — which destroys 96 tables and
+ * leaves 16 — could only call itself `erased` by defining the 16 as *not the tenant's data at all*.
+ * That holds for a forensic chain entry and fails for a sales invoice under a tax obligation, so a
+ * genuine statutory retention could be expressed only by quietly joining a set whose definition
+ * denies it. The outcome splits the claim without touching the figures: the `scope` still reports
+ * only what was destroyed, and the retained side carries obligations and a reference with no numeric
+ * field at all.
+ *
+ * **It moves no bytes.** `canonicalContentManifest` hashes the composed `DeletionScope` (plus the
+ * declaration, under v2) and nothing else — attestations are not hashed and never were — so every
+ * previously-valid input produces the digest it always did. The flip side is the limitation worth
+ * stating: a *retention* is therefore outside the signed bytes, exactly as the capability declaration
+ * was before ADR-0329 gave it a v2 tag. Putting it inside is a `v3` decision and is not taken here.
  */
 
 /**
@@ -201,6 +216,12 @@ export const CONSERVATIVE_DELETION_CAPABILITIES: DeletionCapabilities = Object.f
  * deployment *has*, never what a given deletion found — a subsystem declared `erases` may perfectly
  * well attest `nothing_to_erase`, and one declared `retains` may attest `erased` once the obligation
  * lapses. What it may not do is stay quiet.
+ *
+ * `erased_and_retained` is admissible under either, and the vocabulary has no
+ * `erases_and_retains` disposition to match it. That is the same looseness, not a gap papered over:
+ * `shared_tables` destroys most of what it holds and keeps a statutory remainder, and which tables
+ * fall on which side is a property of the catalog rather than of the deployment. The declaration
+ * says the subsystem is *in scope and must speak*; the attestation says what it did.
  */
 export function requiredSubsystemsFor(
   capabilities: DeletionCapabilities,
@@ -228,8 +249,57 @@ export const ATTESTATION_OUTCOMES = [
   "nothing_to_erase",
   /** The subsystem holds data it is lawfully required to keep. */
   "retained",
+  /**
+   * Part of it was destroyed and part of it is lawfully kept — one subsystem, one attestation, two
+   * claims.
+   *
+   * ADR-0329 named this and deferred it, and the thing it was deferred *around* is why it exists.
+   * `shared_tables` erases 96 of the catalog's 112 tenant-scoped tables and leaves 16, and the only
+   * way to call that attestation `erased` without lying was to define the 16 as *not the tenant's
+   * data at all* — true of a forensic chain entry, and false of a sales invoice under a seven-year
+   * tax obligation. So a real retention could only be expressed by quietly adding a table to a set
+   * defined as "not the tenant's data", which is a false statement inside a cryptographic proof. The
+   * honest option was unavailable, and this is it.
+   *
+   * It is a **fourth outcome** and not a retention block riding along on `erased`, because the
+   * outcome field is the single answer to "what happened here" and it has to stay total. An optional
+   * field can be forgotten with the outcome unchanged — which is ADR-0317's silence in a new place,
+   * `erased` meaning two different things depending on a field a reader may not check. A new enum
+   * member is a *compile-time* demand on every exhaustive reader instead.
+   *
+   * The division of labour is the rule that keeps the proof honest: the **figures** describe only what
+   * was destroyed (`scope`, exactly as on `erased`), and the retained side carries obligations and a
+   * reference and has no numeric field at all.
+   */
+  "erased_and_retained",
 ] as const;
 export type AttestationOutcome = (typeof ATTESTATION_OUTCOMES)[number];
+
+/**
+ * The outcomes that may carry measured figures. Everything else is refused a `scope` outright.
+ *
+ * Named rather than written as a disjunction at each of its four use sites: the rule "figures
+ * describe only what was destroyed" is the whole provenance argument, and four copies of it is four
+ * places to forget the fourth outcome.
+ */
+export const SCOPE_BEARING_OUTCOMES: readonly AttestationOutcome[] = Object.freeze([
+  "erased",
+  "erased_and_retained",
+]);
+
+/** The outcomes that assert a lawful retention, and must therefore name it and locate it. */
+export const RETENTION_BEARING_OUTCOMES: readonly AttestationOutcome[] = Object.freeze([
+  "retained",
+  "erased_and_retained",
+]);
+
+function bearsScope(outcome: AttestationOutcome): boolean {
+  return SCOPE_BEARING_OUTCOMES.includes(outcome);
+}
+
+function bearsRetention(outcome: AttestationOutcome): boolean {
+  return RETENTION_BEARING_OUTCOMES.includes(outcome);
+}
 
 /** The contribution a subsystem may report. Every field optional; omitted means it owns nothing there. */
 export const ScopeContributionSchema = z
@@ -251,11 +321,27 @@ export const DeletionAttestationSchema = z
   .object({
     subsystem: DeletionSubsystemSchema,
     outcome: z.enum(ATTESTATION_OUTCOMES),
-    /** Required for `erased`, forbidden otherwise — see the superRefine. */
+    /** Required for the scope-bearing outcomes, forbidden otherwise — see the superRefine. */
     scope: ScopeContributionSchema.optional(),
     /** Required for `retained`: which obligation keeps it. `none` is not an obligation. */
     retentionObligation: z.enum(RETENTION_OBLIGATIONS).optional(),
-    /** Required for `retained`: where the retained data lives, for the audit trail. */
+    /**
+     * Required for `erased_and_retained`: the obligations keeping back the part that stayed.
+     *
+     * A list, and singular `retentionObligation` deliberately left alone, because the two outcomes
+     * make different claims. `retained` holds a whole subsystem back under *the* obligation; a
+     * partial retention is a *subset* chosen table by table, and a subset is exactly where two
+     * obligations become possible — a tax retention over billing rows and a HIPAA one over clinical
+     * rows are one subsystem's two reasons. Collapsing them to one field would force a producer to
+     * either pick one (a proof that under-reports why data is still there) or refuse the deletion the
+     * day a second obligation appears. One name per claim rather than one field for two claims.
+     *
+     * It carries no count, and there is no field here that could: the figures in a proof describe
+     * what was **destroyed**. A retained row's existence is a legal fact with a pointer, not a
+     * measurement in the erasure's scope, and a number on this side would be read as part of it.
+     */
+    retainedObligations: z.array(z.enum(RETENTION_OBLIGATIONS)).optional(),
+    /** Required for both retention-bearing outcomes: where the retained data is, for the audit trail. */
     retainedDataReference: z.string().min(1).optional(),
     /** Who or what attested. Free text: a subsystem is not a `meta.users` row (ADR-0289). */
     attestedBy: z.string().min(1),
@@ -263,14 +349,14 @@ export const DeletionAttestationSchema = z
   })
   .strict()
   .superRefine((v, ctx) => {
-    if (v.outcome === "erased" && v.scope === undefined) {
+    if (bearsScope(v.outcome) && v.scope === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["scope"],
-        message: "an 'erased' attestation must report what it destroyed",
+        message: `an '${v.outcome}' attestation must report what it destroyed`,
       });
     }
-    if (v.outcome !== "erased" && v.scope !== undefined) {
+    if (!bearsScope(v.outcome) && v.scope !== undefined) {
       // Otherwise a `nothing_to_erase` could smuggle figures into the proof, which is the
       // provenance hole this module closes.
       ctx.addIssue({
@@ -287,26 +373,58 @@ export const DeletionAttestationSchema = z
           message: "a 'retained' attestation must name the obligation keeping the data ('none' is not one)",
         });
       }
+    } else if (v.retentionObligation !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["retentionObligation"],
+        message:
+          v.outcome === "erased_and_retained"
+            ? "an 'erased_and_retained' attestation names its obligations in retainedObligations," +
+              " which is a list because a partial retention can have more than one reason"
+            : `outcome '${v.outcome}' must not declare retentionObligation`,
+      });
+    }
+    if (v.outcome === "erased_and_retained") {
+      // The retained side cannot be silent (ADR-0317). An empty list is the shape that would say
+      // "something stayed" and name nothing, which is precisely the silence that reads as "none".
+      if (v.retainedObligations === undefined || v.retainedObligations.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["retainedObligations"],
+          message:
+            "an 'erased_and_retained' attestation must name at least one obligation keeping the" +
+            " retained part back",
+        });
+      } else if (v.retainedObligations.includes("none")) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["retainedObligations"],
+          message: "'none' is not an obligation; a retention with no obligation is not a retention",
+        });
+      }
+    } else if (v.retainedObligations !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["retainedObligations"],
+        message: `outcome '${v.outcome}' must not declare retainedObligations`,
+      });
+    }
+    if (bearsRetention(v.outcome)) {
       if (v.retainedDataReference === undefined) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["retainedDataReference"],
-          message: "a 'retained' attestation must say where the retained data is",
+          message: `an '${v.outcome}' attestation must say where the retained data is`,
         });
       }
+    } else if (v.retainedDataReference !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["retainedDataReference"],
+        message: `outcome '${v.outcome}' must not declare retainedDataReference`,
+      });
     }
-    if (v.outcome !== "retained") {
-      for (const field of ["retentionObligation", "retainedDataReference"] as const) {
-        if (v[field] !== undefined) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: [field],
-            message: `outcome '${v.outcome}' must not declare ${field}`,
-          });
-        }
-      }
-    }
-    if (v.outcome === "erased" && v.scope !== undefined) {
+    if (bearsScope(v.outcome) && v.scope !== undefined) {
       const permitted = new Set<string>(SUBSYSTEM_SCOPE_FIELDS[v.subsystem]);
       for (const key of Object.keys(v.scope)) {
         if (!permitted.has(key)) {
@@ -370,6 +488,10 @@ function dedupeSorted(values: readonly string[]): string[] {
  * two subsystems naming the same table (the shared store and a tenant schema cannot, but a future
  * pair might) count it once. Counts sum. `nothing_to_erase` and `retained` contribute nothing by
  * construction, because they are refused a `scope` at all.
+ *
+ * An `erased_and_retained` attestation folds in exactly like an `erased` one, and that is the
+ * provenance rule rather than a convenience: what enters a `DeletionScope` is what a subsystem
+ * destroyed, so the half it kept contributes nothing here and cannot be read as part of the erasure.
  */
 export function composeDeletionScope(
   attestations: readonly DeletionAttestation[],
@@ -387,7 +509,7 @@ export function composeDeletionScope(
   let fileCount = 0;
 
   for (const a of attestations) {
-    if (a.outcome !== "erased" || a.scope === undefined) continue;
+    if (!bearsScope(a.outcome) || a.scope === undefined) continue;
     for (const key of Object.keys(lists)) {
       const contributed = a.scope[key as keyof ScopeContribution];
       if (Array.isArray(contributed)) lists[key]?.push(...contributed);
@@ -597,7 +719,7 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
       scope.searchIndexes.length +
       scope.cacheKeys.length ===
     0;
-  const retained = parsed.filter((a) => a.outcome === "retained");
+  const retained = parsed.filter((a) => bearsRetention(a.outcome));
   if (scopeIsEmpty && retained.length === 0) {
     // Every subsystem attested and every one of them found nothing, with nothing retained either.
     // That is not a deletion; `TombstoneRecordSchema` would refuse it for `tenant_deletion` anyway,
@@ -693,11 +815,37 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
   };
 }
 
+/**
+ * The obligations one attestation names, whichever shape it names them in.
+ *
+ * The single place that knows `retained` says it in `retentionObligation` and
+ * `erased_and_retained` in `retainedObligations`. `none` is filtered out rather than reported: the
+ * schema refuses it on both outcomes, so one here would mean a record that bypassed validation, and
+ * the honest answer for a reader is "this names no obligation" rather than "it names 'none'".
+ */
+export function attestationRetainedObligations(
+  attestation: DeletionAttestation,
+): readonly RetentionObligation[] {
+  const named =
+    attestation.outcome === "retained"
+      ? attestation.retentionObligation === undefined
+        ? []
+        : [attestation.retentionObligation]
+      : attestation.outcome === "erased_and_retained"
+        ? (attestation.retainedObligations ?? [])
+        : [];
+  return [...new Set(named.filter((o) => o !== "none"))].sort();
+}
+
 /** One readable sentence naming every obligation keeping data back. */
 function retainedReasonFor(retained: readonly DeletionAttestation[]): string {
-  const parts = retained.map(
-    (a) => `${a.subsystem}: ${a.retentionObligation ?? "unspecified"}`,
-  );
+  const parts = retained.map((a) => {
+    const obligations = attestationRetainedObligations(a);
+    // "unspecified" is unreachable past the schema and kept for the same reason the assembler
+    // re-verifies its own hashes: the failure it stands for is a proof whose retention prose names
+    // nothing, and a reader meeting the word knows the record is wrong rather than reading a blank.
+    return `${a.subsystem}: ${obligations.length === 0 ? "unspecified" : obligations.join(", ")}`;
+  });
   return `retained under legal obligation — ${parts.join("; ")}`;
 }
 
@@ -710,9 +858,7 @@ export function retainedObligations(
 ): readonly RetentionObligation[] {
   const out = new Set<RetentionObligation>();
   for (const a of attestations) {
-    if (a.outcome === "retained" && a.retentionObligation !== undefined) {
-      out.add(a.retentionObligation);
-    }
+    for (const obligation of attestationRetainedObligations(a)) out.add(obligation);
   }
   return [...out].sort();
 }

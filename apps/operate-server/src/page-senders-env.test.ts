@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { PAGE_CHANNEL_KINDS } from "@crossengin/notification-providers";
+
 import {
   DEFAULT_PAGE_RETRY,
   PAGE_RETRY_ATTEMPTS_VAR,
@@ -50,6 +52,33 @@ describe("buildPageSendersFromEnv", () => {
   });
 });
 
+describe("every channel kind an alert policy can name", () => {
+  it("has a transport when the environment is fully configured", () => {
+    // The guarantee ADR-0329 closed. ADR-0325's rule is that a channel the policy **names** and the
+    // environment cannot serve is a `sev1` that will not arrive — and `email_digest` was exactly
+    // that until this increment, so a deployment whose only configured channel was email had its
+    // page reported `unroutable` and nobody woken. Asserted over `PAGE_CHANNEL_KINDS` itself rather
+    // than a hand-written list, so a kind added to the policy vocabulary tomorrow fails here
+    // instead of silently becoming the next hole.
+    const SECRET = "abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+    const built = buildPageSendersFromEnv({
+      PAGE_SLACK_BOT_TOKEN: "xoxb-1",
+      PAGE_WEBHOOK_SECRET: SECRET,
+      PAGE_SMS_ACCOUNT_SID: "AC123",
+      PAGE_SMS_AUTH_TOKEN: "tok",
+      PAGE_SMS_FROM_NUMBER: "+15551234567",
+      PAGE_EMAIL_REGION: "eu-west-1",
+      PAGE_EMAIL_FROM_ADDRESS: "pages@crossengin.example",
+      PAGE_EMAIL_ACCESS_KEY_ID: "AKIAEXAMPLE",
+      PAGE_EMAIL_SECRET_ACCESS_KEY: SECRET,
+    });
+    expect(built.report.skipped).toEqual([]);
+    for (const kind of PAGE_CHANNEL_KINDS) {
+      expect(built.report.kinds, kind).toContain(kind);
+    }
+  });
+});
+
 describe("buildPageDispatcher", () => {
   it("labels the page with the signal and reports what happened", async () => {
     const reports: boolean[] = [];
@@ -64,6 +93,92 @@ describe("buildPageDispatcher", () => {
     });
     expect(report.outcomes[0]?.disposition).toBe("unroutable");
     expect(reports).toEqual([true]);
+  });
+});
+
+describe("email paging credentials", () => {
+  const SECRET = "abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+  const FULL = {
+    PAGE_EMAIL_REGION: "eu-west-1",
+    PAGE_EMAIL_FROM_ADDRESS: "pages@crossengin.example",
+    PAGE_EMAIL_ACCESS_KEY_ID: "AKIAEXAMPLE",
+    PAGE_EMAIL_SECRET_ACCESS_KEY: SECRET,
+  };
+
+  it("is unwired until asked for, and never borrows the notification stack's sender identity", () => {
+    expect(buildPageSendersFromEnv({}).report.kinds).not.toContain("email_digest");
+    // The identity never falls back, for the reason `TWILIO_VOICE_FROM_NUMBER` does not: a
+    // deployment should page from a different sender than its tenants' notifications come from.
+    expect(
+      buildPageSendersFromEnv({
+        SES_REGION: "us-east-1",
+        SES_FROM_ADDRESS: "noreply@crossengin.example",
+        AWS_ACCESS_KEY_ID: "AKIA",
+        AWS_SECRET_ACCESS_KEY: SECRET,
+      }).report.kinds,
+    ).not.toContain("email_digest");
+  });
+
+  it("wires a complete set, closing the one channel kind that had no transport", () => {
+    const built = buildPageSendersFromEnv(FULL);
+    expect(built.report.kinds).toContain("email_digest");
+    expect(built.report.skipped).toEqual([]);
+  });
+
+  it("borrows the AWS access key, because that is an account credential and not an identity", () => {
+    // The asymmetry is deliberate: an access key is for the whole account and a deployment that
+    // wants one set should not write it twice, while a sender identity is the thing that must not
+    // be guessed.
+    const built = buildPageSendersFromEnv({
+      PAGE_EMAIL_REGION: "eu-west-1",
+      PAGE_EMAIL_FROM_ADDRESS: "pages@crossengin.example",
+      AWS_ACCESS_KEY_ID: "AKIAEXAMPLE",
+      AWS_SECRET_ACCESS_KEY: SECRET,
+    });
+    expect(built.report.kinds).toContain("email_digest");
+    expect(built.report.skipped).toEqual([]);
+  });
+
+  it("reports a half-configured set rather than guessing or silently skipping", () => {
+    const noRegion = buildPageSendersFromEnv({
+      PAGE_EMAIL_FROM_ADDRESS: "pages@crossengin.example",
+    });
+    expect(noRegion.report.kinds).not.toContain("email_digest");
+    expect(noRegion.report.skipped.join(" ")).toContain("PAGE_EMAIL_REGION");
+
+    const noFrom = buildPageSendersFromEnv({ PAGE_EMAIL_REGION: "eu-west-1" });
+    expect(noFrom.report.skipped.join(" ")).toContain("PAGE_EMAIL_FROM_ADDRESS");
+
+    const noKey = buildPageSendersFromEnv({
+      PAGE_EMAIL_REGION: "eu-west-1",
+      PAGE_EMAIL_FROM_ADDRESS: "pages@crossengin.example",
+    });
+    expect(noKey.report.skipped.join(" ")).toContain("PAGE_EMAIL_ACCESS_KEY_ID");
+  });
+
+  it("reports the sender's own refusal rather than wiring something that fails at 3am", () => {
+    const shortSecret = buildPageSendersFromEnv({ ...FULL, PAGE_EMAIL_SECRET_ACCESS_KEY: "short" });
+    expect(shortSecret.report.kinds).not.toContain("email_digest");
+    expect(shortSecret.report.skipped.join(" ")).toContain("at least 16 characters");
+
+    const badFrom = buildPageSendersFromEnv({ ...FULL, PAGE_EMAIL_FROM_ADDRESS: "+15550000000" });
+    expect(badFrom.report.kinds).not.toContain("email_digest");
+    expect(badFrom.report.skipped.join(" ")).toContain("fromAddress");
+  });
+
+  it("treats a whitespace-only value as unset rather than as half-configured", () => {
+    expect(buildPageSendersFromEnv({ PAGE_EMAIL_REGION: "   " }).report.kinds).not.toContain(
+      "email_digest",
+    );
+    expect(buildPageSendersFromEnv({ PAGE_EMAIL_REGION: "   " }).report.skipped).toEqual([]);
+  });
+
+  it("accepts an endpoint override, for a VPC endpoint or a staging stand-in", () => {
+    const built = buildPageSendersFromEnv({
+      ...FULL,
+      PAGE_EMAIL_ENDPOINT: "http://127.0.0.1:9099/ses",
+    });
+    expect(built.report.kinds).toContain("email_digest");
   });
 });
 

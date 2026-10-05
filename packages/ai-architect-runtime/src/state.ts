@@ -84,6 +84,20 @@ export class SessionCostTracker {
     if (ratio > s.estimateInflation) s.estimateInflation = ratio;
   }
 
+  /**
+   * Installs a tenant's durably learned correction as this session's starting factor, so a
+   * restart does not begin by admitting the requests the estimator had learned to delay.
+   *
+   * It raises and never lowers, for the same reason `observeEstimateRatio` does: the session
+   * may already have observed something worse than the tenant's stored figure, and a seed
+   * arriving late must not undo that.
+   */
+  seedEstimateInflation(sessionId: string, inflation: number): void {
+    if (!Number.isFinite(inflation) || inflation <= 1) return;
+    const s = this.sessionState(sessionId);
+    if (inflation > s.estimateInflation) s.estimateInflation = inflation;
+  }
+
   /** Seals a session: every later guard evaluation blocks. Fail closed, never reversed. */
   seal(sessionId: string, reason: string): void {
     const s = this.sessionState(sessionId);

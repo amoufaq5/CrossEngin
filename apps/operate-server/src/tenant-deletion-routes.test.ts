@@ -77,7 +77,13 @@ const OK_OUTCOME: DeletionOutcomeLike = {
     rowCount: 8,
     storageBytes: 4096,
     examinedTables: ["meta.operate_entity_records", "meta.events", "meta.operate_sequences"],
-    retainedTables: ["meta.audit_log", "meta.tenant_tombstones"],
+    retainedTables: ["meta.audit_log", "meta.tenant_tombstones", "meta.invoices"],
+    // ADR-0330: what is lawfully still there, and why. No count — a figure on the retained side
+    // could be read as part of the erasure.
+    statutoryRetained: {
+      obligations: ["tax_records_7y"],
+      dataReference: "meta.invoices; meta.tenant_credits",
+    },
   },
 };
 
@@ -441,6 +447,28 @@ describe("the delete route", () => {
     // And the retention set is visible, because a reader of an Article 17 receipt needs to know
     // what was deliberately left in place as much as what was destroyed.
     expect(body.erasedSharedTables.retainedTables).toContain("meta.tenant_tombstones");
+  });
+
+  it("names what is lawfully retained, with no figure beside it", async () => {
+    // ADR-0330. This is the sentence an operator sends: everything was destroyed except these
+    // rows, held under this obligation. A count on the retained side could be read as part of the
+    // erasure, which is ADR-0317's subject, so there is deliberately no field for one.
+    const h = harness();
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    const body = res.body as {
+      readonly erasedSharedTables: {
+        readonly statutoryRetained: {
+          readonly obligations: readonly string[];
+          readonly dataReference: string;
+        } | null;
+      };
+    };
+    expect(body.erasedSharedTables.statutoryRetained?.obligations).toEqual(["tax_records_7y"]);
+    expect(body.erasedSharedTables.statutoryRetained?.dataReference).toContain("meta.invoices");
+    expect(Object.keys(body.erasedSharedTables.statutoryRetained ?? {})).toEqual([
+      "obligations",
+      "dataReference",
+    ]);
   });
 
   it("does not fail the request when the audit record cannot be written", async () => {

@@ -79,6 +79,14 @@ const FCM_VARS = [
   "FCM_SERVICE_ACCOUNT_PRIVATE_KEY",
   "FCM_METADATA_ENDPOINT",
   "FCM_METADATA_SERVICE_ACCOUNT",
+  // Endpoint overrides. They were missing from this list, which made them the only two
+  // `FCM_*` variables whose presence did not count as evidence that an operator had started
+  // configuring push — so setting an override and forgetting `FCM_PROJECT_ID` skipped the channel
+  // in silence, where every other half-configuration says what it needs. They belong here for the
+  // same reason `FCM_METADATA_ENDPOINT` does: this list answers "did somebody mean to set this
+  // up?", not "is this sufficient to construct a sender".
+  "FCM_TOKEN_ENDPOINT",
+  "FCM_BASE_URL",
 ] as const;
 
 /**

@@ -41,6 +41,24 @@ export const DeletionEscalationConfigSchema = z
      * map is the point: an unnamed defect keeps `severity`.
      */
     severityByDefect: z.record(z.enum(EVIDENCE_DEFECTS), z.enum(SEVERITIES)).optional(),
+    /**
+     * The grade a **stalled tombstone sweep** is declared at. Defaults to `sev2`, and the default is
+     * the decision rather than a convenience.
+     *
+     * `AlertPolicy` maps a severity to a channel set, so the grade *is* the route (ADR-0326) — and
+     * choosing `sev2` is choosing **not** to wake the rotation that receives tamper findings. The
+     * two are different kinds of claim: `severity` above is for a *detected* falsified Article 17
+     * proof, a fact in hand about a named record, while a stall concludes nothing about any row and
+     * persists for exactly as long as its cause does. Paging the sev1 rotation for it would put a
+     * standing misconfiguration beside a confirmed tamper on one board, which is how the board stops
+     * being read — the same dishonesty `severityByDefect` exists to undo, one level up.
+     *
+     * A grade it cannot parse is a **parse error**, not a fall-back to the default: that is
+     * `severityByDefect`'s rule, for the sharper reason here that there is one value rather than a
+     * map, so a silently-ignored typo would route *every* stall to the configured `severity` — the
+     * tamper rotation — which is precisely the outcome this field exists to avoid.
+     */
+    sweepStallSeverity: z.enum(SEVERITIES).default("sev2"),
     declaredBy: z.string().min(1).default("operate-server"),
     /** Required — escalation with nowhere to page is not escalation (ADR-0288's rule). */
     alertPolicy: AlertPolicySchema,

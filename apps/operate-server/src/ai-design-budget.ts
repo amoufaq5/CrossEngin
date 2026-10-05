@@ -20,6 +20,24 @@ export interface AiDesignBudgetOptions {
   readonly now?: () => Date;
   readonly periodKeyFor?: (date: Date) => string;
   readonly onDenied?: (tenantId: string, spentUsd: number, limitUsd: number) => void;
+  /**
+   * The durable estimator correction (ADR-0330). Absent leaves `inflationFor` answering 1, which is
+   * the behaviour before it existed.
+   */
+  readonly inflationStore?: EstimateInflationStoreLike;
+  readonly onInflationFallback?: (tenantId: string, provenance: string) => void;
+}
+
+/**
+ * The slice of `PostgresEstimateInflationStore` the budget needs. Structural, so a test needs no
+ * database and the app needs no second import path.
+ */
+export interface EstimateInflationStoreLike {
+  load(tenantId: string): Promise<{
+    readonly inflation: number;
+    readonly provenance: string;
+  }>;
+  observe(tenantId: string, ratio: number): Promise<unknown>;
 }
 
 export interface BudgetCheck {
@@ -34,9 +52,30 @@ export interface AiDesignBudget {
   check(tenantId: string): Promise<BudgetCheck>;
   record(tenantId: string, costUsd: number): Promise<number>;
   readonly maxUsdPerRequest: number | null;
+  /**
+   * The estimator's learned correction for this tenant, and the sink that updates it (ADR-0330).
+   *
+   * On the budget rather than beside it, because the correction is an input to the *same* ceiling
+   * `maxUsdPerRequest` expresses — a caller holding one and not the other would price a request
+   * against an estimate the deployment had already learned was optimistic.
+   *
+   * Both are optional on the interface: a deployment with no Postgres store has no durable place
+   * to keep the figure, and `inflationFor` answering 1 there is the pre-ADR-0330 behaviour.
+   */
+  inflationFor?(tenantId: string): Promise<number>;
+  observeInflation?(tenantId: string, ratio: number): Promise<void>;
 }
 
 export const DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH = 25;
+
+/**
+ * What an unreadable inflation store resolves to, matching the resolver's own fallback.
+ *
+ * 2, not 1. A store that exists and cannot be read is **lost knowledge**, and a tenant whose
+ * correction was 40 reading as 1 would admit every request it had learned to delay. Reading it as
+ * "no correction" is the one answer this must not give.
+ */
+export const UNREADABLE_BUDGET_INFLATION = 2;
 
 /** `YYYY-MM` (UTC) — mirrors `monthlyPeriodKey` so keys match the shared ledger. */
 function defaultPeriodKey(date: Date): string {
@@ -59,10 +98,37 @@ export function buildAiDesignBudget(opts: AiDesignBudgetOptions): AiDesignBudget
     perRequest !== undefined && Number.isFinite(perRequest) && perRequest > 0 ? perRequest : null;
   const now = opts.now ?? ((): Date => new Date());
   const periodKeyFor = opts.periodKeyFor ?? defaultPeriodKey;
-  const { store, onDenied } = opts;
+  const { store, onDenied, inflationStore, onInflationFallback } = opts;
 
   return {
     maxUsdPerRequest,
+
+    ...(inflationStore === undefined
+      ? {}
+      : {
+          async inflationFor(tenantId: string): Promise<number> {
+            try {
+              const record = await inflationStore.load(tenantId);
+              // A pessimistic fallback that nothing reports is a silently delayed tenant, so the
+              // provenance is surfaced whenever the resolver had to substitute a figure.
+              if (record.provenance !== "learned" && record.provenance !== "no_history") {
+                onInflationFallback?.(tenantId, record.provenance);
+              }
+              return Math.max(1, record.inflation);
+            } catch (err) {
+              // Fail **pessimistic**, which is the opposite of most fail-closed choices here and is
+              // the right direction for this one input: over-counting delays a request,
+              // under-counting admits one the ceiling exists to refuse (ADR-0311). An unreadable
+              // store is lost knowledge, not an absence of it.
+              onInflationFallback?.(tenantId, "unreadable");
+              void err;
+              return UNREADABLE_BUDGET_INFLATION;
+            }
+          },
+          async observeInflation(tenantId: string, ratio: number): Promise<void> {
+            await inflationStore.observe(tenantId, ratio);
+          },
+        }),
 
     async check(tenantId: string): Promise<BudgetCheck> {
       const periodKey = periodKeyFor(now());

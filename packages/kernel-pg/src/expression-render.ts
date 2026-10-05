@@ -22,13 +22,37 @@ export interface RenderedExpressions {
    * reporting rather than a reason to guess.
    */
   readonly byRequest: ReadonlyMap<string, string | null>;
+  /**
+   * The columns each expression actually references, as Postgres parsed it — `conkey` of the probe
+   * constraint, in attnum order.
+   *
+   * This is the one fact that makes a *column-level* CHECK matchable (ADR-0330). Postgres names such
+   * a constraint `<table>_<column>_check` when the parsed expression resolves to exactly one column
+   * and `<table>_check` when it resolves to none or several, because `AddRelationNewConstraints`
+   * only passes a column name along in the first case. Deciding which applies means knowing the
+   * expression's Var set, and this is that set, from the same parser that stored the live one.
+   *
+   * **Optional.** A caller that assembled a `RenderedExpressions` by hand has not probed, and an
+   * absent entry means the name cannot be known — never that it is the one-column spelling. Null
+   * means the probe itself could not read `conkey` back.
+   */
+  readonly columnsByRequest?: ReadonlyMap<string, readonly string[] | null>;
 }
 
-export const NO_RENDERED_EXPRESSIONS: RenderedExpressions = { byRequest: new Map() };
+export const NO_RENDERED_EXPRESSIONS: RenderedExpressions = {
+  byRequest: new Map(),
+  columnsByRequest: new Map(),
+};
+
+/** One expression as Postgres renders and parses it. */
+interface ProbeResult {
+  readonly rendering: string | null;
+  readonly columns: readonly string[] | null;
+}
 
 /** Thrown to force the probe transaction to roll back; never escapes `renderExpressions`. */
 class RollbackProbe extends Error {
-  constructor(readonly rendered: Map<string, string | null>) {
+  constructor(readonly rendered: Map<string, ProbeResult>) {
     super("probe complete");
     this.name = "RollbackProbe";
   }
@@ -65,7 +89,7 @@ export async function renderExpressions(
 
   try {
     await conn.transaction(async (tx) => {
-      const rendered = new Map<string, string | null>();
+      const rendered = new Map<string, ProbeResult>();
       for (const [key, req] of unique) {
         rendered.set(key, await probeOne(tx, schema, req));
       }
@@ -73,18 +97,49 @@ export async function renderExpressions(
       throw new RollbackProbe(rendered);
     });
   } catch (err) {
-    if (err instanceof RollbackProbe) return { byRequest: err.rendered };
+    if (err instanceof RollbackProbe) {
+      const byRequest = new Map<string, string | null>();
+      const columnsByRequest = new Map<string, readonly string[] | null>();
+      for (const [key, result] of err.rendered) {
+        byRequest.set(key, result.rendering);
+        columnsByRequest.set(key, result.columns);
+      }
+      return { byRequest, columnsByRequest };
+    }
     throw err;
   }
   // `transaction` resolved without the sentinel, which cannot happen.
   throw new Error("expression probe did not roll back");
 }
 
+const UNRENDERABLE: ProbeResult = { rendering: null, columns: null };
+
+/**
+ * `conkey` comes back alongside the rendering because the probe is the only place either can be
+ * had and the row is already in hand — reading it costs no extra statement.
+ *
+ * `attname::text` for the ADR-0291 reason: node-postgres has no array parser for `name[]`, so an
+ * unqualified `attname` arrives as the literal string `{d,a}` and every column reads as mismatched.
+ * `unnest(NULL)` yields no rows, so an expression over no column at all arrives as an empty array
+ * rather than failing the query — which is the `<table>_check` spelling, not an unknown.
+ */
+const PROBE_QUERY = `
+  SELECT pg_get_constraintdef(oid) AS def,
+         ARRAY(
+           SELECT a.attname::text
+             FROM unnest(conkey) WITH ORDINALITY AS k(attnum, ord)
+             JOIN pg_attribute a ON a.attrelid = conrelid AND a.attnum = k.attnum
+            ORDER BY k.ord
+         ) AS cols
+    FROM pg_constraint
+   WHERE conname = $1 AND conrelid = $2::regclass
+`;
+
 async function probeOne(
   tx: PgConnection,
   schema: string,
   req: ExpressionRequest,
-): Promise<string | null> {
+): Promise<ProbeResult> {
   const fq = `${quoteIdent(schema)}.${quoteIdent(req.table)}`;
   const probe = quoteIdent(PROBE_CONSTRAINT);
   await tx.query("SAVEPOINT crossengin_expr_probe");
@@ -92,15 +147,19 @@ async function probeOne(
     await tx.query(
       `ALTER TABLE ${fq} ADD CONSTRAINT ${probe} CHECK (${req.expr}) NOT VALID`,
     );
-    const result = await tx.query<{ def: string }>(
-      "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = $1 AND conrelid = $2::regclass",
+    const result = await tx.query<{ def: string; cols: readonly string[] | null }>(
+      PROBE_QUERY,
       [PROBE_CONSTRAINT, `${schema}.${req.table}`],
     );
-    const def = result.rows[0]?.def;
-    return def === undefined ? null : stripCheckWrapper(def);
+    const row = result.rows[0];
+    if (row === undefined) return UNRENDERABLE;
+    return {
+      rendering: stripCheckWrapper(row.def),
+      columns: row.cols ?? null,
+    };
   } catch {
     // An expression the table cannot carry is reported as unrenderable, not as a thrown pass.
-    return null;
+    return UNRENDERABLE;
   } finally {
     await tx.query("ROLLBACK TO SAVEPOINT crossengin_expr_probe");
   }

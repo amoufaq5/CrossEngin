@@ -12,7 +12,9 @@ import {
 
 import {
   eraseSharedTablesWithin,
+  sharedTableErasureAttestation,
   sharedTableErasureScope,
+  sharedTableRetention,
   type SharedTableErasure,
 } from "./shared-table-erasure.js";
 import { PostgresTombstoneStore, type StoredTombstone } from "./tombstone-store.js";
@@ -179,8 +181,20 @@ export type DeleteTenantOutcome =
         readonly storageBytes: number;
         /** Every erasable table, so a reader can see the coverage the scope does not carry. */
         readonly examinedTables: readonly string[];
-        /** Every table the retention set deliberately left in place. */
+        /** Every table either retention set deliberately left in place. */
         readonly retainedTables: readonly string[];
+        /**
+         * The lawful retention the proof carries, or `null` when there is none.
+         *
+         * Reported because the deletion's 200 body is what an operator answers an Article 17
+         * request from, and "we erased everything except these rows, under this obligation" is the
+         * answer — not a figure. There is deliberately no count here, for the same reason the
+         * attestation has no field for one.
+         */
+        readonly statutoryRetained: {
+          readonly obligations: readonly string[];
+          readonly dataReference: string;
+        } | null;
       };
     }
   | { readonly ok: false; readonly refusals: readonly PipelineRefusal[] };
@@ -210,28 +224,17 @@ function tenantSchemaAttestation(erasure: SchemaErasure, attestedBy: string): De
   };
 }
 
+/**
+ * Delegated, because the claim and the two retention sets it is derived from belong together — the
+ * outcome depends on which tables the deployment lawfully keeps, and that is the erasure module's
+ * fact, not the pipeline's. What stays here is *when* it is called: after the erasure ran in this
+ * transaction, never from a caller's input (ADR-0319).
+ */
 function sharedTablesAttestation(
   erasure: SharedTableErasure,
   attestedBy: string,
 ): DeletionAttestation {
-  if (!erasure.erased) {
-    return {
-      subsystem: "shared_tables",
-      outcome: "nothing_to_erase",
-      attestedBy,
-      attestedAt: erasure.erasedAt,
-    };
-  }
-  const scope = sharedTableErasureScope(erasure);
-  return {
-    subsystem: "shared_tables",
-    outcome: "erased",
-    // Exactly the three fields `SUBSYSTEM_SCOPE_FIELDS.shared_tables` names, and notably not
-    // `schemas`: the shared schema is not this tenant's and is not going anywhere.
-    scope: { ...scope, tables: [...scope.tables] },
-    attestedBy,
-    attestedAt: erasure.erasedAt,
-  };
+  return sharedTableErasureAttestation(erasure, attestedBy);
 }
 
 function assemblyRefusals(refusals: readonly AssemblyRefusal[]): readonly PipelineRefusal[] {
@@ -383,6 +386,7 @@ export async function deleteTenantAtomically(
         storageBytes: sharedScope.storageBytes,
         examinedTables: shared.examinedTables,
         retainedTables: shared.retainedTables,
+        statutoryRetained: sharedTableRetention(shared),
       },
     };
   });

@@ -1,16 +1,24 @@
 import { META_TABLES, type ColumnDefinition, type TableDefinition } from "@crossengin/kernel/bootstrap";
 import type { PgConnection } from "@crossengin/kernel-pg";
-import { SUBSYSTEM_SCOPE_FIELDS } from "@crossengin/tenant-lifecycle";
+import {
+  DeletionAttestationSchema,
+  SUBSYSTEM_SCOPE_FIELDS,
+} from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
 import {
+  DELIBERATELY_ERASED_BILLING_TABLES,
+  PLATFORM_RECORD_TABLES,
   RETAINED_SHARED_TABLES,
   SHARED_TABLE_ERASURE_REFUSAL_REASONS,
+  STATUTORY_RETENTION_TABLES,
   TENANT_SCOPE_COLUMN,
   eraseSharedTablesWithin,
   partitionSharedTables,
   probeSharedTableErasability,
+  sharedTableErasureAttestation,
   sharedTableErasureScope,
+  sharedTableRetention,
   type SharedTableErasure,
 } from "./shared-table-erasure.js";
 
@@ -62,6 +70,9 @@ const ERASABLE_FIXTURES = [
   "meta.notification_dispatches",
   "meta.operate_entity_records",
 ] as const;
+
+/** The statutory set in the order the census reads it, taken from the partition rather than guessed. */
+const STATUTORY_FIXTURES = partitionSharedTables(CATALOG).statutory.map((t) => t.qualified);
 
 interface Call {
   readonly sql: string;
@@ -142,8 +153,8 @@ describe("the erasable set is derived, the retention set is named", () => {
       t.columns.some((c) => c.name === TENANT_SCOPE_COLUMN),
     );
     expect(partition.tenantScoped).toHaveLength(tenantScoped.length);
-    expect(tenantScoped).toHaveLength(112);
-    expect(partition.erasable).toHaveLength(112 - RETAINED_SHARED_TABLES.length);
+    expect(tenantScoped).toHaveLength(113);
+    expect(partition.erasable).toHaveLength(113 - RETAINED_SHARED_TABLES.length);
     expect(partition.retained).toHaveLength(RETAINED_SHARED_TABLES.length);
   });
 
@@ -166,6 +177,8 @@ describe("the erasable set is derived, the retention set is named", () => {
       "forensic_chain_checkpoints",
       "forensic_chain_entries",
       "gdpr_deletion_requests",
+      "invoices",
+      "tenant_credits",
       "tenant_lifecycle_events",
       "tenant_tombstones",
     ]);
@@ -197,8 +210,9 @@ describe("the erasable set is derived, the retention set is named", () => {
     expect(
       orphans,
       `these ${TENANT_SCOPE_COLUMN}-bearing tables are in neither set — add each to` +
-        " RETAINED_SHARED_TABLES if it is evidence of the deletion, or leave it erasable:" +
-        ` ${orphans.join(", ")}`,
+        " PLATFORM_RECORD_TABLES if it is the platform's record of the deletion, or to" +
+        " STATUTORY_RETENTION_TABLES with its obligation if the law requires it, or leave it" +
+        ` erasable: ${orphans.join(", ")}`,
     ).toEqual([]);
     expect(partition.unclassified).toEqual([]);
   });
@@ -345,8 +359,10 @@ describe("eraseSharedTablesWithin", () => {
     const confirmed = calls
       .filter((c) => c.sql.startsWith("SELECT count(*) AS n FROM"))
       .map((c) => relationOf(c.sql));
-    // The claim is that no row of this tenant remains in any shared table, so that is what is checked.
-    expect(confirmed).toEqual([...ERASABLE_FIXTURES]);
+    // The claim is that no row of this tenant remains in any *erasable* shared table, so that is
+    // what is checked — followed by the statutory census, which asks the opposite question of the
+    // tables whose rows are supposed to remain.
+    expect(confirmed).toEqual([...ERASABLE_FIXTURES, ...STATUTORY_FIXTURES]);
   });
 
   it("confirms absence after the last delete, never before", async () => {
@@ -388,6 +404,9 @@ describe("eraseSharedTablesWithin", () => {
       "four_eyes_violated",
       "unclassified_tenant_table",
       "retention_entry_unresolved",
+      "retention_reason_unassigned",
+      "retention_reason_ambiguous",
+      "retained_table_blocks_erasure",
       "table_missing",
       "rls_would_confine_this_session",
     ]);
@@ -520,5 +539,333 @@ describe("sharedTableErasureScope", () => {
   it("claims nothing when nothing was erased", async () => {
     const { out } = await erase();
     expect(sharedTableErasureScope(out)).toEqual({ tables: [], rowCount: 0, storageBytes: 0 });
+  });
+});
+
+/**
+ * The two retention sets, which are not two halves of one list.
+ *
+ * `PLATFORM_RECORD_TABLES` is *not the tenant's data* and is silent in the proof.
+ * `STATUTORY_RETENTION_TABLES` **is** the tenant's data, Article 17 reaches it, and the proof names
+ * the obligation keeping it. A table may be in exactly one.
+ */
+describe("the two retention sets", () => {
+  it("names the statutory set and its obligations, so changing it is a visible edit", () => {
+    // Asserted by name for `RETAINED_SHARED_TABLES`' reason, and harder: adding a name here keeps
+    // the tenant's own data after an Article 17 erasure, and the proof will say a law required it.
+    expect([...STATUTORY_RETENTION_TABLES]).toEqual([
+      { table: "invoices", obligation: "tax_records_7y" },
+      { table: "tenant_credits", obligation: "tax_records_7y" },
+    ]);
+  });
+
+  it("never names 'none' as an obligation", () => {
+    // `DeletionAttestationSchema` refuses it, so an entry declaring it would refuse every deletion.
+    for (const entry of STATUTORY_RETENTION_TABLES) {
+      expect(entry.obligation, entry.table).not.toBe("none");
+    }
+  });
+
+  it("derives the union, so the retained set has one source", () => {
+    expect([...RETAINED_SHARED_TABLES]).toEqual(
+      [...PLATFORM_RECORD_TABLES, ...STATUTORY_RETENTION_TABLES.map((r) => r.table)].sort(),
+    );
+    expect(PLATFORM_RECORD_TABLES).toHaveLength(16);
+    expect(STATUTORY_RETENTION_TABLES).toHaveLength(2);
+  });
+
+  it("keeps the two sets disjoint in the live catalog", () => {
+    const partition = partitionSharedTables();
+    expect(
+      partition.ambiguousRetention,
+      "a table cannot be both 'not the tenant's data' and 'the tenant's data lawfully kept'" +
+        ` — remove from one: ${partition.ambiguousRetention.join(", ")}`,
+    ).toEqual([]);
+    expect(partition.platformRecord).toHaveLength(PLATFORM_RECORD_TABLES.length);
+    expect(partition.statutory).toHaveLength(STATUTORY_RETENTION_TABLES.length);
+    expect(partition.retained).toHaveLength(partition.platformRecord.length + partition.statutory.length);
+  });
+
+  it("assigns every retained table a reason in the live catalog", () => {
+    expect(partitionSharedTables().unassignedRetention).toEqual([]);
+  });
+
+  it("resolves every statutory entry against the live catalog, tenant-scoped", () => {
+    const tenantScoped = new Set(
+      META_TABLES.filter((t) => t.columns.some((c) => c.name === TENANT_SCOPE_COLUMN)).map(
+        (t) => t.name,
+      ),
+    );
+    for (const entry of STATUTORY_RETENTION_TABLES) {
+      expect(tenantScoped.has(entry.table), entry.table).toBe(true);
+    }
+    const statutory = partitionSharedTables().statutory;
+    expect(statutory.map((t) => t.qualified)).toEqual(["meta.invoices", "meta.tenant_credits"]);
+    expect(statutory.every((t) => t.obligation === "tax_records_7y")).toBe(true);
+  });
+
+  it("leaves the billing tables it decided against erasable", () => {
+    const erasable = new Set(partitionSharedTables().erasable.map((t) => t.table));
+    for (const name of DELIBERATELY_ERASED_BILLING_TABLES) {
+      expect(erasable.has(name), `${name} should still be erased`).toBe(true);
+    }
+  });
+
+  it("finds no retained foreign key that would block an erasable DELETE", () => {
+    // ADR-0318's defect, derived rather than discovered: a retained row referencing an erasable
+    // parent with ON DELETE RESTRICT makes that parent undeletable *because* the retention exists,
+    // and every deletion for a tenant holding one aborts.
+    const blocked = partitionSharedTables().blockedByRetention;
+    expect(blocked, `retained rows would refuse an erasable table's DELETE: ${blocked.join("; ")}`).toEqual(
+      [],
+    );
+  });
+
+  it("detects one when the catalog has it, naming the column and the action", async () => {
+    // Reachable through the catalog, which is the only injectable half — the sets themselves are
+    // constants on purpose (a caller-supplied retention list is ADR-0328's defect in a new field).
+    const blocking: readonly TableDefinition[] = CATALOG.map((t) =>
+      t.name === "invoices"
+        ? {
+            ...t,
+            columns: [
+              ...t.columns,
+              {
+                name: "issued_by",
+                type: "UUID",
+                references: {
+                  schema: "meta",
+                  table: "operate_entity_records",
+                  column: "id",
+                  onDelete: "RESTRICT" as const,
+                },
+              },
+            ],
+          }
+        : t,
+    );
+    const partition = partitionSharedTables(blocking);
+    expect(partition.blockedByRetention).toEqual([
+      "meta.invoices.issued_by -> operate_entity_records (ON DELETE RESTRICT)",
+    ]);
+    const h = fake();
+    const out = await eraseSharedTablesWithin(
+      h.conn,
+      TENANT,
+      { executedBy: ALICE, approvedBy: BOB },
+      { catalog: blocking, clock: () => new Date(AT) },
+    );
+    expect(out.refusals.map((r) => r.reason)).toEqual(["retained_table_blocks_erasure"]);
+    expect(out.refusals[0]?.detail).toContain("the whole transaction would abort");
+    // A cheap refusal: settled before the probe, so nothing was read and nothing destroyed.
+    expect(h.calls).toEqual([]);
+  });
+
+  it("treats an FK the retention can survive as no blocker", () => {
+    for (const onDelete of ["CASCADE", "SET NULL"] as const) {
+      const catalog: readonly TableDefinition[] = CATALOG.map((t) =>
+        t.name === "invoices"
+          ? {
+              ...t,
+              columns: [
+                ...t.columns,
+                {
+                  name: "issued_by",
+                  type: "UUID",
+                  references: {
+                    schema: "meta",
+                    table: "operate_entity_records",
+                    column: "id",
+                    onDelete,
+                  },
+                },
+              ],
+            }
+          : t,
+      );
+      expect(partitionSharedTables(catalog).blockedByRetention, onDelete).toEqual([]);
+    }
+  });
+
+  it("flags SET DEFAULT, which this module cannot prove will succeed", () => {
+    const catalog: readonly TableDefinition[] = CATALOG.map((t) =>
+      t.name === "invoices"
+        ? {
+            ...t,
+            columns: [
+              ...t.columns,
+              {
+                name: "issued_by",
+                type: "UUID",
+                references: {
+                  schema: "meta",
+                  table: "operate_entity_records",
+                  column: "id",
+                  onDelete: "SET DEFAULT" as const,
+                },
+              },
+            ],
+          }
+        : t,
+    );
+    expect(partitionSharedTables(catalog).blockedByRetention).toHaveLength(1);
+  });
+});
+
+/**
+ * The statutory census: the mirror image of the confirm-absence pass.
+ *
+ * A retained table's rows are *supposed* to remain, so confirming their absence would refuse every
+ * deletion. What is confirmed is **presence**, and only to decide whether there is a retention to
+ * claim — a proof asserting a seven-year hold over an invoice the tenant never had is the same
+ * defect as a scope claiming a destruction that did not happen.
+ */
+describe("the statutory census", () => {
+  it("claims a retention only for the statutory tables that still hold rows", async () => {
+    const { out } = await erase({
+      rows: { "meta.operate_entity_records": 7 },
+      survivors: { "meta.invoices": 3 },
+    });
+    expect(out.statutoryRetained).toEqual([
+      { table: "meta.invoices", obligation: "tax_records_7y" },
+    ]);
+    // `meta.tenant_credits` is in the statutory *set* and held nothing, so it is coverage and not a
+    // claim — exactly how `examinedTables` relates to `erasedTables`.
+    expect(out.statutoryTables).toEqual([...STATUTORY_FIXTURES]);
+  });
+
+  it("claims nothing when the statutory tables are empty for this tenant", async () => {
+    const { out } = await erase({ rows: { "meta.operate_entity_records": 7 } });
+    expect(out.statutoryRetained).toEqual([]);
+    expect(sharedTableRetention(out)).toBeNull();
+  });
+
+  it("carries no count beside a retained table, only the obligation", async () => {
+    const { out } = await erase({ survivors: { "meta.invoices": 9999 } });
+    expect(Object.keys(out.statutoryRetained[0] ?? {}).sort()).toEqual(["obligation", "table"]);
+  });
+
+  it("reads the statutory tables after the last delete, never before", async () => {
+    const { calls } = await erase({
+      rows: { "meta.operate_entity_records": 7 },
+      survivors: { "meta.invoices": 1 },
+    });
+    const lastDelete = calls.reduce(
+      (acc, c, i) => (c.sql.startsWith("WITH deleted AS") ? i : acc),
+      -1,
+    );
+    const census = calls.findIndex(
+      (c) => c.sql.startsWith("SELECT count(*) AS n FROM") && relationOf(c.sql) === "meta.invoices",
+    );
+    expect(lastDelete).toBeGreaterThan(-1);
+    expect(census).toBeGreaterThan(lastDelete);
+  });
+
+  it("probes the statutory tables too, so a confined session cannot under-report a retention", async () => {
+    // The dangerous direction: a confined session reads 0 from meta.invoices, claims no retention,
+    // and the proof goes quiet about rows it did not destroy.
+    const { out } = await erase({ confined: ["invoices"] });
+    expect(out.refusals.map((r) => r.reason)).toEqual(["rls_would_confine_this_session"]);
+    expect(out.refusals[0]?.detail).toContain("meta.invoices");
+  });
+
+  it("refuses a statutory table the database does not have", async () => {
+    const { out } = await erase({ missing: ["tenant_credits"] });
+    expect(out.refusals.map((r) => r.reason)).toEqual(["table_missing"]);
+    expect(out.refusals[0]?.detail).toContain("meta.tenant_credits");
+  });
+
+  it("claims nothing on a refusal, because no erasure happened to retain anything from", async () => {
+    const { out } = await erase({ survivors: { "meta.invoices": 3 } }, { approvedBy: ALICE });
+    expect(out.refusals.map((r) => r.reason)).toEqual(["four_eyes_violated"]);
+    expect(out.statutoryRetained).toEqual([]);
+    expect(sharedTableRetention(out)).toBeNull();
+  });
+
+  it("splits the retained tables by reason", async () => {
+    const { out } = await erase({ rows: { "meta.operate_entity_records": 1 } });
+    expect(out.platformRecordTables).toEqual(PLATFORM_RECORD_TABLES.map((n) => `meta.${n}`).sort());
+    expect([...out.retainedTables].sort()).toEqual(
+      [...out.platformRecordTables, ...out.statutoryTables].sort(),
+    );
+  });
+});
+
+/** The combined claim: destroyed these, kept those under this obligation, in one attestation. */
+describe("sharedTableErasureAttestation", () => {
+  const BY = "tenant-lifecycle-pg/deletion:alice";
+
+  it("reports erased_and_retained when it destroyed some and kept some", async () => {
+    const { out } = await erase({
+      rows: { "meta.operate_entity_records": 7, "meta.notification_dispatches": 2 },
+      survivors: { "meta.invoices": 3, "meta.tenant_credits": 1 },
+    });
+    const attestation = sharedTableErasureAttestation(out, BY);
+    expect(DeletionAttestationSchema.safeParse(attestation).success).toBe(true);
+    expect(attestation.outcome).toBe("erased_and_retained");
+    expect(attestation.retainedObligations).toEqual(["tax_records_7y"]);
+    expect(attestation.retainedDataReference).toBe("meta.invoices, meta.tenant_credits");
+    // The figures describe only what was destroyed.
+    expect(attestation.scope).toEqual({
+      tables: ["meta.notification_dispatches", "meta.operate_entity_records"],
+      rowCount: 9,
+      storageBytes: 900,
+    });
+  });
+
+  it("reports erased when nothing was lawfully kept", async () => {
+    const { out } = await erase({ rows: { "meta.operate_entity_records": 7 } });
+    const attestation = sharedTableErasureAttestation(out, BY);
+    expect(DeletionAttestationSchema.safeParse(attestation).success).toBe(true);
+    expect(attestation.outcome).toBe("erased");
+    expect(attestation.retainedObligations).toBeUndefined();
+    expect(attestation.retainedDataReference).toBeUndefined();
+  });
+
+  it("reports retained when the tenant held only statutory rows", async () => {
+    const { out } = await erase({ survivors: { "meta.invoices": 3 } });
+    const attestation = sharedTableErasureAttestation(out, BY);
+    expect(DeletionAttestationSchema.safeParse(attestation).success).toBe(true);
+    expect(attestation.outcome).toBe("retained");
+    // Singular, because with nothing destroyed there is no scope to carry and `retained` is the
+    // contract's shape for that.
+    expect(attestation.retentionObligation).toBe("tax_records_7y");
+    expect(attestation.retainedDataReference).toBe("meta.invoices");
+    expect(attestation.scope).toBeUndefined();
+  });
+
+  it("reports nothing_to_erase when the tenant held nothing anywhere", async () => {
+    const { out } = await erase();
+    const attestation = sharedTableErasureAttestation(out, BY);
+    expect(DeletionAttestationSchema.safeParse(attestation).success).toBe(true);
+    expect(attestation.outcome).toBe("nothing_to_erase");
+    expect(attestation.scope).toBeUndefined();
+  });
+
+  it("owns only the three scope fields shared_tables is allowed", async () => {
+    const { out } = await erase({
+      rows: { "meta.operate_entity_records": 7 },
+      survivors: { "meta.invoices": 1 },
+    });
+    const attestation = sharedTableErasureAttestation(out, BY);
+    expect(Object.keys(attestation.scope ?? {}).sort()).toEqual(
+      [...SUBSYSTEM_SCOPE_FIELDS.shared_tables].sort(),
+    );
+  });
+
+  it("stamps the attestation from the erasure's own clock, never a fresh now", async () => {
+    const { out } = await erase({ rows: { "meta.operate_entity_records": 1 } });
+    expect(sharedTableErasureAttestation(out, BY).attestedAt).toBe(AT);
+    expect(sharedTableErasureAttestation(out, BY).attestedBy).toBe(BY);
+  });
+
+  it("sorts and deduplicates the obligations so the claim does not depend on catalog order", async () => {
+    const { out } = await erase({
+      rows: { "meta.operate_entity_records": 1 },
+      survivors: { "meta.invoices": 1, "meta.tenant_credits": 1 },
+    });
+    const retention = sharedTableRetention(out);
+    expect(retention?.obligations).toEqual(["tax_records_7y"]);
+    expect(retention?.dataReference).toBe("meta.invoices, meta.tenant_credits");
   });
 });

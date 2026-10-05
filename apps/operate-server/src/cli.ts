@@ -65,6 +65,15 @@ export interface ServeOptions {
   readonly jobInvokeRoles: readonly string[];
   /** Per-action role overrides for job-invoke as `action:role` specs (repeatable). */
   readonly jobInvokeActionRoles: readonly string[];
+  /**
+   * Roles permitted to cancel a workflow instance (repeatable); empty refuses everyone.
+   *
+   * Its **own** grant, deliberately not `--job-invoke-role`. The job-cancel route shares that one
+   * on the argument that starting and stopping a job are one privilege over one queue, and that
+   * does not transfer: a workflow instance is not a job run, and a `compensate` cancellation runs
+   * reversing handlers over real GL postings (ADR-0329). Fail-closed on empty, like job-cancel.
+   */
+  readonly workflowCancelRoles: readonly string[];
   /** Path to a marketplace pack-catalog JSON ({packs:[...]}) — enables the /v1/admin/packs routes (needs pg). */
   readonly packCatalogFile: string | null;
   /** Enable the third-party authoring routes (/v1/authoring/packs — submit/review/publish pack versions). Needs pg. */
@@ -192,6 +201,16 @@ export interface ServeOptions {
   readonly deletionCapabilities: string | null;
   /** Run the reverse-direction audit (completed requests whose proof no longer stands up) every Nth deletion-runner tick. Default 0 = never; it re-hashes every completed request's tombstone, so it is far more expensive than the forward pass. */
   readonly deletionAuditEveryTicks: number | null;
+  /**
+   * How many consecutive non-advancing tombstone-sweep attempts make a stall (default 3).
+   *
+   * `stallAfterAttempts` has existed on the scheduler since ADR-0329 with no flag reaching it, so
+   * every deployment ran on the hardcoded default. Worth exposing now that a stall declares an
+   * incident rather than only logging. The scheduler reads a malformed value as the **default, not
+   * off** — the opposite of `deletionAuditEveryTicks`, because there "off" is the status quo and
+   * here "off" is the silence this exists to end — so refusing it here is belt-and-braces.
+   */
+  readonly deletionSweepStallAfter: number | null;
   /** Days from submission to the Article 12(3) deadline (default 30, cap 90). Set per deployment rather than per request. */
   readonly deletionRequestDeadlineDays: number | null;
   /** Run verified deletion requests out of band every N ms (needs --tenant-deletion-routes' wiring). Off unless set; the first tick is one interval after boot, never at boot. */
@@ -262,6 +281,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let eventPrefix: string | null = null;
   let enableJobInvoke = false;
   const jobInvokeRoles: string[] = [];
+  const workflowCancelRoles: string[] = [];
   const jobInvokeActionRoles: string[] = [];
   let packCatalogFile: string | null = null;
   let marketplaceAuthoring = false;
@@ -320,6 +340,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let deletionEscalationConfig: string | null = null;
   let deletionCapabilities: string | null = null;
   let deletionAuditEveryTicks: number | null = null;
+  let deletionSweepStallAfter: number | null = null;
   let deletionRequestDeadlineDays: number | null = null;
   let deletionRunnerMs: number | null = null;
   let deletionRunnerExecutedBy: string | null = null;
@@ -455,6 +476,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       enableJobInvoke = true;
     } else if (arg === "--job-invoke-role" || arg.startsWith("--job-invoke-role=")) {
       jobInvokeRoles.push(takeValue(arg, next, "--job-invoke-role"));
+      i += consumed();
+    } else if (arg === "--workflow-cancel-role" || arg.startsWith("--workflow-cancel-role=")) {
+      workflowCancelRoles.push(takeValue(arg, next, "--workflow-cancel-role"));
       i += consumed();
     } else if (arg === "--job-invoke-action-role" || arg.startsWith("--job-invoke-action-role=")) {
       jobInvokeActionRoles.push(takeValue(arg, next, "--job-invoke-action-role"));
@@ -760,6 +784,17 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       }
       deletionAuditEveryTicks = n;
       i += consumed();
+    } else if (
+      arg === "--deletion-sweep-stall-after" ||
+      arg.startsWith("--deletion-sweep-stall-after=")
+    ) {
+      const raw = takeValue(arg, next, "--deletion-sweep-stall-after");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new CliUsageError(`invalid --deletion-sweep-stall-after: ${raw} (>= 1)`);
+      }
+      deletionSweepStallAfter = n;
+      i += consumed();
     } else if (arg === "--deletion-runner-ms" || arg.startsWith("--deletion-runner-ms=")) {
       const raw = takeValue(arg, next, "--deletion-runner-ms");
       const n = Number(raw);
@@ -913,6 +948,20 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (jobInvokeActionRoles.length > 0 && !enableJobInvoke) {
     throw new CliUsageError("--job-invoke-action-role requires --enable-job-invoke");
   }
+  // Refused rather than mounted-and-useless, and the message names the real reason. ADR-0329 built
+  // the route, its tests and the fence columns; what is missing is upstream of all of it — this
+  // binary never instantiates a `WorkflowEngine`, and `meta.workflow_definitions` has no writer, so
+  // there is no source of `WorkflowDefinition` records for one to be built from. A route mounted
+  // against an empty definition map would answer `unknown_instance` for every instance, which is
+  // the silent degradation ADR-0327 said a surface must never choose.
+  if (workflowCancelRoles.length > 0) {
+    throw new CliUsageError(
+      "--workflow-cancel-role names a route that cannot mount yet: this server instantiates no" +
+        " WorkflowEngine, because meta.workflow_definitions has no writer and so there is no" +
+        " source of workflow definitions. Entity lifecycle transitions are a different mechanism" +
+        " and are unaffected.",
+    );
+  }
   for (const spec of jobInvokeActionRoles) {
     const idx = spec.indexOf(":");
     if (idx <= 0 || idx === spec.length - 1) {
@@ -996,6 +1045,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     eventPrefix,
     enableJobInvoke,
     jobInvokeRoles,
+    workflowCancelRoles,
     jobInvokeActionRoles,
     packCatalogFile,
     marketplaceAuthoring,
@@ -1071,6 +1121,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionEscalationConfig,
     deletionCapabilities,
     deletionAuditEveryTicks,
+    deletionSweepStallAfter,
     deletionRequestDeadlineDays,
     deletionRunnerMs,
     deletionRunnerExecutedBy,

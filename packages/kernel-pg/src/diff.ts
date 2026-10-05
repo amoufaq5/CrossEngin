@@ -20,6 +20,13 @@ import {
   samePolicyRoles,
 } from "./canonical.js";
 import {
+  columnCheckRequestsFor,
+  diffColumnChecks,
+  type ColumnCheckDelta,
+  type ColumnCheckDiff,
+  type MissingColumnCheck,
+} from "./column-check.js";
+import {
   NO_RENDERED_EXPRESSIONS,
   expressionKey,
   type RenderedExpressions,
@@ -186,6 +193,16 @@ export interface TableDiff {
   readonly addedConstraints: readonly AddedConstraint[];
   readonly removedConstraints: readonly RemovedConstraint[];
   readonly changedConstraints: readonly ConstraintDelta[];
+  /**
+   * Column-level `check` expressions whose stored constraint differs from the declaration.
+   *
+   * Carried apart from `changedConstraints` because the two are repaired differently: a table-level
+   * constraint is identified by the name the catalog gives it, while these are named by Postgres and
+   * so carry both the name a `DROP` must use and the name an `ADD` may write (ADR-0330).
+   */
+  readonly changedColumnChecks: readonly ColumnCheckDelta[];
+  /** Column-level `check` expressions with no constraint behind them at all. */
+  readonly missingColumnChecks: readonly MissingColumnCheck[];
   readonly rlsTargetEnabled: boolean;
   readonly rlsLiveEnabled: boolean;
 }
@@ -307,6 +324,10 @@ export function expressionRequestsFor(
   for (const check of declaredCheckConstraints(table)) {
     out.push({ table: table.name, expr: check.expression });
   }
+  // A column-level `check` is the same kind of expression and goes through the same deparser —
+  // and the probe's `conkey` is additionally the only way to know what Postgres named it
+  // (ADR-0330), so an unprobed column check is not comparable at all.
+  out.push(...columnCheckRequestsFor(table));
   return out;
 }
 
@@ -337,6 +358,7 @@ function diffTableConstraints(
   readonly added: AddedConstraint[];
   readonly changed: ConstraintDelta[];
   readonly removed: RemovedConstraint[];
+  readonly columnChecks: ColumnCheckDiff;
 } {
   const added: AddedConstraint[] = [];
   const changed: ConstraintDelta[] = [];
@@ -344,9 +366,12 @@ function diffTableConstraints(
 
   const liveChecks = new Map(live.checkConstraints.map((c) => [c.name, c] as const));
   const liveFks = new Map(live.foreignKeys.map((f) => [f.name, f] as const));
+  /** Live CHECK rows a declared table-level check matched, which a column check may not re-claim. */
+  const claimedChecks = new Set<string>();
 
   for (const check of declaredCheckConstraints(target)) {
     const liveCheck = liveChecks.get(check.name);
+    if (liveCheck !== undefined) claimedChecks.add(liveCheck.name);
     if (liveCheck === undefined) {
       // The name may exist as a foreign key instead, which is a different constraint wearing the
       // declared name rather than a missing one.
@@ -440,9 +465,25 @@ function diffTableConstraints(
     }
   }
 
-  const expectedChecks = expectedCheckConstraintNames(target);
+  const columnChecks = diffColumnChecks(target, live, rendered, claimedChecks);
+
+  // What accounts for each live CHECK row. A declared table-level check accounts for the row it
+  // matched; a declared column check accounts for the row `diffColumnChecks` claimed, which is the
+  // *measured* answer rather than a guess at Postgres's naming.
+  //
+  // The guess is kept as a fallback, and only as one. `expectedCheckConstraintNames` deliberately
+  // expects **both** spellings whenever any column check exists, because without the probe there is
+  // no telling which applies — so folding it in unconditionally would leave the over-approximation
+  // in place and an undeclared `<table>_check` would still never be reported. It is folded in when
+  // the column-check pass was **incomplete**, because then an unclaimed row may well be a check
+  // nobody examined, and ADR-0292's rule is that unknown must not read as drift.
+  const accounted = new Set<string>(claimedChecks);
+  for (const name of columnChecks.claimed) accounted.add(name);
+  if (!columnChecks.complete) {
+    for (const name of expectedCheckConstraintNames(target)) accounted.add(name);
+  }
   for (const liveCheck of live.checkConstraints) {
-    if (expectedChecks.has(liveCheck.name)) continue;
+    if (accounted.has(liveCheck.name)) continue;
     removed.push({
       name: liveCheck.name,
       columns: liveCheck.columns,
@@ -450,7 +491,7 @@ function diffTableConstraints(
     });
   }
 
-  return { added, changed, removed };
+  return { added, changed, removed, columnChecks };
 }
 
 function diffOneTable(
@@ -731,6 +772,8 @@ function diffOneTable(
     addedConstraints: tableConstraints.added,
     removedConstraints: tableConstraints.removed,
     changedConstraints: tableConstraints.changed,
+    changedColumnChecks: tableConstraints.columnChecks.changed,
+    missingColumnChecks: tableConstraints.columnChecks.missing,
     rlsTargetEnabled: target.rls?.enabled === true,
     rlsLiveEnabled: live.rlsEnabled,
   };
@@ -754,6 +797,8 @@ function tableHasDrift(diff: TableDiff): boolean {
     diff.addedConstraints.length > 0 ||
     diff.removedConstraints.length > 0 ||
     diff.changedConstraints.length > 0 ||
+    diff.changedColumnChecks.length > 0 ||
+    diff.missingColumnChecks.length > 0 ||
     diff.rlsTargetEnabled !== diff.rlsLiveEnabled
   );
 }
@@ -861,6 +906,15 @@ export function formatSchemaDiff(diff: SchemaDiff): string {
       for (const c of m.changedConstraints) {
         lines.push(
           `          ~ ${c.kind} constraint ${c.name} [${c.reasons.join(", ")}] ${c.detail}`,
+        );
+      }
+      for (const c of m.missingColumnChecks) {
+        lines.push(`          + check on column ${c.column} (${c.expectedName})`);
+      }
+      for (const c of m.changedColumnChecks) {
+        lines.push(
+          `          ~ check on column ${c.column} (${c.liveName}) ` +
+            `[${c.reasons.join(", ")}] ${c.detail}`,
         );
       }
       if (m.rlsTargetEnabled !== m.rlsLiveEnabled) {

@@ -14,7 +14,12 @@ import {
   WorkflowDefinitionIdResolver,
   WorkflowInstanceIdResolver,
 } from "./id-mapping.js";
-import { PostgresInstanceStore } from "./instance-store.js";
+import {
+  PostgresInstanceStore,
+  type StoredCancellationColumns,
+  cancellationProjectionFromRow,
+  isoInstant,
+} from "./instance-store.js";
 import { PostgresSignalStore, type SignalProjection } from "./signal-store.js";
 import { PostgresTimerStore, type TimerProjection } from "./timer-store.js";
 
@@ -66,18 +71,19 @@ export interface WorkflowReplayerOptions {
   readonly definitionResolver?: WorkflowDefinitionIdResolver;
 }
 
-interface StoredInstanceRow {
+/** The timestamps are `unknown` because node-postgres hands a `TIMESTAMPTZ` back as a `Date`. */
+interface StoredInstanceRow extends StoredCancellationColumns {
   readonly instance_id: string;
   readonly status: string;
   readonly current_state: string;
   readonly variables: unknown;
   readonly sequence_cursor: number;
-  readonly completed_at: string | null;
-  readonly failed_at: string | null;
-  readonly cancelled_at: string | null;
-  readonly suspended_at: string | null;
-  readonly compensation_started_at: string | null;
-  readonly compensation_completed_at: string | null;
+  readonly completed_at: unknown;
+  readonly failed_at: unknown;
+  readonly cancelled_at: unknown;
+  readonly suspended_at: unknown;
+  readonly compensation_started_at: unknown;
+  readonly compensation_completed_at: unknown;
 }
 
 interface StoredActivityRow {
@@ -347,7 +353,9 @@ export class WorkflowReplayer {
     const result = await this.conn.query<StoredInstanceRow>(
       `SELECT instance_id, status, current_state, variables, sequence_cursor,
               completed_at, failed_at, cancelled_at, suspended_at,
-              compensation_started_at, compensation_completed_at
+              compensation_started_at, compensation_completed_at,
+              cancellation_requested_at, cancellation_requested_by,
+              cancellation_disposition, cancellation_signalled_activity_ids
          FROM ${SCHEMA}.workflow_instances
         WHERE instance_id = $1
         LIMIT 1`,
@@ -423,7 +431,15 @@ function compareInstanceProjection(
   if (!shallowEqual(expectedVariables, storedVariables)) {
     fields.push({ field: "variables", stored: storedVariables, expected: expectedVariables });
   }
-  const terminalFields: Array<[string, string | null, string | null]> = [
+  // The cancellation fence, compared on the same footing as the terminal timestamps. It is the field
+  // the driver loops read *instead of* the status, so a row whose `cancellation_requested_at` was
+  // cleared would serve a cancelled instance's timers as live — and until this, nothing looked.
+  const storedCancellation = cancellationProjectionFromRow(stored);
+  // Every timestamp goes through `isoInstant`, including the six that were here before: node-postgres
+  // returns a `TIMESTAMPTZ` as a `Date`, so the plain `!==` these used reported drift on every row
+  // that had one set. Verified live against a real cluster; the offline fakes hand back strings,
+  // which is why no test saw it.
+  const timestampFields: Array<[string, unknown, string | null]> = [
     ["completed_at", stored.completed_at, expected.completedAt],
     ["failed_at", stored.failed_at, expected.failedAt],
     ["cancelled_at", stored.cancelled_at, expected.cancelledAt],
@@ -438,13 +454,58 @@ function compareInstanceProjection(
       stored.compensation_completed_at,
       expected.compensationCompletedAt,
     ],
+    [
+      "cancellation_requested_at",
+      storedCancellation.cancellationRequestedAt,
+      expected.cancellationRequestedAt,
+    ],
   ];
-  for (const [name, storedValue, expectedValue] of terminalFields) {
+  for (const [name, storedValue, expectedValue] of timestampFields) {
+    const storedInstant = isoInstant(storedValue);
+    if (storedInstant !== (expectedValue === null ? null : isoInstant(expectedValue))) {
+      fields.push({ field: name, stored: storedInstant, expected: expectedValue });
+    }
+  }
+  const textFields: Array<[string, string | null, string | null]> = [
+    [
+      "cancellation_requested_by",
+      storedCancellation.cancellationRequestedBy,
+      expected.cancellationRequestedBy,
+    ],
+    [
+      "cancellation_disposition",
+      storedCancellation.cancellationDisposition,
+      expected.cancellationDisposition,
+    ],
+  ];
+  for (const [name, storedValue, expectedValue] of textFields) {
     if (storedValue !== expectedValue) {
       fields.push({ field: name, stored: storedValue, expected: expectedValue });
     }
   }
+  // **Compared as a sequence, not as a set.** The projection builds this from a `Set` whose
+  // insertion order is first-occurrence order over `listByInstance`, which orders by
+  // `sequence_number` — unique per instance under `workflow_events_instance_sequence_key`, so the
+  // order is a total and deterministic function of the log, and the only writer of the column is
+  // `upsertProjection` from that same projection. A healthy row therefore matches element for
+  // element, and a set comparison would be strictly weaker for no gain: it would pass a reordered
+  // column that the healthy writer could never have produced. A stored value that is not a JSON
+  // array of strings reads as drift rather than as emptiness, which is why the raw value is
+  // reported.
+  const storedIds = storedCancellation.cancellationSignalledActivityIds;
+  if (storedIds === null || !sequenceEqual(storedIds, expected.cancellationSignalledActivityIds)) {
+    fields.push({
+      field: "cancellation_signalled_activity_ids",
+      stored: storedIds ?? stored.cancellation_signalled_activity_ids,
+      expected: expected.cancellationSignalledActivityIds,
+    });
+  }
   return { instanceMissing: false, fields };
+}
+
+function sequenceEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
 }
 
 function compareActivityProjections(

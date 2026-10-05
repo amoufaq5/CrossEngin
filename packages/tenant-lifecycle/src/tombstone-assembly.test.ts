@@ -8,10 +8,13 @@ import {
   DeletionAttestationSchema,
   DeletionCapabilitiesSchema,
   EMPTY_DELETION_SCOPE,
+  RETENTION_BEARING_OUTCOMES,
+  SCOPE_BEARING_OUTCOMES,
   SUBSYSTEM_DISPOSITIONS,
   SUBSYSTEM_SCOPE_FIELDS,
   absentSubsystemsFor,
   assembleTombstone,
+  attestationRetainedObligations,
   composeDeletionScope,
   requiredSubsystemsFor,
   retainedObligations,
@@ -22,6 +25,7 @@ import {
   type TombstoneAssemblyInput,
 } from "./tombstone-assembly.js";
 import {
+  canonicalContentManifest,
   computeContentManifestSha256,
   computeContentManifestSha256V2,
   verifyTombstoneHashes,
@@ -79,10 +83,26 @@ describe("the vocabulary", () => {
     expect(owners).toEqual(["tenant_schema"]);
   });
 
-  it("declares three outcomes, three dispositions and twelve refusal reasons", () => {
-    expect([...ATTESTATION_OUTCOMES]).toEqual(["erased", "nothing_to_erase", "retained"]);
+  it("declares four outcomes, three dispositions and twelve refusal reasons", () => {
+    expect([...ATTESTATION_OUTCOMES]).toEqual([
+      "erased",
+      "nothing_to_erase",
+      "retained",
+      "erased_and_retained",
+    ]);
     expect([...SUBSYSTEM_DISPOSITIONS]).toEqual(["erases", "retains", "absent"]);
     expect(ASSEMBLY_REFUSAL_REASONS).toHaveLength(12);
+  });
+
+  it("partitions the outcomes by what they may carry, covering every one", () => {
+    // The two rules the fourth outcome has to respect: figures describe only what was destroyed,
+    // and a retention names itself. Every outcome falls under at least one or neither, never by
+    // accident — a fifth outcome added to neither list would fail here rather than silently be
+    // refused a scope it needs.
+    expect([...SCOPE_BEARING_OUTCOMES]).toEqual(["erased", "erased_and_retained"]);
+    expect([...RETENTION_BEARING_OUTCOMES]).toEqual(["retained", "erased_and_retained"]);
+    const covered = new Set([...SCOPE_BEARING_OUTCOMES, ...RETENTION_BEARING_OUTCOMES]);
+    expect([...ATTESTATION_OUTCOMES].filter((o) => !covered.has(o))).toEqual(["nothing_to_erase"]);
   });
 
   it("exports an empty scope rather than making a caller invent one", () => {
@@ -776,5 +796,414 @@ describe("the erasure handoff", () => {
     expect(out.record.scope.tables).toEqual(fromErasure.tables);
     expect(out.record.scope.rowCount).toBe(26);
     expect(out.record.scope.fileCount).toBe(0);
+  });
+});
+
+/**
+ * `erased_and_retained`: one subsystem, one attestation, two claims.
+ *
+ * The outcome exists because `shared_tables` destroys most of what it holds and lawfully keeps a
+ * statutory remainder, and until it existed the only way to say so was to define the remainder as
+ * "not the tenant's data at all" — true of a chain entry, false of a sales invoice.
+ */
+describe("erased_and_retained", () => {
+  function both(over: Partial<DeletionAttestation> = {}): DeletionAttestation {
+    return {
+      subsystem: "shared_tables",
+      outcome: "erased_and_retained",
+      scope: { tables: ["meta.operate_entity_records"], rowCount: 94, storageBytes: 4096 },
+      retainedObligations: ["tax_records_7y"],
+      retainedDataReference: "meta.invoices, meta.tenant_credits",
+      attestedBy: "tenant-lifecycle-pg/deletion",
+      attestedAt: AT,
+      ...over,
+    } as DeletionAttestation;
+  }
+
+  it("accepts a report that destroyed some rows and kept others", () => {
+    expect(DeletionAttestationSchema.safeParse(both()).success).toBe(true);
+  });
+
+  it("requires a scope, because it destroyed something", () => {
+    const r = DeletionAttestationSchema.safeParse({ ...both(), scope: undefined });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues[0]?.message).toContain("must report what it destroyed");
+    }
+  });
+
+  it("refuses a silent retained side: no obligation at all", () => {
+    // ADR-0317's rule on the new half — silence is not "none".
+    const r = DeletionAttestationSchema.safeParse({ ...both(), retainedObligations: undefined });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.path.join(".") === "retainedObligations")).toBe(true);
+    }
+  });
+
+  it("refuses an empty obligation list, which is the silence with a field around it", () => {
+    expect(
+      DeletionAttestationSchema.safeParse({ ...both(), retainedObligations: [] }).success,
+    ).toBe(false);
+  });
+
+  it("refuses 'none' as an obligation, on either side of the list", () => {
+    expect(
+      DeletionAttestationSchema.safeParse({ ...both(), retainedObligations: ["none"] }).success,
+    ).toBe(false);
+    expect(
+      DeletionAttestationSchema.safeParse({
+        ...both(),
+        retainedObligations: ["tax_records_7y", "none"],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires the retained side to say where the data is", () => {
+    const r = DeletionAttestationSchema.safeParse({ ...both(), retainedDataReference: undefined });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.path.join(".") === "retainedDataReference")).toBe(true);
+    }
+  });
+
+  it("accepts more than one obligation, which is why the field is a list", () => {
+    const r = DeletionAttestationSchema.safeParse({
+      ...both(),
+      retainedObligations: ["tax_records_7y", "medical_records_10y"],
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("sends it to retainedObligations rather than the singular field", () => {
+    const r = DeletionAttestationSchema.safeParse({
+      ...both(),
+      retainedObligations: undefined,
+      retentionObligation: "tax_records_7y",
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues.map((i) => i.message).join(" ")).toContain("retainedObligations");
+    }
+  });
+
+  it("keeps retainedObligations off the other three outcomes", () => {
+    for (const outcome of ["erased", "nothing_to_erase", "retained"] as const) {
+      const base =
+        outcome === "erased"
+          ? attest()
+          : outcome === "nothing_to_erase"
+            ? { ...attest({ outcome }), scope: undefined }
+            : {
+                ...attest({ outcome }),
+                scope: undefined,
+                retentionObligation: "tax_records_7y",
+                retainedDataReference: "x",
+              };
+      const r = DeletionAttestationSchema.safeParse({
+        ...base,
+        retainedObligations: ["tax_records_7y"],
+      });
+      expect(r.success, outcome).toBe(false);
+    }
+  });
+
+  it("still owns only its own scope fields", () => {
+    // The new outcome gets no new reach: `shared_tables` reporting a *schema* is the programming
+    // error `SUBSYSTEM_SCOPE_FIELDS` exists to catch, outcome notwithstanding.
+    const r = DeletionAttestationSchema.safeParse({
+      ...both(),
+      scope: { schemas: ["meta"], rowCount: 1 },
+    });
+    expect(r.success).toBe(false);
+    if (!r.success) {
+      expect(r.error.issues[0]?.message).toContain("shared_tables does not own 'schemas'");
+    }
+  });
+
+  it("folds only its destroyed figures into the scope", () => {
+    const scope = composeDeletionScope([both()]);
+    expect(scope.tables).toEqual(["meta.operate_entity_records"]);
+    expect(scope.rowCount).toBe(94);
+    expect(scope.storageBytes).toBe(4096);
+    // Nothing from the retained side reached the scope: the reference is prose, not a list of
+    // tables that were destroyed, and there is no field for a retained count to arrive in.
+    expect(scope.schemas).toEqual([]);
+  });
+
+  it("composes identically to the same erasure reported as plain 'erased'", () => {
+    // The guarantee that makes this outcome adoptable: a deployment that switches a subsystem from
+    // `erased` to `erased_and_retained` for the same destroyed rows gets the same bytes.
+    const plain = attest({
+      subsystem: "shared_tables",
+      outcome: "erased",
+      scope: { tables: ["meta.operate_entity_records"], rowCount: 94, storageBytes: 4096 },
+    });
+    expect(composeDeletionScope([both()])).toEqual(composeDeletionScope([plain]));
+  });
+
+  it("derives the record's retention prose and reference from it", () => {
+    const out = assembleTombstone(
+      inputOf({ requiredSubsystems: ["shared_tables"], attestations: [both()] }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.retainedReason).toBe(
+      "retained under legal obligation — shared_tables: tax_records_7y",
+    );
+    expect(out.record.retainedDataReference).toBe("meta.invoices, meta.tenant_credits");
+    expect(verifyTombstoneHashes(out.record)).toEqual({ contentManifestOk: true, proofOk: true });
+  });
+
+  it("names every obligation in the prose when there is more than one", () => {
+    const out = assembleTombstone(
+      inputOf({
+        requiredSubsystems: ["shared_tables"],
+        attestations: [both({ retainedObligations: ["tax_records_7y", "audit_logs_3y"] })],
+      }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.retainedReason).toBe(
+      "retained under legal obligation — shared_tables: audit_logs_3y, tax_records_7y",
+    );
+  });
+
+  it("does not let a caller remember the retention instead of deriving it", () => {
+    // `retainedReason` / `retainedDataReference` are not accepted on the assembly input at all —
+    // the only way either reaches a record is from an attestation that caused it.
+    const out = assembleTombstone(
+      inputOf({ requiredSubsystems: ["shared_tables"], attestations: [both()] }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const forged = { ...out.record, retainedReason: "nothing was retained" };
+    expect(tombstoneMatchesAttestations(forged, [both()])).toBe(true);
+    // Which is the honest reading and the limitation: the scope still matches, because the
+    // retention is outside the signed bytes. Stated rather than implied.
+    expect(verifyTombstoneHashes(forged).contentManifestOk).toBe(true);
+  });
+
+  it("counts as a retention for scope_empty, so an all-retained deletion is recordable", () => {
+    const out = assembleTombstone(
+      inputOf({
+        requiredSubsystems: ["shared_tables"],
+        attestations: [both({ scope: { tables: ["meta.users"], rowCount: 1, storageBytes: 1 } })],
+      }),
+    );
+    expect(out.ok).toBe(true);
+  });
+
+  it("reports the obligations through both readers", () => {
+    expect(attestationRetainedObligations(both())).toEqual(["tax_records_7y"]);
+    expect(attestationRetainedObligations(attest())).toEqual([]);
+    expect(
+      retainedObligations([
+        attest(),
+        both({ retainedObligations: ["tax_records_7y", "tax_records_7y"] }),
+        attest({
+          subsystem: "backups",
+          outcome: "retained",
+          scope: undefined,
+          retentionObligation: "audit_logs_3y",
+          retainedDataReference: "vault://b",
+        }),
+      ]),
+    ).toEqual(["audit_logs_3y", "tax_records_7y"]);
+  });
+
+  it("is still one attestation per subsystem", () => {
+    // Splitting the claim across two reports is the duplicate the assembler refuses, which is the
+    // reason the composite outcome exists rather than per-table attestations.
+    const out = assembleTombstone(
+      inputOf({
+        requiredSubsystems: ["shared_tables"],
+        attestations: [
+          attest({
+            subsystem: "shared_tables",
+            scope: { tables: ["meta.users"], rowCount: 1, storageBytes: 1 },
+          }),
+          both(),
+        ],
+      }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toContain("duplicate_attestation");
+  });
+});
+
+/**
+ * The content manifest's bytes, pinned to digests computed **before** the fourth outcome existed.
+ *
+ * This is the constraint that outranks the feature. Every stored tombstone's
+ * `contentManifestSha256` was computed over these bytes, and `verifyStoredEvidence` reports a digest
+ * that stops matching as `scope_tampered` (ADR-0323) — the one defect the forensic chain cannot
+ * refute. A change here does not break a test; it pages a `sev1` per honest record on file.
+ */
+describe("the content manifest's bytes do not move", () => {
+  const FIXTURE_BASE = {
+    id: "tomb_fixture0001ABCD",
+    kind: "tenant_deletion" as const,
+    tenantId: "11111111-1111-4111-8111-111111111111",
+    deletedAt: "2026-10-05T00:00:00.000Z",
+    executedBy: "op-exec",
+    approvedBy: "op-approve",
+    anchors: [
+      {
+        kind: "internal_audit_log" as const,
+        reference: "chain-entry-1",
+        anchoredAt: "2026-10-05T00:00:00.000Z",
+      },
+    ],
+  };
+  const FIXTURE_ATTESTATIONS: readonly DeletionAttestation[] = [
+    {
+      subsystem: "tenant_schema",
+      outcome: "erased",
+      scope: {
+        schemas: ["tenant_abc"],
+        tables: ["tenant_abc.invoice"],
+        rowCount: 26,
+        storageBytes: 65536,
+      },
+      attestedBy: "fixture",
+      attestedAt: "2026-10-05T00:00:00.000Z",
+    },
+    {
+      subsystem: "shared_tables",
+      outcome: "erased",
+      scope: {
+        tables: ["meta.operate_entity_records", "meta.users"],
+        rowCount: 94,
+        storageBytes: 4096,
+      },
+      attestedBy: "fixture",
+      attestedAt: "2026-10-05T00:00:00.000Z",
+    },
+    {
+      subsystem: "object_storage",
+      outcome: "nothing_to_erase",
+      attestedBy: "fixture",
+      attestedAt: "2026-10-05T00:00:00.000Z",
+    },
+    {
+      subsystem: "backups",
+      outcome: "retained",
+      retentionObligation: "tax_records_7y",
+      retainedDataReference: "backup-vault://2026",
+      attestedBy: "fixture",
+      attestedAt: "2026-10-05T00:00:00.000Z",
+    },
+  ];
+  const FIXTURE_REQUIRED: readonly DeletionSubsystem[] = [
+    "tenant_schema",
+    "shared_tables",
+    "object_storage",
+    "backups",
+  ];
+  const FIXTURE_CAPABILITIES: DeletionCapabilities = {
+    tenant_schema: "erases",
+    shared_tables: "erases",
+    object_storage: "erases",
+    backups: "retains",
+    search_indexes: "absent",
+    caches: "absent",
+  };
+
+  it("pins the v1 digests for the legacy three-outcome input", () => {
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      requiredSubsystems: FIXTURE_REQUIRED,
+      attestations: FIXTURE_ATTESTATIONS,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.proofVersion).toBe("v1");
+    expect(out.record.contentManifestSha256).toBe(
+      "1f0c450df8c8a69213cc86504ce5da1cd8f5cc89dab68a4b94abcea907e2a36f",
+    );
+    expect(out.record.proofSha256).toBe(
+      "cffebd50c3e87b001aad383d28b2a5406e7fc6800e46574646d095d8ec8a2f18",
+    );
+  });
+
+  it("pins the v2 digests for the same input under a declaration", () => {
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      capabilities: FIXTURE_CAPABILITIES,
+      attestations: FIXTURE_ATTESTATIONS,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.proofVersion).toBe("v2");
+    expect(out.record.contentManifestSha256).toBe(
+      "132f4a6e2e5bfadd124507f7edbeaf14bd4e5bbf830f14c0ff9079af07a07858",
+    );
+    expect(out.record.proofSha256).toBe(
+      "7723c2c6fa72889c518559386607c94fc074ec98ff4154100c9de530b93cc5eb",
+    );
+  });
+
+  it("pins the canonical v1 body itself, not only its digest", () => {
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      requiredSubsystems: FIXTURE_REQUIRED,
+      attestations: FIXTURE_ATTESTATIONS,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(canonicalContentManifest(out.record.scope)).toBe(
+      '{"backupGenerations":[],"cacheKeys":[],"fileCount":0,"objectStorageBuckets":[],' +
+        '"rowCount":120,"schemas":["tenant_abc"],"searchIndexes":[],"storageBytes":69632,' +
+        '"tables":["meta.operate_entity_records","meta.users","tenant_abc.invoice"]}',
+    );
+    expect(computeContentManifestSha256(out.record.scope)).toBe(
+      out.record.contentManifestSha256,
+    );
+  });
+
+  it("keeps those digests when a subsystem restates the same erasure as a retention", () => {
+    // The fourth outcome's whole compatibility claim: the retained side is not in the bytes, so
+    // adopting it never invalidates a proof over the same destroyed rows.
+    const restated = FIXTURE_ATTESTATIONS.map((a) =>
+      a.subsystem === "shared_tables"
+        ? ({
+            ...a,
+            outcome: "erased_and_retained",
+            retainedObligations: ["tax_records_7y"],
+            retainedDataReference: "meta.invoices, meta.tenant_credits",
+          } as DeletionAttestation)
+        : a,
+    );
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      requiredSubsystems: FIXTURE_REQUIRED,
+      attestations: restated,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.contentManifestSha256).toBe(
+      "1f0c450df8c8a69213cc86504ce5da1cd8f5cc89dab68a4b94abcea907e2a36f",
+    );
+    expect(out.record.proofSha256).toBe(
+      "cffebd50c3e87b001aad383d28b2a5406e7fc6800e46574646d095d8ec8a2f18",
+    );
+    // And the retention *is* recorded — just outside the digest, which is the v3 question.
+    expect(out.record.retainedReason).toContain("shared_tables: tax_records_7y");
+  });
+
+  it("keeps the legacy retention prose byte-for-byte", () => {
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      requiredSubsystems: FIXTURE_REQUIRED,
+      attestations: FIXTURE_ATTESTATIONS,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.retainedReason).toBe(
+      "retained under legal obligation — backups: tax_records_7y",
+    );
+    expect(out.record.retainedDataReference).toBe("backup-vault://2026");
   });
 });

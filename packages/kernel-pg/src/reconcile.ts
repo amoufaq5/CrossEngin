@@ -64,6 +64,8 @@ export const RECONCILE_STEP_KINDS = [
   "replace_policy",
   "add_table_constraint",
   "replace_table_constraint",
+  "add_column_check",
+  "replace_column_check",
 ] as const;
 export type ReconcileStepKind = (typeof RECONCILE_STEP_KINDS)[number];
 
@@ -90,6 +92,7 @@ export const UNRECONCILED_REASONS = [
   "foreign_key_removed",
   "constraint_needs_validation",
   "constraint_removed",
+  "column_check_name_unavailable",
   "rls_unexpectedly_enabled",
 ] as const;
 export type UnreconciledReason = (typeof UNRECONCILED_REASONS)[number];
@@ -359,6 +362,9 @@ function planTable(
     steps,
     unreconciled,
   );
+  // After the type changes above: `ALTER COLUMN TYPE` re-derives a column's CHECK under the new
+  // type, so replacing the expression first would be undone.
+  planColumnChecks(table, tableDiff, rowCount, steps, unreconciled);
 
   const expected = expectedIndexNames(table);
   const declaredIndexes = new Map((table.indexes ?? []).map((i) => [i.name, i] as const));
@@ -680,6 +686,143 @@ function planTableConstraints(
       guarded: true,
     });
   }
+}
+
+/**
+ * Plans the column-level CHECK constraints the catalog declares and the database does not hold as
+ * declared (ADR-0330).
+ *
+ * **Report, not plan, on a populated table** — ADR-0299's rule, unchanged: whether every existing row
+ * satisfies an expression the catalog just started declaring is not something a plan may assume, and
+ * `NOT VALID` would record a rule the data may violate. The refusal carries the `DROP`/`ADD` pair and
+ * the `SELECT … WHERE NOT (…)` that names the rows which would refuse it.
+ *
+ * **Planned on an empty table**, which is the table-level sibling's rule and is sound here for the
+ * same reason — there is nothing to violate it — plus one that is specific to a constraint Postgres
+ * named rather than the catalog: neither identifier in the statement is inferred. The `DROP` names
+ * the row the diff actually matched, and the `ADD` names either that same row or the spelling a fresh
+ * install produces, which the diff established nothing else holds. A name the plan would have to
+ * *predict* — `ChooseConstraintName`'s numeric suffix inside the shared `<table>_check` family — is
+ * never written: `addName` is null there and the difference is reported instead.
+ */
+function planColumnChecks(
+  table: TableDefinition,
+  tableDiff: TableDiff,
+  rowCount: number | undefined,
+  steps: ReconcileStep[],
+  unreconciled: UnreconciledItem[],
+): void {
+  for (const missing of tableDiff.missingColumnChecks) {
+    if (missing.addName === null) {
+      unreconciled.push({
+        reason: "column_check_name_unavailable",
+        table: table.name,
+        target: missing.column,
+        detail:
+          `column '${missing.column}' declares a CHECK that the database does not hold, and the ` +
+          `name Postgres would give it is already taken or shared ('${missing.expectedName}'); ` +
+          "which name it would end up under is Postgres's to choose, not a plan's to predict",
+        manualSql: manualColumnCheckSql(table, missing.expression, null, missing.expectedName),
+      });
+      continue;
+    }
+    if (rowCount !== 0) {
+      unreconciled.push({
+        reason: "constraint_needs_validation",
+        table: table.name,
+        target: missing.column,
+        detail:
+          `column '${missing.column}' declares a CHECK the database does not hold and the table ` +
+          `holds ${rowCount === undefined ? "an unknown number of" : String(rowCount)} row(s); ` +
+          "whether every one of them already satisfies it is not something a plan may assume",
+        manualSql: manualColumnCheckSql(table, missing.expression, null, missing.addName),
+      });
+      continue;
+    }
+    steps.push({
+      kind: "add_column_check",
+      table: table.name,
+      target: missing.column,
+      sql: emitAddTableConstraintIfEmpty(table, {
+        kind: "check",
+        name: missing.addName,
+        expression: missing.expression,
+      }),
+      guarded: true,
+    });
+  }
+
+  for (const delta of tableDiff.changedColumnChecks) {
+    const addName = delta.addName;
+    if (addName === null) {
+      unreconciled.push({
+        reason: "column_check_name_unavailable",
+        table: table.name,
+        target: delta.column,
+        detail:
+          `column '${delta.column}' declares a CHECK the database holds differently ` +
+          `(${delta.detail}), and no name is safe to re-create it under`,
+        manualSql: manualColumnCheckSql(
+          table,
+          delta.expression,
+          delta.liveName,
+          delta.expectedName,
+        ),
+      });
+      continue;
+    }
+    if (rowCount !== 0) {
+      unreconciled.push({
+        reason: "constraint_needs_validation",
+        table: table.name,
+        target: delta.column,
+        detail:
+          `column '${delta.column}' declares a CHECK the database holds differently ` +
+          `(${delta.detail}) and the table holds ` +
+          `${rowCount === undefined ? "an unknown number of" : String(rowCount)} row(s); ` +
+          "whether every one of them already satisfies the declared expression is not something a " +
+          "plan may assume",
+        manualSql: manualColumnCheckSql(table, delta.expression, delta.liveName, addName),
+      });
+      continue;
+    }
+    steps.push({
+      kind: "replace_column_check",
+      table: table.name,
+      target: delta.column,
+      sql: emitReplaceTableConstraintIfEmpty(
+        table,
+        { kind: "check", name: addName, expression: delta.expression },
+        delta.liveName,
+      ),
+      guarded: true,
+    });
+  }
+}
+
+/**
+ * The SQL an operator runs to put a column-level CHECK right by hand.
+ *
+ * The `DROP` names the constraint the database actually holds, which for a column check is never the
+ * name the catalog states — there is none — and the comment above it is the decision the plan
+ * declines to make: a *widening* expression can never fail against existing rows, but nothing here
+ * understands the expressions well enough to tell widening from narrowing, so the query that names
+ * the refusing rows is handed over instead.
+ */
+function manualColumnCheckSql(
+  table: TableDefinition,
+  expression: string,
+  liveName: string | null,
+  addName: string,
+): string {
+  const fq = quoted(table.schema, table.name);
+  const drop = liveName === null ? "" : `ALTER TABLE ${fq} DROP CONSTRAINT "${liveName}";\n`;
+  return (
+    `-- rows that would refuse it:\n` +
+    `-- SELECT * FROM ${fq} WHERE NOT (${expression});\n` +
+    drop +
+    `ALTER TABLE ${fq} ADD CONSTRAINT "${addName}" CHECK (${expression});`
+  );
 }
 
 /**
@@ -1074,7 +1217,11 @@ async function probeRowCounts(
         m.addedColumns.length > 0 ||
         m.changedColumns.some((c) => c.reasons.includes("type")) ||
         m.addedConstraints.some((c) => needsConstraintCount(c.kind)) ||
-        m.changedConstraints.some((c) => needsConstraintCount(c.kind)),
+        m.changedConstraints.some((c) => needsConstraintCount(c.kind)) ||
+        // A column-level CHECK is a CHECK: whether it may be planned turns on emptiness exactly as
+        // the table-level form does, and without the count the planner refuses rather than assumes.
+        m.changedColumnChecks.length > 0 ||
+        m.missingColumnChecks.length > 0,
     )
     .map((m) => m.table);
   const rowCounts = new Map<string, number>();

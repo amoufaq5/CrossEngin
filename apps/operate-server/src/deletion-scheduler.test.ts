@@ -7,6 +7,7 @@ import {
   type StrandedReconcilerLike,
   type DeletionRunnerLike,
   type TombstoneSweepPage,
+  type TombstoneSweepProgress,
   type TombstoneSweepStall,
 } from "./deletion-scheduler.js";
 import type { IntervalHandle, IntervalScheduler } from "./jwks.js";
@@ -1732,5 +1733,288 @@ describe("DeletionScheduler — a sweep that says it stalled (ADR-0329)", () => 
     // interval and nothing else.
     expect(ran.filter((x) => x === "runDue")).toHaveLength(3);
     expect(ran.filter((x) => x === "reconcile")).toHaveLength(3);
+  });
+});
+
+describe("DeletionScheduler — a sweep that says it recovered (ADR-0329)", () => {
+  const TOMB = "tomb_aaaabbbbccccdddd";
+  const NEXT = "tomb_bbbbccccddddeeee";
+
+  function pageOf(over: Partial<TombstoneSweepPage> = {}): TombstoneSweepPage {
+    return { examined: 10, findings: [], nextAfterTombstoneId: null, ...over };
+  }
+
+  type Step = TombstoneSweepPage | "throws";
+
+  /** Steps in order, the last repeating. */
+  function sweeper(steps: readonly Step[]): StrandedReconcilerLike {
+    let n = 0;
+    return {
+      reconcileStranded: async () => [],
+      auditTombstones: async (): Promise<TombstoneSweepPage> => {
+        const step = steps[Math.min(n, steps.length - 1)] ?? pageOf();
+        n += 1;
+        if (step === "throws") throw new Error("the connection dropped mid-page");
+        return step;
+      },
+    };
+  }
+
+  function build(
+    over: Partial<ConstructorParameters<typeof DeletionScheduler>[0]> = {},
+  ): DeletionScheduler {
+    return new DeletionScheduler({
+      runner: runner().runner,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      clock: (): Date => new Date("2026-10-04T00:00:00.000Z"),
+      onError: () => undefined,
+      ...over,
+    });
+  }
+
+  async function tick(s: DeletionScheduler, times: number): Promise<void> {
+    for (let i = 0; i < times; i += 1) await s.runOnce();
+  }
+
+  it("says nothing about a sweep that has never stalled", async () => {
+    const recovered: TombstoneSweepProgress[] = [];
+    const s = build({
+      reconciler: sweeper([pageOf()]),
+      onSweepRecovered: (p) => {
+        recovered.push(p);
+      },
+    });
+    await tick(s, 10);
+    // Edge-triggered: a sink hears from this only as the answer to a stall it was told about, so it
+    // never has to remember whether it was told the opposite.
+    expect(recovered).toEqual([]);
+    expect(s.sweepProgress().lapsCompleted).toBe(10);
+  });
+
+  it("announces the recovery once, when a page moves the cursor again", async () => {
+    const recovered: TombstoneSweepProgress[] = [];
+    const stalls: number[] = [];
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+      ]),
+      onSweepStall: (stall) => {
+        stalls.push(stall.attemptsWithoutAdvance);
+      },
+      onSweepRecovered: (p) => {
+        recovered.push(p);
+      },
+    });
+    await tick(s, 4);
+    expect(stalls).toEqual([3]);
+    expect(recovered).toEqual([]);
+    await tick(s, 3);
+    // Once, not once per healthy tick. The condition is over; repeating it would be the shape the
+    // stall line deliberately has and a recovery deliberately does not.
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.stall).toBeNull();
+    expect(recovered[0]?.cursor).toBe(NEXT);
+  });
+
+  it("carries the evidence the recovery is drawn from", async () => {
+    let ms = Date.parse("2026-10-04T00:00:00.000Z");
+    const recovered: TombstoneSweepProgress[] = [];
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+      ]),
+      clock: (): Date => {
+        const d = new Date(ms);
+        ms += 60_000;
+        return d;
+      },
+      onSweepStall: () => undefined,
+      onSweepRecovered: (p) => {
+        recovered.push(p);
+      },
+    });
+    await tick(s, 5);
+    // An advance is **positive evidence**, not an absence of bad news: `pagesAdvanced` only moves in
+    // the branch a page takes after it covered ground. That is why this recovery may be applied
+    // automatically where ADR-0322's `never_committed` may not.
+    expect(recovered[0]?.pagesAdvanced).toBe(2);
+    expect(recovered[0]?.lastAdvanceAt).toBe("2026-10-04T00:04:00.000Z");
+  });
+
+  it("treats reaching the end of the table as the recovery too", async () => {
+    const recovered: TombstoneSweepProgress[] = [];
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: null }),
+      ]),
+      onSweepStall: () => undefined,
+      onSweepRecovered: (p) => {
+        recovered.push(p);
+      },
+    });
+    await tick(s, 5);
+    // The end of the table counts as motion (ADR-0328), which is the rule that keeps an empty or
+    // single-page table from reading as stalled — and it has to clear a stall for the same reason.
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]?.lapsCompleted).toBe(1);
+  });
+
+  it("re-arms, so a sweep that stalls twice recovers twice", async () => {
+    const stalls: number[] = [];
+    const recovered: string[] = [];
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+        pageOf({ nextAfterTombstoneId: null }),
+      ]),
+      onSweepStall: (stall) => {
+        stalls.push(stall.attemptsWithoutAdvance);
+      },
+      onSweepRecovered: () => {
+        recovered.push("recovered");
+      },
+    });
+    await tick(s, 9);
+    // A flapping store is two episodes rather than one, because each was genuinely closed on
+    // evidence in between — the opposite of the stall *kind* flipping, which is one episode.
+    expect(stalls).toEqual([3, 3]);
+    expect(recovered).toEqual(["recovered", "recovered"]);
+  });
+
+  it("retries a recovery its sink refused, and routes the failure to onError", async () => {
+    const errors: unknown[] = [];
+    let attempts = 0;
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+      ]),
+      onSweepStall: () => undefined,
+      onSweepRecovered: () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("the incident store is unreachable");
+      },
+      onError: (e) => errors.push(e),
+    });
+    await tick(s, 5);
+    expect(attempts).toBe(1);
+    expect(errors).toHaveLength(1);
+    await s.runOnce();
+    // The flag is cleared only after the sink accepts it, so a resolution lost to a blip is
+    // re-offered — otherwise an incident stays open for a sweep that is working.
+    expect(attempts).toBe(2);
+    await tick(s, 2);
+    expect(attempts).toBe(2);
+  });
+
+  it("still recovers after a stall announcement its own sink refused", async () => {
+    const recovered: string[] = [];
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+      ]),
+      onSweepStall: () => {
+        throw new Error("the log sink is gone");
+      },
+      onSweepRecovered: () => {
+        recovered.push("recovered");
+      },
+    });
+    await tick(s, 5);
+    // The edge is armed *before* the stall is announced, for this case: the recovery is what closes
+    // an incident, and arming it on a failed announcement costs only a recovery for an episode
+    // nothing opened — which every resolution here answers with `none`.
+    expect(recovered).toEqual(["recovered"]);
+  });
+
+  it("never announces one for a deployment with no sweep", async () => {
+    const recovered: string[] = [];
+    const s = build({
+      reconciler: { reconcileStranded: async () => [], auditCompleted: async () => [] },
+      onSweepStall: () => undefined,
+      onSweepRecovered: () => {
+        recovered.push("recovered");
+      },
+    });
+    await tick(s, 10);
+    // Nothing can recover from a stall that could not be concluded.
+    expect(recovered).toEqual([]);
+  });
+
+  it("never announces one for a deployment with no audit cadence", async () => {
+    const recovered: string[] = [];
+    const s = build({
+      reconciler: sweeper([pageOf({ nextAfterTombstoneId: TOMB })]),
+      auditEveryTicks: 0,
+      onSweepRecovered: () => {
+        recovered.push("recovered");
+      },
+    });
+    await tick(s, 10);
+    expect(recovered).toEqual([]);
+  });
+
+  it("answers on the audit's cadence, not on every tick", async () => {
+    const recovered: number[] = [];
+    const s = build({
+      auditEveryTicks: 2,
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+      ]),
+      onSweepStall: () => undefined,
+      onSweepRecovered: (p) => {
+        recovered.push(p.pagesSwept);
+      },
+    });
+    await tick(s, 10);
+    // The sweep rides the audit's cadence, so the recovery does too: five sweeps in ten ticks, the
+    // fifth of which advanced.
+    expect(recovered).toEqual([5]);
+  });
+
+  it("works with no recovery sink wired, and still clears the condition", async () => {
+    const s = build({
+      reconciler: sweeper([
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: TOMB }),
+        pageOf({ nextAfterTombstoneId: NEXT }),
+      ]),
+      onSweepStall: () => undefined,
+    });
+    await tick(s, 5);
+    expect(s.sweepProgress().stall).toBeNull();
   });
 });

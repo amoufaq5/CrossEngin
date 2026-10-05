@@ -17,14 +17,20 @@ import {
   DELETION_EVIDENCE_SIGNAL,
   DeletionEvidenceEscalator,
   ESCALATING_VERDICTS,
+  ESCALATION_SUBJECT_KINDS,
   RESOLVING_VERDICTS,
+  SWEEP_EPISODE_PREFIX,
   TOMBSTONE_EPISODE_PREFIX,
+  TOMBSTONE_SWEEP_SURFACE,
   deletionEvidenceKey,
+  deletionEvidenceSweepKey,
   deletionEvidenceTombstoneKey,
   episodeKeyFor,
+  escalationAuditEntity,
   severityForDefects,
   tombstoneFindingSubject,
   type EscalatableFinding,
+  type EscalatableSweepStall,
   type EscalatableTombstoneFinding,
   type EscalatableVerdict,
 } from "./deletion-evidence-escalation.js";
@@ -49,6 +55,12 @@ const ALERT_POLICY: AlertPolicy = {
     {
       severity: "P2",
       channels: [{ kind: "slack", channel: "#deletion-evidence" }],
+    },
+    // Where a `sev2` lands, which is the whole point of grading a stalled sweep below `sev1`: the
+    // grade *is* the route, so this is a different rotation from the tamper one above.
+    {
+      severity: "P1",
+      channels: [{ kind: "webhook", url: "https://example.test/sweep" }],
     },
   ],
 };
@@ -1139,5 +1151,318 @@ describe("onTombstoneResolved (ADR-0328)", () => {
     expect(outcome.action).toBe("failed");
     expect(outcome.closeOut).toBeNull();
     expect(outcome.subject).toEqual({ kind: "tombstone", id: TOMB });
+  });
+});
+
+describe("a stalled sweep's episode key (ADR-0329)", () => {
+  it("adds the sweep as a third subject kind", () => {
+    // The first subject that is not a record. Every other finding here says "this proof is wrong";
+    // this one says "no proof is being read", which is the one thing a findings surface cannot.
+    expect(ESCALATION_SUBJECT_KINDS).toEqual(["request", "tombstone", "sweep"]);
+  });
+
+  it("keys per surface, under its own namespace", () => {
+    expect(SWEEP_EPISODE_PREFIX).toBe("sweep:");
+    expect(TOMBSTONE_SWEEP_SURFACE).toBe("tombstones");
+    expect(deletionEvidenceSweepKey(TOMBSTONE_SWEEP_SURFACE)).toBe(
+      `${DELETION_EVIDENCE_SIGNAL}:sweep:tombstones`,
+    );
+    expect(episodeKeyFor({ kind: "sweep", id: TOMBSTONE_SWEEP_SURFACE })).toBe(
+      deletionEvidenceSweepKey(TOMBSTONE_SWEEP_SURFACE),
+    );
+  });
+
+  it("cannot collide with a request or a tombstone episode", () => {
+    // The request namespace is bare ids, so an unprefixed `sweep` key would be the episode of a
+    // deletion request whose id is the string `sweep`. This module validates none of the three kinds
+    // of id it is handed, which is exactly why the tombstone namespace is prefixed too.
+    expect(deletionEvidenceSweepKey("x")).not.toBe(deletionEvidenceTombstoneKey("x"));
+    expect(deletionEvidenceSweepKey("x")).not.toBe(deletionEvidenceKey("x"));
+    const keys = new Set([
+      deletionEvidenceKey("x"),
+      deletionEvidenceTombstoneKey("x"),
+      deletionEvidenceSweepKey("x"),
+    ]);
+    expect(keys.size).toBe(3);
+    // The limit of the scheme, inherited rather than introduced: a prefix separates the spaces for
+    // *bare* ids only. A request id literally spelled `sweep:tombstones` still collides, exactly as
+    // one spelled `tombstone:<id>` has collided with the tombstone namespace since ADR-0328.
+    expect(deletionEvidenceSweepKey("tombstones")).toBe(deletionEvidenceKey("sweep:tombstones"));
+  });
+
+  it("names each subject as its own table names it", () => {
+    expect(escalationAuditEntity("request")).toBe("GdprDeletionRequest");
+    expect(escalationAuditEntity("tombstone")).toBe("TenantTombstone");
+    // A process rather than a row, and so not a table name — but total, so the mapping cannot be
+    // asked a kind it has no answer for.
+    expect(escalationAuditEntity("sweep")).toBe("TombstoneSweep");
+    expect(new Set(ESCALATION_SUBJECT_KINDS.map(escalationAuditEntity)).size).toBe(3);
+  });
+});
+
+describe("the grade a stalled sweep is declared at (ADR-0329)", () => {
+  it("defaults to sev2, below the tamper grade", () => {
+    const config = configOf();
+    expect(config.sweepStallSeverity).toBe("sev2");
+    // Deliberately not the same value: `severity` is for a detected falsified proof, a fact in hand.
+    expect(config.severity).toBe("sev1");
+  });
+
+  it("takes an explicit grade", () => {
+    expect(configOf({ sweepStallSeverity: "sev3" }).sweepStallSeverity).toBe("sev3");
+  });
+
+  it("refuses a grade it cannot parse rather than falling back to the default", () => {
+    // There is one value rather than a map here, so an ignored typo would route *every* stall to the
+    // configured `severity` — the tamper rotation — which is the outcome the field exists to avoid.
+    expect(() => configOf({ sweepStallSeverity: "sev9" })).toThrow();
+    expect(() => configOf({ sweepStallSeverity: "SEV2" })).toThrow();
+    expect(() => configOf({ sweepStallSeverity: 2 })).toThrow();
+    expect(() => configOf({ sweepStallSeverity: null })).toThrow();
+  });
+
+  it("is not reachable through severityForDefects, which would answer the tamper grade", () => {
+    // A stall has no defects, so the defect grader falls through to `config.severity`. That is the
+    // reason the stall path carries its own grade instead of sharing the grader.
+    expect(severityForDefects([], configOf())).toBe("sev1");
+  });
+});
+
+describe("onSweepStall (ADR-0329)", () => {
+  const STALL: EscalatableSweepStall = {
+    kind: "pinned_cursor",
+    attemptsWithoutAdvance: 3,
+    pagesWithoutAdvance: 3,
+    lastAdvanceAt: "2026-10-04T00:00:00.000Z",
+    cursor: TOMB,
+    detail: "3 pages came back over 3 attempts without moving past tomb_aaaabbbbccccdddd",
+  };
+
+  it("declares at the stall grade and pages the route that grade chooses", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onSweepStall(STALL);
+    expect(h.findOpenKeys).toEqual([deletionEvidenceSweepKey(TOMBSTONE_SWEEP_SURFACE)]);
+    expect(outcome.action).toBe("declared");
+    expect(outcome.severity).toBe("sev2");
+    expect(h.declared[0]?.severity).toBe("sev2");
+    // The grade is the route (ADR-0326), so grading this below a tamper is what keeps it off the
+    // rotation a falsified Article 17 proof pages. A sev1 finding reaches `pagerduty_phone`.
+    expect(outcome.page?.alertSeverity).toBe("P1");
+    expect(outcome.page?.channels.map((c) => c.kind)).toEqual(["webhook"]);
+  });
+
+  it("declares at a configured grade instead", async () => {
+    const h = harness({}, configOf({ sweepStallSeverity: "sev3" }));
+    const outcome = await h.escalator.onSweepStall(STALL);
+    expect(outcome.severity).toBe("sev3");
+    expect(outcome.page?.channels.map((c) => c.kind)).toEqual(["slack"]);
+  });
+
+  it("does not declare a security incident", async () => {
+    const h = harness();
+    await h.escalator.onSweepStall(STALL);
+    // `securityIncident` gates `breachDataClasses` and marks the record for the compliance surfaces
+    // that read it. A detected tamper is one; having stopped looking says nothing about whether
+    // anything happened, and declaring it one would start a breach assessment over a monitoring gap.
+    expect(h.declared[0]?.securityIncident).toBe(false);
+    expect(h.declared[0]?.affectedTenantIds ?? []).toEqual([]);
+  });
+
+  it("carries the kind in what a responder reads and never in the key", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onSweepStall(STALL);
+    const declared = h.declared[0];
+    expect(declared?.autoDeclaredFor).toBe(deletionEvidenceSweepKey(TOMBSTONE_SWEEP_SURFACE));
+    // A title is written once and never again, so one naming `pinned_cursor` would still say so
+    // after the condition had become `no_pages`. The kind goes in the detail, read as the moment.
+    expect(declared?.title).not.toContain("pinned_cursor");
+    expect(declared?.title).toContain("tombstones");
+    expect(declared?.detail).toContain("pinned_cursor");
+    expect(outcome.detail).toContain(STALL.detail);
+  });
+
+  it("is one episode across a database that flips between the two kinds", async () => {
+    let open: IncidentRecord | null = null;
+    const asked: string[] = [];
+    const declared: IncidentDeclarationRequest[] = [];
+    const escalator = new DeletionEvidenceEscalator({
+      declarer: {
+        declare: async (request): Promise<IncidentRecord> => {
+          declared.push(request);
+          open = incidentOf(INC, "sev2");
+          return open;
+        },
+        findOpen: async (key): Promise<IncidentRecord | null> => {
+          asked.push(key);
+          return open;
+        },
+        closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+      },
+      config: configOf(),
+      clock: () => new Date(AT),
+    });
+    const first = await escalator.onSweepStall(STALL);
+    const second = await escalator.onSweepStall({ ...STALL, kind: "no_pages", cursor: null });
+    const third = await escalator.onSweepStall({ ...STALL, kind: "pinned_cursor" });
+    // A half-up database flips between the two kinds from one audit tick to the next, and that is
+    // one episode with one cause. A kind in the key would declare a second incident and page a
+    // second time for a flap — ADR-0328's mistake, in a new place.
+    expect([first.action, second.action, third.action]).toEqual([
+      "declared",
+      "adopted",
+      "adopted",
+    ]);
+    expect(declared).toHaveLength(1);
+    expect(new Set(asked).size).toBe(1);
+  });
+
+  it("takes a named surface, so a second sweep is a second episode", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onSweepStall({ ...STALL, surface: "audit-chain" });
+    expect(outcome.subject).toEqual({ kind: "sweep", id: "audit-chain" });
+    expect(outcome.episodeKey).toBe(deletionEvidenceSweepKey("audit-chain"));
+    expect(outcome.episodeKey).not.toBe(deletionEvidenceSweepKey(TOMBSTONE_SWEEP_SURFACE));
+  });
+
+  it("names no request, because it is not about one", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onSweepStall(STALL);
+    expect(outcome.requestId).toBeNull();
+    expect(outcome.subject.kind).toBe("sweep");
+  });
+
+  it("leaves no audit row, and says so rather than dropping it silently", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onSweepStall(STALL);
+    // `meta.audit_log.tenant_id` is NOT NULL and references `meta.tenants`. A sweep walks every
+    // tenant's proofs and a stall is about the walk, so there is no tenant to file it under —
+    // the same wall ADR-0327 found for the SLO escalator. Filing it under a borrowed tenant would
+    // be ADR-0327's rejected Option B.
+    expect(outcome.audited).toBe(false);
+    expect(h.emitted).toEqual([]);
+    // The page still went out and the incident is still declared: the absence is the row, not the
+    // escalation.
+    expect(outcome.incidentId).toBe(INC);
+    expect(h.pages).toHaveLength(1);
+  });
+
+  it("reports a failed declaration rather than throwing, so the next tick retries", async () => {
+    const subjects: string[] = [];
+    const escalator = new DeletionEvidenceEscalator({
+      declarer: {
+        declare: async (): Promise<IncidentRecord> => {
+          throw new Error("incident store unreachable");
+        },
+        findOpen: async (): Promise<IncidentRecord | null> => null,
+        closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+      },
+      config: configOf(),
+      onError: (_err, subjectId) => subjects.push(subjectId),
+      clock: () => new Date(AT),
+    });
+    const outcome = await escalator.onSweepStall(STALL);
+    expect(outcome.action).toBe("failed");
+    expect(outcome.incidentId).toBeNull();
+    expect(outcome.page).toBeNull();
+    // The subject's id, not a request id: an error line reading `tomb_…` or a request id for a
+    // stall would name the wrong thing to go and look at.
+    expect(subjects).toEqual([TOMBSTONE_SWEEP_SURFACE]);
+  });
+
+  it("does not page when the policy has no route for the stall grade", async () => {
+    const h = harness(
+      {},
+      DeletionEscalationConfigSchema.parse({
+        alertPolicy: {
+          id: "ap_tamper_only",
+          routes: [{ severity: "P0", channels: [{ kind: "pagerduty_phone", serviceKey: "k" }] }],
+        },
+      }),
+    );
+    const outcome = await h.escalator.onSweepStall(STALL);
+    // A deployment that routes only the tamper grade gets the incident and no page, which is the
+    // honest outcome of "the grade is the route" — it is not quietly promoted to a route that exists.
+    expect(outcome.action).toBe("declared");
+    expect(outcome.page).toBeNull();
+    expect(h.pages).toEqual([]);
+  });
+});
+
+describe("onSweepRecovered (ADR-0329)", () => {
+  it("closes out the sweep's episode and resolves its alert at the declared grade", async () => {
+    const resolved: PageDirective[] = [];
+    const asked: string[] = [];
+    const escalator = new DeletionEvidenceEscalator({
+      declarer: {
+        declare: async (): Promise<IncidentRecord> => incidentOf(),
+        findOpen: async (key): Promise<IncidentRecord | null> => {
+          asked.push(key);
+          return incidentOf(INC, "sev2");
+        },
+        closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+      },
+      config: configOf(),
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+      clock: () => new Date(AT),
+    });
+    const outcome = await escalator.onSweepRecovered();
+    expect(asked).toEqual([deletionEvidenceSweepKey(TOMBSTONE_SWEEP_SURFACE)]);
+    expect(outcome.action).toBe("closed_out");
+    expect(outcome.closeOut).toBe("cancelled");
+    expect(outcome.severity).toBe("sev2");
+    // A resolve reaches exactly where its trigger did, or it closes nothing (ADR-0326).
+    expect(resolved.map((p) => p.alertSeverity)).toEqual(["P1"]);
+    expect(outcome.detail).toContain("advanced the cursor");
+  });
+
+  it("answers none when nothing is open, so a caller may retry it", async () => {
+    const h = harness({ open: null });
+    const outcome = await h.escalator.onSweepRecovered();
+    expect(outcome.action).toBe("none");
+    expect(h.closedOut).toEqual([]);
+    expect(outcome.subject).toEqual({ kind: "sweep", id: TOMBSTONE_SWEEP_SURFACE });
+  });
+
+  it("resolves the surface it is given and not the default", async () => {
+    const h = harness({ open: incidentOf(INC, "sev2") });
+    const outcome = await h.escalator.onSweepRecovered("audit-chain");
+    expect(h.findOpenKeys).toEqual([deletionEvidenceSweepKey("audit-chain")]);
+    expect(outcome.subject.id).toBe("audit-chain");
+  });
+
+  it("does not resolve the alert of an incident a human has triaged", async () => {
+    const h = harness({ open: incidentOf(INC, "sev2"), closeOut: "human_owned" });
+    const outcome = await h.escalator.onSweepRecovered();
+    expect(outcome.closeOut).toBe("human_owned");
+    expect(outcome.action).toBe("closed_out");
+  });
+
+  it("leaves no audit row either, for the same want of a tenant", async () => {
+    const h = harness({ open: incidentOf(INC, "sev2") });
+    const outcome = await h.escalator.onSweepRecovered();
+    expect(outcome.audited).toBe(false);
+    expect(h.emitted).toEqual([]);
+  });
+
+  it("reports a failed close-out rather than claiming the episode closed", async () => {
+    const subjects: string[] = [];
+    const escalator = new DeletionEvidenceEscalator({
+      declarer: {
+        declare: async (): Promise<IncidentRecord> => incidentOf(),
+        findOpen: async (): Promise<IncidentRecord | null> => incidentOf(INC, "sev2"),
+        closeOut: async (): Promise<IncidentCloseOut> => {
+          throw new Error("close-out failed");
+        },
+      },
+      config: configOf(),
+      onError: (_err, subjectId) => subjects.push(subjectId),
+      clock: () => new Date(AT),
+    });
+    const outcome = await escalator.onSweepRecovered();
+    expect(outcome.action).toBe("failed");
+    expect(outcome.closeOut).toBeNull();
+    expect(subjects).toEqual([TOMBSTONE_SWEEP_SURFACE]);
   });
 });

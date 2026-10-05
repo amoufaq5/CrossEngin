@@ -978,4 +978,29 @@ describe("parseServeArgs — --audit-read-sensitive-class", () => {
       expect(message).toContain(cls);
     }
   });
+
+  it("refuses --workflow-cancel-role rather than mounting a route that cannot work", () => {
+    // ADR-0330. The route, its tests and its fence columns exist; what is missing is upstream of
+    // all of it — this server instantiates no WorkflowEngine because `meta.workflow_definitions`
+    // has no writer. A route mounted against an empty definition map would answer
+    // `unknown_instance` for every instance, which is the silent degradation ADR-0327 said a
+    // surface must never choose.
+    expect(() => parseServeArgs([...PG, "--workflow-cancel-role", "ops"])).toThrow(CliUsageError);
+  });
+
+  it("names the real reason for that refusal, not just the flag", () => {
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--workflow-cancel-role=ops"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("meta.workflow_definitions has no writer");
+    // And says what is *not* broken, so nobody reads this as "workflows do not work at all".
+    expect(message).toContain("Entity lifecycle transitions are a different mechanism");
+  });
+
+  it("boots fine without it, which is every deployment today", () => {
+    expect(parseServeArgs([...PG]).workflowCancelRoles).toEqual([]);
+  });
 });

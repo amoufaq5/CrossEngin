@@ -72,6 +72,15 @@ import type { DeletionEscalationConfig } from "./deletion-escalation-config.js";
  * adopts) whatever the request paths already declared, and only a finding with no live request of
  * its own gets a `tombstone:`-namespaced key. The prefix is what makes the two spaces disjoint —
  * a bare id in one namespace could collide with an id in the other.
+ *
+ * **And one episode for the verifier itself** (ADR-0329). The three directions above all answer
+ * "this proof is wrong". The fourth answers "no proof is being read", which is the failure none of
+ * them can express: a sweep that has stopped produces no findings, and so is silent in exactly the
+ * same way as a sweep over a table of honest proofs. It is keyed per *surface* and not per stall
+ * kind — a half-up database flips between `no_pages` and `pinned_cursor` and that is one episode —
+ * graded `sweepStallSeverity` (default `sev2`) rather than from defects, since the grade is the
+ * route and this must not page the rotation that exists for a tamper in hand, and declared with
+ * `securityIncident: false`, because having stopped looking is not a finding about anything.
  */
 
 /** The verdicts that warrant an incident. */
@@ -145,6 +154,42 @@ export function deletionEvidenceTombstoneKey(tombstoneId: string): string {
 }
 
 /**
+ * The third namespace, for the **verifier** rather than for anything it verified.
+ *
+ * Prefixed for the reason `TOMBSTONE_EPISODE_PREFIX` is, and it is not theoretical here either: the
+ * request namespace is bare ids, so an unprefixed `sweep` key would be the episode of a deletion
+ * request whose id is the string `sweep`. Request ids are generated `dreq_<uuid>` today, but this
+ * module takes its ids from three stores and validates none of them — which is exactly why the
+ * tombstone namespace is prefixed and not merely documented.
+ *
+ * The id after the prefix names *which* sweep. There is one today, and naming it is what keeps a
+ * second one — the audit chain has a sweep of its own shape — from having to share this episode or
+ * invent a fourth namespace.
+ *
+ * The separation it buys is against a **bare** id, which is the only kind the three stores mint. A
+ * request id spelled `sweep:tombstones` would still collide, exactly as one spelled `tombstone:<id>`
+ * has since ADR-0328; a test pins that, so the limit is recorded rather than assumed away.
+ */
+export const SWEEP_EPISODE_PREFIX = "sweep:";
+
+/** The only sweep there is: ADR-0327's keyset walk over `meta.tenant_tombstones`. */
+export const TOMBSTONE_SWEEP_SURFACE = "tombstones";
+
+/**
+ * The episode key for a sweep that has stopped covering its table.
+ *
+ * **Per surface, and deliberately not per `SweepStallKind`.** A database that is half-up flips
+ * between `no_pages` (the store is unreachable) and `pinned_cursor` (pages arrive and the position
+ * does not move) from one audit tick to the next, and that is one episode with one cause: a kind in
+ * the key would declare a second incident and page a second time for a flap, which is the mistake
+ * ADR-0328 had to reason its way out of for tombstone findings. The kind is *narrative* — it names
+ * the remedy, so it belongs in what a responder reads, not in what identifies the episode.
+ */
+export function deletionEvidenceSweepKey(surface: string): string {
+  return autoDeclaredForKey(DELETION_EVIDENCE_SIGNAL, `${SWEEP_EPISODE_PREFIX}${surface}`);
+}
+
+/**
  * What an episode is *about*.
  *
  * The three paths into this escalator see the same tampered row through different handles — a
@@ -152,7 +197,17 @@ export function deletionEvidenceTombstoneKey(tombstoneId: string): string {
  * incident regardless of which one arrived. So the subject is the record, and the key is derived
  * from it rather than chosen by the caller.
  */
-export const ESCALATION_SUBJECT_KINDS = ["request", "tombstone"] as const;
+export const ESCALATION_SUBJECT_KINDS = [
+  "request",
+  "tombstone",
+  /**
+   * The sweep itself — the one subject that is not a record. Every other finding here is about a
+   * proof that is wrong; this one is about **not reading the proofs at all**, which is the failure a
+   * findings-only surface cannot express, because a verifier that has stopped is silent in exactly
+   * the same way as one that finds nothing (ADR-0329).
+   */
+  "sweep",
+] as const;
 export type EscalationSubjectKind = (typeof ESCALATION_SUBJECT_KINDS)[number];
 
 export interface EscalationSubject {
@@ -161,9 +216,37 @@ export interface EscalationSubject {
 }
 
 export function episodeKeyFor(subject: EscalationSubject): string {
-  return subject.kind === "request"
-    ? deletionEvidenceKey(subject.id)
-    : deletionEvidenceTombstoneKey(subject.id);
+  switch (subject.kind) {
+    case "request":
+      return deletionEvidenceKey(subject.id);
+    case "tombstone":
+      return deletionEvidenceTombstoneKey(subject.id);
+    case "sweep":
+      return deletionEvidenceSweepKey(subject.id);
+  }
+}
+
+/**
+ * What `meta.audit_log.entity` calls an escalation's subject.
+ *
+ * The entity is the thing the escalation is *about*, which for a tombstone episode is not a request:
+ * filing one as a `GdprDeletionRequest` with a tombstone id in `entityId` would be a row whose
+ * entity and id disagree, and for an unreferenced tombstone there is no request to file it under at
+ * all. Each is named as its table names it (`meta.tenant_tombstones`), the way `TenantSchema` is.
+ *
+ * `TombstoneSweep` names no table, because the sweep is a process rather than a row — and a sweep's
+ * escalation never reaches a row anyway, for want of a tenant (see `record`). It is here so the
+ * mapping is total and so the one surface that would carry a stall is already spelled correctly.
+ */
+export function escalationAuditEntity(kind: EscalationSubjectKind): string {
+  switch (kind) {
+    case "request":
+      return "GdprDeletionRequest";
+    case "tombstone":
+      return "TenantTombstone";
+    case "sweep":
+      return "TombstoneSweep";
+  }
 }
 
 /**
@@ -224,7 +307,7 @@ export type EscalationAction = (typeof ESCALATION_ACTIONS)[number];
 export interface DeletionEscalationOutcome {
   /**
    * The deletion request this episode is about, or **null** when it is about a tombstone that no
-   * live request names.
+   * live request names, or about the sweep itself.
    *
    * Kept rather than replaced by `subject`, and widened rather than reused: every existing caller
    * reads this field, and the alternative — putting a tombstone id in it — would make the outcome
@@ -299,6 +382,26 @@ export interface EscalatableTombstoneFinding {
   readonly detail: string;
 }
 
+/**
+ * The slice of `TombstoneSweepStall` this reads (ADR-0329).
+ *
+ * `kind` is a `SweepStallKind` typed as a string, for the reason `reference` above is: the escalator
+ * takes its inputs from the scheduler and must not refuse a tick for a vocabulary it has not been
+ * rebuilt against. There is no `tenantId` field and that is not an omission — see `onSweepStall`.
+ */
+export interface EscalatableSweepStall {
+  /** Defaults to `TOMBSTONE_SWEEP_SURFACE`; present so a second sweep has somewhere to go. */
+  readonly surface?: string;
+  /** `"no_pages" | "pinned_cursor"`. */
+  readonly kind: string;
+  readonly attemptsWithoutAdvance: number;
+  readonly pagesWithoutAdvance: number;
+  readonly lastAdvanceAt: string | null;
+  /** The tombstone id the sweep is pinned behind, or null at the start of a lap. */
+  readonly cursor: string | null;
+  readonly detail: string;
+}
+
 export interface DeletionEscalatorOptions {
   readonly declarer: IncidentDeclarer;
   readonly config: DeletionEscalationConfig;
@@ -329,9 +432,10 @@ export interface DeletionEscalatorOptions {
   readonly clock?: () => Date;
   /**
    * The second argument is the **subject's** id — the request id for a request episode, the
-   * tombstone id for a tombstone one. Deliberately the bare id rather than the episode key: the key
-   * is derivable from it and a log line reading `deletion_evidence:tombstone:tomb_…` is worse at the
-   * only thing this argument is for, which is naming the row to go and look at.
+   * tombstone id for a tombstone one, the sweep's surface for a stall. Deliberately the bare id
+   * rather than the episode key: the key is derivable from it and a log line reading
+   * `deletion_evidence:tombstone:tomb_…` is worse at the only thing this argument is for, which is
+   * naming the row to go and look at.
    */
   readonly onError?: (err: unknown, subjectId: string) => void;
 }
@@ -452,6 +556,90 @@ export class DeletionEvidenceEscalator {
     });
   }
 
+  /**
+   * The fourth direction, and the only one that is not about a record: the sweep has stopped
+   * covering its table, so **no stored Article 17 proof is being verified** (ADR-0329).
+   *
+   * Why this needs an incident at all. `verifyStoredEvidence` is the only detector there is for a
+   * tampered `scope` (ADR-0323), and the sweep is the only thing that applies it to a tombstone no
+   * request names — every one the synchronous route of ADR-0320 writes. So a stalled sweep is not a
+   * degraded check, it is the *absence* of the platform's one detector; and it fails invisibly,
+   * because a findings surface that reports nothing reads identically whether every proof verifies
+   * or none is being read. ADR-0328 shipped the counter and nothing read it.
+   *
+   * Three things it does differently from the three directions above, each for its own reason.
+   *
+   * **It is graded `sweepStallSeverity`, not from defects.** There are no defects — nothing has been
+   * examined — so `severityForDefects([])` would answer the configured `severity`, which is the
+   * tamper grade. The grade is the route (ADR-0326), so that would page the rotation that exists for
+   * a *detected* falsified proof about a condition that concludes nothing, and persists for as long
+   * as its cause. The grade is the one place that distinction is expressible.
+   *
+   * **It is not a `securityIncident`.** The flag gates `breachDataClasses` and marks the record as a
+   * security event for the compliance surfaces that read it. A detected tamper is one; "we stopped
+   * looking" is a lapse in a control and says nothing about whether anything happened. Declaring it
+   * one would start a breach assessment over a monitoring gap, which is the same conflation the
+   * grade avoids.
+   *
+   * **It names no tenant, so it leaves no audit row.** A sweep is platform-wide: it walks every
+   * tenant's proofs, and a stall is about the walk, not about a row. `meta.audit_log.tenant_id` is
+   * NOT NULL *and* a foreign key to `meta.tenants`, so there is no tenant to file it under and
+   * inventing one would file a platform fact in one tenant's RLS scope — ADR-0327's rejected Option
+   * B. Reported as `audited: false` rather than dropped silently, which is `IntegrityEscalator`'s
+   * precedent for the same wall. The records that *do* land are the incident itself (the kind, the
+   * counter and the cursor are in its detail) and the `paged` timeline note its page leaves.
+   */
+  async onSweepStall(stall: EscalatableSweepStall): Promise<DeletionEscalationOutcome> {
+    const surface = stall.surface ?? TOMBSTONE_SWEEP_SURFACE;
+    return this.escalate(
+      { kind: "sweep", id: surface },
+      {
+        // Kind-free on purpose. A title is written once, at declaration, and never again — so a
+        // title naming `no_pages` would still say so after the condition had become
+        // `pinned_cursor`, which is the flap the single episode exists to absorb. The kind is in
+        // the detail and the outcome, where it is read as a reading of the moment rather than as
+        // the episode's name.
+        title: `Deletion proof sweep is not verifying stored tombstones (${surface})`,
+        detail: `${stall.kind}: ${stall.detail}`,
+        tenantId: null,
+        defects: [],
+        verdict: null,
+        severity: this.opts.config.sweepStallSeverity,
+        securityIncident: false,
+        stallKind: stall.kind,
+        attemptsWithoutAdvance: stall.attemptsWithoutAdvance,
+        cursor: stall.cursor,
+      },
+    );
+  }
+
+  /**
+   * The sweep is covering ground again.
+   *
+   * **This recovery is applied automatically, and it is the exception to the house rule in this
+   * family.** Everywhere else here an absence is only an inference: ADR-0322 refuses to apply
+   * `never_committed` because "not committed" and "not committed yet" are indistinguishable, and
+   * ADR-0328 refuses to read a clean sweep page as a verdict on a particular tombstone because the
+   * row may simply not have been on it. A future reader will expect the same caution here and should
+   * not: an **advance is positive evidence**. `attemptsWithoutAdvance` is reset in exactly one
+   * place — the branch in `sweepOnce` that a page took after it moved the cursor or reached the end
+   * of the table — so a stall that has lifted means a page came back and covered ground that had not
+   * been covered. That is a fact in hand about the sweep, which is the whole of what the episode
+   * claims; it is not a claim that any particular proof verifies, and the episode never made one.
+   *
+   * Idempotent, like every resolution here: with nothing open it answers `none`, so a caller may
+   * retry it until it lands.
+   */
+  async onSweepRecovered(
+    surface: string = TOMBSTONE_SWEEP_SURFACE,
+  ): Promise<DeletionEscalationOutcome> {
+    return this.resolve(
+      { kind: "sweep", id: surface },
+      "a sweep page advanced the cursor, so stored proofs are being verified again",
+      { tenantId: null, verdict: null },
+    );
+  }
+
   private detailFor(result: EscalatableVerdict): string {
     const named =
       result.tombstoneIds.length > 1
@@ -465,11 +653,26 @@ export class DeletionEvidenceEscalator {
     about: {
       readonly title: string;
       readonly detail: string;
-      readonly tenantId: string;
+      /**
+       * Null for a subject that names no tenant — the sweep. The audit row is skipped rather than
+       * filed under a borrowed tenant; see `onSweepStall` and `record`.
+       */
+      readonly tenantId: string | null;
       readonly defects: readonly string[];
       readonly verdict: string | null;
+      /**
+       * An explicit grade, for a subject whose severity does not come from defects. A finding grades
+       * from what is wrong with the record; the sweep has no record and no defects, so it carries
+       * its own grade rather than falling through to the tamper default.
+       */
+      readonly severity?: Severity;
+      /** Defaults to true: every *finding* here is a detected tamper. A stall is not; see above. */
+      readonly securityIncident?: boolean;
       readonly tombstoneId?: string;
       readonly reference?: string;
+      readonly stallKind?: string;
+      readonly attemptsWithoutAdvance?: number;
+      readonly cursor?: string | null;
     },
   ): Promise<DeletionEscalationOutcome> {
     const key = episodeKeyFor(subject);
@@ -477,7 +680,7 @@ export class DeletionEvidenceEscalator {
     // `severityForDefects` would be two chances to disagree, and a page routed by a different grade
     // than the incident carries is a page to the wrong rotation about an incident that does not say
     // so.
-    const severity = severityForDefects(about.defects, this.opts.config);
+    const severity = about.severity ?? severityForDefects(about.defects, this.opts.config);
     try {
       const open = await this.opts.declarer.findOpen(key);
       if (open !== null) {
@@ -502,8 +705,8 @@ export class DeletionEvidenceEscalator {
         declaredBy: this.opts.config.declaredBy,
         detail: about.detail,
         declaredAt: this.now(),
-        affectedTenantIds: [about.tenantId],
-        securityIncident: true,
+        affectedTenantIds: about.tenantId === null ? [] : [about.tenantId],
+        securityIncident: about.securityIncident ?? true,
         metadata: {
           surface: `deletion-evidence/${subject.kind}/${subject.id}`,
           autoDeclared: true,
@@ -522,6 +725,11 @@ export class DeletionEvidenceEscalator {
         reason: about.detail,
         ...(about.tombstoneId !== undefined ? { tombstoneId: about.tombstoneId } : {}),
         ...(about.reference !== undefined ? { reference: about.reference } : {}),
+        ...(about.stallKind !== undefined ? { stallKind: about.stallKind } : {}),
+        ...(about.attemptsWithoutAdvance !== undefined
+          ? { attemptsWithoutAdvance: about.attemptsWithoutAdvance }
+          : {}),
+        ...(about.cursor !== undefined ? { cursor: about.cursor } : {}),
       });
       return {
         ...this.episode(subject),
@@ -554,7 +762,8 @@ export class DeletionEvidenceEscalator {
     subject: EscalationSubject,
     reason: string,
     about: {
-      readonly tenantId: string;
+      /** Null for the sweep, which names no tenant and so leaves no audit row. */
+      readonly tenantId: string | null;
       readonly verdict: string | null;
       readonly tombstoneId?: string;
     },
@@ -641,7 +850,7 @@ export class DeletionEvidenceEscalator {
   private async record(input: {
     readonly operation: string;
     readonly subject: EscalationSubject;
-    readonly tenantId: string;
+    readonly tenantId: string | null;
     readonly incidentId: string;
     readonly severity: Severity;
     readonly defects: readonly string[];
@@ -649,22 +858,26 @@ export class DeletionEvidenceEscalator {
     readonly reason: string;
     readonly tombstoneId?: string;
     readonly reference?: string;
+    readonly stallKind?: string;
+    readonly attemptsWithoutAdvance?: number;
+    readonly cursor?: string | null;
   }): Promise<boolean> {
-    if (this.opts.audit === undefined) return false;
+    // No tenant, no row. `meta.audit_log.tenant_id` is NOT NULL and references `meta.tenants`, so a
+    // platform-scope escalation — the sweep's — cannot leave one, and the alternative is filing it
+    // under a tenant it is not about (ADR-0327's rejected Option B). Reported through
+    // `audited: false`, which is `IntegrityEscalator.record`'s answer to the same wall; the incident
+    // and its timeline note are the records that still land.
+    if (this.opts.audit === undefined || input.tenantId === null) return false;
+    const tenantId = input.tenantId;
     try {
       await this.opts.audit.emit(
         auditEntry({
           id: randomUUID(),
-          tenantId: input.tenantId,
+          tenantId,
           occurredAt: this.now(),
           actor: auditActor({ kind: "system", userId: null }),
           operation: input.operation,
-          // The entity is the record the escalation is *about*, which for a tombstone episode is not
-          // a request. Filing it as a `GdprDeletionRequest` with a tombstone id in `entityId` would
-          // be a row whose entity and id disagree — and for an unreferenced tombstone there is no
-          // request to file it under at all, which is the whole reason this path exists. Named as
-          // its table names it (`meta.tenant_tombstones`), the way `TenantSchema` is.
-          entity: input.subject.kind === "request" ? "GdprDeletionRequest" : "TenantTombstone",
+          entity: escalationAuditEntity(input.subject.kind),
           entityId: input.subject.id,
           after: {
             incidentId: input.incidentId,
@@ -676,6 +889,18 @@ export class DeletionEvidenceEscalator {
             // request's id, so without this the row would not name the proof that is wrong.
             ...(input.tombstoneId !== undefined ? { tombstoneId: input.tombstoneId } : {}),
             ...(input.reference !== undefined ? { reference: input.reference } : {}),
+            // A stall's figures. They are *allowed* here — `meta.audit_log` is RLS-confined and
+            // read only through `app.platform_audit` elevation, so a reader of this row is already
+            // entitled to the tombstone ids the sibling rows carry — and they do not reach the
+            // page, which travels to a third-party provider and a lock screen (ADR-0325). Written
+            // here anyway although the sweep's own row never lands, so the shape is right the day a
+            // platform-scope audit row becomes expressible, and so a second sweep that *does* name
+            // a tenant needs no new branch.
+            ...(input.stallKind !== undefined ? { stallKind: input.stallKind } : {}),
+            ...(input.attemptsWithoutAdvance !== undefined
+              ? { attemptsWithoutAdvance: input.attemptsWithoutAdvance }
+              : {}),
+            ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
           },
           reason: input.reason,
         }),

@@ -1,5 +1,6 @@
 import {
   DEFAULT_PAGE_BACKOFF_FACTOR,
+  EmailPageSender,
   DEFAULT_PAGE_JITTER_RATIO,
   DEFAULT_PAGE_RETRY_BUDGET_MS,
   JITTERED_PAGE_RETRY,
@@ -58,6 +59,27 @@ export const PAGE_SMS_VARS = [
   "PAGE_SMS_FROM_NUMBER",
   "PAGE_SMS_MESSAGING_SERVICE_SID",
 ] as const;
+
+/**
+ * Email paging credentials, separate from `SES_*` for `PAGE_SMS_*`'s reason (ADR-0329).
+ *
+ * The same SES account would work and reusing `SES_REGION` / `SES_FROM_ADDRESS` would save an
+ * operator some typing — but a deployment should be able to page from a different sender identity,
+ * or a different AWS account, than the one its tenants' notifications come from, and silently
+ * borrowing credentials configured for another purpose is the implicit coupling ADR-0325 refused at
+ * the transport level. The `AWS_*` keys are *not* duplicated: a page-specific pair is accepted and
+ * the notification stack's is the fallback, because unlike the sender identity an access key is a
+ * credential for the whole account and a deployment that wants one set should not have to write it
+ * twice.
+ */
+export const PAGE_EMAIL_VARS = [
+  "PAGE_EMAIL_REGION",
+  "PAGE_EMAIL_FROM_ADDRESS",
+  "PAGE_EMAIL_ACCESS_KEY_ID",
+  "PAGE_EMAIL_SECRET_ACCESS_KEY",
+  "PAGE_EMAIL_SESSION_TOKEN",
+] as const;
+export const PAGE_EMAIL_ENDPOINT_VAR = "PAGE_EMAIL_ENDPOINT";
 
 export interface PageWiringReport {
   /** Channel kinds a page can actually be delivered on. */
@@ -123,6 +145,45 @@ export function buildPageSendersFromEnv(env: NodeJS.ProcessEnv = process.env): B
       });
     } catch (err) {
       skipped.push(`sms (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  // Email. ADR-0329 closed the one kind in `PAGE_CHANNEL_KINDS` that had no transport at all: a
+  // deployment whose only configured channel was email had its policy name `email_digest`, the
+  // dispatcher report `unroutable`, and nobody woken. The access key falls back to the
+  // notification stack's because it is an account credential rather than a sender identity; the
+  // *identity* never falls back, for the reason `TWILIO_VOICE_FROM_NUMBER` does not.
+  if (PAGE_EMAIL_VARS.some((n) => value(env, n) !== null)) {
+    try {
+      const region = value(env, "PAGE_EMAIL_REGION");
+      if (region === null) throw new Error("PAGE_EMAIL_REGION is required");
+      const fromAddress = value(env, "PAGE_EMAIL_FROM_ADDRESS");
+      if (fromAddress === null) throw new Error("PAGE_EMAIL_FROM_ADDRESS is required");
+      const accessKeyId =
+        value(env, "PAGE_EMAIL_ACCESS_KEY_ID") ?? value(env, "AWS_ACCESS_KEY_ID");
+      const secretAccessKey =
+        value(env, "PAGE_EMAIL_SECRET_ACCESS_KEY") ?? value(env, "AWS_SECRET_ACCESS_KEY");
+      if (accessKeyId === null || secretAccessKey === null) {
+        throw new Error(
+          "needs PAGE_EMAIL_ACCESS_KEY_ID and PAGE_EMAIL_SECRET_ACCESS_KEY," +
+            " or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY",
+        );
+      }
+      const sessionToken =
+        value(env, "PAGE_EMAIL_SESSION_TOKEN") ?? value(env, "AWS_SESSION_TOKEN");
+      const emailEndpoint = value(env, PAGE_EMAIL_ENDPOINT_VAR);
+      senders["email_digest"] = new EmailPageSender({
+        region,
+        fromAddress,
+        credentials: {
+          accessKeyId,
+          secretAccessKey,
+          ...(sessionToken === null ? {} : { sessionToken }),
+        },
+        ...(emailEndpoint === null ? {} : { endpoint: emailEndpoint }),
+      });
+    } catch (err) {
+      skipped.push(`email_digest (${err instanceof Error ? err.message : String(err)})`);
     }
   }
 

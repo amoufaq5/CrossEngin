@@ -758,10 +758,6 @@ describe("the catalog's own emission is unchanged", () => {
       "notification_read_watermarks",
       "notification_user_quiet_hours",
       "tenant_tombstones",
-      // Not a cross-column rule: `workflow_events_kind_check` is a single-column enum, declared
-      // table-level because that is the only placement the reconciler compares (ADR-0329). It is
-      // the exception the rule above describes, so it is named here rather than widening the rule.
-      "workflow_events",
     ]);
     for (const sql of statements) {
       expect(sql).not.toMatch(/CONSTRAINT "[^"]+" FOREIGN KEY \(/);
@@ -777,7 +773,6 @@ describe("the catalog's own emission is unchanged", () => {
       "notification_read_watermarks",
       "notification_user_quiet_hours",
       "tenant_tombstones",
-      "workflow_events",
     ]);
     for (const table of META_TABLES) {
       for (const policy of table.rls?.policies ?? []) {

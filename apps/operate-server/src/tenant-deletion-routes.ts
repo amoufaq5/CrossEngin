@@ -114,6 +114,21 @@ export type DeletionOutcomeLike =
         readonly examinedTables: readonly string[];
         /** Every table the retention set deliberately left in place. */
         readonly retainedTables: readonly string[];
+        /**
+         * What is lawfully still there, and why (ADR-0330).
+         *
+         * `null` when nothing was retained — never an empty list, so "nothing to claim" cannot
+         * collapse into the silence the attestation schema refuses. It deliberately carries **no
+         * count**: a figure on the retained side could be read as part of the erasure, and
+         * ADR-0317's whole subject is numbers that mean something other than what a reader assumes.
+         *
+         * This is the sentence an operator sends in answer to an Article 17 request: everything was
+         * destroyed except these rows, which are held under this obligation.
+         */
+        readonly statutoryRetained: {
+          readonly obligations: readonly string[];
+          readonly dataReference: string;
+        } | null;
       };
     }
   | {

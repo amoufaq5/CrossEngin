@@ -6867,6 +6867,44 @@ export const META_WORKFLOW_INSTANCES: TableDefinition = {
     { name: "awaiting_activity_ids", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "awaiting_signal_names", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "awaiting_timer_names", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
+    /**
+     * The cancellation fence and what it recorded (ADR-0329's instance cancellation).
+     *
+     * `cancellation_requested_at` **is** the fence, so NULL has to stay available to mean "not
+     * requested" — a `DEFAULT now()` would fence every instance at birth. There is deliberately no
+     * new instance *status*: `status` carries a CHECK, so unlike an event kind a new value is not
+     * an additive change, and the fence being a field is ADR-0315's shape.
+     *
+     * `cancellation_requested_by` is TEXT and **not** a `meta.users` reference: the value is a
+     * user's uuid *or* a system slug, because a scheduled-timeout cancellation has no human in it
+     * — ADR-0318's `tenant_tombstones.executed_by` lesson in a second table.
+     *
+     * `cancellation_disposition` is nullable because an instance nobody asked to cancel has no
+     * disposition, and a `NOT NULL DEFAULT` would make one of the two the reading of silence —
+     * exactly what the contract refused by giving the field no `z.default()`. No cross-column
+     * CHECK ties it to the fence: the projection sets it NULL when a stored event's disposition is
+     * unreadable *while* the fence is set, so `requested_at IS NULL OR disposition IS NOT NULL`
+     * would reject a legitimately-unreadable row.
+     *
+     * `cancellation_signalled_activity_ids` is `NOT NULL DEFAULT '[]'`, matching its three
+     * `awaiting_*` siblings: "nothing was signalled" and "we do not know what was signalled" are
+     * different facts, and a nullable column collapses them (ADR-0317).
+     */
+    { name: "cancellation_requested_at", type: "TIMESTAMPTZ" },
+    { name: "cancellation_requested_by", type: "TEXT" },
+    {
+      name: "cancellation_disposition",
+      type: "TEXT",
+      // Inline, and compared since ADR-0330. Satisfied by NULL in Postgres, which is what makes a
+      // nullable column with a value CHECK coherent.
+      check: "cancellation_disposition IN ('compensate', 'abandon')",
+    },
+    {
+      name: "cancellation_signalled_activity_ids",
+      type: "JSONB",
+      notNull: true,
+      default: "'[]'::jsonb",
+    },
   ],
   primaryKey: ["id"],
   indexes: [
@@ -7297,8 +7335,15 @@ export const META_WORKFLOW_EVENTS: TableDefinition = {
       name: "kind",
       type: "TEXT",
       notNull: true,
-      // The CHECK is **table-level**, in `constraints` below, and this is the one column in the
-      // catalog where that placement is load-bearing rather than stylistic. See the note there.
+      // `instance_cancellation_requested` and `activity_cancelled` are ADR-0329's two new kinds.
+      // Inline again, and safely so since ADR-0330: a column-level `check` expression **is**
+      // compared now — the probe's `conkey` tells the reconciler which name Postgres chose, so the
+      // difference is planned on an empty table and reported with its SQL on a populated one.
+      // ADR-0329 had to lift this one constraint to a named table-level form precisely because a
+      // column-level expression was never compared, which would have made widening it an invisible
+      // migration; that workaround is no longer needed and the catalog is uniform again.
+      check:
+        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'instance_cancellation_requested', 'instance_suspended', 'instance_resumed', 'state_transitioned', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'activity_timed_out', 'activity_cancelled', 'activity_compensated', 'signal_received', 'signal_consumed', 'timer_scheduled', 'timer_fired', 'timer_cancelled', 'variable_updated', 'compensation_started', 'compensation_step_completed', 'compensation_completed', 'manual_action_taken', 'child_workflow_spawned', 'child_workflow_completed')",
     },
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true },
     { name: "actor_principal_id", type: "UUID", references: USER_FK },
@@ -7320,33 +7365,6 @@ export const META_WORKFLOW_EVENTS: TableDefinition = {
     { name: "causation_event_id", type: "TEXT" },
   ],
   primaryKey: ["id"],
-  constraints: [
-    {
-      kind: "check",
-      // **Table-level on purpose, and it is the enum that grows.** ADR-0329 added
-      // `instance_cancellation_requested` and `activity_cancelled`, and widening this as an inline
-      // column `check` would have been an invisible migration: `declaredCheckConstraints` reads
-      // only `table.constraints`, so a column-level expression is never compared —
-      // `expectedCheckConstraintNames` adds its *name* to the expected set purely so a correct
-      // database is not reported as drifted. A fresh install would therefore get 27 values while
-      // every already-migrated database silently kept its 25 and rejected both new kinds at the
-      // first append.
-      //
-      // Declared here, the reconciler matches it by name and compares the expression through
-      // ADR-0292's deparser, so the difference is *reported* — as `unreconciled` with the SQL,
-      // since revalidating a CHECK against existing rows is ADR-0299's manual case. The name is
-      // deliberately the one Postgres itself gives a single-column column check
-      // (`makeObjectName("workflow_events", "kind", "check")`), so on a database that already
-      // applied the column form the declaration matches the live constraint and reports a changed
-      // expression rather than a missing constraint plus an undeclared one.
-      //
-      // The general hole is still open for the catalog's other column-level checks; this is the
-      // table where it would have bitten now.
-      name: "workflow_events_kind_check",
-      expression:
-        "kind IN ('instance_started', 'instance_completed', 'instance_failed', 'instance_cancelled', 'instance_cancellation_requested', 'instance_suspended', 'instance_resumed', 'state_transitioned', 'activity_scheduled', 'activity_started', 'activity_completed', 'activity_failed', 'activity_timed_out', 'activity_cancelled', 'activity_compensated', 'signal_received', 'signal_consumed', 'timer_scheduled', 'timer_fired', 'timer_cancelled', 'variable_updated', 'compensation_started', 'compensation_step_completed', 'compensation_completed', 'manual_action_taken', 'child_workflow_spawned', 'child_workflow_completed')",
-    },
-  ],
   uniqueConstraints: [
     {
       name: "workflow_events_instance_sequence_key",
@@ -9697,6 +9715,48 @@ export const META_ARCHITECT_TENANT_COST: TableDefinition = {
   },
 };
 
+/**
+ * The learned correction to the AI cost estimator, per tenant (ADR-0330).
+ *
+ * **Its own table and not columns on `architect_tenant_cost`**, which is keyed
+ * `(tenant_id, period_key)` — a figure stored there resets at every month boundary, which is the
+ * forgetting ADR-0311 left open on a monthly cadence instead of a per-restart one. What this
+ * measures is a tenant's prompt mix, which has nothing to do with a billing period.
+ *
+ * `inflation >= 1` is load-bearing rather than decorative: a factor below 1 would *deflate* the
+ * estimate, and the estimate feeds a ceiling. `worst_observed` is kept beside the live factor
+ * un-relaxed, because once the factor has relaxed "never saw anything bad" and "saw 40x and has
+ * been re-measured since" are otherwise the same number. No indexes: the primary key is the only
+ * access path either statement uses.
+ */
+export const META_ARCHITECT_ESTIMATE_INFLATION: TableDefinition = {
+  schema: "meta",
+  name: "architect_estimate_inflation",
+  columns: [
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    { name: "inflation", type: "NUMERIC(12,6)", notNull: true, default: "1", check: "inflation >= 1" },
+    {
+      name: "worst_observed",
+      type: "NUMERIC(12,6)",
+      notNull: true,
+      default: "1",
+      check: "worst_observed >= 1",
+    },
+    { name: "observations", type: "BIGINT", notNull: true, default: "0", check: "observations >= 0" },
+    { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["tenant_id"],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "architect_estimate_inflation_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_SLO_EVALUATIONS: TableDefinition = {
   schema: "meta",
   name: "slo_evaluations",
@@ -10690,13 +10750,31 @@ export const META_NOTIFICATION_READ_STATES: TableDefinition = {
     { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
     { name: "user_id", type: "UUID", notNull: true, references: USER_FK },
     {
+      // TEXT and referencing `notification_dispatches.dispatch_id`, not UUID referencing its `id`.
+      //
+      // Declared UUID and never written, this table had drifted behind its own contract in the way
+      // ADR-0300 found for `meta.feature_flags` and ADR-0318 for `meta.tenant_tombstones` — and in
+      // the same way, nothing noticed because nothing had ever tried to write a row.
+      // `NotificationReadState.dispatchId` is `disp_[A-Za-z0-9_-]{8,40}`, which cannot be stored in
+      // a UUID column at all, so the first `INSERT` would have failed on a schema that looked
+      // correct.
+      //
+      // The dispatch's `dispatch_id` is the right target rather than its surrogate `id`: it is the
+      // identifier the contract carries and it is unique-constrained, so it is a valid foreign key
+      // target. Translating `disp_…` to a UUID in the store instead would put a join in front of
+      // every write and turn a missing dispatch into a lookup miss rather than a constraint
+      // violation — a worse failure, and a second spelling of the same identity to keep in step.
       name: "dispatch_id",
-      type: "UUID",
+      type: "TEXT",
       notNull: true,
+      check: "dispatch_id ~ '^disp_[A-Za-z0-9_-]{8,40}$'",
       references: {
         schema: "meta",
         table: "notification_dispatches",
-        column: "id",
+        column: "dispatch_id",
+        // CASCADE, because a read state has no meaning without the notice it is about. The
+        // alternative would keep a row asserting that somebody read something that no longer
+        // exists.
         onDelete: "CASCADE",
       },
     },
@@ -10971,6 +11049,7 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_ARCHITECT_TOOL_INVOCATIONS,
   META_ARCHITECT_PROPOSALS,
   META_ARCHITECT_TENANT_COST,
+  META_ARCHITECT_ESTIMATE_INFLATION,
   META_SLO_EVALUATIONS,
   META_SLO_ENFORCEMENT_ACTIONS,
   META_SLO_LATENCY_EVALUATIONS,

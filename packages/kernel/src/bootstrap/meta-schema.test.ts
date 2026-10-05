@@ -107,6 +107,9 @@ import {
   META_TENANT_DATA_EXPORTS,
   META_TENANT_LIFECYCLE_EVENTS,
   META_TENANT_STORAGE_USAGE,
+  META_ARCHITECT_ESTIMATE_INFLATION,
+  META_NOTIFICATION_READ_STATES,
+  META_WORKFLOW_INSTANCES,
   META_TENANT_TOMBSTONES,
   META_TENANT_UNIT_ECONOMICS,
   META_TENANTS,
@@ -118,7 +121,6 @@ import {
   META_WORKFLOW_ACTIVITIES,
   META_WORKFLOW_DEFINITIONS,
   META_WORKFLOW_EVENTS,
-  META_WORKFLOW_INSTANCES,
   META_WORKFLOW_SIGNALS,
   META_WORKFLOW_TIMERS,
 } from "./meta-schema.js";
@@ -136,7 +138,7 @@ function uniqueConstraintName(column: ColumnDefinition | undefined): string | un
 
 describe("META_TABLES", () => {
   it("contains 143 tables", () => {
-    expect(META_TABLES).toHaveLength(143);
+    expect(META_TABLES).toHaveLength(144);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -162,6 +164,7 @@ describe("META_TABLES", () => {
       "ai_conversations",
       "ai_provider_calls",
       "api_keys",
+      "architect_estimate_inflation",
       "architect_messages",
       "architect_proposals",
       "architect_sessions",
@@ -1290,6 +1293,75 @@ describe("table column shapes", () => {
     // Nullable, and paired with the version by the contract: v2 must carry it, v1 must not.
     expect(col("capability_declaration")?.type).toBe("JSONB");
     expect(col("capability_declaration")?.notNull).toBeUndefined();
+  });
+
+  it("META_ARCHITECT_ESTIMATE_INFLATION cannot hold a factor that deflates an estimate", () => {
+    const col = (n: string) =>
+      META_ARCHITECT_ESTIMATE_INFLATION.columns.find((c) => c.name === n);
+    // The estimate feeds a ceiling, so a factor below 1 would admit a request that should have
+    // been delayed. Refused at the column, not only in the resolver (ADR-0330).
+    expect(col("inflation")?.check).toBe("inflation >= 1");
+    expect(col("worst_observed")?.check).toBe("worst_observed >= 1");
+    expect(col("inflation")?.notNull).toBe(true);
+    // Keyed on the tenant **alone**, which is the point of the table existing: its sibling
+    // `architect_tenant_cost` is keyed `(tenant_id, period_key)`, so a figure stored there would
+    // reset every month — ADR-0311's forgetting on a monthly cadence instead of a per-restart one.
+    expect(META_ARCHITECT_ESTIMATE_INFLATION.primaryKey).toEqual(["tenant_id"]);
+    expect(col("period_key")).toBeUndefined();
+    // No indexes: the primary key is the only access path either statement uses.
+    expect(META_ARCHITECT_ESTIMATE_INFLATION.indexes).toBeUndefined();
+  });
+
+  it("META_WORKFLOW_INSTANCES carries the cancellation fence without letting silence decide", () => {
+    const col = (n: string) => META_WORKFLOW_INSTANCES.columns.find((c) => c.name === n);
+    // The fence itself: nullable with no default, because a non-NULL value *means* "cancellation
+    // requested" and a `DEFAULT now()` would fence every instance at birth (ADR-0329).
+    expect(col("cancellation_requested_at")?.type).toBe("TIMESTAMPTZ");
+    expect(col("cancellation_requested_at")?.notNull).toBeUndefined();
+    expect(col("cancellation_requested_at")?.default).toBeUndefined();
+    // TEXT and unreferenced: the value is a user's uuid *or* a system slug, because a scheduled
+    // cancellation has no human in it — ADR-0318's lesson in a second table.
+    expect(col("cancellation_requested_by")?.type).toBe("TEXT");
+    expect(col("cancellation_requested_by")?.references).toBeUndefined();
+    // Nullable and with no default, so neither disposition is the reading of silence — the same
+    // refusal the contract makes by giving the field no `z.default()`.
+    expect(col("cancellation_disposition")?.notNull).toBeUndefined();
+    expect(col("cancellation_disposition")?.default).toBeUndefined();
+    // NOT NULL, matching its `awaiting_*` siblings: "nothing was signalled" and "we do not know"
+    // are different facts and a nullable column collapses them (ADR-0317).
+    expect(col("cancellation_signalled_activity_ids")?.notNull).toBe(true);
+    expect(col("cancellation_signalled_activity_ids")?.default).toBe("'[]'::jsonb");
+  });
+
+  it("META_WORKFLOW_INSTANCES constrains the disposition where the reconciler can see it", () => {
+    const disposition = META_WORKFLOW_INSTANCES.columns.find(
+      (c) => c.name === "cancellation_disposition",
+    );
+    // Inline on the column, which ADR-0330 made safe: a column-level expression **is** compared
+    // now, so widening it later is planned on an empty table and reported with its SQL on a
+    // populated one. ADR-0329 had to lift two constraints to named table-level forms because this
+    // was not true; both are back inline and the catalog is uniform again.
+    expect(disposition?.check).toBe("cancellation_disposition IN ('compensate', 'abandon')");
+    // And the status vocabulary did *not* grow: `status` carries its own CHECK, so a new value
+    // there is not an additive change the way a new event kind is.
+    const status = META_WORKFLOW_INSTANCES.columns.find((c) => c.name === "status");
+    expect(status?.check).not.toContain("cancellation");
+  });
+
+  it("META_NOTIFICATION_READ_STATES carries the dispatch id the contract carries", () => {
+    const col = (n: string) => META_NOTIFICATION_READ_STATES.columns.find((c) => c.name === n);
+    // Declared UUID and never written, this table had drifted behind its own contract exactly as
+    // `meta.feature_flags` had (ADR-0300): `NotificationReadState.dispatchId` is
+    // `disp_[A-Za-z0-9_-]{8,40}`, which cannot be stored in a UUID column, so the first INSERT
+    // would have failed on a schema that read as correct. Nothing noticed because nothing wrote.
+    expect(col("dispatch_id")?.type).toBe("TEXT");
+    expect(col("dispatch_id")?.check).toBe("dispatch_id ~ '^disp_[A-Za-z0-9_-]{8,40}$'");
+    // The dispatch's own identifier, not its surrogate key — unique-constrained there, so a valid
+    // foreign key target, and the one the contract names.
+    expect(col("dispatch_id")?.references?.table).toBe("notification_dispatches");
+    expect(col("dispatch_id")?.references?.column).toBe("dispatch_id");
+    // CASCADE: a read state has no meaning without the notice it is about.
+    expect(col("dispatch_id")?.references?.onDelete).toBe("CASCADE");
   });
 
   it("META_TENANT_TOMBSTONES is readable after its tenant is gone, by SELECT only", () => {

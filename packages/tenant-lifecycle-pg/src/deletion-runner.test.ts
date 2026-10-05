@@ -71,7 +71,11 @@ const OK: DeleteTenantOutcome = {
     rowCount: 7,
     storageBytes: 700,
     examinedTables: ["meta.operate_entity_records"],
-    retainedTables: ["meta.audit_log"],
+    retainedTables: ["meta.audit_log", "meta.invoices"],
+    statutoryRetained: {
+      obligations: ["tax_records_7y"],
+      dataReference: "meta.invoices",
+    },
   },
 };
 

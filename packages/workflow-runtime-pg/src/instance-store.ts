@@ -1,4 +1,8 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  INSTANCE_CANCELLATION_DISPOSITIONS,
+  type InstanceCancellationDisposition,
+} from "@crossengin/workflow-engine";
 import type { ProjectedInstance } from "@crossengin/workflow-runtime";
 
 import type {
@@ -13,6 +17,97 @@ export interface CreateInstanceInput {
   readonly projection: ProjectedInstance;
   readonly definitionId: string;
   readonly relatedEntity?: Record<string, unknown> | null;
+}
+
+/**
+ * The cancellation columns as a row carries them, so the one definition serves the writer here and
+ * the drift comparison in `replayer.ts`.
+ *
+ * `cancellation_requested_by` is TEXT and not a `meta.users` reference: the projection sets it to
+ * `actorPrincipalId ?? actorSystemId`, so the value is a user's uuid *or* a system slug, and a
+ * scheduled timeout cancellation has no human in it at all. ADR-0318's lesson on
+ * `meta.tenant_tombstones.executed_by`, in a second table.
+ */
+export interface StoredCancellationColumns {
+  /** `unknown`, not `string | null`: node-postgres hands a `TIMESTAMPTZ` back as a `Date`. */
+  readonly cancellation_requested_at: unknown;
+  readonly cancellation_requested_by: string | null;
+  readonly cancellation_disposition: string | null;
+  readonly cancellation_signalled_activity_ids: unknown;
+}
+
+/**
+ * A stored timestamp as the ISO text a `ProjectedInstance` holds.
+ *
+ * Load-bearing, and found live: node-postgres returns a `TIMESTAMPTZ` as a JS `Date`, so comparing a
+ * stored timestamp to the projection's string with `!==` is true of *every* row that has one set.
+ * The offline fakes hand back strings, which is exactly the class of defect CLAUDE.md says a fake
+ * `PgConnection` cannot catch.
+ *
+ * An unparseable value comes back **as it stands** rather than as `null`, because `null` means "no
+ * timestamp" and a garbage column must not compare equal to an absent one.
+ */
+export function isoInstant(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
+  }
+  if (typeof value === "string") {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? value : new Date(ms).toISOString();
+  }
+  return String(value);
+}
+
+/** The four `ProjectedInstance` cancellation fields, as read back off a row. */
+export interface CancellationProjectionFields {
+  readonly cancellationRequestedAt: string | null;
+  readonly cancellationRequestedBy: string | null;
+  readonly cancellationDisposition: InstanceCancellationDisposition | null;
+  /** `null` when the stored column is not a JSON array of strings, which is drift and not emptiness. */
+  readonly cancellationSignalledActivityIds: readonly string[] | null;
+}
+
+function asDisposition(value: unknown): InstanceCancellationDisposition | null {
+  return typeof value === "string" &&
+    (INSTANCE_CANCELLATION_DISPOSITIONS as readonly string[]).includes(value)
+    ? (value as InstanceCancellationDisposition)
+    : null;
+}
+
+/**
+ * A stored JSONB array of strings, or `null` when it is anything else.
+ *
+ * `null` rather than `[]` on purpose: an unreadable column and an empty list are different facts,
+ * and collapsing them would make a tampered `cancellation_signalled_activity_ids` compare equal to
+ * the healthy empty case on every instance that signalled nothing.
+ */
+export function parseStringArray(value: unknown): readonly string[] | null {
+  const raw: unknown =
+    typeof value === "string"
+      ? (() => {
+          try {
+            return JSON.parse(value) as unknown;
+          } catch {
+            return undefined;
+          }
+        })()
+      : value;
+  if (!Array.isArray(raw)) return null;
+  return raw.every((v): v is string => typeof v === "string") ? (raw as readonly string[]) : null;
+}
+
+export function cancellationProjectionFromRow(
+  row: StoredCancellationColumns,
+): CancellationProjectionFields {
+  return {
+    cancellationRequestedAt: isoInstant(row.cancellation_requested_at),
+    cancellationRequestedBy: row.cancellation_requested_by,
+    // Never silently one of the two: an unreadable stored disposition reads as unknown, which is the
+    // projection's own rule for an unreadable event payload.
+    cancellationDisposition: asDisposition(row.cancellation_disposition),
+    cancellationSignalledActivityIds: parseStringArray(row.cancellation_signalled_activity_ids),
+  };
 }
 
 export class PostgresInstanceStore {
@@ -100,8 +195,12 @@ export class PostgresInstanceStore {
               sequence_cursor = $17,
               awaiting_activity_ids = $18::jsonb,
               awaiting_signal_names = $19::jsonb,
-              awaiting_timer_names = $20::jsonb
-        WHERE instance_id = $21`,
+              awaiting_timer_names = $20::jsonb,
+              cancellation_requested_at = $21,
+              cancellation_requested_by = $22,
+              cancellation_disposition = $23,
+              cancellation_signalled_activity_ids = $24::jsonb
+        WHERE instance_id = $25`,
       [
         p.status,
         p.currentState,
@@ -123,6 +222,13 @@ export class PostgresInstanceStore {
         JSON.stringify([...p.awaitingActivityIds]),
         JSON.stringify([...p.awaitingSignalNames]),
         JSON.stringify([...p.awaitingTimerNames]),
+        // The fence, persisted. ADR-0329 put it only in the projection, so a restart re-read the row
+        // and found a `running` instance with no `cancellation_requested_at` — and the driver reads
+        // the fence, not the status, so every dropped timer and refused activity came back live.
+        p.cancellationRequestedAt,
+        p.cancellationRequestedBy,
+        p.cancellationDisposition,
+        JSON.stringify([...p.cancellationSignalledActivityIds]),
         p.instanceId,
       ],
     );

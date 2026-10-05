@@ -307,6 +307,10 @@ describe("WorkflowReplayer.verifyInstance", () => {
       suspended_at: null,
       compensation_started_at: null,
       compensation_completed_at: null,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      cancellation_disposition: null,
+      cancellation_signalled_activity_ids: [],
     };
     const replayer = buildReplayer(state);
     const report = await replayer.verifyInstance("wfi_inst0001");
@@ -330,6 +334,10 @@ describe("WorkflowReplayer.verifyInstance", () => {
       suspended_at: null,
       compensation_started_at: null,
       compensation_completed_at: null,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      cancellation_disposition: null,
+      cancellation_signalled_activity_ids: [],
     };
     const replayer = buildReplayer(state);
     const report = await replayer.verifyInstance("wfi_inst0001");
@@ -373,6 +381,10 @@ describe("WorkflowReplayer.verifyInstance", () => {
       suspended_at: null,
       compensation_started_at: null,
       compensation_completed_at: null,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      cancellation_disposition: null,
+      cancellation_signalled_activity_ids: [],
     };
     const replayer = buildReplayer(state);
     const report = await replayer.verifyInstance("wfi_inst0001");
@@ -394,6 +406,10 @@ describe("WorkflowReplayer.verifyInstance", () => {
       suspended_at: null,
       compensation_started_at: null,
       compensation_completed_at: null,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      cancellation_disposition: null,
+      cancellation_signalled_activity_ids: [],
     };
     state.activities = [
       { activity_id: "wfa_orphan001", status: "succeeded", definition_activity_key: "x" },
@@ -441,6 +457,10 @@ describe("WorkflowReplayer.verifyInstance", () => {
       suspended_at: null,
       compensation_started_at: null,
       compensation_completed_at: null,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      cancellation_disposition: null,
+      cancellation_signalled_activity_ids: [],
     };
     state.activities = [
       { activity_id: "wfa_act00001", status: "failed", definition_activity_key: "charge" },
@@ -448,6 +468,229 @@ describe("WorkflowReplayer.verifyInstance", () => {
     const replayer = buildReplayer(state);
     const report = await replayer.verifyInstance("wfi_inst0001");
     expect(report.activities.mismatchedIds).toContain("wfa_act00001");
+  });
+});
+
+/** An `activity_scheduled` → `activity_started` → `activity_cancelled` triple for one activity. */
+function signalledActivityEvents(
+  activityId: string,
+  firstSequence: number,
+): readonly WorkflowEvent[] {
+  const base = {
+    instanceId: "wfi_inst0001",
+    tenantId: TENANT,
+    occurredAt: "2026-05-16T12:00:01.000Z",
+    actorPrincipalId: null,
+    actorSystemId: "engine",
+    previousState: null,
+    newState: null,
+    signalId: null,
+    timerId: null,
+    childInstanceId: null,
+    variableName: null,
+    correlationId: null,
+    causationEventId: null,
+  };
+  return [
+    {
+      ...base,
+      id: `wfe_sch_${activityId}`,
+      sequenceNumber: firstSequence,
+      kind: "activity_scheduled" as const,
+      activityId,
+      payload: { kind: "http_call", definitionActivityKey: "charge" },
+    },
+    {
+      ...base,
+      id: `wfe_srt_${activityId}`,
+      sequenceNumber: firstSequence + 1,
+      kind: "activity_started" as const,
+      activityId,
+      payload: {},
+    },
+    {
+      ...base,
+      id: `wfe_can_${activityId}`,
+      sequenceNumber: firstSequence + 2,
+      kind: "activity_cancelled" as const,
+      activityId,
+      payload: { checkpoint: "cooperative_abort", signalDelivered: true },
+    },
+  ];
+}
+
+function cancelledInstanceEvents(): WorkflowEvent[] {
+  const requested: WorkflowEvent = {
+    id: "wfe_req0001",
+    instanceId: "wfi_inst0001",
+    tenantId: TENANT,
+    sequenceNumber: 1,
+    kind: "instance_cancellation_requested",
+    occurredAt: "2026-05-16T12:30:00.000Z",
+    actorPrincipalId: "00000000-0000-4000-8000-0000000000aa",
+    actorSystemId: null,
+    previousState: null,
+    newState: null,
+    activityId: null,
+    signalId: null,
+    timerId: null,
+    childInstanceId: null,
+    variableName: null,
+    payload: { reason: "superseded", disposition: "abandon" },
+    correlationId: null,
+    causationEventId: null,
+  };
+  return [
+    startedEvent(),
+    requested,
+    // Two in-flight activities, told in log order. `wfa_zz` first on purpose: a sorted comparison
+    // would call the healthy row drifted.
+    ...signalledActivityEvents("wfa_zz00001", 2),
+    ...signalledActivityEvents("wfa_aa00001", 5),
+  ];
+}
+
+const CANCELLED_ROW_BASE = {
+  instance_id: "wfi_inst0001",
+  current_state: "draft",
+  variables: { amount: 250 },
+  completed_at: null,
+  failed_at: null,
+  cancelled_at: null,
+  suspended_at: null,
+  compensation_started_at: null,
+  compensation_completed_at: null,
+} as const;
+
+describe("WorkflowReplayer.verifyInstance — the cancellation fence", () => {
+  async function fieldsFor(
+    over: Record<string, unknown>,
+  ): Promise<readonly { readonly field: string; readonly stored: unknown }[]> {
+    const state = emptyState([...cancelledInstanceEvents()]);
+    const expected = {
+      ...CANCELLED_ROW_BASE,
+      status: "running",
+      sequence_cursor: 7,
+      cancellation_requested_at: "2026-05-16T12:30:00.000Z",
+      cancellation_requested_by: "00000000-0000-4000-8000-0000000000aa",
+      cancellation_disposition: "abandon",
+      cancellation_signalled_activity_ids: ["wfa_zz00001", "wfa_aa00001"],
+    };
+    state.instanceRow = { ...expected, ...over };
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    return report.instance.fields;
+  }
+
+  it("reports no cancellation drift for a row that matches the log", async () => {
+    const fields = await fieldsFor({});
+    expect(fields.filter((f) => f.field.startsWith("cancellation_"))).toEqual([]);
+  });
+
+  it("catches a cleared cancellation_requested_at, which would un-fence the instance", async () => {
+    const fields = await fieldsFor({ cancellation_requested_at: null });
+    const drift = fields.find((f) => f.field === "cancellation_requested_at");
+    expect(drift).toBeDefined();
+    expect(drift?.stored).toBeNull();
+  });
+
+  it("catches a rewritten cancellation_requested_by", async () => {
+    const fields = await fieldsFor({ cancellation_requested_by: "somebody_else" });
+    expect(fields.map((f) => f.field)).toContain("cancellation_requested_by");
+  });
+
+  it("catches a flipped disposition, which is the difference between reversing and not", async () => {
+    const fields = await fieldsFor({ cancellation_disposition: "compensate" });
+    const drift = fields.find((f) => f.field === "cancellation_disposition");
+    expect(drift?.stored).toBe("compensate");
+  });
+
+  it("catches an unreadable disposition rather than reading it as unknown-and-equal", async () => {
+    const fields = await fieldsFor({ cancellation_disposition: "rollback" });
+    const drift = fields.find((f) => f.field === "cancellation_disposition");
+    expect(drift?.stored).toBeNull();
+    expect(drift).toBeDefined();
+  });
+
+  it("catches a dropped signalled activity id", async () => {
+    const fields = await fieldsFor({ cancellation_signalled_activity_ids: ["wfa_zz00001"] });
+    expect(fields.map((f) => f.field)).toContain("cancellation_signalled_activity_ids");
+  });
+
+  it("catches a reordered signalled list, which the healthy writer could not produce", async () => {
+    const fields = await fieldsFor({
+      cancellation_signalled_activity_ids: ["wfa_aa00001", "wfa_zz00001"],
+    });
+    expect(fields.map((f) => f.field)).toContain("cancellation_signalled_activity_ids");
+  });
+
+  it("accepts the signalled list as a JSON string, as a jsonb column may arrive", async () => {
+    const fields = await fieldsFor({
+      cancellation_signalled_activity_ids: '["wfa_zz00001","wfa_aa00001"]',
+    });
+    expect(fields.filter((f) => f.field.startsWith("cancellation_"))).toEqual([]);
+  });
+
+  it("reports a non-array signalled column as drift, with the raw value", async () => {
+    const fields = await fieldsFor({ cancellation_signalled_activity_ids: { a: 1 } });
+    const drift = fields.find((f) => f.field === "cancellation_signalled_activity_ids");
+    expect(drift?.stored).toEqual({ a: 1 });
+  });
+
+  it("marks the whole report drifted on a cancellation-only tamper", async () => {
+    const state = emptyState([...cancelledInstanceEvents()]);
+    state.instanceRow = {
+      ...CANCELLED_ROW_BASE,
+      status: "running",
+      sequence_cursor: 7,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      cancellation_disposition: null,
+      cancellation_signalled_activity_ids: ["wfa_zz00001", "wfa_aa00001"],
+    };
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.drifted).toBe(true);
+  });
+
+  it("reports no cancellation drift for an instance that was never asked to cancel", async () => {
+    const state = emptyState([startedEvent()]);
+    state.instanceRow = {
+      ...CANCELLED_ROW_BASE,
+      status: "running",
+      sequence_cursor: 0,
+      cancellation_requested_at: null,
+      cancellation_requested_by: null,
+      cancellation_disposition: null,
+      cancellation_signalled_activity_ids: [],
+    };
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.instance.fields).toEqual([]);
+  });
+
+  it("reports no drift when the timestamps arrive as Dates, as a real row delivers them", async () => {
+    // The shape a fake `PgConnection` cannot produce and a real cluster always does. Before
+    // `isoInstant`, this reported `completed_at`, `cancelled_at` and the fence as drifted on a row
+    // that was exactly correct.
+    const state = emptyState([...cancelledInstanceEvents()]);
+    state.instanceRow = {
+      ...CANCELLED_ROW_BASE,
+      status: "running",
+      sequence_cursor: 7,
+      cancellation_requested_at: new Date("2026-05-16T12:30:00.000Z"),
+      cancellation_requested_by: "00000000-0000-4000-8000-0000000000aa",
+      cancellation_disposition: "abandon",
+      cancellation_signalled_activity_ids: ["wfa_zz00001", "wfa_aa00001"],
+    };
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.instance.fields).toEqual([]);
+  });
+
+  it("resyncs the fence back into the row it repairs", async () => {
+    const state = emptyState([...cancelledInstanceEvents()]);
+    await buildReplayer(state).resyncInstance("wfi_inst0001");
+    const update = state.updates.find((u) => u.sql.includes("UPDATE meta.workflow_instances"));
+    expect(update?.params?.[20]).toBe("2026-05-16T12:30:00.000Z");
+    expect(update?.params?.[22]).toBe("abandon");
+    expect(JSON.parse(update?.params?.[23] as string)).toEqual(["wfa_zz00001", "wfa_aa00001"]);
   });
 });
 

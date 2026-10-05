@@ -153,7 +153,10 @@ import { buildDesignDecisionDispatch } from "./design-notifications.js";
 import { PostgresNotificationStore } from "./notification-store.js";
 import { buildNotificationRoutes } from "./notification-routes.js";
 import { startDesignJob } from "./design-runner.js";
-import { PostgresTenantCostStore } from "@crossengin/ai-architect-runtime-pg";
+import {
+  PostgresEstimateInflationStore,
+  PostgresTenantCostStore,
+} from "@crossengin/ai-architect-runtime-pg";
 import { loadResidencyDirectory } from "./residency-source.js";
 import type { Region } from "@crossengin/residency";
 import type { TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -924,6 +927,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // `pagerduty_*` needs nothing — the Events API authenticates on the routing key the alert policy
   // already carries — so a deployment with a PagerDuty route pages correctly with no environment.
   const pageSenders = buildPageSendersFromEnv();
+  // What *is* wired, beside what is not — the `[notify] channels:` line's counterpart. The skips
+  // alone answered "did I misconfigure something", and left "can this deployment page at all"
+  // unanswerable without reading the code: a deployment whose alert policy names a kind nothing
+  // serves gets `unroutable` at the one moment nobody is reading logs (ADR-0329).
+  console.info(`[paging] transports: ${pageSenders.report.kinds.join(", ")}`);
   for (const skipped of pageSenders.report.skipped) {
     console.warn(`[paging] not wired: ${skipped}`);
   }
@@ -1447,6 +1455,16 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       conn !== undefined
         ? buildAiDesignBudget({
             store: new PostgresTenantCostStore(conn, schemaOpt),
+            // The estimator's learned correction, kept per tenant and across restarts (ADR-0330).
+            // Its own table rather than a column on the monthly ledger, because that one is keyed
+            // by period and would reset the correction every month — ADR-0311's forgetting on a
+            // monthly cadence instead of a per-restart one.
+            inflationStore: new PostgresEstimateInflationStore(conn, schemaOpt),
+            onInflationFallback: (tenantId, provenance) =>
+              console.warn(
+                `[ai-design] tenant ${tenantId} cost estimator fell back to a pessimistic` +
+                  ` correction (${provenance}); requests may be delayed until it is re-learned`,
+              ),
             maxUsdPerMonth: options.aiMaxUsdPerMonth ?? DEFAULT_AI_DESIGN_MAX_USD_PER_MONTH,
             // Bounds one prompt rather than one month (ADR-0267). Off unless configured: a request
             // ceiling that is wrong refuses legitimate designs, which the monthly ceiling never
@@ -2012,6 +2030,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         ...(options.deletionAuditEveryTicks !== null
           ? { auditEveryTicks: options.deletionAuditEveryTicks }
           : {}),
+        ...(options.deletionSweepStallAfter !== null
+          ? { stallAfterAttempts: options.deletionSweepStallAfter }
+          : {}),
         // The repair half (ADR-0322). Conclusive verdicts only: a scheduler may record a deletion
         // that demonstrably happened, and may never reject a request on the *absence* of evidence.
         reconciler: new DeletionReconciler({
@@ -2125,7 +2146,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         // `attemptsWithoutAdvance` grows on each line, so the repetition is the signal — it says
         // how long this has been true, which is the one thing an operator needs and the one thing a
         // deduped line cannot say.
-        onSweepStall: (stall): void => {
+        onSweepStall: async (stall): Promise<void> => {
+          // The log line **first and unchanged**: it is the record that still lands when the
+          // declaration cannot be stored, and a `no_pages` stall is frequently the same Postgres
+          // the declarer writes to. Deliberately not deduped — the growing counter is the signal.
           console.error(
             `[platform] tombstone sweep STALLED (${stall.kind}): no stored Article 17 proof has` +
               ` been verified in ${stall.attemptsWithoutAdvance.toString()} audit tick(s)` +
@@ -2133,6 +2157,50 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               `, last advance ${stall.lastAdvanceAt ?? "never"}` +
               `, cursor ${stall.cursor ?? "start of table"}) — ${stall.detail}`,
           );
+          try {
+            // Declared at `sev2`, not paged at `sev1` (ADR-0329's successor reasoning): ADR-0324's
+            // `sev1` is for a *detected* falsified proof — a fact in hand — while a stall concludes
+            // nothing about any row and persists for as long as its cause does. Paging it would
+            // compete with real tamper findings on the same rotation.
+            const outcome = await deletionEscalator?.onSweepStall({
+              kind: stall.kind,
+              attemptsWithoutAdvance: stall.attemptsWithoutAdvance,
+              pagesWithoutAdvance: stall.pagesWithoutAdvance,
+              lastAdvanceAt: stall.lastAdvanceAt,
+              cursor: stall.cursor,
+              detail: stall.detail,
+            });
+            // `adopted` is the steady state while the condition stands; only the transition earns a
+            // line, since the stall log above already repeats by design.
+            if (outcome?.action === "declared") {
+              console.error(
+                `[deletion-evidence] sweep stall → declared ${outcome.incidentId ?? "-"}`,
+              );
+            }
+          } catch (err) {
+            console.error("[deletion-evidence] escalating the sweep stall failed", err);
+          }
+        },
+        onSweepRecovered: async (progress): Promise<void> => {
+          // An advance is **positive evidence of motion**, which is the exception to this family's
+          // house rule that an absence is only an inference (ADR-0322). So this recovery may be
+          // applied automatically where `never_committed` may not.
+          console.info(
+            `[platform] tombstone sweep recovered: cursor ${progress.cursor ?? "start of table"}` +
+              `, last advance ${progress.lastAdvanceAt ?? "never"}` +
+              `, ${progress.pagesAdvanced.toString()} page(s) advanced`,
+          );
+          try {
+            const outcome = await deletionEscalator?.onSweepRecovered();
+            if (outcome?.action === "closed_out") {
+              console.info(
+                `[deletion-evidence] sweep stall → closed_out ${outcome.incidentId ?? "-"}` +
+                  ` (${outcome.closeOut ?? "-"})`,
+              );
+            }
+          } catch (err) {
+            console.error("[deletion-evidence] resolving the sweep stall failed", err);
+          }
         },
         ...(deletionEscalator !== null && options.deletionAuditEveryTicks !== null
           ? ((escalator: DeletionEvidenceEscalator) => ({

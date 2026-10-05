@@ -11,3 +11,4 @@ export * from "./page-sms.js";
 export * from "./retry-after.js";
 export * from "./fcm-token.js";
 export * from "./metadata-token.js";
+export * from "./page-email.js";

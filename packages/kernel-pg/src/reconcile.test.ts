@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   META_SCHEMA_NAME,
   META_TABLES,
@@ -14,8 +14,10 @@ import {
   RECONCILE_STEP_KINDS,
   UNRECONCILED_REASONS,
   formatReconciliationPlan,
+  planLiveReconciliation,
   planSchemaReconciliation,
 } from "./reconcile.js";
+import type { PgConnection, PgQueryResult } from "./connection.js";
 
 const WIDGETS: TableDefinition = {
   schema: "meta",
@@ -91,6 +93,8 @@ describe("RECONCILE_STEP_KINDS", () => {
       "replace_policy",
       "add_table_constraint",
       "replace_table_constraint",
+      "add_column_check",
+      "replace_column_check",
     ]);
   });
 
@@ -118,6 +122,7 @@ describe("UNRECONCILED_REASONS", () => {
       "foreign_key_removed",
       "constraint_needs_validation",
       "constraint_removed",
+      "column_check_name_unavailable",
       "rls_unexpectedly_enabled",
     ]);
   });
@@ -1788,5 +1793,334 @@ describe("renaming a column", () => {
   it("prints the rename in the plan report", () => {
     const out = formatReconciliationPlan(planFor([RENAMED], live([liveFlags("default_value")])));
     expect(out).toContain("rename_column flags.default_json");
+  });
+});
+
+describe("planSchemaReconciliation — column-level CHECK expressions", () => {
+  const TARGET: TableDefinition = {
+    schema: "meta",
+    name: "events",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "kind", type: "TEXT", notNull: true, check: "kind IN ('a', 'b')" },
+      { name: "seq", type: "INTEGER", notNull: true, check: "seq >= 0" },
+    ],
+    primaryKey: ["id"],
+  };
+  const KIND = "(kind = ANY (ARRAY['a'::text, 'b'::text]))";
+  const SEQ = "(seq >= 0)";
+  const RENDERED = {
+    byRequest: new Map<string, string | null>([
+      [expressionKey("events", "kind IN ('a', 'b')"), KIND],
+      [expressionKey("events", "seq >= 0"), SEQ],
+    ]),
+    columnsByRequest: new Map<string, readonly string[] | null>([
+      [expressionKey("events", "kind IN ('a', 'b')"), ["kind"]],
+      [expressionKey("events", "seq >= 0"), ["seq"]],
+    ]),
+  };
+
+  function liveEvents(checks: LiveTable["checkConstraints"]): LiveSchema {
+    return {
+      schema: "meta",
+      tables: [
+        {
+          schema: "meta",
+          name: "events",
+          columns: [
+            { name: "id", dataType: "uuid", isNullable: false, defaultExpr: null },
+            { name: "kind", dataType: "text", isNullable: false, defaultExpr: null },
+            { name: "seq", dataType: "integer", isNullable: false, defaultExpr: null },
+          ],
+          indexes: [
+            { name: "events_pkey", columns: ["id"], unique: true, primary: true, method: "btree", predicate: null, constraintBacked: true },
+          ],
+          policies: [],
+          foreignKeys: [],
+          checkConstraints: checks,
+          rlsEnabled: false,
+        },
+      ],
+    };
+  }
+
+  const NARROWED: LiveTable["checkConstraints"] = [
+    { name: "events_kind_check", expression: "(kind = 'a'::text)", columns: ["kind"] },
+    { name: "events_seq_check", expression: SEQ, columns: ["seq"] },
+  ];
+
+  function planWith(checks: LiveTable["checkConstraints"], rowCount: number | undefined) {
+    const diff = diffSchema([TARGET], liveEvents(checks), RENDERED);
+    return planSchemaReconciliation(
+      diff,
+      [TARGET],
+      rowCount === undefined ? undefined : { rowCounts: new Map([["events", rowCount]]) },
+    );
+  }
+
+  it("plans nothing for a correctly-applied table", () => {
+    const plan = planWith(
+      [
+        { name: "events_kind_check", expression: KIND, columns: ["kind"] },
+        { name: "events_seq_check", expression: SEQ, columns: ["seq"] },
+      ],
+      0,
+    );
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("replaces a changed inline CHECK on an empty table, guarded", () => {
+    const plan = planWith(NARROWED, 0);
+    expect(plan.steps.map((s) => s.kind)).toEqual(["replace_column_check"]);
+    const step = plan.steps[0];
+    expect(step?.target).toBe("kind");
+    expect(step?.guarded).toBe(true);
+    // One statement, so the table is never committed without the rule.
+    expect(step?.sql).toContain('DROP CONSTRAINT IF EXISTS "events_kind_check"');
+    expect(step?.sql).toContain('ADD CONSTRAINT "events_kind_check" CHECK (kind IN (\'a\', \'b\'))');
+    expect(step?.sql).toContain("SELECT count(*) INTO existing");
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("refuses a changed inline CHECK on a populated table, with the SQL and the violators query", () => {
+    const plan = planWith(NARROWED, 7);
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled).toHaveLength(1);
+    const item = plan.unreconciled[0];
+    expect(item?.reason).toBe("constraint_needs_validation");
+    expect(item?.target).toBe("kind");
+    expect(item?.detail).toContain("7 row(s)");
+    expect(item?.manualSql).toContain(
+      "-- SELECT * FROM \"meta\".\"events\" WHERE NOT (kind IN ('a', 'b'));",
+    );
+    expect(item?.manualSql).toContain('DROP CONSTRAINT "events_kind_check"');
+    expect(item?.manualSql).toContain('ADD CONSTRAINT "events_kind_check" CHECK (kind IN (\'a\', \'b\'))');
+  });
+
+  it("refuses when the row count is unknown rather than assuming the table is empty", () => {
+    const plan = planWith(NARROWED, undefined);
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled[0]?.detail).toContain("an unknown number of row(s)");
+  });
+
+  it("adds a missing inline CHECK on an empty table", () => {
+    const plan = planWith([{ name: "events_seq_check", expression: SEQ, columns: ["seq"] }], 0);
+    expect(plan.steps.map((s) => s.kind)).toEqual(["add_column_check"]);
+    expect(plan.steps[0]?.sql).toContain('ADD CONSTRAINT "events_kind_check"');
+    expect(plan.steps[0]?.sql).not.toContain("DROP CONSTRAINT");
+    expect(plan.steps[0]?.guarded).toBe(true);
+  });
+
+  it("refuses a missing inline CHECK on a populated table", () => {
+    const plan = planWith([{ name: "events_seq_check", expression: SEQ, columns: ["seq"] }], 3);
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled[0]).toMatchObject({
+      reason: "constraint_needs_validation",
+      target: "kind",
+    });
+    expect(plan.unreconciled[0]?.manualSql).not.toContain("DROP CONSTRAINT");
+  });
+
+  it("refuses rather than predicting a name Postgres would choose for itself", () => {
+    const shared: TableDefinition = {
+      schema: "meta",
+      name: "events",
+      columns: [
+        { name: "id", type: "UUID", notNull: true },
+        { name: "kind", type: "TEXT", notNull: true },
+        { name: "seq", type: "INTEGER", notNull: true, check: "seq >= 0 OR kind IS NULL" },
+      ],
+      primaryKey: ["id"],
+    };
+    const rendered = {
+      byRequest: new Map<string, string | null>([
+        [expressionKey("events", "seq >= 0 OR kind IS NULL"), "((seq >= 0) OR (kind IS NULL))"],
+      ]),
+      columnsByRequest: new Map<string, readonly string[] | null>([
+        [expressionKey("events", "seq >= 0 OR kind IS NULL"), ["kind", "seq"]],
+      ]),
+    };
+    // The database holds `events_check` under a *different* expression that no declaration renders
+    // to, and `events_check1` is where Postgres would land — which depends on what else it names.
+    const diff = diffSchema(
+      [shared],
+      liveEvents([{ name: "events_check", expression: "(seq > 0)", columns: ["seq"] }]),
+      rendered,
+    );
+    const plan = planSchemaReconciliation(diff, [shared], { rowCounts: new Map([["events", 0]]) });
+    // Matched by name, so it is a replace under the live name — nothing is predicted.
+    expect(plan.steps.map((s) => s.kind)).toEqual(["replace_column_check"]);
+    expect(plan.steps[0]?.sql).toContain('DROP CONSTRAINT IF EXISTS "events_check"');
+    expect(plan.steps[0]?.sql).toContain('ADD CONSTRAINT "events_check"');
+  });
+
+  it("reports a missing check whose name is contested, with no name written", () => {
+    const pair: TableDefinition = {
+      schema: "meta",
+      name: "events",
+      columns: [
+        { name: "id", type: "UUID", notNull: true },
+        { name: "kind", type: "TEXT", notNull: true, check: "kind IS NULL OR seq >= 0" },
+        { name: "seq", type: "INTEGER", notNull: true, check: "seq >= 0 OR kind IS NULL" },
+      ],
+      primaryKey: ["id"],
+    };
+    const rendered = {
+      byRequest: new Map<string, string | null>([
+        [expressionKey("events", "kind IS NULL OR seq >= 0"), "((kind IS NULL) OR (seq >= 0))"],
+        [expressionKey("events", "seq >= 0 OR kind IS NULL"), "((seq >= 0) OR (kind IS NULL))"],
+      ]),
+      columnsByRequest: new Map<string, readonly string[] | null>([
+        [expressionKey("events", "kind IS NULL OR seq >= 0"), ["kind", "seq"]],
+        [expressionKey("events", "seq >= 0 OR kind IS NULL"), ["kind", "seq"]],
+      ]),
+    };
+    const diff = diffSchema([pair], liveEvents([]), rendered);
+    const plan = planSchemaReconciliation(diff, [pair], { rowCounts: new Map([["events", 0]]) });
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled.map((u) => u.reason)).toEqual([
+      "column_check_name_unavailable",
+      "column_check_name_unavailable",
+    ]);
+    expect(plan.unreconciled[0]?.manualSql).toContain('ADD CONSTRAINT "events_check"');
+  });
+
+  it("plans nothing and refuses nothing when no renderings were supplied", () => {
+    const plan = planSchemaReconciliation(diffSchema([TARGET], liveEvents(NARROWED)), [TARGET], {
+      rowCounts: new Map([["events", 0]]),
+    });
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled).toEqual([]);
+  });
+
+  it("names the replace after the type change, so the retype does not undo it", () => {
+    const retyped: TableDefinition = {
+      ...TARGET,
+      columns: TARGET.columns.map((c) => (c.name === "seq" ? { ...c, type: "BIGINT" } : c)),
+    };
+    const diff = diffSchema([retyped], liveEvents(NARROWED), RENDERED);
+    const plan = planSchemaReconciliation(diff, [retyped], {
+      rowCounts: new Map([["events", 0]]),
+    });
+    const kinds = plan.steps.map((s) => s.kind);
+    expect(kinds).toContain("alter_column_type");
+    expect(kinds.indexOf("alter_column_type")).toBeLessThan(kinds.indexOf("replace_column_check"));
+  });
+
+  it("prints the column-check steps in the plan report", () => {
+    const out = formatReconciliationPlan(planWith(NARROWED, 0));
+    expect(out).toContain("replace_column_check events");
+  });
+});
+
+describe("planLiveReconciliation — the row count a column-check finding needs", () => {
+  const TARGET: TableDefinition = {
+    schema: "meta",
+    name: "events",
+    columns: [
+      { name: "id", type: "UUID", notNull: true },
+      { name: "kind", type: "TEXT", notNull: true, check: "kind IN ('a', 'b')" },
+    ],
+    primaryKey: ["id"],
+  };
+
+  interface Captured {
+    sql: string;
+    params: readonly unknown[] | undefined;
+  }
+
+  /**
+   * A connection that answers every introspection query for one `meta.events`, renders the probe,
+   * and records what it was asked. The probe runs inside `transaction`, so the fake has to let the
+   * rollback sentinel escape the way node-postgres would.
+   */
+  function fakeConnection(capture: Captured[], rowCount: string): PgConnection {
+    const respond = (sql: string): PgQueryResult => {
+      if (sql.includes("c.relrowsecurity")) {
+        return { rows: [{ schema: "meta", name: "events", rls_enabled: false }], rowCount: 1 };
+      }
+      if (sql.includes("format_type")) {
+        return {
+          rows: [
+            { table_name: "events", column_name: "id", data_type: "uuid", not_null: true, default_expr: null, attnum: 1 },
+            { table_name: "events", column_name: "kind", data_type: "text", not_null: true, default_expr: null, attnum: 2 },
+          ],
+          rowCount: 2,
+        };
+      }
+      if (sql.includes("pg_get_indexdef")) {
+        return {
+          rows: [
+            { table_name: "events", index_name: "events_pkey", is_unique: true, is_primary: true, method: "btree", predicate: null, constraint_backed: true, columns: ["id"] },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("polwithcheck")) return { rows: [], rowCount: 0 };
+      if (sql.includes("confdeltype")) return { rows: [], rowCount: 0 };
+      if (sql.includes("con.conbin")) {
+        return {
+          rows: [
+            { table_name: "events", constraint_name: "events_kind_check", expression: "(kind = 'a'::text)", columns: ["kind"] },
+          ],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("pg_get_constraintdef")) {
+        return {
+          rows: [{ def: "CHECK ((kind = ANY (ARRAY['a'::text, 'b'::text]))) NOT VALID", cols: ["kind"] }],
+          rowCount: 1,
+        };
+      }
+      if (sql.includes("count(*)")) return { rows: [{ count: rowCount }], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    };
+    const tx: PgConnection = {
+      query: vi.fn(async (sql: string, params?: readonly unknown[]) => {
+        capture.push({ sql, params });
+        return respond(sql);
+      }) as PgConnection["query"],
+      transaction: vi.fn() as PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+    return {
+      query: vi.fn(async (sql: string, params?: readonly unknown[]) => {
+        capture.push({ sql, params });
+        return respond(sql);
+      }) as PgConnection["query"],
+      transaction: vi.fn(async <T>(fn: (c: PgConnection) => Promise<T>) => fn(tx)) as
+        PgConnection["transaction"],
+      withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
+      close: vi.fn() as PgConnection["close"],
+    };
+  }
+
+  it("counts the table, so a changed column check can be planned at all", async () => {
+    const capture: Captured[] = [];
+    const plan = await planLiveReconciliation(fakeConnection(capture, "0"), "meta", [TARGET]);
+    expect(capture.map((c) => c.sql)).toContain(
+      'SELECT count(*)::TEXT AS count FROM "meta"."events"',
+    );
+    expect(plan.steps.map((s) => s.kind)).toEqual(["replace_column_check"]);
+  });
+
+  it("refuses when that count comes back non-zero", async () => {
+    const plan = await planLiveReconciliation(fakeConnection([], "12"), "meta", [TARGET]);
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled[0]).toMatchObject({
+      reason: "constraint_needs_validation",
+      target: "kind",
+    });
+    expect(plan.unreconciled[0]?.detail).toContain("12 row(s)");
+  });
+
+  it("probes the column check's expression against its own table", async () => {
+    const capture: Captured[] = [];
+    await planLiveReconciliation(fakeConnection(capture, "0"), "meta", [TARGET]);
+    const probe = capture.find((c) => c.sql.includes("_crossengin_expr_probe") && c.sql.includes("ADD CONSTRAINT"));
+    expect(probe?.sql).toContain("CHECK (kind IN ('a', 'b'))");
+    expect(probe?.sql).toContain("NOT VALID");
   });
 });

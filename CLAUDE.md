@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 324 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 325 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~13,040 tests**, all green, no
+**87 packages + 3 apps, 144 meta-schema tables, ~13,300 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -99,7 +99,7 @@ packages exist at only one layer, noted below where that is true.
 ### Substrate (the kernel itself)
 
 - **`kernel`** — the meta-schema and manifest compiler. Four areas: `bootstrap/`
-  (`META_TABLES`, the catalog of **143** platform Postgres tables, plus deterministic DDL
+  (`META_TABLES`, the catalog of **144** platform Postgres tables, plus deterministic DDL
   emit), `ddl/` (the DDL *vocabulary* — `resolvedFields`, field→Postgres types, built-in
   traits, column naming, default rendering, identifier quoting, structural entity diff;
   it does **not** emit entity tables, `operate-runtime-pg` does — ADR-0284),
@@ -128,6 +128,22 @@ packages exist at only one layer, noted below where that is true.
   **Foreign keys are reconciled** (ADR-0291), matched by column since the emitter writes them inline
   and unnamed: a declared one missing is added, a changed target or `ON DELETE` is replaced, an
   undeclared one is reported — unless it blocks a type change, where dropping it is a visible step.
+  **A column-level `check` expression is compared too** (ADR-0330), which closes the hole ADR-0329
+  had to work around: `declaredCheckConstraints` read only `table.constraints`, so a changed inline
+  CHECK was neither planned nor reported across **765** of them. The obstacle was never the
+  comparison but the *matching*, because Postgres names a column check `<table>_<column>_check` when
+  the expression references exactly one column and `<table>_check` when it references none or
+  several. **`pg_constraint.conkey` on the probe's own row is that `Var` set**, computed by the same
+  parser that computed the live one — so the name is *asked for* rather than inferred, for the price
+  of one extra column in a query that already runs, and ADR-0292's refusal to write a SQL parser
+  stands. Matching goes by rendering first (so a *changed* expression is one finding rather than
+  missing-plus-undeclared, which an operator would act on differently), by derived name second, and
+  by naming family third when exactly one candidate fits. Planned as a guarded
+  `replace_column_check` on an empty table — safe because **neither identifier in the statement is
+  inferred** — and reported `constraint_needs_validation` with the SQL on a populated one. A name the
+  plan would have to *predict*, `ChooseConstraintName`'s numeric suffix inside a shared family, is
+  never written and reads `column_check_name_unavailable`. Costs +765 probes (~850 ms, flat in row
+  count).
   **Index and policy definitions are compared too** (ADR-0292) — columns, order, uniqueness and
   access method structurally; predicates and policy clauses by **asking Postgres to deparse the
   declared text** (`expression-render.ts` attaches it as a `CHECK … NOT VALID` constraint inside a
@@ -348,9 +364,33 @@ packages exist at only one layer, noted below where that is true.
   `StreamCostMeter` aborting a stream that runs past budget. Plus `classifyDesignOutput`, which splits a
   failed design into `shape` (what the payload *is*) × `wrapper` (how it was *delivered*), so a fenced
   manifest (recoverable) and a fenced array (the model answered the wrong question) stop landing in one
-  bucket.
-- **`ai-architect-runtime-pg`** — thin: a Postgres per-tenant monthly AI cost store backing
-  that guard.
+  bucket. ADR-0330 made that split *act*: `DESIGN_SHAPE_RETRIABILITY` is a **total map** over the shape
+  enum drawing one line — *did the model understand the question?* Broken syntax is a transcription
+  failure and is retried; a well-formed object or array that is not a manifest is a confident answer to
+  something else and is not, because asking again buys the same wrong answer for another paid call. A
+  total map rather than an `if`-chain so a ninth shape is a compile error instead of a new member
+  falling into whichever branch the chain ended on. A *wrapper* is never itself a reason to retry —
+  `classifyDesignOutput` already unwraps a fence, so a fenced manifest is accepted with no second call.
+  Also `script-tokens.ts` (ADR-0330), which closes ADR-0311's CJK note: `estimateInputTokens` takes the
+  **greater** of the character count and a script-aware scan over *code points* (so an emoji counts
+  once, not as two Latin characters), with a per-class ratio — latin 3.5, other_script 2, cjk 0.75,
+  astral 0.5. Two orderings are load-bearing: everything above U+FFFF is `astral` first, because four
+  UTF-8 bytes is dearer than a BMP ideograph's three; and the **cheapest class is an allow-list** so an
+  unrecognised script falls to `other_script`, never to `latin` — but not to the dearest class either,
+  since pricing every unknown code point as an ideograph would refuse legitimate requests.
+- **`ai-architect-runtime-pg`** — a Postgres per-tenant monthly AI cost store backing that guard, and
+  (ADR-0330) the **durable** estimator correction over `meta.architect_estimate_inflation`, which
+  closes ADR-0311's "only per session": a restart forgot the correction in the direction that *admits*
+  requests it had learned to delay. Its own table keyed on the tenant alone, because the monthly ledger
+  is keyed `(tenant_id, period_key)` and a figure there would reset every month — the same forgetting
+  on a monthly cadence. The high-water mark **relaxes per observation and never on time**: a time-decay
+  would loosen a ceiling input *on silence*, which is what ADR-0317 refused for an attestation and
+  ADR-0328 for a schema default, so an idle tenant keeps its correction and a busy one earns its way
+  back; a reading that cannot be priced relaxes nothing, so a provider outage cannot loosen the
+  ceiling. An **unreadable** stored row resolves pessimistic (2) rather than to "no correction" (1) —
+  the opposite of most fail-closed choices here and right for this one input, since over-counting
+  delays a request while under-counting admits one the ceiling exists to refuse — while an **absent**
+  row resolves to 1, because nothing was ever learned and so nothing was lost.
 
 ### Vertical packs
 
@@ -400,8 +440,20 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   what made the first one false was not a wrong number but a subsystem nobody asked whose silence read as
   nothing to delete: `assembleTombstone` refuses `subsystem_unattested` for any of the six
   `DELETION_SUBSYSTEMS` in scope that did not report, each owns its `DeletionScope` fields exclusively so
-  a list has one provenance, and only an `erased` outcome may carry figures — a `nothing_to_erase` that
-  could would smuggle numbers into the proof. `retainedReason`/`retainedDataReference` are *derived* from
+  a list has one provenance, and only a **scope-bearing** outcome may carry figures — a
+  `nothing_to_erase` that could would smuggle numbers into the proof.
+  There are **four** outcomes since ADR-0330: `erased_and_retained` joined them, so a subsystem that
+  destroyed some data and lawfully kept the rest can say both in one claim with one provenance.
+  A fourth enum member rather than an optional retention block riding along on `erased`, because the
+  outcome is the single answer to "what happened here" and has to stay total: an optional field can be
+  forgotten with the outcome unchanged, which is ADR-0317's silence in a new place, and a new member is
+  a **compile-time** demand on every exhaustive reader where a new field is not. `SCOPE_BEARING_OUTCOMES`
+  and `RETENTION_BEARING_OUTCOMES` replace four inline `=== "erased"` comparisons, and a test asserts
+  they partition the enum with only `nothing_to_erase` left over, so a fifth outcome added to neither
+  fails there. The retained side carries an obligation and a reference and **no figure at all** — there
+  is no numeric field on it — and `retainedObligations` is a *list* for `erased_and_retained` while
+  `retained` keeps its singular field, because a partial retention is chosen table by table and that is
+  exactly where two obligations become possible over one subsystem. `retainedReason`/`retainedDataReference` are *derived* from
   a `retained` attestation rather than remembered. Every refusal lands before a hash is computed, and the
   assembler re-verifies its own output. `tombstoneMatchesAttestations` answers the question a hash cannot:
   whether a stored record still agrees with its evidence — a tampered scope flips `contentManifestOk`
@@ -437,9 +489,12 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`tenant-lifecycle-pg`** — the tombstone's store (ADR-0318), and the first writer
   `meta.tenant_tombstones` ever had: declared in Phase 1, it had drifted behind its contract in the way
   ADR-0300 found for `meta.feature_flags`, and in the table where it mattered most. `executed_by` and
-  `approved_by` referenced `meta.users`, which a tenant deletion *erases* — so the tombstone would have
-  named rows it had just destroyed, and `ON DELETE RESTRICT` would have made those users undeletable
-  because a tombstone named them; a `scheduled_purge` has no human executor at all. They are TEXT and
+  `approved_by` referenced `meta.users` with `ON DELETE RESTRICT`, which would make a user
+  undeletable *because* a tombstone named them; and a `scheduled_purge` has no human executor at all.
+  (ADR-0318's own wording said a tenant deletion erases `meta.users`. It does not —
+  **`meta.users` has no `tenant_id` column**, so `eraseSharedTablesWithin` never reaches it and a
+  tenant deletion leaves every user row intact, verified against the live catalog in ADR-0330. The
+  decision stands on the `RESTRICT` argument alone; the stronger premise was wrong.) They are TEXT and
   unreferenced now, the table gained the `attestations` its claim is composed from and the chain
   coordinates that witness it, a `SELECT`-only platform policy (isolation alone made the record
   unreadable by the only people who need it, since a tombstone outlives its tenant), and a four-eyes
@@ -517,13 +572,29 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   exist at all: **112 of the 143 `META_TABLES` carry a `tenant_id`** and nothing erased one of them,
   so every deployment declared `shared_tables: "absent"` and signed an Article 17 proof over a tenant
   whose rows were still in `meta.operate_entity_records`. Targets are derived from `META_TABLES` minus
-  a **compile-time** retention set of 16 — a caller-supplied retention list would be ADR-0328's defect
-  in a new field — on one rule: *a retained table holds the platform's record of what happened to the
-  tenant; everything else is the tenant's data and goes.* So the tombstone, the request, the chain and
-  its checkpoints, the audit log and its verdicts, the lifecycle events, the compliance attestations
-  and certification reports, the **public**-key registry the chain's signatures resolve against, and
-  the six access-review tables stay; `tenant_data_exports` does not, since a copy of the subject's own
-  data behind a TTL'd link is reached by Article 17 as much as the original. Deletion is in **reverse
+  a **compile-time** retention set — a caller-supplied retention list would be ADR-0328's defect in a
+  new field — which ADR-0330 split into its **two genuinely different reasons**, because defining one
+  of them away was the thing that made statutory retention inexpressible.
+  `PLATFORM_RECORD_TABLES` (16) is the original rule: *the platform's record of what happened to the
+  tenant; not the tenant's data, not an Article 17 subject at all* — the tombstone, the request, the
+  chain and its checkpoints, the audit log and its verdicts, the lifecycle events, the compliance
+  attestations and certification reports, the **public**-key registry the chain's signatures resolve
+  against, and the six access-review tables. These are silent in the proof.
+  `STATUTORY_RETENTION_TABLES` (2) is the tenant's own data the law forbids deleting, each naming its
+  obligation: `meta.invoices` and `meta.tenant_credits` under `tax_records_7y` — a tax invoice the
+  platform *issued* and the credit notes adjusting it, where retaining the invoices and destroying the
+  credits would leave a record that **overstates** the tax charged. These are **named** in the proof.
+  `tenant_data_exports` stays erased, since a copy of the subject's own data behind a TTL'd link is
+  reached by Article 17 as much as the original; so do `billing_events` (an operational log whose
+  unbounded `payload` a seven-year hold must not sweep up — Art 5(1)(c)), `subscriptions` (the
+  *current* state of a contract, and a contractual limitation period is not even expressible in
+  `RETENTION_OBLIGATIONS`), `billing_subscriptions` (retaining it would leave a deleted tenant
+  **entitled**) and `billing_usage_records`. `DELIBERATELY_ERASED_BILLING_TABLES` names them so nobody
+  "completes the table" later. Three refusals guard the split, and
+  `retained_table_blocks_erasure` is the load-bearing one: a retained table with a `RESTRICT` foreign
+  key into an erasable one makes the parent undeletable *because* the retention exists — ADR-0318's
+  defect, now derived from the catalog instead of discovered by a deletion, since retaining a table is
+  precisely the edit that creates it. Deletion is in **reverse
   `META_TABLES` order**, relying on the meta-schema invariant that an FK resolves to a table declared
   earlier, so nothing hand-sorts. `rls_would_confine_this_session` is not theoretical and was observed
   live: as a non-owner role with no tenant context the `DELETE` matched 0 rows, reported 0, and the
@@ -926,7 +997,7 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   recorded even when clean because the *examined* count is the claim — ADR-0323), plus one page per
   audit tick on the deletion scheduler, lapping when it reaches the end rather than sweeping the whole
   table, since that table only grows and a full sweep per tick would eventually outlast its interval.
-  Mobile **push** is finally built from the environment (`FCM_PROJECT_ID` plus either
+  Mobile **push** is built from the environment (`FCM_PROJECT_ID` plus either
   `FCM_SERVICE_ACCOUNT_JSON` or the client-email/private-key pair, which `normalizePrivateKeyPem`
   absorbs the literal-`\n` form of), and since ADR-0328 also from the **GCE metadata server** —
   `FCM_CREDENTIAL_SOURCE=metadata_server`, declared rather than probed, because a key file is
@@ -965,7 +1036,42 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   non-terminal, answer `422`, and Twilio retries non-2xx.
   The deletion route's 200 also carries **both** erasures (ADR-0329) — `erased` and
   `erasedSharedTables`, never summed, because they are different claims over different scopes that the
-  tombstone carries as two attestations — while the audit row's single `rowCount` is the total.
+  tombstone carries as two attestations — while the audit row's single `rowCount` is the total; and
+  since ADR-0330 it names **what is lawfully retained and why** (`statutoryRetained`, `null` rather
+  than an empty list when there is nothing to claim, and carrying no figure at all), which is the
+  sentence an operator sends in answer to an Article 17 request.
+  **A stalled sweep declares a `sev2`** (ADR-0330), keyed `deletion_evidence:sweep:<surface>` — per
+  surface and never per kind, because a half-up database flips between `no_pages` and `pinned_cursor`
+  and that is one incident, with the kind in the detail rather than the key. Not `sev1`: ADR-0324's
+  grade is for a *detected* falsified proof, a fact in hand, while a stall concludes nothing about any
+  row and persists as long as its cause does, so paging it would compete with real tamper findings on
+  the same rotation — and the grade **is** the route, since `AlertPolicy` maps severity to a channel
+  set. `--deletion-sweep-stall-after` moves the threshold (3 by default); the grade lives in
+  `--deletion-escalation-config` beside `severity` and `severityByDefect`, because a second CLI knob
+  would split one policy across two places. The recovery is applied **automatically**, which is the
+  exception to this family's rule that an absence is only an inference: an advance is positive
+  evidence of motion. It writes **no audit row** and says so (`audited: false`): `meta.audit_log.tenant_id`
+  is NOT NULL with a foreign key to `meta.tenants`, and a sweep walks every tenant's proofs, so the
+  row is structurally impossible — the same wall ADR-0327 named for the SLO escalator, and there is in
+  fact **no platform-scope anchored record anywhere in this system**.
+  `PostgresReadStateStore` (ADR-0330) is the writer `meta.notification_read_states` and
+  `meta.notification_read_watermarks` never had — ADR-0309 modelled both and nothing stored one, so the
+  tables had sat unwritten and, in the way of ADR-0300, **drifted**: `dispatch_id` was `UUID` against a
+  contract whose `dispatchId` is `disp_…`, a value that cannot be stored in a UUID column, so the first
+  `INSERT` would have failed on a schema that read as correct. Both write rules are enforced **in SQL**
+  because an inbox is the one surface where the same person has several tabs open: `ON CONFLICT … DO
+  NOTHING` so re-opening a notice cannot move `readAt` (the field answers "when did you first see
+  this"), and `GREATEST` inside the `DO UPDATE` so a stale client replaying an older position cannot
+  un-read everything between the two — ADR-0321's "the row is the lock", applied to a different race.
+  **`--workflow-cancel-role` refuses to boot** (ADR-0330), naming the real reason: ADR-0329 built the
+  cancel route, its tests and the fence columns, but what is missing is upstream of all of it — this
+  binary instantiates no `WorkflowEngine` and `meta.workflow_definitions` has **no writer**, so there
+  is no source of `WorkflowDefinition` records for one to be built from, and nothing instantiates the
+  three workers in `workflow-worker` either. A route mounted against an empty definition map would
+  answer `unknown_instance` for every instance, which is the silent degradation ADR-0327 said a
+  surface must never choose. **Entity lifecycle transitions are a different mechanism**
+  (`operate-runtime`'s lifecycle handlers) and are unaffected; what is unreachable is the
+  `workflow-engine` orchestration layer — timers, activities, signals, sagas.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -1001,7 +1107,7 @@ Recurring patterns enforced by zod `superRefine`:
 
 ## Meta-schema
 
-`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **143**
+`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **144**
 platform-level Postgres tables. Each new package adds tables there and updates
 `meta-schema.test.ts` (count, sorted expected-names list, column assertions).
 
@@ -1303,13 +1409,16 @@ opened them.
   **ADR-0329 closes both of those**: `verifyTombstone(id)` is the targeted re-read that substantiates a
   recovery, with `absent` as its own outcome closing nothing — a deleted proof is not a verified one,
   and it is exactly the fact a naive "it stopped appearing" check reads as recovery — and the stall
-  detector reads the cursor. What is left there: a stalled sweep is **reported, not escalated**. The
-  recommended shape is written down (declare at `sev2`, keyed per *surface* as
-  `deletion_evidence:sweep` with the kind as a timeline note, so a database that is half-up and flips
-  between `no_pages` and `pinned_cursor` is one episode) and deliberately not built, because ADR-0324's
-  `sev1` is for a *detected* falsified proof — a fact in hand — while a stall concludes nothing about
-  any row and persists for as long as the misconfiguration does, so paging it would compete with real
-  tamper pages on the same rotation.
+  detector reads the cursor. **A stall escalates now** (ADR-0330), at `sev2` and keyed per surface.
+  What that leaves: a kind flip *within* one episode is recorded nowhere durable, since the title and
+  detail are written at declaration and an adoption writes nothing — so an episode that starts
+  `no_pages` and becomes `pinned_cursor` reads as `no_pages` on the incident forever (only the
+  undeduped log line carries the current kind). The recovery is **edge-triggered in process**, so a
+  server that stalls, restarts, and then recovers never fires it and the `sev2` stays open for a human
+  — the fail-closed direction, and the same limitation ADR-0326 accepted for the SLO resolve. And the
+  stall incident cannot be turned off independently of tamper escalation: a deployment wanting one and
+  not the other has to point `sweepStallSeverity` at a grade its `alertPolicy` does not route, which
+  suppresses the page and not the incident.
 - **A page now really leaves the process, and closes itself when the finding is put right**
   (ADR-0325, ADR-0326). `PageDispatcher` delivers over PagerDuty, Slack, a signed webhook and SMS, and
   **reports** rather than throws: `delivered === 0` is `undelivered`, logged at error, because the
@@ -1343,8 +1452,7 @@ opened them.
   senders catch their own transport failures and report them as **results**, so a timeout never reaches
   the dispatcher's `catch`; what does is a sender that broke its contract, and a special cadence would
   go to a bug rather than the network failure it was written for.
-  What is left: `email_digest` stays `unroutable` by design, so a deployment with only email has no
-  page at all and is told so once per page; and the jitter spreads load rather than shedding it — the
+  What is left: the jitter spreads load rather than shedding it — the
   call count is unchanged, and a `Retry-After` longer than the jittered gap re-synchronises every
   replica it binds, accepted because the alternative is holding a page longer than the provider asked.
   There is also no tooling to *resolve* an unverified tombstone (the attestations beside it are enough to
@@ -1353,11 +1461,20 @@ opened them.
   is outside both directions of the audit. A request is also submitted for a *tenant*, not for a subject
   within one: `subjectIdentifier` is recorded and not acted on, so a single data subject inside a
   multi-user tenant cannot be erased by this path at all.
-- **The AI cost estimator is a heuristic on the input side** (ADR-0311). `maxTokens` bounds the output by
-  construction; the input is `ESTIMATED_CHARS_PER_TOKEN = 3.5`, deliberately pessimistic because the
-  number feeds a ceiling. `reconcileRequestCost` corrects it from the worst observed ratio, but only
-  **per session** — a restart forgets that the estimator was optimistic. `classifyDesignOutput` diagnoses
-  a recoverable wrapper and nothing retries selectively on it yet.
+- **The AI cost estimator is a heuristic on the input side** (ADR-0311, ADR-0330). `maxTokens` bounds
+  the output by construction; the input is a character count at `ESTIMATED_CHARS_PER_TOKEN = 3.5`,
+  raised by a script-aware scan where that under-counts. The correction is **durable** now and
+  relaxes per observation rather than on time, and `classifyDesignOutput`'s split finally *acts* —
+  a wrong answer is not retried. What is left: the ratios are heuristics and **no tokenizer was
+  consulted**, so `other_script` lumps Cyrillic with Devanagari and Latin Extended is over-counted
+  (the safe direction, not the minimal one); a per-provider override is still unaddressed; the
+  relaxation rate (0.9 per observation) and the cap (100x) are defensible and arbitrary, and nothing
+  reports the distribution of observed ratios that would let a deployment tune them; the mark is
+  per *tenant*, not per prompt shape, so a tenant alternating a tiny English prompt with a huge CJK
+  one gets one factor and the CJK one pins it; `observations` is written and nothing reads it; and the
+  retry never rewrites the prompt — `runDesignWithRetry` re-calls the same attempt, so the corrective
+  machinery staying in `ai-design.ts` means a caller that does not append one collects the same
+  failure three times.
 - **The audit emitter's flag list is gone, because it was wrong three times** (ADR-0288, ADR-0313,
   ADR-0321, ADR-0327). `needsAuditEmitter` enumerated every flag whose feature writes an audit row.
   ADR-0288 was the first miss; `--audit-read-routes` the second, found by booting the real server; and
@@ -1387,17 +1504,25 @@ opened them.
 
 **Contained**
 
-- `dispatched_at` is still unused (ADR-0277). No route writes a read state or reads the *template*
-  audit trail over HTTP (ADR-0279). A platform-scoped audit read is recorded against the reader's own
+- `dispatched_at` is still unused (ADR-0277). A read state can be **stored** since ADR-0330 and no
+  route writes one yet, so the inbox still cannot mark a notice read over HTTP; nothing reads the
+  *template* audit trail over HTTP either (ADR-0279). The store also found both read-state tables had
+  drifted (`dispatch_id` UUID against a `disp_…` contract) and **their column CHECK did not reach an
+  already-applied database** — caught by this same increment's column-check comparison, which is the
+  tidiest demonstration of why that hole mattered. A platform-scoped audit read is recorded against the reader's own
   tenant, because `meta.audit_log.tenant_id` is NOT NULL, so a reader with no resolvable tenant cannot
   read at all (ADR-0313). Per-class sensitive grants are expressible now
   (`--audit-read-sensitive-class <class>=<role>`, ADR-0329), and `--audit-read-sensitive-role` remains
   the wholesale form, reaching only classes no `=` entry names. A job handler that ignores its
   `AbortSignal` runs to completion and commits its effects while the run records `cancelled`; the
   guarantee is deliberately phrased as "no further work will be *started*" (ADR-0315). A **workflow
-  instance** can be cancelled since ADR-0329, but only from the engine — there is no HTTP route the way
-  job cancellation has one, so it is reachable by embedding code and not by a tenant, and that is the
-  obvious first item next. An in-flight activity is only `signalled`, and `signalDelivered` is `false`
+  instance** has a cancel route, its tests and its fence columns since ADR-0330 — and it **cannot
+  mount**, which is the finding rather than the gap: this binary instantiates no `WorkflowEngine`,
+  `meta.workflow_definitions` has no writer, and nothing instantiates `workflow-worker`'s three
+  workers, so the whole `workflow-engine` orchestration layer is unreachable from the deployed
+  server. `--workflow-cancel-role` refuses to boot naming that. Entity lifecycle transitions are a
+  different mechanism and work. Where `WorkflowDefinition` records should come from — a manifest
+  compiler, or a definition store with its own authoring surface — is the open question. An in-flight activity is only `signalled`, and `signalDelivered` is `false`
   when its handler belongs to another process: nothing propagates the abort across a process boundary.
   A `child_instance` is `not_cascaded` by design, and side effects with no compensation key are
   reported by neither disposition. `ESTIMATED_CHARS_PER_TOKEN` under-counts for CJK,
@@ -1418,20 +1543,54 @@ opened them.
   `npx prettier --write` no longer reformats at width 80 — but **882** of `packages/*/src` are not
   Prettier-clean (the config existed since Phase 1 and was never applied), so there is deliberately no
   `format:check` script. `FCM_TOKEN_ENDPOINT` and `FCM_BASE_URL` are not in `FCM_VARS`, so setting only
-  one of them is silent where every other half-configuration warns.
-- **A column-level `check` expression is never compared by the reconciler** (ADR-0329).
-  `declaredCheckConstraints` reads only `table.constraints`, and `expectedCheckConstraintNames` adds a
-  column check's *name* to the expected set purely so a correct database is not reported as drifted — so
-  a changed inline CHECK is neither planned nor reported, across the catalog's 741 of them. It bit this
-  increment directly: `meta.workflow_events.kind` had to grow two values, so that one constraint moved
-  to a **named table-level** one, which *is* compared through ADR-0292's deparser, under exactly the
-  name Postgres gives a single-column column check so a migrated database matches rather than reporting
-  a missing constraint plus an undeclared one. Verified live both ways: on an empty table the plan is a
-  guarded `replace_table_constraint`; on a populated one it is reported `constraint_needs_validation`
-  with the `DROP`/`ADD` pair and a `SELECT … WHERE NOT (…)` naming the rows that would refuse it. Note
-  the cost that leaves: a *widening* CHECK can never fail against existing rows, but the reconciler
-  cannot tell widening from narrowing, so any deployment with workflow history runs that `ALTER` by
-  hand. The general hole stays open; the honest minimum is reporting it `unreconciled` with the SQL.
+  one of them is silent where every other half-configuration warns. **Both are in `FCM_VARS` now**
+  (ADR-0330), so an endpoint override with no `FCM_PROJECT_ID` warns like every other
+  half-configuration instead of skipping push in silence.
+- **A retained claim is outside the signed bytes** (ADR-0330), which is the new load-bearing gap and
+  the same class as ADR-0323's `scope_tampered` in a third place. `contentManifestSha256` commits to
+  the composed `DeletionScope`; `retainedReason` / `retainedDataReference` are on the record and in
+  **neither** digest, and never were — so a stored `erased_and_retained` proof can have its retention
+  prose edited with both digests byte-identical. The adoption guarantee is the other side of the same
+  coin and was measured: restating an existing erasure under the new outcome reproduces both v1
+  digests **exactly**, pinned against digests computed from the pre-change `dist/`. Closing it means a
+  `crossengin.tombstone.content.v3` carrying the retention claim, the way ADR-0329's v2 carried the
+  capability declaration. Until then the honest reading is that the proof names what was *destroyed*
+  cryptographically and what was *kept* on the record's face. Relatedly, `retainedDataReference`
+  carries no per-table obligation pairing (the erasure's own report does), and the pure `retained`
+  outcome can carry only one obligation — reachable the day a second joins the statutory set, where it
+  becomes a visible refusal rather than a silent narrowing.
+- **`meta.invoices` is the platform's billing *of* the tenant, not the tenant's own books**
+  (ADR-0330). The tenant's ERP invoices live in their own schema and `operate_entity_records`, both of
+  which are erased — so a tenant with a seven-year obligation over *their* sales invoices gets no
+  protection from the statutory set. The mechanism is expressible now; only the platform's own tax
+  records use it.
+- **A deleted tenant's retained rows are readable by anyone who can set that tenant's context**
+  (ADR-0330). RLS confines them per tenant, but the predicate has no status clause and credential→
+  tenant resolution is stateless — the token carries the tenant id and nothing consults
+  `meta.tenants.status`, so a credential issued before the deletion still resolves. Latent rather than
+  live: `meta.invoices` has no wired store in `operate-server` and `meta.tenant_credits` has no reader
+  anywhere, so there is no reachable read path today. One wiring step away from being one.
+- **A `TIMESTAMPTZ` read back from node-postgres is a `Date`, and the comparison idiom assumed a
+  string** (ADR-0330). `compareInstanceProjection` compared six timestamp columns with `!==` against
+  ISO strings, so the workflow replayer reported drift on **every healthy instance** that had any of
+  them set. Fixed with one normaliser, and the stored row's timestamps typed `unknown` so the type
+  system stops asserting something false. The offline fakes hand back strings, which is exactly why no
+  test caught it. **This is almost certainly not unique to that replayer**: every `StoredXRow`
+  interface in the workspace types a `TIMESTAMPTZ` column as `string | null`, and
+  `incident-response-runtime-pg`'s re-parsing replayer feeds the integrity escalator.
+- **A column-level `check` expression is compared now** (ADR-0330), which closes ADR-0329's hole and
+  removes the two table-level workarounds it needed. The naming ambiguity that made it look like a
+  parser problem is answered by `pg_constraint.conkey` on the probe's own row — Postgres's own parser,
+  asked rather than imitated. What it leaves: **+765 probes on every `apply` and drift check**
+  (~850 ms, flat in row count, not cacheable across runs); `conkey` cannot express a whole-row `Var`,
+  so `CHECK (t IS NOT NULL)` reads as an empty column set and gets the right spelling for the wrong
+  reason (nothing in the catalog has one); an unrenderable declared expression marks the pass
+  incomplete and says nothing, which is conservative but silent; `MAX_CHECK_NAME_PASSES = 32` bounds
+  `ChooseConstraintName`'s retry rather than proving it; and a constraint an operator renamed by hand
+  outside the naming family reads as undeclared plus missing, because there is no `renamedFrom` for
+  constraints. **A widening CHECK still cannot be told from a narrowing one**, so ADR-0329's cost is
+  unchanged: a deployment with workflow history runs that `ALTER` by hand. Closing *that* means
+  understanding the expressions, which is ADR-0292's refused problem.
 - Column-store migration is **additive only** (ADR-0283, ADR-0314): a removed field's column
   is never dropped and a changed type is never altered, since both need a decision
   about existing data. Per-tenant activated manifests now *do* get DDL, into the tenant's
@@ -1449,7 +1608,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 324 records; 245 Accepted, 79 Proposed (the
+title or status change cannot drift. 325 records; 246 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
