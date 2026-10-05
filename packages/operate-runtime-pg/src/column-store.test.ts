@@ -4,7 +4,11 @@ import { encodeKeyset } from "@crossengin/operate-runtime";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import { ColumnMappedEntityStore, decimalSpecFromSqlType } from "./column-store.js";
+import {
+  ColumnMappedEntityStore,
+  UndecidedWireTypeError,
+  decimalSpecFromSqlType,
+} from "./column-store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -592,5 +596,37 @@ describe("ColumnMappedEntityStore — decimal wire type", () => {
     const sel = cap2.calls.find((c) => c.sql.includes("SELECT"))!;
     expect(sel.sql).toContain('"price" > $2::NUMERIC(12, 2)');
     expect(sel.params).toContain("9.50");
+  });
+});
+
+describe("ColumnMappedEntityStore — a column type with no decided wire type", () => {
+  const SHIFT: Entity = {
+    name: "Span",
+    fields: [{ name: "elapsed", type: { kind: "duration" } }],
+  };
+  const spanStore = (cap: Captured): ColumnMappedEntityStore =>
+    new ColumnMappedEntityStore(cap.conn, { entities: [SHIFT] } as unknown as Manifest, {
+      schema: "tenant_app",
+    });
+
+  it("refuses to serve an INTERVAL column rather than handing out [object Object]", async () => {
+    const cap = capturePg([{ id: "s1", elapsed: { days: 3, hours: 4 } }]);
+    await expect(spanStore(cap).get(TENANT, "Span", "s1")).rejects.toThrow(UndecidedWireTypeError);
+    await expect(spanStore(cap).get(TENANT, "Span", "s1")).rejects.toThrow(
+      /elapsed: no wire type is defined for a INTERVAL column/,
+    );
+  });
+
+  it("refuses on the write echo too, so nothing is stored under a type it cannot read back", async () => {
+    const cap = capturePg();
+    await expect(spanStore(cap).create(TENANT, "Span", { id: "s1", elapsed: "3 days" })).rejects.toThrow(
+      UndecidedWireTypeError,
+    );
+  });
+
+  it("still emits DDL for the column — the refusal is about serving, not about declaring", async () => {
+    const cap = capturePg();
+    await spanStore(cap).ensureSchema();
+    expect(cap.calls.map((c) => c.sql).join("\n")).toContain('"elapsed" INTERVAL');
   });
 });

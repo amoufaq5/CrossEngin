@@ -560,6 +560,35 @@ export function decimalSpecFromSqlType(sqlType: string): DecimalSpec | null {
 }
 
 /**
+ * Thrown when a column's SQL type has no decided wire type.
+ *
+ * `INTERVAL` is the only one: a manifest `duration` field compiles to it, and node-postgres
+ * returns it as a `PostgresInterval` object whose `String()` is `"[object Object]"` — measured
+ * live. Serving that would put the literal text `[object Object]` in a keyset cursor and leak an
+ * undeclared `{days, hours, …}` shape into a record, so the first `duration` field anybody
+ * declares fails **here**, at the first read, naming itself — rather than six months later in
+ * somebody's page 2.
+ *
+ * Nothing in the catalog, the 144 `META_TABLES` or the seven packs declares a `duration` today
+ * (verified), so this is unreachable. It stays a refusal rather than a conversion because
+ * choosing `duration`'s wire form is its own decision with no consumer to decide it for — the
+ * likely answer is ISO 8601 (`P3DT4H5M6.5S`), which Postgres parses back and so would round-trip
+ * a cursor, but that also needs an answer for ordering it in the in-memory store, and inventing
+ * a contract for a field nobody has declared is how a wrong one gets locked in.
+ */
+export class UndecidedWireTypeError extends Error {
+  constructor(
+    readonly field: string,
+    readonly sqlType: string,
+  ) {
+    super(
+      `${field}: no wire type is defined for a ${sqlType} column — a 'duration' field cannot be served yet`,
+    );
+    this.name = "UndecidedWireTypeError";
+  }
+}
+
+/**
  * The temporal SQL types this store emits, keyed by the `sqlType` string `castSuffix` already
  * casts with — one source for "which columns are temporal", so a filter cast and a read conversion
  * cannot disagree. `TIME` is absent on purpose: node-postgres returns it as text already.
@@ -586,9 +615,11 @@ const TEMPORAL_READERS: ReadonlyMap<string, (value: unknown) => string | null> =
  */
 function readColumn(mapping: ColumnMapping, value: unknown): unknown {
   const isArray = mapping.sqlType.endsWith("[]");
+  const base = isArray ? mapping.sqlType.slice(0, -2) : mapping.sqlType;
+  if (base === "INTERVAL") throw new UndecidedWireTypeError(mapping.field, base);
   const decimal = decimalSpecFromSqlType(mapping.sqlType);
   if (decimal !== null) return convertDecimal(value, decimal, isArray);
-  const reader = TEMPORAL_READERS.get(isArray ? mapping.sqlType.slice(0, -2) : mapping.sqlType);
+  const reader = TEMPORAL_READERS.get(base);
   if (reader === undefined) return value;
   // Only a `Date` is rewritten. Text that is already a timestamp is left exactly as the write put
   // it — canonicalising it would make a round trip hand back a different spelling than the JSONB
@@ -604,9 +635,14 @@ function readColumn(mapping: ColumnMapping, value: unknown): unknown {
  * node-postgres already hands back a string, and for a constrained `NUMERIC(p, s)` that string is
  * the canonical form — so on the read path this is almost always the identity. It runs anyway for
  * the two cases where it is not: an **encrypted** decimal column decrypts to whatever text was
- * stored rather than to Postgres's own rendering, and a `write` echoes the caller's value back
- * without a round trip (see `writeDecimal`). One function on both paths, so one store cannot
+ * stored rather than to Postgres's own rendering, and `createOn`/`writePlaceholder` echo the
+ * caller's value back without a round trip. One function on all three paths, so one store cannot
  * disagree with itself about what it just stored.
+ *
+ * A value it cannot read as a decimal passes through untouched rather than raising. The refusal
+ * belongs to `withDecimalWireType`, which owns the contract and can say whether the offending
+ * value came from a caller or from the row — so there is one refusal with one message, not a
+ * second one here that would fire first and know less.
  */
 function convertDecimal(value: unknown, spec: DecimalSpec, isArray: boolean): unknown {
   const one = (element: unknown): unknown => {

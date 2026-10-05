@@ -4,7 +4,12 @@ import {
   type FailoverRecord,
 } from "@crossengin/dr";
 import { PostgresDrFailoverStore } from "./failover-store.js";
-import { failoverExecutionRecordFrom } from "./records.js";
+import {
+  SET_PLATFORM_RECORD_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+  failoverExecutionRecordFrom,
+  scopedWrite,
+} from "./records.js";
 import { mockConnection, type Captured } from "./test-fakes.js";
 
 /**
@@ -148,5 +153,67 @@ describe("PostgresDrFailoverStore.countSince", () => {
       mockConnection(undefined, { rows: [], rowCount: 0 }),
     );
     expect(await store.countSince(new Date(NOW))).toBe(0);
+  });
+});
+
+describe("the platform write arm", () => {
+  it("claims app.platform_record_write before a platform-scope write", async () => {
+    // This store used to set nothing at all, which worked only because the deployment connects as
+    // the table's owner and an owner bypasses its policies. As a non-owner the one `ALL`-scope
+    // policy admitted a platform row unconditionally — the defect — so the write arm is now a
+    // separate `INSERT`-scoped policy on this setting.
+    const capture: Captured[] = [];
+    const store = new PostgresDrFailoverStore(mockConnection(capture));
+    await store.record(
+      failoverExecutionRecordFrom(failover(), { tenantId: null, recordedAt: LATER }),
+    );
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_RECORD_WRITE_SQL);
+    expect(capture[0]?.sql).toContain("app.platform_record_write");
+    expect(capture[1]?.sql).toContain("INSERT INTO meta.dr_failover_executions");
+  });
+
+  it("claims the tenant context instead for a tenant-scope write, never both", async () => {
+    const capture: Captured[] = [];
+    await new PostgresDrFailoverStore(mockConnection(capture)).record(record());
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+    expect(settings[0]?.params).toEqual([TENANT]);
+  });
+
+  it("claims nothing at all on a read, which the split left unchanged", async () => {
+    // The platform read policy is `SELECT`-scoped on `tenant_id IS NULL` and demands no grant, so a
+    // read behaves exactly as it did before the split.
+    const capture: Captured[] = [];
+    await new PostgresDrFailoverStore(mockConnection(capture)).listRecent(5);
+    expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
+  });
+
+  it("refuses a tenantId that is not a plausible RLS context, before issuing anything", async () => {
+    // The record schema's `uuid()` catches this first on every path the store exposes, so this is
+    // defence in depth rather than the only guard — but the id is interpolated into no SQL and
+    // bound as a parameter, and a scope wrapper that trusted its argument would be the one place
+    // that stopped being true.
+    const capture: Captured[] = [];
+    await expect(
+      scopedWrite(mockConnection(capture), "'; DROP TABLE meta.tenants --", async () => undefined),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
+  });
+
+  it("claims the elevation transaction-locally, never session-wide", () => {
+    // `set_config(..., true)` — the third argument is `is_local`. A session-wide `SET` on a pooled
+    // connection would hand the elevation to whoever is served next.
+    expect(SET_PLATFORM_RECORD_WRITE_SQL).toContain(", true)");
+    expect(SET_PLATFORM_RECORD_WRITE_SQL.startsWith("SET ")).toBe(false);
+  });
+
+  it("is not the config grant, and not the cross-tenant read grant", () => {
+    // A DR drill scheduler that could also flip `gateway.strict_jwt_aud` is an authentication
+    // bypass, which is why recording what the deployment did and changing what it does are two
+    // grants rather than one.
+    expect(SET_PLATFORM_RECORD_WRITE_SQL).not.toContain("app.platform_config_write");
+    expect(SET_PLATFORM_RECORD_WRITE_SQL).not.toContain("app.platform_key_write");
+    expect(SET_PLATFORM_RECORD_WRITE_SQL).not.toContain("app.platform_audit");
   });
 });

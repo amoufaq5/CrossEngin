@@ -137,8 +137,8 @@ function uniqueConstraintName(column: ColumnDefinition | undefined): string | un
 
 
 describe("META_TABLES", () => {
-  it("contains 144 tables", () => {
-    expect(META_TABLES).toHaveLength(144);
+  it("contains 145 tables", () => {
+    expect(META_TABLES).toHaveLength(145);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -237,6 +237,7 @@ describe("META_TABLES", () => {
       "notification_digest_items",
       "notification_digests",
       "notification_dispatches",
+      "notification_fax_observations",
       "notification_preferences",
       "notification_read_states",
       "notification_read_watermarks",
@@ -2121,10 +2122,23 @@ describe("table column shapes", () => {
     expect(delivery?.check).toContain("'exactly_once_idempotent'");
   });
 
-  it("META_WORKFLOW_SIGNALS enforces (tenant, name, idempotency_key) uniqueness", () => {
-    expect(
-      META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns,
-    ).toEqual(["tenant_id", "signal_name", "idempotency_key"]);
+  it("META_WORKFLOW_SIGNALS keys idempotency per DELIVERY, not per submit", () => {
+    // ADR-0332. One submit correlating to N instances is N signals carrying one idempotency key,
+    // because `WorkflowSignal.instanceId` is singular — so the three-column form refused the
+    // *second* delivery of every fan-out, measured live. `instance_id` is the fourth column.
+    expect(META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns).toEqual([
+      "tenant_id",
+      "signal_name",
+      "idempotency_key",
+      "instance_id",
+    ]);
+  });
+
+  it("keeps submit-level dedup as the PREFIX of that key, so the index still serves it", () => {
+    // The reason the fourth column costs nothing: `PostgresSignalDeduplicator` reads
+    // (tenant, name, key), which is a left prefix of the constraint's index.
+    const cols = META_WORKFLOW_SIGNALS.uniqueConstraints?.[0]?.columns ?? [];
+    expect(cols.slice(0, 3)).toEqual(["tenant_id", "signal_name", "idempotency_key"]);
   });
 
   it("META_WORKFLOW_TIMERS kind enum has 4 kinds", () => {

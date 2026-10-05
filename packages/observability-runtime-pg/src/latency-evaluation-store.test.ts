@@ -1,7 +1,17 @@
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 import { PostgresSloLatencyEvaluationStore } from "./latency-evaluation-store.js";
-import type { SloLatencyEvaluationRecord } from "./records.js";
+import {
+  SET_PLATFORM_RECORD_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+  type SloLatencyEvaluationRecord,
+} from "./records.js";
+
+/** `{sql, params}` as the offline fakes in this file record it. */
+interface Captured {
+  readonly sql: string;
+  readonly params: readonly unknown[] | undefined;
+}
 
 /**
  * The statement under test, found by what it *is* rather than by where it sits.
@@ -92,5 +102,32 @@ describe("PostgresSloLatencyEvaluationStore.record", () => {
       mockConnection(undefined, { rows: [{ count: "4" }], rowCount: 1 }),
     );
     expect(await store.countBreachesSince("catalog-latency", new Date())).toBe(4);
+  });
+});
+
+describe("the platform write arm", () => {
+  it("claims app.platform_record_write before a platform-scope write", async () => {
+    const capture: Captured[] = [];
+    const store = new PostgresSloLatencyEvaluationStore(mockConnection(capture));
+    await store.record(fixture({ tenantId: null }));
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_RECORD_WRITE_SQL);
+    expect(written(capture).sql).toContain("INSERT INTO meta.slo_latency_evaluations");
+  });
+
+  it("claims the tenant context instead for a tenant-scope write, never both", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloLatencyEvaluationStore(mockConnection(capture)).record(fixture());
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+  });
+
+  it("claims nothing at all on a read, which the split left unchanged", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloLatencyEvaluationStore(mockConnection(capture)).countBreachesSince(
+      "orders-latency",
+      new Date("2026-01-01T00:00:00.000Z"),
+    );
+    expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 });

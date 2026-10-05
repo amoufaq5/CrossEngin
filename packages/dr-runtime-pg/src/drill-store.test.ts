@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { DrillRecordSchema, type DrillRecord } from "@crossengin/dr";
 import { PostgresDrDrillStore } from "./drill-store.js";
-import { drillExecutionRecordFrom } from "./records.js";
+import {
+  drillExecutionRecordFrom,
+  SET_PLATFORM_RECORD_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+} from "./records.js";
 import { mockConnection, type Captured } from "./test-fakes.js";
 
 /**
@@ -147,5 +151,29 @@ describe("PostgresDrDrillStore.countSince", () => {
       mockConnection(undefined, { rows: [{ count: "3" }], rowCount: 1 }),
     );
     expect(await store.countSince(new Date(NOW))).toBe(3);
+  });
+});
+
+describe("the platform write arm", () => {
+  it("claims app.platform_record_write before a platform-scope write", async () => {
+    const capture: Captured[] = [];
+    const store = new PostgresDrDrillStore(mockConnection(capture));
+    await store.record({ ...record(), tenantId: null });
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_RECORD_WRITE_SQL);
+    expect(written(capture).sql).toContain("INSERT INTO meta.dr_drill_executions");
+  });
+
+  it("claims the tenant context instead for a tenant-scope write, never both", async () => {
+    const capture: Captured[] = [];
+    await new PostgresDrDrillStore(mockConnection(capture)).record(record());
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+  });
+
+  it("claims nothing at all on a read, which the split left unchanged", async () => {
+    const capture: Captured[] = [];
+    await new PostgresDrDrillStore(mockConnection(capture)).listRecent(10);
+    expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 });

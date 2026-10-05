@@ -2,7 +2,12 @@ import type { PipelineExecution } from "@crossengin/api-gateway";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
-import { PostgresPipelineExecutionStore } from "./pipeline-execution-store.js";
+import {
+  PostgresPipelineExecutionStore,
+  SET_PLATFORM_RECORD_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+  scopedWrite,
+} from "./pipeline-execution-store.js";
 
 /**
  * The statement under test, found by what it *is* rather than by where it sits.
@@ -142,5 +147,58 @@ describe("PostgresPipelineExecutionStore.countSince", () => {
       mockConnection(undefined, { rows: [], rowCount: 0 }),
     );
     expect(await store.countSince(new Date())).toBe(0);
+  });
+});
+
+describe("the platform write arm", () => {
+  it("claims app.platform_record_write before a platform-scope write", async () => {
+    // Both writers in this package set nothing at all before the split, which worked only because
+    // the deployment connects as the table's owner and an owner bypasses its policies. As a
+    // non-owner the single `ALL`-scope policy admitted a platform row unconditionally — the defect
+    // — and refused a *tenant* row outright, since with no context
+    // `current_setting('app.current_tenant_id', true)` answers NULL and the comparison is never
+    // true. Both arms are set now, for those two separate reasons.
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const store = new PostgresPipelineExecutionStore(mockConnection(capture));
+    await store.record(fixtureExecution({ tenantId: null }));
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_RECORD_WRITE_SQL);
+    expect(capture[0]?.sql).toContain("app.platform_record_write");
+    expect(written(capture).sql).toContain("INSERT INTO meta.gateway_pipeline_executions");
+  });
+
+  it("claims the tenant context instead for a tenant-scope write, never both", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresPipelineExecutionStore(mockConnection(capture)).record(fixtureExecution());
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+    expect(settings[0]?.params).toEqual([TENANT]);
+  });
+
+  it("claims nothing at all on a read, which the split left unchanged", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresPipelineExecutionStore(mockConnection(capture)).countSince(
+      new Date("2026-01-01T00:00:00.000Z"),
+    );
+    expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
+  });
+
+  it("is the record grant and not the one that decides what the gateway does", () => {
+    // `meta.gateway_pipeline_executions` and `meta.rate_limit_decisions` say what the gateway did;
+    // `meta.rate_limit_policies` and `meta.quota_definitions` say what it should do, and they are
+    // on `app.platform_config_write`. One grant for both would let a request logger raise a quota.
+    expect(SET_PLATFORM_RECORD_WRITE_SQL).toBe(
+      "SELECT set_config('app.platform_record_write', 'on', true)",
+    );
+    expect(SET_PLATFORM_RECORD_WRITE_SQL).not.toContain("app.platform_config_write");
+    expect(SET_PLATFORM_RECORD_WRITE_SQL).not.toContain("app.platform_audit");
+  });
+
+  it("rejects a tenantId that is not a plausible RLS context, having issued nothing", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await expect(
+      scopedWrite(mockConnection(capture), "'; DROP TABLE meta.tenants --", async () => undefined),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(capture).toEqual([]);
   });
 });

@@ -146,3 +146,42 @@ describe("buildUiSchema", () => {
     if (account !== undefined) expect(account.searchableFields.length).toBeGreaterThan(0);
   });
 });
+
+describe("buildUiSchema — decimal declarations", () => {
+  it("advertises precision and scale on a decimal field, keeping a numeric input", () => {
+    const total = entity("Invoice").fields.find((f) => f.name === "total")!;
+    expect(total.input).toBe("number");
+    expect(total.decimal).toEqual({ precision: 14, scale: 2 });
+  });
+
+  it("leaves an integer field without the marker, so a client can still post it as a number", () => {
+    const m = {
+      entities: [
+        {
+          name: "Widget",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "price", type: { kind: "decimal", precision: 12, scale: 3 } },
+            { name: "sku", type: { kind: "text" } },
+          ],
+        },
+      ],
+    } as unknown as Manifest;
+    const fields = buildUiSchema(m, new Date("2026-06-20T00:00:00Z")).entities[0]!.fields;
+    expect(fields.find((f) => f.name === "qty")).toMatchObject({ input: "number" });
+    expect(fields.find((f) => f.name === "qty")?.decimal).toBeUndefined();
+    expect(fields.find((f) => f.name === "price")?.decimal).toEqual({ precision: 12, scale: 3 });
+    expect(fields.find((f) => f.name === "sku")?.decimal).toBeUndefined();
+  });
+
+  it("marks every decimal field the core pack declares", () => {
+    const declared = (buildErpCorePack().entities ?? []).flatMap((e) =>
+      e.fields.filter((f) => f.type.kind === "decimal").map((f) => `${e.name}.${f.name}`),
+    );
+    const advertised = schema.entities.flatMap((e) =>
+      e.fields.filter((f) => f.decimal !== undefined).map((f) => `${e.name}.${f.name}`),
+    );
+    expect([...advertised].sort()).toEqual([...declared].sort());
+    expect(declared.length).toBeGreaterThan(0);
+  });
+});

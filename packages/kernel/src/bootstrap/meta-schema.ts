@@ -7284,8 +7284,18 @@ export const META_WORKFLOW_SIGNALS: TableDefinition = {
   primaryKey: ["id"],
   uniqueConstraints: [
     {
+      // `instance_id` is the fourth column because **one delivery per instance is the natural
+      // key**: `WorkflowSignal.instanceId` is singular and `matchSignalToInstance` returns one id,
+      // so a submit correlating to N instances is N signals carrying one idempotency key — which
+      // the three-column form refuses outright on the *second* row. Measured live: the fan-out
+      // threw `SignalIdempotencyConflict` and one of the two deliveries was lost.
+      //
+      // Submit-level dedup is unharmed, because `(tenant_id, signal_name, idempotency_key)` is the
+      // **prefix** of this index and that is what `PostgresSignalDeduplicator` reads. The fourth
+      // column leaves the constraint as the per-delivery race guard it should always have been.
+      // NULLs stay DISTINCT in Postgres, so keyless signals remain as unconstrained as before.
       name: "workflow_signals_tenant_name_idempotency_key",
-      columns: ["tenant_id", "signal_name", "idempotency_key"],
+      columns: ["tenant_id", "signal_name", "idempotency_key", "instance_id"],
     },
   ],
   indexes: [
@@ -11090,6 +11100,69 @@ export const META_NOTIFICATION_USER_QUIET_HOURS: TableDefinition = {
   },
 };
 
+/**
+ * The consecutive-`fax` count ADR-0310 left open and ADR-0329 named the shape of.
+ *
+ * One row per (tenant, number), **not** an append-only log: what a threshold needs is the *current
+ * run*, and a log would make "consecutive" a query rather than a column — and would grow without
+ * bound for a fact its own next observation supersedes.
+ *
+ * A single `AnsweredBy=fax` is a detector's guess from a few hundred milliseconds of audio and must
+ * never produce a suppression (ADR-0302's rule that a safety record never widens on an inference).
+ * A *run* of them inside a window, with no answered call between, is what a threshold can be
+ * crossed by — and the row is the evidence an operator reads before trusting the block.
+ */
+export const META_NOTIFICATION_FAX_OBSERVATIONS: TableDefinition = {
+  schema: "meta",
+  name: "notification_fax_observations",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    // Normalised by `normalizeRecipientAddress` before it gets here, so this key and the
+    // suppression the run eventually justifies are derived from one string (ADR-0302).
+    { name: "recipient_address", type: "TEXT", notNull: true },
+    // `> 0`, because a run of zero *is* an absent row: a reset deletes rather than zeroing, since
+    // the two would otherwise be two spellings of one fact.
+    { name: "consecutive_count", type: "INTEGER", notNull: true, check: "consecutive_count > 0" },
+    { name: "first_observed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    { name: "last_observed_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+    // The `CallSid` the run last advanced on — the counter's only dedup key. Twilio retries a
+    // callback that did not answer 2xx, and unlike a suppression (whose id commits to its content)
+    // nothing about a count is naturally idempotent, so one call's retries would have walked a
+    // number to the threshold on their own.
+    { name: "last_call_sid", type: "TEXT" },
+    // Which branch the last observation took. Stored rather than derived in `RETURNING`, because
+    // `RETURNING` sees the *new* row while all four branches are statements about the old one.
+    {
+      name: "last_disposition",
+      type: "TEXT",
+      notNull: true,
+      check: "last_disposition IN ('started', 'advanced', 'restarted', 'duplicate')",
+    },
+    // When a run first crossed a configured threshold. `COALESCE`-stamped so a run that keeps
+    // growing past it does not walk this forward — the row has to be able to say when the block
+    // began, not when it was last reconfirmed.
+    { name: "suppressed_at", type: "TIMESTAMPTZ" },
+  ],
+  primaryKey: ["id"],
+  indexes: [
+    // Total rather than predicated: the counter's `ON CONFLICT (tenant_id, recipient_address)`
+    // needs exactly this arbiter, and there is only ever one run per number.
+    {
+      name: "notification_fax_observations_tenant_address_key",
+      columns: ["tenant_id", "recipient_address"],
+      unique: true,
+    },
+    { name: "idx_notification_fax_observations_suppressed", columns: ["suppressed_at"] },
+  ],
+  rls: {
+    enabled: true,
+    policies: [
+      { name: "notification_fax_observations_tenant_isolation", using: TENANT_ISOLATION_USING },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -11235,4 +11308,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_NOTIFICATION_READ_STATES,
   META_NOTIFICATION_READ_WATERMARKS,
   META_NOTIFICATION_USER_QUIET_HOURS,
+  META_NOTIFICATION_FAX_OBSERVATIONS,
 ];

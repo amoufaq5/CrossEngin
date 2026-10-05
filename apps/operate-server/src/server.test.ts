@@ -81,7 +81,8 @@ describe("OperateHttpServer — serving a pack over raw HTTP", () => {
     expect(list.status).toBe(200);
     const rows = parse(list.body)["data"] as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ sku: "SKU-1", unit_cost: 1.1 });
+    // `unit_cost` is `decimal(12, 2)`: it leaves the gateway as its canonical wire string.
+    expect(rows[0]).toMatchObject({ sku: "SKU-1", unit_cost: "1.10" });
   });
 
   it("redacts unit_cost for a cashier but not a manager (same route)", async () => {
@@ -96,7 +97,7 @@ describe("OperateHttpServer — serving a pack over raw HTTP", () => {
 
     const manager = await server.dispatch(req("GET", "/v1/products", "key-manager"), null);
     const managerRows = parse(manager.body)["data"] as Array<Record<string, unknown>>;
-    expect(managerRows[0]).toHaveProperty("unit_cost", 1.1);
+    expect(managerRows[0]).toHaveProperty("unit_cost", "1.10");
   });
 
   it("denies a cashier creating a product with 403", async () => {

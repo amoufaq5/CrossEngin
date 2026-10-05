@@ -131,7 +131,8 @@ describe("createFetchHandler — serving over the Fetch API", () => {
     const list = await fetch(getReq("/v1/products", "key-manager"));
     expect(list.status).toBe(200);
     const parsed = (await list.json()) as { data: Array<Record<string, unknown>> };
-    expect(parsed.data[0]).toMatchObject({ sku: "SKU-1", unit_cost: 1.1 });
+    // `unit_cost` is `decimal(12, 2)`: it leaves the gateway as its canonical wire string.
+    expect(parsed.data[0]).toMatchObject({ sku: "SKU-1", unit_cost: "1.10" });
   });
 
   it("redacts unit_cost for a cashier (classification at the edge)", async () => {

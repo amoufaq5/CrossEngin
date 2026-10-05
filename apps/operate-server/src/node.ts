@@ -153,6 +153,8 @@ import {
   BACKFILL_GRANTED_OPERATION,
   buildReadStateRoutes,
 } from "./read-state-routes.js";
+import { PostgresFaxObservationStore } from "./fax-observation-store.js";
+import { appendIncidentNote } from "./incident-note.js";
 import { PostgresReadStateStore } from "./read-state-store.js";
 import { buildWorkflowCancellationRoutes } from "./workflow-cancellation-routes.js";
 import { PostgresAuditReadStore } from "./audit-read-store.js";
@@ -1100,6 +1102,33 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       resolvePage: async (page): Promise<void> => {
         await resolveAndNote(deletionPager, page, "deletion-evidence");
       },
+      // The stall episode's durable record of *which kind* it currently is (ADR-0332, closing
+      // ADR-0330's open end). The title and detail are written once at declaration and an adoption
+      // writes nothing, so an episode that began `no_pages` and became `pinned_cursor` read as
+      // `no_pages` forever — and the two send a responder to different halves of the system.
+      //
+      // The timeline rather than an audit row, for `notePage`'s reasons: no tenant column to get
+      // wrong, append-only, appendable in any status, and on the record a review actually opens.
+      // The previous kind is read back *off that record* rather than remembered in this process, so
+      // a flip is detected after a restart and by a different replica.
+      ...(pagedNoteStore !== null
+        ? {
+            note: async (incidentId, note): Promise<void> => {
+              const outcome = await appendIncidentNote(pagedNoteStore, incidentId, {
+                kind: "observation",
+                message: note.message,
+                metadata: note.metadata,
+                actorUserId: PAGE_NOTE_ACTOR,
+              });
+              if (!outcome.recorded) {
+                console.warn(
+                  `[deletion-evidence] stall-kind note not added to ${incidentId}: ` +
+                    `${outcome.reason ?? "unknown"}`,
+                );
+              }
+            },
+          }
+        : {}),
       // Store-backed, with no fallback declarer: unlike the integrity escalator's one-shot finding
       // (ADR-0304), this one is re-derived from the same two rows on the next pass, so a failed
       // declaration is retried rather than lost and an in-process id cannot collide with a stored
@@ -2580,12 +2609,50 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     } else {
       const resolver = secrets.resolver;
       const suppressions = new PostgresSuppressionStore(conn, schemaOpt);
+      // The consecutive-fax counter (ADR-0332). Constructed only when asked for, because a run is
+      // a durable row per (tenant, number) and a deployment that does not want the count should not
+      // be accumulating one.
+      const faxObservations = options.bounceFaxObservations
+        ? new PostgresFaxObservationStore(conn, schemaOpt)
+        : null;
+      if (options.bounceFaxObservations) {
+        console.info(
+          "[bounce-webhook] counting consecutive fax verdicts" +
+            (options.bounceFaxSuppressAfter === null
+              ? " (counting only — no --bounce-fax-suppress-after, so nothing will be suppressed)"
+              : `, suppressing after ${options.bounceFaxSuppressAfter.toString()}`),
+        );
+        if (process.env["TWILIO_VOICE_MACHINE_DETECTION"] === undefined) {
+          // A warning rather than a refusal: the counter is harmless while inert, and machine
+          // detection can be enabled at Twilio without restarting this process. But said out loud,
+          // because without it Twilio never reports `AnsweredBy` and no run can ever start — a
+          // threshold configured and structurally unreachable.
+          console.warn(
+            "[bounce-webhook] --bounce-fax-observations is on but TWILIO_VOICE_MACHINE_DETECTION" +
+              " is unset, so Twilio will never report AnsweredBy and no fax verdict can arrive",
+          );
+        }
+      }
       const intercept = buildBounceWebhookInterceptor({
         store: suppressions,
         secretForTenant: resolver,
         ...(options.bounceTransientHours !== null
           ? { transientSuppressionHours: options.bounceTransientHours }
           : {}),
+        ...(faxObservations !== null ? { faxObservations } : {}),
+        ...(options.bounceFaxSuppressAfter !== null
+          ? { faxSuppressAfter: options.bounceFaxSuppressAfter }
+          : {}),
+        ...(options.bounceFaxWindowHours !== null
+          ? { faxObservationWindowHours: options.bounceFaxWindowHours }
+          : {}),
+        // No address and no CallSid: a voice suppression names a real person's telephone number.
+        // The run length is what an operator acts on, and it is the thing nothing recorded before.
+        onObserved: (info) =>
+          console.info(
+            `[bounce-webhook] tenant=${info.tenantId} ${info.signal} ${info.disposition}` +
+              ` run=${info.consecutiveCount.toString()} suppressed=${String(info.suppressionPlanned)}`,
+          ),
         onRecorded: (info) =>
           console.info(
             `[bounce-webhook] tenant=${info.tenantId} source=${info.source}` +

@@ -199,3 +199,55 @@ describe("decimalToNumber", () => {
     expect(decimalToNumber("9007199254740993")).toBe(9007199254740992);
   });
 });
+
+// Measured against PostgreSQL 16.13: each row is `SELECT ($1::numeric(p,s))::text` for the same
+// input. The canonical form is not invented here — it is what Postgres prints — so this table is
+// the guard that keeps `toDecimalWire` from drifting away from the database it has to agree with.
+describe("renders byte-identically to Postgres numeric(p,s)", () => {
+  const MEASURED: ReadonlyArray<readonly [string, number, number, string]> = [
+    ["0.005", 16, 2, "0.01"],
+    ["-0.005", 16, 2, "-0.01"],
+    ["0.004", 16, 2, "0.00"],
+    ["-0.004", 16, 2, "0.00"],
+    ["0.015", 16, 2, "0.02"],
+    ["0.025", 16, 2, "0.03"],
+    ["1.235", 16, 2, "1.24"],
+    ["1.2345", 16, 2, "1.23"],
+    ["-1.235", 16, 2, "-1.24"],
+    ["10", 16, 2, "10.00"],
+    ["10.1", 16, 2, "10.10"],
+    ["-0.001", 16, 2, "0.00"],
+    ["1.5", 20, 10, "1.5000000000"],
+    ["9999999999999.99", 15, 2, "9999999999999.99"],
+    ["99999999999999.99", 16, 2, "99999999999999.99"],
+    ["42.4", 5, 0, "42"],
+    ["42.5", 5, 0, "43"],
+    ["-42.5", 5, 0, "-43"],
+    ["1234567890123456789012345678.1234567890", 38, 10, "1234567890123456789012345678.1234567890"],
+    ["9007199254740993", 20, 0, "9007199254740993"],
+    ["0", 16, 2, "0.00"],
+    ["-0", 16, 2, "0.00"],
+    ["1e3", 16, 2, "1000.00"],
+    ["15e-4", 16, 4, "0.0015"],
+    ["0.0000000001", 20, 10, "0.0000000001"],
+  ];
+
+  for (const [input, precision, scale, expected] of MEASURED) {
+    it(`${input} as numeric(${precision.toString()},${scale.toString()}) is ${expected}`, () => {
+      expect(toDecimalWire(input, { precision, scale })).toEqual({ ok: true, wire: expected });
+    });
+  }
+
+  // Postgres raises `numeric field overflow` for both of these; the refusal is the same boundary.
+  for (const [input, precision, scale] of [
+    ["12345.00", 4, 2],
+    ["100", 4, 2],
+  ] as const) {
+    it(`${input} overflows numeric(${precision.toString()},${scale.toString()}) as Postgres says`, () => {
+      expect(toDecimalWire(input, { precision, scale })).toEqual({
+        ok: false,
+        reason: "precision_overflow",
+      });
+    });
+  }
+});

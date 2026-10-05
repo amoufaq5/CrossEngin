@@ -122,8 +122,22 @@ describe("withDecimalWireType", () => {
       DecimalWireError,
     );
     await expect(store.create("t1", "Invoice", { id: "a", total: "about ten" })).rejects.toThrow(
-      /Invoice\.total: not_a_decimal/,
+      /Invoice\.total: not_a_decimal \(inbound\)/,
     );
+  });
+
+  it("names the direction, so a 500 says whether a caller or the database produced it", async () => {
+    const inner = new InMemoryEntityStore();
+    // Reaches the store behind the decorator, as a row written before the wire type existed.
+    await inner.create("t1", "Invoice", { id: "legacy", total: "n/a" });
+    const store = withDecimalWireType(inner, INDEX);
+    await expect(store.get("t1", "Invoice", "legacy")).rejects.toThrow(
+      /Invoice\.total: not_a_decimal \(stored\)/,
+    );
+    const err = await store.get("t1", "Invoice", "legacy").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DecimalWireError);
+    expect((err as DecimalWireError).direction).toBe("stored");
+    expect((err as DecimalWireError).reason).toBe("not_a_decimal");
   });
 
   it("refuses an integer part the column cannot hold", async () => {

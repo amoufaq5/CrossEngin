@@ -884,7 +884,12 @@ describe("replacing a changed index, constraint or policy", () => {
     expect(step?.sql).toContain("DROP CONSTRAINT IF EXISTS");
     expect(step?.sql).toContain("ADD CONSTRAINT");
     expect(step?.sql).not.toContain("DROP INDEX");
-    expect(step?.guarded).toBe(true);
+    // Not guarded, by `add_foreign_key`'s rule: the statement does no re-check, and a narrowing
+    // change failing means the data already contradicts the catalog. What keeps that failure safe
+    // is atomicity, not a guard — the pair goes out as one string and rolls back together, which
+    // was measured live rather than assumed.
+    expect(step?.guarded).toBe(false);
+    expect(step?.sql.indexOf("DROP CONSTRAINT")).toBeLessThan(step?.sql.indexOf("ADD CONSTRAINT") ?? -1);
   });
 
   it("drops the constraint when a declared index is constraint-backed in the database", () => {

@@ -3,6 +3,10 @@ import type { IncomingRequest } from "@crossengin/api-gateway";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
+import {
+  SET_PLATFORM_RECORD_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+} from "./pipeline-execution-store.js";
 import { PostgresRateLimitChecker } from "./rate-limit-checker.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
@@ -202,5 +206,72 @@ describe("PostgresRateLimitChecker — decisionId format", () => {
       now: new Date("2026-05-16T12:00:00.000Z"),
     });
     expect(d.decisionId).toMatch(/^rld_[0-9a-z]{20}$/);
+  });
+});
+
+describe("PostgresRateLimitChecker — the platform write arm", () => {
+  it("claims app.platform_record_write before persisting an anonymous (platform-scope) decision", async () => {
+    // `RateLimitCheckInput.tenantId` is nullable and an unauthenticated request has none, so a
+    // platform-scope decision row is the ordinary case on this path rather than an edge one — and
+    // under the old single `ALL`-scope policy any tenant session could forge one.
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const checker = new PostgresRateLimitChecker({
+      conn: mockConnection(capture),
+      limit: 1,
+      windowSeconds: 60,
+    });
+    await checker.check({
+      tenantId: null,
+      principalId: null,
+      route: fixtureRoute(),
+      request: {} as IncomingRequest,
+      now: new Date("2026-05-16T12:00:00.000Z"),
+    });
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_PLATFORM_RECORD_WRITE_SQL);
+    expect(
+      capture.some((c) => c.sql.includes("INSERT INTO meta.rate_limit_decisions")),
+    ).toBe(true);
+  });
+
+  it("claims the tenant context instead for a tenant-scope decision, never both", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const checker = new PostgresRateLimitChecker({
+      conn: mockConnection(capture),
+      limit: 1,
+      windowSeconds: 60,
+    });
+    await checker.check({
+      tenantId: TENANT,
+      principalId: USER,
+      route: fixtureRoute(),
+      request: {} as IncomingRequest,
+      now: new Date("2026-05-16T12:00:00.000Z"),
+    });
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+    expect(settings[0]?.params).toEqual([TENANT]);
+  });
+
+  it("claims nothing when persistence is off", async () => {
+    // No write, so no elevation: the setting rides with the statement that needs it rather than
+    // with the call.
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const checker = new PostgresRateLimitChecker({
+      conn: mockConnection(capture),
+      limit: 1,
+      windowSeconds: 60,
+      persistDecisions: false,
+    });
+    await checker.check({
+      tenantId: null,
+      principalId: null,
+      route: fixtureRoute(),
+      request: {} as IncomingRequest,
+      now: new Date("2026-05-16T12:00:00.000Z"),
+    });
+    expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 });

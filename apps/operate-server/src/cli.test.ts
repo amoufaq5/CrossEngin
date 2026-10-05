@@ -1033,6 +1033,62 @@ describe("parseServeArgs — --read-state-routes", () => {
   });
 });
 
+/** The consecutive-fax counter (ADR-0332), closing ADR-0310's named-but-inert `fax` verdict. */
+describe("parseServeArgs — --bounce-fax-observations", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg", "--bounce-webhook"];
+
+  it("is off, unthresholded and default-windowed unless asked for", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.bounceFaxObservations).toBe(false);
+    expect(o.bounceFaxSuppressAfter).toBeNull();
+    expect(o.bounceFaxWindowHours).toBeNull();
+  });
+
+  it("counts without suppressing, which is the designed default and not a degradation", () => {
+    // One `AnsweredBy=fax` is a detector's guess from a few hundred ms of audio, so the one
+    // suppression derived from an inference is the one a deployment opts into (ADR-0302).
+    const o = parseServeArgs([...PG, "--bounce-fax-observations"]);
+    expect(o.bounceFaxObservations).toBe(true);
+    expect(o.bounceFaxSuppressAfter).toBeNull();
+  });
+
+  it("refuses a threshold of 1 by name rather than clamping it", () => {
+    // Clamping would impose a policy the operator did not choose, and 1 is exactly the
+    // suppress-on-one-sample behaviour the count exists to prevent.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--bounce-fax-observations", "--bounce-fax-suppress-after=1"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("single detector sample");
+    expect(parseServeArgs([...PG, "--bounce-fax-observations", "--bounce-fax-suppress-after=2"])
+      .bounceFaxSuppressAfter).toBe(2);
+  });
+
+  it("refuses the counter without the webhook, and on the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--store", "pg", "--bounce-fax-observations"]))
+      .toThrow(/requires --bounce-webhook/);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--bounce-webhook", "--bounce-fax-observations"]))
+      .toThrow(/requires a Postgres store/);
+  });
+
+  it("refuses a threshold or a window with no counter to configure", () => {
+    // A threshold that silently counts nothing is the shape of misconfiguration this family refuses.
+    expect(() => parseServeArgs([...PG, "--bounce-fax-suppress-after=3"]))
+      .toThrow(/requires --bounce-fax-observations/);
+    expect(() => parseServeArgs([...PG, "--bounce-fax-window-hours=24"]))
+      .toThrow(/requires --bounce-fax-observations/);
+  });
+
+  it("takes a window in hours", () => {
+    const o = parseServeArgs([...PG, "--bounce-fax-observations", "--bounce-fax-window-hours", "24"]);
+    expect(o.bounceFaxWindowHours).toBe(24);
+    expect(() => parseServeArgs([...PG, "--bounce-fax-observations", "--bounce-fax-window-hours=0"]))
+      .toThrow(/>= 1/);
+  });
+});
+
 describe("parseServeArgs — per-route body limits", () => {
   const PG = ["--pack", "erp-core", "--store", "pg", "--audit-read-routes"];
 

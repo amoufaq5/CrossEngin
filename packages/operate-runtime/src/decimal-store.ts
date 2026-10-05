@@ -1,7 +1,7 @@
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { resolvedFields } from "@crossengin/kernel/ddl";
 
-import { toDecimalWire, type DecimalSpec } from "./decimal.js";
+import { toDecimalWire, type DecimalRefusal, type DecimalSpec } from "./decimal.js";
 import type {
   EntityRecord,
   EntityStore,
@@ -35,31 +35,48 @@ export function decimalFieldIndexFromManifest(manifest: Manifest): DecimalFieldI
   return out;
 }
 
+/** Which side of the store produced a value that cannot be a decimal. */
+export const DECIMAL_WIRE_DIRECTIONS = ["inbound", "stored"] as const;
+export type DecimalWireDirection = (typeof DECIMAL_WIRE_DIRECTIONS)[number];
+
 /**
- * Thrown when a value bound for a `decimal` field cannot be one — a word where a figure belongs,
- * or an integer part wider than the column holds. It propagates out of the store call, so a
- * handler maps it to 500 and a transactional write rolls back: there is no reading of
- * `price: "about ten"` that should reach a GL posting, and writing a quantised guess would be
- * the silent loss this layer exists to end.
+ * Thrown when a value on a `decimal` field cannot be one — a word where a figure belongs, or an
+ * integer part wider than the column holds. It propagates out of the store call, so a handler
+ * maps it to 500 and a transactional write rolls back.
+ *
+ * It is raised in **both** directions, and the direction is on the error because the two mean
+ * different things to whoever reads the 500. `inbound` is a caller handing the store something
+ * it must not write: refusing costs nothing, since nothing is lost and the caller is told, and
+ * there is no reading of `price: "about ten"` that should reach a GL posting. `stored` is the
+ * database already holding such a value — which refusing makes *unreadable*, so it is the
+ * sharper choice, taken because a wire type a consumer can only usually rely on is not one. A
+ * value that cannot be parsed is a data defect an operator has to see; serving it would quietly
+ * reinstate the disagreement for exactly the rows most likely to be wrong.
  */
 export class DecimalWireError extends Error {
   constructor(
     readonly entity: string,
     readonly field: string,
-    readonly reason: string,
+    readonly reason: DecimalRefusal,
+    readonly direction: DecimalWireDirection,
   ) {
-    super(`${entity}.${field}: ${reason}`);
+    super(`${entity}.${field}: ${reason} (${direction})`);
     this.name = "DecimalWireError";
   }
 }
 
-function convert(entity: string, specs: ReadonlyMap<string, DecimalSpec>, record: EntityRecord): EntityRecord {
+function convert(
+  entity: string,
+  specs: ReadonlyMap<string, DecimalSpec>,
+  record: EntityRecord,
+  direction: DecimalWireDirection,
+): EntityRecord {
   let out: EntityRecord | null = null;
   for (const [field, spec] of specs) {
     const value = record[field];
     if (value === undefined || value === null) continue;
     const converted = toDecimalWire(value, spec);
-    if (!converted.ok) throw new DecimalWireError(entity, field, converted.reason);
+    if (!converted.ok) throw new DecimalWireError(entity, field, converted.reason, direction);
     if (converted.wire === value) continue;
     out ??= { ...record };
     out[field] = converted.wire;
@@ -87,9 +104,13 @@ function convert(entity: string, specs: ReadonlyMap<string, DecimalSpec>, record
 export function withDecimalWireType<S extends EntityStore>(store: S, index: DecimalFieldIndex): S {
   if (index.size === 0) return store;
 
-  const map = (entity: string, record: EntityRecord): EntityRecord => {
+  const map = (
+    entity: string,
+    record: EntityRecord,
+    direction: DecimalWireDirection,
+  ): EntityRecord => {
     const specs = index.get(entity);
-    return specs === undefined ? record : convert(entity, specs, record);
+    return specs === undefined ? record : convert(entity, specs, record, direction);
   };
 
   // `Object.create` rather than a fresh object literal: a store also implements interfaces this
@@ -99,22 +120,26 @@ export function withDecimalWireType<S extends EntityStore>(store: S, index: Deci
   // only the six carrying records are overridden.
   const overrides: EntityStore & Partial<TransactionalEntityStore> = {
     async list(tenantId, entity) {
-      return (await store.list(tenantId, entity)).map((r) => map(entity, r));
+      return (await store.list(tenantId, entity)).map((r) => map(entity, r, "stored"));
     },
     async listPage(tenantId, entity, query: ListQuery): Promise<ListPage> {
       const page = await store.listPage(tenantId, entity, query);
-      return { records: page.records.map((r) => map(entity, r)), nextCursor: page.nextCursor };
+      return {
+        records: page.records.map((r) => map(entity, r, "stored")),
+        nextCursor: page.nextCursor,
+      };
     },
     async get(tenantId, entity, id) {
       const record = await store.get(tenantId, entity, id);
-      return record === null ? null : map(entity, record);
+      return record === null ? null : map(entity, record, "stored");
     },
     async create(tenantId, entity, record) {
-      return map(entity, await store.create(tenantId, entity, map(entity, record)));
+      const created = await store.create(tenantId, entity, map(entity, record, "inbound"));
+      return map(entity, created, "stored");
     },
     async update(tenantId, entity, id, patch) {
-      const updated = await store.update(tenantId, entity, id, map(entity, patch));
-      return updated === null ? null : map(entity, updated);
+      const updated = await store.update(tenantId, entity, id, map(entity, patch, "inbound"));
+      return updated === null ? null : map(entity, updated, "stored");
     },
     remove(tenantId, entity, id) {
       return store.remove(tenantId, entity, id);

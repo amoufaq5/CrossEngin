@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { assessDrReadiness } from "@crossengin/dr-runtime";
 import { PostgresDrReadinessStore } from "./readiness-store.js";
-import { readinessSnapshotRecordFrom } from "./records.js";
+import {
+  readinessSnapshotRecordFrom,
+  SET_PLATFORM_RECORD_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+} from "./records.js";
 import { mockConnection, type Captured } from "./test-fakes.js";
 
 /**
@@ -118,5 +122,29 @@ describe("PostgresDrReadinessStore.listRecent / latest", () => {
   it("rejects a non-positive listRecent limit", async () => {
     const store = new PostgresDrReadinessStore(mockConnection());
     await expect(store.listRecent(0)).rejects.toThrow();
+  });
+});
+
+describe("the platform write arm", () => {
+  it("claims app.platform_record_write before a platform-scope write", async () => {
+    const capture: Captured[] = [];
+    const store = new PostgresDrReadinessStore(mockConnection(capture));
+    await store.record({ ...record(), tenantId: null });
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_RECORD_WRITE_SQL);
+    expect(written(capture).sql).toContain("INSERT INTO meta.dr_readiness_snapshots");
+  });
+
+  it("claims the tenant context instead for a tenant-scope write, never both", async () => {
+    const capture: Captured[] = [];
+    await new PostgresDrReadinessStore(mockConnection(capture)).record(record());
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+  });
+
+  it("claims nothing at all on a read, which the split left unchanged", async () => {
+    const capture: Captured[] = [];
+    await new PostgresDrReadinessStore(mockConnection(capture)).listRecent(5);
+    expect(capture.some((c) => c.sql.includes("set_config"))).toBe(false);
   });
 });

@@ -19,10 +19,16 @@ import { templateFromRow } from "./template-store.js";
  * able to lose a concurrent one. So authoring is a separate store with a narrow surface — insert a
  * draft, read it back, and move it along the declared state machine one compare-and-set at a time.
  *
- * INVARIANT — writes are always `tenant_id = $1`, never `tenant_id IS NULL`. The table's policy
- * (`tenant_id IS NULL OR tenant_id = current_setting(…)`) would happily accept a platform-wide row
- * written from inside a tenant context, because `tenant_id IS NULL` satisfies it: RLS cannot defend
- * this one, so the store does, before any SQL is issued.
+ * INVARIANT — writes are always `tenant_id = $1`, never `tenant_id IS NULL`. This store refuses a
+ * platform-wide row before any SQL is issued, and that refusal is now the *second* layer rather than
+ * the only one: the table used to carry one `ALL`-scope policy whose `USING` doubled as its
+ * `WITH CHECK`, so `tenant_id IS NULL OR tenant_id = current_setting(…)` accepted a platform-wide
+ * row from inside any tenant context and RLS genuinely could not defend it. It is three policies
+ * now — tenant isolation, a `SELECT`-only platform read, and an `INSERT`-scoped platform write
+ * gated on `app.platform_config_write` (plus an `UPDATE`-scoped one, because a template's status
+ * moves) — so a platform row is refused by the database too. Nothing here claims that grant: no
+ * route in this binary authors the platform-wide default, which an operator seeds as the owner.
+ * The *read* side is unchanged, because the platform read policy demands no grant.
  */
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;

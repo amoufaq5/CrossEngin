@@ -419,7 +419,19 @@ function planTable(
           sql:
             `${emitDropConstraint(table, delta.name)} ` +
             `${emitAddUniqueConstraint(table, delta.name, cols)}`,
-          guarded: true,
+          // **Not** guarded, by `add_foreign_key`'s rule: `guarded` means the statement re-checks
+          // whether it still applies, and this one does not — `ADD CONSTRAINT … UNIQUE` validates
+          // against existing rows, so a *narrowing* change fails when the data already contradicts
+          // the catalog, which is information rather than an accident. It was marked `true` for a
+          // while, which claimed a re-check that is not in the SQL.
+          //
+          // What makes the failure safe is a different property, measured rather than assumed: the
+          // two statements go out as **one** string, and node-postgres runs a multi-statement simple
+          // query in one implicit transaction — so a failed `ADD` rolls the `DROP` back and the old
+          // constraint survives. Verified live on a populated table (ADR-0292 asserted this for an
+          // index; it holds here too). A *widening* change, such as appending a column to the key,
+          // cannot fail against existing rows at all and applies on a populated table.
+          guarded: false,
         });
         continue;
       }

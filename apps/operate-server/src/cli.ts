@@ -10,6 +10,7 @@ import {
 } from "./deletion-scheduler.js";
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
+import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
 import { DEFAULT_UNREAD_SCAN_LIMIT, MAX_UNREAD_SCAN_LIMIT } from "./read-state-routes.js";
 import { parseRequestBodyLimit, parseRouteBodyLimits } from "./request-body-limit.js";
 
@@ -52,6 +53,24 @@ export interface ServeOptions {
   readonly notificationDrainMs: number | null;
   readonly bounceWebhook: boolean;
   readonly bounceTransientHours: number | null;
+  /** Count consecutive Twilio `AnsweredBy=fax` verdicts per number in meta.notification_fax_observations. Counting only; suppression needs the threshold below. */
+  readonly bounceFaxObservations: boolean;
+  /**
+   * Consecutive fax verdicts before a **permanent** voice_call hard_bounce is recorded.
+   *
+   * Null is the designed default — count, report, never suppress — not a degradation:
+   * `AnsweredBy` is a detector's guess from a few hundred ms of audio, and ADR-0302's rule is that
+   * a safety record never widens on an inference, so the one suppression derived from one is the
+   * one a deployment asks for (`transientSuppressionHours`' precedent).
+   *
+   * Permanent rather than bounded for a mechanical reason: the suppression store's only conflict
+   * action is `DO NOTHING` and its id commits to (tenant, channel, address, reason), so a bounded
+   * row **cannot be renewed** — it would mean suppressed for N days and then never suppressible
+   * again, carrying the full risk of being wrong and keeping none of the benefit.
+   */
+  readonly bounceFaxSuppressAfter: number | null;
+  /** How long a run of fax verdicts stays one run (default 168h). A verdict arriving later restarts it at one: a number gets reassigned, and verdicts months apart are not evidence about the same device. */
+  readonly bounceFaxWindowHours: number | null;
   /** Roles treated as a tenant's admins when resolving a `tenant_admins` notification audience. */
   readonly notificationAdminRoles: readonly string[];
   /** Roles permitted to read the whole tenant's notifications via `?scope=tenant`. */
@@ -303,6 +322,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let notificationDrainMs: number | null = null;
   let bounceWebhook = false;
   let bounceTransientHours: number | null = null;
+  let bounceFaxObservations = false;
+  let bounceFaxSuppressAfter: number | null = null;
+  let bounceFaxWindowHours: number | null = null;
   const notificationAdminRoles: string[] = [];
   const notificationAuditRoles: string[] = [];
   let emitEntityEvents = false;
@@ -493,6 +515,33 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       const n = Number(raw);
       if (!Number.isInteger(n) || n < 1) throw new CliUsageError(`invalid --bounce-transient-hours: ${raw} (>= 1)`);
       bounceTransientHours = n;
+      i += consumed();
+    } else if (arg === "--bounce-fax-observations") {
+      bounceFaxObservations = true;
+    } else if (
+      arg === "--bounce-fax-suppress-after" ||
+      arg.startsWith("--bounce-fax-suppress-after=")
+    ) {
+      const raw = takeValue(arg, next, "--bounce-fax-suppress-after");
+      const n = Number(raw);
+      // Refused rather than clamped: a threshold of 1 is "suppress on a single detector sample",
+      // which is the thing the count exists to avoid — and an operator who typed 1 believes they
+      // asked for something supported, so silently raising it imposes a policy they did not choose.
+      if (!Number.isInteger(n) || n < MIN_FAX_SUPPRESSION_THRESHOLD) {
+        throw new CliUsageError(
+          `invalid --bounce-fax-suppress-after: ${raw} (a whole number >= ` +
+            `${MIN_FAX_SUPPRESSION_THRESHOLD.toString()}; 1 would suppress on a single detector sample)`,
+        );
+      }
+      bounceFaxSuppressAfter = n;
+      i += consumed();
+    } else if (arg === "--bounce-fax-window-hours" || arg.startsWith("--bounce-fax-window-hours=")) {
+      const raw = takeValue(arg, next, "--bounce-fax-window-hours");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) {
+        throw new CliUsageError(`invalid --bounce-fax-window-hours: ${raw} (>= 1)`);
+      }
+      bounceFaxWindowHours = n;
       i += consumed();
     } else if (arg === "--notification-admin-role" || arg.startsWith("--notification-admin-role=")) {
       notificationAdminRoles.push(takeValue(arg, next, "--notification-admin-role"));
@@ -1019,6 +1068,23 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (bounceTransientHours !== null && !bounceWebhook) {
     throw new CliUsageError("--bounce-transient-hours requires --bounce-webhook");
   }
+  if (bounceFaxObservations && !bounceWebhook) {
+    throw new CliUsageError("--bounce-fax-observations requires --bounce-webhook");
+  }
+  if (bounceFaxObservations && store === "memory") {
+    // The counter is a table, so on the memory store it cannot work at all.
+    throw new CliUsageError(
+      "--bounce-fax-observations requires a Postgres store (--store pg or pg-columns)",
+    );
+  }
+  // Both of these configure the counter, so neither means anything without it — and a threshold
+  // that silently counts nothing is the shape of misconfiguration this whole family refuses.
+  if (bounceFaxSuppressAfter !== null && !bounceFaxObservations) {
+    throw new CliUsageError("--bounce-fax-suppress-after requires --bounce-fax-observations");
+  }
+  if (bounceFaxWindowHours !== null && !bounceFaxObservations) {
+    throw new CliUsageError("--bounce-fax-window-hours requires --bounce-fax-observations");
+  }
   if (notificationAdminRoles.length > 0 && notificationDrainMs === null) {
     throw new CliUsageError("--notification-admin-role requires --notification-drain-ms (the drain interval)");
   }
@@ -1138,6 +1204,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     notificationDrainMs,
     bounceWebhook,
     bounceTransientHours,
+    bounceFaxObservations,
+    bounceFaxSuppressAfter,
+    bounceFaxWindowHours,
     notificationAdminRoles:
       notificationAdminRoles.length > 0 ? notificationAdminRoles : DEFAULT_ADMIN_ROLES,
     notificationAuditRoles,
@@ -1495,6 +1564,23 @@ Options:
   --bounce-transient-hours <n>  How long a soft/transient bounce suppresses an address.
                        Omitted, a transient bounce suppresses nothing
                        (needs --bounce-webhook)
+  --bounce-fax-observations
+                       Count consecutive Twilio AnsweredBy=fax verdicts per number in
+                       meta.notification_fax_observations. Counts only: suppression needs
+                       --bounce-fax-suppress-after. One fax verdict is a detector's guess from a
+                       few hundred ms of audio and must never suppress on its own. Needs
+                       TWILIO_VOICE_MACHINE_DETECTION, or Twilio never reports AnsweredBy at all
+                       (needs --bounce-webhook and --store pg)
+  --bounce-fax-suppress-after <n>
+                       Consecutive fax verdicts before a PERMANENT voice_call hard_bounce is
+                       recorded. >= 2, refused rather than clamped. Unset means never suppress,
+                       which is the default. Permanent rather than bounded because the suppression
+                       store's only conflict action is DO NOTHING, so a bounded row cannot be
+                       renewed - it would mean blocked for N days and then never blockable again
+  --bounce-fax-window-hours <n>
+                       How long a run of fax verdicts stays one run (default 168). A verdict
+                       arriving later restarts the run at one: a number gets reassigned, and
+                       verdicts months apart are not evidence about the same device
   --notification-admin-role <r>  Role treated as a tenant admin when resolving a
                        tenant_admins audience (repeatable; default erp_admin +
                        tenant_admin + platform_admin)

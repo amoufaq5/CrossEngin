@@ -4,7 +4,17 @@ import {
   PostgresSloEnforcementActionStore,
   SLO_ENFORCEMENT_ACTION_COLUMNS,
 } from "./enforcement-action-store.js";
-import type { SloEnforcementActionRecord } from "./records.js";
+import {
+  SET_PLATFORM_RECORD_WRITE_SQL,
+  SET_TENANT_CONTEXT_SQL,
+  type SloEnforcementActionRecord,
+} from "./records.js";
+
+/** `{sql, params}` as the offline fakes in this file record it. */
+interface Captured {
+  readonly sql: string;
+  readonly params: readonly unknown[] | undefined;
+}
 
 /**
  * The statement under test, found by what it *is* rather than by where it sits.
@@ -270,5 +280,32 @@ describe("PostgresSloEnforcementActionStore.countSince", () => {
       mockConnection(undefined, { rows: [{ count: "12" }], rowCount: 1 }),
     );
     expect(await store.countSince(new Date())).toBe(12);
+  });
+});
+
+describe("the platform write arm", () => {
+  it("claims app.platform_record_write before a platform-scope write", async () => {
+    // An SLO surface is never a tenant (ADR-0327), so an enforcement action about one is routinely
+    // platform-scope — which is exactly the row the old single policy let any tenant session forge.
+    const capture: Captured[] = [];
+    const store = new PostgresSloEnforcementActionStore(mockConnection(capture));
+    await store.record(fixture({ tenantId: null }));
+    expect(capture[0]?.sql).toBe(SET_PLATFORM_RECORD_WRITE_SQL);
+    expect(written(capture).sql).toContain("INSERT INTO meta.slo_enforcement_actions");
+  });
+
+  it("claims the tenant context instead for a tenant-scope write, never both", async () => {
+    const capture: Captured[] = [];
+    await new PostgresSloEnforcementActionStore(mockConnection(capture)).record(fixture());
+    const settings = capture.filter((c) => c.sql.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    expect(settings[0]?.sql).toBe(SET_TENANT_CONTEXT_SQL);
+  });
+
+  it("does not reach the kill switch it names, which is on the config grant", () => {
+    // The action row records that a flag was rolled back; `meta.feature_flag_kill_switches` is the
+    // rollback itself. One grant covering both would let the thing that reports an enforcement
+    // perform one.
+    expect(SET_PLATFORM_RECORD_WRITE_SQL).not.toContain("app.platform_config_write");
   });
 });

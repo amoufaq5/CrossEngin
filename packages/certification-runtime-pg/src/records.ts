@@ -73,7 +73,10 @@ export const SET_PLATFORM_RECORD_WRITE_SQL = setPlatformWriteSql("record");
 
 const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
 
-export function scopedWrite<T>(
+// `async` rather than returning `conn.transaction(...)` directly, so a rejected tenant id arrives
+// as a rejection like every other failure here. A synchronous throw out of a `Promise`-returning
+// function is a trap for a caller that only writes `.catch`.
+export async function scopedWrite<T>(
   conn: PgConnection,
   tenantId: string | null,
   fn: (tx: PgConnection) => Promise<T>,
