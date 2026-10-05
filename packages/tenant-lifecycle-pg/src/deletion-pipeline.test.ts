@@ -483,10 +483,10 @@ describe("deleteTenantAtomically", () => {
       "meta.operate_entity_records",
     ]);
     expect(out.erasedSharedTables.rowCount).toBe(9);
-    // Coverage, which the scope deliberately does not carry: 95 of the catalog's 113 tenant-scoped
+    // Coverage, which the scope deliberately does not carry: 96 of the catalog's 114 tenant-scoped
     // tables examined, 18 left — 16 as the platform's record of the deletion and 2 under a statutory
     // obligation.
-    expect(out.erasedSharedTables.examinedTables).toHaveLength(95);
+    expect(out.erasedSharedTables.examinedTables).toHaveLength(96);
     expect(out.erasedSharedTables.retainedTables).toHaveLength(RETAINED_SHARED_TABLES.length);
   });
 

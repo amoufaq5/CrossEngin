@@ -146,7 +146,12 @@ describe("the column projection", () => {
     FEATURE_FLAG_COLUMN_NAMES.forEach((col, i) => {
       expect(parts[i]?.endsWith("::jsonb")).toBe(FEATURE_FLAG_JSONB_COLUMNS.has(col));
     });
-    expect(FEATURE_FLAG_JSONB_COLUMNS.has("default_value")).toBe(false);
+    expect(FEATURE_FLAG_JSONB_COLUMNS.has("default_value_json")).toBe(false);
+    // And the column list names what the catalog declares. ADR-0308 renamed this column and the
+    // list kept the old name, so every statement here named a column no applied database has: the
+    // store could not round-trip one flag, and only a live cluster said so.
+    expect(FEATURE_FLAG_COLUMN_NAMES).toContain("default_value_json");
+    expect(FEATURE_FLAG_COLUMN_NAMES).not.toContain("default_value");
     expect(FEATURE_FLAG_JSONB_COLUMNS.has("killed_value_json")).toBe(false);
   });
 
@@ -443,7 +448,7 @@ describe("refusing a hand-edited row on the way out", () => {
   });
 
   it("refuses a default value that is not JSON", () => {
-    const row = { ...flagRow(flag()), default_value: "{oops" };
+    const row = { ...flagRow(flag()), default_value_json: "{oops" };
     expect(() => rowToFeatureFlag(row)).toThrow(/defaultValueJson must be valid JSON/);
   });
 

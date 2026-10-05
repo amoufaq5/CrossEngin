@@ -32,7 +32,7 @@ export type FlagEnvironment = FlagDefinition["environments"][number];
  * unable to store the records their contracts produce; `meta.feature_flags` was the worst instance,
  * because it predated `FlagDefinition` entirely. Of the eleven columns it declared, six mapped
  * (`key`, `description`, `environments`, `created_at`, `updated_at`, `archived_at`), one held the
- * contract's text as JSONB (`default_value`), two had no contract counterpart at all (`enabled`,
+ * contract's text as JSONB (`default_value_json`), two had no contract counterpart at all (`enabled`,
  * `rules`) and **eighteen contract fields had no column** — `tenantId`, `status`, `label`,
  * `riskLevel` and `ownerUserId` among them, every one required. No store limited to that shape
  * could round-trip a single flag, because the re-parse below would reject what came back.
@@ -49,12 +49,15 @@ export const FEATURE_FLAG_COLUMN_NAMES: readonly string[] = Object.freeze([
   "label",
   "description",
   "status",
-  // `default_value`, beside a `killed_value_json` — the asymmetry is deliberate, not a typo. Both
-  // are TEXT; only the second got the `_json` suffix, because the reconciler has no concept of a
-  // rename and renaming the pre-existing column would add the new name while reporting the old one
-  // as undeclared-but-not-dropped, leaving a `NOT NULL` column with no default that every insert
-  // would fail on.
-  "default_value",
+  // `default_value_json`, matching the contract's `defaultValueJson` and its sibling
+  // `killed_value_json`. It really was the asymmetric `default_value` for one increment, because the
+  // reconciler then had no concept of a rename; ADR-0308's `renamedFrom` closed that and the catalog
+  // was renamed with it — and **this list was not**, so every statement here named a column no
+  // applied database has had since. Measured as a non-owner role against a live cluster: every
+  // insert, update and read raised `column "default_value" of relation "feature_flags" does not
+  // exist`, so this store could not round-trip a single flag. The catalog is the source of truth and
+  // the only reader of this list is the SQL, so the list is what moves.
+  "default_value_json",
   "killed_value_json",
   "variants",
   "environments",
@@ -172,7 +175,7 @@ function asJson(value: unknown): unknown {
  * between a hand-edited row and a flag the platform will act on. `TableDefinition.constraints` can
  * now carry a cross-column CHECK, so several of them *could* be declared — that a `kill_switch`
  * flag requires four eyes, that an `archived` row carries all three archival columns, that
- * `expires_at` is after `created_at`. Two cannot be, at all: whether `default_value` parses as
+ * `expires_at` is after `created_at`. Two cannot be, at all: whether `default_value_json` parses as
  * JSON (no `IS JSON` before Postgres 17), and whether a `multivariate` flag's variant weights sum
  * to 10000 basis points with no duplicate key — that needs `jsonb_array_elements`, and a CHECK
  * admits neither a set-returning function nor an aggregate. So the re-parse is both the only place
@@ -188,7 +191,7 @@ export function rowToFeatureFlag(row: Record<string, unknown>): FlagDefinition {
     label: asString(row["label"]),
     description: asString(row["description"]),
     status: asString(row["status"]),
-    defaultValueJson: asString(row["default_value"]),
+    defaultValueJson: asString(row["default_value_json"]),
     killedValueJson: asNullableString(row["killed_value_json"]),
     variants: asJson(row["variants"]),
     environments: asJson(row["environments"]),

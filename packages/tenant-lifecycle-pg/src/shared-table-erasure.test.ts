@@ -153,8 +153,12 @@ describe("the erasable set is derived, the retention set is named", () => {
       t.columns.some((c) => c.name === TENANT_SCOPE_COLUMN),
     );
     expect(partition.tenantScoped).toHaveLength(tenantScoped.length);
-    expect(tenantScoped).toHaveLength(113);
-    expect(partition.erasable).toHaveLength(113 - RETAINED_SHARED_TABLES.length);
+    // 114 of the catalog's 145 tables carry a `tenant_id`. The figure moves whenever a
+    // tenant-scoped table is added, which is why the assertion above derives it from the live
+    // catalog and only this line pins the number — a new table should make *one* line fail here,
+    // visibly, rather than let the erasable set drift silently.
+    expect(tenantScoped).toHaveLength(114);
+    expect(partition.erasable).toHaveLength(114 - RETAINED_SHARED_TABLES.length);
     expect(partition.retained).toHaveLength(RETAINED_SHARED_TABLES.length);
   });
 
