@@ -184,7 +184,7 @@ describe("buildListSql — numeric ordering", () => {
     expect(parts.orderBy).toBe(`${AMOUNT} DESC NULLS LAST, record_id ASC`);
   });
 
-  it("leaves a text field's ORDER BY exactly as it was", () => {
+  it("orders a text field NULLS LAST too, now that a cursor can name the tail", () => {
     const params: unknown[] = [];
     const parts = buildListSql(
       query({ sort: [{ field: "name", direction: "desc" }] }),
@@ -192,7 +192,10 @@ describe("buildListSql — numeric ordering", () => {
       [],
       params,
     );
-    expect(parts.orderBy).toBe("document ->> 'name' DESC, record_id ASC");
+    // Unconditional, for every key: Postgres's default moves the tail with the direction (last
+    // ascending, first descending) while one cursor component has to mean one thing. It is safe for
+    // a `text` key only because `keysetOf` now renders a missing value as `null` rather than `""`.
+    expect(parts.orderBy).toBe("document ->> 'name' DESC NULLS LAST, record_id ASC");
   });
 });
 
@@ -273,17 +276,17 @@ describe("buildListSql — the keyset agrees with the ORDER BY", () => {
       params,
     );
     expect(parts.orderBy).toBe(
-      `document ->> 'name' ASC, ${AMOUNT} DESC NULLS LAST, record_id ASC`,
+      `document ->> 'name' ASC NULLS LAST, ${AMOUNT} DESC NULLS LAST, record_id ASC`,
     );
     expect(parts.where).toBe(
-      "((document ->> 'name' > $1) OR " +
+      "(((document ->> 'name' > $1 OR document ->> 'name' IS NULL)) OR " +
         `(document ->> 'name' = $2 AND (${AMOUNT} < $3::numeric OR ${AMOUNT} IS NULL)) OR ` +
         `(document ->> 'name' = $4 AND ${AMOUNT} = $5::numeric AND record_id > $6))`,
     );
     expect(params).toEqual(["acme", "acme", "9.00", "acme", "9.00", "r01"]);
   });
 
-  it("keeps a text-only keyset byte-identical to what it was", () => {
+  it("admits the NULL tail on a text key's seek, so an ascending walk cannot drop it", () => {
     const params: unknown[] = [];
     const parts = buildListSql(
       query({ sort: [{ field: "name", direction: "asc" }], cursor: encodeKeyset({ k: ["acme"], id: "r01" }) }),
@@ -291,8 +294,11 @@ describe("buildListSql — the keyset agrees with the ORDER BY", () => {
       [],
       params,
     );
+    // The `OR … IS NULL` disjunct is the other half of `NULLS LAST`: NULL is the greatest value
+    // in both directions, so a row with no value sorts after this cursor and has to qualify.
+    // Without it an ascending walk of eight rows returned seven — measured live on both stores.
     expect(parts.where).toBe(
-      "((document ->> 'name' > $1) OR (document ->> 'name' = $2 AND record_id > $3))",
+      "(((document ->> 'name' > $1 OR document ->> 'name' IS NULL)) OR (document ->> 'name' = $2 AND record_id > $3))",
     );
     expect(params).toEqual(["acme", "acme", "r01"]);
   });

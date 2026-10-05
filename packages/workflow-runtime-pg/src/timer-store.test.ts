@@ -30,6 +30,7 @@ function fixtureTimer(overrides: Partial<TimerProjection> = {}): TimerProjection
     firedAt: null,
     cancelledAt: null,
     fireCount: 0,
+    nextFireAt: null,
     ...overrides,
   };
 }
@@ -202,5 +203,58 @@ describe("PostgresTimerStore.upsert", () => {
     const store = new PostgresTimerStore({ conn, instanceResolver: resolver });
     await store.upsertMany([]);
     expect(capture).toEqual([]);
+  });
+});
+
+describe("PostgresTimerStore.upsert — a recurring timer's next occurrence", () => {
+  it("names next_fire_at in the INSERT, a catalog column nothing had ever written", async () => {
+    const insert = await captureUpsert(fixtureTimer());
+    expect(insertColumnList(insert.sql)).toContain("next_fire_at");
+  });
+
+  it("binds the next occurrence for a fired cron timer", async () => {
+    const insert = await captureUpsert(
+      fixtureTimer({
+        kind: "cron_schedule",
+        cronExpression: "0 2 * * *",
+        relativeSeconds: null,
+        status: "fired",
+        firedAt: "2026-05-17T02:00:00.000Z",
+        fireCount: 1,
+        nextFireAt: "2026-05-18T02:00:00.000Z",
+      }),
+    );
+    expect(boundValue(insert, "next_fire_at")).toBe("2026-05-18T02:00:00.000Z");
+    expect(boundValue(insert, "fire_count")).toBe(1);
+  });
+
+  it("binds null for a kind that fires once", async () => {
+    const insert = await captureUpsert(fixtureTimer());
+    expect(boundValue(insert, "next_fire_at")).toBeNull();
+  });
+
+  it("updates next_fire_at and scheduled_at on conflict, so a re-arm moves the row", async () => {
+    const insert = await captureUpsert(fixtureTimer());
+    expect(insert.sql).toContain("next_fire_at = EXCLUDED.next_fire_at");
+    expect(insert.sql).toContain("scheduled_at = EXCLUDED.scheduled_at");
+  });
+
+  it("releases the claim exactly when the write records a fire the row had not", async () => {
+    // Keyed on `fire_count` advancing, not on `EXCLUDED.status = 'scheduled'`: `ProjectingEventLog`
+    // re-projects every timer on every append, so a status-keyed clause would clear a live claim
+    // another worker holds mid-fire whenever an unrelated event landed on the instance.
+    const insert = await captureUpsert(fixtureTimer());
+    expect(insert.sql).toMatch(
+      /claimed_by = CASE\s+WHEN EXCLUDED\.fire_count > meta\.workflow_timers\.fire_count THEN NULL/,
+    );
+    expect(insert.sql).toMatch(
+      /claim_expires_at = CASE\s+WHEN EXCLUDED\.fire_count > meta\.workflow_timers\.fire_count THEN NULL/,
+    );
+    expect(insert.sql).not.toContain("EXCLUDED.status = 'scheduled'");
+  });
+
+  it("does not clear the claim unconditionally", async () => {
+    const insert = await captureUpsert(fixtureTimer());
+    expect(insert.sql).not.toMatch(/claimed_by = NULL/);
   });
 });

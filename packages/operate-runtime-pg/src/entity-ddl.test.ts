@@ -174,7 +174,38 @@ describe("emitEntityTableDdl — trait-supplied timestamps", () => {
 
   it("keeps the trait column's own default, so inserts that omit it still work", () => {
     const create = emitEntityTableDdl(columnPlanForEntity(AUDITED, { schema: "app" }))[0] ?? "";
+    // The trait declares `now()` and the emitter does not rewrite a declared default — a planned
+    // column's default is the manifest's statement, not this emitter's. Its *precision* is
+    // corrected by the `ALTER COLUMN … SET DEFAULT` that follows, which is the one place that
+    // reaches a table an earlier manifest already created.
     expect(create).toContain('"created_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
+  });
+
+  it("follows up with a millisecond-truncating SET DEFAULT, reaching an existing table too", () => {
+    const stmts = emitEntityTableDdl(columnPlanForEntity(AUDITED, { schema: "app" }));
+    const alters = stmts.filter((s) => s.includes("SET DEFAULT"));
+    expect(alters).toEqual([
+      `ALTER TABLE "app"."visit" ALTER COLUMN "created_at" SET DEFAULT date_trunc('milliseconds', now());`,
+      `ALTER TABLE "app"."visit" ALTER COLUMN "updated_at" SET DEFAULT date_trunc('milliseconds', now());`,
+    ]);
+    // After the ADD COLUMNs: on an `auditable` entity the timestamps are planned columns, so a
+    // table created by an earlier manifest may not hold them yet and the ALTER would fail.
+    const lastAdd = stmts.reduce(
+      (acc, stmt, i) => (stmt.includes("ADD COLUMN IF NOT EXISTS") ? i : acc),
+      -1,
+    );
+    expect(stmts.indexOf(alters[0]!)).toBeGreaterThan(lastAdd);
+  });
+
+  it("truncates to the millisecond because that is all the wire form holds", () => {
+    // `TIMESTAMPTZ` keeps microseconds; a JS `Date` does not; so `isoInstant` serves a truncated
+    // instant, the keyset cursor is rendered from the served value, and the seek then compares a
+    // truncated cursor against an untruncated column. Measured live before this: six rows 100
+    // microseconds apart, walked with `limit 2`, returned `us-0 us-1 us-1 us-2 us-1 us-2 …` and
+    // never terminated. Storing what the contract can hold is the fix; truncating in the ORDER BY
+    // would pay per row forever and could never back an index (`date_trunc` is STABLE).
+    const stmts = emitEntityTableDdl(columnPlanForEntity(PLAIN, { schema: "app" }));
+    expect(stmts.join("\n")).not.toMatch(/DEFAULT now\(\)/);
   });
 
   it("emits the trait's other columns as ordinary domain columns", () => {
@@ -185,8 +216,8 @@ describe("emitEntityTableDdl — trait-supplied timestamps", () => {
 
   it("still supplies the housekeeping timestamps for an entity with no auditable trait", () => {
     const create = emitEntityTableDdl(columnPlanForEntity(PLAIN, { schema: "app" }))[0] ?? "";
-    expect(create).toContain('"created_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
-    expect(create).toContain('"updated_at" TIMESTAMPTZ NOT NULL DEFAULT now()');
+    expect(create).toContain(`"created_at" TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`);
+    expect(create).toContain(`"updated_at" TIMESTAMPTZ NOT NULL DEFAULT date_trunc('milliseconds', now())`);
   });
 });
 

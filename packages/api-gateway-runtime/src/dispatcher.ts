@@ -40,6 +40,20 @@ export class HandlerRegistry {
   size(): number {
     return this.handlers.size;
   }
+
+  /**
+   * Every registered operation id, so a caller can wrap **all** handlers rather than a list it
+   * maintains by hand. `size()` existed and this did not, which meant a cross-cutting decorator
+   * applied after registration had to be told which operations to cover — and ADR-0288's
+   * `needsAuditEmitter` is what a hand-maintained list of that shape turns into.
+   *
+   * Insertion order, which is registration order; `register` on an existing id replaces the
+   * handler without moving it, so re-registering a wrapped handler during iteration over this
+   * snapshot is safe.
+   */
+  operationIds(): readonly string[] {
+    return [...this.handlers.keys()];
+  }
 }
 
 export function handlerOutputToResponse(output: HandlerOutput): OutgoingResponse {

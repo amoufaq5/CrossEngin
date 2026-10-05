@@ -934,11 +934,54 @@ export interface StatementTarget {
   readonly table: string;
 }
 
+/**
+ * Every keyword by which SQL can name a table, which is the vocabulary of the census rule.
+ *
+ * Deliberately *not* `binding` — a module const whose value happens to spell `meta.users` would be
+ * counted as a reference, and a prose string in an error message spells exactly that. The direction
+ * of the mistake is what settles it: a false reference means the census does **not** require a
+ * declaration for that table, so a Phase-1 table with no writer would slip the fence it exists for.
+ * A keyword is unambiguous SQL; a string that looks like a table name is not.
+ */
+export const TABLE_REFERENCE_VIAS = ["from", "join", "into", "update", "delete", "truncate"] as const;
+export type TableReferenceVia = (typeof TABLE_REFERENCE_VIAS)[number];
+
+export const TableReferenceSchema = z.object({
+  file: z.string().min(1),
+  line: z.number().int().positive(),
+  /**
+   * `null` when the schema was an interpolation this scan could not resolve while the table was
+   * written out — `FROM ${this.schema}.access_review_evidence`, which is how roughly half of
+   * `apps/operate-server`'s readers name their table. The census then matches on the table name
+   * alone, because the catalog declares one schema and a reference under an unknown one is still a
+   * reference.
+   */
+  schema: z.string().min(1).nullable(),
+  table: z.string().min(1),
+  via: z.enum(TABLE_REFERENCE_VIAS),
+});
+export type TableReference = z.infer<typeof TableReferenceSchema>;
+
 export interface SqlExtraction {
   readonly statements: readonly SqlStatement[];
   readonly unresolved: readonly UnresolvedStatement[];
   /** Every write whose table is known, including those whose columns are not. */
   readonly targets: readonly StatementTarget[];
+  /**
+   * Every table any SQL in this module *names*, whatever became of its columns.
+   *
+   * This is a strictly wider question than `statements` or `targets` answers, and the difference is
+   * the whole trustworthiness of the census rule. The statement extractor reads writes and a
+   * conservative subset of reads: a `SELECT` whose target does not resolve, or whose column list is
+   * not bare identifiers, or that carries a join or an alias, is **silently skipped** by design —
+   * reporting `count(*)` as a coverage gap would make the unresolved bucket unreadable. Three
+   * catalogued tables are reached only that way: `meta.access_review_evidence`, read by
+   * `certification.ts` through an unresolvable `${this.schema}`; and `meta.users` plus
+   * `meta.user_tenant_membership`, read by `recipient-resolver.ts` through a two-table join. Reading
+   * "no statement names this table" as "no SQL names this table" would have declared all three
+   * deliberately storeless, which is false of every one of them.
+   */
+  readonly references: readonly TableReference[];
 }
 
 /**
@@ -966,6 +1009,42 @@ export function extractSqlStatements(
   const statements: SqlStatement[] = [];
   const unresolved: UnresolvedStatement[] = [];
   const targets: StatementTarget[] = [];
+  const references: TableReference[] = [];
+
+  /*
+   * Every table any SQL here names. `DELETE\s+FROM` precedes `FROM` in the alternation so a delete
+   * is attributed to the statement that issued it rather than to a bare read, and consumes its
+   * target so the inner `FROM` is not matched a second time.
+   */
+  for (const m of code.matchAll(
+    /\b(DELETE\s+FROM|FROM|JOIN|INTO|UPDATE|TRUNCATE(?:\s+TABLE)?)\s+([^\s(;`,)]+)/gi,
+  )) {
+    const keyword = (m[1] ?? "").toLowerCase();
+    const via: TableReferenceVia = keyword.startsWith("delete")
+      ? "delete"
+      : keyword.startsWith("truncate")
+        ? "truncate"
+        : (keyword as TableReferenceVia);
+    const raw = m[2] ?? "";
+    const substituted = substituteBindings(raw, bindings);
+    const parsed = substituted === null ? null : parseQualifiedName(substituted);
+    if (parsed !== null) {
+      references.push(
+        TableReferenceSchema.parse({ file, line: lineAt(code, m.index), ...parsed, via }),
+      );
+      continue;
+    }
+    // `${this.schema}.access_review_evidence`: the schema did not resolve and the table is written
+    // out. The table name is the part the census asks about, so it is kept with a null schema
+    // rather than discarded — the alternative reads a real reader as no reader at all.
+    const spelled = /^\$\{[^{}]*\}\.("?[a-z_][a-z0-9_]*"?)$/.exec(raw.trim());
+    const table = spelled === null ? null : parseColumnName(spelled[1] ?? "");
+    if (table !== null) {
+      references.push(
+        TableReferenceSchema.parse({ file, line: lineAt(code, m.index), schema: null, table, via }),
+      );
+    }
+  }
 
   const resolveTarget = (
     raw: string,
@@ -1112,7 +1191,7 @@ export function extractSqlStatements(
     );
   }
 
-  return { statements, unresolved, targets };
+  return { statements, unresolved, targets, references };
 }
 
 /**

@@ -20,6 +20,7 @@ export const TIMER_PROVENANCE_DEFECTS = [
   "definition_unavailable",
   "timer_undeclared",
   "cron_next_fire_unresolved",
+  "next_fire_on_non_recurring_timer",
 ] as const;
 export type TimerProvenanceDefect = (typeof TIMER_PROVENANCE_DEFECTS)[number];
 
@@ -103,6 +104,8 @@ export function resolveTimerProvenance(input: {
   readonly timerName: string;
   readonly status: TimerProjection["status"];
   readonly fireCount: number;
+  /** The next occurrence the firing event recorded, projected from the log. */
+  readonly nextFireAt: string | null;
   readonly definition: WorkflowDefinition | undefined;
 }): TimerProvenance {
   const { timerId, timerName } = input;
@@ -127,19 +130,36 @@ export function resolveTimerProvenance(input: {
   // the one refusal here that is not about a missing declaration.
   //
   // A fired `cron_schedule` timer requires a `nextFireAt`: it is a *recurring* timer, and the next
-  // occurrence is what makes it one. Nothing in the engine computes it — `fireDueTimersForInstance`
-  // appends `timer_fired` with `{timerName}` and reschedules nothing — so the honest answer is that
-  // this deployment cannot recur a cron timer, and a stored row saying `fired` with no next
-  // occurrence would record a recurring timer that has silently stopped recurring. That is the
-  // worst of the three outcomes: worse than refusing, and worse than never having offered the kind.
-  if (declared.kind === "cron_schedule" && input.status === "fired") {
+  // occurrence is what makes it one. The engine computes it now (`nextOccurrenceFor`, from the same
+  // declared `cronExpression` and `timezone` this function reads) and records it on the
+  // `timer_fired` event, so a healthy fire arrives here with one. The refusal stays and is *not*
+  // vacuous: a log written by the engine that appended `timer_fired` with `{timerName}` alone — i.e.
+  // every cron fire before this — still reaches here, and a stored row saying `fired` with no next
+  // occurrence would record a recurring timer that has silently stopped recurring. That is the worst
+  // of the three outcomes: worse than refusing, and worse than never having offered the kind.
+  if (declared.kind === "cron_schedule" && input.status === "fired" && input.nextFireAt === null) {
     throw new TimerProvenanceUnresolved({
       defect: "cron_next_fire_unresolved",
       timerId,
       timerName,
       detail:
         `the definition declares cron_schedule and the log records ${String(input.fireCount)} fire(s), ` +
-        "but no timer_fired event carries a nextFireAt — this engine does not compute a cron timer's next occurrence",
+        "but no timer_fired event carries a nextFireAt — this timer was fired by an engine that did " +
+        "not compute a cron timer's next occurrence",
+    });
+  }
+  // The mirror refusal, and it is the one the fix itself could introduce: a non-recurring timer
+  // whose event log names a next occurrence. `WorkflowTimerSchema` forbids it and the nullable
+  // column permits it, so a `relative_after` row carrying one would claim a recurrence that nothing
+  // will ever honour — the defect this lane exists to remove, inverted.
+  if (declared.kind !== "cron_schedule" && input.nextFireAt !== null) {
+    throw new TimerProvenanceUnresolved({
+      defect: "next_fire_on_non_recurring_timer",
+      timerId,
+      timerName,
+      detail:
+        `the definition declares ${declared.kind}, which fires once, but the log names a next ` +
+        `occurrence at ${input.nextFireAt}`,
     });
   }
   return {
@@ -165,6 +185,7 @@ export function projectPersistableTimers(
       timerName: t.timerName,
       status: t.status,
       fireCount: t.fireCount,
+      nextFireAt: t.nextFireAt,
       definition,
     });
     return {
@@ -183,6 +204,7 @@ export function projectPersistableTimers(
       firedAt: t.firedAt,
       cancelledAt: t.cancelledAt,
       fireCount: t.fireCount,
+      nextFireAt: t.nextFireAt,
     };
   });
 }

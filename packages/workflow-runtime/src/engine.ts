@@ -2,13 +2,17 @@ import { sha256 } from "@crossengin/crypto";
 import {
   InstanceCancellationRequestSchema,
   TERMINAL_STATE_KINDS,
+  TIMER_KIND_SCHEDULING,
   planInstanceCancellation,
+  resolveNextTimerFireAt,
+  resolveTimerFireAt,
   type ActionKind,
   type ActivityCancellationCheckpoint,
   type InstanceCancellationCompensationOutcome,
   type InstanceCancellationOutcome,
   type InstanceCancellationRequestInput,
   type StateAction,
+  type TimerDefinition,
   type TransitionDefinition,
   type WorkflowDefinition,
   type WorkflowEvent,
@@ -61,6 +65,15 @@ export const WORKFLOW_ACTION_FAILURES = [
   "unresolved_correlation_key",
   "child_depth_exceeded",
   "signal_depth_exceeded",
+  /** `schedule_timer` names a timer the definition does not declare. */
+  "undeclared_timer",
+  /**
+   * The declared timer cannot be turned into a fire instant — the eleven
+   * `TIMER_SCHEDULE_DEFECTS`, surfaced as one action failure carrying the defect in its detail.
+   * One member rather than eleven because the caller's remedy is the same for all of them (fix the
+   * declaration) and the defect name is already in the message.
+   */
+  "unschedulable_timer",
 ] as const;
 export type WorkflowActionFailure = (typeof WORKFLOW_ACTION_FAILURES)[number];
 
@@ -673,6 +686,13 @@ export class WorkflowEngine {
     const firedTimerIds: string[] = [];
     for (const timer of scheduled) {
       if (timer.fireAt > nowMs) continue;
+      const declared = definition.timers.find((t) => t.name === timer.name);
+      // A fired timer the definition does not declare cannot be re-armed and cannot be told apart
+      // from a one-shot, so it fires once and nothing recurs — the honest answer for a log written
+      // against a definition that has since been superseded. `applyScheduleTimer` refuses to arm one,
+      // so this is unreachable from the write path.
+      const nextFireAt =
+        declared === undefined ? null : this.nextOccurrenceFor(instanceId, declared, nowMs);
       const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
       await this.appendEvent({
         instanceId,
@@ -689,7 +709,13 @@ export class WorkflowEngine {
         timerId: timer.id,
         childInstanceId: null,
         variableName: null,
-        payload: { timerName: timer.name },
+        // `nextFireAt` is in the *firing* event and not only in the re-arm, because the projection
+        // has to be able to answer "when does this next fire" for a timer that fired and was not
+        // re-armed — which is every recurring timer on an instance that ended in the same fire.
+        payload: {
+          timerName: timer.name,
+          ...(nextFireAt === null ? {} : { nextFireAt }),
+        },
         correlationId: null,
         causationEventId: null,
       });
@@ -707,6 +733,24 @@ export class WorkflowEngine {
         await this.applyTransition(instanceId, definition, transition, liveState, null, timer.id);
       }
       await this.runStepLoop(instanceId, definition);
+      // Re-armed **after** the transition and the step loop, and only while the instance can still
+      // act on the next occurrence. Re-arming unconditionally would leave a `scheduled` row on a
+      // completed instance, which `fireDueTimersForInstance` refuses to advance on its status check —
+      // so a worker would claim it, fire nothing, let the lease lapse and claim it again forever.
+      // That is the hot loop ADR-0333 found on the UUID/TEXT mismatch, rebuilt deliberately.
+      if (declared !== null && declared !== undefined && nextFireAt !== null) {
+        const after = await this.getInstanceState(instanceId);
+        if (after !== null && (after.status === "running" || after.status === "waiting_for_timer")) {
+          await this.appendTimerRearm(
+            instanceId,
+            state.tenantId,
+            declared,
+            timer.id,
+            nowMs,
+            nextFireAt,
+          );
+        }
+      }
     }
     return { firedTimerIds, affectedInstanceIds: firedTimerIds.length > 0 ? [instanceId] : [] };
   }
@@ -1085,7 +1129,7 @@ export class WorkflowEngine {
         await this.applyScheduleActivity(instanceId, definition, action, tenantId);
         return;
       case "schedule_timer":
-        await this.applyScheduleTimer(instanceId, tenantId, action);
+        await this.applyScheduleTimer(instanceId, definition, tenantId, action);
         return;
       case "cancel_timer":
         await this.applyCancelTimer(instanceId, tenantId, action);
@@ -1991,20 +2035,69 @@ export class WorkflowEngine {
     });
   }
 
+  /**
+   * Arms a declared timer **at the instant its own kind says**, which is what this did not do.
+   *
+   * It used to read `parameters.relativeSeconds` (defaulting to 60) and ignore the declared `kind`
+   * entirely, so a definition declaring `cron_schedule`, `absolute_at` or `business_hours` got a
+   * fire-once timer at `now + 60s` — while `timer-provenance.ts` wrote the **declared** kind into
+   * `meta.workflow_timers`. The row said `cron_schedule` and the behaviour was `relative_after`,
+   * which is the sharpest shape of this family's defect: the record is right, the behaviour is
+   * wrong, and so nothing disagrees with anything.
+   *
+   * The declaration is the only input. An undeclared timer name is a named refusal rather than the
+   * old `"timer"` fallback — which armed a timer no transition could ever be triggered by, because
+   * `evaluateNextTransition` matches a `timer_fired` trigger by name. `WorkflowDefinitionSchema`
+   * refuses both at publication now; this is the second fence, for a definition stored before it.
+   */
   private async applyScheduleTimer(
     instanceId: string,
+    definition: WorkflowDefinition,
     tenantId: string,
     action: StateAction,
   ): Promise<void> {
-    const timerName =
-      typeof action.parameters["timerName"] === "string"
-        ? (action.parameters["timerName"] as string)
-        : "timer";
-    const relativeSeconds =
-      typeof action.parameters["relativeSeconds"] === "number"
-        ? (action.parameters["relativeSeconds"] as number)
-        : 60;
-    const fireAt = new Date(this.clock.now().getTime() + relativeSeconds * 1000).toISOString();
+    const timerName = stringParam(action, "timerName");
+    if (timerName === null) {
+      throw new WorkflowActionError({
+        actionKind: "schedule_timer",
+        failure: "missing_parameter",
+        instanceId,
+        detail: "parameters.timerName must be a non-empty string naming a declared timer",
+      });
+    }
+    const declared = definition.timers.find((t) => t.name === timerName);
+    if (declared === undefined) {
+      throw new WorkflowActionError({
+        actionKind: "schedule_timer",
+        failure: "undeclared_timer",
+        instanceId,
+        detail:
+          `definition ${definition.id} declares no timer named ${JSON.stringify(timerName)} ` +
+          `(declared: ${definition.timers.map((t) => t.name).join(", ") || "none"})`,
+      });
+    }
+    // `absolute_at` reads its instant out of an instance variable, so the projection is an input to
+    // scheduling — log-driven like every other read here, so this works for an instance this engine
+    // never started. The extra read is taken only for the kinds that need it, decided by reading
+    // `TIMER_KIND_SCHEDULING` rather than by naming the kind here: a fifth kind that reads a
+    // variable would otherwise get an empty variable bag and refuse `absolute_variable_unset`.
+    const needsVariables = TIMER_KIND_SCHEDULING[declared.kind].reads.includes(
+      "absoluteTimestampVariable",
+    );
+    const projected = needsVariables ? await this.getInstanceState(instanceId) : null;
+    const resolution = resolveTimerFireAt(declared, {
+      now: this.clock.now(),
+      variables: projected?.variables ?? {},
+    });
+    if (!resolution.ok) {
+      throw new WorkflowActionError({
+        actionKind: "schedule_timer",
+        failure: "unschedulable_timer",
+        instanceId,
+        detail: `timer ${timerName} (${declared.kind}): ${resolution.defect} — ${resolution.detail}`,
+      });
+    }
+    const fireAt = resolution.fireAt;
     const timerId = this.ids.generate("wft");
     const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
     await this.appendEvent({
@@ -2022,7 +2115,86 @@ export class WorkflowEngine {
       timerId,
       childInstanceId: null,
       variableName: null,
-      payload: { timerName, fireAt },
+      // `timerKind` rides along so the log alone says what schedule this arming came from. Nothing
+      // reads it back for scheduling (the definition is the authority and is immutable once
+      // published), but a `timer_scheduled` that does not name its kind cannot be told from one
+      // written by the engine that scheduled everything as `relative_after`.
+      payload: { timerName, fireAt, timerKind: declared.kind },
+      correlationId: null,
+      causationEventId: null,
+    });
+  }
+
+  /**
+   * The instant a recurring timer next fires after this one, or `null` when the kind fires once.
+   *
+   * `null` is the contract rather than a gap: `WorkflowTimerSchema` requires `nextFireAt` to be null
+   * for every kind but `cron_schedule`. A *recurring* timer whose next occurrence cannot be computed
+   * throws instead, because a `fired` cron row with no next occurrence is a recurring timer that has
+   * silently stopped recurring — the row `timer-provenance.ts` refuses to store.
+   */
+  private nextOccurrenceFor(
+    instanceId: string,
+    declared: TimerDefinition,
+    firedAtMs: number,
+  ): string | null {
+    const resolution = resolveNextTimerFireAt(declared, { after: new Date(firedAtMs) });
+    if (resolution === null) return null;
+    if (!resolution.ok) {
+      throw new WorkflowActionError({
+        actionKind: "schedule_timer",
+        failure: "unschedulable_timer",
+        instanceId,
+        detail:
+          `timer ${declared.name} (${declared.kind}) fired but its next occurrence could not be ` +
+          `computed: ${resolution.defect} — ${resolution.detail}`,
+      });
+    }
+    return resolution.fireAt;
+  }
+
+  /**
+   * Arms a recurring timer's next occurrence on the **same timer id**.
+   *
+   * One row per schedule, moving — not one row per occurrence — because that is what the contract
+   * already models: `projectTimers` *counts* fires rather than setting a flag, `WorkflowTimerSchema`
+   * caps `fireCount` at a million for `cron_schedule` and at one for every other kind, and
+   * `meta.workflow_timers` carries `fire_count` and `next_fire_at` on one row.
+   *
+   * It must be appended **after** the `timer_fired` it follows: `outstandingTimersFromLog` drops a
+   * timer id on `timer_fired` and re-admits it on a later `timer_scheduled`, so the other order
+   * would arm the next occurrence and then immediately cancel it out.
+   */
+  private async appendTimerRearm(
+    instanceId: string,
+    tenantId: string,
+    declared: TimerDefinition,
+    timerId: string,
+    firedAtMs: number,
+    nextFireAt: string,
+  ): Promise<void> {
+    const nextSeq = (await this.eventLog.latestSequence(instanceId))!;
+    await this.appendEvent({
+      instanceId,
+      tenantId,
+      sequenceNumber: nextSeq + 1,
+      kind: "timer_scheduled",
+      occurredAt: new Date(firedAtMs).toISOString(),
+      actorPrincipalId: null,
+      actorSystemId: this.systemActorId,
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      timerId,
+      childInstanceId: null,
+      variableName: null,
+      payload: {
+        timerName: declared.name,
+        fireAt: nextFireAt,
+        timerKind: declared.kind,
+        rearm: true,
+      },
       correlationId: null,
       causationEventId: null,
     });

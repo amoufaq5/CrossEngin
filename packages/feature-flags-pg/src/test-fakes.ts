@@ -17,16 +17,51 @@ export type QueryResponder = (
 export const EMPTY: PgQueryResult = { rows: [], rowCount: 0 };
 
 /**
+ * Which statements must name `tenant_id`, and the one thing a recorder fake *can* check about scope.
+ *
+ * This fake does not model rows, so it cannot tell a scoped store from an unscoped one the way
+ * `crypto-pg`'s `fakeCryptoKeysPg` can — which is exactly how the write-side half of ADR-0331's
+ * defect survived: a fake that answers `{rowCount: 1}` to everything is as happy with
+ * `WHERE flag_id = $1` as with `WHERE flag_id = $1 AND tenant_id = $28`, so a platform-scoped write
+ * landing on a tenant's row looked identical to one that did not.
+ *
+ * What it can do instead of modelling rows is **refuse to answer a statement that could not have
+ * been scoped**: any `INSERT`/`UPDATE`/`DELETE` against these two tables must mention `tenant_id`
+ * somewhere, as a column it supplies or as a predicate it carries. That is a tripwire rather than a
+ * simulation — it cannot say the predicate is *right* — and it is the half that fails loudly when
+ * someone adds the next write path and forgets. Reads are deliberately exempt: the diagnosing
+ * re-read in `classifyScopedWriteRefusal` is unscoped **on purpose**, because its question is
+ * whether the row sits in another scope.
+ */
+const MUTATING_RE = /^\s*(INSERT|UPDATE|DELETE)\b/i;
+
+export function assertStatementIsScoped(sql: string): void {
+  if (!MUTATING_RE.test(sql)) return;
+  if (sql.includes("tenant_id")) return;
+  throw new Error(
+    "this fake refuses an unscoped write: a statement that changes rows in a " +
+      "`tenant_id`-nullable table must name tenant_id, as a supplied column or as a predicate — " +
+      `got: ${sql.replace(/\s+/g, " ").slice(0, 120)}`,
+  );
+}
+
+/**
  * A `PgConnection` that records every statement and answers from `respond`. Assertions are on the
  * recorded SQL and bound parameters — never a live database, which the live verification covers.
+ *
+ * It **throws on an unscoped write** (see `assertStatementIsScoped`), which is the floor a recorder
+ * fake can hold. `allowUnscopedWrites` exists for the tests that assert on the tripwire itself and
+ * for the ones that deliberately exercise a bare statement.
  */
 export function mockConnection(
   capture?: Captured[],
   respond: QueryResponder = () => ({ rows: [], rowCount: 1 }),
+  opts: { readonly allowUnscopedWrites?: boolean } = {},
 ): PgConnection {
   const conn: PgConnection = {
     query: vi.fn(async (sql: string, params?: readonly unknown[]) => {
       if (capture !== undefined) capture.push({ sql, params });
+      if (opts.allowUnscopedWrites !== true) assertStatementIsScoped(sql);
       return respond(sql, params);
     }) as PgConnection["query"],
     transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as

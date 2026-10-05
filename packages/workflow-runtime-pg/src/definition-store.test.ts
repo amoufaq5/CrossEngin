@@ -423,6 +423,98 @@ describe("PostgresWorkflowDefinitionStore.publish", () => {
     );
   });
 
+  it("carries the scope on the UPDATE, bound after the four-eyes guard", async () => {
+    const capture: Recorded[] = [];
+    const inReview = definition({ status: "in_review", publishedAt: null, publishedBy: null });
+    const conn = mockConnection((sql) => {
+      if (sql.includes("WHERE definition_key = $1")) return { rows: [row(inReview)], rowCount: 1 };
+      if (sql.includes("UPDATE")) return { rows: [{ id: ROW_UUID }], rowCount: 1 };
+      return EMPTY;
+    }, capture);
+    await new PostgresWorkflowDefinitionStore(conn).publish(definition());
+    const update = capture.find((c) => c.sql.includes("UPDATE"));
+    // Strict, and strict is right here even though every *read* in this store is inclusive:
+    // `updateAssignments` includes `tenant_id`, so a cross-scope match would move a platform-wide
+    // definition into one tenant and take that workflow from every other tenant in the deployment.
+    expect(update?.sql).toContain("AND tenant_id = $24");
+    expect(update?.sql).not.toContain("OR tenant_id IS NULL");
+    // After the four-eyes parameter, so the assignment positions and `guardParam` are untouched.
+    expect(update?.sql).toContain("created_by <> $23");
+    expect(update?.params?.[23]).toBe(TENANT);
+  });
+
+  it("asks for the platform scope as IS NULL, which binds no parameter", async () => {
+    const capture: Recorded[] = [];
+    const inReview = definition({
+      tenantId: null,
+      status: "in_review",
+      publishedAt: null,
+      publishedBy: null,
+    });
+    const conn = mockConnection((sql) => {
+      if (sql.includes("WHERE definition_key = $1")) return { rows: [row(inReview)], rowCount: 1 };
+      if (sql.includes("UPDATE")) return { rows: [{ id: ROW_UUID }], rowCount: 1 };
+      return EMPTY;
+    }, capture);
+    await new PostgresWorkflowDefinitionStore(conn).publish(definition({ tenantId: null }));
+    const update = capture.find((c) => c.sql.includes("UPDATE"));
+    expect(update?.sql).toContain("AND tenant_id IS NULL");
+    expect(update?.params).toHaveLength(23); // 22 columns + the four-eyes guard, no scope param
+  });
+
+  it("keeps the inclusive arm on the publish LOOKUPS, which two refusals are defined over", async () => {
+    // Do not narrow this to `scopeFilter`. `definition_id_reused` and
+    // `key_shadows_platform_definition` are defined over *cross-scope* rows, and `definition_id`
+    // carries a table-wide UNIQUE — so a strict lookup turns both named refusals into a raw 23505
+    // from the INSERT. Measured both ways; the narrowing that keeps a write in its own scope happens
+    // in the planner and in `updateRow`'s predicate, not here.
+    const capture: Recorded[] = [];
+    const conn = mockConnection(() => EMPTY, capture);
+    await new PostgresWorkflowDefinitionStore(conn).publish(definition()).catch(() => undefined);
+    const lookup = capture.find((c) => c.sql.includes("WHERE definition_key = $1"));
+    expect(lookup?.sql).toContain("OR tenant_id IS NULL");
+  });
+
+  it("distinguishes the three ways a guarded UPDATE can match no row", async () => {
+    const inReview = definition({ status: "in_review", publishedAt: null, publishedBy: null });
+    const build = (
+      diagnose: PgQueryResult<Record<string, unknown>>,
+    ): PgConnection =>
+      mockConnection((sql) => {
+        if (sql.includes("WHERE definition_key = $1")) return { rows: [row(inReview)], rowCount: 1 };
+        if (sql.includes("UPDATE")) return EMPTY;
+        return diagnose;
+      });
+
+    const refusalOf = async (diagnose: PgQueryResult<Record<string, unknown>>): Promise<string> => {
+      try {
+        await new PostgresWorkflowDefinitionStore(build(diagnose)).publish(definition());
+      } catch (err) {
+        if (err instanceof WorkflowDefinitionConflictError) return err.writeRefusal;
+        throw err;
+      }
+      throw new Error("expected a conflict");
+    };
+
+    // All three produce the same zero-row UPDATE; only the diagnosing read tells them apart, which
+    // is why a test that checked the happy path alone let this class survive.
+    expect(await refusalOf(EMPTY)).toBe("row_absent");
+    expect(await refusalOf({ rows: [{ tenant_id: null }], rowCount: 1 })).toBe("wrong_scope");
+    expect(await refusalOf({ rows: [{ tenant_id: TENANT }], rowCount: 1 })).toBe("guard_refused");
+  });
+
+  it("issues no diagnosing read when the UPDATE landed", async () => {
+    const capture: Recorded[] = [];
+    const inReview = definition({ status: "in_review", publishedAt: null, publishedBy: null });
+    const conn = mockConnection((sql) => {
+      if (sql.includes("WHERE definition_key = $1")) return { rows: [row(inReview)], rowCount: 1 };
+      if (sql.includes("UPDATE")) return { rows: [{ id: ROW_UUID }], rowCount: 1 };
+      return EMPTY;
+    }, capture);
+    await new PostgresWorkflowDefinitionStore(conn).publish(definition());
+    expect(capture.filter((c) => /SELECT tenant_id FROM/.test(c.sql))).toEqual([]);
+  });
+
   it("raises a conflict when an INSERT returns no row", async () => {
     const conn = mockConnection(() => EMPTY);
     await expect(new PostgresWorkflowDefinitionStore(conn).publish(definition())).rejects.toThrow(

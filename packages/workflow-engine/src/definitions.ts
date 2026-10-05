@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  BUSINESS_HOURS_REFUSAL_DETAIL,
+  cronParseFailure,
+  isResolvableTimezone,
+} from "./timer-schedule.js";
+
 export const STATE_KINDS = [
   "initial",
   "intermediate",
@@ -272,6 +278,55 @@ export const TimerDefinitionSchema = z
   });
 export type TimerDefinition = z.infer<typeof TimerDefinitionSchema>;
 
+/**
+ * Parameters on a `schedule_timer` action that *look* like they configure the schedule and are read
+ * by nothing.
+ *
+ * Until the per-kind scheduling landed, `applyScheduleTimer` read `parameters.relativeSeconds`
+ * (defaulting to 60) and ignored the declared `kind` entirely, while `timer-provenance.ts` wrote the
+ * **declared** `relativeSeconds` into `meta.workflow_timers`. So an action saying 600 against a
+ * timer declaring 60 produced a row that said 60 and a timer that fired at 600 — the sharpest shape
+ * of this family's defect, because the record is right and the behaviour is wrong, so nothing
+ * disagrees with anything.
+ *
+ * The fix makes the declared `TimerDefinition` the only source of a schedule. These four names are
+ * then dead, and a definition carrying one believes something false about itself — so they are
+ * refused at publication rather than ignored at runtime. A refusal is affordable precisely because
+ * it is a `superRefine`: it narrows what is accepted and changes no accepted definition's
+ * `definitionContentSha256`.
+ */
+export const DEAD_SCHEDULE_TIMER_PARAMETERS = [
+  "relativeSeconds",
+  "cronExpression",
+  "timezone",
+  "absoluteTimestampVariable",
+] as const;
+
+/** Every `StateAction` in a definition, with a path fragment naming where it was declared. */
+function allDeclaredActions(
+  definition: Pick<WorkflowDefinitionShape, "states" | "transitions">,
+): readonly { readonly action: StateAction; readonly where: string }[] {
+  const out: { action: StateAction; where: string }[] = [];
+  for (const s of definition.states) {
+    for (const a of s.onEntryActions) out.push({ action: a, where: `state ${s.name} onEntryActions` });
+    for (const a of s.onExitActions) out.push({ action: a, where: `state ${s.name} onExitActions` });
+  }
+  for (const t of definition.transitions) {
+    for (const a of t.preTransitionActions) {
+      out.push({ action: a, where: `transition ${t.name} preTransitionActions` });
+    }
+    for (const a of t.postTransitionActions) {
+      out.push({ action: a, where: `transition ${t.name} postTransitionActions` });
+    }
+  }
+  return out;
+}
+
+interface WorkflowDefinitionShape {
+  readonly states: readonly StateDefinition[];
+  readonly transitions: readonly TransitionDefinition[];
+}
+
 export const SignalDefinitionSchema = z.object({
   name: z.string().regex(/^[a-z][a-z0-9_.-]*$/).max(120),
   correlationVariable: z.string().min(1).max(80),
@@ -465,6 +520,100 @@ export const WorkflowDefinitionSchema = z
             code: z.ZodIssueCode.custom,
             path: ["transitions"],
             message: `transition ${t.name} guard references undeclared variable ${g.variableName}`,
+          });
+        }
+      }
+    }
+
+    // ── References into this same document ────────────────────────────────────────────────────────
+    //
+    // The rule for what is checked here and what is only reported: **a reference whose declaration
+    // site exists in this document is checked; one whose declaration site lives in another document,
+    // or does not exist in the contract at all, is not.** By that line `activityKey` (no
+    // `ActivityDefinitionSchema` exists — ADR-0333's open question) and `childDefinitionKey` (another
+    // definition entirely) are out, and these four are in.
+    //
+    // All four are free with respect to `definitionContentSha256`: a `superRefine` adds no field and
+    // rewrites no value, so the canonical bytes of every definition it still accepts are unchanged.
+    for (const { action, where } of allDeclaredActions(d)) {
+      if (action.kind === "schedule_timer" || action.kind === "cancel_timer") {
+        const name = action.parameters["timerName"];
+        if (typeof name === "string" && !timerNames.has(name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["states"],
+            message:
+              `${where}: ${action.kind} references undeclared timer ${name} ` +
+              `(declared timers: ${[...timerNames].join(", ") || "none"})`,
+          });
+        }
+      }
+      if (action.kind === "schedule_timer") {
+        for (const dead of DEAD_SCHEDULE_TIMER_PARAMETERS) {
+          if (action.parameters[dead] === undefined) continue;
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["states"],
+            message:
+              `${where}: schedule_timer carries parameter ${dead}, which is read by nothing — ` +
+              "a timer's schedule comes from its TimerDefinition and nowhere else",
+          });
+        }
+      }
+      if (action.kind === "set_variable") {
+        const name = action.parameters["variableName"];
+        if (typeof name === "string" && !variableNames.has(name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["states"],
+            message: `${where}: set_variable writes undeclared variable ${name}`,
+          });
+        }
+      }
+    }
+
+    // ── Timers this deployment could not schedule ────────────────────────────────────────────────
+    //
+    // Each of these refusals used to surface at the *first fire attempt* of a published definition —
+    // and a published definition is immutable, its content digest covering its fields, so one
+    // accepted with any of them can never be corrected in place: it has to be republished as a new
+    // version. Moving the check to publication is this family's rule that the honest fix sits one
+    // level up from where the pain was felt.
+    for (const t of d.timers) {
+      if (t.kind === "business_hours") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["timers"],
+          message: `timer ${t.name}: ${BUSINESS_HOURS_REFUSAL_DETAIL}`,
+        });
+      }
+      if (!isResolvableTimezone(t.timezone)) {
+        // Load-bearing even for the two kinds that never read it: the cron evaluator resolves a zone
+        // through `Intl` and *silently falls back to UTC* on one it cannot resolve, so an
+        // unresolvable zone is a timer firing on a schedule other than the one its row records.
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["timers"],
+          message: `timer ${t.name} declares timezone ${t.timezone}, which is not an IANA zone (it would evaluate in UTC)`,
+        });
+      }
+      if (t.kind === "absolute_at" && t.absoluteTimestampVariable !== null) {
+        if (!variableNames.has(t.absoluteTimestampVariable)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["timers"],
+            message:
+              `timer ${t.name} reads its fire instant from undeclared variable ${t.absoluteTimestampVariable}`,
+          });
+        }
+      }
+      if (t.kind === "cron_schedule" && t.cronExpression !== null) {
+        const failure = cronParseFailure(t.cronExpression);
+        if (failure !== null) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["timers"],
+            message: `timer ${t.name} declares an unparsable cronExpression: ${failure}`,
           });
         }
       }

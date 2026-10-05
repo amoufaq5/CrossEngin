@@ -120,11 +120,12 @@ function firedTimer(name = "approval_deadline"): WorkflowEvent {
 }
 
 describe("TIMER_PROVENANCE_DEFECTS", () => {
-  it("names three defects", () => {
+  it("names four defects", () => {
     expect(TIMER_PROVENANCE_DEFECTS).toEqual([
       "definition_unavailable",
       "timer_undeclared",
       "cron_next_fire_unresolved",
+      "next_fire_on_non_recurring_timer",
     ]);
   });
 
@@ -139,6 +140,7 @@ describe("resolveTimerProvenance", () => {
     timerName: "approval_deadline",
     status: "scheduled" as const,
     fireCount: 0,
+    nextFireAt: null as string | null,
   };
 
   it("reads the declared kind off the definition", () => {
@@ -363,6 +365,45 @@ describe("resolveTimerProvenance", () => {
       expect.unreachable();
     } catch (err) {
       expect((err as TimerProvenanceUnresolved).defect).toBe("cron_next_fire_unresolved");
+    }
+  });
+
+  it("accepts a fired cron timer that names its next occurrence", () => {
+    const cron = definition({
+      timers: [
+        {
+          name: "approval_deadline",
+          kind: "cron_schedule",
+          relativeSeconds: null,
+          absoluteTimestampVariable: null,
+          cronExpression: "0 9 * * *",
+          timezone: "UTC",
+        },
+      ],
+    });
+    expect(
+      resolveTimerProvenance({
+        ...base,
+        status: "fired",
+        fireCount: 1,
+        nextFireAt: "2026-05-17T09:00:00.000Z",
+        definition: cron,
+      }).kind,
+    ).toBe("cron_schedule");
+  });
+
+  it("refuses a next occurrence on a kind that fires once", () => {
+    try {
+      resolveTimerProvenance({
+        ...base,
+        status: "fired",
+        fireCount: 1,
+        nextFireAt: "2026-05-17T09:00:00.000Z",
+        definition: definition(),
+      });
+      expect.unreachable();
+    } catch (err) {
+      expect((err as TimerProvenanceUnresolved).defect).toBe("next_fire_on_non_recurring_timer");
     }
   });
 

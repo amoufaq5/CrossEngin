@@ -43,11 +43,29 @@ export const META_TENANTS: TableDefinition = {
     },
     { name: "name", type: "TEXT", notNull: true },
     {
+      // `pending_deletion` joined the four since ADR-0334, and it is the one state the deployment
+      // was missing rather than a fifth for symmetry. `tenant-lifecycle` declared a seven-state
+      // lifecycle that nothing in the workspace read, with `READ_ONLY_STATES` and `blocksWrites`
+      // already naming the policy; this column's four values were what could actually be stored, so
+      // three of those seven were unreachable. Two were billing facts duplicated onto the tenant
+      // (`past_due` is a subscription status with its own transition map, `trial` a plan tier) and
+      // are gone from the contract. This one is a real tenant state with a real consequence:
+      // ADR-0321 made the Article 17 erasure asynchronous because a large tenant outlasts an HTTP
+      // request, and ADR-0316's ordering retires the row only *after* the erasure commits — so a
+      // tenant whose deletion was verified and queued sat `active` and went on accepting writes
+      // into data that was about to be destroyed. It is also the `fromState` `deletion_grace` and
+      // `appeal_window` name, and it is already in `READ_ONLY_STATES`.
+      //
+      // Widening a CHECK is not a tightening and cannot fail against existing rows, but
+      // `planSchemaReconciliation` cannot tell the two apart (ADR-0330), so this lands as
+      // `constraint_needs_validation` with the SQL on any populated deployment and is applied by
+      // hand there. That cost is ADR-0329's, unchanged, and is the open end this exercises.
       name: "status",
       type: "TEXT",
       notNull: true,
       default: "'active'",
-      check: "status IN ('active', 'suspended', 'archived', 'deleted')",
+      check:
+        "status IN ('active', 'suspended', 'archived', 'pending_deletion', 'deleted')",
     },
     {
       name: "tier",

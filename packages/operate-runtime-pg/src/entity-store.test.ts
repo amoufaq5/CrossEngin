@@ -402,7 +402,7 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
       sort: [{ field: "name", direction: "desc" }],
       filters: [],
     });
-    expect(last.sql).toContain("ORDER BY document ->> 'name' DESC, record_id ASC");
+    expect(last.sql).toContain("ORDER BY document ->> 'name' DESC NULLS LAST, record_id ASC");
     expect(last.sql).toContain("LIMIT $3");
     expect(last.sql).not.toContain("OFFSET");
     expect(last.params).toEqual([TENANT, "Product", 3]);
@@ -476,7 +476,7 @@ describe("PostgresEntityStore.listPage — declared numeric fields", () => {
       filters: [],
       valueTypes: numeric,
     });
-    expect(last.sql).toContain("ORDER BY document ->> 'name' ASC, record_id ASC");
+    expect(last.sql).toContain("ORDER BY document ->> 'name' ASC NULLS LAST, record_id ASC");
     expect(last.sql).not.toContain("CASE WHEN");
   });
 
@@ -490,7 +490,7 @@ describe("PostgresEntityStore.listPage — declared numeric fields", () => {
       sort: [{ field: "price", direction: "asc" }],
       filters: [],
     });
-    expect(last.sql).toContain("ORDER BY document ->> 'price' ASC, record_id ASC");
+    expect(last.sql).toContain("ORDER BY document ->> 'price' ASC NULLS LAST, record_id ASC");
   });
 
   it("binds a numeric filter with a numeric cast", async () => {
@@ -654,5 +654,68 @@ describe("PostgresEntityStore.pruneDanglingLinks", () => {
     const result = await store.pruneDanglingLinks(OTHER_TENANT, "Product", "Tag");
     expect(result).toEqual({ pruned: 0, kept: 0 });
     expect(remainingLinks()).toHaveLength(1);
+  });
+});
+
+describe("PostgresEntityStore.listPage — declared datetime fields", () => {
+  const typed = new Map<string, ListValueType>([["occurred", "timestamptz"]]);
+
+  it("compares a datetime through the guarded instant cast, not byte-wise", async () => {
+    const cap = capturePg([]);
+    await new PostgresEntityStore(cap.conn).listPage(TENANT, "Evt", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "occurred", direction: "asc" }],
+      filters: [],
+      valueTypes: typed,
+    });
+    const sql = cap.last.sql;
+    // The spellings a document can hold are not all the canonical one: a legacy
+    // `2026-01-31T19:00:00+09:00` is the same instant as `2026-01-31T10:00:00.000Z` and sorts nine
+    // hours away from it as text. Measured live over eight rows, this store placed such a row five
+    // positions from where `ColumnMappedEntityStore` placed it.
+    expect(sql).toContain("::timestamptz");
+    expect(sql).toContain("make_date(");
+    expect(sql).toContain("ASC NULLS LAST");
+  });
+
+  it("binds a filter value as an instant and folds an uncomparable one to a constant", async () => {
+    const cap = capturePg([]);
+    const store = new PostgresEntityStore(cap.conn);
+    await store.listPage(TENANT, "Evt", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "occurred", op: "gt", value: "2026-01-31T00:00:00.000Z" }],
+      valueTypes: typed,
+    });
+    expect(cap.last.sql).toContain("> $3::timestamptz");
+    await store.listPage(TENANT, "Evt", {
+      limit: 5,
+      cursor: null,
+      sort: [],
+      filters: [{ field: "occurred", op: "gt", value: "soon" }],
+      valueTypes: typed,
+    });
+    // `'soon'::timestamptz` raises, and no instant compares to a word, so `gt` matches nothing.
+    // Binding it would answer 500 for a query that should answer an empty page.
+    expect(cap.last.sql).toContain("FALSE");
+    expect(cap.last.params).not.toContain("soon");
+  });
+
+  it("leaves a date and a time field comparing as text", async () => {
+    const cap = capturePg([]);
+    await new PostgresEntityStore(cap.conn).listPage(TENANT, "Evt", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "day", direction: "asc" }],
+      filters: [],
+      valueTypes: new Map<string, ListValueType>([["day", "text"]]),
+    });
+    // `YYYY-MM-DD` is fixed-width and zero-padded, so byte order *is* chronological, and `date_in`
+    // is STABLE — a cast would be unindexable and `DateStyle`-dependent (`'01/02/2026'::date` is
+    // January 2nd under MDY and February 1st under DMY, measured) for no ordering gain.
+    expect(cap.last.sql).not.toContain("::date");
+    expect(cap.last.sql).toContain("ORDER BY document ->> 'day' ASC NULLS LAST");
   });
 });

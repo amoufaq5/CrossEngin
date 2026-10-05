@@ -10,6 +10,9 @@ import {
   looksLikeProductionDatabase,
   parsePgEnvConfig,
   requireIsoInstant,
+  assertScopeTenantId,
+  scopeFilter,
+  scopeFilterWithPlatform,
   setPlatformWriteSql,
   type PlatformWriteGrant,
 } from "./connection.js";
@@ -334,5 +337,85 @@ describe("setPlatformWriteSql", () => {
 
   it("binds no parameters, so a caller cannot pass a grant name through it", () => {
     expect(setPlatformWriteSql("record")).not.toContain("$1");
+  });
+});
+
+const TENANT = "11111111-1111-4111-8111-111111111111";
+
+/**
+ * The predicate eight packages held a verbatim copy of. What is asserted here is the *shape* and
+ * the *branch*; which spelling a given table wants is asserted in that table's own package, because
+ * it is a fact about the table.
+ */
+describe("scopeFilter", () => {
+  it("asks for a tenant's rows by equality, binding the id", () => {
+    expect(scopeFilter(TENANT)).toEqual({ sql: "tenant_id = $1", params: [TENANT] });
+  });
+
+  it("asks for the platform scope as IS NULL, binding nothing", () => {
+    // `tenant_id = NULL` is never true, so the platform scope cannot ride along as a parameter.
+    expect(scopeFilter(null)).toEqual({ sql: "tenant_id IS NULL", params: [] });
+  });
+
+  it("places its parameter where the caller says, so it composes with a bound list", () => {
+    expect(scopeFilter(TENANT, 4).sql).toBe("tenant_id = $4");
+    expect(scopeFilter(null, 4).params).toEqual([]);
+  });
+
+  /**
+   * The measurement that makes the branch load-bearing: `IS NOT DISTINCT FROM` is the one operator
+   * matching NULL to NULL, and with a **bound parameter** — which is how a store issues it — it is a
+   * sequential scan. 10.67 ms against 0.73 ms on 45k rows, and 24.7 ms against 1.7 ms. With a
+   * *literal* NULL it is index-scanned, because Postgres constant-folds it, so the penalty is
+   * invisible in a psql session and real in production.
+   */
+  it("never uses IS NOT DISTINCT FROM, in either arm", () => {
+    expect(scopeFilter(TENANT).sql).not.toContain("IS NOT DISTINCT FROM");
+    expect(scopeFilter(null).sql).not.toContain("IS NOT DISTINCT FROM");
+    expect(scopeFilterWithPlatform(TENANT).sql).not.toContain("IS NOT DISTINCT FROM");
+  });
+
+  it("refuses a tenantId that could not be one, in both functions", () => {
+    expect(() => scopeFilter("'; DROP TABLE meta.audit_log; --")).toThrow(/invalid tenantId/);
+    expect(() => scopeFilterWithPlatform("'; DROP TABLE meta.audit_log; --")).toThrow(
+      /invalid tenantId/,
+    );
+  });
+
+  it("keeps the message every package's tests already match on", () => {
+    // Seven of the eight copies spelled this exact string; moving it must not break their asserts.
+    expect(() => assertScopeTenantId("not a tenant")).toThrow(
+      /invalid tenantId for RLS context/,
+    );
+    expect(() => assertScopeTenantId(TENANT)).not.toThrow();
+  });
+});
+
+describe("scopeFilterWithPlatform", () => {
+  it("keeps the platform's rows in a tenant's answer, as an OR of two indexable arms", () => {
+    expect(scopeFilterWithPlatform(TENANT)).toEqual({
+      sql: "(tenant_id = $1 OR tenant_id IS NULL)",
+      params: [TENANT],
+    });
+  });
+
+  /**
+   * For the platform scope the two functions agree, and that is the arm the defect was always in: a
+   * platform read is the one that was being handed a tenant's row.
+   */
+  it("agrees with the strict form on the platform scope", () => {
+    expect(scopeFilterWithPlatform(null)).toEqual(scopeFilter(null));
+  });
+
+  it("contains the strict form as a substring, which a SQL-matching fake must read OR-first", () => {
+    // `(tenant_id = $1 OR tenant_id IS NULL)` contains `tenant_id = $1`, so a fake that tests for
+    // the strict spelling first silently drops the platform rows the OR exists to keep.
+    expect(scopeFilterWithPlatform(TENANT, 1).sql).toContain(scopeFilter(TENANT, 1).sql);
+  });
+
+  it("places its parameter where the caller says", () => {
+    expect(scopeFilterWithPlatform(TENANT, 3).sql).toBe(
+      "(tenant_id = $3 OR tenant_id IS NULL)",
+    );
   });
 });

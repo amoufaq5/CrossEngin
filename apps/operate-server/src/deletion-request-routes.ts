@@ -68,6 +68,20 @@ export interface DeletionRequestLike {
   readonly tombstoneId: string | null;
 }
 
+/**
+ * Moves a tenant row between lifecycle states as a deletion request advances.
+ *
+ * Two methods rather than one `setStatus(tenantId, status)`, because the two are authorised by
+ * different facts and a single setter would make the route the place that decides which state a
+ * rejection restores. `restore` also has to answer "restore to *what*" — a tenant suspended for
+ * non-payment while its deletion request was pending must not come back `active` — and that is a
+ * question for whatever implements this, not for the route.
+ */
+export interface TenantStateMover {
+  markPendingDeletion(tenantId: string): Promise<void>;
+  restore(tenantId: string): Promise<void>;
+}
+
 /** Structural mirror of a `ReconciliationResult` (ADR-0322, ADR-0323). */
 export interface ReconciliationLike {
   readonly requestId: string;
@@ -197,6 +211,19 @@ export interface DeletionRequestRoutesContext {
   readonly verifyRoles: ReadonlySet<string>;
   /** Roles permitted to poll a handle. Defaults to the union of the two above. */
   readonly readRoles?: ReadonlySet<string>;
+  /**
+   * Moves the **tenant row** alongside the request (ADR-0334). Absent ⇒ the request's status is the
+   * only record, which is what every deployment had: `meta.tenants.status` could not hold
+   * `pending_deletion` at all, so a tenant whose erasure was verified and queued sat `active` and
+   * went on accepting writes into data that was about to be destroyed.
+   *
+   * The request's transition is the authoritative act — it carries the in-predicate guard, the
+   * four-eyes rule and the audit row — and this is its consequence, so it runs **after** and its
+   * failure is *reported* on the handle rather than thrown. ADR-0320's rule: a verify that moved the
+   * request and could not move the tenant has happened, and answering 500 would say otherwise;
+   * `tenantReadOnly: false` on the 202 is what tells an operator the window is still open.
+   */
+  readonly tenantState?: TenantStateMover;
   /**
    * Reconciling a stranded request (ADR-0322). Absent ⇒ the two routes are not mounted at all, since
    * a reconciler is needed to serve them.
@@ -457,9 +484,36 @@ function buildVerifyHandler(ctx: DeletionRequestRoutesContext): Handler {
       detail: parsed.data.verificationMethod,
       at,
     });
+    // The tenant goes read-only here, which is the point of the state existing: between this moment
+    // and the runner's commit the tenant is serving data that is about to be destroyed.
+    const readOnly = await moveTenant(ctx, "markPendingDeletion", moved.tenantId);
     // Verified is the queue: nothing here runs the deletion, and a 202 says so.
-    return json(202, requestHandle(moved));
+    return json(202, { ...requestHandle(moved), tenantReadOnly: readOnly });
   };
+}
+
+/**
+ * Runs one side of the tenant move and answers whether it landed. `null` means no mover is
+ * configured at all, which is a different fact from a mover that failed and is reported as such —
+ * `false` says the window is open and somebody should look, `null` says this deployment does not
+ * move tenant rows.
+ */
+async function moveTenant(
+  ctx: DeletionRequestRoutesContext,
+  method: keyof TenantStateMover,
+  tenantId: string,
+): Promise<boolean | null> {
+  const mover = ctx.tenantState;
+  if (mover === undefined) return null;
+  try {
+    await mover[method](tenantId);
+    return true;
+  } catch (err) {
+    console.error(
+      `[deletion-request] tenant ${method} failed for ${tenantId}: ${messageOf(err)}`,
+    );
+    return false;
+  }
 }
 
 function buildRejectHandler(ctx: DeletionRequestRoutesContext): Handler {
@@ -509,7 +563,11 @@ function buildRejectHandler(ctx: DeletionRequestRoutesContext): Handler {
       detail: parsed.data.reason,
       at,
     });
-    return json(200, requestHandle(moved));
+    // `verified -> rejected` is a permitted request transition, so a rejection can arrive for a
+    // tenant this flow already made read-only. Restoring is conditional on the tenant actually
+    // being in `pending_deletion` — the mover decides that, not this route.
+    const restored = await moveTenant(ctx, "restore", moved.tenantId);
+    return json(200, { ...requestHandle(moved), tenantRestored: restored });
   };
 }
 

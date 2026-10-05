@@ -4,11 +4,8 @@ import { encodeKeyset } from "@crossengin/operate-runtime";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
-import {
-  ColumnMappedEntityStore,
-  UndecidedWireTypeError,
-  decimalSpecFromSqlType,
-} from "./column-store.js";
+import { UndecidedColumnTypeError } from "./column-plan.js";
+import { ColumnMappedEntityStore, decimalSpecFromSqlType } from "./column-store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -139,7 +136,7 @@ describe("ColumnMappedEntityStore — CRUD maps fields to typed columns", () => 
     const updated = await store(cap).update(TENANT, "Widget", "w1", { price: 12 });
     const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
     expect(upd.sql).toContain('"price" = $3');
-    expect(upd.sql).toContain('"updated_at" = now()');
+    expect(upd.sql).toContain('"updated_at" = date_trunc(\'milliseconds\', now())');
     expect(upd.sql).toContain("RETURNING");
     expect(updated).toMatchObject({ id: "w1", price: "12.00" });
   });
@@ -445,8 +442,23 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
 
   it("builds a keyset cursor Postgres can bind back, not a Date's toString form", async () => {
     const cap = capturePg([
-      { id: "v1", reason: "a", created_at: new Date("2026-08-26T01:02:03.456Z"), created_by: "u1" },
-      { id: "v2", reason: "b", created_at: new Date("2026-08-27T01:02:03.456Z"), created_by: "u1" },
+      {
+        id: "v1",
+        reason: "a",
+        created_at: new Date("2026-08-26T01:02:03.456Z"),
+        created_by: "u1",
+        // The full-precision cursor alias `listPageOn` adds for an instant sort key. A `Date` has
+        // lost the microseconds by the time it reaches JS, so the cursor is rendered from the
+        // column's own `to_char` instead — see `FULL_PRECISION_INSTANT_FORMAT`.
+        __ck0: "2026-08-26T01:02:03.456000Z",
+      },
+      {
+        id: "v2",
+        reason: "b",
+        created_at: new Date("2026-08-27T01:02:03.456Z"),
+        created_by: "u1",
+        __ck0: "2026-08-27T01:02:03.456000Z",
+      },
     ]);
     const page = await auditedStore(cap).listPage(TENANT, "Visit", {
       limit: 1,
@@ -460,7 +472,7 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
     ) as { k: readonly string[] };
     // `Fri Aug 26 2026 … (Coordinated Universal Time)` is what this was, and
     // `$n::TIMESTAMPTZ` refuses it — verified live, `invalid input syntax`.
-    expect(decoded.k[0]).toBe("2026-08-26T01:02:03.456Z");
+    expect(decoded.k[0]).toBe("2026-08-26T01:02:03.456000Z");
     expect(decoded.k[0]).not.toContain("Coordinated Universal Time");
   });
 
@@ -468,7 +480,7 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
     const cap = capturePg([{ id: "v1", reason: "x" }]);
     await auditedStore(cap).update(TENANT, "Visit", "v1", { reason: "x" });
     const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
-    expect(upd.sql).toContain('"updated_at" = now()');
+    expect(upd.sql).toContain('"updated_at" = date_trunc(\'milliseconds\', now())');
   });
 
   it("assigns updated_at once when the patch names it, not twice", async () => {
@@ -476,7 +488,7 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
     await auditedStore(cap).update(TENANT, "Visit", "v1", { updated_at: "2026-08-26T00:00:00Z" });
     const upd = cap.calls.find((c) => c.sql.includes("UPDATE"))!;
     expect(upd.sql.match(/"updated_at" =/g)).toHaveLength(1);
-    expect(upd.sql).not.toContain('"updated_at" = now()');
+    expect(upd.sql).not.toContain('"updated_at" = date_trunc');
   });
 
   it("migrates an existing table additively on ensureSchema", async () => {
@@ -611,24 +623,51 @@ describe("ColumnMappedEntityStore — a column type with no decided wire type", 
       schema: "tenant_app",
     });
 
-  it("refuses to serve an INTERVAL column rather than handing out [object Object]", async () => {
-    const cap = capturePg([{ id: "s1", elapsed: { days: 3, hours: 4 } }]);
-    await expect(spanStore(cap).get(TENANT, "Span", "s1")).rejects.toThrow(UndecidedWireTypeError);
-    await expect(spanStore(cap).get(TENANT, "Span", "s1")).rejects.toThrow(
-      /elapsed: no wire type is defined for a INTERVAL column/,
+  // The refusal moved from the first *read* to the *plan*. A manifest declaring a `duration` used
+  // to provision a table, serve every other field, and fail on the first page of the one entity
+  // that had it; now it cannot be planned at all. See `UNDECIDED_SQL_TYPES` for the measurements
+  // behind refusing rather than choosing a wire form.
+  it("refuses at plan time, naming the entity and the field", () => {
+    const cap = capturePg();
+    expect(() => spanStore(cap)).toThrow(UndecidedColumnTypeError);
+    expect(() => spanStore(cap)).toThrow(
+      /Span\.elapsed: cannot plan a INTERVAL column — a 'duration' field has no decided wire type/,
     );
   });
 
-  it("refuses on the write echo too, so nothing is stored under a type it cannot read back", async () => {
+  it("carries the entity, field, sqlType and reason on the error", () => {
     const cap = capturePg();
-    await expect(spanStore(cap).create(TENANT, "Span", { id: "s1", elapsed: "3 days" })).rejects.toThrow(
-      UndecidedWireTypeError,
+    let caught: unknown = null;
+    try {
+      spanStore(cap);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(UndecidedColumnTypeError);
+    const err = caught as UndecidedColumnTypeError;
+    // The entity as well as the field: the plan is per entity, and `elapsed` may be declared on
+    // several, so an operator reading a boot failure needs to know which one to edit.
+    expect(err.entity).toBe("Span");
+    expect(err.field).toBe("elapsed");
+    expect(err.sqlType).toBe("INTERVAL");
+  });
+
+  it("refuses an array of them too, since the element type is the undecided one", () => {
+    const cap = capturePg();
+    const arrayOfSpans = {
+      entities: [{ name: "Span", fields: [{ name: "elapsed", type: { kind: "array", element: { kind: "duration" } } }] }],
+    } as unknown as Manifest;
+    expect(() => new ColumnMappedEntityStore(cap.conn, arrayOfSpans, { schema: "tenant_app" })).toThrow(
+      UndecidedColumnTypeError,
     );
   });
 
-  it("still emits DDL for the column — the refusal is about serving, not about declaring", async () => {
+  it("emits no DDL for it, because there is no plan to emit DDL from", async () => {
     const cap = capturePg();
-    await spanStore(cap).ensureSchema();
-    expect(cap.calls.map((c) => c.sql).join("\n")).toContain('"elapsed" INTERVAL');
+    expect(() => spanStore(cap)).toThrow(UndecidedColumnTypeError);
+    // The earlier decision was "the refusal is about serving, not about declaring", which left a
+    // provisioned table nothing could read. Declaring a column whose values can never be served is
+    // not a smaller failure than refusing the manifest; it is the same failure, later.
+    expect(cap.calls).toHaveLength(0);
   });
 });

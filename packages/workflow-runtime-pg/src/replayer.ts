@@ -103,6 +103,27 @@ interface StoredSignalRow {
 interface StoredTimerRow {
   readonly timer_id: string;
   readonly status: string;
+  readonly fire_count: unknown;
+  /** `TIMESTAMPTZ`, so node-postgres hands back a `Date` — normalised, per ADR-0330. */
+  readonly next_fire_at: unknown;
+}
+
+/**
+ * What the replayer compares for a timer: its status **and its recurrence position**.
+ *
+ * `status` alone was enough while every timer fired once. A recurring timer is armed again on its own
+ * id, so a row whose `fire_count` has stopped advancing or whose `next_fire_at` is stale projects as
+ * `scheduled` just like a healthy one — the drift would be a cron timer that quietly stopped
+ * recurring, which is precisely the state `cron_next_fire_unresolved` exists to refuse at write time
+ * and nothing watched for afterwards. One signature string rather than three `DriftField`s because
+ * `compareSimpleProjections` reports ids and the caller's remedy is a re-upsert either way.
+ */
+export function timerProjectionSignature(input: {
+  readonly status: string;
+  readonly fireCount: number;
+  readonly nextFireAt: string | null;
+}): string {
+  return `${input.status}|${String(input.fireCount)}|${input.nextFireAt ?? "-"}`;
 }
 
 function parseJsonObject(value: unknown): Record<string, unknown> {
@@ -247,8 +268,22 @@ export class WorkflowReplayer {
     const expectedTimers = projectTimers(events);
     const storedTimers = await this.fetchTimerRows(instanceId);
     const timerDrift = compareSimpleProjections(
-      expectedTimers.map((t) => ({ id: t.id, status: t.status })),
-      storedTimers.map((t) => ({ id: t.timer_id, status: t.status })),
+      expectedTimers.map((t) => ({
+        id: t.id,
+        status: timerProjectionSignature({
+          status: t.status,
+          fireCount: t.fireCount,
+          nextFireAt: t.nextFireAt,
+        }),
+      })),
+      storedTimers.map((t) => ({
+        id: t.timer_id,
+        status: timerProjectionSignature({
+          status: t.status,
+          fireCount: Number(t.fire_count ?? 0),
+          nextFireAt: isoInstant(t.next_fire_at),
+        }),
+      })),
     );
 
     const drifted =
@@ -388,7 +423,7 @@ export class WorkflowReplayer {
     const uuid = await this.instanceResolver.resolve(instanceId);
     if (uuid === null) return [];
     const result = await this.conn.query<StoredTimerRow>(
-      `SELECT timer_id, status
+      `SELECT timer_id, status, fire_count, next_fire_at
          FROM ${SCHEMA}.workflow_timers
         WHERE instance_id = $1`,
       [uuid],

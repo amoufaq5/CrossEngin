@@ -6,6 +6,7 @@ export * from "./job-cancellation.js";
 export * from "./job-claim.js";
 export * from "./job-engine.js";
 export * from "./job-enqueue.js";
+export * from "./job-handlers.js";
 export * from "./job-worker.js";
 export * from "./definition-authoring.js";
 export * from "./definition-store.js";

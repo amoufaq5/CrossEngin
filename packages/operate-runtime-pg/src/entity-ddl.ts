@@ -73,10 +73,58 @@ export function emitAddColumnDdl(plan: EntityTablePlan): string[] {
  * other entity the emitter supplies them here. Either way the table has exactly one of each
  * — the plan wins, since a planned column is also readable, filterable and sortable.
  */
+/**
+ * The clock every system timestamp is stamped from: `now()` **truncated to the millisecond**.
+ *
+ * Not decoration, and not a style choice. The wire form of a `datetime` is millisecond-resolution
+ * by construction — node-postgres builds a JS `Date` from a `TIMESTAMPTZ`, and a `Date` holds
+ * milliseconds — so `isoInstant` truncates, and a column holding microseconds serves a value that
+ * is **not the value stored**. The keyset cursor is rendered from the served value, so the seek
+ * predicate then compares a truncated instant against an untruncated column, and a row at
+ * `10:00:00.000100` satisfies `occurred > '10:00:00.000Z'` *after having been served*.
+ *
+ * Measured live, before this: a six-row table seeded at 100-microsecond spacing, walked with
+ * `limit 2`, returned `us-0 us-1 us-1 us-2 us-1 us-2 us-1 us-2 …` and **did not terminate** — the
+ * cursor never advanced past the second row. One page answered correctly; every paged walk looped.
+ * `created_at` and `updated_at` are exactly the columns this reaches, since the `auditable` trait
+ * gives them to nearly every entity and `now()` is microsecond-resolution.
+ *
+ * Fixed here, at the write, rather than by truncating in the `ORDER BY`: `date_trunc(text,
+ * timestamptz)` is **STABLE** (measured, `pg_proc.provolatile = 's'`, because its unit argument may
+ * be timezone-dependent), so truncating in the query would make the sort unindexable on every page
+ * to compensate for a precision the serving contract never carried. Storing what the contract can
+ * hold is the fix one level up.
+ */
+const MILLISECOND_NOW = "date_trunc('milliseconds', now())";
+
 const SYSTEM_TIMESTAMPS: readonly { readonly name: string; readonly sql: string }[] = [
-  { name: "created_at", sql: "TIMESTAMPTZ NOT NULL DEFAULT now()" },
-  { name: "updated_at", sql: "TIMESTAMPTZ NOT NULL DEFAULT now()" },
+  { name: "created_at", sql: `TIMESTAMPTZ NOT NULL DEFAULT ${MILLISECOND_NOW}` },
+  { name: "updated_at", sql: `TIMESTAMPTZ NOT NULL DEFAULT ${MILLISECOND_NOW}` },
 ];
+
+/**
+ * `ALTER COLUMN … SET DEFAULT` for both system timestamps.
+ *
+ * `CREATE TABLE IF NOT EXISTS` is a no-op on a table an earlier manifest created, so a deployment
+ * provisioned before {@link MILLISECOND_NOW} would keep stamping microseconds forever — the same
+ * trap `emitAddColumnDdl` exists for. A default change touches no existing row (ADR-0291 plans one
+ * on a populated table for exactly that reason) and is idempotent, so it runs on every
+ * `ensureSchema`.
+ *
+ * It does **not** rewrite rows already stamped at microsecond resolution; those keep paginating
+ * wrongly until backfilled. The detection query is exact and cheap:
+ * `SELECT count(*) FROM <table> WHERE created_at <> date_trunc('milliseconds', created_at)`.
+ */
+export function emitTimestampPrecisionDdl(plan: EntityTablePlan): string[] {
+  const qualified = qualifyTable(plan.schema, plan.table);
+  return SYSTEM_TIMESTAMPS.map(
+    (t) =>
+      `ALTER TABLE ${qualified} ALTER COLUMN ${quoteIdent(t.name)} SET DEFAULT ${MILLISECOND_NOW};`,
+  );
+}
+
+/** The millisecond-truncated clock, for the `updated_at` stamp an UPDATE writes. */
+export const MILLISECOND_NOW_SQL = MILLISECOND_NOW;
 
 /** `<type>[ NOT NULL][ DEFAULT <sql>]` for one planned column. */
 function columnType(c: ColumnMapping): string {
@@ -122,6 +170,9 @@ export function emitEntityTableDdl(plan: EntityTablePlan): string[] {
     // gained a field would leave the column missing and the very next statement (its
     // trigram index) would fail.
     ...emitAddColumnDdl(plan),
+    // After the ADD COLUMNs, because on an `auditable` entity the timestamps are *planned* columns
+    // and a table created by an earlier manifest may not hold them yet.
+    ...emitTimestampPrecisionDdl(plan),
     `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexNm)} ON ${qualified} (${quoteIdent("tenant_id")});`,
     `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
     `DROP POLICY IF EXISTS ${quoteIdent(policyName)} ON ${qualified};`,

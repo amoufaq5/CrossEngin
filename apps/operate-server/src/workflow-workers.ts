@@ -9,6 +9,7 @@ import {
   buildJobClaimer,
   buildTimerClaimer,
   type ActivityExecutingEngine,
+  type JobClaimScope,
   type JobExecutingEngine,
   type ReapedJobRun,
   type TimerFiringEngine,
@@ -33,6 +34,25 @@ const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
  */
 export const WORKFLOW_WORKER_KINDS = ["timer", "activity", "job"] as const;
 export type WorkflowWorkerKind = (typeof WORKFLOW_WORKER_KINDS)[number];
+
+/**
+ * Which workers cannot advance anything without a loaded workflow definition.
+ *
+ * A **total** map rather than a loop over every kind, because the answer is not uniform and
+ * treating it as uniform was the defect: a timer fire and an activity execute both resolve their
+ * instance through the engine's definition map, while a job run resolves through `meta.job_runs` and
+ * the `JobHandlerRegistry` and consults no definition at all. So `no_definitions` refused a job
+ * worker that would have worked — and in every deployment, since the shipped catalog declares zero
+ * orchestration or scheduled workflows, so that table is empty unless an operator authored one. It
+ * also hid the refusal that *is* true, reporting `no_definitions` where `no_job_handlers` is the
+ * answer. A fourth worker kind is a compile error here rather than a kind that inherits whichever
+ * answer the loop happened to give it.
+ */
+export const WORKFLOW_WORKER_NEEDS_DEFINITIONS: Readonly<Record<WorkflowWorkerKind, boolean>> = {
+  timer: true,
+  activity: true,
+  job: false,
+};
 
 /** Why a worker this process could have run was not started. */
 export const WORKFLOW_WORKER_REFUSALS = [
@@ -242,6 +262,15 @@ export interface WorkflowWorkerSupervisorInput {
   readonly activitiesDeferred: boolean;
   /** The job execution engine. Absent ⇒ no job worker, reported as `no_job_handlers`. */
   readonly jobEngine?: JobExecutingEngine;
+  /**
+   * The job ids this process's registry serves — `buildJobHandlerRegistry().servedJobIds`. Passed to
+   * the claim's `due` CTE, so an unserved run is never claimed rather than claimed and then
+   * finalized `failed` with `handler_not_found`, and an unserved backlog cannot starve served runs
+   * out of a batch. Absent leaves the claim unfiltered, because a worker tier and a web tier are a
+   * legitimate split and a producer must not refuse what another replica serves; an **empty**
+   * declaration claims nothing, since `= ANY('{}')` is false.
+   */
+  readonly jobServes?: JobClaimScope;
   /** Honour durable job cancellations: pre-flight clear, mid-flight abort, and reap the abandoned. */
   readonly jobCancellation?: boolean;
   readonly schema?: string;
@@ -377,99 +406,108 @@ export class WorkflowWorkerSupervisor {
     const supervised: Supervised[] = [];
     const refusals: { kind: WorkflowWorkerKind; refusal: WorkflowWorkerRefusal }[] = [];
 
-    // Nothing runs without a definition. The engine answers "fired nothing" for an instance whose
-    // definition it does not hold, and that leaves the item claimable — so a fleet with an empty
-    // map is a fleet that writes a claim and a release on every poll and advances nothing.
-    if (input.definitionCount <= 0) {
-      for (const kind of WORKFLOW_WORKER_KINDS) refusals.push({ kind, refusal: "no_definitions" });
-      this.supervised = [];
-      this.refusals = refusals;
-      return;
+    // Nothing that *reads the definition map* runs without one. The engine answers "fired nothing"
+    // for an instance whose definition it does not hold, and that leaves the item claimable — so a
+    // timer/activity fleet with an empty map writes a claim and a release on every poll and advances
+    // nothing. The job worker is exempt by `WORKFLOW_WORKER_NEEDS_DEFINITIONS`: its queue and its
+    // handler registry are independent of the map, and a claimed run is finalized terminally either
+    // way. It is not an early return any more for exactly that reason.
+    const definitionsLoaded = input.definitionCount > 0;
+    if (!definitionsLoaded) {
+      for (const kind of WORKFLOW_WORKER_KINDS) {
+        if (WORKFLOW_WORKER_NEEDS_DEFINITIONS[kind]) {
+          refusals.push({ kind, refusal: "no_definitions" });
+        }
+      }
     }
 
     const notice = (): NoticeThrottle =>
       new NoticeThrottle(config.noticeIntervalMs, () => now().getTime());
 
-    // ---- timer ----
-    const timerLedger = new TimerFireLedger();
-    const timerNoProgress = notice();
-    const timerBacklog = notice();
-    const timerReport = (result: RawBatch): void => {
-      const unfired = timerLedger.settle(result.succeeded);
-      this.reportBatch("timer", result, timerBacklog);
-      for (const failure of result.failed) {
-        events.onItemFailed?.("timer", failureId(failure), failure.error);
-      }
-      if (unfired.length > 0) {
-        const suppressed = timerNoProgress.admit();
-        if (suppressed !== null) events.onNoProgress?.("timer", unfired, suppressed);
-      }
-    };
-    const timerEntry: Supervised = {
-      kind: "timer",
-      report: timerReport,
-      worker: new WorkflowTimerWorker({
-        workerId: input.workerId,
-        claimer: buildTimerClaimer(input.conn, schemaOpt),
-        processor: this.timerProcessor(input, timerLedger, renewIntervalMs, now, sleep),
-        batchLimit: config.batchLimit,
-        leaseMs: config.leaseMs,
-        idlePollMs: config.idlePollMs,
-        activePollMs: config.activePollMs,
-        now,
-        sleep,
-        onError: (err) => this.reportClaimError("timer", err),
-        onBatch: timerReport,
-        onSkipped: () => {
-          timerEntry.released += 1;
-        },
-      }),
-      released: 0,
-      claimFailures: 0,
-    };
-    supervised.push(timerEntry);
-
-    // ---- activity ----
-    if (!input.activitiesDeferred) {
-      refusals.push({ kind: "activity", refusal: "activities_run_inline" });
-    } else {
-      const activityNoProgress = notice();
-      const activityBacklog = notice();
-      const activityReport = (result: RawBatch): void => {
-        this.reportBatch("activity", result, activityBacklog);
+    // Both of these resolve their instance through the engine's definition map, so with an
+    // empty map each would claim an item, advance nothing and release it on every poll.
+    if (definitionsLoaded) {
+      // ---- timer ----
+      const timerLedger = new TimerFireLedger();
+      const timerNoProgress = notice();
+      const timerBacklog = notice();
+      const timerReport = (result: RawBatch): void => {
+        const unfired = timerLedger.settle(result.succeeded);
+        this.reportBatch("timer", result, timerBacklog);
         for (const failure of result.failed) {
-          events.onItemFailed?.("activity", failureId(failure), failure.error);
+          events.onItemFailed?.("timer", failureId(failure), failure.error);
+        }
+        if (unfired.length > 0) {
+          const suppressed = timerNoProgress.admit();
+          if (suppressed !== null) events.onNoProgress?.("timer", unfired, suppressed);
         }
       };
-      const activityEntry: Supervised = {
-        kind: "activity",
-        report: activityReport,
-        worker: new WorkflowActivityWorker({
+      const timerEntry: Supervised = {
+        kind: "timer",
+        report: timerReport,
+        worker: new WorkflowTimerWorker({
           workerId: input.workerId,
-          claimer: buildActivityClaimer(input.conn, schemaOpt),
-          processor: this.activityProcessor(
-            input,
-            renewIntervalMs,
-            now,
-            sleep,
-            activityNoProgress,
-          ),
+          claimer: buildTimerClaimer(input.conn, schemaOpt),
+          processor: this.timerProcessor(input, timerLedger, renewIntervalMs, now, sleep),
           batchLimit: config.batchLimit,
           leaseMs: config.leaseMs,
           idlePollMs: config.idlePollMs,
           activePollMs: config.activePollMs,
           now,
           sleep,
-          onError: (err) => this.reportClaimError("activity", err),
-          onBatch: activityReport,
+          onError: (err) => this.reportClaimError("timer", err),
+          onBatch: timerReport,
           onSkipped: () => {
-            activityEntry.released += 1;
+            timerEntry.released += 1;
           },
         }),
         released: 0,
         claimFailures: 0,
       };
-      supervised.push(activityEntry);
+      supervised.push(timerEntry);
+
+      // ---- activity ----
+      if (!input.activitiesDeferred) {
+        refusals.push({ kind: "activity", refusal: "activities_run_inline" });
+      } else {
+        const activityNoProgress = notice();
+        const activityBacklog = notice();
+        const activityReport = (result: RawBatch): void => {
+          this.reportBatch("activity", result, activityBacklog);
+          for (const failure of result.failed) {
+            events.onItemFailed?.("activity", failureId(failure), failure.error);
+          }
+        };
+        const activityEntry: Supervised = {
+          kind: "activity",
+          report: activityReport,
+          worker: new WorkflowActivityWorker({
+            workerId: input.workerId,
+            claimer: buildActivityClaimer(input.conn, schemaOpt),
+            processor: this.activityProcessor(
+              input,
+              renewIntervalMs,
+              now,
+              sleep,
+              activityNoProgress,
+            ),
+            batchLimit: config.batchLimit,
+            leaseMs: config.leaseMs,
+            idlePollMs: config.idlePollMs,
+            activePollMs: config.activePollMs,
+            now,
+            sleep,
+            onError: (err) => this.reportClaimError("activity", err),
+            onBatch: activityReport,
+            onSkipped: () => {
+              activityEntry.released += 1;
+            },
+          }),
+          released: 0,
+          claimFailures: 0,
+        };
+        supervised.push(activityEntry);
+      }
     }
 
     // ---- job ----
@@ -494,6 +532,7 @@ export class WorkflowWorkerSupervisor {
           claimer: buildJobClaimer(input.conn, {
             ...schemaOpt,
             reapCancellations: cancelling,
+            ...(input.jobServes !== undefined ? { serves: input.jobServes } : {}),
             ...(events.onJobsReaped !== undefined ? { onReaped: events.onJobsReaped } : {}),
           }),
           processor: this.jobProcessor(jobEngine, input, watcher, renewIntervalMs, now, sleep),

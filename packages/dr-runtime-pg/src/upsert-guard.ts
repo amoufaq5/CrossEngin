@@ -59,6 +59,26 @@ export function observationNotStaleGuard(table: string): string {
 }
 
 /**
+ * The scope rule, shared by both tables: **this write stays in the scope it names**.
+ *
+ * `execution_id` is table-wide unique, so without it the `DO UPDATE` reached whichever scope held
+ * that id — and as the owner, who bypasses RLS, a platform-scoped `record()` could advance a
+ * *tenant's* failover row. Narrower than the feature-flag and kill-switch cases, because neither
+ * `FAILOVER_MUTABLE_COLUMNS` nor `DRILL_MUTABLE_COLUMNS` contains `tenant_id`, so the row cannot be
+ * *moved* between scopes — only its status, its breach flags and the `record` JSONB that
+ * `assessDrReadiness` reads can be rewritten from outside. Which is the same damage ADR-0333 found
+ * in the stale half of this defect, arriving by a different route.
+ *
+ * `IS NOT DISTINCT FROM` rather than `kernel-pg`'s branching `scopeFilter`, and this is the position
+ * where that single operator is correct rather than a shortcut: both operands come from one
+ * already-located row, no index is consulted, and `EXCLUDED.tenant_id` is `NULL` for a platform
+ * write — so `=` would be never-true and a platform execution could never advance its own row.
+ */
+export function scopeUnchangedGuard(table: string): string {
+  return `${table}.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id`;
+}
+
+/**
  * The failover status rule, rendered from `FAILOVER_TRANSITIONS`.
  *
  * A row-value `IN` list rather than a chain of ORs, so the rendered predicate is one shape whatever
@@ -81,7 +101,11 @@ export function failoverStatusGuard(table: string): string {
 }
 
 export function failoverUpsertGuard(table: string): string {
-  return `${observationNotStaleGuard(table)}\n           AND ${failoverStatusGuard(table)}`;
+  return (
+    `${scopeUnchangedGuard(table)}\n` +
+    `           AND ${observationNotStaleGuard(table)}\n` +
+    `           AND ${failoverStatusGuard(table)}`
+  );
 }
 
 /**
@@ -114,7 +138,8 @@ export function drillUpsertGuard(table: string): string {
     throw new Error(`${PLANNED_DRILL_OUTCOME} is not a declared drill outcome`);
   }
   return (
-    `${observationNotStaleGuard(table)}\n` +
+    `${scopeUnchangedGuard(table)}\n` +
+    `           AND ${observationNotStaleGuard(table)}\n` +
     `           AND (EXCLUDED.executed_at IS NOT NULL OR ${table}.executed_at IS NULL)\n` +
     `           AND (EXCLUDED.outcome IS DISTINCT FROM ${planned}` +
     ` OR ${table}.outcome IS NOT DISTINCT FROM EXCLUDED.outcome)`
@@ -138,6 +163,13 @@ export const DR_WRITE_REFUSAL_REASONS = [
   "stale_observation",
   "illegal_transition",
   "row_vanished",
+  /**
+   * The row exists and belongs to another scope — `kernel-pg`'s `wrong_scope`, named locally so
+   * this store's one error type keeps carrying every reason it can refuse for. Reachable only as
+   * the table's owner: a non-owner's cross-scope write is refused by RLS before it gets here, and
+   * the diagnosing read is confined by the same policy, so that session reports `row_vanished`.
+   */
+  "wrong_scope",
 ] as const;
 export type DrWriteRefusalReason = (typeof DR_WRITE_REFUSAL_REASONS)[number];
 
@@ -160,6 +192,8 @@ export interface GuardedUpsertDiagnosis {
   readonly recordedAt: string;
   /** `status` for a failover, `outcome` for a drill — what the refusal is most likely about. */
   readonly stateColumn: string;
+  /** The scope the write named: a tenant id, or `null` for the platform scope. */
+  readonly tenantId: string | null;
 }
 
 /**
@@ -175,8 +209,10 @@ export async function refuseUnlessWritten(
   d: GuardedUpsertDiagnosis,
 ): Promise<void> {
   if (rowCount > 0) return;
+  // No scope predicate on the diagnosing read, deliberately: the question it answers is whether the
+  // row is sitting in *another* scope, which a scoped read could only ever call absent.
   const result = await tx.query<Record<string, unknown>>(
-    `SELECT ${d.stateColumn} AS state, recorded_at
+    `SELECT ${d.stateColumn} AS state, recorded_at, tenant_id
        FROM ${d.schema}.${d.table}
       WHERE execution_id = $1`,
     [d.executionId],
@@ -188,6 +224,22 @@ export async function refuseUnlessWritten(
       d.executionId,
       "row_vanished",
       "the write matched no row and no row with that execution id exists",
+    );
+  }
+  // Scope first, because a wrong scope makes the other two questions meaningless: the stored
+  // `recorded_at` and status belong to a row this write was never entitled to move, so naming
+  // either of those rules would report a real conflict with a row the caller cannot see.
+  const storedTenant =
+    row["tenant_id"] === null || row["tenant_id"] === undefined
+      ? null
+      : String(row["tenant_id"]);
+  if (storedTenant !== d.tenantId) {
+    throw new DrExecutionWriteRefusedError(
+      `${d.schema}.${d.table}`,
+      d.executionId,
+      "wrong_scope",
+      `this write named ${d.tenantId === null ? "the platform scope" : `tenant ${d.tenantId}`}` +
+        ` and the row belongs to ${storedTenant === null ? "the platform scope" : `tenant ${storedTenant}`}`,
     );
   }
   // ADR-0331: a TIMESTAMPTZ arrives from node-postgres as a `Date`, so the comparison goes through

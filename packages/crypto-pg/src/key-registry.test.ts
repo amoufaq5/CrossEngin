@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import type { PgConnection, ScopedWriteRefusedError } from "@crossengin/kernel-pg";
 import {
   InMemoryKeyStore,
   type KeyPurpose,
@@ -14,14 +14,20 @@ import {
   SET_TENANT_CONTEXT_SQL,
 } from "./tenant-context.js";
 
-/** A fake that records `{sql, params}` and answers nothing, for asserting the statement order. */
+/**
+ * A fake that records `{sql, params}` and answers nothing, for asserting the statement order.
+ *
+ * `rowCount: 1` rather than 0, because a zero-row write is now **diagnosed** rather than swallowed:
+ * these tests assert which statements a write issues and in what order, and answering 0 would put
+ * every one of them through `classifyScopedWriteRefusal` instead.
+ */
 function recordingPg(
   capture: Array<{ sql: string; params: readonly unknown[] | undefined }>,
 ): PgConnection {
   const client: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]) => {
       capture.push({ sql, params });
-      return { rows: [], rowCount: 0 };
+      return { rows: [], rowCount: 1 };
     }) as PgConnection["query"],
     transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
       fn(client)) as PgConnection["transaction"],
@@ -304,16 +310,198 @@ describe("the platform write arm, against the policy-shaped fake", () => {
     expect((await registry.getByKeyId(tenantKey.keyId, TENANT))?.keyId).toBe(tenantKey.keyId);
   });
 
-  it("lets a tenant read a platform key but not change it", async () => {
+  it("lets a tenant read a platform key but not change it, and says so", async () => {
     const conn = fakeCryptoKeysPg();
     const registry = new PostgresKeyRegistry(conn);
     const platformKey = await record(null);
     await registry.register(platformKey);
     // Readable from a tenant's context — the platform read arm needs no grant.
     expect((await registry.getByKeyId(platformKey.keyId, TENANT))?.status).toBe("active");
-    // And not writable from it: the UPDATE matches zero rows rather than revoking it.
-    await registry.revoke(platformKey.keyId, TENANT);
+    // And not writable from it. It used to match zero rows and **report success**, which is the
+    // half of this defect both roles got wrong: an operator revoking a key under the wrong scope
+    // was told it worked. It now names which rule refused.
+    const err = await registry
+      .revoke(platformKey.keyId, TENANT)
+      .then(() => null, (e: unknown) => e);
+    expect((err as ScopedWriteRefusedError).reason).toBe("wrong_scope");
+    expect((err as ScopedWriteRefusedError).scopeTenantId).toBe(TENANT);
+    expect((err as ScopedWriteRefusedError).storedTenantId).toBeNull();
     expect((await registry.getByKeyId(platformKey.keyId))?.status).toBe("active");
+  });
+});
+
+/**
+ * The write-side half of ADR-0331's defect, which ADR-0333 left open and named. Every case here is
+ * run against the fake in **owner** mode, because as a non-owner RLS refuses the cross-scope write
+ * whether the store carries a predicate or not — the defect is invisible from either vantage alone.
+ *
+ * Measured live on a fresh cluster as the owner before these predicates existed: a platform-scope
+ * `register` **replaced a tenant's public key** and reported success, and `revoke(<a tenant's key
+ * id>, null)` revoked a tenant's key. `meta.crypto_keys` is the table whose write elevation is its
+ * own grant precisely because it holds the public keys a chain entry's signature resolves against.
+ */
+describe("a scoped write stays in its scope, as the owner", () => {
+  it("refuses a platform register that would replace a tenant's public key", async () => {
+    const conn = fakeCryptoKeysPg({ owner: true });
+    const registry = new PostgresKeyRegistry(conn);
+    const tenantKey = await record(TENANT);
+    await registry.register(tenantKey);
+
+    const err = await registry
+      .register({ ...tenantKey, tenantId: null, publicKeyBase64: "c3RvbGVu", keyVersion: 2 })
+      .then(() => null, (e: unknown) => e);
+    expect((err as ScopedWriteRefusedError).reason).toBe("wrong_scope");
+    expect((err as ScopedWriteRefusedError).storedTenantId).toBe(TENANT);
+
+    // The tenant's key is untouched: this is the assertion the live run made before and after.
+    const stored = await registry.getByKeyId(tenantKey.keyId, TENANT);
+    expect(stored?.publicKeyBase64).toBe(tenantKey.publicKeyBase64);
+    expect(stored?.keyVersion).toBe(tenantKey.keyVersion);
+  });
+
+  it("still lets a scope re-register its own key, which registerAuditChainKey does every boot", async () => {
+    const conn = fakeCryptoKeysPg({ owner: true });
+    const registry = new PostgresKeyRegistry(conn);
+    const platformKey = await record(null);
+    await registry.register(platformKey);
+    await expect(
+      registry.register({ ...platformKey, keyVersion: 2 }),
+    ).resolves.toBeUndefined();
+    expect((await registry.getByKeyId(platformKey.keyId))?.keyVersion).toBe(2);
+  });
+
+  it("refuses a platform revoke of a tenant's key", async () => {
+    const conn = fakeCryptoKeysPg({ owner: true });
+    const registry = new PostgresKeyRegistry(conn);
+    const tenantKey = await record(TENANT);
+    await registry.register(tenantKey);
+    const err = await registry
+      .revoke(tenantKey.keyId, null)
+      .then(() => null, (e: unknown) => e);
+    expect((err as ScopedWriteRefusedError).reason).toBe("wrong_scope");
+    expect((await registry.getByKeyId(tenantKey.keyId, TENANT))?.status).toBe("active");
+  });
+
+  it("names `row_absent` for a key id that exists nowhere, instead of reporting success", async () => {
+    // The mode both roles got wrong: a zero-row UPDATE was silently accepted, so revoking a
+    // compromised key under a mistyped id was indistinguishable from revoking it.
+    const registry = new PostgresKeyRegistry(fakeCryptoKeysPg({ owner: true }));
+    const err = await registry
+      .revoke("key_ed25519_01BX5ZZKBKACTAV9WEVGEMMVRY", null)
+      .then(() => null, (e: unknown) => e);
+    expect((err as ScopedWriteRefusedError).reason).toBe("row_absent");
+    expect((err as Error).message).toContain("key_ed25519_01BX5ZZKBKACTAV9WEVGEMMVRY");
+  });
+
+  it("revokes a key in its own scope, both arms", async () => {
+    const registry = new PostgresKeyRegistry(fakeCryptoKeysPg({ owner: true }));
+    const tenantKey = await record(TENANT);
+    const platformKey = await record(null);
+    await registry.register(tenantKey);
+    await registry.register(platformKey);
+    await expect(registry.revoke(tenantKey.keyId, TENANT)).resolves.toBeUndefined();
+    await expect(registry.revoke(platformKey.keyId, null)).resolves.toBeUndefined();
+    expect((await registry.getByKeyId(tenantKey.keyId, TENANT))?.status).toBe("revoked");
+    expect((await registry.getByKeyId(platformKey.keyId))?.status).toBe("revoked");
+  });
+
+  it("carries the strict predicate on markStatus, and binds the tenant after the key id", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresKeyRegistry(recordingPg(capture)).revoke(
+      "key_ed25519_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      TENANT,
+    );
+    const write = capture.find((c) => c.sql.includes("UPDATE meta.crypto_keys"));
+    expect(write?.sql).toContain("WHERE key_id = $2 AND tenant_id = $3");
+    // The inclusive arm is right for `getByKeyId` and would be a defect here.
+    expect(write?.sql).not.toContain("OR tenant_id IS NULL");
+    expect(write?.params).toEqual(["revoked", "key_ed25519_01ARZ3NDEKTSV4RRFFQ69G5FAV", TENANT]);
+  });
+
+  it("pins the scope inside the upsert's DO UPDATE, where the single NULL-matching operator is right", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresKeyRegistry(recordingPg(capture)).register(await record(null));
+    const write = capture.find((c) => c.sql.includes("INSERT INTO meta.crypto_keys"));
+    // Both operands come from one already-located row, so no index is consulted and `=` would be
+    // never-true for a platform registration — which would make the platform unable to
+    // re-register its own key on every boot.
+    expect(write?.sql).toContain(
+      "WHERE crypto_keys.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id",
+    );
+  });
+
+  it("issues the diagnosing read only when the write failed, and unscoped when it does", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    await new PostgresKeyRegistry(recordingPg(capture)).revoke(
+      "key_ed25519_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      TENANT,
+    );
+    expect(capture.filter((c) => c.sql.includes("SELECT tenant_id FROM"))).toHaveLength(0);
+
+    const failing: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = fakeCryptoKeysPg({ owner: true });
+    const wrapped: PgConnection = {
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        failing.push({ sql, params });
+        return conn.query(sql, params);
+      }) as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+        fn(wrapped)) as PgConnection["transaction"],
+      withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) =>
+        fn()) as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+    await new PostgresKeyRegistry(wrapped)
+      .revoke("key_ed25519_01BX5ZZKBKACTAV9WEVGEMMVRY", TENANT)
+      .catch(() => undefined);
+    const diag = failing.find((c) => c.sql.includes("SELECT tenant_id FROM"));
+    // No scope predicate, deliberately: the question is which scope holds the row.
+    expect(diag?.sql).toBe("SELECT tenant_id FROM meta.crypto_keys WHERE key_id = $1");
+    expect(diag?.params).toEqual(["key_ed25519_01BX5ZZKBKACTAV9WEVGEMMVRY"]);
+  });
+
+  it("refuses, in the fake, a write that carries no scope predicate at all", async () => {
+    // The pre-fix statement. A fake that answered it is how this class survived: the boundary is
+    // drawn at the SQL string, so a scoped store and an unscoped one look identical.
+    const conn = fakeCryptoKeysPg({ owner: true });
+    const tenantKey = await record(TENANT);
+    await new PostgresKeyRegistry(conn).register(tenantKey);
+    await expect(
+      conn.transaction((tx) =>
+        tx.query("UPDATE meta.crypto_keys SET status = $1 WHERE key_id = $2", [
+          "revoked",
+          tenantKey.keyId,
+        ]),
+      ),
+    ).rejects.toThrow(/carries no tenant_id predicate/);
+  });
+
+  it("refuses, in the fake, the inclusive arm on a write", async () => {
+    const conn = fakeCryptoKeysPg({ owner: true });
+    const tenantKey = await record(TENANT);
+    await new PostgresKeyRegistry(conn).register(tenantKey);
+    await expect(
+      conn.transaction((tx) =>
+        tx.query(
+          "UPDATE meta.crypto_keys SET status = $1 WHERE key_id = $2 AND (tenant_id = $3 OR tenant_id IS NULL)",
+          ["revoked", tenantKey.keyId, TENANT],
+        ),
+      ),
+    ).rejects.toThrow(/refuses the inclusive scope arm on a write/);
+  });
+
+  it("refuses, in the fake, an upsert whose DO UPDATE does not pin the scope", async () => {
+    const conn = fakeCryptoKeysPg({ owner: true });
+    const tenantKey = await record(TENANT);
+    await new PostgresKeyRegistry(conn).register(tenantKey);
+    await expect(
+      conn.transaction(async (tx) => {
+        await tx.query(
+          "INSERT INTO meta.crypto_keys (key_id, tenant_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (key_id) DO UPDATE SET status = EXCLUDED.status",
+          [tenantKey.keyId, null, "ed25519", "pack_signing", "x", "a".repeat(64), 2, "active", "2026-01-01T00:00:00.000Z"],
+        );
+      }),
+    ).rejects.toThrow(/does not pin the scope/);
   });
 });
 

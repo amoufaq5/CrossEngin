@@ -1274,3 +1274,49 @@ describe("--workflow-workers", () => {
     }
   });
 });
+
+describe("--tenant-status-gate", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off by default, which is what every deployment has had", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.tenantStatusGate).toBe(false);
+    expect(o.tenantStatusTtlMs).toBeNull();
+  });
+
+  it("mounts the gate", () => {
+    const o = parseServeArgs([...PG, "--tenant-status-gate"]);
+    expect(o.tenantStatusGate).toBe(true);
+  });
+
+  it("takes a TTL in both spellings", () => {
+    expect(parseServeArgs([...PG, "--tenant-status-gate", "--tenant-status-ttl-ms", "5000"]).tenantStatusTtlMs).toBe(5000);
+    expect(parseServeArgs([...PG, "--tenant-status-gate", "--tenant-status-ttl-ms=60000"]).tenantStatusTtlMs).toBe(60_000);
+  });
+
+  it("refuses a TTL outside the floor and the ceiling", () => {
+    for (const bad of ["999", "300001", "0", "-1", "1.5", "soon"]) {
+      expect(() =>
+        parseServeArgs([...PG, "--tenant-status-gate", "--tenant-status-ttl-ms", bad]),
+      ).toThrow(/invalid --tenant-status-ttl-ms/);
+    }
+  });
+
+  it("refuses the memory store, because every request would be a 503", () => {
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "memory", "--tenant-status-gate"]),
+    ).toThrow(/requires a Postgres store/);
+  });
+
+  it("refuses a TTL with no gate mounted", () => {
+    expect(() => parseServeArgs([...PG, "--tenant-status-ttl-ms", "5000"])).toThrow(
+      /no effect without --tenant-status-gate/,
+    );
+  });
+
+  it("documents the gate and its exemption in the help text", () => {
+    expect(helpText).toContain("--tenant-status-gate");
+    expect(helpText).toContain("--tenant-status-ttl-ms");
+    expect(helpText).toContain("/v1/platform routes are exempt");
+  });
+});

@@ -1,10 +1,10 @@
 # ADR index
 
-328 records. Generated from the ADR files themselves — regenerate rather than
+329 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 249  **Proposed:** 79
+- **Accepted:** 250  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -340,3 +340,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0331](0331-the-row-that-could-not-exist-and-the-type-that-lied.md) | The row that could not exist, and the type that lied | — | Accepted | 2026-10-05 |
 | [0332](0332-the-defects-that-were-silences.md) | The defects that were silences | — | Accepted | 2026-10-05 |
 | [0333](0333-the-stores-that-could-not-write-and-the-workers-nobody-started.md) | The stores that could not write, and the workers nobody started | — | Accepted | 2026-10-05 |
+| [0334](0334-the-column-nobody-read-and-the-work-nobody-drove.md) | The column nobody read, and the work nobody drove | — | Accepted | 2026-10-05 |

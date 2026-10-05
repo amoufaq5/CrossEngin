@@ -19,8 +19,10 @@ import {
   T2,
   TENANT,
   TRIGGERER,
+  assertStatementIsScoped,
   killSwitch,
   killSwitchRow,
+  mockConnection,
   releasedKillSwitch,
 } from "./test-fakes.js";
 
@@ -244,4 +246,56 @@ describe("rowToKillSwitch", () => {
     expect(() => rowToKillSwitch(row)).toThrow();
   });
 
+});
+
+/**
+ * A fake that answers every statement is the boundary ADR-0333 named: it is drawn at the SQL
+ * *string*, so a scoped store and an unscoped one look identical to it. This one cannot model rows,
+ * so it holds the floor it can — refusing a write that could not have been scoped.
+ */
+describe("the fake refuses an unscoped write", () => {
+  it("refuses an UPDATE that names no tenant_id", async () => {
+    const conn = mockConnection();
+    await expect(
+      conn.query("UPDATE meta.feature_flags SET status = $1 WHERE flag_id = $2", ["x", "y"]),
+    ).rejects.toThrow(/refuses an unscoped write/);
+  });
+
+  it("refuses an INSERT that supplies no tenant_id column", async () => {
+    const conn = mockConnection();
+    await expect(
+      conn.query("INSERT INTO meta.feature_flags (flag_id, key) VALUES ($1, $2)", ["a", "b"]),
+    ).rejects.toThrow(/refuses an unscoped write/);
+  });
+
+  it("refuses a DELETE that names no tenant_id", async () => {
+    const conn = mockConnection();
+    await expect(
+      conn.query("DELETE FROM meta.feature_flags WHERE flag_id = $1", ["a"]),
+    ).rejects.toThrow(/refuses an unscoped write/);
+  });
+
+  it("admits a write scoped by predicate and one scoped by supplied column", () => {
+    expect(() =>
+      assertStatementIsScoped("UPDATE meta.feature_flags SET x = $1 WHERE id = $2 AND tenant_id IS NULL"),
+    ).not.toThrow();
+    expect(() =>
+      assertStatementIsScoped("INSERT INTO meta.feature_flags (flag_id, tenant_id) VALUES ($1, $2)"),
+    ).not.toThrow();
+  });
+
+  /**
+   * Reads are exempt deliberately, and the diagnosing re-read is the reason: its whole question is
+   * whether the row sits in *another* scope, so a scope predicate on it could only answer "absent".
+   */
+  it("admits an unscoped SELECT, which the refusal diagnosis depends on", () => {
+    expect(() =>
+      assertStatementIsScoped("SELECT tenant_id FROM meta.feature_flags WHERE flag_id = $1"),
+    ).not.toThrow();
+  });
+
+  it("can be switched off for the tests that assert on a bare statement", async () => {
+    const conn = mockConnection(undefined, undefined, { allowUnscopedWrites: true });
+    await expect(conn.query("UPDATE meta.feature_flags SET x = 1")).resolves.toBeDefined();
+  });
 });

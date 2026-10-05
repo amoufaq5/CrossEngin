@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { setPlatformWriteSql, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  assertScopeTenantId,
+  setPlatformWriteSql,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 import { SeveritySchema } from "@crossengin/incident-response";
 import { INCIDENT_CLOSE_OUTS } from "@crossengin/incident-response-runtime";
 import type {
@@ -275,44 +279,22 @@ export const SET_TENANT_CONTEXT_SQL =
 
 export const SET_PLATFORM_RECORD_WRITE_SQL = setPlatformWriteSql("record");
 
-const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
+/**
+ * `scopeFilter` lives in `kernel-pg` beside `setPlatformWriteSql` and `isoInstant` — eight packages
+ * held a verbatim copy and `kernel-pg` is the only dependency all eight share. The rule that chooses
+ * between the strict and the inclusive spelling, and the two measurements behind the branch, are
+ * written down there once.
+ *
+ * **Which this package reads: the strict form**, for all three tables. These reads are nearly all
+ * aggregates, which is the sharp case — the caller gets a plausible scalar, not a visibly long list.
+ * Measured live with two tenant breach rows beside one platform row on the same `slo_id`:
+ * `countBreachesSince` answered **3** as the owner and **1** as a non-owner, so a burn-rate input
+ * driving an incident declaration was off by a factor of three in the direction that pages.
+ */
+export { scopeFilter, type ScopeFilter } from "@crossengin/kernel-pg";
 
 function assertTenantId(tenantId: string): void {
-  if (!TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
-}
-
-/** A `tenant_id` predicate and the parameters it binds, for one scope. */
-export interface ScopeFilter {
-  readonly sql: string;
-  readonly params: readonly unknown[];
-}
-
-/**
- * The `tenant_id` predicate a scoped read must carry, **beside** RLS rather than instead of it.
- *
- * All three tables here are `tenant_id`-nullable with a `SELECT`-scoped platform read arm, and **a
- * table's owner bypasses its policies** (ADR-0331), so an unscoped read answers from every scope in
- * a deployment that connects as the owner and from the platform's alone in one that does not. These
- * reads are nearly all aggregates, which is the sharp case — the caller gets a plausible scalar, not
- * a visibly long list. Measured live with two tenant breach rows beside one platform row on the same
- * `slo_id`: `countBreachesSince` answered **3** as the owner and **1** as a non-owner, so a burn-rate
- * input driving an incident declaration was off by a factor of three in the direction that pages.
- *
- * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
- * matching NULL to NULL: ADR-0331 measured it at 16 ms sequential scan against 45k entries where
- * `tenant_id = $1` is a 0.09 ms index scan, because it is not indexable. `tenant_id IS NULL` is, so
- * both arms keep `idx_slo_evaluations_tenant_at` and its siblings.
- *
- * Verbatim from `forensics-pg`'s `scopeFilter`; it belongs in `kernel-pg` beside
- * `setPlatformWriteSql`, which this module already imports.
- */
-export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
-  // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`.
-  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
-  assertTenantId(tenantId);
-  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
+  assertScopeTenantId(tenantId);
 }
 
 /**

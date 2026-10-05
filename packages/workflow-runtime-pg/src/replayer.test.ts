@@ -6,7 +6,7 @@ import {
   WorkflowDefinitionIdResolver,
   WorkflowInstanceIdResolver,
 } from "./id-mapping.js";
-import { WorkflowReplayer } from "./replayer.js";
+import { WorkflowReplayer, timerProjectionSignature } from "./replayer.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const INSTANCE_UUID = "00000000-0000-4000-8000-000000000111";
@@ -16,7 +16,13 @@ interface MockState {
   instanceRow: Record<string, unknown> | null;
   activities: Array<{ activity_id: string; status: string; definition_activity_key: string }>;
   signals: Array<{ signal_id: string; status: string }>;
-  timers: Array<{ timer_id: string; status: string }>;
+  timers: Array<{
+    timer_id: string;
+    status: string;
+    fire_count?: unknown;
+    /** `TIMESTAMPTZ` comes back from node-postgres as a `Date`, so the fake offers both. */
+    next_fire_at?: unknown;
+  }>;
   instanceListing: string[];
   updates: Array<{ sql: string; params: readonly unknown[] | undefined }>;
 }
@@ -848,5 +854,111 @@ describe("WorkflowReplayer.bulkResync", () => {
     const replayer = buildReplayer(state);
     const reports = await replayer.bulkResync({ batchSize: 10, maxInstances: 2 });
     expect(reports.length).toBeLessThanOrEqual(2);
+  });
+});
+
+describe("timerProjectionSignature", () => {
+  it("encodes the recurrence position beside the status", () => {
+    expect(timerProjectionSignature({ status: "fired", fireCount: 3, nextFireAt: "2026-05-16T14:00:00.000Z" })).toBe(
+      "fired|3|2026-05-16T14:00:00.000Z",
+    );
+  });
+
+  it("distinguishes a cron timer that stopped advancing from one that did not", () => {
+    const stalled = timerProjectionSignature({ status: "scheduled", fireCount: 1, nextFireAt: null });
+    const healthy = timerProjectionSignature({ status: "scheduled", fireCount: 4, nextFireAt: null });
+    expect(stalled).not.toBe(healthy);
+  });
+
+  it("reads a missing next occurrence as a dash rather than as the string 'null'", () => {
+    expect(timerProjectionSignature({ status: "scheduled", fireCount: 0, nextFireAt: null })).toBe(
+      "scheduled|0|-",
+    );
+  });
+});
+
+describe("WorkflowReplayer — recurring timer drift", () => {
+  function recurringEvents(): WorkflowEvent[] {
+    const base = {
+      instanceId: "wfi_inst0001",
+      tenantId: "00000000-0000-4000-8000-000000000001",
+      occurredAt: "2026-05-16T12:00:00.000Z",
+      actorPrincipalId: null,
+      actorSystemId: "engine",
+      previousState: null,
+      newState: null,
+      activityId: null,
+      signalId: null,
+      childInstanceId: null,
+      variableName: null,
+      correlationId: null,
+      causationEventId: null,
+    } as const;
+    return [
+      {
+        ...base,
+        id: "wfe_00000001",
+        sequenceNumber: 1,
+        kind: "instance_started",
+        timerId: null,
+        payload: { definitionId: "wfd_def00001", currentState: "draft" },
+      },
+      {
+        ...base,
+        id: "wfe_00000002",
+        sequenceNumber: 2,
+        kind: "timer_scheduled",
+        timerId: "wft_cron0001",
+        payload: { timerName: "heartbeat", fireAt: "2026-05-16T13:00:00.000Z", timerKind: "cron_schedule" },
+      },
+      {
+        ...base,
+        id: "wfe_00000003",
+        sequenceNumber: 3,
+        kind: "timer_fired",
+        timerId: "wft_cron0001",
+        occurredAt: "2026-05-16T13:00:00.000Z",
+        payload: { timerName: "heartbeat", nextFireAt: "2026-05-16T14:00:00.000Z" },
+      },
+      {
+        ...base,
+        id: "wfe_00000004",
+        sequenceNumber: 4,
+        kind: "timer_scheduled",
+        timerId: "wft_cron0001",
+        occurredAt: "2026-05-16T13:00:00.000Z",
+        payload: { timerName: "heartbeat", fireAt: "2026-05-16T14:00:00.000Z", rearm: true },
+      },
+    ] as WorkflowEvent[];
+  }
+
+  it("reports no drift when the row's fire_count matches the log", async () => {
+    const state = { ...emptyState(), events: recurringEvents() };
+    state.timers = [{ timer_id: "wft_cron0001", status: "scheduled", fire_count: 1, next_fire_at: null }];
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.timers.mismatchedIds).toEqual([]);
+  });
+
+  it("reports drift when a recurring timer's row stopped advancing — status alone cannot see it", async () => {
+    const state = { ...emptyState(), events: recurringEvents() };
+    // Same status, stale count: this is exactly a cron timer that quietly stopped recurring.
+    state.timers = [{ timer_id: "wft_cron0001", status: "scheduled", fire_count: 0, next_fire_at: null }];
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.timers.mismatchedIds).toEqual(["wft_cron0001"]);
+    expect(report.drifted).toBe(true);
+  });
+
+  it("normalises a Date out of next_fire_at rather than comparing an object", async () => {
+    const state = { ...emptyState(), events: recurringEvents().slice(0, 3) };
+    state.timers = [
+      {
+        timer_id: "wft_cron0001",
+        status: "fired",
+        fire_count: 1,
+        next_fire_at: new Date("2026-05-16T14:00:00.000Z"),
+      },
+    ];
+    const report = await buildReplayer(state).verifyInstance("wfi_inst0001");
+    expect(report.timers.mismatchedIds).toEqual([]);
   });
 });

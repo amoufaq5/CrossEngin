@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 328 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 329 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~14,600 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~15,150 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -53,6 +53,21 @@ type errors.
   is that **the honest fix usually sits one level up from where the pain was felt** — here, a
   workspace test that reads the catalog and every store's SQL rather than a convention asking people
   to be careful.
+  ADR-0334 is the fifth sweep and its class is **what a value *is*, and who agrees**. The
+  centre of it: `tenant-lifecycle` declared a **seven**-state tenant machine with
+  `READ_ONLY_STATES`/`blocksWrites`/`blocksReads` that **nothing in the workspace read**, while
+  `operate-server` carried its own four-value enum — and *that* one is what the catalog's CHECK
+  constrains. Two of the unreachable three were billing facts duplicated onto the tenant (`past_due`
+  is a *subscription* status with its own transition map; `trial` is a plan tier with no producer
+  anywhere); the third, `pending_deletion`, was the state the deployment was actually **missing**, and
+  it is load-bearing: ADR-0321 made the Article 17 erasure asynchronous and ADR-0316 retires the
+  tenant row only after it commits, so a tenant whose deletion was verified and queued sat `active`
+  and went on **accepting writes into data about to be destroyed**. There is one vocabulary now, of
+  five, in the contracts package, and `--tenant-status-gate` is the request-path enforcement that
+  column never had. Beside it, three subsystems that had never run: a cron timer that fired exactly
+  once, every job producer filling a queue with no consumer (and `no_definitions` refusing the one
+  worker that does not read a definition), and **83 of 145 tables with no writer** and nothing saying
+  which of those are deliberate.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -356,6 +371,18 @@ packages exist at only one layer, noted below where that is true.
   cancellation. That is the opposite choice from the pre-flight check in `processJobBatch`
   (`cancellation_unknown` skips the item), where nothing has been done yet and deferring costs nothing.
   Two answers to "what if we cannot tell?", each correct for its position.
+  **`no_definitions` does not refuse the job worker** since ADR-0334, and the supervisor's own
+  refusal text said why: it reads *"every claimed item would be released unadvanced and re-claimed —
+  a hot loop that makes no progress"*, which is true of a timer and an activity and **false of a job
+  run**, because `claimDueJobs` reads `meta.job_runs` and `executeJobRun` dispatches through
+  `JobHandlerRegistry` and **no workflow definition is consulted anywhere on the job path**. The
+  refusal was live, not theoretical: the shipped catalog declares zero orchestration or scheduled
+  workflows, so `meta.workflow_definitions` is empty in every deployment and `definitionCount` is 0 —
+  a process with job handlers registered got its job worker refused for the absence of a thing the
+  job queue does not use, and the printed remedy sent an operator to workflow authoring. It also hid
+  the refusal that *is* true (`no_job_handlers`). `WORKFLOW_WORKER_NEEDS_DEFINITIONS` is a **total
+  map** `{timer: true, activity: true, job: false}` rather than a loop, so a fourth kind is a compile
+  error instead of a kind inheriting whichever answer the loop happened to give it.
 - **`workflow-signal-bridge`** — verifies an inbound webhook's HMAC, extracts a correlation
   key by field path, and submits a signal to the workflow runtime; ships as a registered
   gateway handler with typed bridge outcomes → HTTP statuses.
@@ -369,6 +396,17 @@ packages exist at only one layer, noted below where that is true.
   cancelling now and recording the request; `workflow-runtime-pg`'s `requestJobCancellation` re-asserts the
   premise *inside* the `UPDATE` predicate so a worker that claimed the run in between wins the row, and
   `COALESCE`-stamps so cancelling twice is a no-op on the record.
+  `survey.ts` (ADR-0334) is `surveyManifestWorkflows`' shape for jobs — five verdicts
+  (`handler_registered` / `served_by_kind_handler` / `deprecated` / `no_producer` / `handler_missing`)
+  over `JOB_KIND_PRODUCERS`, a **total map over `JOB_KINDS`** naming which producer enqueues each
+  kind. `workflow` and `cdc` are `"none"`, so a job of those kinds reports `no_producer` **in
+  preference to** `handler_missing`: naming a fix that would not work is worse than naming none.
+  `cron.ts`'s evaluator is complete and correct (5-/6-field, IANA zones via `Intl`, pure) and is what
+  `scheduledJobsDue` has always used — but it **constructs an `Intl.DateTimeFormat` per stepped
+  minute**, and takes that path for any non-`undefined` zone including the literal `"UTC"`, which is
+  `ScheduledTrigger.timezone`'s and `TimerDefinition.timezone`'s effective default. Measured: 30 ms
+  without a zone against **9,427 ms** with `"UTC"` on one sparse expression, 314×, and it runs per
+  scheduled job per tenant per tick. See *What's actually left*.
 
 ### Identity, security, data protection
 
@@ -505,9 +543,27 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`finops`** — 17 cost categories × 5 allocation methods, per-tenant attribution, budgets
   with breach actions, unit economics (LTV/CAC/contribution margin), chargeback statements,
   anomaly kinds, cost reports.
-- **`tenant-lifecycle`** — 7-state tenant lifecycle (trial → … → deleted), grace periods,
+- **`tenant-lifecycle`** — **5**-state tenant lifecycle (`active` / `suspended` / `archived` /
+  `pending_deletion` / `deleted`), grace periods,
   GDPR Article 17 deletion requests with legal bases and retention obligations, data
   exports with TTL-bounded download links, cryptographic tombstones with proof hashes.
+  **It was seven and nothing read it** (ADR-0334). `TENANT_LIFECYCLE_TRANSITIONS`,
+  `READ_ONLY_STATES`, `TERMINAL_STATES`, `RESTORABLE_STATES` and the four predicates
+  (`isReadOnly`/`isTerminal`/`isRestorable`/`blocksWrites`/`blocksReads`) had **no consumer in the
+  workspace**, while `operate-server` carried its own four-value `TenantStatus` — and that one is
+  what `meta.tenants.status`' CHECK constrains and what the console transitions. Two of the
+  unreachable three were **billing facts duplicated onto the tenant**: `past_due` is a *subscription*
+  status with its own transition map in `@crossengin/billing` (a tenant in arrears is still an
+  `active` tenant), and `trial` is a plan tier in `PLAN_TIERS` with no producer anywhere. Both are
+  gone, and `GRACE_FROM_STATE`'s `billing_grace` reads `active` — it used to name a `fromState` no
+  tenant row could hold. The third, `pending_deletion`, is **kept and added to the CHECK**, because it
+  is the one the deployment was missing: it has been in `READ_ONLY_STATES` since Phase 1 and is what
+  `deletion_grace` and `appeal_window` name as their `fromState`. `pending_deletion -> active` is in
+  the map because `DELETION_REQUEST_TRANSITIONS` permits `verified -> rejected`, so a request that put
+  a tenant there can be rejected afterwards and the tenant must come all the way back — routing the
+  restore through `archived` would cost a tenant their write access for somebody else's mistake.
+  `operate-server` re-exports the enum rather than restating it, and
+  `consoleTransitionsAreLifecycleTransitions()` proves the console's map is a subset.
   A tombstone is **composed from per-subsystem attestations, never written by hand** (ADR-0317), because
   what made the first one false was not a wrong number but a subsystem nobody asked whose silence read as
   nothing to delete: `assembleTombstone` refuses `subsystem_unattested` for any of the six
@@ -1259,9 +1315,74 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   existed since the scheduler was written: its own comment said it enqueues "so the distributed
   worker fleet runs them" and there was no fleet, so every deployment using it has been accumulating
   `pending` rows in `meta.job_runs` indefinitely and the manifest's scheduled jobs have **never run
-  in this binary**. The job worker is still refused — nothing here registers a job handler, and
-  passing an engine would finalize every claimed run `failed` with `handler_not_found` where leaving
-  them `pending` is recoverable.
+  in this binary**. Since ADR-0334 it warns **separately** for the two reasons, which need different
+  fixes: no worker is mounted at all, or one is mounted and no handler serves the jobs being
+  enqueued. And the defect was never limited to `--schedule-ms` — `POST /v1/meta/jobs/invoke` and the
+  entity-event emitter fill the same queue, so `JOB_KIND_PRODUCERS` (a total map over `JOB_KINDS`)
+  names the producer behind each unserved declaration.
+  **A job handler is registered against the job's id by the deployment, and `JOB_HANDLER_PROVIDERS`
+  ships empty** (ADR-0334). A `JobDeclaration` carries an id, a trigger, a retry policy, concurrency,
+  data classes and a prose `description` — and **no field of any kind that describes the work**, not
+  even the `z.unknown()` slot an orchestration `Workflow` has, so there is nothing in a manifest to
+  compile and a compiler would have zero valid inputs (ADR-0331's finding one notch more absolute).
+  What the manifest *owns* is how a run is **governed**, and `buildJobHandlerRegistry` reads the
+  ceiling, the backoff, the data classes and the failure strategy off the declaration and **refuses**
+  a provider that restates any of them, so the queue cannot disagree with the manifest a reviewer
+  approved. A `kind` provider is **expanded into one registration per declaration** rather than using
+  `registerForKind`, because a kind registration carries one ceiling for twelve jobs that do not
+  share one. All 25 declarations across the seven packs are tenant-domain ERP work — eight are
+  third-party integrations with no client in this repo, the rest need `operate-runtime`'s entity store
+  and the packs have no runtime layer — and **no noop handler ships**, because a run reported
+  `completed` having done nothing is exactly the class ADR-0332 and ADR-0333 exist to end. So the
+  absence is *said*: `surveyManifestJobs` names every unserved declaration with its producer, the
+  claim's `due` CTE is filtered to `servedJobIds` so an unserved backlog cannot starve served runs out
+  of a batch (an **empty** declaration claims nothing, since `= ANY('{}')` is false), and a run
+  claimed anyway is **dead-lettered** rather than only status-flipped. `retry.backoff.jitter: true` is
+  declared on all 25 jobs and had never been applied; `onFailure` was declared on all 25 and read by
+  nothing, and now gates the dead-letter write (`swallow-and-log` → suppressed).
+  **`probeJobQueueVisibility` is the loud half of a finding the fleet cannot report itself**
+  (ADR-0334): `meta.job_runs`, `_dead_letter_jobs` and `_job_costs` each carry one `ALL`-scope
+  isolation policy and no platform arm, while the fleet is deliberately cross-tenant — so as a
+  non-owner with no tenant context the claim matches **0 rows** and `executeJobRun` answers
+  `not_claimable`, and neither is an error: an empty claim is what an empty queue looks like. **A
+  fleet that can never execute anything reads exactly like an idle one.** The probe asks the catalog
+  (`relrowsecurity`, `rolbypassrls`, ownership) rather than counting rows, because a count of 0 is
+  also what an empty queue gives, and answers `visible` / `confined_by_rls` / `unguarded` / `absent`.
+  **`--tenant-status-gate` enforces `meta.tenants.status` on every request** (ADR-0334), which that
+  column never had: a `suspended`, `archived` or `pending_deletion` tenant is read-only and a
+  `deleted` one is refused outright. Read-vs-write comes from `SAFE_HTTP_METHODS` on the **route's own
+  method**, not from a declaration at registration, so it is total by construction — every route has
+  a method and a route added later cannot omit itself from a classification list (ADR-0288's lesson) —
+  and the two rules are `blocksWrites`/`blocksReads` **called**, not restated. `applyTenantStatusGate`
+  runs over `registry.operationIds()` (a method added to `HandlerRegistry` for this, because a
+  cross-cutting refusal covering "the routes we remembered" is the shape of defect this repo keeps
+  finding) inside `buildOperateHttpServer`, so a per-tenant gateway gets it too, sharing one directory
+  instance. **`platform.` is exempt on a rule**: the gate answers for the tenant a request *acts on*,
+  and a platform route acts on the deployment — gating on the caller's tenant would mean a deployment
+  whose platform tenant went `suspended` could not reach the route that reactivates it. A state that
+  forbids the request is **403** with the state on an RFC 9457 problem; a state that could not be
+  *established* is **503**, because a 403 is a claim about the tenant and there is none in hand, and
+  because a 503 is retryable and a 403 is not. The directory is cached
+  (`--tenant-status-ttl-ms`, 1000..300000, default 30s) with a **shorter absence TTL** — the two
+  mistakes are not symmetric: a stale status delays an enforcement, a stale absence keeps refusing a
+  tenant an operator has just provisioned. A **first** lookup that throws propagates (never known, so
+  no guess in either direction); a **refresh** that throws serves the last known answer up to
+  `maxStaleMs`, because "we knew a minute ago" is evidence and cannot mean forever. **Opt-in**, because
+  the gate 403s a credential whose tenant has no `meta.tenants` row and `--api-key 'key:role:tenant'`
+  names arbitrary UUIDs — so a boot survey names those tenants *before* the first request, separating
+  `missing` from `unreachable` (at boot the database may not be up, and calling that "not provisioned"
+  would print a list of tenants that are).
+  **The deletion-request routes move the tenant row with the request** (ADR-0334): `pending_deletion`
+  on verify, `active` on reject. Both run **after** the request's own transition — the authoritative
+  act, carrying the in-predicate guard, the four-eyes rule and the audit row — and a failure is
+  *reported* as `tenantReadOnly: false` / `tenantRestored: false` rather than thrown, which is
+  ADR-0320's `tenantRetired` rule: a verify that moved the request and could not move the tenant has
+  happened, and a 5xx would say otherwise. `transitionStatus(id, to, from)` re-asserts the **source**
+  state in the `UPDATE` predicate (ADR-0321's "the row is the lock"), with the source sets derived
+  from `TENANT_LIFECYCLE_TRANSITIONS` — so a console suspension mid-flight wins the row, verified
+  live, and the no-match is named in the log rather than overwritten. The sets are chosen so a
+  no-match still leaves the handle's claim true: `markPendingDeletion`'s complement is
+  `{pending_deletion, deleted}` and both block writes, which a test asserts.
   **Per-viewer notification read state is reachable over HTTP** (`--read-state-routes`, ADR-0331),
   closing ADR-0309's tables-with-no-writer: mark one notice read, move a read-through watermark, read
   an unread count. The viewer is **always the credential** and a body naming one is *refused* rather
@@ -1369,14 +1490,20 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are two now:
-`typecheck-config.ts` (ADR-0307) and `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **three** now:
+`typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
-column is named by every `INSERT`. Both read the real workspace from disk rather than importing it,
-which is what keeps them unconditional: importing `@crossengin/kernel` would make the dependency
-graph cyclic, and reading `kernel/dist` would make the answer depend on whether someone ran
+column is named by every `INSERT` — and `pg-storeless-tables.ts` (ADR-0334), which declares every
+catalogued table with **no writer** and why. All three read the real workspace from disk rather than
+importing it, which is what keeps them unconditional: importing `@crossengin/kernel` would make the
+dependency graph cyclic, and reading `kernel/dist` would make the answer depend on whether someone ran
 `pnpm -r build`. A rule that is green only after a build is not a rule.
+`workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
+both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
+`truncate`, 312 references across 862 files) — without which three tables read as writerless that are
+not, because the statement extractor silently skips a `SELECT` with a join, an alias or an unresolved
+target. That check changed the census's answer three times and is the one that makes it trustworthy.
 
 Full workspace build + typecheck + test is several minutes; run it backgrounded
 into a log rather than blocking on it. There is **no top-level lint script** —
@@ -1424,7 +1551,20 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   table's owner bypasses RLS and testing as the owner proves nothing about it.
   A fake that silently ignores a column is worse than no fake: `fakeCertificationPg`
   ignored `tenant_id` entirely, so a store reading one scope and a store reading
-  every scope looked identical to it.
+  every scope looked identical to it. **That class had three more members**
+  (ADR-0334): `crypto-pg`'s fake modelled `tenant_id` but applied the RLS predicate to
+  *writes*, i.e. only ever as a non-owner — so every owner-bypass write defect was
+  invisible to it by construction, and it takes `{owner: true}` now and **throws** on a
+  write with no `tenant_id` predicate; `feature-flags-pg`'s and `dr-runtime-pg`'s
+  `mockConnection` modelled it **not at all**, pure recorders answering `{rowCount: 1}`,
+  and now call `assertStatementIsScoped`. So: **a fake that answers a statement it
+  could not really serve is a test asserting the wrong thing.** Reads stay exempt from
+  that tripwire on purpose — `classifyScopedWriteRefusal`'s diagnosing re-read is
+  deliberately unscoped, because its whole question is whether the row sits in another
+  scope and a scoped read could only answer "absent". A **writerless** table is also a
+  failure now unless declared with a reason
+  (`pg-storeless-tables.ts`), because a table with no store cannot have a wrong store
+  and so never appeared in either SQL rule.
 - **Comments are rare and earn their place.** No JSDoc on every export. Comment
   a non-obvious invariant — why this order, why fail-closed here, why this
   outcome and not that one — not what the code plainly says.
@@ -1487,6 +1627,59 @@ opened them.
 
 **Load-bearing**
 
+- **83 of 145 catalogued tables have no writer, and every one is now declared with a reason**
+  (ADR-0334). `packages/testing/src/strategy/pg-storeless-tables.ts` classifies them —
+  `static_catalog` (2), `out_of_band` (3), `dynamic_writer` (1), `superseded` (8), `unwritten_table`
+  (29, ADR-0300's class: a live store writes the siblings), `unbuilt_subsystem` (40) — each with an
+  owner package asserted to exist, a note carrying the evidence and, for the two gap reasons, a
+  required consequence. Compared against `META_TABLES` **in both directions** every run
+  (`undeclared` / `overtaken` / `unknown_table` / `duplicate`), which is the part that matters:
+  ADR-0288's list had no forcing function, and *location* was never what made `needsAuditEmitter`
+  wrong — the absence of a both-ways comparison was. A new Phase-1 table with no writer is a test
+  failure the moment it lands. Vacuity floors include an **upper**-bound-shaped one (`writerless ≥
+  75`, the opposite of the usual), because the dangerous direction is over-counting writers: if
+  everything looked written, nothing would need declaring and the fence would pass having examined
+  nothing. What it cannot check is whether a declared *reason* is true — only shape, referential
+  integrity and both directions of membership.
+  The gaps judged **real**, in rough cost order:
+  **`meta.access_review_evidence`** is the cheapest: the reader exists with its exact column list
+  (`certification.ts:177–199`), `sealEvidence` exists in the contracts, and three sibling stores exist
+  — so today the access-review signal is **silently missing from every certification report**, because
+  the adapter answers `null` and the engine reads that as "no evidence" rather than "not wired".
+  **`meta.users`** is load-bearing and bigger: **73 catalogued tables carry a `USER_FK` column** and
+  **9 of them have a live writer and a NOT NULL one** (`pack_installations.requested_by`,
+  `notification_templates.created_by`, `notification_digests.user_id`,
+  `access_review_campaigns.created_by`, `access_review_decisions.decided_by_user_id`,
+  `workflow_definitions.created_by`, `gateway_routes.created_by`,
+  `notification_read_states.user_id`, `notification_read_watermarks.user_id`), so each store cannot
+  insert unless `meta.users` already holds the id and nothing writes it — while `deploy/README.md`
+  tells operators to put a real `meta.users.id` in an api-key spec with no documented way to create
+  one. ADR-0331 hit this for read states and answered it by *refusing* non-user principals, which
+  presumes the row. The repo has twice concluded a `RESTRICT` FK into `meta.users` is wrong (ADR-0318,
+  ADR-0321, which made those columns TEXT); applying that to these nine is the cheaper half.
+  Relatedly **`meta.rate_limit_decisions.principal_id` is a `RESTRICT` FK into `meta.users`** and
+  `rate-limit-checker.ts` passes `input.principalId` straight through, with no equivalent refusal.
+  Also: **`meta.notification_preferences`** is read and never written, so every user's preferences are
+  the built-in defaults for ever; **`meta.tenant_lifecycle_events`**, whose own
+  `PLATFORM_RECORD_TABLES` comment says *"without it nothing in the database distinguishes a tenant
+  that was deleted from one that never existed"*, and the deletion pipeline is already one transaction
+  that would write it; **`meta.feature_flag_targeting_rules`**, so a flag read back from the database
+  round-trips `ftr_…` ids pointing at nothing and cannot be evaluated against its own targeting; and
+  **`meta.rate_limit_policies` / `quota_definitions`**, which are a *decision* rather than a store —
+  `rate-limit-checker.ts` hardcodes both FK columns to `NULL` *because* the tables are empty, so if
+  policies are config (like the plan catalog) the correct fix is to **drop the two columns**, not add
+  two stores. `meta.job_costs` is not built because it needs a cost model, which is a decision too.
+  One consequence worth knowing: the Article 17 erasure's `PLATFORM_RECORD_TABLES` protects **five
+  tables nothing writes**, so that protection is vacuous today.
+- **The tenant-status gate is opt-in, and what that leaves** (ADR-0334). `--tenant-status-gate` is off
+  by default because it 403s a credential whose tenant has no `meta.tenants` row and
+  `--api-key 'key:role:tenant'` names arbitrary UUIDs — so on-by-default would refuse every request of
+  a deployment that works today. The boot survey names them, but an operator has to read it, and
+  nothing *enforces* that an api-key tenant is provisioned. The TTL (30s default) is how long a state
+  change takes to bite, so a `pending_deletion` tenant can still write for up to that long; a
+  per-**tenant** TTL and a per-tenant request-body cap are both unaddressed. And the gate answers for
+  the tenant on the *credential*: a request is still not scoped to a data **subject** within a tenant,
+  which is the same limitation ADR-0327 recorded for `subjectIdentifier`.
 - **The 29-table platform-write class is swept** (ADR-0313, ADR-0331, ADR-0332), and what is left of it
   is narrower. Every one of the 29 single-`ALL`-policy tables now carries a split, on **two orthogonal
   axes**: *shape* decides how many policies (**12 mutable** get four — isolation, `SELECT` read,
@@ -1503,8 +1696,14 @@ opened them.
   plus 13 cases through the real stores, and a fresh-cluster bootstrap of **958/958** statements whose
   re-plan came back clean. The arithmetic that confirms the shape axis is the live policy census —
   `ALL 114`, `SELECT 34`, `INSERT 32`, **`UPDATE 12`** — twelve `UPDATE` arms for twelve mutable
-  tables. What remains: **14 of the 29 have no store**, so their write arms are capability
-  with no caller; the grants are `PUBLIC`-scoped settings, so any session able to call `set_config` can
+  tables. What remains: **15 of the 29 have no store** (machine-counted in ADR-0334; ADR-0332's
+  "fourteen" was the count of those that *do* have one, transposed), so their write arms are
+  capability with no caller — and the honest total is **16 of 29**, because `meta.notification_templates`
+  has two stores and **neither can ever write a platform row**: both throw
+  `"cannot author a platform-wide template: tenantId is null"` before any SQL. The other 13 route
+  through a `scopedWrite(conn, tenantId | null, …)` helper that claims the grant on a null scope, so
+  they are callable; whether any caller passes null is per-call and unsettled.
+  The grants are `PUBLIC`-scoped settings, so any session able to call `set_config` can
   claim one — and that is **forced**, because a policy's `roles` list would have to name roles the
   catalog cannot know a deployment created, which is why no policy in `META_TABLES` narrows `roles` at
   all. So what the split buys is a *declaration* rather than an authorisation: claiming a grant is a
@@ -1560,12 +1759,44 @@ opened them.
   constant-folds it; with a **bound parameter**, which is how a store issues it, it is a sequential
   scan. Measured twice on 45k rows: 10.67 ms vs 0.73 ms, and 24.7 ms vs 1.7 ms. **The penalty is
   invisible in a psql session and real in production.** Branch.
-  What remains: `scopeFilter` now lives in **six per-package copies** and belongs in `kernel-pg`'s
-  `connection.ts` beside `setPlatformWriteSql`, the only dependency all six share; and the
-  **write**-side analogue is open — `guardedWrite`, `release`, `markStatus`, `gatherForPublication`
-  and `rowIdOf` all `UPDATE … WHERE <unique id> = $n` with no scope, so as the owner a platform
-  write can land on a tenant's row. It needs a *caller* passing the wrong scope, where the reads
-  returned a wrong answer to a correct caller, and closing it changes what a zero-row update means.
+  **Both of ADR-0333's open ends here are closed by ADR-0334, and the counts were wrong.**
+  `scopeFilter` / `scopeFilterWithPlatform` / `assertScopeTenantId` now live in `kernel-pg`'s
+  `connection.ts` beside `setPlatformWriteSql` and `isoInstant` — and there were **eight** copies, not
+  six, two of them added by ADR-0333's own increment (`feature-flags-pg/kill-switch-store.ts`,
+  `observability-runtime-pg/records.ts`). Each package re-exports from *the module that held the copy*,
+  deliberately: every sibling already imports the rest of its scope vocabulary from there, and the
+  **local** rationale — which spelling that package's tables want, and the measurement behind it —
+  stays where a reader of that package looks. `dr-runtime-pg`'s guard is the one genuine divergence
+  (a strict full-UUID regex) and stays a local wrapper delegating to the shared one.
+  The **write** side is closed too: `classifyScopedWriteRefusal` distinguishes `row_absent` /
+  `wrong_scope` / `guard_refused` from one zero-row result, re-reading the row **on the failure path
+  only** and **with no scope predicate** — the question is whether the row sits in another scope, and
+  a scoped read could only answer "absent". Six writes were measured taking a cross-scope row **as the
+  owner, before the fix**: a tenant's feature flag *moved into platform scope* with its label and
+  default rewritten, a kill switch moved and its releasing user overwritten (the four-eyes
+  attribution the status guard exists to protect), a tenant's public key replaced through an
+  `ON CONFLICT … DO UPDATE`, a tenant's key revoked, a DR execution advanced, and a `revoke` of an id
+  that exists nowhere succeeding silently in **both** roles. As a non-owner the same flag update
+  raised `FeatureFlagConflictError` saying *"another writer changed it first"* about a row no writer
+  had touched — so the predicate does not create the ambiguity, it makes it reachable for the owner
+  too, and the diagnosis resolves it for both.
+  The writes are **strict** where the reads are inclusive, and that is the decision rather than an
+  inconsistency: `tenant_id = $n OR tenant_id IS NULL` on a read is right (a platform flag is *meant*
+  to be evaluated by every tenant's gateway), and on a write it is a route from a tenant's session
+  into the platform's row — a tenant flipping `gateway.strict_jwt_aud`, the exact bypass ADR-0332
+  separated `config` from `record` to prevent. The one correct use of
+  `tenant_id IS NOT DISTINCT FROM` in the repo is inside `register`'s `ON CONFLICT … DO UPDATE WHERE`,
+  where both operands come from one located row and no index is consulted.
+  **`meta.workflow_definitions` is the exception that proves the rule and keeps the inclusive arm on
+  its *write path*.** `planDefinitionPublication`'s `definition_id_reused` and
+  `key_shadows_platform_definition` are **defined over cross-scope rows**, and `definition_id` carries
+  a table-wide UNIQUE — so narrowing the publish *lookups* turns both named refusals into a raw
+  `23505` from the INSERT, measured both ways. The narrowing happens **in the planner**, which filters
+  `stored` on `s.tenantId === proposed.tenantId` before deciding, and in `updateRow`'s own predicate.
+  That predicate was the third finding and is latent rather than live: `definitionUpdateAssignments`
+  includes `tenant_id`, so a cross-scope match would *move* a platform-wide definition into one
+  tenant, taking that workflow from every other tenant — prevented today by a conjunction across three
+  modules, and now by the predicate, which also closes a real READ COMMITTED race against itself.
 - **The split is reconcilable in one pass only because the isolation policy keeps its name**
   (ADR-0331, ADR-0332). `planSchemaReconciliation` creates new policies and **refuses to drop an
   existing one**, because dropping a policy loosens access (ADR-0290's invariant) and `allowLoosening`
@@ -1886,6 +2117,95 @@ opened them.
 
 **Contained**
 
+- **A cron timer recurs on one row, and what that row still cannot say** (ADR-0334). `fire_count` and
+  `next_fire_at` were declared on `meta.workflow_timers` and never written, and a re-arm reset the
+  count — so a cron timer fired exactly once and the replayer could not tell a stopped one from a
+  healthy one (`timerProjectionSignature` compares `status|fireCount|nextFireAt` now).
+  `TIMER_TRANSITIONS.fired` stays `[]` deliberately: recurrence is a **kind** property, so a status
+  edge would be false for three of four kinds — which resolves the two axes rather than pinning a
+  contradiction, the contrast with ADR-0307's `failed`. The claim is released **exactly when
+  `fire_count` advances**, not when the projected status is `scheduled`, because `ProjectingEventLog`
+  re-projects every timer on every append and a status-keyed clause would steal a live claim from a
+  worker mid-fire. DST is decided per case from this runtime's tzdata: a spring-forward schedule at a
+  local time that does not exist **skips that day**, and a fall-back one at a doubled local time
+  **fires twice**. An unresolvable timezone is **refused at publication** (`timezone_unresolvable`),
+  because `cronNextAfter` silently falls back to UTC — a schedule running on a zone nobody declared,
+  in the table the schedule is read back from, is ADR-0331's `delivery_guarantee` argument.
+  What it leaves: `nextFireAt` is one occurrence ahead and never two, so the row cannot show a cadence
+  while it sits `scheduled`; a cron timer on an instance that terminates in the same fire keeps its
+  computed `next_fire_at` as a record and nothing cancels the row (it is `fired`, so no worker claims
+  it); `business_hours` is **refused by name** because `isWithinBusinessHours` needs a working-day
+  configuration that exists nowhere in the contract, and declaring it means a
+  `crossengin.workflow.definition.content.v2` tag; and the same silent-UTC fallback still reaches
+  `scheduledJobsDue`, because `JobDeclaration` has no publication-time check. `cron.ts`'s
+  per-minute `Intl.DateTimeFormat` construction (314× measured) is mitigated only at the timer layer,
+  by mapping the seven UTC-equivalent zone names to `undefined`; a genuinely zoned sparse cron still
+  pays, and the fix is a cached formatter on `ParsedCron`.
+- **Four self-references in a workflow definition are checked now, three cannot be** (ADR-0334). The
+  line drawn: *a reference whose declaration site exists in this document is checked; one whose site
+  lives in another document, or does not exist in the contract at all, is reported.* Checked and
+  digest-neutral (verified by computing both schemas' digests over the same raw definitions in a
+  throwaway worktree — identical for everything still accepted): `schedule_timer`'s and
+  **`cancel_timer`'s** `timerName`, `set_variable`'s `variableName`,
+  `TimerDefinition.absoluteTimestampVariable`, and that `cronExpression` parses. Not taken:
+  **`activityKey`** has no declaration site at all (ADR-0333's missing `ActivityDefinitionSchema`), and
+  `childDefinitionKey` / `spawn_child_workflow` resolve against *another* definition. Held back:
+  `SignalDefinition.correlationVariable` *does* have a site and is unchecked, but a correlation key
+  legitimately arrives in `startInstance`'s input, and that question was not settled. The cost is on
+  the other side and is real: four shapes the schema used to accept are now refused, and **the
+  engine's own test fixtures were in those shapes and had never been parsed** — `definitionFixture()`
+  declared `timers: []` while carrying a `timer_fired` trigger, which `WorkflowDefinitionSchema` has
+  *always* refused. 31 engine tests broke on the fix; all were invalid fixtures.
+- **A `datetime` crosses the wire as `toISOString()`, uniformly** (ADR-0334) — fixed width 24, always
+  `Z`, always three fraction digits, so byte order **is** chronological by construction. Convergence
+  rather than invention, as with ADR-0332's `decimal`: it is what every server writer already emits and
+  what `isoInstant` produces. `date` is `YYYY-MM-DD` and `time` is Postgres's own `TIME` output. An
+  **offset** is normalised (`TIMESTAMPTZ` does not retain it either, so the canonical form holds the
+  same value); **sub-millisecond** precision is a 422 from a client and truncated at the store
+  boundary, ADR-0332's provenance split; an instant with **no offset** is refused in both directions,
+  because Postgres reads it in the session `TimeZone` and ECMAScript in the process's local zone, so it
+  names no instant. Nothing goes through `Date.parse`, which succeeds on `"2026"` and fails on
+  `"…T19:00:00+09"` that Postgres accepts. `checkType` is a **total map** `FIELD_TYPE_CHECKS` over
+  `PrimitiveFieldType["kind"]` now, asserted against the schema's own options: three of the 14 kinds
+  that defaulted to `acceptAny` are closed and the other **11 remain as eleven visible lines** rather
+  than an invisible fall-through. `"0x10"`, `"0b101"`, `"0o17"`, `true`/`false` and `[5]` stop being
+  accepted as numbers (`Number()` coerced them); `" 10.25 "`, `"+10.25"` and `"1e3"` still are.
+  `datetime` gets a `timestamptz` `ListValueType` with a guarded cast; **`date` and `time` do not**,
+  measured: `date_in`/`time_in` are `STABLE`, so `(text)::date` cannot back an index *and*
+  `'01/02/2026'::date` is 2 January under MDY and 1 February under DMY, while their canonical
+  spellings already sort as text. **The guard is the sharp part**: a regex alone is not total — seven
+  classes match an ISO-ish pattern and *raise* on `::timestamptz` (`2026-02-30`, `2026-02-29` in a
+  non-leap year, month 13, minute 60, offset `+99:00`), and **one such legacy row makes every page of
+  that entity a 500**, because the sort evaluates the cast on every candidate before `LIMIT`. A regex
+  cannot exclude a day beyond its month's length without a leap-year parser in it, so the guard asks
+  Postgres for that one conjunct (`EXTRACT(MONTH FROM make_date(y,m,1) + (d-1)) = m`) inside a nested
+  `CASE`, because a flat `AND` does not guarantee operand order. `pg_input_is_valid` would be the right
+  guard and arrived in PG 16 against a floor of 14; a tripwire test asserts `MIN_POSTGRES_MAJOR < 16`.
+  What it leaves: a `datetime` list key is **unindexable by construction**, so a deployment wanting one
+  needs a generated column; `DATETIME_SQL_PATTERN` and `parseInstant` are two spellings of one set that
+  disagree, so `isDatetimeSqlSafe` must not be used as a SQL guard on its own; and `matchesFilter`'s
+  `eq`/`ne` NULL semantics still diverge from SQL, deliberately left.
+  Three further defects were found live and fixed in passing: `created_at`/`updated_at` defaulted to
+  `now()` (microseconds) while node-postgres yields millisecond `Date`s, so the cursor re-admitted the
+  row it came from and a `limit 2` walk **never terminated**; the NULL tail was dropped on every
+  ascending walk on both stores; and a forged or `''` cursor component **raised** on the column store,
+  where it now reads as the NULL tail.
+- **`duration` is refused at plan time, by name** (ADR-0334), not at the first read — which turns
+  "serves every other field and 500s on page 1" into a boot failure naming entity and field. A seconds
+  count is lossy (`interval '1 mon'` has no fixed second count); an ISO string is lossless but is not
+  an ordering key (`PT2H` sorts before `PT10M`) and `interval_in` is `STABLE`, so a guarded cast is
+  unindexable *and* `IntervalStyle`-dependent; `interval 'P1M' = interval 'P30D'` is **true**, so
+  `interval` is not even a total order on the wire values; and `interval '-PT1H'` raises. What would
+  unblock it is a different *field type* (`{kind: "duration", unit: "seconds"}` → `BIGINT`, already
+  covered by `numeric`), which is a kernel change. Nothing in the catalog or the seven packs declares
+  one. A plan throw would bypass ADR-0314's JSONB degradation, so
+  `applyTenantManifestSchema` catches it and reports a blocking `unservable_field_type` change — same
+  fact, two situations.
+- **`meta.workflow_timers` still accepts a row its contract forbids** (ADR-0333's Option C): a
+  `cron_schedule` row with a NULL `cron_expression` commits cleanly. ADR-0334 makes it unreachable
+  from the write path, since the kind and its parameter now come out of one `TimerDefinition` — the
+  cheaper half of the same guarantee. Still a tightening that would land as standing manual SQL.
+
 - `dispatched_at` is still unused (ADR-0277). A read state can be **stored** since ADR-0330 and no
   route wrote one until ADR-0331, which added the three read-state routes — so the inbox can mark a
   notice read over HTTP now; nothing reads the *template* audit trail over HTTP still (ADR-0279). The store also found both read-state tables had
@@ -2061,7 +2381,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 328 records; 249 Accepted, 79 Proposed (the
+title or status change cannot drift. 329 records; 250 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

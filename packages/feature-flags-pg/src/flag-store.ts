@@ -1,4 +1,9 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  classifyScopedWriteRefusal,
+  scopeFilter,
+  type PgConnection,
+  type ScopedWriteRefusal,
+} from "@crossengin/kernel-pg";
 import {
   FLAG_STATUSES,
   FlagDefinitionSchema,
@@ -231,15 +236,26 @@ function predecessorsOf(to: FlagStatus): readonly FlagStatus[] {
   return FLAG_STATUSES.filter((from) => canTransitionFlag(from, to));
 }
 
+/**
+ * A guarded write that moved no row, and **which of the three reasons it was**.
+ *
+ * The class, its name and `expectedUpdatedAt` stay — a caller catching it would be broken by a new
+ * unrelated type — and it carries `reason` now. The old message was not merely incomplete, it was
+ * **measured wrong**: as a non-owner, where RLS already refused a cross-scope write, it claimed
+ * "another writer changed it first" about a row no writer had touched. The scope predicate did not
+ * create that ambiguity, it only made it reachable as the owner too; `classifyScopedWriteRefusal`
+ * resolves it for both.
+ */
 export class FeatureFlagConflictError extends Error {
   constructor(
     readonly flagId: string,
     readonly expectedUpdatedAt: string,
+    readonly reason: ScopedWriteRefusal,
+    readonly scopeTenantId: string | null,
+    readonly storedTenantId: string | null,
+    detail: string,
   ) {
-    super(
-      `feature flag '${flagId}' was not last updated at ${expectedUpdatedAt} — ` +
-        "another writer changed it first, or it is no longer in a status this write may leave",
-    );
+    super(`feature flag '${flagId}' was not written (${reason}): ${detail}`);
     this.name = "FeatureFlagConflictError";
   }
 }
@@ -445,22 +461,64 @@ export class PostgresFeatureFlagStore {
     }
   }
 
+  /**
+   * The one `UPDATE` both `update` and `transition` go through, **scoped to the record's own
+   * tenant**.
+   *
+   * The scope predicate is the write-side half of ADR-0331's defect, and this is where it bit
+   * hardest. `flag_id` is table-wide unique, so a platform-scoped write naming a tenant's flag
+   * matched it as the owner — and `updateAssignments` covers **`tenant_id`**, so the statement did
+   * not merely edit that row, it rewrote the row's scope. Measured live on a fresh cluster as the
+   * owner, before the predicate: `update({...flag, tenantId: null}, …)` on a tenant's
+   * `checkout.new_pricing` reported success, moved the row to `tenant_id = NULL` and flipped its
+   * default from `false` to `true`. The flag was taken away from the tenant and the call said it
+   * worked.
+   *
+   * **Strict** rather than inclusive, which is the opposite choice from every read in this package
+   * and the right one. `tenant_id = $n OR tenant_id IS NULL` is correct for a read because a
+   * platform-wide flag is *meant* to be evaluated by every tenant's gateway; on a write it is a
+   * route from a tenant's session into the platform's row — a tenant flipping
+   * `gateway.strict_jwt_aud`, which is exactly the authentication bypass ADR-0332's `config` grant
+   * was separated from `record` to prevent.
+   *
+   * It goes **after** the guard parameter rather than before it, so `guardParam` and the column
+   * placeholders keep the positions `flagUpdateAssignments` derives.
+   */
   private async guardedWrite(
     flag: FlagDefinition,
     expectedUpdatedAt: string,
     extra: string,
   ): Promise<void> {
     const values = flagRowValues(flag);
-    const result = await this.scopedWrite(flag.tenantId, (tx) =>
-      tx.query(
+    const scope = scopeFilter(flag.tenantId, this.guardParam + 1);
+    await this.scopedWrite(flag.tenantId, async (tx) => {
+      const result = await tx.query(
         `UPDATE ${this.schema}.${TABLE} SET ${this.updateAssignments}
-         WHERE flag_id = $1 AND updated_at = $${this.guardParam}${extra}`,
-        [...values, expectedUpdatedAt],
-      ),
-    );
-    if ((result.rowCount ?? 0) === 0) {
-      throw new FeatureFlagConflictError(flag.id, expectedUpdatedAt);
-    }
+         WHERE flag_id = $1 AND ${scope.sql}
+           AND updated_at = $${this.guardParam}${extra}`,
+        [...values, expectedUpdatedAt, ...scope.params],
+      );
+      const refusal = await classifyScopedWriteRefusal(tx, result.rowCount, {
+        schema: this.schema,
+        table: TABLE,
+        idColumn: "flag_id",
+        idValue: flag.id,
+        tenantId: flag.tenantId,
+        guard:
+          `it was not last updated at ${expectedUpdatedAt} — another writer changed it first, ` +
+          "or it is no longer in a status this write may leave",
+      });
+      if (refusal !== null) {
+        throw new FeatureFlagConflictError(
+          flag.id,
+          expectedUpdatedAt,
+          refusal.reason,
+          flag.tenantId,
+          refusal.storedTenantId,
+          refusal.detail,
+        );
+      }
+    });
   }
 
   /** A read's scope: a tenant context, or nothing — `PostgresKillSwitchStore.scoped`'s reasoning. */

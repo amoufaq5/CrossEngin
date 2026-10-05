@@ -9,6 +9,7 @@ import {
 } from "@crossengin/operate-runtime";
 
 import { buildListSql, guardedNumericCast, type ListSqlAdapter } from "./list-sql.js";
+import { guardedTimestamptzCast } from "./temporal-sql.js";
 import { mergeRecord, resolveRecordId, type DocumentRow } from "./records.js";
 
 const FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -52,9 +53,34 @@ export async function listPageOp(
     columnExpr: (field) => {
       if (!FIELD_RE.test(field)) return null;
       const json = `document ->> '${field}'`;
-      return valueTypeOf(field) === "numeric" ? `(${guardedNumericCast(json)})` : json;
+      switch (valueTypeOf(field)) {
+        case "numeric":
+          return `(${guardedNumericCast(json)})`;
+        // A `datetime` field is compared as an instant, not as bytes, because the spellings a
+        // document can hold are not all the canonical one: a legacy `2026-01-31T19:00:00+09:00` is
+        // the same instant as `2026-01-31T10:00:00.000Z` and sorts nine hours away from it as
+        // text. Measured live over eight rows, the JSONB store placed such a row five positions
+        // from where `ColumnMappedEntityStore` placed it. `date` and `time` get no cast — their
+        // canonical spellings are fixed-width and zero-padded, so byte order *is* chronological,
+        // and `date_in`/`time_in` are STABLE (so a cast would also be unindexable and
+        // `DateStyle`-dependent: `'01/02/2026'::date` is January 2nd under MDY and February 1st
+        // under DMY, measured).
+        case "timestamptz":
+          return `(${guardedTimestamptzCast(json)})`;
+        default:
+          return json;
+      }
     },
-    castSuffix: (field) => (valueTypeOf(field) === "numeric" ? "::numeric" : ""),
+    castSuffix: (field) => {
+      switch (valueTypeOf(field)) {
+        case "numeric":
+          return "::numeric";
+        case "timestamptz":
+          return "::timestamptz";
+        default:
+          return "";
+      }
+    },
     valueType: valueTypeOf,
     idExpr: "record_id",
   };

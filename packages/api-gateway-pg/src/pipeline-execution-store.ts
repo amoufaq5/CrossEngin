@@ -1,5 +1,11 @@
 import type { PipelineExecution } from "@crossengin/api-gateway";
-import { setPlatformWriteSql, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  assertScopeTenantId,
+  scopeFilter,
+  setPlatformWriteSql,
+  type PgConnection,
+  type ScopeFilter,
+} from "@crossengin/kernel-pg";
 
 const SCHEMA = "meta";
 const TABLE = "gateway_pipeline_executions";
@@ -26,45 +32,26 @@ export const SET_TENANT_CONTEXT_SQL =
 
 export const SET_PLATFORM_RECORD_WRITE_SQL = setPlatformWriteSql("record");
 
-const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
+/**
+ * `scopeFilter` lives in `kernel-pg` beside `setPlatformWriteSql` and `isoInstant` — eight packages
+ * held a verbatim copy and `kernel-pg` is the only dependency all eight share. The rule that chooses
+ * between the strict and the inclusive spelling, and the two measurements behind the branch, are
+ * written down there once.
+ *
+ * **Which this package reads.** The strict form, for both tables: a pipeline execution and a
+ * rate-limit decision are the deployment's own observational record of one scope's traffic, and a
+ * closed set. Measured live on this schema with three tenant executions beside one platform one,
+ * `countSince` answered **4** as the owner and **1** as a non-owner, for the same call. An aggregate
+ * is the sharp case, because the caller receives a plausible scalar rather than a visibly long list.
+ *
+ * `optionalScopeFilter` below is genuinely local: `undefined` meaning "every scope" exists only for
+ * the replayer, which is a deliberately cross-scope diagnostic, and that is not a third spelling of
+ * the predicate but a decision not to carry one.
+ */
+export { scopeFilter, type ScopeFilter } from "@crossengin/kernel-pg";
 
 function assertTenantId(tenantId: string): void {
-  if (!TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
-}
-
-/** A `tenant_id` predicate and the parameters it binds, for one scope. */
-export interface ScopeFilter {
-  readonly sql: string;
-  readonly params: readonly unknown[];
-}
-
-/**
- * The `tenant_id` predicate a scoped read must carry, **beside** RLS rather than instead of it.
- *
- * Both tables this package reads are `tenant_id`-nullable with a `SELECT`-scoped platform read arm,
- * and **a table's owner bypasses its policies** (ADR-0331) — so a read with no predicate answers
- * from every scope in a deployment that connects as the owner, and from the platform's alone in one
- * that does not. Measured live on this schema with three tenant executions beside one platform one:
- * `countSince` answered **4** as the owner and **1** as a non-owner, for the same call. An aggregate
- * is the sharp case, because the caller receives a plausible scalar rather than a long list.
- *
- * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
- * matching NULL to NULL and the one that would give a single code path: ADR-0331 measured it at
- * 16 ms sequential scan against 45k entries where `tenant_id = $1` is a 0.09 ms index scan, because
- * it is not an indexable operator. `tenant_id IS NULL` is indexable, so both arms keep
- * `idx_gateway_pipeline_tenant_started` / `idx_rate_limit_decisions_tenant_decided`.
- *
- * Verbatim from `forensics-pg`'s `scopeFilter`; it belongs in `kernel-pg` beside
- * `setPlatformWriteSql`, which this module already imports, and lives here only because the rest
- * of this package's scope plumbing does.
- */
-export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
-  // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`.
-  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
-  assertTenantId(tenantId);
-  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
+  assertScopeTenantId(tenantId);
 }
 
 /**

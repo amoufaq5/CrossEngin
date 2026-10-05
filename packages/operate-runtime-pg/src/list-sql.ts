@@ -1,10 +1,13 @@
 import {
   decodeKeyset,
+  type KeysetCursor,
   type ListFilter,
   type ListQuery,
   type ListSort,
   type ListValueType,
 } from "@crossengin/operate-runtime";
+
+import { isDatetimeComparable } from "./temporal-sql.js";
 
 /**
  * Adapts a field name to the SQL needed to read + compare it, so one query
@@ -23,9 +26,26 @@ export interface ListSqlAdapter {
    * to end, so a new adapter is a compile error until it says.
    */
   valueType(field: string): ListValueType;
+  /**
+   * Whether `text` is a value this key can be **bound and compared against** in SQL.
+   *
+   * Optional, and absent means "ask the value type" ({@link VALUE_TYPE_COMPARABLE}). A store
+   * overrides it when its columns carry a type the value type does not name: a `DATE` or `TIME`
+   * column's `ListValueType` is `text` — fixed-width canonical spellings order correctly as bytes,
+   * which is why Lane A left them text — but `castSuffix` still appends `::DATE`, and
+   * `''::DATE` **raises** (measured, as do `''::TIME`, `''::TIMESTAMPTZ` and `''::NUMERIC`). So a
+   * store whose answer is "text" for *ordering* can still have to say "not that spelling" for
+   * *binding*, and the two questions are genuinely different.
+   *
+   * Everything a store answers false for is read as the NULL tail rather than bound, which is what
+   * makes a **forged** cursor a page rather than a 500: `decodeKeyset` is base64 JSON a client
+   * holds, so `{"k":["DROP"],"id":"x"}` would otherwise reach `'DROP'::TIMESTAMPTZ`.
+   */
+  comparableValue?(field: string, text: string): boolean;
   /** SQL expression for the stable id tiebreaker column. */
   readonly idExpr: string;
 }
+
 
 const SQL_OP: Record<string, string> = { eq: "=", ne: "<>", gt: ">", gte: ">=", lt: "<", lte: "<=" };
 
@@ -87,6 +107,21 @@ export function isSqlSafeNumericText(value: string): boolean {
 }
 
 /**
+ * Which cursor components and filter literals each comparison type can be bound as — a **total**
+ * map over `ListValueType`, so a fourth member is a compile error here rather than a new type
+ * silently inheriting `text`'s "everything is comparable" and binding a word to a typed column.
+ *
+ * `text` admits everything because a text key genuinely compares any string, including `""`.
+ */
+export const VALUE_TYPE_COMPARABLE: {
+  readonly [K in ListValueType]: (text: string) => boolean;
+} = {
+  text: () => true,
+  numeric: isSqlSafeNumericText,
+  timestamptz: isDatetimeComparable,
+};
+
+/**
  * Wraps a text-valued expression in a cast to `numeric` that **cannot raise**.
  *
  * The guard is not decoration. A JSONB document table has no column type enforcing that
@@ -131,17 +166,18 @@ function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: un
   const expr = adapter.columnExpr(filter.field);
   if (expr === null) return null;
   const op = filter.op ?? "eq";
-  const numeric = adapter.valueType(filter.field) === "numeric";
+  const typed = adapter.valueType(filter.field) !== "text";
   if (op === "in") {
     const arr = Array.isArray(filter.value) ? filter.value : [filter.value as string];
-    if (numeric) {
-      // Compare numerically, so `?amount[in]=9` matches a scale-2 field's canonical `"9.00"` —
-      // which is what the in-memory store's `equalsValue` already does. Non-numerals are dropped
-      // rather than bound: `'n/a'::numeric[]` raises, and a numeric field holds no row equal to a
-      // word, so dropping narrows the set rather than widening it.
-      const numerals = arr.map((v) => String(v)).filter(isSqlSafeNumericText);
-      if (numerals.length === 0) return "FALSE";
-      return `${expr} = ANY(${bind(params, numerals)}::numeric[])`;
+    if (typed) {
+      // Compare on the declared type, so `?amount[in]=9` matches a scale-2 field's canonical
+      // `"9.00"` and `?occurred[in]=2026-01-31T19:00:00%2B09:00` matches the row stored as
+      // `…T10:00:00.000Z` — which is what the in-memory store's comparator already does.
+      // Uncomparable members are dropped rather than bound: `'n/a'::numeric[]` raises, and a typed
+      // field holds no row equal to a word, so dropping narrows the set rather than widening it.
+      const members = arr.map((v) => String(v)).filter((v) => comparableValue(adapter, filter.field, v));
+      if (members.length === 0) return "FALSE";
+      return `${expr} = ANY(${bind(params, members)}${adapter.castSuffix(filter.field)}[])`;
     }
     // membership compares as text (always valid); cast the column to text
     return `${expr}::text = ANY(${bind(params, [...arr])}::text[])`;
@@ -154,60 +190,81 @@ function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: un
     // for search). A plain-column pg_trgm GIN index still accelerates this.
     return `unaccent(${expr}::text) ILIKE ('%' || unaccent(${bind(params, value)}) || '%')`;
   }
-  if (numeric && !isSqlSafeNumericText(String(value))) {
-    // A constant, because no numeric value compares to a word: `?amount[gt]=n/a` matches nothing
-    // and `?amount[ne]=n/a` matches everything. Binding it would raise, which on the column
-    // store — whose `castSuffix` is `::NUMERIC(p, s)` — it already does today: a garbage query
-    // parameter returns a 500 where it should return a page.
+  if (!comparableValue(adapter, filter.field, String(value))) {
+    // A constant, because no typed value compares to a word: `?amount[gt]=n/a` and
+    // `?occurred[lt]=soon` match nothing, and the `ne` forms match everything. Binding it would
+    // raise, which on the column store — whose `castSuffix` is the column's own SQL type — it
+    // already does today: a garbage query parameter returns a 500 where it should return a page.
+    // Keyed on `comparableValue` rather than on the value type, so a `DATE`/`TIME` column (whose
+    // value type is `text`) is covered too — `'soon'::DATE` raises just as `'n/a'::numeric` does.
     return op === "ne" ? "TRUE" : "FALSE";
   }
   return `${expr} ${SQL_OP[op]} ${bind(params, value)}${adapter.castSuffix(filter.field)}`;
 }
 
+/** Whether `text` can be bound and compared against this key — the adapter's say, or its type's. */
+function comparableValue(adapter: ListSqlAdapter, field: string, text: string): boolean {
+  return adapter.comparableValue !== undefined
+    ? adapter.comparableValue(field, text)
+    : VALUE_TYPE_COMPARABLE[adapter.valueType(field)](text);
+}
+
 /**
- * Whether a cursor component names the NULL tail for a `numeric` sort key.
+ * Whether a cursor component names the NULL tail — that the row it came from had no ordering value
+ * for this key.
  *
- * `keysetOf` renders a record's sort value with `String(row[field] ?? "")`, so a row whose field
- * is absent, JSON `null`, or unparseable produces a component the guarded cast maps to NULL — and
- * the empty string among them. Reading "the component is not a numeral" as "the cursor sits in the
- * NULL tail" is exact rather than approximate: the guard and this test admit the same set by
- * construction, so a component is a numeral iff the row it came from has a non-NULL ordering
- * value. The ambiguity that blocks the same treatment for a *text* key — `""` being a legitimate
- * text value — does not arise, because no numeral renders as `""`.
+ * Two ways a component says so, and the first is new. `keysetOf` now renders a missing, `null` or
+ * `undefined` sort value as **`null`** rather than as `""`, so the cursor can finally *say* "no
+ * value" for a key of any type — which is what lets `NULLS LAST` be written for a `text` key and
+ * closes the hole the old comment here described as needing "a cursor format that can hold a null".
+ * The second is a component the key cannot compare at all: a numeral guard's `'n/a'`, an instant
+ * guard's `'not-a-date'`, or a forged `'DROP'`. Reading that as the NULL tail is exact rather than
+ * approximate, because the ordering expression's guard and this test admit the same set by
+ * construction — so a component is comparable iff the row it came from has a non-NULL ordering
+ * value.
  */
-function isNullTail(component: string): boolean {
-  return !isSqlSafeNumericText(component);
+function namesNullTail(
+  adapter: ListSqlAdapter,
+  field: string,
+  component: string | null | undefined,
+): boolean {
+  if (component === null || component === undefined) return true;
+  return !comparableValue(adapter, field, component);
 }
 
 /** `expr` equals the cursor component, under the key's comparison type. */
 function equalToCursor(
   expr: string,
   field: string,
-  component: string,
+  component: string | null | undefined,
   adapter: ListSqlAdapter,
   params: unknown[],
 ): string {
-  if (adapter.valueType(field) === "numeric" && isNullTail(component)) {
-    return `${expr} IS NULL`;
-  }
+  if (namesNullTail(adapter, field, component)) return `${expr} IS NULL`;
   return `${expr} = ${bind(params, component)}${adapter.castSuffix(field)}`;
 }
 
 /**
- * Whether no row can sort after this cursor component on this key — a numeric cursor already in
- * the NULL tail, since `NULLS LAST` makes NULL the greatest value in both directions. Asked
- * *before* any parameter is bound, so skipping the disjunct cannot leave an orphan placeholder.
+ * Whether no row can sort after this cursor component on this key — a cursor already in the NULL
+ * tail, since `NULLS LAST` makes NULL the greatest value in both directions. Asked *before* any
+ * parameter is bound, so skipping the disjunct cannot leave an orphan placeholder.
  */
-function nothingSortsAfter(field: string, component: string, adapter: ListSqlAdapter): boolean {
-  return adapter.valueType(field) === "numeric" && isNullTail(component);
+function nothingSortsAfter(
+  adapter: ListSqlAdapter,
+  field: string,
+  component: string | null | undefined,
+): boolean {
+  return namesNullTail(adapter, field, component);
 }
 
 /**
  * `expr` sorts strictly after the cursor component.
  *
- * For a numeric key NULL is the greatest value in both directions, so a non-NULL cursor is passed
- * by every NULL row too — which is the half of the agreement with `NULLS LAST` that keeps a page
- * boundary from skipping the rows whose ordering value is unknown.
+ * NULL is the greatest value in both directions for **every** key now, because every key is
+ * ordered `NULLS LAST`, so a non-NULL cursor is passed by every NULL row too. That disjunct is the
+ * half of the agreement with `NULLS LAST` that keeps a page boundary from skipping the rows whose
+ * ordering value is unknown — measured live before it was written for temporal keys: an ascending
+ * walk of eight rows returned seven, dropping the one with no value, on **both** stores.
  */
 function strictlyAfterCursor(
   expr: string,
@@ -218,7 +275,7 @@ function strictlyAfterCursor(
 ): string {
   const cmp = sort.direction === "desc" ? "<" : ">";
   const bound = `${expr} ${cmp} ${bind(params, component)}${adapter.castSuffix(sort.field)}`;
-  return adapter.valueType(sort.field) === "numeric" ? `(${bound} OR ${expr} IS NULL)` : bound;
+  return `(${bound} OR ${expr} IS NULL)`;
 }
 
 /**
@@ -230,16 +287,15 @@ function strictlyAfterCursor(
  * NULL is part of that total order, not an exception to it. Before this was so, a row whose sort
  * field was absent was **dropped from every page after the first**: the predicate
  * `document ->> 'f' > $cursor` evaluates to NULL for it, which is not true, so it never qualified
- * — verified live, 7 of 8 rows returned, and on the column store the same cursor instead bound
- * `''::NUMERIC(16, 2)` and raised, so page 2 of every descending list with a NULL in the sort
- * column was a 500. That hole is closed for `numeric` keys, where the cursor can name the NULL
- * tail unambiguously; for `text` keys it stands, because `""` is a cursor component a genuine
- * empty string also produces, and telling the two apart needs a cursor format that can hold a
- * null — a change that invalidates every cursor in flight.
+ * — verified live, 7 of 8 rows returned on both stores, and where the column store bound the `""`
+ * component instead it raised (`''::NUMERIC(16, 2)`, `''::TIMESTAMPTZ`, `''::DATE` and `''::TIME`
+ * all do), so page 2 of such a list was a 500. The hole is closed for **every** key now: the
+ * cursor carries `null` for a missing value, so `""` is no longer overloaded and
+ * `NULLS LAST` is written unconditionally.
  */
 function seekPredicate(
   sort: readonly ListSort[],
-  cursor: { k: readonly string[]; id: string },
+  cursor: KeysetCursor,
   adapter: ListSqlAdapter,
   params: unknown[],
 ): string | null {
@@ -247,32 +303,25 @@ function seekPredicate(
   const clauses: string[] = [];
   for (let i = 0; i < usable.length; i += 1) {
     const s = usable[i]!;
-    if (nothingSortsAfter(s.field, cursor.k[i] ?? "", adapter)) continue;
+    const component = cursor.k[i];
+    if (nothingSortsAfter(adapter, s.field, component)) continue;
     const eqs: string[] = [];
     for (let j = 0; j < i; j += 1) {
       const prior = usable[j]!;
       eqs.push(
-        equalToCursor(
-          adapter.columnExpr(prior.field)!,
-          prior.field,
-          cursor.k[j] ?? "",
-          adapter,
-          params,
-        ),
+        equalToCursor(adapter.columnExpr(prior.field)!, prior.field, cursor.k[j], adapter, params),
       );
     }
-    eqs.push(
-      strictlyAfterCursor(adapter.columnExpr(s.field)!, s, cursor.k[i] ?? "", adapter, params),
-    );
+    // Safe: `nothingSortsAfter` already returned false, which for a null or uncomparable component
+    // it never does, so this is a comparable string.
+    eqs.push(strictlyAfterCursor(adapter.columnExpr(s.field)!, s, component!, adapter, params));
     clauses.push(`(${eqs.join(" AND ")})`);
   }
   // tiebreaker: all sort keys equal, id strictly greater
   const tie: string[] = [];
   for (let j = 0; j < usable.length; j += 1) {
     const s = usable[j]!;
-    tie.push(
-      equalToCursor(adapter.columnExpr(s.field)!, s.field, cursor.k[j] ?? "", adapter, params),
-    );
+    tie.push(equalToCursor(adapter.columnExpr(s.field)!, s.field, cursor.k[j], adapter, params));
   }
   tie.push(`${adapter.idExpr} > ${bind(params, cursor.id)}`);
   clauses.push(`(${tie.join(" AND ")})`);
@@ -316,12 +365,13 @@ export function buildListSql(
   for (const s of query.sort) {
     const expr = adapter.columnExpr(s.field);
     if (expr === null) continue;
-    // `NULLS LAST` is written for a numeric key in *both* directions, and that is the decision the
-    // keyset depends on: Postgres's default places them last ascending and first descending, so
-    // the tail would move with the direction while a cursor component cannot say which end it is
-    // at. One placement, stated, and `strictlyAfterCursor` encodes the same one.
-    const nulls = adapter.valueType(s.field) === "numeric" ? " NULLS LAST" : "";
-    orderParts.push(`${expr} ${s.direction === "desc" ? "DESC" : "ASC"}${nulls}`);
+    // `NULLS LAST` in *both* directions, for every key, and that is the decision the keyset
+    // depends on: Postgres's default places them last ascending and first descending, so the tail
+    // would move with the direction while one cursor component has to mean one thing. One
+    // placement, stated, and `strictlyAfterCursor` encodes the same one. It is unconditional now
+    // because the cursor can name the tail for a `text` key too — a `null` component — where
+    // before only a numeral guard could tell `""`-the-value from `""`-the-absence.
+    orderParts.push(`${expr} ${s.direction === "desc" ? "DESC" : "ASC"} NULLS LAST`);
   }
   orderParts.push(`${adapter.idExpr} ASC`);
   return { where: where.join(" AND "), orderBy: orderParts.join(", "), params };

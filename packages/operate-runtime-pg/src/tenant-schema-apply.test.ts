@@ -323,3 +323,50 @@ describe("applyTenantManifestSchema", () => {
     expect(cap.sql()).toContain(`CREATE SCHEMA IF NOT EXISTS "${SCHEMA}";`);
   });
 });
+
+describe("applyTenantManifestSchema — a field type with no wire form", () => {
+  it("refuses the application instead of throwing, so the registry can degrade", async () => {
+    const cap = capturePg();
+    const manifest = {
+      entities: [{ name: "Span", fields: [{ name: "elapsed", type: { kind: "duration" } }] }],
+    } as unknown as Manifest;
+    // A tenant's *authored* manifest arrives at runtime, and `TenantColumnStoreRegistry` is built
+    // to degrade a refused application to the JSONB fallback (ADR-0314) — it cannot degrade an
+    // exception. A deployment's own pack manifest still throws at boot, through
+    // `ColumnMappedEntityStore`'s constructor, which is where a configuration error belongs.
+    const application = await applyTenantManifestSchema(cap.conn, TENANT, manifest);
+    expect(application.applied).toBe(false);
+    expect(application.statements).toEqual([]);
+    expect(application.changes).toEqual([
+      {
+        kind: "unservable_field_type",
+        table: "Span",
+        column: "elapsed",
+        detail: "a 'duration' field has no decided wire type",
+        blocking: true,
+        sql: null,
+      },
+    ]);
+  });
+
+  it("refuses before it opens a transaction or touches the schema", async () => {
+    const cap = capturePg();
+    const manifest = {
+      entities: [{ name: "Span", fields: [{ name: "elapsed", type: { kind: "duration" } }] }],
+    } as unknown as Manifest;
+    await applyTenantManifestSchema(cap.conn, TENANT, manifest);
+    // Not even `CREATE SCHEMA IF NOT EXISTS`: the refusal is decided from the manifest alone, so a
+    // manifest that can never be served leaves no schema behind to be cleaned up.
+    expect(cap.calls.map((c) => c.sql).filter((s) => !s.includes("set_config"))).toEqual([]);
+  });
+
+  it("still propagates an error that is not a wire-form refusal", async () => {
+    const cap = capturePg();
+    const manifest = { entities: [{ name: "Span", fields: [] }] } as unknown as Manifest;
+    // The catch is narrowed to `UndecidedColumnTypeError`; an invalid schema name is a programming
+    // error and must not read as "this tenant's manifest needs a human".
+    await expect(
+      applyTenantManifestSchema(cap.conn, TENANT, manifest, { schema: "Not A Schema" }),
+    ).rejects.toThrow(/invalid tenant schema name/);
+  });
+});

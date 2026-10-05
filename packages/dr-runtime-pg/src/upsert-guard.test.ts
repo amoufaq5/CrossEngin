@@ -16,10 +16,12 @@ import {
   failoverUpsertGuard,
   observationNotStaleGuard,
   refuseUnlessWritten,
+  scopeUnchangedGuard,
 } from "./upsert-guard.js";
 import { mockConnection, type Captured } from "./test-fakes.js";
 
 const T = "dr_failover_executions";
+const TENANT = "11111111-1111-4111-8111-111111111111";
 
 describe("failoverStatusGuard", () => {
   const sql = failoverStatusGuard(T);
@@ -136,6 +138,38 @@ describe("excludedSetClause", () => {
   });
 });
 
+describe("scopeUnchangedGuard", () => {
+  it("pins the conflicting row's scope to the incoming one", () => {
+    expect(scopeUnchangedGuard(T)).toBe(
+      "dr_failover_executions.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id",
+    );
+  });
+
+  /**
+   * `IS NOT DISTINCT FROM` rather than `kernel-pg`'s branching `scopeFilter`, and this is the one
+   * position where that single operator is correct rather than a shortcut: both operands come from
+   * one already-located row, so no index is consulted and the measured sequential-scan penalty does
+   * not apply. `=` would be **never-true** for a platform write, whose `EXCLUDED.tenant_id` is NULL
+   * — a platform execution could then never advance its own row.
+   */
+  it("does not use `=`, which is never true for the platform scope", () => {
+    expect(scopeUnchangedGuard(T)).not.toMatch(/tenant_id\s*=/);
+  });
+
+  it("is the first clause of both composite guards, so a wrong scope is refused before anything else", () => {
+    expect(failoverUpsertGuard(T).startsWith(scopeUnchangedGuard(T))).toBe(true);
+    expect(drillUpsertGuard("dr_drill_executions").startsWith(
+      scopeUnchangedGuard("dr_drill_executions"),
+    )).toBe(true);
+  });
+
+  it("keeps the clauses it was added beside", () => {
+    const sql = failoverUpsertGuard(T);
+    expect(sql).toContain(observationNotStaleGuard(T));
+    expect(sql).toContain(failoverStatusGuard(T));
+  });
+});
+
 describe("refuseUnlessWritten", () => {
   const d = {
     schema: "meta",
@@ -143,6 +177,7 @@ describe("refuseUnlessWritten", () => {
     executionId: "fov_00000001",
     recordedAt: "2026-06-02T12:00:00.000Z",
     stateColumn: "status",
+    tenantId: null,
   } as const;
 
   it("returns without asking anything when the write landed", async () => {
@@ -153,7 +188,7 @@ describe("refuseUnlessWritten", () => {
 
   it("names a stale observation when the stored row is newer", async () => {
     const conn = mockConnection(undefined, {
-      rows: [{ state: "succeeded", recorded_at: new Date("2026-06-02T13:00:00.000Z") }],
+      rows: [{ state: "succeeded", recorded_at: new Date("2026-06-02T13:00:00.000Z"), tenant_id: null }],
       rowCount: 1,
     });
     await expect(refuseUnlessWritten(conn, 0, d)).rejects.toMatchObject({
@@ -168,7 +203,7 @@ describe("refuseUnlessWritten", () => {
     // cannot even re-parse. Comparing it against an ISO string would make every refusal read as an
     // illegal transition — the wrong half of the diagnosis, every time.
     const conn = mockConnection(undefined, {
-      rows: [{ state: "queued", recorded_at: new Date("2026-06-02T11:00:00.000Z") }],
+      rows: [{ state: "queued", recorded_at: new Date("2026-06-02T11:00:00.000Z"), tenant_id: null }],
       rowCount: 1,
     });
     await expect(refuseUnlessWritten(conn, 0, d)).rejects.toMatchObject({
@@ -180,7 +215,7 @@ describe("refuseUnlessWritten", () => {
     // `recordedAt` satisfies `z.string().datetime({ offset: true })`, so `2026-06-02T14:00:00+03:00`
     // is a legal spelling of 11:00Z — *earlier* than a stored 12:00Z, though it sorts later as text.
     const conn = mockConnection(undefined, {
-      rows: [{ state: "succeeded", recorded_at: new Date("2026-06-02T12:00:00.000Z") }],
+      rows: [{ state: "succeeded", recorded_at: new Date("2026-06-02T12:00:00.000Z"), tenant_id: null }],
       rowCount: 1,
     });
     await expect(
@@ -190,7 +225,7 @@ describe("refuseUnlessWritten", () => {
 
   it("names an illegal transition when the stored row is older or equal", async () => {
     const conn = mockConnection(undefined, {
-      rows: [{ state: "reverted", recorded_at: d.recordedAt }],
+      rows: [{ state: "reverted", recorded_at: d.recordedAt, tenant_id: null }],
       rowCount: 1,
     });
     await expect(refuseUnlessWritten(conn, 0, d)).rejects.toThrow(/reverted/);
@@ -206,7 +241,7 @@ describe("refuseUnlessWritten", () => {
   it("asks for the state column by name and binds the execution id", async () => {
     const capture: Captured[] = [];
     const conn = mockConnection(capture, {
-      rows: [{ state: "queued", recorded_at: d.recordedAt }],
+      rows: [{ state: "queued", recorded_at: d.recordedAt, tenant_id: null }],
       rowCount: 1,
     });
     await expect(refuseUnlessWritten(conn, 0, d)).rejects.toThrow();
@@ -219,7 +254,57 @@ describe("refuseUnlessWritten", () => {
       "stale_observation",
       "illegal_transition",
       "row_vanished",
+      "wrong_scope",
     ]);
+  });
+
+  /**
+   * The scope is asked **first**, because a wrong scope makes the other two questions meaningless:
+   * the stored `recorded_at` and status belong to a row this write was never entitled to move, so
+   * naming either of those would report a real conflict with a row the caller cannot see.
+   */
+  it("names `wrong_scope` when a platform write found a tenant's row", async () => {
+    const conn = mockConnection(undefined, {
+      rows: [{ state: "succeeded", recorded_at: new Date("2026-06-02T13:00:00.000Z"), tenant_id: TENANT }],
+      rowCount: 1,
+    });
+    await expect(refuseUnlessWritten(conn, 0, d)).rejects.toMatchObject({
+      reason: "wrong_scope",
+    });
+  });
+
+  it("names `wrong_scope` when a tenant write found the platform's row", async () => {
+    const conn = mockConnection(undefined, {
+      rows: [{ state: "queued", recorded_at: d.recordedAt, tenant_id: null }],
+      rowCount: 1,
+    });
+    await expect(
+      refuseUnlessWritten(conn, 0, { ...d, tenantId: TENANT }),
+    ).rejects.toMatchObject({ reason: "wrong_scope" });
+  });
+
+  it("prefers `wrong_scope` over a stale observation on the same row", async () => {
+    // The stored row is both in another scope *and* newer. Reporting the staleness would describe
+    // a conflict with a row this write had no business touching.
+    const conn = mockConnection(undefined, {
+      rows: [{ state: "succeeded", recorded_at: new Date("2026-06-02T13:00:00.000Z"), tenant_id: TENANT }],
+      rowCount: 1,
+    });
+    await expect(refuseUnlessWritten(conn, 0, d)).rejects.toMatchObject({
+      reason: "wrong_scope",
+    });
+  });
+
+  it("reads tenant_id in the diagnosing statement, with no scope predicate on it", async () => {
+    const capture: Captured[] = [];
+    const conn = mockConnection(capture, {
+      rows: [{ state: "queued", recorded_at: d.recordedAt, tenant_id: null }],
+      rowCount: 1,
+    });
+    await expect(refuseUnlessWritten(conn, 0, d)).rejects.toThrow();
+    expect(capture[0]?.sql).toContain("tenant_id");
+    // The question is which scope holds the row, so the read itself names none.
+    expect(capture[0]?.sql).not.toMatch(/WHERE[\s\S]*tenant_id/);
   });
 
   it("carries the table and reason on the error, not only in its message", async () => {

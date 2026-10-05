@@ -310,6 +310,66 @@ describe("release", () => {
     await expect(store.release(releasedKillSwitch())).rejects.toThrow(KILL_SWITCH_ID);
   });
 
+  it("carries the strict scope predicate, never the inclusive one a read takes", async () => {
+    const capture: Captured[] = [];
+    await new PostgresKillSwitchStore(mockConnection(capture)).release(
+      releasedKillSwitch({ tenantId: TENANT }),
+    );
+    const sql = written(capture).sql;
+    expect(sql).toContain(`AND tenant_id = $${KILL_SWITCH_PARAM_COUNT + 1}`);
+    expect(sql).not.toContain("OR tenant_id IS NULL");
+    expect(written(capture).params?.[KILL_SWITCH_PARAM_COUNT]).toBe(TENANT);
+  });
+
+  it("asks for the platform scope as IS NULL, binding nothing extra", async () => {
+    const capture: Captured[] = [];
+    await new PostgresKillSwitchStore(mockConnection(capture)).release(releasedKillSwitch());
+    expect(written(capture).sql).toContain("WHERE kill_switch_id = $1 AND tenant_id IS NULL");
+    expect(written(capture).params).toHaveLength(KILL_SWITCH_PARAM_COUNT);
+  });
+
+  /**
+   * The predicate makes `UPDATE 0` mean three things where it used to mean one. Each is reached with
+   * the same row count and named differently, which is the whole of the increment on this path.
+   */
+  describe("a zero-row release is diagnosed, not guessed", () => {
+    function refusing(rows: readonly Record<string, unknown>[]) {
+      return mockConnection(undefined, (sql) =>
+        sql.includes("SELECT tenant_id FROM") ? { rows, rowCount: rows.length } : EMPTY,
+      );
+    }
+
+    it("names `row_absent` when nothing anywhere carries the id", async () => {
+      const err = await new PostgresKillSwitchStore(refusing([]))
+        .release(releasedKillSwitch())
+        .then(() => null, (e: unknown) => e);
+      expect((err as KillSwitchNotFoundError).reason).toBe("row_absent");
+    });
+
+    it("names `wrong_scope` when the switch belongs to a tenant and the write named the platform", async () => {
+      const err = await new PostgresKillSwitchStore(refusing([{ tenant_id: TENANT }]))
+        .release(releasedKillSwitch())
+        .then(() => null, (e: unknown) => e);
+      expect((err as KillSwitchNotFoundError).reason).toBe("wrong_scope");
+      expect((err as KillSwitchNotFoundError).scopeTenantId).toBeNull();
+      expect((err as KillSwitchNotFoundError).storedTenantId).toBe(TENANT);
+    });
+
+    it("names `guard_refused` — already released — when the row is in scope", async () => {
+      const err = await new PostgresKillSwitchStore(refusing([{ tenant_id: null }]))
+        .release(releasedKillSwitch())
+        .then(() => null, (e: unknown) => e);
+      expect((err as KillSwitchNotFoundError).reason).toBe("guard_refused");
+      expect((err as Error).message).toContain("triggered_active");
+    });
+
+    it("issues no diagnosing read when the release landed", async () => {
+      const capture: Captured[] = [];
+      await new PostgresKillSwitchStore(mockConnection(capture)).release(releasedKillSwitch());
+      expect(capture.filter((c) => c.sql.includes("SELECT tenant_id FROM"))).toHaveLength(0);
+    });
+  });
+
   it("resolves when one row was released", async () => {
     const store = new PostgresKillSwitchStore(mockConnection());
     await expect(store.release(releasedKillSwitch())).resolves.toBeUndefined();

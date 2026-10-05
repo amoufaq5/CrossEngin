@@ -765,3 +765,118 @@ describe("projectActivities — cancellation", () => {
     expect(acts[0]?.status).toBe("compensated");
   });
 });
+
+describe("projectTimers — a recurring timer re-armed on its own id", () => {
+  const armed = (seq: number, fireAt: string, rearm = false) =>
+    event({
+      kind: "timer_scheduled",
+      sequenceNumber: seq,
+      timerId: "wft_cron0001",
+      occurredAt: "2026-05-16T12:00:00.000Z",
+      payload: { timerName: "heartbeat", fireAt, timerKind: "cron_schedule", ...(rearm ? { rearm: true } : {}) },
+    });
+  const fired = (seq: number, at: string, nextFireAt: string) =>
+    event({
+      kind: "timer_fired",
+      sequenceNumber: seq,
+      timerId: "wft_cron0001",
+      occurredAt: at,
+      payload: { timerName: "heartbeat", nextFireAt },
+    });
+
+  it("merges a re-arm rather than replacing it, so fireCount survives", () => {
+    const [t] = projectTimers([
+      armed(1, "2026-05-16T13:00:00.000Z"),
+      fired(2, "2026-05-16T13:00:00.000Z", "2026-05-16T14:00:00.000Z"),
+      armed(3, "2026-05-16T14:00:00.000Z", true),
+      fired(4, "2026-05-16T14:00:00.000Z", "2026-05-16T15:00:00.000Z"),
+      armed(5, "2026-05-16T15:00:00.000Z", true),
+    ]);
+    expect(t?.status).toBe("scheduled");
+    expect(t?.fireCount).toBe(2);
+    expect(t?.fireAt).toBe("2026-05-16T15:00:00.000Z");
+  });
+
+  it("keeps firedAt on a re-arm, so a re-armed timer is not a fresh one", () => {
+    const [t] = projectTimers([
+      armed(1, "2026-05-16T13:00:00.000Z"),
+      fired(2, "2026-05-16T13:00:00.000Z", "2026-05-16T14:00:00.000Z"),
+      armed(3, "2026-05-16T14:00:00.000Z", true),
+    ]);
+    expect(t?.firedAt).toBe("2026-05-16T13:00:00.000Z");
+  });
+
+  it("clears nextFireAt on the re-arm, because the next occurrence is now fireAt", () => {
+    const [t] = projectTimers([
+      armed(1, "2026-05-16T13:00:00.000Z"),
+      fired(2, "2026-05-16T13:00:00.000Z", "2026-05-16T14:00:00.000Z"),
+      armed(3, "2026-05-16T14:00:00.000Z", true),
+    ]);
+    expect(t?.nextFireAt).toBeNull();
+  });
+
+  it("reads nextFireAt off the firing event", () => {
+    const [t] = projectTimers([
+      armed(1, "2026-05-16T13:00:00.000Z"),
+      fired(2, "2026-05-16T13:00:00.000Z", "2026-05-16T14:00:00.000Z"),
+    ]);
+    expect(t?.status).toBe("fired");
+    expect(t?.nextFireAt).toBe("2026-05-16T14:00:00.000Z");
+  });
+
+  it("is null when the fire names no next occurrence", () => {
+    const [t] = projectTimers([
+      armed(1, "2026-05-16T13:00:00.000Z"),
+      event({
+        kind: "timer_fired",
+        sequenceNumber: 2,
+        timerId: "wft_cron0001",
+        payload: { timerName: "heartbeat" },
+      }),
+    ]);
+    expect(t?.nextFireAt).toBeNull();
+  });
+
+  it("stays one timer however many times it recurs", () => {
+    const events = [armed(1, "2026-05-16T13:00:00.000Z")];
+    for (let i = 0; i < 10; i += 1) {
+      events.push(fired(2 + i * 2, "2026-05-16T13:00:00.000Z", "2026-05-16T14:00:00.000Z"));
+      events.push(armed(3 + i * 2, "2026-05-16T14:00:00.000Z", true));
+    }
+    const timers = projectTimers(events);
+    expect(timers).toHaveLength(1);
+    expect(timers[0]?.fireCount).toBe(10);
+  });
+
+  it("moves scheduledAt to the re-arm instant, keeping fireAt > scheduledAt", () => {
+    const [t] = projectTimers([
+      armed(1, "2026-05-16T13:00:00.000Z"),
+      fired(2, "2026-05-16T13:00:00.000Z", "2026-05-16T14:00:00.000Z"),
+      event({
+        kind: "timer_scheduled",
+        sequenceNumber: 3,
+        timerId: "wft_cron0001",
+        occurredAt: "2026-05-16T13:00:00.000Z",
+        payload: { timerName: "heartbeat", fireAt: "2026-05-16T14:00:00.000Z", rearm: true },
+      }),
+    ]);
+    expect(t?.scheduledAt).toBe("2026-05-16T13:00:00.000Z");
+    expect(Date.parse(t!.fireAt)).toBeGreaterThan(Date.parse(t!.scheduledAt));
+  });
+
+  it("a cancellation after a fire still reads as cancelled", () => {
+    const [t] = projectTimers([
+      armed(1, "2026-05-16T13:00:00.000Z"),
+      fired(2, "2026-05-16T13:00:00.000Z", "2026-05-16T14:00:00.000Z"),
+      armed(3, "2026-05-16T14:00:00.000Z", true),
+      event({
+        kind: "timer_cancelled",
+        sequenceNumber: 4,
+        timerId: "wft_cron0001",
+        payload: { timerName: "heartbeat" },
+      }),
+    ]);
+    expect(t?.status).toBe("cancelled");
+    expect(t?.fireCount).toBe(1);
+  });
+});

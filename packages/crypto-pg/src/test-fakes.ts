@@ -20,8 +20,27 @@ export class FakeRlsViolation extends Error {
  * set — including when the elevation is. That second rule is what makes the fake worth having:
  * holding the platform grant must buy no access to a tenant's keys, and a fake that let it through
  * would have reported the store correct while the live policy refused it.
+ *
+ * **And it models only a non-owner, which is how the write-side defect hid behind it.** A table's
+ * owner bypasses its policies, and connecting as the owner is an ordinary deployment — so every
+ * rule above is simply absent there, and the store's own predicate is the only thing left. With
+ * `owner: true` the policies are not applied and a statement reaches whatever row its own `WHERE`
+ * reaches, which is what a correct store must survive. Measured live on a fresh cluster, as the
+ * owner, before the predicates existed: a platform-scope `register` **replaced a tenant's public
+ * key**, and `revoke(<a tenant's key id>, null)` revoked a tenant's key. Both now refuse, and the
+ * owner-mode tests are what keeps that true offline.
  */
-export function fakeCryptoKeysPg(): PgConnection {
+export interface FakeCryptoKeysOptions {
+  /**
+   * Run as the table's owner: RLS is not applied at all. Both arms exist because this class of
+   * defect is invisible from either vantage alone — a non-owner's cross-scope write is refused by
+   * the policy whether the store carries a predicate or not.
+   */
+  readonly owner?: boolean;
+}
+
+export function fakeCryptoKeysPg(options: FakeCryptoKeysOptions = {}): PgConnection {
+  const owner = options.owner === true;
   const rows = new Map<string, Record<string, unknown>>();
 
   function paramIndex(sql: string, expr: string): number | null {
@@ -35,6 +54,7 @@ export function fakeCryptoKeysPg(): PgConnection {
 
     /** `WITH CHECK` for whichever of the three write policies could match this row. */
     function assertWritable(tenantId: string | null): void {
+      if (owner) return;
       if (tenantId === null) {
         if (!platformWrite) {
           throw new FakeRlsViolation(
@@ -82,15 +102,31 @@ export function fakeCryptoKeysPg(): PgConnection {
         const existing = rows.get(keyId);
         if (existing === undefined) {
           rows.set(keyId, incoming);
-        } else {
-          rows.set(keyId, {
-            ...existing,
-            public_key_base64: incoming.public_key_base64,
-            fingerprint_sha256: incoming.fingerprint_sha256,
-            key_version: incoming.key_version,
-            status: incoming.status,
-          });
+          return { rows: [], rowCount: 1 };
         }
+        // `ON CONFLICT (key_id) DO UPDATE … WHERE crypto_keys.tenant_id IS NOT DISTINCT FROM
+        // EXCLUDED.tenant_id`. A `DO UPDATE` whose `WHERE` is false matches no row — `INSERT 0 0`,
+        // which is byte-identical to a `DO NOTHING` and is the silence `assertScopedWriteLanded`
+        // turns into a named refusal. The guard is *required* to be present: a statement without it
+        // is the pre-fix store, and a fake that quietly applied it anyway would be the member of
+        // this class that hides the next one.
+        if (!/tenant_id IS NOT DISTINCT FROM EXCLUDED\.tenant_id/.test(sql)) {
+          throw new Error(
+            "this fake refuses an upsert whose DO UPDATE does not pin the scope: without " +
+              "`crypto_keys.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id` a platform " +
+              "registration replaces whichever scope's row holds that key_id",
+          );
+        }
+        if ((existing["tenant_id"] ?? null) !== ((incoming.tenant_id ?? null) as string | null)) {
+          return { rows: [], rowCount: 0 };
+        }
+        rows.set(keyId, {
+          ...existing,
+          public_key_base64: incoming.public_key_base64,
+          fingerprint_sha256: incoming.fingerprint_sha256,
+          key_version: incoming.key_version,
+          status: incoming.status,
+        });
         return { rows: [], rowCount: 1 };
       }
 
@@ -100,18 +136,27 @@ export function fakeCryptoKeysPg(): PgConnection {
         if (statusIdx === null || keyIdIdx === null) return { rows: [], rowCount: 0 };
         const keyId = p[keyIdIdx] as string;
         const row = rows.get(keyId);
+        if (row === undefined) return { rows: [], rowCount: 0 };
         // An UPDATE whose row no policy reaches matches zero rows; it does not raise. Only the
         // `WITH CHECK` on the row it would *write* raises, and the statement never changes
-        // `tenant_id`, so the two predicates are the same one here.
-        if (row === undefined || !writable(row, currentTenant, platformWrite)) {
+        // `tenant_id`, so the two predicates are the same one here. For the **owner** there is no
+        // policy at all, which is the whole point: what is left is the statement's own predicate.
+        if (!owner && !writable(row, currentTenant, platformWrite)) {
           return { rows: [], rowCount: 0 };
         }
+        if (!matchesStatementScope(sql, p, row)) return { rows: [], rowCount: 0 };
         row.status = p[statusIdx];
         return { rows: [], rowCount: 1 };
       }
 
       if (sql.includes("SELECT")) {
-        let visibleRows = [...rows.values()].filter((r) => visible(r, currentTenant));
+        // The owner sees every row, which is what makes the diagnosing re-read in
+        // `classifyScopedWriteRefusal` able to answer `wrong_scope` at all. A non-owner's same read
+        // is confined by the policy and answers `row_absent` — the truth from that vantage, and the
+        // reason this class is invisible from either role alone.
+        let visibleRows = owner
+          ? [...rows.values()]
+          : [...rows.values()].filter((r) => visible(r, currentTenant));
 
         const keyIdIdx = paramIndex(sql, "key_id");
         if (keyIdIdx !== null) {
@@ -195,4 +240,35 @@ function writable(
 ): boolean {
   const tenantId = (row["tenant_id"] ?? null) as string | null;
   return tenantId === null ? platformWrite : tenantId === currentTenant;
+}
+
+/**
+ * The `tenant_id` predicate a **statement** carries, applied independently of RLS.
+ *
+ * A write must carry one — `kernel-pg`'s strict `scopeFilter` — and a statement with none reaches
+ * every scope's row as the owner, which is the defect. So "no predicate" is an error here rather
+ * than a pass: a fake that silently ignored the column is how `fakeCertificationPg` hid this class
+ * (CLAUDE.md's own note), and a fake that treats its absence as "match anything" hides it the same
+ * way one level down.
+ */
+function matchesStatementScope(
+  sql: string,
+  p: readonly unknown[],
+  row: Record<string, unknown>,
+): boolean {
+  const tenantId = (row["tenant_id"] ?? null) as string | null;
+  const inclusive = sql.match(/\(\s*tenant_id\s*=\s*\$(\d+)\s+OR\s+tenant_id IS NULL\s*\)/);
+  if (inclusive !== null) {
+    throw new Error(
+      "this fake refuses the inclusive scope arm on a write: `tenant_id = $n OR tenant_id IS NULL` " +
+        "is a route from a tenant's session into the platform's row",
+    );
+  }
+  const strict = sql.match(/tenant_id\s*=\s*\$(\d+)/);
+  if (strict !== null) return tenantId === p[Number(strict[1]) - 1];
+  if (/tenant_id IS NULL/.test(sql)) return tenantId === null;
+  throw new Error(
+    "this fake refuses a write that carries no tenant_id predicate: as the table's owner it " +
+      "reaches whichever scope's row holds that id",
+  );
 }

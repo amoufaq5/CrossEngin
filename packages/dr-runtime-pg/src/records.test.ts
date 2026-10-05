@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { assertStatementIsScoped } from "./test-fakes.js";
 import {
   DrillRecordSchema,
   FailoverRecordSchema,
@@ -233,5 +234,45 @@ describe("readinessSnapshotRecordFrom", () => {
         snapshotId: "bad-id",
       }),
     ).toThrow();
+  });
+});
+
+/**
+ * The boundary ADR-0333 named, held at the one place a recorder fake can hold it.
+ */
+describe("the fake refuses an unscoped write", () => {
+  it("refuses an UPDATE that names no tenant_id", () => {
+    expect(() =>
+      assertStatementIsScoped(
+        "UPDATE meta.dr_failover_executions SET status = $1 WHERE execution_id = $2",
+      ),
+    ).toThrow(/refuses an unscoped write/);
+  });
+
+  it("refuses an upsert whose DO UPDATE does not pin the scope", () => {
+    expect(() =>
+      assertStatementIsScoped(
+        "INSERT INTO meta.dr_drill_executions (execution_id) VALUES ($1) " +
+          "ON CONFLICT (execution_id) DO UPDATE SET outcome = EXCLUDED.outcome",
+      ),
+    ).toThrow(/refuses an unscoped write/);
+  });
+
+  it("admits the real statement, which supplies the column and pins the scope", () => {
+    expect(() =>
+      assertStatementIsScoped(
+        "INSERT INTO meta.dr_drill_executions (execution_id, tenant_id) VALUES ($1, $2) " +
+          "ON CONFLICT (execution_id) DO UPDATE SET outcome = EXCLUDED.outcome " +
+          "WHERE dr_drill_executions.tenant_id IS NOT DISTINCT FROM EXCLUDED.tenant_id",
+      ),
+    ).not.toThrow();
+  });
+
+  it("admits the unscoped diagnosing read, which the refusal depends on", () => {
+    expect(() =>
+      assertStatementIsScoped(
+        "SELECT status AS state, recorded_at, tenant_id FROM meta.dr_failover_executions WHERE execution_id = $1",
+      ),
+    ).not.toThrow();
   });
 });

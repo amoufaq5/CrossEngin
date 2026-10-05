@@ -1,7 +1,3 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import { describe, expect, it } from "vitest";
 
 import {
@@ -45,6 +41,7 @@ import {
   type StatementTarget,
   type UnresolvedStatement,
 } from "./pg-column-coverage.js";
+import { readCatalogSource, scanWorkspaceSql } from "./workspace-sql-scan.js";
 
 /* ------------------------------------------------------------------ fixtures */
 
@@ -439,6 +436,49 @@ export class Store {
     expect(statements.map((s) => s.table)).toEqual(["widgets"]);
   });
 
+  it("collects every table its SQL names, including the reads a statement cannot be made of", () => {
+    // The census rule asks a wider question than the column rules: which tables does any SQL here
+    // *name*. A join and a non-bare column list are both silently skipped as statements, and both
+    // still name a table — `recipient-resolver.ts` reaches `meta.users` only this way.
+    const source = [
+      "const SCHEMA = \"meta\";",
+      "const q1 = `SELECT ${COLS} FROM ${SCHEMA}.alpha a JOIN ${SCHEMA}.beta b ON b.id = a.b_id`;",
+      "const q2 = `DELETE FROM ${SCHEMA}.gamma WHERE id = $1`;",
+      "const q3 = `TRUNCATE TABLE ${SCHEMA}.delta`;",
+    ].join("\n");
+    const { references, statements } = extractSqlStatements("f.ts", source);
+    expect(statements.filter((s) => s.kind === "select")).toEqual([]);
+    expect(references.map((r) => `${r.via}:${r.schema ?? "?"}.${r.table}`)).toEqual([
+      "from:meta.alpha",
+      "join:meta.beta",
+      "delete:meta.gamma",
+      "truncate:meta.delta",
+    ]);
+  });
+
+  it("keeps a table whose schema did not resolve, with a null schema", () => {
+    // `FROM ${this.schema}.access_review_evidence`, where `schema` is a destructured parameter
+    // default this scan does not follow. Discarding it reads a real reader as no reader at all.
+    const { references } = extractSqlStatements(
+      "f.ts",
+      "const q = `SELECT a, b FROM ${this.schema}.access_review_evidence WHERE x = $1`;",
+    );
+    expect(references).toEqual([
+      { file: "f.ts", line: 1, schema: null, table: "access_review_evidence", via: "from" },
+    ]);
+  });
+
+  it("does not invent a reference from a string that merely looks like a table name", () => {
+    // Deliberately not reading bindings: a prose error message spells `meta.users`, and a false
+    // reference would mean the census stops requiring a declaration for that table — the one
+    // direction in which a mistake here loosens the fence rather than tightening it.
+    const { references } = extractSqlStatements(
+      "f.ts",
+      'const MSG = "meta.users carries no tenant_id";\nconst T = "meta.widgets";',
+    );
+    expect(references).toEqual([]);
+  });
+
   it("names the original file's line after comments and folds", () => {
     const source = [
       "// a comment",
@@ -564,115 +604,9 @@ describe("auditPlatformWriteArms", () => {
 
 /* ------------------------------------------------------------ the real workspace */
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
-const CATALOG_PATH = "packages/kernel/src/bootstrap/meta-schema.ts";
-
-function sourceFilesUnder(dir: string, out: string[]): void {
-  for (const entry of readdirSync(dir)) {
-    const absolute = join(dir, entry);
-    if (statSync(absolute).isDirectory()) sourceFilesUnder(absolute, out);
-    else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) out.push(absolute);
-  }
-}
-
-/** The workspace roots `pnpm-workspace.yaml` declares, read rather than hardcoded. */
-function workspaceRoots(): readonly string[] {
-  const yaml = readFileSync(join(REPO_ROOT, "pnpm-workspace.yaml"), "utf8");
-  const globs = [...yaml.matchAll(/^\s*-\s*['"]?([^'"\n]+?)['"]?\s*$/gm)].map((m) => m[1] ?? "");
-  const roots: string[] = [];
-  for (const glob of globs) {
-    expect(glob.endsWith("/*"), `unhandled workspace glob '${glob}'`).toBe(true);
-    const root = glob.slice(0, -2);
-    if (existsSync(join(REPO_ROOT, root))) roots.push(root);
-  }
-  return roots;
-}
-
-/**
- * Bindings merged across one package's `src/`, used only as a fallback for names a module imports.
- *
- * Per package rather than per workspace, because `TABLE` means something different in every store
- * file and merging the lot would make it ambiguous everywhere — which would turn this scan into one
- * that finds nothing while passing.
- */
-function mergeBindings(all: readonly ModuleBindings[]): ModuleBindings {
-  const strings = new Map<string, string>();
-  const arrays = new Map<string, readonly string[]>();
-  const ambiguous = new Set<string>();
-  for (const bindings of all) {
-    for (const [key, value] of bindings.strings) {
-      const prior = strings.get(key);
-      if (prior !== undefined && prior !== value) ambiguous.add(key);
-      else strings.set(key, value);
-    }
-    for (const [key, value] of bindings.arrays) {
-      const prior = arrays.get(key);
-      if (prior !== undefined && prior.join("\u0000") !== value.join("\u0000")) ambiguous.add(key);
-      else arrays.set(key, value);
-    }
-    for (const key of bindings.ambiguous) ambiguous.add(key);
-  }
-  return { strings, arrays, ambiguous };
-}
-
-interface WorkspaceScan {
-  readonly files: number;
-  readonly statements: readonly SqlStatement[];
-  readonly unresolved: readonly UnresolvedStatement[];
-  readonly targets: readonly StatementTarget[];
-}
-
-function scanWorkspace(): WorkspaceScan {
-  const exempt = new Set(PG_SCAN_EXEMPT_PACKAGE_DIRS);
-  const statements: SqlStatement[] = [];
-  const unresolved: UnresolvedStatement[] = [];
-  const targets: StatementTarget[] = [];
-  let files = 0;
-
-  for (const root of workspaceRoots()) {
-    for (const entry of readdirSync(join(REPO_ROOT, root))) {
-      const dir = `${root}/${entry}`;
-      if (exempt.has(dir)) continue;
-      const src = join(REPO_ROOT, dir, "src");
-      if (!existsSync(src) || !statSync(src).isDirectory()) continue;
-
-      const absolute: string[] = [];
-      sourceFilesUnder(src, absolute);
-      const texts = new Map<string, string>();
-      for (const file of absolute) {
-        const relative = file.slice(REPO_ROOT.length + 1);
-        try {
-          texts.set(relative, readFileSync(file, "utf8"));
-        } catch (error) {
-          unresolved.push(
-            UnresolvedStatementSchema.parse({
-              file: relative,
-              line: 0,
-              kind: "unreadable_file",
-              snippet: `could not be read as text: ${String(error)}`,
-            }),
-          );
-        }
-      }
-      const fallback = mergeBindings(
-        [...texts.values()].map((text) => collectModuleBindings(normalizeSource(text))),
-      );
-      for (const [relative, text] of texts) {
-        files += 1;
-        const extracted = extractSqlStatements(relative, text, fallback);
-        statements.push(...extracted.statements);
-        unresolved.push(...extracted.unresolved);
-        targets.push(...extracted.targets);
-      }
-    }
-  }
-
-  return { files, statements, unresolved, targets };
-}
-
 describe("the real workspace", () => {
-  const catalog = parseCatalogSource(readFileSync(join(REPO_ROOT, CATALOG_PATH), "utf8"));
-  const scan = scanWorkspace();
+  const catalog = parseCatalogSource(readCatalogSource());
+  const scan = scanWorkspaceSql();
   const metaStatements = scan.statements.filter((s) => s.schema === "meta");
 
   it("read the catalog, rather than silently reading nothing", () => {

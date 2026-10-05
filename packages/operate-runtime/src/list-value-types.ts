@@ -16,22 +16,40 @@ import type {
  * a new member falling into a text default and sorting wrong in production.
  *
  * `numeric` is given to exactly the two kinds whose Postgres type is numeric — `integer`
- * (`INTEGER`) and `decimal` (`NUMERIC(p, s)`). Everything else is `text`, and four of those are
- * worth the sentence because text is a *measured* answer rather than a shrug:
+ * (`INTEGER`) and `decimal` (`NUMERIC(p, s)`). `timestamptz` is given to exactly one,
+ * `datetime`. Of the rest, three are `text` as a *measured* answer rather than a shrug:
  *
  * - **`boolean`** — JSON renders it `true`/`false`, and `'false' < 'true'` lexicographically is
  *   the same order as `false < true` as booleans. A cast would buy nothing.
- * - **`date`** — a `YYYY-MM-DD` numeral is fixed-width and zero-padded, so byte order *is*
- *   chronological order.
- * - **`time`** — likewise for `HH:MM:SS`.
- * - **`datetime`** — ISO-8601 instants sort correctly **only while every writer spells them the
- *   same way**. They do not have to: `2026-01-31T10:00:00+09:00` and `2026-01-31T01:00:00Z` are
- *   one instant with two spellings that sort three hours apart, and `validateBody` has no rule for
- *   a `datetime` field at all, so either can be stored. This is a known hole, left here rather
- *   than closed with a third `ListValueType`, because fixing it is a question about the *wire
- *   form* of a `datetime` (which spelling is canonical, and what the column store's `isoInstant`
- *   should agree with) and not about ordering — exactly the shape of the `decimal` question
- *   ADR-0332 had to answer before this one could be. See that increment's follow-ups.
+ * - **`date`** — the canonical wire form is `YYYY-MM-DD`, fixed-width and zero-padded, so byte
+ *   order *is* chronological order.
+ * - **`time`** — likewise: the `HH:MM:SS` head is fixed-width, and two fractional parts with no
+ *   trailing zeros compare lexicographically in the order of their values.
+ *
+ * **`datetime` is `timestamptz`, and the reason is not the canonical form.** That form —
+ * `YYYY-MM-DDTHH:mm:ss.sssZ`, fixed width, always UTC — makes byte order chronological by
+ * construction, and `withDatetimeWireType` plus `validateBody` now mean nothing else can be
+ * written. The cast is for the rows written **before** that was true, whose spellings are not all
+ * canonical, and the two stores then place one of them differently:
+ * `2026-01-31T19:00:00+09:00` is the same instant as `2026-01-31T10:00:00.000Z` and sorts nine
+ * hours away from it as text, while `ColumnMappedEntityStore`'s real `TIMESTAMPTZ` column orders it
+ * by its instant. Measured live over five legacy rows, the JSONB store's text order and the instant
+ * order differ, and since the keyset cursor is built from the ordering that is the skip-and-repeat
+ * failure ADR-0331 established rather than a cosmetic reorder.
+ *
+ * What it is **not** is a cursor-versus-stored-text divergence, which was the first guess and is
+ * wrong: both SQL stores and the in-memory one build `nextCursor` from the **raw row** inside
+ * `listPage`, below this decorator, so the cursor carries the stored spelling and the comparison is
+ * like-for-like. Verified live — a one-row-per-page walk over five mixed-spelling rows issued
+ * cursors reading `2026-01-31T05:00:00-05:00` and `2026-01-31T10:00:00Z`, and visited all five
+ * exactly once.
+ *
+ * `date` and `time` keep `text` on the same test read the other way: a cast is warranted where a
+ * plausible stored spelling orders differently from its value, and for those two every form
+ * anything ever wrote is already the canonical one — `YYYY-MM-DD` from every server writer and
+ * every date input, `HH:MM:SS` from a `TIME` column — so there is nothing for a cast to reorder.
+ * Their divergent spellings (`2026-1-5`, `10:00`) are a 422 now and were never produced by a
+ * writer. One cast for the kind where the divergence is the normal case, not three for symmetry.
  *
  * The remaining kinds are text by nature (`text`, `long_text`, `email`, `phone`, `url`, `enum`,
  * `country_code`, `language_code`, `timezone`), opaque identifiers nobody orders *by value*
@@ -52,7 +70,7 @@ export const FIELD_LIST_VALUE_TYPES: {
   boolean: "text",
   date: "text",
   time: "text",
-  datetime: "text",
+  datetime: "timestamptz",
   duration: "text",
   uuid: "text",
   enum: "text",

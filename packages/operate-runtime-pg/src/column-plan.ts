@@ -38,6 +38,54 @@ export interface EntityTablePlan {
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 
+/**
+ * The SQL types this store has no wire form for, and the reason — one entry, `INTERVAL`, which a
+ * manifest `duration` field compiles to.
+ *
+ * ## The decision: `duration` is refused, and it is refused *here*
+ *
+ * ADR-0331 and ADR-0332 both left `duration` open and nothing has reached it, because nothing in
+ * the catalog, the 145 `META_TABLES` or the seven packs declares one. The refusal used to fire at
+ * the first **read** (`UndecidedWireTypeError` out of `readColumn`), which is the trap: a manifest
+ * declaring a `duration` provisioned a table, served every other field, and failed on the first
+ * page of the one entity that had it. Refusing at **plan** time makes it a boot failure naming the
+ * entity and the field, which is where a configuration error belongs.
+ *
+ * ## Why not pick a wire form instead
+ *
+ * The candidates are an ISO-8601 duration string, an integer count of seconds, or refusal. All
+ * three were measured on PostgreSQL 16.13 and neither of the first two works:
+ *
+ * - **An integer count of seconds is lossy by construction.** `interval '1 mon'` has no fixed
+ *   second count — it is a *calendar* offset, not a quantity — so converting it to seconds picks
+ *   a month length the value does not carry.
+ * - **An ISO-8601 string is lossless but is not an ordering key.** Its text order is not its
+ *   duration order (`PT2H` sorts before `PT10M`), so it would need the same guarded cast a
+ *   `decimal` gets — and `interval_in` is **STABLE**, not IMMUTABLE (`pg_proc.provolatile = 's'`),
+ *   so `CREATE INDEX … ((document ->> 'f')::interval)` is **refused** and the parse depends on the
+ *   session's `IntervalStyle`. Two replicas with different `IntervalStyle` would order the same
+ *   rows differently, which is the disagreement this whole seam exists to end.
+ * - **`interval` is not even a total order on the values.** `interval 'P1M' = interval 'P30D'` is
+ *   **true** (measured) while the two wire strings differ, so a sort cannot distinguish two values
+ *   a round trip must keep distinct — and the output spelling is a session GUC as well, so
+ *   `(interval)::text` is `P1Y2M3DT4H5M6.5S` under `iso_8601` and `1 year 2 mons …` under
+ *   `postgres`. A wire form would therefore need a *second* renderer in JS that agrees with
+ *   Postgres's parser, for a field nobody has declared — ADR-0332's two-spellings defect, invented
+ *   on purpose.
+ * - Negative durations have no round-tripping ISO spelling either: `interval '-PT1H'` **raises**.
+ *
+ * ## What would unblock it
+ *
+ * Not a wire form for `INTERVAL` — a different *field type*. A `duration` declared with a unit
+ * (`{kind: "duration", unit: "seconds" | "milliseconds"}`) compiles to `BIGINT`, which is a scalar,
+ * is a total order, is lossless for its unit, and needs no new `ListValueType` at all because
+ * `numeric` already covers it. That is a kernel change to `FieldType`, not a store change, and it
+ * is the shape to add when somebody actually wants one.
+ */
+const UNDECIDED_SQL_TYPES: ReadonlyMap<string, string> = new Map([
+  ["INTERVAL", "a 'duration' field has no decided wire type"],
+]);
+
 function mappingForField(field: Field): ColumnMapping {
   const classification = field.classification ?? null;
   const isReference = field.type.kind === "reference";
@@ -76,12 +124,42 @@ export function columnPlanForEntity(
   if (!SCHEMA_RE.test(opts.schema)) {
     throw new Error(`invalid schema name: ${JSON.stringify(opts.schema)}`);
   }
+  const columns = resolvedFields(entity, opts.traits ?? []).map(mappingForField);
+  for (const column of columns) {
+    // At plan time, not at the first read: see `UNDECIDED_SQL_TYPES`. A manifest that cannot be
+    // served is a configuration error, and the one thing worse than refusing it is provisioning a
+    // table for it and failing on somebody's first page.
+    const base = column.sqlType.endsWith("[]") ? column.sqlType.slice(0, -2) : column.sqlType;
+    const reason = UNDECIDED_SQL_TYPES.get(base);
+    if (reason !== undefined) {
+      throw new UndecidedColumnTypeError(entity.name, column.field, base, reason);
+    }
+  }
   return {
     entity: entity.name,
     schema: opts.schema,
     table: toTableName(entity.name),
-    columns: resolvedFields(entity, opts.traits ?? []).map(mappingForField),
+    columns,
   };
+}
+
+/**
+ * Thrown when an entity declares a field whose Postgres type this store has no wire form for.
+ *
+ * Carries the entity as well as the field, because the plan is built per entity and an operator
+ * reading a boot failure needs to know which entity to edit, not only which field name — a name
+ * that may well be declared on several.
+ */
+export class UndecidedColumnTypeError extends Error {
+  constructor(
+    readonly entity: string,
+    readonly field: string,
+    readonly sqlType: string,
+    readonly reason: string,
+  ) {
+    super(`${entity}.${field}: cannot plan a ${sqlType} column — ${reason}`);
+    this.name = "UndecidedColumnTypeError";
+  }
 }
 
 /** Builds a `field → mapping` lookup for one plan (used to map records ↔ rows). */

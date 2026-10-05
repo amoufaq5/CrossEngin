@@ -107,6 +107,18 @@ export interface ServeOptions {
    * inline. Only meaningful with `--workflow-workers`, and refused without it — see the refusal.
    */
   readonly workflowDeferActivities: boolean;
+  /**
+   * Enforce `meta.tenants.status` on the request path (ADR-0334): a `suspended` / `archived` /
+   * `pending_deletion` tenant is read-only and a `deleted` one is refused outright.
+   *
+   * Opt-in, because the gate refuses a credential whose tenant has no `meta.tenants` row and
+   * `--api-key 'key:role:tenant'` specs name arbitrary UUIDs that nothing requires to exist. A boot
+   * survey names those tenants before the first request rather than leaving an operator to infer it
+   * from a 403.
+   */
+  readonly tenantStatusGate: boolean;
+  /** How long a resolved tenant status is cached (ms). Default 30s. */
+  readonly tenantStatusTtlMs: number | null;
   /** Path to a marketplace pack-catalog JSON ({packs:[...]}) — enables the /v1/admin/packs routes (needs pg). */
   readonly packCatalogFile: string | null;
   /** Enable the third-party authoring routes (/v1/authoring/packs — submit/review/publish pack versions). Needs pg. */
@@ -348,6 +360,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let workflowWorkers = false;
   let workflowWorkerConfig: string | null = null;
   let workflowDeferActivities = false;
+  let tenantStatusGate = false;
+  let tenantStatusTtlMs: number | null = null;
   const jobInvokeActionRoles: string[] = [];
   let packCatalogFile: string | null = null;
   let marketplaceAuthoring = false;
@@ -585,6 +599,20 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--workflow-defer-activities") {
       workflowDeferActivities = true;
+    } else if (arg === "--tenant-status-gate") {
+      tenantStatusGate = true;
+    } else if (arg === "--tenant-status-ttl-ms" || arg.startsWith("--tenant-status-ttl-ms=")) {
+      const raw = takeValue(arg, next, "--tenant-status-ttl-ms");
+      const n = Number(raw);
+      // A floor of a second and a ceiling of five minutes. The floor is because the gate runs on
+      // every request and a sub-second TTL turns it into a per-request query; the ceiling is because
+      // the value is how long a `pending_deletion` tenant goes on accepting writes after the state
+      // changed, and a gate that lags by an hour is not enforcing much.
+      if (!Number.isInteger(n) || n < 1000 || n > 300_000) {
+        throw new CliUsageError(`invalid --tenant-status-ttl-ms: ${raw} (1000..300000)`);
+      }
+      tenantStatusTtlMs = n;
+      i += consumed();
     } else if (arg === "--job-invoke-action-role" || arg.startsWith("--job-invoke-action-role=")) {
       jobInvokeActionRoles.push(takeValue(arg, next, "--job-invoke-action-role"));
       i += consumed();
@@ -1182,6 +1210,23 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         " at its first activity and nothing reports it.",
     );
   }
+  // The gate reads `meta.tenants`, which the memory store does not have — and unlike a scheduler
+  // that would merely go quiet, a gate whose directory throws refuses *every* request with a 503.
+  if (tenantStatusGate && store === "memory") {
+    throw new CliUsageError(
+      "--tenant-status-gate requires a Postgres store (--store pg or pg-columns): the gate reads" +
+        " meta.tenants, which the memory store has no registry for, so every request would be" +
+        " refused 503 rather than gated.",
+    );
+  }
+  // A TTL for a gate that is not mounted is the same silence as `--workflow-worker-config` without
+  // workers: read, validated, ignored, and the operator believes they tuned something.
+  if (tenantStatusTtlMs !== null && !tenantStatusGate) {
+    throw new CliUsageError(
+      "--tenant-status-ttl-ms has no effect without --tenant-status-gate: it tunes how long the" +
+        " gate caches a tenant's status, and no gate is mounted.",
+    );
+  }
   for (const spec of jobInvokeActionRoles) {
     const idx = spec.indexOf(":");
     if (idx <= 0 || idx === spec.length - 1) {
@@ -1272,6 +1317,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     workflowWorkers,
     workflowWorkerConfig,
     workflowDeferActivities,
+    tenantStatusGate,
+    tenantStatusTtlMs,
     jobInvokeActionRoles,
     packCatalogFile,
     marketplaceAuthoring,
@@ -1667,6 +1714,17 @@ Options:
   --workflow-defer-activities  Leave a scheduled activity at rest for the activity worker instead
                        of running its handler inline. REQUIRES --workflow-workers: with no worker
                        claiming, every instance stalls at its first activity and nothing says so
+  --tenant-status-gate  Enforce meta.tenants.status on EVERY request: a suspended, archived or
+                       pending_deletion tenant is read-only and a deleted one is refused outright.
+                       Without it the status is a column nothing on the request path reads, so a
+                       tenant whose Article 17 erasure is queued goes on accepting writes into data
+                       about to be destroyed. /v1/platform routes are exempt — they act on the
+                       deployment, not on the caller's tenant. Opt-in: a credential whose tenant has
+                       no meta.tenants row is refused 403, and a boot survey names those tenants
+                       before the first request. Needs --store pg|pg-columns
+  --tenant-status-ttl-ms <ms>  How long a resolved tenant status is cached (1000..300000, default
+                       30000). This is how long a state change takes to bite; the floor keeps the
+                       gate off the per-request query path. With --tenant-status-gate
   --pack-catalog <file>  Marketplace pack-catalog JSON ({packs:[...]}) — enables the admin pack
                        routes GET /v1/admin/packs, POST /v1/admin/packs/install,
                        POST /v1/admin/packs/{id}/uninstall (needs --store pg|pg-columns)

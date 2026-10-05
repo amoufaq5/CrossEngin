@@ -15,12 +15,36 @@ export interface ClaimedJob {
   readonly claimExpiresAt: string;
 }
 
+/**
+ * Which runs this worker is able to execute, so it claims nothing else.
+ *
+ * **Absent and empty mean different things, and that is the whole point.** Absent is "no filter" —
+ * every due run, the behaviour every existing caller has. Present means the caller has declared what
+ * it serves, and an *empty* declaration therefore claims **nothing** rather than everything: a
+ * worker with no handlers must not take work it will fail. A spelling like `($n IS NULL OR …)` would
+ * make the empty case unfiltered, which is the fail-open direction and the reason this is one
+ * optional object rather than two optional arrays.
+ *
+ * `jobIds` and `jobKinds` are OR'd: a run qualifies if its `job_id` is named or its `job_kind` is.
+ */
+export interface JobClaimScope {
+  readonly jobIds?: readonly string[];
+  readonly jobKinds?: readonly string[];
+}
+
 export interface ClaimDueJobsOptions {
   readonly workerId: string;
   readonly now: string;
   readonly limit?: number;
   readonly leaseMs?: number;
   readonly schema?: string;
+  /**
+   * The handlers this worker holds. Omit for the unfiltered claim; supply it and a run whose job
+   * nothing here can execute is never claimed — which is what keeps a partially-configured fleet
+   * from finalizing another replica's work `failed` with `handler_not_found`, and what keeps a
+   * process with no handlers from a claim/release hot loop.
+   */
+  readonly serves?: JobClaimScope;
 }
 
 interface ClaimRow {
@@ -66,6 +90,23 @@ export async function claimDueJobs(
   if (!Number.isInteger(leaseMs) || leaseMs < 1) throw new Error(`invalid leaseMs: ${String(leaseMs)}`);
   const claimExpiresAt = new Date(new Date(options.now).getTime() + leaseMs).toISOString();
 
+  // The served predicate goes **inside** the `due` CTE, beside the `LIMIT`. Filtering the claim's
+  // output instead would let a head-of-queue run this worker cannot execute consume one of the
+  // `LIMIT` slots — so a backlog of unserved runs would starve the served ones behind it while
+  // every poll honestly reported claiming nothing.
+  const params: unknown[] = [options.now, limit, options.workerId, claimExpiresAt];
+  let servedPredicate = "";
+  if (options.serves !== undefined) {
+    const clauses: string[] = [];
+    params.push(options.serves.jobIds ?? []);
+    clauses.push(`job_id = ANY($${params.length.toString()}::text[])`);
+    params.push(options.serves.jobKinds ?? []);
+    clauses.push(`job_kind = ANY($${params.length.toString()}::text[])`);
+    // `= ANY('{}')` is false, so two empty arrays claim nothing — the fail-closed answer for a
+    // worker that declared it serves nothing.
+    servedPredicate = `\n          AND (${clauses.join(" OR ")})`;
+  }
+
   const result = await conn.query<ClaimRow>(
     `WITH due AS (
        SELECT id
@@ -73,7 +114,7 @@ export async function claimDueJobs(
         WHERE status = 'pending'
           AND started_at <= $1::timestamptz
           AND cancel_requested_at IS NULL
-          AND (claimed_by IS NULL OR claim_expires_at IS NULL OR claim_expires_at < $1::timestamptz)
+          AND (claimed_by IS NULL OR claim_expires_at IS NULL OR claim_expires_at < $1::timestamptz)${servedPredicate}
         ORDER BY started_at ASC
         LIMIT $2
         FOR UPDATE SKIP LOCKED
@@ -83,7 +124,7 @@ export async function claimDueJobs(
        FROM due
       WHERE j.id = due.id
      RETURNING j.run_id, j.tenant_id, j.job_id, j.job_kind, j.attempts, j.claim_expires_at`,
-    [options.now, limit, options.workerId, claimExpiresAt],
+    params,
   );
 
   return result.rows.map((r) => ({
@@ -94,6 +135,120 @@ export async function claimDueJobs(
     attempts: int(r.attempts, 1),
     claimExpiresAt: str(r.claim_expires_at),
   }));
+}
+
+/**
+ * Whether this connection can see the job queue at all.
+ *
+ * `meta.job_runs`, `meta.dead_letter_jobs` and `meta.job_costs` each carry exactly one `ALL`-scope
+ * tenant-isolation policy and **no platform arm**, while the worker fleet is deliberately
+ * cross-tenant — one fleet serves every tenant, with `tenant_id` riding back per row. Those two
+ * facts only compose when the connection's role bypasses RLS, which for an ordinary deployment means
+ * being the table's owner. As a non-owner with no tenant context, `claimDueJobs` returns **0 rows**
+ * and `executeJobRun` answers `not_claimable` — verified live — and neither is an error: an empty
+ * claim is what an empty queue looks like, and `not_claimable` is what an already-finalized run
+ * looks like. So a fleet that will never execute anything reads exactly like a fleet with nothing to
+ * do.
+ */
+export const JOB_QUEUE_VISIBILITY = [
+  /** The role bypasses RLS on this table (its owner, or `BYPASSRLS`): the claim sees every tenant. */
+  "visible",
+  /** RLS confines this role, so an unscoped cross-tenant claim will match nothing, silently. */
+  "confined_by_rls",
+  /** RLS is not enabled on the table — unexpected for a `tenant_id`-bearing table, and reported. */
+  "unguarded",
+  /** The catalog had no row for the table: it does not exist in this schema. */
+  "absent",
+] as const;
+export type JobQueueVisibility = (typeof JOB_QUEUE_VISIBILITY)[number];
+
+export interface JobQueueVisibilityReport {
+  readonly visibility: JobQueueVisibility;
+  readonly role: string;
+  readonly isOwner: boolean;
+  readonly bypassesRls: boolean;
+  readonly detail: string;
+}
+
+/**
+ * Asks the catalog — rather than counting rows — whether this connection's role can serve the queue.
+ *
+ * Counting is the wrong question and that is the point: zero visible runs and zero existing runs are
+ * the same observation, which is the ambiguity that let this go unnoticed. Ownership, `rolbypassrls`
+ * and `relrowsecurity` are facts Postgres will state, so they are *asked for* (ADR-0330's rule) and
+ * the answer is deterministic on an empty database and on a full one alike.
+ *
+ * Intended for the boot path, beside the supervisor's own refusals: a worker fleet that cannot see
+ * its queue should say so once, loudly, instead of polling in silence forever.
+ */
+export async function probeJobQueueVisibility(
+  conn: PgConnection,
+  options: { readonly schema?: string; readonly table?: string } = {},
+): Promise<JobQueueVisibilityReport> {
+  const schema = options.schema ?? DEFAULT_SCHEMA;
+  if (!SCHEMA_RE.test(schema)) throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
+  const table = options.table ?? "job_runs";
+  if (!SCHEMA_RE.test(table)) throw new Error(`invalid table identifier: ${JSON.stringify(table)}`);
+
+  const result = await conn.query<{
+    role: unknown;
+    bypasses_rls: unknown;
+    is_owner: unknown;
+    rls_enabled: unknown;
+  }>(
+    `SELECT current_user AS role,
+            COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false) AS bypasses_rls,
+            pg_catalog.pg_get_userbyid(c.relowner) = current_user AS is_owner,
+            c.relrowsecurity AS rls_enabled
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = $1 AND c.relname = $2`,
+    [schema, table],
+  );
+  const row = result.rows[0];
+  if (row === undefined) {
+    return {
+      visibility: "absent",
+      role: "",
+      isOwner: false,
+      bypassesRls: false,
+      detail: `${schema}.${table} does not exist`,
+    };
+  }
+  const role = str(row.role);
+  const isOwner = row.is_owner === true;
+  const bypassesRls = row.bypasses_rls === true;
+  if (row.rls_enabled !== true) {
+    return {
+      visibility: "unguarded",
+      role,
+      isOwner,
+      bypassesRls,
+      detail: `row-level security is disabled on ${schema}.${table}, so nothing confines a tenant's rows`,
+    };
+  }
+  if (isOwner || bypassesRls) {
+    return {
+      visibility: "visible",
+      role,
+      isOwner,
+      bypassesRls,
+      detail:
+        `'${role}' ${isOwner ? "owns" : "bypasses RLS on"} ${schema}.${table}, so a cross-tenant ` +
+        "claim sees every tenant's runs",
+    };
+  }
+  return {
+    visibility: "confined_by_rls",
+    role,
+    isOwner,
+    bypassesRls,
+    detail:
+      `'${role}' neither owns nor bypasses RLS on ${schema}.${table}, and the table has only a ` +
+      "tenant-isolation policy — so a cross-tenant claim with no app.current_tenant_id set matches " +
+      "nothing and every poll reports an empty queue. Connect as the table's owner, or grant the " +
+      "role BYPASSRLS",
+  };
 }
 
 /** Hands a claimed-but-unexecuted job back for immediate re-claim (scoped to the owning worker). */

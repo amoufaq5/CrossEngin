@@ -1,4 +1,4 @@
-import type { WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
+import type { TimerDefinition, WorkflowDefinition, WorkflowEvent } from "@crossengin/workflow-engine";
 import { WorkflowEventSchema, isHistoryDense } from "@crossengin/workflow-engine";
 import { describe, expect, it } from "vitest";
 
@@ -35,6 +35,35 @@ import {
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-000000000099";
+
+/**
+ * A declared `relative_after` timer. Every fixture here needs one now: the engine schedules a timer
+ * from its **declaration** rather than from the action's parameters, so a `schedule_timer` naming an
+ * undeclared timer is a refusal — and these fixtures were already invalid against
+ * `WorkflowDefinitionSchema`, whose `superRefine` has always refused a `timer_fired` trigger naming
+ * an undeclared timer. They were never parsed, so nothing noticed.
+ */
+function rel(name: string, relativeSeconds: number): TimerDefinition {
+  return {
+    name,
+    kind: "relative_after",
+    relativeSeconds,
+    absoluteTimestampVariable: null,
+    cronExpression: null,
+    timezone: "UTC",
+  };
+}
+
+function cron(name: string, cronExpression: string, timezone = "UTC"): TimerDefinition {
+  return {
+    name,
+    kind: "cron_schedule",
+    relativeSeconds: null,
+    absoluteTimestampVariable: null,
+    cronExpression,
+    timezone,
+  };
+}
 
 function definitionFixture(
   overrides: Partial<WorkflowDefinition> = {},
@@ -92,7 +121,7 @@ function definitionFixture(
       },
     ],
     variables: [],
-    timers: [],
+    timers: [rel("deadline", 60)],
     signals: [],
     initialState: "draft",
     compensationStrategy: "no_compensation",
@@ -850,7 +879,7 @@ describe("tickTimers", () => {
           onEntryActions: [
             {
               kind: "schedule_timer",
-              parameters: { timerName: "deadline", relativeSeconds: 60 },
+              parameters: { timerName: "deadline" },
             },
           ],
           onExitActions: [],
@@ -879,6 +908,7 @@ describe("tickTimers", () => {
   it("does not fire a timer whose fireAt is in the future", async () => {
     const def: WorkflowDefinition = {
       ...definitionFixture(),
+      timers: [rel("deadline", 3_600)],
       states: [
         { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
         {
@@ -888,7 +918,7 @@ describe("tickTimers", () => {
           onEntryActions: [
             {
               kind: "schedule_timer",
-              parameters: { timerName: "deadline", relativeSeconds: 3_600 },
+              parameters: { timerName: "deadline" },
             },
           ],
           onExitActions: [],
@@ -911,13 +941,14 @@ describe("fireDueTimersForInstance (distributed firing)", () => {
   function timerDef(relativeSeconds: number): WorkflowDefinition {
     return {
       ...definitionFixture(),
+      timers: [rel("deadline", relativeSeconds)],
       states: [
         { name: "draft", kind: "initial", label: "Draft", onEntryActions: [], onExitActions: [], slaSeconds: null },
         {
           name: "awaiting_approval",
           kind: "waiting",
           label: "Awaiting",
-          onEntryActions: [{ kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds } }],
+          onEntryActions: [{ kind: "schedule_timer", parameters: { timerName: "deadline" } }],
           onExitActions: [],
           slaSeconds: null,
         },
@@ -1828,10 +1859,11 @@ function cancelTimerDef(cancelParams: Record<string, unknown> = { timerName: "lo
     id: "wfd_cancel01",
     definitionKey: "cancel.timer",
     initialState: "armed",
+    timers: [rel("short_deadline", 60), rel("long_deadline", 3_600), rel("never_armed", 60)],
     states: [
       st("armed", "initial", [
-        { kind: "schedule_timer", parameters: { timerName: "short_deadline", relativeSeconds: 60 } },
-        { kind: "schedule_timer", parameters: { timerName: "long_deadline", relativeSeconds: 3600 } },
+        { kind: "schedule_timer", parameters: { timerName: "short_deadline" } },
+        { kind: "schedule_timer", parameters: { timerName: "long_deadline" } },
       ]),
       st("settled", "terminal_success"),
     ],
@@ -2444,6 +2476,8 @@ describe("WorkflowActionError", () => {
       "unresolved_correlation_key",
       "child_depth_exceeded",
       "signal_depth_exceeded",
+      "undeclared_timer",
+      "unschedulable_timer",
     ]);
   });
 });
@@ -2459,6 +2493,7 @@ describe("cancelInstance — the guarantee", () => {
     return {
       ...definitionFixture(),
       compensationStrategy: "immediate_reverse_order",
+      timers: [rel("deadline", 600)],
       states: [
         {
           name: "draft",
@@ -2474,7 +2509,7 @@ describe("cancelInstance — the guarantee", () => {
                 compensationActivityKey: "refund_card",
               },
             },
-            { kind: "schedule_timer", parameters: { timerName: "deadline", relativeSeconds: 600 } },
+            { kind: "schedule_timer", parameters: { timerName: "deadline" } },
           ],
           onExitActions: [],
           slaSeconds: null,
@@ -3014,13 +3049,14 @@ describe("cancelInstance — the guarantee", () => {
       ...definitionFixture(),
       id: "wfd_child0001",
       definitionKey: "child.flow",
+      timers: [rel("child_deadline", 600)],
       states: [
         {
           name: "draft",
           kind: "initial",
           label: "Draft",
           onEntryActions: [
-            { kind: "schedule_timer", parameters: { timerName: "child_deadline", relativeSeconds: 600 } },
+            { kind: "schedule_timer", parameters: { timerName: "child_deadline" } },
           ],
           onExitActions: [],
           slaSeconds: null,
@@ -3074,5 +3110,396 @@ describe("cancelInstance — the guarantee", () => {
     expect(
       (await engine.cancelInstance({ ...abandon, instanceId: childId! })).outcome,
     ).toBe("cancelled");
+  });
+});
+
+// ── timer kinds: a timer fires at the instant its own declaration says ─────────────────────────────
+//
+// Every timer used to be scheduled as `relative_after` regardless of its declared `kind`:
+// `applyScheduleTimer` read `parameters.relativeSeconds` (defaulting to 60) and never looked at the
+// kind, while `timer-provenance.ts` wrote the *declared* kind into `meta.workflow_timers`. The row
+// said `cron_schedule`; the behaviour was a fire-once timer at `now + 60s`.
+
+describe("applyScheduleTimer — per-kind scheduling", () => {
+  function timerOnlyDef(timers: readonly TimerDefinition[], over: Partial<WorkflowDefinition> = {}): WorkflowDefinition {
+    return definitionFixture({
+      id: "wfd_timerkd1",
+      definitionKey: "timer.kinds",
+      initialState: "armed",
+      timers: [...timers],
+      states: [
+        st("armed", "initial", timers.map((t) => ({ kind: "schedule_timer", parameters: { timerName: t.name } }))),
+        st("done", "terminal_success"),
+      ],
+      transitions: [tr({ name: "settle", from: "armed", to: "done", trigger: { kind: "signal_received", signalName: "go" } })],
+      signals: [
+        {
+          name: "go",
+          correlationVariable: "corr",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+      ...over,
+    });
+  }
+
+  async function scheduledFireAt(def: WorkflowDefinition, clock: FixedClock): Promise<string> {
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(started.instanceId);
+    const scheduled = events.find((e) => e.kind === "timer_scheduled");
+    return String(scheduled?.payload["fireAt"]);
+  }
+
+  it("relative_after fires at now + the declared seconds", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    expect(await scheduledFireAt(timerOnlyDef([rel("wait", 900)]), clock)).toBe(
+      "2026-05-16T12:15:00.000Z",
+    );
+  });
+
+  it("absolute_at fires at the instant its variable names, not at now + 60s", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerOnlyDef(
+      [
+        {
+          name: "wait",
+          kind: "absolute_at",
+          relativeSeconds: null,
+          absoluteTimestampVariable: "due_at",
+          cronExpression: null,
+          timezone: "UTC",
+        },
+      ],
+      {
+        variables: [{ name: "due_at", type: "date", required: false, defaultValueJson: null }],
+        states: [
+          st("armed", "initial", [
+            { kind: "set_variable", parameters: { variableName: "due_at", value: "2026-07-04T08:00:00.000Z" } },
+            { kind: "schedule_timer", parameters: { timerName: "wait" } },
+          ]),
+          st("done", "terminal_success"),
+        ],
+      },
+    );
+    const fireAt = await scheduledFireAt(def, clock);
+    expect(fireAt).toBe("2026-07-04T08:00:00.000Z");
+    expect(fireAt).not.toBe("2026-05-16T12:01:00.000Z");
+  });
+
+  it("cron_schedule fires at the next cron occurrence, not at now + 60s", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerOnlyDef([cron("wait", "0 2 * * *")]);
+    const fireAt = await scheduledFireAt(def, clock);
+    expect(fireAt).toBe("2026-05-17T02:00:00.000Z");
+    expect(fireAt).not.toBe("2026-05-16T12:01:00.000Z");
+  });
+
+  it("cron_schedule honours the declared timezone", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerOnlyDef([cron("wait", "0 2 * * *", "America/New_York")]);
+    // 02:00 EDT on the 17th is 06:00Z, not 02:00Z.
+    expect(await scheduledFireAt(def, clock)).toBe("2026-05-17T06:00:00.000Z");
+  });
+
+  it("records the declared kind on the timer_scheduled event", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = timerOnlyDef([cron("wait", "0 2 * * *")]);
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    const events = await engine.listEvents(started.instanceId);
+    expect(events.find((e) => e.kind === "timer_scheduled")?.payload["timerKind"]).toBe(
+      "cron_schedule",
+    );
+  });
+
+  it("refuses business_hours as unschedulable rather than arming a 60-second timer", async () => {
+    const def = timerOnlyDef([
+      {
+        name: "wait",
+        kind: "business_hours",
+        relativeSeconds: null,
+        absoluteTimestampVariable: null,
+        cronExpression: null,
+        timezone: "Europe/London",
+      },
+    ]);
+    const { engine } = makeMultiEngine([def]);
+    const err = await engine
+      .startInstance({ definitionId: def.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(WorkflowActionError);
+    expect((err as WorkflowActionError).failure).toBe("unschedulable_timer");
+    expect((err as WorkflowActionError).message).toContain("business_hours_unschedulable");
+  });
+
+  it("refuses a schedule_timer naming an undeclared timer rather than arming a nameless one", async () => {
+    const def = definitionFixture({
+      id: "wfd_undecl01",
+      definitionKey: "timer.undeclared",
+      initialState: "armed",
+      timers: [],
+      states: [
+        st("armed", "initial", [{ kind: "schedule_timer", parameters: { timerName: "ghost" } }]),
+        st("done", "terminal_success"),
+      ],
+      transitions: [tr({ name: "settle", from: "armed", to: "done", trigger: { kind: "automatic" } })],
+    });
+    const { engine } = makeMultiEngine([def]);
+    const err = await engine
+      .startInstance({ definitionId: def.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as WorkflowActionError).failure).toBe("undeclared_timer");
+    expect((err as WorkflowActionError).message).toContain("ghost");
+  });
+
+  it("refuses an absolute_at timer whose variable the instance has not set", async () => {
+    const def = timerOnlyDef(
+      [
+        {
+          name: "wait",
+          kind: "absolute_at",
+          relativeSeconds: null,
+          absoluteTimestampVariable: "due_at",
+          cronExpression: null,
+          timezone: "UTC",
+        },
+      ],
+      { variables: [{ name: "due_at", type: "date", required: false, defaultValueJson: null }] },
+    );
+    const { engine } = makeMultiEngine([def]);
+    const err = await engine
+      .startInstance({ definitionId: def.id, tenantId: TENANT })
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect((err as WorkflowActionError).failure).toBe("unschedulable_timer");
+    expect((err as WorkflowActionError).message).toContain("absolute_variable_unset");
+  });
+});
+
+// ── cron recurrence ───────────────────────────────────────────────────────────────────────────────
+
+describe("fireDueTimersForInstance — a cron timer recurs", () => {
+  function recurringDef(expression: string, timezone = "UTC"): WorkflowDefinition {
+    // No `timer_fired` transition, so the fire does periodic work and leaves the instance where it
+    // is — which is what a recurring timer is for. The instance leaves by signal.
+    return definitionFixture({
+      id: "wfd_recur001",
+      definitionKey: "timer.recurring",
+      initialState: "ticking",
+      timers: [cron("heartbeat", expression, timezone)],
+      states: [
+        st("ticking", "initial", [{ kind: "schedule_timer", parameters: { timerName: "heartbeat" } }]),
+        st("done", "terminal_success"),
+      ],
+      transitions: [tr({ name: "settle", from: "ticking", to: "done", trigger: { kind: "signal_received", signalName: "stop" } })],
+      signals: [
+        {
+          name: "stop",
+          correlationVariable: "corr",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+    });
+  }
+
+  it("fires more than once on one timer id, with fireCount advancing and nextFireAt moving", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = recurringDef("0 * * * *"); // hourly
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+
+    const timerIdOf = async (): Promise<string> => {
+      const events = await engine.listEvents(started.instanceId);
+      return String(events.find((e) => e.kind === "timer_scheduled")?.timerId);
+    };
+    const timerId = await timerIdOf();
+
+    const projectionNow = async (): Promise<{ fireCount: number; nextFireAt: string | null; fireAt: string; status: string }> => {
+      const events = await engine.listEvents(started.instanceId);
+      const t = projectTimers(events).find((x) => x.id === timerId)!;
+      return { fireCount: t.fireCount, nextFireAt: t.nextFireAt, fireAt: t.fireAt, status: t.status };
+    };
+
+    expect(await projectionNow()).toMatchObject({
+      fireCount: 0,
+      fireAt: "2026-05-16T13:00:00.000Z",
+      status: "scheduled",
+    });
+
+    // First fire.
+    clock.advance(70 * 60_000);
+    const first = await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    expect(first.firedTimerIds).toEqual([timerId]);
+    const afterFirst = await projectionNow();
+    expect(afterFirst.fireCount).toBe(1);
+    expect(afterFirst.status).toBe("scheduled"); // re-armed
+    expect(afterFirst.fireAt).toBe("2026-05-16T14:00:00.000Z");
+
+    // Second fire, on the same timer id.
+    clock.advance(60 * 60_000);
+    const second = await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    expect(second.firedTimerIds).toEqual([timerId]);
+    const afterSecond = await projectionNow();
+    expect(afterSecond.fireCount).toBe(2);
+    expect(afterSecond.fireAt).toBe("2026-05-16T15:00:00.000Z");
+
+    // Third, to show it is not a one-off re-arm.
+    clock.advance(60 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const afterThird = await projectionNow();
+    expect(afterThird.fireCount).toBe(3);
+    expect(afterThird.fireAt).toBe("2026-05-16T16:00:00.000Z");
+
+    // One timer row, three fires — not three timers.
+    const events = await engine.listEvents(started.instanceId);
+    expect(new Set(projectTimers(events).map((t) => t.id)).size).toBe(1);
+    expect(events.filter((e) => e.kind === "timer_fired")).toHaveLength(3);
+    expect(events.filter((e) => e.kind === "timer_scheduled")).toHaveLength(4); // 1 arm + 3 re-arms
+  });
+
+  it("records nextFireAt on every timer_fired of a recurring timer", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = recurringDef("0 * * * *");
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    clock.advance(70 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const fired = (await engine.listEvents(started.instanceId)).find((e) => e.kind === "timer_fired");
+    expect(fired?.payload["nextFireAt"]).toBe("2026-05-16T14:00:00.000Z");
+  });
+
+  it("records no nextFireAt on a relative_after fire, which fires once", async () => {
+    const def = definitionFixture({
+      id: "wfd_oneshot1",
+      definitionKey: "timer.oneshot",
+      initialState: "ticking",
+      timers: [rel("heartbeat", 60)],
+      states: [
+        st("ticking", "initial", [{ kind: "schedule_timer", parameters: { timerName: "heartbeat" } }]),
+        st("done", "terminal_success"),
+      ],
+      transitions: [
+        tr({ name: "settle", from: "ticking", to: "done", trigger: { kind: "signal_received", signalName: "stop" } }),
+      ],
+      signals: [
+        {
+          name: "stop",
+          correlationVariable: "corr",
+          payloadSchemaSha256: null,
+          deliveryGuarantee: "at_least_once",
+          idempotencyKey: null,
+        },
+      ],
+    });
+    const { engine, clock } = makeMultiEngine([def]);
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    clock.advance(120_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const fired = (await engine.listEvents(started.instanceId)).find((e) => e.kind === "timer_fired");
+    expect(fired?.payload["nextFireAt"]).toBeUndefined();
+    const timer = projectTimers(await engine.listEvents(started.instanceId))[0];
+    expect(timer?.fireCount).toBe(1);
+    expect(timer?.status).toBe("fired");
+    expect(timer?.nextFireAt).toBeNull();
+  });
+
+  it("marks the re-arm, so the log says which arming is which", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeMultiEngine([recurringDef("0 * * * *")], { clock });
+    const started = await engine.startInstance({ definitionId: "wfd_recur001", tenantId: TENANT });
+    clock.advance(70 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const armings = (await engine.listEvents(started.instanceId)).filter((e) => e.kind === "timer_scheduled");
+    expect(armings[0]?.payload["rearm"]).toBeUndefined();
+    expect(armings[1]?.payload["rearm"]).toBe(true);
+  });
+
+  it("does not re-arm into a terminal instance, which would leave a claim loop with nothing to advance", async () => {
+    // The fire's transition ends the instance, so the next occurrence has nothing to act on. A
+    // `scheduled` row on a completed instance is claimed, advances nothing, and is re-claimed for
+    // ever once the lease lapses.
+    const def = definitionFixture({
+      id: "wfd_recurt1",
+      definitionKey: "timer.recurring.terminal",
+      initialState: "ticking",
+      timers: [cron("heartbeat", "0 * * * *")],
+      states: [
+        st("ticking", "initial", [{ kind: "schedule_timer", parameters: { timerName: "heartbeat" } }]),
+        st("done", "terminal_success"),
+      ],
+      transitions: [
+        tr({ name: "settle", from: "ticking", to: "done", trigger: { kind: "timer_fired", timerName: "heartbeat" } }),
+      ],
+    });
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    clock.advance(70 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const events = await engine.listEvents(started.instanceId);
+    expect(events.filter((e) => e.kind === "timer_scheduled")).toHaveLength(1);
+    const timer = projectTimers(events)[0];
+    expect(timer?.status).toBe("fired");
+    // The occurrence is still *named*, so the row is storable: `WorkflowTimerSchema` requires a
+    // fired cron timer to carry one.
+    expect(timer?.nextFireAt).toBe("2026-05-16T14:00:00.000Z");
+    expect((await engine.getInstanceState(started.instanceId))?.status).toBe("completed");
+  });
+
+  it("re-arms strictly into the future, so a late fire does not immediately re-qualify", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeMultiEngine([recurringDef("0 * * * *")], { clock });
+    const started = await engine.startInstance({ definitionId: "wfd_recur001", tenantId: TENANT });
+    // Ten hours late: the backlog is not replayed, the next occurrence is after *now*.
+    clock.advance(10 * 60 * 60_000 + 60_000);
+    const fired = await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    expect(fired.firedTimerIds).toHaveLength(1);
+    const timer = projectTimers(await engine.listEvents(started.instanceId))[0];
+    expect(Date.parse(timer!.fireAt)).toBeGreaterThan(clock.now().getTime());
+    // And a second pass at the same instant fires nothing.
+    expect(
+      (await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime())).firedTimerIds,
+    ).toEqual([]);
+  });
+
+  it("replays identically in a second engine over the same log", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const def = recurringDef("0 * * * *");
+    const { engine, log } = makeMultiEngine([def], { clock });
+    const started = await engine.startInstance({ definitionId: def.id, tenantId: TENANT });
+    clock.advance(70 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    clock.advance(60 * 60_000);
+    await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime());
+    const replayed = await replayIn([def], log, started.instanceId);
+    expect(replayed).toEqual(await engine.getInstanceState(started.instanceId));
+    const events = await engine.listEvents(started.instanceId);
+    for (const event of events) {
+      expect(WorkflowEventSchema.safeParse(event).success, `${event.kind}@${String(event.sequenceNumber)}`).toBe(true);
+    }
+    expect(isHistoryDense(events)).toBe(true);
+  });
+
+  it("a cancelled instance's recurring timer stops recurring", async () => {
+    const clock = new FixedClock(new Date("2026-05-16T12:00:00.000Z"));
+    const { engine } = makeMultiEngine([recurringDef("0 * * * *")], { clock });
+    const started = await engine.startInstance({ definitionId: "wfd_recur001", tenantId: TENANT });
+    await engine.cancelInstance({
+      instanceId: started.instanceId,
+      disposition: "abandon",
+      reason: "operator asked",
+      requestedBySystem: "ops",
+    });
+    clock.advance(70 * 60_000);
+    expect(
+      (await engine.fireDueTimersForInstance(started.instanceId, clock.now().getTime())).firedTimerIds,
+    ).toEqual([]);
   });
 });

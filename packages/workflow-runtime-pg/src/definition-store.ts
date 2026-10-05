@@ -1,4 +1,13 @@
-import { setPlatformWriteSql, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  assertScopeTenantId,
+  classifyScopedWriteRefusal,
+  scopeFilter,
+  scopeFilterWithPlatform,
+  setPlatformWriteSql,
+  type PgConnection,
+  type ScopeFilter,
+  type ScopedWriteRefusal,
+} from "@crossengin/kernel-pg";
 import {
   DEFINITION_STATUSES,
   WorkflowDefinitionSchema,
@@ -34,96 +43,64 @@ export const SET_TENANT_CONTEXT_SQL =
  */
 export const SET_PLATFORM_CONFIG_WRITE_SQL = setPlatformWriteSql("config");
 
-const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
-
-export function assertTenantId(tenantId: string): void {
-  throwUnless(TENANT_ID_RE.test(tenantId), `invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-}
-
 function throwUnless(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-/** A `tenant_id` predicate and the parameters it binds, for one scope. */
-export interface ScopeFilter {
-  readonly sql: string;
-  readonly params: readonly unknown[];
+/**
+ * `scopeFilter`, `scopeFilterWithPlatform` and `ScopeFilter` live in `kernel-pg` beside
+ * `setPlatformWriteSql` and `isoInstant`. **Eight** packages held a verbatim copy of them (ADR-0334
+ * found two more than ADR-0333 had counted, both added by ADR-0333's own increment), and `kernel-pg`
+ * is the only dependency all eight share; the rule that chooses between the two spellings, and the
+ * two measurements behind the branch, are written down there once. This file keeps what is specific
+ * to *this table*, because that is what a reader of this store needs:
+ *
+ * - **The defect was sharp in two directions here.** `loadByKeyVersion` ordered `tenant_id NULLS
+ *   LAST` and took the first row — the right tie-break for a *tenant* read, where its own row
+ *   should beat the platform's, and exactly backwards for a *platform* read, where it ranks a
+ *   tenant's row first. And `loadEngineDefinitions` carried no predicate at all, so as the owner it
+ *   loaded every tenant's definitions into one map keyed by `definitionId`, inflating the
+ *   `definitionCount` the worker supervisor's `no_definitions` refusal reads and letting the row
+ *   limit crowd the platform's definitions out of the map a timer resolves from.
+ * - **Measured on this table at 45,003 rows**, both spellings returning the same 901 platform rows:
+ *   `tenant_id IS NOT DISTINCT FROM $1` — the one operator matching NULL to NULL, and so the
+ *   tempting single code path — with a *bound parameter*, which is how a store issues it, plans a
+ *   **Seq Scan at 24.7 ms**, against **1.7 ms** for `tenant_id IS NULL` on
+ *   `idx_workflow_definitions_platform_key_version`. With a *literal* NULL Postgres constant-folds
+ *   it and the cost vanishes, which is exactly why the penalty is invisible in psql and real in
+ *   production.
+ * - **Every read here wants the inclusive arm**, and the catalog says so: this table does not carry
+ *   plain `TENANT_ISOLATION_USING`, it carries the isolation policy *plus* a platform read arm, so a
+ *   non-owner tenant session is shown its own rows and the platform's — which is precisely how a
+ *   tenant with no definition of its own gets a state machine. The disjunction stays indexable:
+ *   Postgres plans it as a **BitmapOr** over `idx_workflow_definitions_tenant_key` and the partial
+ *   `idx_workflow_definitions_platform_key_version (…) WHERE tenant_id IS NULL`, that partial index
+ *   being the platform arm written down in the catalog.
+ * - **The write path reads inclusively too**, which is the opposite of the general rule and
+ *   deliberate: `planDefinitionPublication`'s `definition_id_reused` and
+ *   `key_shadows_platform_definition` are *defined over cross-scope rows*, and `definition_id` is
+ *   unique table-wide — so narrowing the publish lookups turns both named refusals into a raw
+ *   `23505` from the INSERT, measured both ways. The narrowing that keeps a write in its own scope
+ *   happens **in the planner**, which filters `stored` on `s.tenantId === proposed.tenantId` before
+ *   deciding, and in `updateRow`'s own predicate.
+ */
+export {
+  scopeFilter,
+  scopeFilterWithPlatform,
+  type ScopeFilter,
+} from "@crossengin/kernel-pg";
+
+/** Delegates to the shared guard — same regex, same message. */
+export function assertTenantId(tenantId: string): void {
+  assertScopeTenantId(tenantId);
 }
 
 /**
- * Builds this transaction's scope predicate at a given placeholder index.
- *
- * A factory rather than a prebuilt `ScopeFilter`, because the index is a property of the *query*,
- * not of the scope: `loadEngineDefinitions` binds the predicate at `$1` and `loadByKeyVersion` at
- * `$3`. Handing every query one filter would make the caller renumber it, which is exactly the kind
- * of restating this sweep is removing.
+ * A scope predicate not yet bound to a placeholder index, because the index is a property of the
+ * *query* and not of the scope: `loadEngineDefinitions` binds at `$1` and `loadByKeyVersion` at
+ * `$3`. Handing every query one filter would make the caller renumber it.
  */
 export type ScopeFactory = (firstParam: number) => ScopeFilter;
-
-/**
- * The `tenant_id` predicate every read here must carry, **beside** RLS rather than instead of it.
- *
- * **A table's owner bypasses its policies** (ADR-0331), and connecting as the owner is an ordinary
- * deployment — so a read that leans on RLS to confine it is right as a non-owner and wrong as the
- * owner, which is the worse of the two because it is the one nobody notices. On this table the
- * consequence was sharp in two directions. `loadByKeyVersion` ordered `tenant_id NULLS LAST` and
- * took the first row: the right tie-break for a *tenant* read, where its own row should beat the
- * platform's, and exactly backwards for a *platform* read, where it ranks a tenant's row first. And
- * `loadEngineDefinitions` carried no predicate at all, so as the owner it loaded every tenant's
- * definitions into one map keyed by `definitionId` — inflating the `definitionCount` that the worker
- * supervisor's `no_definitions` refusal reads, and letting the row limit crowd the platform's
- * definitions out of the map an instance's timer resolves its definition from.
- *
- * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
- * matching NULL to NULL and so the one that would give a single code path. Measured on this table
- * at 45,003 rows, both spellings returning the same 901 platform rows: `IS NOT DISTINCT FROM` with
- * a *bound parameter* — which is how a store issues it — plans a **Seq Scan at 24.7 ms**, against
- * **1.7 ms** for `tenant_id IS NULL` on `idx_workflow_definitions_platform_key_version`. With a
- * *literal* NULL Postgres constant-folds it and the cost vanishes, which is exactly why the penalty
- * is invisible in psql and real in production.
- *
- * Verbatim from `crypto-pg`/`forensics-pg`; one idiom across the sweep, not a third spelling.
- */
-export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
-  // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`.
-  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
-  assertTenantId(tenantId);
-  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
-}
-
-/**
- * `scopeFilter` with the platform's rows kept in a tenant's answer — **the form every read in this
- * store wants**, and the one the table's own policy grants.
- *
- * The rule for choosing between the two is Lane E's: **the predicate reproduces what a non-owner
- * would have been shown, no wider and no narrower.** `meta.workflow_definitions` does not carry
- * plain `TENANT_ISOLATION_USING` — it carries the isolation policy plus a platform read arm — so a
- * non-owner tenant session is shown its own rows *and* the platform's. That is not an accident to
- * be tightened away: a deployment-wide definition with no tenant of its own is precisely how a
- * tenant without its own gets a state machine, and the strict arm would have made this store
- * owner-independent by destroying that rather than by reproducing it.
- *
- * For the platform scope the two functions agree on `tenant_id IS NULL`, and that is the arm the
- * defect was in: the platform read was the one answering with a tenant's row.
- *
- * Still indexable, and verified so here rather than assumed: Postgres plans the disjunction as a
- * **BitmapOr** over `idx_workflow_definitions_tenant_key` and the partial
- * `idx_workflow_definitions_platform_key_version (… ) WHERE tenant_id IS NULL`, because each arm is
- * an indexable operator on its own. That partial index is the platform arm written down in the
- * catalog, which is the clearest sign the two-arm reading is the intended one. It is also the
- * property `IS NOT DISTINCT FROM` lacks.
- */
-export function scopeFilterWithPlatform(
-  tenantId: string | null,
-  firstParam = 1,
-): ScopeFilter {
-  if (tenantId === null) return scopeFilter(null, firstParam);
-  assertTenantId(tenantId);
-  return {
-    sql: `(tenant_id = $${String(firstParam)} OR tenant_id IS NULL)`,
-    params: [tenantId],
-  };
-}
 
 /**
  * The columns of `meta.workflow_definitions` in the order `definitionRowValues` supplies them.
@@ -327,8 +304,20 @@ export class WorkflowDefinitionConflictError extends Error {
   constructor(
     readonly definitionId: string,
     readonly reason: string,
+    /**
+     * Which of the three a zero-row write was: the row is absent, it sits in another scope, or the
+     * guard refused it. Defaulted, so only `updateRow` changes — every other construction site is a
+     * premise the planner had already established, i.e. `guard_refused`. The existing second
+     * parameter is already named `reason` and holds the free-text detail, so the new field cannot
+     * reuse the name; keeping both means a caller catching this error is unaffected.
+     */
+    readonly writeRefusal: ScopedWriteRefusal = "guard_refused",
+    readonly scopeTenantId: string | null = null,
+    readonly storedTenantId: string | null = null,
   ) {
-    super(`workflow definition '${definitionId}' could not be written: ${reason}`);
+    super(
+      `workflow definition '${definitionId}' could not be written (${writeRefusal}): ${reason}`,
+    );
     this.name = "WorkflowDefinitionConflictError";
   }
 }
@@ -686,19 +675,53 @@ export class PostgresWorkflowDefinitionStore {
       definition.status === "published" && definition.publishedBy !== null
         ? ` AND created_by <> $${this.guardParam}`
         : "";
-    const params =
+    const guarded =
       fourEyes === "" ? [...values] : [...values, definition.publishedBy];
+    // **Strict, where the publish *lookups* are inclusive**, and that is not a contradiction: the
+    // lookups answer questions about rows this write may never touch (`definition_id_reused`,
+    // `key_shadows_platform_definition`), while the statement must reach only its own scope.
+    //
+    // Not reachable today — `definition_id` carries a table-wide UNIQUE, and the planner decides
+    // `replace_draft`/`transition_status` only from a same-scope `atVersion` whose id it asserted
+    // equals the proposal's — so this is ADR-0321's "the row is the lock" rather than a repair, and
+    // the protection it replaces lived in a `.filter()` in another module. What it does close:
+    // `updateAssignments` includes `tenant_id`, so a cross-scope match would *move* a platform-wide
+    // definition into one tenant, taking that workflow from every other tenant in the deployment —
+    // and under READ COMMITTED a concurrent `updateRow` committing a scope change between the
+    // planner's read and this statement would leave it landing on the moved row. That race is
+    // self-referential, so the predicate closes it in one edit.
+    //
+    // The scope binds *after* the four-eyes guard, so `definitionUpdateAssignments`' positions and
+    // `this.guardParam` are untouched.
+    const scope = scopeFilter(definition.tenantId, guarded.length + 1);
     const result = await tx.query<{ id: string }>(
       `UPDATE ${this.schema}.${TABLE} SET ${this.updateAssignments}
-       WHERE definition_id = $1 AND status IN (${statuses})${fourEyes}
+       WHERE definition_id = $1 AND ${scope.sql}
+         AND status IN (${statuses})${fourEyes}
        RETURNING id`,
-      params,
+      [...guarded, ...scope.params],
     );
     const row = result.rows[0];
     if (row === undefined) {
+      // `RETURNING id` with no row is the same fact as `rowCount === 0`, and the helper issues its
+      // diagnosing read only for a zero count — so passing the literal is the honest spelling.
+      const refusal = await classifyScopedWriteRefusal(tx, 0, {
+        schema: this.schema,
+        table: TABLE,
+        idColumn: "definition_id",
+        idValue: definition.id,
+        tenantId: definition.tenantId,
+        guard:
+          `no row of it is in status ${statuses} with a different creator — ` +
+          "another writer moved it first",
+      });
       throw new WorkflowDefinitionConflictError(
         definition.id,
-        `no row in status ${statuses} with a different creator — another writer moved it first`,
+        refusal?.detail ??
+          `no row in status ${statuses} with a different creator — another writer moved it first`,
+        refusal?.reason ?? "guard_refused",
+        definition.tenantId,
+        refusal?.storedTenantId ?? null,
       );
     }
     return row.id;

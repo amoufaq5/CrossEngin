@@ -11,19 +11,24 @@ import {
 import {
   encodeKeyset,
   keysetOf,
+  toDateWire,
   toDecimalWire,
+  toTimeWire,
   type DecimalSpec,
   type EntityRecord,
   type EntityStore,
+  type KeysetCursor,
   type ListPage,
   type ListQuery,
+  type ListSort,
   type ListValueType,
   type TransactionalEntityStore,
 } from "@crossengin/operate-runtime";
 
 import type { OnDelete } from "@crossengin/types/meta-schema";
 
-import { buildListSql, type ListSqlAdapter } from "./list-sql.js";
+import { buildListSql, isSqlSafeNumericText, type ListSqlAdapter } from "./list-sql.js";
+import { isDatetimeComparable } from "./temporal-sql.js";
 import {
   columnIndex,
   columnPlansForManifest,
@@ -34,7 +39,7 @@ import {
   type EntityTablePlan,
   type JoinTablePlan,
 } from "./column-plan.js";
-import { emitManifestSchemaDdl } from "./entity-ddl.js";
+import { emitManifestSchemaDdl, MILLISECOND_NOW_SQL } from "./entity-ddl.js";
 import { resolveRecordId } from "./records.js";
 import { withTenantContext } from "./tenant-context.js";
 
@@ -173,10 +178,14 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       },
       // Derived from the column's own type rather than from `query.valueTypes`, because the
       // column *is* the declaration here — but answered at all so the two stores order one field
-      // the same way. It is what puts this store's NULLs last in both directions, matching the
-      // JSONB store's stated placement, and what keeps a cursor whose component is `''` from
-      // binding `''::NUMERIC(p, s)`, which raises.
-      valueType: (field) => numericColumnValueType(idx.get(field)),
+      // the same way.
+      valueType: (field) => columnValueType(idx.get(field)),
+      // The column's own type is a *finer* answer than its `ListValueType` for the one question
+      // binding asks: a `DATE` or `TIME` column's value type is `text` (its canonical spelling
+      // orders correctly as bytes), yet `castSuffix` still appends `::DATE`/`::TIME` and `''::DATE`
+      // raises. So this answers from the SQL type, which is what keeps a cursor component of `""`
+      // — and a forged one — a page rather than a 500.
+      comparableValue: (field, text) => columnComparableValue(idx.get(field), text),
       idExpr: quoteIdent("id"),
     };
     const { where, orderBy } = buildListSql(query, adapter, [`${quoteIdent("tenant_id")} = $1`], params);
@@ -185,8 +194,9 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     // (needed to build the keyset cursor). The handler re-projects to the
     // exact requested set, so selecting sort columns isn't visible to clients.
     const only = this.projectionColumns(query, idx);
+    const cursorExprs = fullPrecisionCursorColumns(query.sort, idx);
     const res = await tx.query<Record<string, unknown>>(
-      `SELECT ${this.selectList(plan, only)}
+      `SELECT ${this.selectList(plan, only)}${cursorExprs.selectSuffix}
          FROM ${qualified}
         WHERE ${where}
         ORDER BY ${orderBy}
@@ -196,8 +206,12 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     const rows = res.rows.map((r) => rowToRecord(plan, r));
     const hasMore = rows.length > query.limit;
     const records = hasMore ? rows.slice(0, query.limit) : rows;
+    const lastRow = res.rows[records.length - 1];
     const last = records[records.length - 1];
-    const nextCursor = hasMore && last !== undefined ? encodeKeyset(keysetOf(last, query.sort)) : null;
+    const nextCursor =
+      hasMore && last !== undefined && lastRow !== undefined
+        ? encodeKeyset(cursorExprs.keyset(last, lastRow, query.sort))
+        : null;
     return { records, nextCursor };
   }
 
@@ -277,7 +291,10 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       if (mapping.column === "updated_at") stampsUpdatedAt = true;
       sets.push(`${quoteIdent(mapping.column)} = ${this.writePlaceholder(mapping, v, params)}`);
     }
-    if (!stampsUpdatedAt) sets.push(`${quoteIdent("updated_at")} = now()`);
+    // Millisecond-truncated for `MILLISECOND_NOW_SQL`'s reason: a microsecond `updated_at` is a
+    // value this store serves truncated, so a keyset cursor on it cannot round-trip and the page
+    // walk does not terminate. Measured live.
+    if (!stampsUpdatedAt) sets.push(`${quoteIdent("updated_at")} = ${MILLISECOND_NOW_SQL}`);
     const res = await tx.query<Record<string, unknown>>(
       `UPDATE ${qualified}
           SET ${sets.join(", ")}
@@ -566,52 +583,146 @@ export function decimalSpecFromSqlType(sqlType: string): DecimalSpec | null {
   return m === null ? null : { precision: Number(m[1]), scale: Number(m[2]) };
 }
 
+/**
+ * A keyset cursor must be rendered from the value the row **stores**, not from the value this
+ * store **serves** — and for an instant column those are not the same value.
+ *
+ * `TIMESTAMPTZ` holds microseconds; node-postgres builds a JS `Date`, which holds milliseconds; so
+ * `isoInstant` serves a truncated instant and `keysetOf` renders the cursor from it. The seek
+ * predicate then compares a truncated cursor against an untruncated column, and the row the cursor
+ * was *built from* satisfies `col > cursor`. Measured live, before this: six rows spaced 100
+ * microseconds apart, walked with `limit 2`, returned `us-0 us-1 us-1 us-2 us-1 us-2 …` and **never
+ * terminated** — the cursor could not advance past the second row, while the same query in one page
+ * answered correctly. `created_at` and `updated_at` are the columns this reaches, because `now()`
+ * is microsecond-resolution.
+ *
+ * `MILLISECOND_NOW_SQL` stops the platform *creating* such rows. This is the other half: it makes
+ * any row that already holds one paginate correctly, from any source, which is what keeps the fix
+ * from resting on a convention. The ORDER BY is deliberately left on the raw column — truncating
+ * *there* would make the sort pay for the precision on every row of every page and could never back
+ * an index, where `to_char` in the SELECT list is one expression per returned row.
+ *
+ * The format is explicit rather than `(col)::text`: that spelling depends on `DateStyle` and
+ * `TimeZone`, and `2026-01-31 10:00:00.0001+00` is not a spelling `isDatetimeComparable` admits, so
+ * the component would read as the NULL tail and the walk would break differently. `AT TIME ZONE
+ * 'UTC'` first, so the rendering is UTC regardless of the session.
+ */
+const FULL_PRECISION_INSTANT_FORMAT = `'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'`;
+
+interface CursorColumns {
+  /** Extra `SELECT` items, each aliased, or `""` when no sort key needs one. */
+  readonly selectSuffix: string;
+  /** The keyset for one page's last row, preferring a full-precision alias where one exists. */
+  keyset(
+    record: EntityRecord,
+    row: Record<string, unknown>,
+    sort: readonly ListSort[],
+  ): KeysetCursor;
+}
+
+function fullPrecisionCursorColumns(
+  sort: readonly ListSort[],
+  idx: ReadonlyMap<string, ColumnMapping>,
+): CursorColumns {
+  const aliases = new Map<string, string>();
+  const items: string[] = [];
+  // The alias shares a row object with the real columns, so a collision would make `rowToRecord`
+  // read a `to_char` rendering as a field's value. Derived against the plan's own column names
+  // rather than assumed unlikely: a field *can* be named `ck0`, and the column name is derived from
+  // the field name.
+  const taken = new Set([...idx.values()].map((m) => m.column));
+  for (const [i, s] of sort.entries()) {
+    const mapping = idx.get(s.field);
+    if (mapping === undefined || mapping.encryptAtRest) continue;
+    if (!INSTANT_SQL_BASES.has(mapping.sqlType)) continue;
+    let alias = `__ck${i.toString()}`;
+    while (taken.has(alias)) alias = `_${alias}`;
+    taken.add(alias);
+    aliases.set(s.field, alias);
+    items.push(
+      `to_char(${quoteIdent(mapping.column)} AT TIME ZONE 'UTC', ${FULL_PRECISION_INSTANT_FORMAT}) AS ${quoteIdent(alias)}`,
+    );
+  }
+  return {
+    selectSuffix: items.length === 0 ? "" : `, ${items.join(", ")}`,
+    // `keysetOf` stays the one definition of what a cursor component is — including that a missing
+    // value renders `null` — and only the instant keys are overridden. Reimplementing it here would
+    // be a second spelling of a rule the in-memory store's `rowSortsAfter` reads from the first.
+    keyset: (record, row, keys) => {
+      const base = keysetOf(record, keys);
+      if (aliases.size === 0) return base;
+      return {
+        k: keys.map((s, i) => {
+          const alias = aliases.get(s.field);
+          if (alias === undefined) return base.k[i] ?? null;
+          const rendered = row[alias];
+          // A NULL column renders NULL, which is exactly the component that names the NULL tail.
+          return typeof rendered === "string" ? rendered : null;
+        }),
+        id: base.id,
+      };
+    },
+  };
+}
+
 /** The scalar SQL types the kernel emits whose values compare as numbers. */
 const NUMERIC_SQL_BASES: ReadonlySet<string> = new Set(["INTEGER", "BIGINT", "SMALLINT"]);
+
+/** The instant-valued SQL types the kernel emits for a `datetime` field. */
+const INSTANT_SQL_BASES: ReadonlySet<string> = new Set(["TIMESTAMPTZ", "TIMESTAMP"]);
 
 /**
  * A column's comparison type, read off the SQL type the kernel emitted for it.
  *
- * An **array** column is `text` even when its element type is numeric: the keyset cursor renders
- * a value with `String()`, so an array's cursor component is already not a value Postgres can
- * compare back, and claiming `numeric` would only add a NULL-placement change to an ordering that
- * is wrong for a different reason.
+ * `TIMESTAMPTZ`/`TIMESTAMP` answer `timestamptz` so that a `datetime` key is the same kind of key
+ * in both stores — this store's column already compares as an instant, so the answer changes
+ * nothing it emits except the cursor-component guard, which is the point: a component this store
+ * produced is `isoInstant`'s output and a component the *other* store produced is the document's
+ * own spelling, and one guard has to accept both.
+ *
+ * `DATE` and `TIME` stay `text`, following the manifest's own `ListValueType`: their canonical
+ * spellings are fixed-width and zero-padded, so byte order is chronological and a cast would buy
+ * nothing. Their binding guard is not text's, though — see `columnComparableValue`.
+ *
+ * An **array** column is `text` even when its element type is numeric or temporal: the keyset
+ * cursor renders a value with `String()`, so an array's cursor component is already not a value
+ * Postgres can compare back, and claiming a scalar type would only add a NULL-placement change to
+ * an ordering that is wrong for a different reason.
  */
-function numericColumnValueType(mapping: ColumnMapping | undefined): ListValueType {
+function columnValueType(mapping: ColumnMapping | undefined): ListValueType {
   if (mapping === undefined || mapping.sqlType.endsWith("[]")) return "text";
+  if (INSTANT_SQL_BASES.has(mapping.sqlType)) return "timestamptz";
   return NUMERIC_SQL_BASES.has(mapping.sqlType) || decimalSpecFromSqlType(mapping.sqlType) !== null
     ? "numeric"
     : "text";
 }
 
 /**
- * Thrown when a column's SQL type has no decided wire type.
+ * Whether `text` can be bound against this column — i.e. whether `$n::<sqlType>` will not raise.
  *
- * `INTERVAL` is the only one: a manifest `duration` field compiles to it, and node-postgres
- * returns it as a `PostgresInterval` object whose `String()` is `"[object Object]"` — measured
- * live. Serving that would put the literal text `[object Object]` in a keyset cursor and leak an
- * undeclared `{days, hours, …}` shape into a record, so the first `duration` field anybody
- * declares fails **here**, at the first read, naming itself — rather than six months later in
- * somebody's page 2.
+ * One guard per SQL type, and each is the **wire form's own converter** rather than a second
+ * regex: `parseInstant` for an instant column, `toDateWire` / `toTimeWire` for the other two. That
+ * is deliberate — a guard written here would be a second spelling of a set `operate-runtime`
+ * already defines, which is ADR-0332's `FEATURE_FLAG_COLUMN_NAMES` defect, and the consequence of
+ * the two drifting is a cursor component one side calls comparable and the other maps to NULL,
+ * which skips a row at a page boundary.
  *
- * Nothing in the catalog, the 144 `META_TABLES` or the seven packs declares a `duration` today
- * (verified), so this is unreachable. It stays a refusal rather than a conversion because
- * choosing `duration`'s wire form is its own decision with no consumer to decide it for — the
- * likely answer is ISO 8601 (`P3DT4H5M6.5S`), which Postgres parses back and so would round-trip
- * a cursor, but that also needs an answer for ordering it in the in-memory store, and inventing
- * a contract for a field nobody has declared is how a wrong one gets locked in.
+ * A column whose type has no guard answers **true**: a `TEXT`, `BOOLEAN`, `UUID` or `JSONB` column
+ * compares the string it is given, and `''::TEXT` is a value rather than an error. The asymmetry
+ * is the right way round — a type that raises must be guarded, a type that does not must not be
+ * narrowed, because narrowing would send a legitimate value to the NULL tail.
  */
-export class UndecidedWireTypeError extends Error {
-  constructor(
-    readonly field: string,
-    readonly sqlType: string,
-  ) {
-    super(
-      `${field}: no wire type is defined for a ${sqlType} column — a 'duration' field cannot be served yet`,
-    );
-    this.name = "UndecidedWireTypeError";
+function columnComparableValue(mapping: ColumnMapping | undefined, text: string): boolean {
+  if (mapping === undefined || mapping.sqlType.endsWith("[]")) return true;
+  if (INSTANT_SQL_BASES.has(mapping.sqlType)) return isDatetimeComparable(text);
+  if (mapping.sqlType === "DATE") return toDateWire(text).ok;
+  if (mapping.sqlType === "TIME") return toTimeWire(text).ok;
+  if (NUMERIC_SQL_BASES.has(mapping.sqlType) || decimalSpecFromSqlType(mapping.sqlType) !== null) {
+    return isSqlSafeNumericText(text);
   }
+  return true;
 }
+
 
 /**
  * The temporal SQL types this store emits, keyed by the `sqlType` string `castSuffix` already
@@ -641,7 +752,9 @@ const TEMPORAL_READERS: ReadonlyMap<string, (value: unknown) => string | null> =
 function readColumn(mapping: ColumnMapping, value: unknown): unknown {
   const isArray = mapping.sqlType.endsWith("[]");
   const base = isArray ? mapping.sqlType.slice(0, -2) : mapping.sqlType;
-  if (base === "INTERVAL") throw new UndecidedWireTypeError(mapping.field, base);
+  // No `INTERVAL` branch: `columnPlanForEntity` refuses to plan one, so a mapping holding that
+  // type cannot reach here and a guard for it would be a branch nothing can call — see
+  // `UNDECIDED_SQL_TYPES` for the decision and for why the refusal belongs at plan time.
   const decimal = decimalSpecFromSqlType(mapping.sqlType);
   if (decimal !== null) return convertDecimal(value, decimal, isArray);
   const reader = TEMPORAL_READERS.get(base);

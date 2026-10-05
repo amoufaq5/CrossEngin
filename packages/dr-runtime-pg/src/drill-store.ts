@@ -83,6 +83,7 @@ export class PostgresDrDrillStore {
         executionId: valid.executionId,
         recordedAt: valid.recordedAt,
         stateColumn: "outcome",
+        tenantId: valid.tenantId,
       });
     });
   }

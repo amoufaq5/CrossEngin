@@ -505,6 +505,33 @@ describe("table column shapes", () => {
     expect(cols).toContain("schema_name");
   });
 
+  it("META_TENANTS.status permits exactly the five states a tenant can be in", () => {
+    // The other half of ADR-0334's reconciliation. `@crossengin/tenant-lifecycle` declared a
+    // seven-state lifecycle that nothing read, while this column's CHECK was what could actually be
+    // stored — so three of those states were unreachable and `READ_ONLY_STATES`, which names the
+    // policy for a suspended or pending-deletion tenant, could not be consulted for two of them.
+    //
+    // The five are spelled here rather than imported, because the kernel must not depend on a
+    // contracts package that depends on it; `tenant-lifecycle`'s own test asserts the same list
+    // from its side, so the pair of them is what keeps one vocabulary from drifting into two again.
+    const status = META_TENANTS.columns.find((c) => c.name === "status");
+    for (const state of [
+      "active",
+      "suspended",
+      "archived",
+      "pending_deletion",
+      "deleted",
+    ]) {
+      expect([state, status?.check?.includes(`'${state}'`)]).toEqual([state, true]);
+    }
+    // And not the two that were billing facts duplicated onto the tenant: `past_due` is a
+    // subscription status with its own transition map, `trial` a plan tier. A tenant in arrears is
+    // `active`, and storing the arrears here would let two records disagree about one fact.
+    for (const notAState of ["past_due", "trial"]) {
+      expect([notAState, status?.check?.includes(`'${notAState}'`)]).toEqual([notAState, false]);
+    }
+  });
+
   it("META_USERS has email + status", () => {
     const cols = META_USERS.columns.map((c) => c.name);
     expect(cols).toContain("email");

@@ -2525,6 +2525,9 @@ importers:
 
   packages/workflow-engine:
     dependencies:
+      '@crossengin/jobs':
+        specifier: workspace:*
+        version: link:../jobs
       zod:
         specifier: ^3.23.0
         version: 3.25.76

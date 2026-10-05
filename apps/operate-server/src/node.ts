@@ -94,10 +94,14 @@ import {
   buildPersistentPackSubmissionEngine,
 } from "@crossengin/marketplace-runtime-pg";
 import {
+  PostgresJobRunEngine,
   PostgresWorkflowDefinitionStore,
+  buildJobHandlerRegistry,
   buildPersistentEngine,
+  probeJobQueueVisibility,
   requestJobCancellation,
   surveyManifestWorkflows,
+  type JobHandlerProvider,
   type PersistentEngineBundle,
 } from "@crossengin/workflow-runtime-pg";
 import {
@@ -115,6 +119,13 @@ import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
 import { PostgresTenantStore, buildPlatformAdminRoutes } from "./platform-admin.js";
+import {
+  CachedTenantStatusDirectory,
+  surveyTenantStatusCoverage,
+  tenantStatusDirectoryFromStore,
+  type TenantStatusGateOptions,
+} from "./tenant-status-gate.js";
+import { buildTenantStateMover } from "./tenant-state-mover.js";
 import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests.js";
 import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
 import { buildAiDesignRoutes } from "./ai-design-routes.js";
@@ -1266,6 +1277,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           ...(options.deletionRequestDeadlineDays !== null
             ? { deadlineDays: options.deletionRequestDeadlineDays }
             : {}),
+          // The tenant row moves with the request (ADR-0334): a verification makes the tenant
+          // read-only and a rejection restores it. Before this, `meta.tenants.status` could not hold
+          // `pending_deletion` at all and nothing on the request path read the column, so a tenant
+          // whose erasure was verified and queued kept accepting writes into data about to be
+          // destroyed. Both transitions are guarded in the predicate, so a console suspension in
+          // between wins the row rather than being overwritten.
+          tenantState: buildTenantStateMover(new PostgresTenantStore(reqConn), {
+            onNoMatch: ({ tenantId, to, from }) =>
+              console.warn(
+                `[deletion-request] tenant ${tenantId} not moved to ${to}:` +
+                  ` not in {${from.join(", ")}}`,
+              ),
+          }),
           newRequestId: () => newRequestId(randomUUID()),
           recordAction: async (event): Promise<void> => {
             await emitter.emit(
@@ -2094,6 +2118,73 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       });
     }
   }
+  // Tenant lifecycle enforcement on the request path (ADR-0334). The column has existed since
+  // Phase 1 and nothing on this path read it, so a `suspended` tenant kept writing and a tenant
+  // whose Article 17 erasure was verified and queued kept writing into data about to be destroyed.
+  //
+  // Opt-in for one concrete reason: the gate refuses a credential whose tenant has no
+  // `meta.tenants` row, and `--api-key 'key:role:tenant'` specs name arbitrary UUIDs that nothing
+  // requires to exist — so on-by-default would 403 every request of a deployment that is working
+  // today. The survey names those tenants at boot instead of leaving an operator to read it off a
+  // 403, which is the rule this file keeps relearning: a surface that refuses has to say so first.
+  let tenantStatusGate: TenantStatusGateOptions | undefined;
+  if (options.tenantStatusGate) {
+    if (conn === undefined) {
+      console.error(
+        "[tenant-status] --tenant-status-gate needs a Postgres store; NOT mounted, so" +
+          " meta.tenants.status is unenforced on the request path",
+      );
+    } else {
+      const directory = new CachedTenantStatusDirectory(
+        tenantStatusDirectoryFromStore(new PostgresTenantStore(conn)),
+        {
+          ...(options.tenantStatusTtlMs !== null ? { ttlMs: options.tenantStatusTtlMs } : {}),
+          onRefreshError: (tenantId, err, servedStale) =>
+            console.error(
+              `[tenant-status] refresh failed for ${tenantId} (` +
+                `${servedStale ? "serving the last known answer" : "no cached answer — refusing"})`,
+              err,
+            ),
+        },
+      );
+      tenantStatusGate = {
+        directory,
+        events: {
+          onRefused: ({ decision, operationId, tenantId, status }) =>
+            console.warn(
+              `[tenant-status] ${decision} tenant=${tenantId} status=${status ?? "-"}` +
+                ` op=${operationId}`,
+            ),
+        },
+      };
+      const survey = await surveyTenantStatusCoverage(
+        directory,
+        apiKeys.map((k) => k.tenantId),
+      );
+      if (survey.missing.length > 0) {
+        console.error(
+          `[tenant-status] ${survey.missing.length.toString()} configured API-key tenant(s) have no` +
+            ` meta.tenants row and EVERY request from them will be refused 403: ` +
+            survey.missing.join(", "),
+        );
+      }
+      if (survey.unreachable.length > 0) {
+        console.warn(
+          "[tenant-status] could not read the status of " +
+            `${survey.unreachable.length.toString()} configured tenant(s) at boot (reported as` +
+            " unreachable, not as absent): " +
+            survey.unreachable.join(", "),
+        );
+      }
+      for (const { tenantId, status } of survey.blocked) {
+        console.warn(`[tenant-status] tenant ${tenantId} is ${status}: writes will be refused`);
+      }
+      console.info(
+        `[tenant-status] gate mounted over ${survey.checked.length.toString()} configured tenant(s)` +
+          `; /v1/platform routes exempt`,
+      );
+    }
+  }
   // Compose the per-request observers (SLO + metering + audit chain) into one execution sink.
   const executionSinks: ((execution: PipelineExecution) => void)[] = [];
   if (sloEnforcement !== null) executionSinks.push(sloEnforcement.observer.asExecutionSink());
@@ -2127,7 +2218,48 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     defaultScheme: options.defaultScheme,
     ...(jwt !== null ? { jwt } : {}),
     ...(onExecution !== undefined ? { onExecution } : {}),
+    ...(tenantStatusGate !== undefined ? { tenantStatusGate } : {}),
   });
+  // The manifest's job declarations, read once. Two readers (the handler registry and the cron
+  // scheduler) over two copies of one expression is the `FEATURE_FLAG_COLUMN_NAMES` shape (ADR-0332).
+  const manifestJobs = Object.values(manifest.jobs ?? {});
+  // The handlers this binary knows how to run. A `JobDeclaration` carries an id, a trigger, a retry
+  // policy, concurrency, data classes and a prose `description` — and **no field of any kind that
+  // describes the work**, not even the `z.unknown()` slot an orchestration `Workflow` has. So there
+  // is nothing in a manifest to compile and a handler is a *deployment* concern, registered against
+  // the job's id by the process that holds the code and the credentials. What the manifest owns is
+  // how the run is *governed* — the ceiling, the backoff, the data classes, the failure strategy —
+  // and `buildJobHandlerRegistry` reads all of that off the declaration and refuses a provider that
+  // restates any of it, so the queue cannot disagree with the manifest a reviewer approved.
+  //
+  // The shipped provider list is **empty, and that is the honest state rather than a gap**: all 25
+  // declarations across the seven packs are tenant-domain ERP work (eight are third-party
+  // integrations with no client in this repo, the rest need `operate-runtime`'s entity store and the
+  // packs have no runtime layer to hold the behaviour). None duplicates one of this app's in-process
+  // schedulers, which are platform work. No noop handler ships: a run reported `completed` having
+  // done nothing is exactly the surface-reports-success-and-records-nothing class ADR-0332 and
+  // ADR-0333 exist to end.
+  const JOB_HANDLER_PROVIDERS: readonly JobHandlerProvider[] = [];
+  const jobHandlers =
+    conn !== undefined && (options.scheduleMs !== null || options.workflowWorkers)
+      ? buildJobHandlerRegistry({ jobs: manifestJobs, providers: JOB_HANDLER_PROVIDERS })
+      : null;
+  if (jobHandlers !== null) {
+    // ADR-0331's rule applied to jobs: a declaration that will never run is named with the reason,
+    // never passed over. This is the sentence that was missing — an enqueue that succeeds is
+    // indistinguishable from work that happens.
+    if (jobHandlers.servedJobIds.length > 0) {
+      console.info(
+        `[jobs] ${jobHandlers.servedJobIds.length.toString()} job handler(s) registered: ` +
+          jobHandlers.servedJobIds.join(", "),
+      );
+    }
+    for (const finding of jobHandlers.survey.findings) {
+      if (finding.verdict === "handler_missing" || finding.verdict === "no_producer") {
+        console.warn(`[jobs] ${finding.jobId} (${finding.verdict}): ${finding.detail}`);
+      }
+    }
+  }
   // In-process cron scheduler: enqueue the manifest's scheduled jobs into job_runs per tenant, so the
   // distributed worker fleet runs them. Enabled by --schedule-ms + --schedule-tenant over a pg store;
   // idempotent enqueue makes running it on every replica safe.
@@ -2139,7 +2271,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : new StaticTenantSource(options.scheduleTenants);
     jobScheduler = new JobScheduler({
       conn,
-      jobs: Object.values(manifest.jobs ?? {}),
+      jobs: manifestJobs,
       tenants,
       intervalMs: options.scheduleMs,
       ...schemaOpt,
@@ -2149,10 +2281,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // accumulates `pending` rows indefinitely and the manifest's scheduled jobs have never run in
     // this binary. --workflow-workers is what drains it — and even then the job worker refuses
     // while no job handler is registered in this process, which is still the case.
+    // Two independent reasons the queue will not drain, and they need different fixes: no worker is
+    // mounted at all, or one is mounted and no handler serves the jobs being enqueued.
+    const unservedJobs = jobHandlers?.survey.unservable ?? [];
     if (!options.workflowWorkers) {
       console.warn(
         "[jobs] --schedule-ms enqueues job runs into meta.job_runs, and no worker in this process" +
           " claims them: they will stay pending. Mount --workflow-workers to drain the queue",
+      );
+    } else if (unservedJobs.length > 0) {
+      console.warn(
+        `[jobs] --schedule-ms will enqueue runs for ${unservedJobs.length.toString()} job(s) no` +
+          ` handler in this process serves (${unservedJobs.slice(0, 5).join(", ")}): those runs stay` +
+          " pending. The enqueue is deliberately not gated on the local registry — a worker tier and" +
+          " a web tier are a legitimate split, so the producer must not refuse what another replica" +
+          " serves",
       );
     }
   }
@@ -2177,13 +2320,41 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       workerId,
       definitionCount: workflowDefinitionCount,
       activitiesDeferred: options.workflowDeferActivities,
-      // No job engine: nothing in this process registers a job handler, so the supervisor reports
-      // `no_job_handlers` and leaves enqueued runs `pending`, which is recoverable. Passing one
-      // would finalize every claimed run `failed` with handler_not_found, which is not.
+      // A job engine iff some handler is registered. With none, the supervisor still reports
+      // `no_job_handlers` — the same refusal as before, but computed from the registry rather than
+      // from a hard-coded absence. The `serves` filter is what makes mounting it safe: the claim's
+      // `due` CTE names only the served job ids, so an unserved run is never claimed at all rather
+      // than claimed and finalized `failed` with handler_not_found, and an unserved backlog cannot
+      // starve served runs out of a batch.
+      ...(jobHandlers !== null && jobHandlers.servedJobIds.length > 0
+        ? {
+            jobEngine: new PostgresJobRunEngine(conn, jobHandlers.registry, {
+              ...schemaOpt,
+              onDeadLetterError: (err, detail) =>
+                console.error(
+                  `[jobs] run ${detail.runId} was finalized but its meta.dead_letter_jobs row was` +
+                    " not written; the run's terminal status is correct and its dead letter is missing",
+                  err,
+                ),
+            }),
+            jobServes: { jobIds: jobHandlers.servedJobIds },
+          }
+        : {}),
       ...schemaOpt,
       ...(workerConfig !== undefined ? { config: workerConfig } : {}),
       events: consoleWorkflowWorkerEvents(),
     });
+    // `meta.job_runs`, `meta.dead_letter_jobs` and `meta.job_costs` each carry one `ALL`-scope
+    // tenant-isolation policy and no platform arm, while the fleet is deliberately cross-tenant. As a
+    // non-owner with no tenant context the claim matches **0 rows** and `executeJobRun` answers
+    // `not_claimable` — observed live — and neither is an error: an empty claim is what an empty
+    // queue looks like. So a fleet that can never execute anything reads exactly like an idle one,
+    // which is why this asks the catalog (RLS enabled, role bypass, ownership) rather than counting
+    // rows. The queue tables are always in `meta`, independent of the entity `--schema`.
+    const queueVisibility = await probeJobQueueVisibility(conn);
+    if (queueVisibility.visibility !== "visible") {
+      console.warn(`[jobs] job queue not visible to this connection: ${queueVisibility.detail}`);
+    }
   }
   // In-process dangling-link prune sweep: periodically prune every active tenant's orphaned m2m
   // association links from the JSONB store. Enabled by --prune-links-ms over the JSONB pg store
@@ -2631,6 +2802,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             ? { jobInvokeActionRoles: invokeActionRoles }
             : {}),
           ...(onExecution !== undefined ? { onExecution } : {}),
+          // A tenant serving their own manifest is still that tenant, so the gate travels with the
+          // per-tenant gateway too — one directory instance, so the cache is shared rather than
+          // re-read per compiled tenant.
+          ...(tenantStatusGate !== undefined ? { tenantStatusGate } : {}),
           defaultScheme: options.defaultScheme,
         }).httpServer;
       },

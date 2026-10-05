@@ -40,12 +40,23 @@ export interface TenantListPage {
   readonly nextCursor: string | null;
 }
 
-export interface TenantStatusCounts {
-  readonly active: number;
-  readonly suspended: number;
-  readonly archived: number;
-  readonly deleted: number;
+/**
+ * Derived from `TENANT_STATUSES` rather than listed, since ADR-0334 — this was four hand-written
+ * keys, and narrowing the two tenant-status vocabularies into one added a fifth state that the
+ * literal silently would not have counted. A tally that omits a status reports a smaller `total`
+ * than the rows it summed, which is the quiet kind of wrong: the console would show four numbers
+ * that no longer add up and nothing would say which state went missing.
+ */
+export type TenantStatusCounts = Readonly<Record<TenantStatus, number>> & {
   readonly total: number;
+};
+
+/** Zero for every declared status, so a status with no rows reads as 0 rather than as absent. */
+function emptyTenantStatusCounts(): Record<TenantStatus, number> {
+  return Object.fromEntries(TENANT_STATUSES.map((s) => [s, 0])) as Record<
+    TenantStatus,
+    number
+  >;
 }
 
 export interface PostgresTenantStoreOptions {
@@ -199,16 +210,46 @@ export class PostgresTenantStore {
     return row === undefined ? null : this.rowToTenant(row);
   }
 
+  /**
+   * A status change whose **source** state is re-asserted inside the `UPDATE` predicate — the row is
+   * the lock (ADR-0321), and stronger than reading the status first because a caller cannot defeat
+   * it by reusing what it read.
+   *
+   * `null` means no row matched, which conflates "no such tenant" with "the tenant is not in one of
+   * `from`" on purpose: both mean the caller's premise was wrong, and the caller that needs to tell
+   * them apart can read the row. Used by the deletion flow, where an unguarded `setStatus` would let
+   * a rejection restore a tenant that a console suspension had meanwhile moved somewhere else.
+   */
+  async transitionStatus(
+    id: string,
+    to: TenantStatus,
+    from: readonly TenantStatus[],
+  ): Promise<TenantRecord | null> {
+    if (from.length === 0) return null;
+    const placeholders = from.map((_s, i) => `$${(i + 3).toString()}`).join(", ");
+    const result = await this.conn.query(
+      `UPDATE ${this.table} SET status = $2, updated_at = now()` +
+        ` WHERE id = $1 AND status IN (${placeholders}) RETURNING ${SELECT_COLUMNS}`,
+      [id, to, ...from],
+    );
+    const row = result.rows[0];
+    return row === undefined ? null : this.rowToTenant(row);
+  }
+
   async counts(): Promise<TenantStatusCounts> {
     const result = await this.conn.query(
       `SELECT status, COUNT(*)::int AS count FROM ${this.table} GROUP BY status`,
     );
-    const byStatus = { active: 0, suspended: 0, archived: 0, deleted: 0 };
+    const byStatus = emptyTenantStatusCounts();
     let total = 0;
     for (const row of result.rows) {
-      const status = String(row["status"]) as TenantStatus;
+      const status = String(row["status"]);
       const count = Number(row["count"]);
-      if (status in byStatus) byStatus[status] += count;
+      // A status the contract does not declare still counts toward `total`, so the figures add up
+      // even against a database holding a value the CHECK was widened past — which is exactly the
+      // state a half-applied migration leaves, since widening this CHECK is `unreconciled` on a
+      // populated deployment (ADR-0330) and is applied by hand.
+      if (status in byStatus) byStatus[status as TenantStatus] += count;
       total += count;
     }
     return { ...byStatus, total };

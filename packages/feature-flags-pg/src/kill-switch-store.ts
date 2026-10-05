@@ -1,4 +1,12 @@
-import { setPlatformWriteSql, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  assertScopeTenantId,
+  classifyScopedWriteRefusal,
+  scopeFilter,
+  scopeFilterWithPlatform,
+  setPlatformWriteSql,
+  type PgConnection,
+  type ScopedWriteRefusal,
+} from "@crossengin/kernel-pg";
 import {
   KILL_SWITCH_STATUSES,
   canTransitionKillSwitch,
@@ -35,83 +43,38 @@ export const SET_TENANT_CONTEXT_SQL =
  */
 export const SET_PLATFORM_CONFIG_WRITE_SQL = setPlatformWriteSql("config");
 
-const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
+/**
+ * `scopeFilter` and `scopeFilterWithPlatform` live in `kernel-pg` beside `setPlatformWriteSql` and
+ * `isoInstant` — eight packages held a verbatim copy and `kernel-pg` is the only dependency all
+ * eight share. The rule that chooses between the two spellings, and the two measurements behind the
+ * branch, are written down there once.
+ *
+ * **Which this package reads, and the distinction that matters most here, because it differs by
+ * direction.**
+ *
+ * A **read** takes the inclusive form. `meta.feature_flags`' own catalog comment says a
+ * platform-wide flag is *meant* to be evaluated by every tenant's gateway, and a kill switch over a
+ * platform-wide flag is the same fact, so a tenant's read legitimately spans its own rows and the
+ * platform's. Narrowing it would make these stores owner-independent by destroying the behaviour
+ * rather than by reproducing it. Observed live as the owner before the predicate existed:
+ * `load("ff_tenantflag…", null)` returned a *tenant's* flag for a platform lookup, and
+ * `loadForIncident(…, null)` saw a tenant's switch beside the platform's and **threw** "this needs a
+ * human" on healthy data.
+ *
+ * A **write** takes the strict form, and the inclusive one would be a defect rather than a wider
+ * answer: `tenant_id = $n OR tenant_id IS NULL` on an `UPDATE` is a route from a tenant's session
+ * into the platform's row, i.e. a tenant flipping `gateway.strict_jwt_aud`. The write side is
+ * `guardedWrite` and `release`, and what a zero-row result means there is
+ * `assertScopedWriteLanded`'s question.
+ */
+export {
+  scopeFilter,
+  scopeFilterWithPlatform,
+  type ScopeFilter,
+} from "@crossengin/kernel-pg";
 
 export function assertTenantId(tenantId: string): void {
-  if (!TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
-}
-
-/** A `tenant_id` predicate and the parameters it binds, for one scope. */
-export interface ScopeFilter {
-  readonly sql: string;
-  readonly params: readonly unknown[];
-}
-
-/**
- * The `tenant_id` predicate a scoped read must carry, **beside** RLS rather than instead of it.
- *
- * RLS alone is not enough for the ordinary reason ADR-0331 measured on the forensic chain: **a
- * table's owner bypasses its policies**, and a deployment that connects as the owner is a normal
- * deployment. Both tables here are `tenant_id`-nullable with a `SELECT`-scoped platform read arm,
- * so a read that names the platform scope and carries no predicate answers from whichever scope
- * the row happens to be in. Observed live on this schema as the owner: `load("ff_tenantflag…",
- * null)` returned a *tenant's* flag for a platform lookup, and `loadForIncident(…, null)` saw a
- * tenant's switch beside the platform's and **threw** "this needs a human" on healthy data.
- *
- * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, which is the
- * one operator matching NULL to NULL and would give a single code path: ADR-0331 measured it at
- * 16 ms sequential scan against 45k entries where `tenant_id = $1` is a 0.09 ms index scan, because
- * it is not an indexable operator. `tenant_id IS NULL` is indexable, so both arms keep
- * `idx_feature_flags_tenant` / `idx_feature_flag_kill_switches_tenant`.
- *
- * This is a verbatim copy of `forensics-pg`'s `scopeFilter`. It belongs in `kernel-pg` beside
- * `setPlatformWriteSql` — the one module every store here already depends on — and lives per
- * package only because that is where the rest of this scope plumbing already lives.
- *
- * `firstParam` is the 1-based position the predicate's own parameter takes, so a caller that
- * already binds values can place this anywhere in its list.
- */
-export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
-  // `tenant_id = NULL` is never true, so the platform scope cannot ride along as a bound parameter
-  // and has to be asked for as `IS NULL`.
-  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
-  assertTenantId(tenantId);
-  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
-}
-
-/**
- * `scopeFilter` with the platform's rows kept in a tenant's answer, which is the predicate **both
- * tables in this package want**.
- *
- * The strict form is right where a scope's rows are a closed set — a hash chain, a tenant's own
- * certification report — and wrong here: `meta.feature_flags`' own catalog comment says a
- * platform-wide flag is *meant* to be evaluated by every tenant's gateway, and a kill switch over a
- * platform-wide flag is the same fact. So a tenant's read legitimately spans its own rows and the
- * platform's, and narrowing it would make this store owner-independent by destroying the behaviour
- * rather than by reproducing it.
- *
- * The rule: **the predicate reproduces what a non-owner would have been shown, no wider and no
- * narrower.** For a tenant that is `tenant_id = $n OR tenant_id IS NULL` — the isolation policy
- * OR'd with the `SELECT`-scoped platform read arm, which is how Postgres combines two permissive
- * policies. For the platform scope the two functions agree on `tenant_id IS NULL`, and that is the
- * arm the defect was in: the platform read is the one that was answering with a tenant's row.
- *
- * Still indexable — Postgres plans the disjunction as a BitmapOr over `idx_feature_flags_tenant`,
- * because each arm is an indexable operator on its own. That is precisely the property
- * `tenant_id IS NOT DISTINCT FROM $1` lacks.
- */
-export function scopeFilterWithPlatform(
-  tenantId: string | null,
-  firstParam = 1,
-): ScopeFilter {
-  if (tenantId === null) return scopeFilter(null, firstParam);
-  assertTenantId(tenantId);
-  return {
-    sql: `(tenant_id = $${String(firstParam)} OR tenant_id IS NULL)`,
-    params: [tenantId],
-  };
+  assertScopeTenantId(tenantId);
 }
 
 /**
@@ -131,9 +94,23 @@ const RELEASABLE_FROM_SQL = RELEASABLE_FROM.map((status) => `'${status}'`).join(
 const ACTIVE_PREDICATE =
   "status = 'triggered_active' AND (expires_at IS NULL OR expires_at > now())";
 
+/**
+ * A `release` that moved no row, and **which of the three reasons it was**.
+ *
+ * The class and its name stay — a caller catching it would be broken by a new unrelated type — and
+ * it carries `reason` now. Before the scope predicate the only possible answer was a stale or
+ * already-released row, so the old message's "not found, or no longer releasable" was the whole
+ * truth; with the predicate a third answer exists and naming it is the point.
+ */
 export class KillSwitchNotFoundError extends Error {
-  constructor(readonly killSwitchId: string) {
-    super(`kill switch '${killSwitchId}' not found, or no longer releasable`);
+  constructor(
+    readonly killSwitchId: string,
+    readonly reason: ScopedWriteRefusal,
+    readonly scopeTenantId: string | null,
+    readonly storedTenantId: string | null,
+    detail: string,
+  ) {
+    super(`kill switch '${killSwitchId}' was not released (${reason}): ${detail}`);
     this.name = "KillSwitchNotFoundError";
   }
 }
@@ -260,13 +237,23 @@ export class PostgresKillSwitchStore {
   }
 
   /**
-   * Writes the released record over the row.
+   * Writes the released record over the row, **in the scope the record names**.
    *
    * The status guard in the WHERE clause is what makes a double release impossible rather than
    * merely unlikely: two processes that both read a triggered switch would otherwise both write a
    * release, and the second would overwrite the first's releasing user and reason — which is
-   * exactly the attribution a four-eyes audit depends on. A zero-row update is therefore an error,
-   * not a success.
+   * exactly the attribution a four-eyes audit depends on.
+   *
+   * The **scope** predicate beside it is the write-side half of ADR-0331's defect. `kill_switch_id`
+   * is table-wide unique, so without it a platform-scoped release landed on a tenant's switch as the
+   * owner — and `UPDATE_ASSIGNMENTS` covers `tenant_id`, so it did not merely edit that row, it
+   * **moved it into platform scope**. Strict rather than inclusive, which is the opposite choice from
+   * every read here and the right one: `tenant_id = $n OR tenant_id IS NULL` on a write is a route
+   * from a tenant's session into the platform's row.
+   *
+   * A zero-row update is an error and no longer an *ambiguous* one. It used to mean "stale or
+   * already released"; with the scope predicate it could also mean "wrong scope", so
+   * `assertScopedWriteLanded` asks the row which — one extra statement, on the failure path only.
    */
   async release(killSwitch: KillSwitch): Promise<void> {
     if (killSwitch.status !== "released") {
@@ -275,16 +262,32 @@ export class PostgresKillSwitchStore {
       );
     }
     const values = killSwitchRowValues(killSwitch);
-    const result = await this.scopedWrite(killSwitch.tenantId, (tx) =>
-      tx.query(
+    const scope = scopeFilter(killSwitch.tenantId, KILL_SWITCH_PARAM_COUNT + 1);
+    await this.scopedWrite(killSwitch.tenantId, async (tx) => {
+      const result = await tx.query(
         `UPDATE ${this.schema}.${TABLE} SET ${UPDATE_ASSIGNMENTS}
-         WHERE kill_switch_id = $1 AND status IN (${RELEASABLE_FROM_SQL})`,
-        values,
-      ),
-    );
-    if ((result.rowCount ?? 0) === 0) {
-      throw new KillSwitchNotFoundError(killSwitch.id);
-    }
+         WHERE kill_switch_id = $1 AND ${scope.sql}
+           AND status IN (${RELEASABLE_FROM_SQL})`,
+        [...values, ...scope.params],
+      );
+      const refusal = await classifyScopedWriteRefusal(tx, result.rowCount, {
+        schema: this.schema,
+        table: TABLE,
+        idColumn: "kill_switch_id",
+        idValue: killSwitch.id,
+        tenantId: killSwitch.tenantId,
+        guard: `its status is not one of ${RELEASABLE_FROM_SQL} — it is already released or expired`,
+      });
+      if (refusal !== null) {
+        throw new KillSwitchNotFoundError(
+          killSwitch.id,
+          refusal.reason,
+          killSwitch.tenantId,
+          refusal.storedTenantId,
+          refusal.detail,
+        );
+      }
+    });
   }
 
   /**

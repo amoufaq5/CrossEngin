@@ -165,7 +165,10 @@ describe("eventChain / lastEvent", () => {
     id,
     tenantId,
     action: "activate",
-    fromState: "trial",
+    // `suspended` since ADR-0334: `trial` was a plan tier masquerading as a tenant state, with no
+    // producer anywhere and no row that could hold it. `suspended -> active` is the activate path
+    // that actually exists.
+    fromState: "suspended",
     toState: "active",
     trigger: "customer_request",
     occurredAt,

@@ -97,6 +97,7 @@ export class PostgresDrFailoverStore {
         executionId: valid.executionId,
         recordedAt: valid.recordedAt,
         stateColumn: "status",
+        tenantId: valid.tenantId,
       });
     });
   }

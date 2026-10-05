@@ -74,6 +74,7 @@ import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./en
 import type { SettingsStore, TenantSettings } from "./settings.js";
 import { entityReadOperationIds } from "./slugs.js";
 import type { EntityStore } from "./store.js";
+import { temporalFieldIndexFromManifest, withDatetimeWireType } from "./datetime-store.js";
 import { decimalFieldIndexFromManifest, withDecimalWireType } from "./decimal-store.js";
 import { listValueTypesForManifest, withListValueTypes } from "./list-value-types.js";
 import { buildUiSchema, buildUiSchemaHandler } from "./ui-schema.js";
@@ -527,9 +528,20 @@ export function compileOperateServer(
   // text-holding store orders a `decimal` or an `integer` lexicographically, and since the keyset
   // cursor is built from that ordering, a list does not merely come back in the wrong order — it
   // skips and repeats rows at page boundaries.
-  const store = withDecimalWireType(
-    withListValueTypes(options.store, listValueTypesForManifest(manifest)),
-    decimalFieldIndexFromManifest(manifest),
+  //
+  // `withDatetimeWireType` is the third layer and the same seam: before it the two Postgres stores
+  // disagreed about a timestamp's *spelling* before they could disagree about its order (the column
+  // store canonicalises through `isoInstant`, the JSONB store echoes whatever the write put in its
+  // document), and `validateBody` had no rule for a `datetime` field at all, so a client could
+  // store any string and four spellings of one instant sorted into three positions. It goes
+  // outside `withListValueTypes` and beside the decimal decorator because the two are independent:
+  // no field is both a `decimal` and a `datetime`, so their record mappings cannot interact.
+  const store = withDatetimeWireType(
+    withDecimalWireType(
+      withListValueTypes(options.store, listValueTypesForManifest(manifest)),
+      decimalFieldIndexFromManifest(manifest),
+    ),
+    temporalFieldIndexFromManifest(manifest),
   );
   const ctx: HandlerContext = {
     store,

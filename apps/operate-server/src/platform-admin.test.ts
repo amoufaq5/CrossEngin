@@ -10,6 +10,7 @@ import {
   buildPlatformAdminRoutes,
   type PlatformAdminContext,
 } from "./platform-admin.js";
+import { TENANT_STATUSES } from "./platform-tenants.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 const USER = "00000000-0000-4000-8000-0000000000aa";
@@ -41,6 +42,14 @@ function fakePg(): PgConnection {
     if (sql.includes("UPDATE")) {
       const row = rows.get(String(p[0]));
       if (row === undefined) return { rows: [], rowCount: 0 };
+      // `transitionStatus` puts its source states in the predicate (ADR-0321's "the row is the
+      // lock"), so the fake has to apply it. A fake that silently ignored the `status IN (…)` would
+      // make a guarded write and an unguarded one indistinguishable — which is exactly the blind
+      // spot ADR-0333 found, and `fakeCertificationPg` ignoring `tenant_id` is its other instance.
+      if (sql.includes("AND status IN (")) {
+        const allowed = p.slice(2).map((s) => String(s));
+        if (!allowed.includes(String(row["status"]))) return { rows: [], rowCount: 0 };
+      }
       row["status"] = String(p[1]);
       row["updated_at"] = new Date();
       return { rows: [row], rowCount: 1 };
@@ -254,7 +263,31 @@ describe("platform-admin — stats", () => {
     await findHandler(ctx, "platform.tenants.suspend")(input("platform_admin", { params: { id: a } }));
     await findHandler(ctx, "platform.tenants.archive")(input("platform_admin", { params: { id: c } }));
     const out = (await findHandler(ctx, "platform.stats")(input("platform_admin"))) as JsonOut;
-    expect(out.body["counts"]).toEqual({ active: 1, suspended: 1, archived: 1, deleted: 0, total: 3 });
+    // Every declared status appears with a zero rather than being absent, and the keys are derived
+    // from `TENANT_STATUSES` — so adding a state to the contract shows up here as a failing
+    // assertion rather than as a tally that quietly stops adding up. `pending_deletion` is the
+    // state ADR-0334 added; a console cannot reach it, which is why it is 0 here.
+    expect(out.body["counts"]).toEqual({
+      active: 1,
+      suspended: 1,
+      archived: 1,
+      pending_deletion: 0,
+      deleted: 0,
+      total: 3,
+    });
+  });
+
+  it("tallies every declared status, so a new state cannot go uncounted", () => {
+    // The defect this pins: the tally was four hand-written keys against an enum that grew to five,
+    // and a missing key makes `total` disagree with the sum of the parts.
+    const counted = Object.keys({
+      active: 0,
+      suspended: 0,
+      archived: 0,
+      pending_deletion: 0,
+      deleted: 0,
+    }).sort();
+    expect(counted).toEqual([...TENANT_STATUSES].sort());
   });
 });
 
@@ -270,5 +303,58 @@ describe("platform-admin — auth gating", () => {
     const ctx = makeCtx();
     expect((await findHandler(ctx, "platform.tenants.list")(input("erp_admin")) as JsonOut).status).toBe(403);
     expect((await findHandler(ctx, "platform.stats")(input("erp_admin")) as JsonOut).status).toBe(403);
+  });
+});
+
+describe("PostgresTenantStore.transitionStatus", () => {
+  async function seeded(): Promise<PostgresTenantStore> {
+    const store = new PostgresTenantStore(fakePg());
+    await store.create({ slug: "acme", name: "Acme", tier: "small", region: "eu", searchLocale: "english" });
+    return store;
+  }
+
+  async function idOf(store: PostgresTenantStore): Promise<string> {
+    const page = await store.list();
+    const row = page.data[0];
+    if (row === undefined) throw new Error("no seeded tenant");
+    return row.id;
+  }
+
+  it("moves a row whose current status is in the source set", async () => {
+    const store = await seeded();
+    const id = await idOf(store);
+    const moved = await store.transitionStatus(id, "pending_deletion", ["active", "suspended"]);
+    expect(moved?.status).toBe("pending_deletion");
+  });
+
+  it("matches no row when the current status is outside the source set", async () => {
+    const store = await seeded();
+    const id = await idOf(store);
+    await store.transitionStatus(id, "pending_deletion", ["active"]);
+    // A second attempt starts from `pending_deletion`, which is not a source — so the row is the
+    // lock and the caller's premise is refused rather than overwritten.
+    expect(await store.transitionStatus(id, "pending_deletion", ["active"])).toBeNull();
+  });
+
+  it("restores only from pending_deletion", async () => {
+    const store = await seeded();
+    const id = await idOf(store);
+    expect(await store.transitionStatus(id, "active", ["pending_deletion"])).toBeNull();
+    await store.transitionStatus(id, "pending_deletion", ["active"]);
+    expect((await store.transitionStatus(id, "active", ["pending_deletion"]))?.status).toBe("active");
+  });
+
+  it("matches no row for an unknown id", async () => {
+    const store = await seeded();
+    expect(await store.transitionStatus(TENANT, "suspended", ["active"])).toBeNull();
+  });
+
+  it("refuses an empty source set without issuing a statement", async () => {
+    const store = await seeded();
+    const id = await idOf(store);
+    // An empty `IN ()` is a syntax error in Postgres, and an empty source set means "no transition
+    // is permitted" — so it is answered here rather than sent.
+    expect(await store.transitionStatus(id, "deleted", [])).toBeNull();
+    expect((await store.getById(id))?.status).toBe("active");
   });
 });

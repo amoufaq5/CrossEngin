@@ -623,25 +623,48 @@ interface MutableTimer {
    * column's `BETWEEN 0 AND 1000000` CHECK permits — ADR-0289's class.
    */
   fireCount: number;
+  /**
+   * When a **recurring** timer fires next, read off the `timer_fired` event that computed it.
+   *
+   * `WorkflowTimerSchema` requires it non-null on a `fired` `cron_schedule` timer and null on every
+   * other kind, which is what makes a recurring timer recurring: the next occurrence is the thing
+   * that distinguishes it from a one-shot. It is cleared on a re-arm, because once the next
+   * occurrence *is* `fireAt` there is nothing further named.
+   */
+  nextFireAt: string | null;
 }
 
+/**
+ * The timers the log holds, one entry per timer **id** rather than per occurrence.
+ *
+ * A recurring timer is armed again on its own id (a second `timer_scheduled` after the
+ * `timer_fired`), so a later arming **merges** rather than replacing: `fireCount` and `firedAt`
+ * survive it. Resetting them — which a plain `set` does — would make a cron timer that had fired
+ * forty times project as one that had never fired, so `meta.workflow_timers.fire_count` would sit at
+ * 0 on a row whose own contract requires `>= 1` after a fire, and the replayer would find drift on
+ * every healthy recurring timer.
+ */
 export function projectTimers(events: readonly WorkflowEvent[]): readonly MutableTimer[] {
   const byId = new Map<string, MutableTimer>();
   for (const event of events) {
     if (event.timerId === null) continue;
     const id = event.timerId;
     if (event.kind === "timer_scheduled") {
+      const prior = byId.get(id);
       byId.set(id, {
         id,
         instanceId: event.instanceId,
         tenantId: event.tenantId,
         timerName: asString(event.payload["timerName"], "") ?? "",
         status: "scheduled",
+        // The start of *this* wait: `WorkflowTimerSchema`'s only invariant on it is
+        // `fireAt > scheduledAt`, and the full arming history stays in the log either way.
         scheduledAt: event.occurredAt,
         fireAt: asString(event.payload["fireAt"], event.occurredAt) ?? event.occurredAt,
-        firedAt: null,
+        firedAt: prior?.firedAt ?? null,
         cancelledAt: null,
-        fireCount: 0,
+        fireCount: prior?.fireCount ?? 0,
+        nextFireAt: null,
       });
       continue;
     }
@@ -653,6 +676,7 @@ export function projectTimers(events: readonly WorkflowEvent[]): readonly Mutabl
       // Counted, not set to 1: a cron timer may fire repeatedly, and `firedAt` already answers
       // "when last" — so incrementing is the only reading that stays true of both kinds.
       existing.fireCount += 1;
+      existing.nextFireAt = asString(event.payload["nextFireAt"], null);
     } else if (event.kind === "timer_cancelled") {
       existing.status = "cancelled";
       existing.cancelledAt = event.occurredAt;

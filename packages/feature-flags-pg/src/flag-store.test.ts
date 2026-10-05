@@ -249,11 +249,27 @@ describe("update", () => {
       T1,
     );
     expect(written(capture).sql).toContain(`SET ${flagUpdateAssignments()}`);
+    expect(written(capture).sql).toContain("WHERE flag_id = $1 AND tenant_id IS NULL");
     expect(written(capture).sql).toContain(
-      `WHERE flag_id = $1 AND updated_at = $${FEATURE_FLAG_PARAM_COUNT + 1}`,
+      `AND updated_at = $${FEATURE_FLAG_PARAM_COUNT + 1}`,
     );
     expect(written(capture).params).toHaveLength(FEATURE_FLAG_PARAM_COUNT + 1);
     expect(written(capture).params?.[FEATURE_FLAG_PARAM_COUNT]).toBe(T1);
+  });
+
+  it("carries the strict scope predicate on the write, never the inclusive one", async () => {
+    const capture: Captured[] = [];
+    await new PostgresFeatureFlagStore(mockConnection(capture)).update(
+      flag({ tenantId: TENANT, updatedAt: T2 }),
+      T1,
+    );
+    const sql = written(capture).sql;
+    // The scope's parameter sits after the guard's, so `flagUpdateAssignments` keeps its positions.
+    expect(sql).toContain(`AND tenant_id = $${FEATURE_FLAG_PARAM_COUNT + 2}`);
+    // `tenant_id = $n OR tenant_id IS NULL` on a write is a route from a tenant's session into the
+    // platform's row — the inclusive arm is right for every read here and wrong for this.
+    expect(sql).not.toContain("OR tenant_id IS NULL");
+    expect(written(capture).params?.[FEATURE_FLAG_PARAM_COUNT + 1]).toBe(TENANT);
   });
 
   it("refuses a write whose updatedAt does not advance past the guard", async () => {
@@ -265,14 +281,89 @@ describe("update", () => {
     expect(capture).toHaveLength(0);
   });
 
-  it("treats a zero-row update as a conflict naming the flag and the stale timestamp", async () => {
-    const store = new PostgresFeatureFlagStore(mockConnection(undefined, () => EMPTY));
-    await expect(store.update(flag({ updatedAt: T2 }), T1)).rejects.toBeInstanceOf(
-      FeatureFlagConflictError,
-    );
-    await expect(store.update(flag({ updatedAt: T2 }), T1)).rejects.toThrow(
-      new RegExp(`${FLAG_ID}.*${T1}`),
-    );
+  /**
+   * A zero-row update used to mean exactly one thing — the guard was stale — and the predicate makes
+   * it mean three. These four tests are the point of the increment: each failure mode is reached
+   * with the same `UPDATE 0` and named differently, by one re-read on the failure path.
+   *
+   * The old message was not merely incomplete, it was **wrong**: measured as a non-owner, where RLS
+   * had already refused a cross-scope write, it said "another writer changed it first" about a row
+   * no writer had touched.
+   */
+  describe("a zero-row update is diagnosed, not guessed", () => {
+    /** Answers the `UPDATE` with zero rows and the diagnosing `SELECT` with `rows`. */
+    function refusing(rows: readonly Record<string, unknown>[]) {
+      return mockConnection(undefined, (sql) =>
+        sql.includes("SELECT tenant_id FROM")
+          ? { rows, rowCount: rows.length }
+          : EMPTY,
+      );
+    }
+
+    it("names `row_absent` when no row anywhere carries the id", async () => {
+      const store = new PostgresFeatureFlagStore(refusing([]));
+      const err = await store
+        .update(flag({ updatedAt: T2 }), T1)
+        .then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(FeatureFlagConflictError);
+      expect((err as FeatureFlagConflictError).reason).toBe("row_absent");
+      expect((err as FeatureFlagConflictError).storedTenantId).toBeNull();
+      expect((err as Error).message).toContain(FLAG_ID);
+    });
+
+    it("names `wrong_scope` when the row belongs to another tenant", async () => {
+      const store = new PostgresFeatureFlagStore(refusing([{ tenant_id: TENANT }]));
+      const err = await store
+        .update(flag({ tenantId: null, updatedAt: T2 }), T1)
+        .then(() => null, (e: unknown) => e);
+      expect((err as FeatureFlagConflictError).reason).toBe("wrong_scope");
+      expect((err as FeatureFlagConflictError).scopeTenantId).toBeNull();
+      expect((err as FeatureFlagConflictError).storedTenantId).toBe(TENANT);
+      expect((err as Error).message).toContain("the platform scope");
+      expect((err as Error).message).toContain(TENANT);
+    });
+
+    it("names `wrong_scope` in the other direction too", async () => {
+      const store = new PostgresFeatureFlagStore(refusing([{ tenant_id: null }]));
+      const err = await store
+        .update(flag({ tenantId: TENANT, updatedAt: T2 }), T1)
+        .then(() => null, (e: unknown) => e);
+      expect((err as FeatureFlagConflictError).reason).toBe("wrong_scope");
+      expect((err as FeatureFlagConflictError).scopeTenantId).toBe(TENANT);
+      expect((err as FeatureFlagConflictError).storedTenantId).toBeNull();
+    });
+
+    it("names `guard_refused`, with the stale timestamp, when the row is in scope", async () => {
+      const store = new PostgresFeatureFlagStore(refusing([{ tenant_id: null }]));
+      const err = await store
+        .update(flag({ updatedAt: T2 }), T1)
+        .then(() => null, (e: unknown) => e);
+      expect((err as FeatureFlagConflictError).reason).toBe("guard_refused");
+      expect((err as FeatureFlagConflictError).expectedUpdatedAt).toBe(T1);
+      expect((err as Error).message).toMatch(new RegExp(`${FLAG_ID}.*${T1}`));
+    });
+
+    it("issues the diagnosing read only when the write failed", async () => {
+      const capture: Captured[] = [];
+      await new PostgresFeatureFlagStore(mockConnection(capture)).update(
+        flag({ updatedAt: T2 }),
+        T1,
+      );
+      expect(capture.filter((c) => c.sql.includes("SELECT tenant_id FROM"))).toHaveLength(0);
+    });
+
+    it("diagnoses with no scope predicate, since the question is which scope holds the row", async () => {
+      const capture: Captured[] = [];
+      const conn = mockConnection(capture, (sql) =>
+        sql.includes("SELECT tenant_id FROM") ? { rows: [], rowCount: 0 } : EMPTY,
+      );
+      await new PostgresFeatureFlagStore(conn)
+        .update(flag({ tenantId: TENANT, updatedAt: T2 }), T1)
+        .catch(() => undefined);
+      const read = capture.find((c) => c.sql.includes("SELECT tenant_id FROM"));
+      expect(read?.sql).toContain("SELECT tenant_id FROM meta.feature_flags WHERE flag_id = $1");
+      expect(read?.params).toEqual([FLAG_ID]);
+    });
   });
 
   it("resolves when one row was written", async () => {

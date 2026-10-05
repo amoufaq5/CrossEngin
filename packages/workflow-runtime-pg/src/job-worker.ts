@@ -17,7 +17,7 @@ import {
   reapCancelledJobRuns,
   type ReapedJobRun,
 } from "./job-cancellation.js";
-import { claimDueJobs, releaseJobClaim, renewJobClaim } from "./job-claim.js";
+import { claimDueJobs, releaseJobClaim, renewJobClaim, type JobClaimScope } from "./job-claim.js";
 import type { PostgresJobRunEngine } from "./job-engine.js";
 
 /** The engine surface a job processor needs — the log-driven, targeted execute. */
@@ -35,11 +35,17 @@ export interface BuildJobClaimerOptions {
   readonly reapCancellations?: boolean;
   readonly reapLimit?: number;
   readonly onReaped?: (runs: readonly ReapedJobRun[]) => void;
+  /**
+   * What this worker's registry can execute. Passed straight to `claimDueJobs`, where absent means
+   * unfiltered and an empty declaration claims nothing.
+   */
+  readonly serves?: JobClaimScope;
 }
 
 /** Adapts the Postgres `claimDueJobs` / `releaseJobClaim` SQL to the worker's `JobClaimer`. */
 export function buildJobClaimer(conn: PgConnection, opts: BuildJobClaimerOptions = {}): JobClaimer {
   const schemaOpt = opts.schema !== undefined ? { schema: opts.schema } : {};
+  const servesOpt = opts.serves !== undefined ? { serves: opts.serves } : {};
   const reap = opts.reapCancellations === true;
   return {
     claim: async (o) => {
@@ -51,7 +57,7 @@ export function buildJobClaimer(conn: PgConnection, opts: BuildJobClaimerOptions
         });
         if (reaped.length > 0) opts.onReaped?.(reaped);
       }
-      return claimDueJobs(conn, { ...o, ...schemaOpt });
+      return claimDueJobs(conn, { ...o, ...schemaOpt, ...servesOpt });
     },
     release: (o) => releaseJobClaim(conn, { ...o, ...schemaOpt }),
   };
@@ -183,6 +189,8 @@ export interface BuildWorkflowJobWorkerInput {
   readonly onCancelObserved?: (job: ClaimedJob) => void;
   readonly onSkipped?: (job: ClaimedJob, reason: JobSkipReason) => void;
   readonly onReaped?: (runs: readonly ReapedJobRun[]) => void;
+  /** The job ids / kinds this process's registry serves — `buildJobHandlerRegistry().servedJobIds`. */
+  readonly serves?: JobClaimScope;
 }
 
 /**
@@ -198,6 +206,7 @@ export function buildWorkflowJobWorker(input: BuildWorkflowJobWorkerInput): Work
     ...(input.schema !== undefined ? { schema: input.schema } : {}),
     reapCancellations: cancelling,
     ...(input.onReaped !== undefined ? { onReaped: input.onReaped } : {}),
+    ...(input.serves !== undefined ? { serves: input.serves } : {}),
   });
   const watcher = cancelling
     ? buildJobCancellationWatcher(input.conn, input.schema !== undefined ? { schema: input.schema } : {})

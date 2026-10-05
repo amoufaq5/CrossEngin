@@ -281,3 +281,42 @@ describe("surveyCancellableWork", () => {
     });
   });
 });
+
+describe("outstandingTimersFromLog — a re-armed recurring timer", () => {
+  const timerEvent = (
+    _seq: number,
+    kind: WorkflowEvent["kind"],
+    timerId: string,
+    payload: Record<string, unknown>,
+  ): WorkflowEvent => event({ kind, timerId, payload });
+
+  it("re-admits a timer id that a later timer_scheduled arms again", () => {
+    // The ordering is the guarantee: `timer_fired` removes the id and the re-arm puts it back, so a
+    // recurring timer is outstanding again after it fires. Arming before firing would cancel out.
+    const out = outstandingTimersFromLog([
+      timerEvent(1, "timer_scheduled", "wft_cron0001", { timerName: "heartbeat", fireAt: "2026-05-16T13:00:00.000Z" }),
+      timerEvent(2, "timer_fired", "wft_cron0001", { timerName: "heartbeat", nextFireAt: "2026-05-16T14:00:00.000Z" }),
+      timerEvent(3, "timer_scheduled", "wft_cron0001", { timerName: "heartbeat", fireAt: "2026-05-16T14:00:00.000Z", rearm: true }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0]?.fireAt).toBe(Date.parse("2026-05-16T14:00:00.000Z"));
+  });
+
+  it("leaves a fired-and-not-re-armed timer out", () => {
+    const out = outstandingTimersFromLog([
+      timerEvent(1, "timer_scheduled", "wft_cron0001", { timerName: "heartbeat", fireAt: "2026-05-16T13:00:00.000Z" }),
+      timerEvent(2, "timer_fired", "wft_cron0001", { timerName: "heartbeat", nextFireAt: "2026-05-16T14:00:00.000Z" }),
+    ]);
+    expect(out).toEqual([]);
+  });
+
+  it("a cancellation after a re-arm removes it again", () => {
+    const out = outstandingTimersFromLog([
+      timerEvent(1, "timer_scheduled", "wft_cron0001", { timerName: "heartbeat", fireAt: "2026-05-16T13:00:00.000Z" }),
+      timerEvent(2, "timer_fired", "wft_cron0001", { timerName: "heartbeat", nextFireAt: "2026-05-16T14:00:00.000Z" }),
+      timerEvent(3, "timer_scheduled", "wft_cron0001", { timerName: "heartbeat", fireAt: "2026-05-16T14:00:00.000Z", rearm: true }),
+      timerEvent(4, "timer_cancelled", "wft_cron0001", { timerName: "heartbeat" }),
+    ]);
+    expect(out).toEqual([]);
+  });
+});

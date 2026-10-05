@@ -3,10 +3,12 @@ import { manifestHash, type Manifest } from "@crossengin/kernel/manifest";
 import type { PgConnection } from "@crossengin/kernel-pg";
 
 import {
+  UndecidedColumnTypeError,
   columnPlansForManifest,
   joinTablePlansForManifest,
   plansRequirePgcrypto,
   relationDeleteIndex,
+  type EntityTablePlan,
 } from "./column-plan.js";
 import { ensureColumnStoreExtensions } from "./column-store.js";
 import { emitManifestSchemaDdl } from "./entity-ddl.js";
@@ -121,7 +123,33 @@ export async function applyTenantManifestSchema(
   opts: TenantSchemaOptions = {},
 ): Promise<TenantSchemaApplication> {
   const schema = resolveTenantSchema(tenantId, opts);
-  const plans = columnPlansForManifest(manifest, { schema });
+  // A field type with no wire form is a refusal here rather than an exception: this is the path
+  // `TenantColumnStoreRegistry` degrades to the JSONB fallback (ADR-0314), and it cannot degrade a
+  // throw. `ColumnMappedEntityStore`'s constructor still throws for a *deployment's* own pack
+  // manifest, where a boot failure is the right answer — see `unservable_field_type`.
+  let plans: ReadonlyMap<string, EntityTablePlan>;
+  try {
+    plans = columnPlansForManifest(manifest, { schema });
+  } catch (error) {
+    if (!(error instanceof UndecidedColumnTypeError)) throw error;
+    return {
+      tenantId,
+      schema,
+      manifestHash: manifestHash(manifest),
+      applied: false,
+      statements: [],
+      changes: [
+        {
+          kind: "unservable_field_type",
+          table: error.entity,
+          column: error.field,
+          detail: error.reason,
+          blocking: true,
+          sql: null,
+        },
+      ],
+    };
+  }
   const joinPlans = joinTablePlansForManifest(manifest, { schema });
   const deletePolicies = relationDeleteIndex(manifest);
   const hash = manifestHash(manifest);

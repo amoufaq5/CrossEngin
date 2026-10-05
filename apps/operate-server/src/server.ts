@@ -17,6 +17,7 @@ import {
 
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
+import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
 
 let requestCounter = 0;
 function defaultRequestId(): string {
@@ -215,6 +216,12 @@ export interface BuildOperateHttpServerOptions {
   readonly idGenerator?: () => string;
   /** Optional live-request observer sink (e.g. the SLO request observer). */
   readonly onExecution?: (execution: PipelineExecution) => void;
+  /**
+   * Enforce the caller tenant's lifecycle state on every request (ADR-0334). Absent ⇒ no gate, which
+   * is what every deployment had: `meta.tenants.status` was a column nothing on the request path
+   * read, so a `pending_deletion` tenant went on accepting writes into data about to be destroyed.
+   */
+  readonly tenantStatusGate?: TenantStatusGateOptions;
 }
 
 export interface BuiltOperateHttpServer {
@@ -253,6 +260,15 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
+  // After every registration and before the first request. The gate goes on the registry rather than
+  // on each `register` call because that is the only way it is *total*: `operationIds()` is the whole
+  // surface — manifest CRUD, lifecycle transitions, associations, the meta routes and every injected
+  // `extraRoutes` entry — and a decorator applied per call site covers the ones somebody remembered.
+  // `GatewayRuntime` resolves a handler per request from this same registry, so replacing entries
+  // after it was constructed takes effect.
+  if (options.tenantStatusGate !== undefined) {
+    applyTenantStatusGate(gateway.handlers, options.tenantStatusGate);
+  }
   const httpServer = new OperateHttpServer({
     gateway,
     ...(options.webhookRoute !== undefined ? { webhookRoute: options.webhookRoute } : {}),

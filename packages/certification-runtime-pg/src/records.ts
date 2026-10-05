@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { setPlatformWriteSql, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  assertScopeTenantId,
+  setPlatformWriteSql,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 import {
   CertificationReportSchema,
   COMPLIANCE_FRAMEWORKS,
@@ -70,45 +74,24 @@ export const SET_TENANT_CONTEXT_SQL =
 
 export const SET_PLATFORM_RECORD_WRITE_SQL = setPlatformWriteSql("record");
 
-const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
-
-function assertTenantId(tenantId: string): void {
-  if (!TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
-}
-
-/** A `tenant_id` predicate and the parameters it binds, for one scope. */
-export interface ScopeFilter {
-  readonly sql: string;
-  readonly params: readonly unknown[];
-}
-
 /**
- * The `tenant_id` predicate a scoped read must carry, **beside** RLS rather than instead of it.
+ * `scopeFilter` lives in `kernel-pg` beside `setPlatformWriteSql` and `isoInstant` — eight packages
+ * held a verbatim copy and `kernel-pg` is the only dependency all eight share. The rule that chooses
+ * between the strict and the inclusive spelling, and the two measurements behind the branch, are
+ * written down there once.
  *
- * `meta.certification_reports` is `tenant_id`-nullable with a `SELECT`-scoped platform read arm, and
- * **a table's owner bypasses its policies** (ADR-0331). This is the loudest member of the class: a
+ * **Which this package reads: the strict form**, and it is the loudest member of the class. A
  * certification report is a compliance claim, not telemetry, and `latestForFramework` answers it
  * with a single `LIMIT 1` row. Observed live as the owner, with a tenant's `soc2_type2` report
  * generated after the platform's: `latestForFramework("soc2_type2")` returned the **tenant's**
  * report, `certifiable: false`, where the platform's own was `certifiable: true`. The same call as a
  * non-owner returned the platform's. One `ORDER BY … LIMIT 1` over two scopes inverted the answer to
  * "are we certifiable" — no error, no empty result, just the wrong row.
- *
- * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
- * matching NULL to NULL: ADR-0331 measured it at 16 ms sequential scan against 45k entries where
- * `tenant_id = $1` is a 0.09 ms index scan, because it is not indexable. `tenant_id IS NULL` is, so
- * both arms keep `idx_certification_reports_tenant_at`.
- *
- * Verbatim from `forensics-pg`'s `scopeFilter`; it belongs in `kernel-pg` beside
- * `setPlatformWriteSql`, which this module already imports.
  */
-export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
-  // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`.
-  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
-  assertTenantId(tenantId);
-  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
+export { scopeFilter, type ScopeFilter } from "@crossengin/kernel-pg";
+
+function assertTenantId(tenantId: string): void {
+  assertScopeTenantId(tenantId);
 }
 
 /**

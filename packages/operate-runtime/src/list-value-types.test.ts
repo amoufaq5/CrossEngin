@@ -41,8 +41,8 @@ const INDEX: ListValueTypeIndex = listValueTypesForManifest(MANIFEST);
 const QUERY: ListQuery = { limit: 10, cursor: null, sort: [], filters: [] };
 
 describe("LIST_VALUE_TYPES", () => {
-  it("is exactly the two comparisons a text-holding store needs", () => {
-    expect(LIST_VALUE_TYPES).toEqual(["text", "numeric"]);
+  it("is exactly the three comparisons a text-holding store needs", () => {
+    expect(LIST_VALUE_TYPES).toEqual(["text", "numeric", "timestamptz"]);
   });
 });
 
@@ -74,19 +74,29 @@ describe("FIELD_LIST_VALUE_TYPES", () => {
 
   it("keeps boolean, date and time on text, which is measured rather than assumed", () => {
     // `'false' < 'true'` is the boolean order; a zero-padded `YYYY-MM-DD` and `HH:MM:SS` sort
-    // chronologically byte-wise. A cast would buy nothing and cost a guard.
+    // chronologically byte-wise. `date` and `time` keep text on the test `datetime` fails: a cast
+    // is warranted where the decorator *rewrites* a plausible stored spelling, and the only form
+    // anything ever wrote for those two is already the canonical one.
     expect(FIELD_LIST_VALUE_TYPES.boolean).toBe("text");
     expect(FIELD_LIST_VALUE_TYPES.date).toBe("text");
     expect(FIELD_LIST_VALUE_TYPES.time).toBe("text");
   });
 
-  it("keeps datetime on text, with the hole that leaves recorded here", () => {
-    // ISO-8601 instants sort correctly only while every writer spells them the same way. Every
-    // server-side writer uses `toISOString()` and does; `validateBody` has no rule for a
-    // `datetime` field, so a client can store `2026-01-31T19:00:00+09:00` — one instant with a
-    // spelling that sorts hours away from `2026-01-31T10:00:00.000Z`. Closing that is a decision
-    // about a `datetime` wire form, not about ordering.
-    expect(FIELD_LIST_VALUE_TYPES.datetime).toBe("text");
+  it("gives `timestamptz` to exactly datetime, and for the legacy rows rather than the form", () => {
+    // The canonical `datetime` wire form is fixed-width and always `Z`, so its byte order *is*
+    // chronological. The cast is for a row written before there was a form: an offset spelling
+    // sorts hours away from its instant as text, while a real TIMESTAMPTZ column orders it by the
+    // instant, so the two Postgres stores place the same row differently — and the keyset cursor
+    // is built from the ordering.
+    const casts = Object.entries(FIELD_LIST_VALUE_TYPES)
+      .filter(([, t]) => t === "timestamptz")
+      .map(([k]) => k);
+    expect(casts).toEqual(["datetime"]);
+    // Nine hours apart as text, one instant in fact.
+    expect("2026-01-31T19:00:00+09:00" > "2026-01-31T11:00:00.000Z").toBe(true);
+    expect(Date.parse("2026-01-31T19:00:00+09:00") < Date.parse("2026-01-31T11:00:00.000Z")).toBe(
+      true,
+    );
   });
 
   it("keeps duration on text, because its wire type is undecided on purpose", () => {
@@ -115,6 +125,8 @@ describe("listValueTypesForManifest", () => {
     expect([...INDEX.get("Invoice")!.entries()]).toEqual([
       ["total", "numeric"],
       ["qty", "numeric"],
+      ["created_at", "timestamptz"],
+      ["updated_at", "timestamptz"],
     ]);
   });
 
@@ -129,11 +141,13 @@ describe("listValueTypesForManifest", () => {
   });
 
   it("reaches trait-supplied fields through `resolvedFields`", () => {
-    // `auditable` supplies `created_at`/`updated_at` (datetime → text), so the entity is indexed
-    // for its own numerics only — but the index is built from the same function the column plan
-    // and `validateManifest` use, so it cannot name a field the store lacks.
+    // `auditable` supplies `created_at`/`updated_at`, which are `datetime` and so now
+    // `timestamptz` — and the index is built from the same function the column plan and
+    // `validateManifest` use, so it cannot name a field the store lacks. That reach is load-bearing
+    // for `datetime` in a way it never was for `decimal`: the shipped packs declare 23 `datetime`
+    // fields by hand and resolve to 159.
     const keys = [...INDEX.get("Invoice")!.keys()];
-    expect(keys).not.toContain("created_at");
+    expect(keys).toContain("created_at");
     expect(keys).not.toContain("due_on");
     expect(keys).not.toContain("tags");
   });

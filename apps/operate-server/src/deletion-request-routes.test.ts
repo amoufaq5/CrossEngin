@@ -403,6 +403,67 @@ describe("verify", () => {
     expect(h.events[0]?.operation).toBe(DELETION_REQUEST_VERIFIED_OPERATION);
   });
 
+  it("reports tenantReadOnly: null when no deployment mover is configured", async () => {
+    const h = harness();
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    // `null` is "this deployment does not move tenant rows", which is a different fact from a mover
+    // that tried and failed — the latter says the write window is still open.
+    expect(res.body["tenantReadOnly"]).toBeNull();
+  });
+
+  it("makes the tenant read-only after the request moves, and says so", async () => {
+    const moved: string[] = [];
+    const h = harness({
+      tenantState: {
+        markPendingDeletion: async (t) => {
+          moved.push(t);
+        },
+        restore: async () => undefined,
+      },
+    });
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    expect(res.status).toBe(202);
+    expect(res.body["tenantReadOnly"]).toBe(true);
+    expect(moved).toEqual([TENANT]);
+  });
+
+  it("still answers 202 when the tenant move fails, with tenantReadOnly: false", async () => {
+    const h = harness({
+      tenantState: {
+        markPendingDeletion: async () => {
+          throw new Error("deadlock detected");
+        },
+        restore: async () => undefined,
+      },
+    });
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    // The request *did* move — it carries the four-eyes rule, the guard and the audit row — so a 5xx
+    // would say the verification had not happened. `false` is what tells an operator the tenant is
+    // still accepting writes (ADR-0320's rule, as for `tenantRetired`).
+    expect(res.status).toBe(202);
+    expect(res.body["status"]).toBe("verified");
+    expect(res.body["tenantReadOnly"]).toBe(false);
+  });
+
+  it("does not move the tenant when the request transition did not land", async () => {
+    const moved: string[] = [];
+    const h = harness(
+      {
+        tenantState: {
+          markPendingDeletion: async (t) => {
+            moved.push(t);
+          },
+          restore: async () => undefined,
+        },
+      },
+      { transitionReturnsNull: true },
+    );
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    // The tenant move is the *consequence* of the request moving. Nothing moved, so nothing follows.
+    expect(res.status).toBe(409);
+    expect(moved).toEqual([]);
+  });
+
   it("refuses a verifier who is the submitter", async () => {
     const h = harness({}, { stored: requestOf({ submittedBy: CALLER }) });
     const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
@@ -471,6 +532,37 @@ describe("reject", () => {
     const res = await call(h.ctx, REJECT, { parsedBody: {} });
     expect(res.status).toBe(400);
     expect(h.transitions).toEqual([]);
+  });
+
+  it("restores the tenant, because verified -> rejected is a permitted request transition", async () => {
+    const restored: string[] = [];
+    const h = harness({
+      tenantState: {
+        markPendingDeletion: async () => undefined,
+        restore: async (t) => {
+          restored.push(t);
+        },
+      },
+    });
+    const res = await call(h.ctx, REJECT, { parsedBody: { reason: "submitted in error" } });
+    expect(res.status).toBe(200);
+    expect(res.body["tenantRestored"]).toBe(true);
+    expect(restored).toEqual([TENANT]);
+  });
+
+  it("still answers 200 when the restore fails, with tenantRestored: false", async () => {
+    const h = harness({
+      tenantState: {
+        markPendingDeletion: async () => undefined,
+        restore: async () => {
+          throw new Error("connection terminated");
+        },
+      },
+    });
+    const res = await call(h.ctx, REJECT, { parsedBody: { reason: "submitted in error" } });
+    expect(res.status).toBe(200);
+    expect(res.body["status"]).toBe("rejected");
+    expect(res.body["tenantRestored"]).toBe(false);
   });
 
   it("is the verify grant, not the submit one", async () => {

@@ -74,6 +74,113 @@ export function setPlatformWriteSql(grant: PlatformWriteGrant): string {
   return `SELECT set_config('${PLATFORM_WRITE_GRANTS[grant]}', 'on', true)`;
 }
 
+/**
+ * The shape of a `tenant_id` a scope predicate will bind, and the whole of that check.
+ *
+ * Loose on purpose — hex digits and dashes, up to 64 — because the value is **bound as a
+ * parameter** in every statement that reaches it, so this is not an injection guard but a fail-fast
+ * on a caller that passed something that could never be a tenant id. Seven of the eight packages
+ * that held a copy of `scopeFilter` spelled exactly this regex and exactly this message, which is
+ * why both move here unchanged: every `/invalid tenantId/` assertion in the workspace still matches.
+ *
+ * `dr-runtime-pg` deliberately keeps a **stricter** local one (a full UUID) and applies it before
+ * delegating here. That is a package's own judgement about its callers, not a disagreement about
+ * what this function needs, so it stays where it was rather than widening or narrowing this.
+ */
+const SCOPE_TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
+
+export function assertScopeTenantId(tenantId: string): void {
+  if (!SCOPE_TENANT_ID_RE.test(tenantId)) {
+    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
+  }
+}
+
+/** A `tenant_id` predicate and the parameters it binds, for one scope. */
+export interface ScopeFilter {
+  readonly sql: string;
+  readonly params: readonly unknown[];
+}
+
+/**
+ * The `tenant_id` predicate a scoped statement carries, **beside** RLS rather than instead of it.
+ *
+ * RLS alone is not enough, and the reason is ordinary rather than exotic: **a table's owner bypasses
+ * its policies**, and a deployment that connects as the owner is a normal deployment. ADR-0331 and
+ * ADR-0333 swept fourteen store classes across seven packages for want of this predicate, and the
+ * damage was never a visibly long result set — it was a *wrong scalar*. `latestForFramework(
+ * "soc2_type2")` returned a tenant's failing SOC 2 report as the platform's and answered "are we
+ * certifiable" with `false`; `countBreachesSince` answered 3 where the scope's own count is 1, a 3×
+ * burn-rate input on the path that pages; `loadForIncident` *threw* on healthy data.
+ *
+ * **It lives here because `kernel-pg` is the only dependency every scope-carrying package shares.**
+ * Eight packages held a verbatim copy, each with a comment naming this module as the destination;
+ * no other home avoids a backwards dependency.
+ *
+ * ## Which spelling, and the one rule that decides
+ *
+ * **The predicate reproduces what a non-owner would have been shown, no wider and no narrower.**
+ *
+ * - `scopeFilter` — strict. Right where a scope's rows are a **closed set**: a hash chain, a
+ *   certification report, a DR drill. A platform failover drill is not evidence about a tenant's
+ *   disaster recovery, so mixing them is the defect rather than the behaviour.
+ * - `scopeFilterWithPlatform` — inclusive. Right where a platform row is **meant** to serve a
+ *   tenant: a feature flag, a public key, a platform-wide workflow definition. That is the `SELECT`-
+ *   scoped platform read arm, which grants without a grant, and it is how Postgres combines two
+ *   permissive policies. Strict everywhere would have made these stores owner-independent by
+ *   **destroying** documented behaviour rather than by reproducing it.
+ *
+ * The catalog says which is which: `idx_workflow_definitions_platform_key_version … WHERE tenant_id
+ * IS NULL` is the platform read arm written down.
+ *
+ * **A write takes the strict form, always** — see `assertScopedWriteLanded`. The inclusive arm on a
+ * write is not a wider read, it is a route from one scope into another's row: a tenant-scoped
+ * `UPDATE` matching `tenant_id IS NULL` would let a tenant flip `gateway.strict_jwt_aud`.
+ *
+ * ## Why it branches
+ *
+ * Both functions **branch** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
+ * matching NULL to NULL and therefore the tempting single code path. Measured, twice, on 45k rows:
+ * with a **literal** NULL it *is* index-scanned, because Postgres constant-folds it — but with a
+ * **bound parameter**, which is how a store issues it, it is a sequential scan. 10.67 ms against
+ * 0.73 ms, and 24.7 ms against 1.7 ms. **The penalty is invisible in a psql session and real in
+ * production.** The inclusive arm keeps its index too: Postgres plans the disjunction as a
+ * **BitmapOr** over the same index, because each arm is an indexable operator on its own. That is
+ * precisely the property the single-operator form lacks.
+ *
+ * `IS NOT DISTINCT FROM` is still right in one position, and `assertScopedWriteLanded`'s callers use
+ * it there: inside an `ON CONFLICT … DO UPDATE WHERE`, where both operands come from one already-
+ * located row and no index is consulted at all.
+ *
+ * `firstParam` is the 1-based position the predicate's own parameter takes, so a caller that already
+ * binds values can place this anywhere in its list.
+ */
+export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
+  // `tenant_id = NULL` is never true, so the platform scope cannot ride along as a bound parameter
+  // and has to be asked for as `IS NULL`.
+  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
+  assertScopeTenantId(tenantId);
+  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
+}
+
+/**
+ * `scopeFilter` with the platform's rows kept in a tenant's answer — see the rule above for when
+ * that is the right predicate and when it is the defect.
+ *
+ * For the platform scope the two functions agree on `tenant_id IS NULL`, and that is the arm the
+ * defect was always in: the platform read is the one that was answering with a tenant's row.
+ */
+export function scopeFilterWithPlatform(
+  tenantId: string | null,
+  firstParam = 1,
+): ScopeFilter {
+  if (tenantId === null) return scopeFilter(null, firstParam);
+  assertScopeTenantId(tenantId);
+  return {
+    sql: `(tenant_id = $${String(firstParam)} OR tenant_id IS NULL)`,
+    params: [tenantId],
+  };
+}
+
 export interface PgConfig {
   readonly host: string;
   readonly port: number;

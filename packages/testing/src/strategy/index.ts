@@ -6,3 +6,5 @@ export * from "./fixtures.js";
 export * from "./ci.js";
 export * from "./typecheck-config.js";
 export * from "./pg-column-coverage.js";
+export * from "./pg-storeless-tables.js";
+export * from "./workspace-sql-scan.js";

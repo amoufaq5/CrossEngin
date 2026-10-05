@@ -1,4 +1,32 @@
-import { setPlatformWriteSql, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  assertScopeTenantId,
+  setPlatformWriteSql,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
+
+/**
+ * `scopeFilter` lives in `kernel-pg` beside `setPlatformWriteSql` and `isoInstant` — eight packages
+ * held a verbatim copy and `kernel-pg` is the only dependency all eight share. The rule that chooses
+ * between the strict and the inclusive spelling, and the two measurements behind the branch, are
+ * written down there once.
+ *
+ * **Which this package reads, and why it is the one table where it matters most.** The point lookups
+ * (`getByKeyId`, `getByFingerprint`) take the **inclusive** arm, because a platform public key is
+ * *meant* to be readable by a tenant — that is what a public key is for, it is what the `SELECT`-
+ * scoped platform read arm grants without a grant, and it is what a tenant-scoped verifier resolving
+ * the platform chain's signing key depends on. `listKeys({tenantId})` takes the **strict** arm,
+ * because that is a filter and means "this tenant's keys".
+ *
+ * Observed live as the owner before the predicate existed:
+ * `getByFingerprint(<a tenant's fingerprint>, null)` returned the **tenant's** key — so any tenant
+ * able to register a key could supply the one a platform chain entry verifies under, which is the
+ * exact hole `app.platform_key_write` exists as its own grant to close.
+ */
+export {
+  scopeFilter,
+  scopeFilterWithPlatform,
+  type ScopeFilter,
+} from "@crossengin/kernel-pg";
 
 export const SET_TENANT_CONTEXT_SQL =
   "SELECT set_config('app.current_tenant_id', $1, true)";
@@ -18,82 +46,8 @@ export const SET_TENANT_CONTEXT_SQL =
  */
 export const SET_PLATFORM_KEY_WRITE_SQL = setPlatformWriteSql("key");
 
-const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
-
-/** A `tenant_id` predicate and the parameters it binds, for one scope. */
-export interface ScopeFilter {
-  readonly sql: string;
-  readonly params: readonly unknown[];
-}
-
-/**
- * The `tenant_id` predicate a scoped read must carry, **beside** RLS rather than instead of it.
- *
- * `meta.crypto_keys` is `tenant_id`-nullable with a `SELECT`-scoped platform read arm, and **a
- * table's owner bypasses its policies** (ADR-0331) — so a read that names the platform scope and
- * carries no predicate answers from whichever scope holds the row. Observed live on this schema as
- * the owner: `getByFingerprint(<a tenant's fingerprint>, null)` returned the **tenant's** key.
- *
- * That matters more here than anywhere else in this class. `app.platform_key_write` exists as its
- * own grant (ADR-0332) precisely because this table holds the public keys a chain entry's
- * `signingKeyFingerprint` resolves against, so a session able to both append to the trail and
- * register a key could re-sign a rewritten chain and have it verify. An unscoped *read* hands that
- * back: `chain-verify.ts` resolves a platform chain entry's key with no tenant id, so any tenant
- * able to register a key could supply the one a platform entry verifies under.
- *
- * The predicate **branches** rather than using `tenant_id IS NOT DISTINCT FROM $1`, the one operator
- * matching NULL to NULL: ADR-0331 measured that at 16 ms sequential scan against 45k entries where
- * `tenant_id = $1` is a 0.09 ms index scan, because it is not indexable. `tenant_id IS NULL` is, so
- * both arms keep `idx_crypto_keys_tenant`.
- *
- * Verbatim from `forensics-pg`'s `scopeFilter`; it belongs in `kernel-pg` beside
- * `setPlatformWriteSql` and lives here only because the rest of this scope plumbing does.
- */
-export function scopeFilter(tenantId: string | null, firstParam = 1): ScopeFilter {
-  // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`.
-  if (tenantId === null) return { sql: "tenant_id IS NULL", params: [] };
-  assertTenantId(tenantId);
-  return { sql: `tenant_id = $${String(firstParam)}`, params: [tenantId] };
-}
-
-/**
- * `scopeFilter` with the platform's rows kept in a tenant's answer.
- *
- * This is the predicate `meta.crypto_keys` wants, and the distinction is not cosmetic. The strict
- * form is right where a scope's rows are a *closed set* — a hash chain, a tenant's own
- * certification report — and wrong here, because **a platform public key is meant to be readable by
- * a tenant**: that is what the `SELECT`-scoped platform read arm grants without a grant, what
- * ADR-0332 verified live, and what a tenant-scoped verifier resolving the platform chain's signing
- * key depends on. Narrowing the tenant arm would have made this store owner-independent by
- * destroying a documented behaviour rather than by reproducing it.
- *
- * So the rule is: **the predicate reproduces what a non-owner would have been shown, no wider and
- * no narrower.** For a tenant that is `tenant_id = $n OR tenant_id IS NULL` — the isolation policy
- * OR'd with the platform read arm, which is exactly how Postgres combines two permissive policies.
- * For the platform scope it is `tenant_id IS NULL` and the two functions agree, which is the arm the
- * defect was in: a platform read is the one that was answering with a tenant's row.
- *
- * Still indexable: Postgres plans the disjunction as a BitmapOr over `idx_crypto_keys_tenant`,
- * because each arm is an indexable operator on its own. That is the property
- * `tenant_id IS NOT DISTINCT FROM $1` lacks, and the reason this is spelled as an OR of two
- * predicates rather than as that one.
- */
-export function scopeFilterWithPlatform(
-  tenantId: string | null,
-  firstParam = 1,
-): ScopeFilter {
-  if (tenantId === null) return scopeFilter(null, firstParam);
-  assertTenantId(tenantId);
-  return {
-    sql: `(tenant_id = $${String(firstParam)} OR tenant_id IS NULL)`,
-    params: [tenantId],
-  };
-}
-
 export function assertTenantId(tenantId: string): void {
-  if (!TENANT_ID_RE.test(tenantId)) {
-    throw new Error(`invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
-  }
+  assertScopeTenantId(tenantId);
 }
 
 export async function withTenantContext<T>(

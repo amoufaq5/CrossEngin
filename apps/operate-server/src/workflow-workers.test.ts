@@ -5,6 +5,7 @@ import {
   NoticeThrottle,
   TimerFireLedger,
   WORKFLOW_WORKER_KINDS,
+  WORKFLOW_WORKER_NEEDS_DEFINITIONS,
   WORKFLOW_WORKER_REFUSALS,
   WORKFLOW_WORKER_REFUSAL_DETAIL,
   WorkflowWorkerConfigSchema,
@@ -265,15 +266,66 @@ describe("WorkflowWorkerSupervisor mounting", () => {
       events,
     });
     expect(supervisor.kinds).toEqual([]);
-    expect(supervisor.notStarted.map((r) => r.refusal)).toEqual([
-      "no_definitions",
-      "no_definitions",
-      "no_definitions",
+    // The job worker's reason is `no_job_handlers`, not `no_definitions`: `BASE` passes no
+    // `jobEngine`, and a job run resolves through `meta.job_runs` and the handler registry without
+    // consulting a definition at all. Reporting `no_definitions` there sent an operator to workflow
+    // authoring for an obstacle that was a missing handler — and refused a worker that would work,
+    // in every deployment, since the shipped catalog publishes no workflow definitions.
+    expect(supervisor.notStarted.map((r) => `${r.kind}:${r.refusal}`)).toEqual([
+      "timer:no_definitions",
+      "activity:no_definitions",
+      "job:no_job_handlers",
     ]);
     supervisor.start();
     expect(log.filter((l) => l.startsWith("started:"))).toEqual([]);
     expect(log).toContain("not-started:timer:no_definitions");
     expect(calls).toEqual([]); // not one claim was written
+  });
+
+  it("WORKFLOW_WORKER_NEEDS_DEFINITIONS is total over the worker kinds", () => {
+    expect(Object.keys(WORKFLOW_WORKER_NEEDS_DEFINITIONS).sort()).toEqual(
+      [...WORKFLOW_WORKER_KINDS].sort(),
+    );
+    expect(WORKFLOW_WORKER_NEEDS_DEFINITIONS).toEqual({ timer: true, activity: true, job: false });
+  });
+
+  it("mounts the job worker with no definitions loaded, because a job run consults none", () => {
+    const { conn } = fakeConn(() => []);
+    const { engine } = fakeEngine();
+    const supervisor = buildWorkflowWorkerSupervisor({
+      ...BASE,
+      definitionCount: 0,
+      activitiesDeferred: true,
+      conn,
+      engine,
+      jobEngine: {
+        executeJobRun: async (runId) => ({ runId, executed: true, disposition: "completed" }),
+      },
+    });
+    expect(supervisor.kinds).toEqual(["job"]);
+    expect(supervisor.notStarted.map((r) => `${r.kind}:${r.refusal}`)).toEqual([
+      "timer:no_definitions",
+      "activity:no_definitions",
+    ]);
+  });
+
+  it("still refuses the activity worker for inline activities when definitions ARE loaded", () => {
+    // The guard must not swallow the other refusal: with definitions loaded and activities inline,
+    // `activities_run_inline` is still the answer, and it is one refusal per kind either way.
+    const { conn } = fakeConn(() => []);
+    const { engine } = fakeEngine();
+    const supervisor = buildWorkflowWorkerSupervisor({
+      ...BASE,
+      definitionCount: 3,
+      activitiesDeferred: false,
+      conn,
+      engine,
+    });
+    expect(supervisor.kinds).toEqual(["timer"]);
+    expect(supervisor.notStarted.map((r) => `${r.kind}:${r.refusal}`)).toEqual([
+      "activity:activities_run_inline",
+      "job:no_job_handlers",
+    ]);
   });
 
   it("refuses the activity worker when the engine runs handlers inline", () => {

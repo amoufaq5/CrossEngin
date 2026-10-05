@@ -26,6 +26,8 @@ export * from "./marketplace-admin.js";
 export * from "./marketplace-authoring.js";
 export * from "./platform-tenants.js";
 export * from "./platform-admin.js";
+export * from "./tenant-status-gate.js";
+export * from "./tenant-state-mover.js";
 export * from "./tenant-manifests.js";
 export * from "./ai-design.js";
 export * from "./ai-design-routes.js";
