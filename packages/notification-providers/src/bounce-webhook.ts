@@ -864,8 +864,10 @@ export const VOICE_ANSWERED_BY_VERDICTS: Readonly<
 };
 
 /*
- * Twilio posts a callback **per call**, and more than one per call as the state advances — this
- * sender asks for `initiated ringing answered completed`, so four. Does that need handling here?
+ * Twilio posts a callback **per call**, and would post more than one per call as the state advances
+ * — but `TwilioVoiceSender` asks for `completed` alone (ADR-0329), so one. It asked for four until
+ * then, which is how this comment came to say so: three of them are non-terminal, could never plan
+ * a suppression, answered `422`, and Twilio **retries non-2xx**. Does any of it need handling here?
  *
  * **No, and not anywhere else either.** Only `failed` with a code in the permanent table plans
  * anything, and `failed` is terminal, so at most one callback per call can produce a suppression;

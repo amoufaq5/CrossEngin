@@ -137,7 +137,7 @@ function uniqueConstraintName(column: ColumnDefinition | undefined): string | un
 
 
 describe("META_TABLES", () => {
-  it("contains 143 tables", () => {
+  it("contains 144 tables", () => {
     expect(META_TABLES).toHaveLength(144);
   });
 

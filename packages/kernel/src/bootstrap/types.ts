@@ -105,7 +105,9 @@ export interface TableForeignKeyConstraint {
  * `ColumnDefinition.unique` is sugar for the single-column case (`true` lets Postgres name it,
  * `{ constraintName }` names it). All three produce the same `CONSTRAINT … UNIQUE (…)` table-level
  * line and are reconciled by the same machinery; the older fields are left exactly as they are
- * because 139 tables use them and changing their emission would rewrite the bootstrap SQL.
+ * because essentially the whole catalog uses them and changing their emission would rewrite the
+ * bootstrap SQL. (A count was written here once and went stale by five tables in three increments —
+ * the reason is the breadth, not the number.)
  */
 export interface TableUniqueConstraint {
   readonly kind: "unique";
@@ -130,7 +132,18 @@ export const PUBLIC_ROLE = "PUBLIC";
 
 export interface RlsPolicy {
   readonly name: string;
-  readonly using: string;
+  /**
+   * The `USING` expression, which decides which existing rows the policy reaches.
+   *
+   * Optional, because **Postgres refuses `USING` on a `FOR INSERT` policy** — there are no existing
+   * rows to filter, so the only expression such a policy can carry is `WITH CHECK`. Before this was
+   * optional an INSERT-scoped policy was not declarable at all: `emitRlsPolicy` always wrote the
+   * clause, and the statement was rejected by the server rather than by the catalog.
+   *
+   * At least one of `using` and `check` must be present. A policy with neither is legal SQL and
+   * means *allow everything*, which the catalog must not be able to say by omission.
+   */
+  readonly using?: string;
   readonly check?: string;
   /**
    * Which command the policy governs. Omitted means `ALL` — exactly what `CREATE POLICY` defaults

@@ -362,9 +362,13 @@ export const PG_NAME_MAX_LENGTH = 63;
  * long Postgres shortens the *longer of the two names* one character at a time until it fits,
  * keeping the label intact — so `access_review_templates` + `default_remediation_days_from_completion`
  * + `check` becomes `access_review_templates_default_remediation_days_from_com_check`, not the first
- * 63 characters of the full name, which would have dropped `_check` altogether. Two of the catalog's
- * 741 column-level checks are long enough for the difference to matter, and getting it wrong would
- * report both as undeclared on a database that is exactly correct.
+ * 63 characters of the full name, which would have dropped `_check` altogether. The catalog has a
+ * handful of column checks whose table and column names together exceed the budget, and getting
+ * this wrong would report every one of them as undeclared on a database that is exactly correct.
+ *
+ * Stated as a condition rather than as a census on purpose: the count was written down as a number
+ * once and was wrong by two dozen within three increments, which is the drift CLAUDE.md warns about
+ * in its own history. What matters is the rule, and the rule has no count in it.
  *
  * Truncation is by bytes in Postgres; every identifier here is ASCII, so characters and bytes agree.
  */

@@ -10,7 +10,7 @@ import type { DeletionAttestation, RetentionObligation } from "@crossengin/tenan
  * ADR-0316 erased a tenant's own Postgres schema; ADR-0317 refused a tombstone whose in-scope
  * subsystem had not attested; ADR-0328 took the scope out of the caller's hands. All three left
  * `shared_tables` — "rows in the shared boot schema and `meta.*`" — as a name in the vocabulary that
- * nothing erased. **112 of the 143 `META_TABLES` carry a `tenant_id`**, so a GDPR Article 17 deletion
+ * nothing erased. **113 of the 144 `META_TABLES` carry a `tenant_id`**, so a GDPR Article 17 deletion
  * dropped one schema and left the tenant's identity, audit, billing, workflow, notification, lineage
  * and entity-store rows exactly where they were — and a deployment that declared
  * `shared_tables: "erases"` handed in its own attestation and got that claim signed and anchored.
@@ -472,9 +472,9 @@ export interface SharedTableErasureAuthority {
 }
 
 export interface SharedTableErasureOptions {
-  /** Overrides the schema every tenant-scoped table is declared in. All 112 declare `meta`. */
+  /** Overrides the schema every tenant-scoped table is declared in. All 113 declare `meta`. */
   readonly schema?: string;
-  /** Injected so a test can pin the catalog rather than assert against the live 143 tables. */
+  /** Injected so a test can pin the catalog rather than assert against the live 144 tables. */
   readonly catalog?: readonly TableDefinition[];
   readonly clock?: () => Date;
 }
