@@ -72,5 +72,6 @@ export * from "./audit-read-store.js";
 export * from "./notification-template-routes.js";
 export * from "./notification-template-store.js";
 export * from "./read-state-store.js";
+export * from "./read-state-routes.js";
 export * from "./cli.js";
 export * from "./node.js";

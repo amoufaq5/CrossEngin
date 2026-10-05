@@ -62,11 +62,19 @@ function paramIndex(sql: string, pattern: RegExp): number | null {
  * `app.current_tenant_id`, mirroring the real policy. Filter predicates are
  * located by their bound parameter index rather than assumed, so a store that
  * numbered `$n` wrongly would read the wrong value here too.
+ *
+ * The three policies are modelled separately, because the whole point of the split is that they
+ * are not interchangeable: `app.current_tenant_id` reaches a tenant's rows for every command,
+ * `app.platform_audit` reaches a platform row for `SELECT` only, and `app.platform_audit_write`
+ * admits an INSERT of a platform row and nothing else. A store that set the read flag and tried to
+ * insert, or set the write flag and tried to read, fails here the way it fails in Postgres.
  */
 function fakeAuditDb(): FakeDb {
   const captured: Captured[] = [];
   const rows: Row[] = [];
   let currentTenant: string | null = null;
+  let platformRead = false;
+  let platformWrite = false;
 
   const run = async (
     sql: string,
@@ -77,15 +85,28 @@ function fakeAuditDb(): FakeDb {
     captured.push({ sql, params: p, inTx });
 
     if (sql.includes("set_config")) {
-      currentTenant = String(p[0]);
+      if (sql.includes("app.platform_audit_write")) platformWrite = true;
+      else if (sql.includes("app.platform_audit")) platformRead = true;
+      else currentTenant = String(p[0]);
       return { rows: [], rowCount: 0 };
     }
 
-    const tenantId = String(p[0]);
-    const visible = (r: Row): boolean =>
-      r["tenant_id"] === currentTenant && r["tenant_id"] === tenantId;
+    // The scope is read off the predicate, not assumed to be `$1`: a platform-scoped statement
+    // binds no tenant at all and every later `$n` shifts by one.
+    const platformScoped = sql.includes("tenant_id IS NULL");
+    const tenantId = platformScoped ? null : String(p[0]);
+    const visible = (r: Row): boolean => {
+      if (r["tenant_id"] == null) return platformScoped && platformRead;
+      return r["tenant_id"] === currentTenant && r["tenant_id"] === tenantId;
+    };
 
     if (sql.startsWith("INSERT INTO")) {
+      if (p[0] == null && !platformWrite) {
+        throw new Error("new row violates row-level security policy for table \"audit_log\"");
+      }
+      if (p[0] != null && String(p[0]) !== currentTenant) {
+        throw new Error("new row violates row-level security policy for table \"audit_log\"");
+      }
       rows.push({
         tenant_id: p[0],
         id: p[1],
@@ -156,7 +177,10 @@ function fakeAuditDb(): FakeDb {
       try {
         return await fn(tx);
       } finally {
+        // Every elevation is transaction-local, so none of them survives the commit.
         currentTenant = null;
+        platformRead = false;
+        platformWrite = false;
       }
     }) as PgConnection["transaction"],
     withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) =>
@@ -254,6 +278,8 @@ describe("audit-log-store — emit is append-only", () => {
       "constructor",
       "countSince",
       "emit",
+      "inScope",
+      "listAnchoredForScope",
       "listAnchoredForTenant",
       "listForTenant",
       "table",
@@ -861,5 +887,197 @@ describe("audit-log-store — forensic chain anchoring", () => {
     const entries = await store.listForTenant(TENANT_A);
     expect(entries[0]?.id).toBe(ENTRY_1);
     expect(entries[0]).not.toHaveProperty("anchor");
+  });
+});
+
+/**
+ * Platform scope (ADR-0331): `tenant_id IS NULL` means "about the deployment".
+ *
+ * Three escalation paths produce these rows and none of them can honestly name a tenant. The
+ * assertions below are about the two things that make such a row safe: it is written under the
+ * `INSERT`-only write elevation and never under a tenant's context, and it is invisible to a
+ * tenant-scoped read.
+ */
+describe("audit-log-store — platform scope", () => {
+  const platformEntry = (): AuditLogEntry =>
+    auditEntry({
+      id: ENTRY_1,
+      tenantId: null,
+      occurredAt: OCCURRED_AT,
+      actor: auditActor({ kind: "system", userId: null }),
+      operation: "platform.page_undelivered",
+      entity: "incident",
+      entityId: "INC-2026-0007",
+      after: { incidentId: "INC-2026-0007", delivered: 0 },
+    });
+
+  function platformChain(seq = 0): {
+    readonly appends: { tenantId: string | null }[];
+    readonly chain: { appendWithin: (tx: PgConnection, i: ChainAppendInput) => Promise<ChainedLogEntry> };
+  } {
+    const appends: { tenantId: string | null }[] = [];
+    return {
+      appends,
+      chain: {
+        appendWithin: async (_tx: PgConnection, input: ChainAppendInput): Promise<ChainedLogEntry> => {
+          appends.push({ tenantId: input.tenantId });
+          return {
+            sequenceNumber: seq,
+            kind: "audit_event",
+            recordedAt: OCCURRED_AT,
+            actorReference: "system",
+            payloadSha256: "a".repeat(64),
+            payloadSizeBytes: input.payload.length,
+            priorEntryHash: "b".repeat(64),
+            entryHash: `hash-${seq.toString()}`,
+          } as ChainedLogEntry;
+        },
+      },
+    };
+  }
+
+  it("binds a null tenant_id rather than refusing the entry", async () => {
+    const { conn, rows } = fakeAuditDb();
+    await new PostgresAuditEmitter(conn).emit(platformEntry());
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.["tenant_id"]).toBeNull();
+  });
+
+  it("sets the write elevation and never a tenant context", async () => {
+    const { conn, captured } = fakeAuditDb();
+    await new PostgresAuditEmitter(conn).emit(platformEntry());
+    const configs = captured.filter((c) => c.sql.includes("set_config"));
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.sql).toContain("app.platform_audit_write");
+    expect(captured.some((c) => c.sql.includes("app.current_tenant_id"))).toBe(false);
+  });
+
+  it("does not set the cross-tenant READ elevation on the write path", async () => {
+    // A read grant that also authorised a write is the forgery ADR-0313 split its policies to
+    // prevent; the emitter must not hand itself that grant on the way to an INSERT.
+    const { conn, captured } = fakeAuditDb();
+    await new PostgresAuditEmitter(conn).emit(platformEntry());
+    expect(captured.some((c) => c.sql.includes("set_config('app.platform_audit',"))).toBe(false);
+  });
+
+  it("anchors into the platform chain, not a tenant's", async () => {
+    const { conn } = fakeAuditDb();
+    const { chain, appends } = platformChain(7);
+    await new PostgresAuditEmitter(conn, { chain }).emit(platformEntry());
+    expect(appends).toHaveLength(1);
+    expect(appends[0]?.tenantId).toBeNull();
+  });
+
+  it("binds the platform anchor's coordinates into the same INSERT", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const { chain } = platformChain(7);
+    await new PostgresAuditEmitter(conn, { chain }).emit(platformEntry());
+    const insert = statements(captured).find((c) => c.sql.startsWith("INSERT INTO"));
+    expect(insert?.params[0]).toBeNull();
+    expect(insert?.params[13]).toBe(7);
+    expect(insert?.params[14]).toBe("hash-7");
+  });
+
+  it("refuses the INSERT when the write elevation was never set", async () => {
+    // Fidelity check on the fake, and on the claim: the row is reachable only through the
+    // `INSERT`-scoped policy, so an emitter that skipped the elevation would be refused by RLS
+    // rather than quietly writing an unprotected row.
+    const { conn } = fakeAuditDb();
+    await expect(
+      conn.transaction(async (tx) =>
+        tx.query("INSERT INTO meta.audit_log (tenant_id) VALUES ($1)", [null]),
+      ),
+    ).rejects.toThrow(/row-level security/);
+  });
+
+  it("is invisible to a tenant-scoped read", async () => {
+    const { conn, rows } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(platformEntry());
+    await store.emit(entryOf({ id: ENTRY_2 }));
+    expect(rows).toHaveLength(2);
+    const tenantView = await store.listAnchoredForTenant(TENANT_A);
+    expect(tenantView.map((a) => a.entry.id)).toEqual([ENTRY_2]);
+  });
+
+  it("reads back under the platform scope with an IS NULL predicate and no bound tenant", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(platformEntry());
+    const read = await store.listAnchoredForScope(null);
+    expect(read.map((a) => a.entry.id)).toEqual([ENTRY_1]);
+    const select = captured.find((c) => c.sql.startsWith("SELECT id,"));
+    expect(select?.sql).toContain("tenant_id IS NULL");
+    expect(select?.sql).not.toContain("tenant_id = $1");
+    // Only the LIMIT is bound, so every later `$n` shifted by one and the store renumbered.
+    expect(select?.params).toEqual([50]);
+  });
+
+  it("renumbers the filter parameters for a platform read", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(platformEntry());
+    const read = await store.listAnchoredForScope(null, {
+      operation: "platform.page_undelivered",
+      entity: "incident",
+    });
+    expect(read).toHaveLength(1);
+    const select = captured.find((c) => c.sql.startsWith("SELECT id,"));
+    expect(select?.sql).toContain("operation = $1");
+    expect(select?.sql).toContain("entity = $2");
+  });
+
+  it("filters a platform read by operation like a tenant read", async () => {
+    const { conn } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(platformEntry());
+    expect(await store.listAnchoredForScope(null, { operation: "something.else" })).toEqual([]);
+  });
+
+  it("counts platform rows under the platform scope", async () => {
+    const { conn } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(platformEntry());
+    await store.emit(entryOf({ id: ENTRY_2 }));
+    const since = new Date("2026-01-01T00:00:00.000Z");
+    expect(await store.countSince(null, since)).toBe(1);
+    expect(await store.countSince(TENANT_A, since)).toBe(1);
+  });
+
+  it("counts a platform operation without a bound tenant parameter", async () => {
+    const { conn, captured } = fakeAuditDb();
+    const store = new PostgresAuditEmitter(conn);
+    await store.emit(platformEntry());
+    expect(await store.countSince(null, new Date(0), "platform.page_undelivered")).toBe(1);
+    const count = captured.find((c) => c.sql.startsWith("SELECT count(*)"));
+    expect(count?.sql).toContain("occurred_at >= $1");
+    expect(count?.sql).toContain("operation = $2");
+  });
+
+  it("reads a stored platform row back as a null tenantId", () => {
+    expect(tryAuditEntryFromRow(storedRow({ tenant_id: null }))?.tenantId).toBeNull();
+  });
+
+  it("does not read a stored null tenant as the string 'null'", () => {
+    // `String(null)` is `"null"`, which the schema rejects as a malformed UUID — so without the
+    // null guard a platform row would be dropped by the re-parse-on-read path as unparseable.
+    expect(tryAuditEntryFromRow(storedRow({ tenant_id: null }))).not.toBeNull();
+  });
+
+  it("still rejects a non-UUID, non-null tenantId before any SQL", async () => {
+    const { conn, captured } = fakeAuditDb();
+    await expect(
+      new PostgresAuditEmitter(conn).emit(
+        entryOf({ tenantId: "tenant_a" as AuditLogEntry["tenantId"] }),
+      ),
+    ).rejects.toThrow(/tenantId must be a UUID or null/);
+    expect(captured).toHaveLength(0);
+  });
+
+  it("commits to a payload naming the platform scope", async () => {
+    const { conn } = fakeAuditDb();
+    const entry = platformEntry();
+    await new PostgresAuditEmitter(conn).emit(entry);
+    expect(canonicalAuditEntryPayload(entry)).toContain('"tenantId":null');
   });
 });

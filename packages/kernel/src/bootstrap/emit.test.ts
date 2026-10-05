@@ -323,6 +323,33 @@ describe("emitRlsPolicy", () => {
     );
   });
 
+  it("omits USING entirely for a policy that declares only WITH CHECK", () => {
+    // `CREATE POLICY … FOR INSERT USING (…)` is refused by Postgres: an INSERT has no existing rows
+    // to filter. Before `using` was optional an INSERT-scoped policy could not be declared at all.
+    expect(
+      emitRlsPolicy(minimalTable, {
+        name: "x_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL",
+      }),
+    ).toBe(
+      `CREATE POLICY "x_platform_write" ON "meta"."x" FOR INSERT WITH CHECK (tenant_id IS NULL);`,
+    );
+  });
+
+  it("refuses a policy that declares neither clause rather than emitting allow-everything", () => {
+    // Legal SQL, and it permits every row. The one thing a policy must not be able to say by
+    // omission is yes.
+    expect(() => emitRlsPolicy(minimalTable, { name: "p", command: "INSERT" })).toThrow(
+      /neither USING nor WITH CHECK/,
+    );
+  });
+
+  it("names the offending policy and table in that refusal", () => {
+    expect(() => emitRlsPolicy(minimalTable, { name: "wide_open" })).toThrow(/"wide_open"/);
+    expect(() => emitRlsPolicy(minimalTable, { name: "wide_open" })).toThrow(/"meta"\."x"/);
+  });
+
   it("orders FOR before TO before USING before WITH CHECK", () => {
     expect(
       emitRlsPolicy(minimalTable, {
@@ -758,6 +785,7 @@ describe("the catalog's own emission is unchanged", () => {
       "notification_read_watermarks",
       "notification_user_quiet_hours",
       "tenant_tombstones",
+      "workflow_definitions",
     ]);
     for (const sql of statements) {
       expect(sql).not.toMatch(/CONSTRAINT "[^"]+" FOREIGN KEY \(/);
@@ -773,6 +801,7 @@ describe("the catalog's own emission is unchanged", () => {
       "notification_read_watermarks",
       "notification_user_quiet_hours",
       "tenant_tombstones",
+      "workflow_definitions",
     ]);
     for (const table of META_TABLES) {
       for (const policy of table.rls?.policies ?? []) {

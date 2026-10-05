@@ -1,0 +1,602 @@
+import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  DEFINITION_STATUSES,
+  WorkflowDefinitionSchema,
+  canTransitionDefinition,
+  type DefinitionStatus,
+  type WorkflowDefinition,
+} from "@crossengin/workflow-engine";
+import {
+  MUTABLE_DEFINITION_STATUSES,
+  definitionContentSha256,
+  planDefinitionPublication,
+  type DefinitionPublicationDecision,
+  type DefinitionPublicationRefusal,
+  type StoredDefinitionSummary,
+} from "./definition-authoring.js";
+import type { WorkflowDefinitionIdResolver } from "./id-mapping.js";
+
+const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
+const TABLE = "workflow_definitions";
+
+/** Mirrors `feature-flags-pg`'s helpers rather than importing them: this package has no edge to it. */
+export const SET_TENANT_CONTEXT_SQL =
+  "SELECT set_config('app.current_tenant_id', $1, true)";
+
+const TENANT_ID_RE = /^[0-9a-fA-F-]{1,64}$/;
+
+export function assertTenantId(tenantId: string): void {
+  throwUnless(TENANT_ID_RE.test(tenantId), `invalid tenantId for RLS context: ${JSON.stringify(tenantId)}`);
+}
+
+function throwUnless(condition: boolean, message: string): void {
+  if (!condition) throw new Error(message);
+}
+
+/**
+ * The columns of `meta.workflow_definitions` in the order `definitionRowValues` supplies them.
+ * Every statement derives its column list, placeholders and UPDATE assignments from this one array,
+ * so a column added in the middle cannot leave an INSERT and an UPDATE disagreeing about which
+ * `$n` means what.
+ *
+ * `id` is absent on purpose: it is the surrogate key with a `uuid_generate_v7()` default, while
+ * `definition_id` is the contract's own `wfd_…` id — the one a caller holds, an UPDATE matches on,
+ * and `WorkflowDefinitionIdResolver` translates.
+ *
+ * Unlike `meta.feature_flags` (ADR-0300) this table had **not** drifted in column coverage: all 22
+ * contract fields have a column and no column is contract-less. What it lacks is constraints, and
+ * those are reported with the reconciliation rather than worked around here.
+ */
+export const WORKFLOW_DEFINITION_COLUMN_NAMES: readonly string[] = Object.freeze([
+  "definition_id",
+  "tenant_id",
+  "definition_key",
+  "version",
+  "label",
+  "description",
+  "status",
+  "states",
+  "transitions",
+  "variables",
+  "timers",
+  "signals",
+  "initial_state",
+  "compensation_strategy",
+  "timeout_seconds",
+  "created_at",
+  "created_by",
+  "published_at",
+  "published_by",
+  "deprecated_at",
+  "superseded_by_definition_id",
+  "source_manifest_sha256",
+]);
+
+export const WORKFLOW_DEFINITION_JSONB_COLUMNS: ReadonlySet<string> = new Set([
+  "states",
+  "transitions",
+  "variables",
+  "timers",
+  "signals",
+]);
+
+export const WORKFLOW_DEFINITION_COLUMNS = WORKFLOW_DEFINITION_COLUMN_NAMES.join(", ");
+
+/** `$1, $8::jsonb, …` positionally matching `WORKFLOW_DEFINITION_COLUMN_NAMES`. */
+export function definitionPlaceholders(): string {
+  return WORKFLOW_DEFINITION_COLUMN_NAMES.map(
+    (col, i) => `$${i + 1}${WORKFLOW_DEFINITION_JSONB_COLUMNS.has(col) ? "::jsonb" : ""}`,
+  ).join(", ");
+}
+
+/**
+ * `col = $n` for every column except the first, which is the key an UPDATE matches on.
+ *
+ * `definition_key` and `tenant_id` are assigned like any other column, which looks redundant since
+ * the UPDATE matches a `definition_id` that is unique table-wide. It is not: writing them means a
+ * row whose key or tenant was edited out from under the contract converges on the next publication
+ * instead of being silently preserved.
+ */
+export function definitionUpdateAssignments(): string {
+  return WORKFLOW_DEFINITION_COLUMN_NAMES.slice(1)
+    .map(
+      (col, i) =>
+        `${col} = $${i + 2}${WORKFLOW_DEFINITION_JSONB_COLUMNS.has(col) ? "::jsonb" : ""}`,
+    )
+    .join(", ");
+}
+
+/** The row values for a `WorkflowDefinition`, positionally matching `WORKFLOW_DEFINITION_COLUMNS`. */
+export function definitionRowValues(record: WorkflowDefinition): readonly unknown[] {
+  const valid = WorkflowDefinitionSchema.parse(record);
+  return [
+    valid.id,
+    valid.tenantId,
+    valid.definitionKey,
+    valid.version,
+    valid.label,
+    valid.description,
+    valid.status,
+    JSON.stringify(valid.states),
+    JSON.stringify(valid.transitions),
+    JSON.stringify(valid.variables),
+    JSON.stringify(valid.timers),
+    JSON.stringify(valid.signals),
+    valid.initialState,
+    valid.compensationStrategy,
+    valid.timeoutSeconds,
+    valid.createdAt,
+    valid.createdBy,
+    valid.publishedAt,
+    valid.publishedBy,
+    valid.deprecatedAt,
+    valid.supersededByDefinitionId,
+    valid.sourceManifestSha256,
+  ];
+}
+
+function asString(value: unknown): string {
+  return String(value);
+}
+
+function asNullableString(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function asIso(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : asString(value);
+}
+
+function asNullableIso(value: unknown): string | null {
+  return value === null || value === undefined ? null : asIso(value);
+}
+
+function asJson(value: unknown): unknown {
+  return typeof value === "string" ? JSON.parse(value) : value;
+}
+
+/**
+ * Rebuilds the `WorkflowDefinition` from a row and **re-validates it** (ADR-0289).
+ *
+ * The row *is* the definition the engine will execute, and the contract's cross-field invariants
+ * are the only thing between a hand-edited row and a state machine the platform drives: that
+ * exactly one state is `initial`, that `initialState` names a declared state, that no transition
+ * departs a terminal state, that every `signal_received` trigger names a declared signal, and that
+ * a `published` definition carries two *different* people. None of those is expressible as a CHECK
+ * — they all need `jsonb_array_elements`, which a CHECK admits no more than it admits an aggregate
+ * — so this is the one place they hold for a stored row. A row that cannot answer them raises here
+ * rather than being served, because a shorter answer would be an engine running a definition the
+ * contract forbids.
+ */
+export function rowToWorkflowDefinition(row: Record<string, unknown>): WorkflowDefinition {
+  return WorkflowDefinitionSchema.parse({
+    id: asString(row["definition_id"]),
+    tenantId: asNullableString(row["tenant_id"]),
+    definitionKey: asString(row["definition_key"]),
+    version: asString(row["version"]),
+    label: asString(row["label"]),
+    description: asString(row["description"]),
+    status: asString(row["status"]),
+    states: asJson(row["states"]),
+    transitions: asJson(row["transitions"]),
+    variables: asJson(row["variables"]),
+    timers: asJson(row["timers"]),
+    signals: asJson(row["signals"]),
+    initialState: asString(row["initial_state"]),
+    compensationStrategy: asString(row["compensation_strategy"]),
+    timeoutSeconds: Number(row["timeout_seconds"]),
+    createdAt: asIso(row["created_at"]),
+    createdBy: asString(row["created_by"]),
+    publishedAt: asNullableIso(row["published_at"]),
+    publishedBy: asNullableString(row["published_by"]),
+    deprecatedAt: asNullableIso(row["deprecated_at"]),
+    supersededByDefinitionId: asNullableString(row["superseded_by_definition_id"]),
+    sourceManifestSha256: asNullableString(row["source_manifest_sha256"]),
+  });
+}
+
+/**
+ * The summary the planner compares against, computed from the re-parsed row rather than read from a
+ * stored digest column.
+ *
+ * There is no such column, and that is the better arrangement: ADR-0323 found that a digest which
+ * does not commit to the thing it describes detects nothing, so recomputing means a row edited
+ * after it was published compares *unequal* to the definition that produced it, instead of matching
+ * a digest somebody could have edited alongside it.
+ */
+export function summarizeDefinition(
+  definition: WorkflowDefinition,
+): StoredDefinitionSummary {
+  return {
+    id: definition.id,
+    tenantId: definition.tenantId,
+    definitionKey: definition.definitionKey,
+    version: definition.version,
+    status: definition.status,
+    contentSha256: definitionContentSha256(definition),
+  };
+}
+
+/**
+ * The statuses a definition may be in to legally reach `to`, read off `DEFINITION_TRANSITIONS`.
+ * Quoting is safe because the values come from the contract's frozen status tuple, never a caller.
+ */
+function predecessorsOf(to: DefinitionStatus): readonly DefinitionStatus[] {
+  return DEFINITION_STATUSES.filter((from) => canTransitionDefinition(from, to));
+}
+
+function quoted(statuses: readonly string[]): string {
+  return statuses.map((s) => `'${s}'`).join(", ");
+}
+
+const MUTABLE_SQL = quoted([...MUTABLE_DEFINITION_STATUSES]);
+
+export class WorkflowDefinitionConflictError extends Error {
+  constructor(
+    readonly definitionId: string,
+    readonly reason: string,
+  ) {
+    super(`workflow definition '${definitionId}' could not be written: ${reason}`);
+    this.name = "WorkflowDefinitionConflictError";
+  }
+}
+
+export interface DefinitionWriteResult {
+  readonly decision: DefinitionPublicationDecision;
+  readonly refusal: DefinitionPublicationRefusal | null;
+  readonly detail: string | null;
+  readonly contentSha256: string;
+  /** The row's surrogate uuid, which is what `meta.workflow_instances.definition_id` references. */
+  readonly rowId: string | null;
+}
+
+export interface PostgresWorkflowDefinitionStoreOptions {
+  readonly schema?: string;
+  /**
+   * When supplied, every definition this store reads or writes registers its `wfd_…` → row-uuid
+   * mapping here, so `PostgresInstanceStore.create` does not re-query for it on the first instance
+   * of each definition.
+   */
+  readonly definitionResolver?: WorkflowDefinitionIdResolver;
+}
+
+export interface LoadEngineDefinitionsOptions {
+  readonly tenantId?: string | null;
+  readonly limit?: number;
+}
+
+/**
+ * The default ceiling on a loaded definition map. Generous: the catalog is per-deployment, not
+ * per-instance, and hitting it raises rather than truncating (see `loadEngineDefinitions`).
+ */
+export const DEFAULT_DEFINITION_LOAD_LIMIT = 2000;
+
+/**
+ * Persists `WorkflowDefinition` records in `meta.workflow_definitions` — the source of definitions
+ * that `buildPersistentEngine` has had no way to obtain since it was written (ADR-0330).
+ *
+ * **Tenant scoping is conditional**, as in `PostgresFeatureFlagStore`, and for the same reason read
+ * off the contract: `WorkflowDefinition.tenantId` is `.nullable()`, so a definition is either one
+ * tenant's or the platform's, and the table already carries the matching policy — `tenant_id IS
+ * NULL OR tenant_id = …` — rather than plain `TENANT_ISOLATION_USING`. Under plain isolation a
+ * platform-wide definition would be invisible to every reader including the one that wrote it. An
+ * unconditional `withTenantContext` wrapper is wrong for the mirror-image reason: setting a tenant
+ * context around a platform-wide write would hide the very row being written. So a write takes its
+ * scope from the record's own `tenantId`, and a read takes an optional one defaulting to null,
+ * where RLS exposes exactly the platform-wide rows — the fail-closed answer for a caller that has
+ * not said whose definitions it wants.
+ *
+ * **There is no `revision` and no `updated_at` column, so a status change is guarded by the status
+ * itself.** The predecessors of the target status go into the `UPDATE` predicate, so the row is the
+ * lock (ADR-0321): two publishers racing one `in_review` definition means one `UPDATE` matches and
+ * the other matches zero rows and raises. That is a stronger guard than a timestamp token, not a
+ * weaker one — it cannot be defeated by a caller reusing the value it read — and it needs no column
+ * the table does not have.
+ */
+export class PostgresWorkflowDefinitionStore {
+  private readonly schema: string;
+  private readonly resolver: WorkflowDefinitionIdResolver | null;
+  private readonly placeholders: string;
+  private readonly updateAssignments: string;
+  /** The guard binds after every column value, so it is always the next placeholder. */
+  private readonly guardParam: number;
+
+  constructor(
+    private readonly conn: PgConnection,
+    options: PostgresWorkflowDefinitionStoreOptions = {},
+  ) {
+    this.schema = options.schema ?? "meta";
+    throwUnless(
+      SCHEMA_RE.test(this.schema),
+      `invalid schema identifier: ${JSON.stringify(this.schema)}`,
+    );
+    this.resolver = options.definitionResolver ?? null;
+    this.placeholders = definitionPlaceholders();
+    this.updateAssignments = definitionUpdateAssignments();
+    this.guardParam = WORKFLOW_DEFINITION_COLUMN_NAMES.length + 1;
+  }
+
+  /**
+   * Plans a publication against what is stored and carries it out, in one transaction.
+   *
+   * One transaction because the plan is a read followed by a write whose premise is what the read
+   * saw; splitting them would let a second publisher land between the two. Each statement then
+   * **re-asserts** that premise in its own predicate, so the transaction is the window and the
+   * predicate is the lock.
+   *
+   * The result is a report and not an exception for the planned refusals: "this version is already
+   * published with different content" is an answer a caller acts on, while a predicate that matches
+   * zero rows after the plan said it would is a broken premise and raises.
+   */
+  async publish(definition: WorkflowDefinition): Promise<DefinitionWriteResult> {
+    const valid = WorkflowDefinitionSchema.parse(definition);
+    return this.scoped(valid.tenantId, async (tx) => {
+      const stored = await this.gatherForPublication(tx, valid);
+      const plan = planDefinitionPublication({ proposed: valid, stored });
+      if (plan.decision === "refused" || plan.decision === "unchanged") {
+        const rowId =
+          plan.decision === "unchanged" ? await this.rowIdOf(tx, valid.id) : null;
+        return {
+          decision: plan.decision,
+          refusal: plan.refusal,
+          detail: plan.detail,
+          contentSha256: plan.contentSha256,
+          rowId,
+        };
+      }
+      const rowId =
+        plan.decision === "insert"
+          ? await this.insertRow(tx, valid)
+          : await this.updateRow(tx, valid, plan.decision);
+      if (this.resolver !== null) this.resolver.register(valid.id, rowId);
+      return {
+        decision: plan.decision,
+        refusal: null,
+        detail: null,
+        contentSha256: plan.contentSha256,
+        rowId,
+      };
+    });
+  }
+
+  async loadById(
+    definitionId: string,
+    tenantId: string | null = null,
+  ): Promise<WorkflowDefinition | null> {
+    return this.scoped(tenantId, async (tx) => {
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
+         WHERE definition_id = $1`,
+        [definitionId],
+      );
+      return this.firstDefinition(result.rows);
+    });
+  }
+
+  async loadByKeyVersion(
+    definitionKey: string,
+    version: string,
+    tenantId: string | null = null,
+  ): Promise<WorkflowDefinition | null> {
+    return this.scoped(tenantId, async (tx) => {
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
+         WHERE definition_key = $1 AND version = $2
+         ORDER BY tenant_id NULLS LAST`,
+        [definitionKey, version],
+      );
+      return this.firstDefinition(result.rows);
+    });
+  }
+
+  /**
+   * Every stored version of a key, as summaries.
+   *
+   * `tenant_id NULLS LAST` on the companion lookups is not cosmetic: a tenant-scoped read sees its
+   * own rows *and* the platform-wide ones, so a key held by both would otherwise answer whichever
+   * Postgres returned first. The tenant's own row wins, which is the only reading under which a
+   * tenant's definition means anything — and `planDefinitionPublication` refuses to create that
+   * ambiguity in the first place.
+   */
+  async listByKey(
+    definitionKey: string,
+    tenantId: string | null = null,
+  ): Promise<readonly StoredDefinitionSummary[]> {
+    return this.scoped(tenantId, (tx) => this.summariesForKey(tx, definitionKey));
+  }
+
+  /**
+   * The map `buildPersistentEngine` and `ProjectingEventLog` take, **keyed by `definition.id`**.
+   *
+   * That key is not a choice. `startInstance` looks the proposal up by `input.definitionId`, then
+   * records `definitionId: definition.id` in the `instance_started` payload; `projectInstance`
+   * reads that payload field into `ProjectedInstance.definitionId`, and every later lookup — timer
+   * firing, signal delivery, activity execution, compensation, cancellation — is
+   * `definitions.get(state.definitionId)`. Keying by `definitionKey` would make `startInstance`
+   * succeed and every subsequent lookup miss.
+   *
+   * **Every status is loaded, not only `published`.** A missing definition does not raise in the
+   * engine: it `continue`s past a due timer, declines a signal, reports `executed: false` for a
+   * claimed activity and answers `strategy: null` for a compensation. So a map narrowed to
+   * `published` would make in-flight instances of a *deprecated* definition go quiet — the silent
+   * degradation ADR-0327 refuses — while `startInstance` and `resolveChildDefinition` already
+   * refuse a non-published definition by name. The status filter belongs to the engine, which says
+   * so; it does not belong to the loader, which cannot.
+   *
+   * Hitting `limit` **raises**. A truncated map is the same failure as a narrowed one, except
+   * nothing would report it.
+   */
+  async loadEngineDefinitions(
+    options: LoadEngineDefinitionsOptions = {},
+  ): Promise<ReadonlyMap<string, WorkflowDefinition>> {
+    const limit = options.limit ?? DEFAULT_DEFINITION_LOAD_LIMIT;
+    throwUnless(limit > 0, "limit must be positive");
+    return this.scoped(options.tenantId ?? null, async (tx) => {
+      const result = await tx.query<Record<string, unknown>>(
+        `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
+         ORDER BY definition_key, version
+         LIMIT $1`,
+        [limit + 1],
+      );
+      if (result.rows.length > limit) {
+        throw new Error(
+          `workflow definition map hit its ${limit}-row limit; a truncated map silently stops ` +
+            "every instance whose definition fell off the end",
+        );
+      }
+      const map = new Map<string, WorkflowDefinition>();
+      for (const row of result.rows) {
+        const definition = rowToWorkflowDefinition(row);
+        const previous = map.get(definition.id);
+        if (previous !== undefined) {
+          throw new Error(
+            `two rows claim workflow definition id ${definition.id} — the engine keys by it`,
+          );
+        }
+        map.set(definition.id, definition);
+        if (this.resolver !== null) this.resolver.register(definition.id, asString(row["id"]));
+      }
+      return map;
+    });
+  }
+
+  private firstDefinition(
+    rows: readonly Record<string, unknown>[],
+  ): WorkflowDefinition | null {
+    const row = rows[0];
+    if (row === undefined) return null;
+    const definition = rowToWorkflowDefinition(row);
+    if (this.resolver !== null) this.resolver.register(definition.id, asString(row["id"]));
+    return definition;
+  }
+
+  private async summariesForKey(
+    tx: PgConnection,
+    definitionKey: string,
+  ): Promise<readonly StoredDefinitionSummary[]> {
+    const result = await tx.query<Record<string, unknown>>(
+      `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
+       WHERE definition_key = $1
+       ORDER BY tenant_id NULLS LAST, version`,
+      [definitionKey],
+    );
+    return result.rows.map((row) => summarizeDefinition(rowToWorkflowDefinition(row)));
+  }
+
+  /**
+   * What the planner needs to see: every row sharing the proposal's key, plus the row (if any)
+   * already holding its `wfd_…` id.
+   *
+   * Two narrow indexed queries rather than loading the table, because `definition_id_reused` is a
+   * question about the whole id space and `version_not_monotonic` is a question about one key, and
+   * only the second has a useful index. The id lookup is deduplicated against the key list so a row
+   * that answers both does not appear twice and read as two conflicting facts.
+   */
+  private async gatherForPublication(
+    tx: PgConnection,
+    proposed: WorkflowDefinition,
+  ): Promise<readonly StoredDefinitionSummary[]> {
+    const byKey = await this.summariesForKey(tx, proposed.definitionKey);
+    if (byKey.some((s) => s.id === proposed.id)) return byKey;
+    const result = await tx.query<Record<string, unknown>>(
+      `SELECT id, ${WORKFLOW_DEFINITION_COLUMNS} FROM ${this.schema}.${TABLE}
+       WHERE definition_id = $1`,
+      [proposed.id],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return byKey;
+    return [...byKey, summarizeDefinition(rowToWorkflowDefinition(row))];
+  }
+
+  private async rowIdOf(tx: PgConnection, definitionId: string): Promise<string | null> {
+    const result = await tx.query<{ id: string }>(
+      `SELECT id FROM ${this.schema}.${TABLE} WHERE definition_id = $1`,
+      [definitionId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    if (this.resolver !== null) this.resolver.register(definitionId, row.id);
+    return row.id;
+  }
+
+  private async insertRow(
+    tx: PgConnection,
+    definition: WorkflowDefinition,
+  ): Promise<string> {
+    const result = await tx.query<{ id: string }>(
+      `INSERT INTO ${this.schema}.${TABLE} (${WORKFLOW_DEFINITION_COLUMNS})
+       VALUES (${this.placeholders})
+       RETURNING id`,
+      [...definitionRowValues(definition)],
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      // Only reachable if `definition_id`'s unique constraint fired between the plan and here,
+      // which the plan said could not happen — so the premise is broken, not the request.
+      throw new WorkflowDefinitionConflictError(
+        definition.id,
+        "a concurrent publication claimed this definition id",
+      );
+    }
+    return row.id;
+  }
+
+  /**
+   * The guarded UPDATE for a `replace_draft` or a `transition_status`.
+   *
+   * The predicate carries three things the plan asserted. The **status set** re-asserts it: the
+   * statuses the target may be reached from for a lifecycle move, and the editable set for a draft
+   * rewrite. The **four-eyes predicate** `created_by <> $publishedBy` is the third layer on the one
+   * rule the contract already enforces in `superRefine` and the table should enforce as a CHECK
+   * (ADR-0313's shape) — carried here because the contract's copy holds for a value in memory and
+   * this one holds for the row, so a published definition cannot be its own author's doing even if
+   * a caller assembled the record by hand.
+   */
+  private async updateRow(
+    tx: PgConnection,
+    definition: WorkflowDefinition,
+    decision: Extract<DefinitionPublicationDecision, "replace_draft" | "transition_status">,
+  ): Promise<string> {
+    const statuses =
+      decision === "replace_draft" ? MUTABLE_SQL : quoted(predecessorsOf(definition.status));
+    throwUnless(
+      statuses.length > 0,
+      `no status can transition to '${definition.status}' — it is reached by insert, not by update`,
+    );
+    const values = definitionRowValues(definition);
+    const fourEyes =
+      definition.status === "published" && definition.publishedBy !== null
+        ? ` AND created_by <> $${this.guardParam}`
+        : "";
+    const params =
+      fourEyes === "" ? [...values] : [...values, definition.publishedBy];
+    const result = await tx.query<{ id: string }>(
+      `UPDATE ${this.schema}.${TABLE} SET ${this.updateAssignments}
+       WHERE definition_id = $1 AND status IN (${statuses})${fourEyes}
+       RETURNING id`,
+      params,
+    );
+    const row = result.rows[0];
+    if (row === undefined) {
+      throw new WorkflowDefinitionConflictError(
+        definition.id,
+        `no row in status ${statuses} with a different creator — another writer moved it first`,
+      );
+    }
+    return row.id;
+  }
+
+  private scoped<T>(
+    tenantId: string | null,
+    fn: (tx: PgConnection) => Promise<T>,
+  ): Promise<T> {
+    if (tenantId !== null) assertTenantId(tenantId);
+    return this.conn.transaction(async (tx) => {
+      if (tenantId !== null) await tx.query(SET_TENANT_CONTEXT_SQL, [tenantId]);
+      return fn(tx);
+    });
+  }
+}
+
+/** The number of bound parameters an INSERT carries — one per column. */
+export const WORKFLOW_DEFINITION_PARAM_COUNT = WORKFLOW_DEFINITION_COLUMN_NAMES.length;

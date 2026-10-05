@@ -425,6 +425,38 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
     });
   });
 
+  // The whole reason this class of defect survived: every offline fake here hands back a string,
+  // and node-postgres hands back a `Date`. Measured live against Postgres 16.
+  it("renders a Date trait timestamp as the ISO text an EntityRecord holds", async () => {
+    const cap = capturePg([
+      { id: "v1", reason: "checkup", created_at: new Date("2026-08-26T01:02:03.456Z"), created_by: "u1" },
+    ]);
+    const record = await auditedStore(cap).get(TENANT, "Visit", "v1");
+    expect(typeof record?.["created_at"]).toBe("string");
+    expect(record?.["created_at"]).toBe("2026-08-26T01:02:03.456Z");
+  });
+
+  it("builds a keyset cursor Postgres can bind back, not a Date's toString form", async () => {
+    const cap = capturePg([
+      { id: "v1", reason: "a", created_at: new Date("2026-08-26T01:02:03.456Z"), created_by: "u1" },
+      { id: "v2", reason: "b", created_at: new Date("2026-08-27T01:02:03.456Z"), created_by: "u1" },
+    ]);
+    const page = await auditedStore(cap).listPage(TENANT, "Visit", {
+      limit: 1,
+      cursor: null,
+      sort: [{ field: "created_at", direction: "asc" }],
+      filters: [],
+    });
+    expect(page.nextCursor).not.toBeNull();
+    const decoded = JSON.parse(
+      Buffer.from(page.nextCursor ?? "", "base64url").toString("utf8"),
+    ) as { k: readonly string[] };
+    // `Fri Aug 26 2026 … (Coordinated Universal Time)` is what this was, and
+    // `$n::TIMESTAMPTZ` refuses it — verified live, `invalid input syntax`.
+    expect(decoded.k[0]).toBe("2026-08-26T01:02:03.456Z");
+    expect(decoded.k[0]).not.toContain("Coordinated Universal Time");
+  });
+
   it("still stamps updated_at when the patch does not name it", async () => {
     const cap = capturePg([{ id: "v1", reason: "x" }]);
     await auditedStore(cap).update(TENANT, "Visit", "v1", { reason: "x" });
@@ -451,5 +483,47 @@ describe("ColumnMappedEntityStore — an auditable entity's trait columns", () =
       "created_by",
       "updated_by",
     ]);
+  });
+});
+
+describe("ColumnMappedEntityStore — a DATE column", () => {
+  const SHIFT = {
+    name: "Shift",
+    fields: [
+      { name: "on_day", type: { kind: "date" } },
+      { name: "spare_days", type: { kind: "array", element: { kind: "date" } } },
+    ],
+  };
+  const SHIFT_MANIFEST = { entities: [SHIFT] } as unknown as Manifest;
+  const shiftStore = (cap: Captured): ColumnMappedEntityStore =>
+    new ColumnMappedEntityStore(cap.conn, SHIFT_MANIFEST, { schema: "tenant_app" });
+
+  // node-postgres parses a DATE into *local* midnight, so `toISOString().slice(0, 10)` names the
+  // previous day east of UTC. `isoCalendarDate` reads the local parts, which are right everywhere.
+  it("renders a Date as the calendar day it is, independent of the process timezone", async () => {
+    const cap = capturePg([{ id: "s1", on_day: new Date(2026, 1, 2, 0, 0, 0) }]);
+    const record = await shiftStore(cap).get(TENANT, "Shift", "s1");
+    expect(record?.["on_day"]).toBe("2026-02-02");
+  });
+
+  it("renders each element of a DATE[] column", async () => {
+    const cap = capturePg([
+      { id: "s1", spare_days: [new Date(2026, 1, 2, 0, 0, 0), new Date(2026, 1, 3, 0, 0, 0)] },
+    ]);
+    const record = await shiftStore(cap).get(TENANT, "Shift", "s1");
+    expect(record?.["spare_days"]).toEqual(["2026-02-02", "2026-02-03"]);
+  });
+
+  it("leaves text already in YYYY-MM-DD exactly as the write put it", async () => {
+    const cap = capturePg([{ id: "s1", on_day: "2026-02-02" }]);
+    const record = await shiftStore(cap).get(TENANT, "Shift", "s1");
+    expect(record?.["on_day"]).toBe("2026-02-02");
+  });
+
+  it("leaves a non-temporal column untouched", async () => {
+    // A `NUMERIC` still arrives as a string and is deliberately not rewritten here; see the ADR.
+    const cap = capturePg([{ id: "s1", on_day: null }]);
+    const record = await shiftStore(cap).get(TENANT, "Shift", "s1");
+    expect(record).toEqual({ id: "s1" });
   });
 });

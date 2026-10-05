@@ -8,7 +8,7 @@ import {
 } from "@crossengin/kernel-pg";
 
 import { helpText, parseArgs, type ParsedCommand } from "./cli.js";
-import { applyJsonPayload, runApply } from "./apply.js";
+import { applyJsonPayload, runApply, standingDifferences } from "./apply.js";
 import { printJson } from "./format.js";
 import type { RunContext } from "./commands.js";
 
@@ -260,6 +260,52 @@ describe("applyJsonPayload", () => {
     expect(parsedOut.report.firstFailureAt).toBe(0);
     expect(parsedOut.failures[0]?.excerpt).toContain("ADD COLUMN year");
     expect(parsedOut.failures[1]?.errorMessage).toContain('column "year" does not exist');
+  });
+});
+
+describe("standingDifferences", () => {
+  const APPLIED_PLAN: ReconciliationPlan = {
+    schema: "meta",
+    steps: [
+      {
+        kind: "add_column",
+        table: "tenant_tombstones",
+        target: "retained_obligations",
+        sql: 'ALTER TABLE "meta"."tenant_tombstones" ADD COLUMN "retained_obligations" JSONB;',
+        guarded: false,
+      },
+    ],
+    unreconciled: [
+      {
+        reason: "constraint_needs_validation",
+        table: "tenant_tombstones",
+        target: "proof_version",
+        detail: "the table holds 1 row(s)",
+        manualSql: "ALTER TABLE ...;",
+      },
+    ],
+    statements: ['ALTER TABLE "meta"."tenant_tombstones" ADD COLUMN "retained_obligations" JSONB;'],
+  };
+
+  it("prefers the re-plan, so an applied statement is not re-printed as outstanding", () => {
+    // Found live against a real cluster: the pre-apply plan was rendered *after* a clean apply, so
+    // the one statement it had just executed printed as "1 statement(s) to apply". The re-plan has
+    // the same standing difference and no statements, which is the honest pair.
+    const converged: ReconciliationPlan = {
+      schema: "meta",
+      steps: [],
+      unreconciled: APPLIED_PLAN.unreconciled,
+      statements: [],
+    };
+    const standing = standingDifferences(APPLIED_PLAN, converged);
+    expect(standing.statements).toEqual([]);
+    expect(standing.unreconciled).toHaveLength(1);
+  });
+
+  it("falls back to the pre-apply plan when no re-plan was taken", () => {
+    // `null` only happens on an apply that did not finish, where the pre-apply plan is the best
+    // available — and the failure report printed above it says why it is not a present-tense claim.
+    expect(standingDifferences(APPLIED_PLAN, null)).toBe(APPLIED_PLAN);
   });
 });
 

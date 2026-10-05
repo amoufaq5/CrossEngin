@@ -18,7 +18,7 @@ const INCIDENT = "INC-2026-0001";
 
 type Emitted = {
   operation: string;
-  tenantId: string;
+  tenantId: string | null;
   entity: string;
   entityId: string | null;
   occurredAt: string;
@@ -38,7 +38,7 @@ function fakeAudit(throwOn?: Error) {
     audit: {
       emit: async (entry: {
         operation: string;
-        tenantId: string;
+        tenantId: string | null;
         entity: string;
         entityId: string | null;
         occurredAt: string;
@@ -413,20 +413,22 @@ describe("PageRecorder.record", () => {
     expect(errors).toEqual([]);
   });
 
-  it("cannot record a platform-scope page, because audit_log.tenant_id is NOT NULL", async () => {
+  it("records a platform-scope page at platform scope (ADR-0331)", async () => {
     const { audit, emitted } = fakeAudit();
     const res = await new PageRecorder({ audit, tenantIdFor: () => null }).record(report());
-    expect(res.audited).toBe(false);
-    expect(res.reason).toContain("NOT NULL");
-    expect(emitted).toEqual([]);
+    expect(res.audited).toBe(true);
+    expect(res.reason).toBeNull();
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.tenantId).toBeNull();
   });
 
-  it("does not invent a tenant id when none is resolvable", async () => {
+  it("does not invent a tenant id when the scope is the platform", async () => {
+    // The row that lands names no tenant at all. That is the whole distinction from ADR-0327's
+    // rejected Option B, which would have filed it under a tenant the page is not about.
     const { audit, emitted } = fakeAudit();
     const res = await new PageRecorder({ audit }).record(report());
-    expect(res.audited).toBe(false);
-    expect(res.reason).not.toBeNull();
-    expect(emitted).toEqual([]);
+    expect(res.audited).toBe(true);
+    expect(emitted[0]?.tenantId).toBeNull();
   });
 
   it("treats an empty-string tenant id as no tenant rather than emitting one", async () => {
@@ -541,20 +543,47 @@ describe("PageRecorder.record with a caller-supplied tenant", () => {
     expect(emitted[0]?.tenantId).toBe(TENANT_B);
   });
 
-  it("cannot record when the caller supplies null and no resolver answers", async () => {
+  it("records at platform scope when the caller supplies null and no resolver answers", async () => {
+    // This is the SLO loop's case: `deliverAndRecord(sloPager, directive, "slo", null)`. An SLO
+    // surface is never a tenant, so before ADR-0331 this page left no evidence at all.
     const { audit, emitted } = fakeAudit();
-    // The platform-scope case: the SLO loop's page is about no tenant, and
-    // `meta.audit_log.tenant_id` is NOT NULL, so there is no row to write.
     const res = await new PageRecorder({ audit }).record(report(), null);
+    expect(res.audited).toBe(true);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.tenantId).toBeNull();
+  });
+
+  it("does not read a resolver that THREW as platform scope", async () => {
+    // A failure to find out is not a claim about the deployment. The page already went out, so
+    // this is reported and not raised.
+    const errors: unknown[] = [];
+    const { audit, emitted } = fakeAudit();
+    const res = await new PageRecorder({
+      audit,
+      tenantIdFor: () => {
+        throw new Error("directory down");
+      },
+      onError: (e) => errors.push(e),
+    }).record(report());
     expect(res.audited).toBe(false);
-    expect(res.reason).toContain("NOT NULL");
+    expect(res.reason).toContain("could not resolve");
+    expect(emitted).toEqual([]);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("does not read a blank resolved scope as platform scope", async () => {
+    const { audit, emitted } = fakeAudit();
+    const res = await new PageRecorder({ audit, tenantIdFor: () => "  " }).record(report());
+    expect(res.audited).toBe(false);
+    expect(res.reason).toContain("blank");
     expect(emitted).toEqual([]);
   });
 
-  it("treats a blank supplied tenant as no tenant, not as a value to emit", async () => {
+  it("treats a blank supplied tenant as no answer, not as platform scope", async () => {
     const { audit, emitted } = fakeAudit();
     const res = await new PageRecorder({ audit }).record(report(), "   ");
     expect(res.audited).toBe(false);
+    expect(res.reason).toContain("blank");
     expect(emitted).toEqual([]);
   });
 

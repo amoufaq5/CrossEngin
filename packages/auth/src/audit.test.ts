@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 import type { TenantId, UserId } from "@crossengin/types";
 
@@ -20,6 +22,92 @@ const base = (over: Partial<AuditLogEntry> = {}): AuditLogEntry => ({
     diff: null,
     ...over,
   });
+
+/**
+ * Two digests computed from the **published `dist/`** before `tenantId` was widened to
+ * `TenantId | null`, over the two extremes of the shape: an entry with every optional field absent
+ * and one with every optional field present and an offset timestamp.
+ *
+ * They are here because every `chain_entry_hash` stored in every deployment commits to these exact
+ * bytes. If widening the field had moved them — by dropping the key, re-rendering it, or changing
+ * its sorted position — every anchor ever written would stop verifying, which is the v1→v2
+ * domain-tag situation ADR-0329 had to create for the tombstone content manifest rather than edit
+ * bytes in place. These assertions are what establishes that no such migration is needed; they must
+ * fail loudly rather than be updated.
+ */
+const PRE_CHANGE_DIGEST_MINIMAL =
+  "6ab3cf498721aae2fae38bdc0de0eaab89c1d1018bdb59da47d3818fa9c16fe2";
+const PRE_CHANGE_DIGEST_FULL = "8f698ad62d0bff26a13c539453db78c76dc8015012fb59cc099347cec6108694";
+
+const digest = (payload: string): string =>
+  createHash("sha256").update(payload, "utf8").digest("hex");
+
+const pinnedMinimal = (): AuditLogEntry => ({
+  id: "11111111-1111-4111-8111-111111111111",
+  tenantId,
+  occurredAt: "2026-10-05T10:00:00.000Z",
+  actor: { kind: "system", userId: null, sessionId: null, ip: null, userAgent: null },
+  operation: "platform.page_delivered",
+  entity: "incident",
+  entityId: "INC-2026-0007",
+  before: null,
+  after: null,
+  diff: null,
+});
+
+const pinnedFull = (): AuditLogEntry => ({
+  ...pinnedMinimal(),
+  occurredAt: "2026-10-05T12:00:00+02:00",
+  actor: {
+    kind: "user",
+    userId: userId("33333333-3333-4333-8333-333333333333"),
+    sessionId: "sess_1",
+    ip: "198.51.100.7",
+    userAgent: "curl/8.5.0",
+  },
+  before: { b: 1, a: 2 },
+  after: { z: [1, 2, { q: null }], y: "é🙂" },
+  diff: { changed: ["a", "b"] },
+  reason: "because",
+  eSignature: { method: "totp", challengeId: "ch_1", signedAt: "2026-10-05T12:00:00+02:00" },
+  regoDecisionTrace: "trace",
+});
+
+describe("canonicalAuditEntryPayload stored-digest compatibility", () => {
+  it("renders a minimal tenant-scoped entry to the pre-change bytes", () => {
+    expect(digest(canonicalAuditEntryPayload(pinnedMinimal()))).toBe(PRE_CHANGE_DIGEST_MINIMAL);
+  });
+
+  it("renders a fully-populated tenant-scoped entry to the pre-change bytes", () => {
+    expect(digest(canonicalAuditEntryPayload(pinnedFull()))).toBe(PRE_CHANGE_DIGEST_FULL);
+  });
+
+  it("still renders a tenant id as a quoted string at its sorted position", () => {
+    expect(canonicalAuditEntryPayload(pinnedMinimal())).toContain(`"tenantId":"${tenantId}"`);
+  });
+});
+
+describe("canonicalAuditEntryPayload platform scope", () => {
+  it("renders a platform-scope entry's tenantId as null", () => {
+    expect(canonicalAuditEntryPayload(base({ tenantId: null }))).toContain('"tenantId":null');
+  });
+
+  it("commits to different bytes than the same entry under a tenant", () => {
+    expect(canonicalAuditEntryPayload(base({ tenantId: null }))).not.toBe(
+      canonicalAuditEntryPayload(base()),
+    );
+  });
+
+  it("collapses an undefined tenantId to null rather than dropping the key", () => {
+    // Dropping it would be a third rendering, and one no stored digest commits to.
+    const untyped = base({ tenantId: undefined } as Partial<AuditLogEntry>);
+    expect(canonicalAuditEntryPayload(untyped)).toBe(canonicalAuditEntryPayload(base({ tenantId: null })));
+  });
+
+  it("keeps the key present for a platform entry, so the payload shape is one shape", () => {
+    expect(canonicalAuditEntryPayload(base({ tenantId: null }))).toContain('"tenantId":');
+  });
+});
 
 describe("canonicalAuditEntryPayload", () => {
   it("is stable for the same entry", () => {

@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 325 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 326 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 144 meta-schema tables, ~13,300 tests**, all green, no
+**87 packages + 3 apps, 144 meta-schema tables, ~13,850 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -36,6 +36,13 @@ type errors.
   platform console, AI onboarding, the notification stack, and a long run on GDPR
   Article 17 (ADR-0316 – ADR-0329): the erasure, its proof, the proof's reach, the
   audit of the proofs, and the alarm for what that audit finds.
+  The last three increments (ADR-0330, ADR-0331) have been **sweeps rather than features**: taking a
+  defect that was found once and asking how many other members its class has. That turned up a
+  column-level CHECK nobody compared across 765 of them, a `Date`-vs-string assumption in four stores
+  (one of them breaking keyset pagination in production), 28 tables letting a tenant write a
+  platform-wide row, a signal store that could never succeed against a real database, and a workflow
+  orchestration layer that was unreachable from the deployed binary. The recurring shape is that
+  **the honest fix usually sits one level up from where the pain was felt.**
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -65,6 +72,16 @@ increment. See **What's actually left** at the bottom for the current open ends.
   `SELECT`-only policy** (ADR-0313) rather than an `OR` inside the isolation one: on an `ALL`-scope policy
   the `USING` expression also serves as the `WITH CHECK`, so a combined form would let an elevated reader
   forge an entry into another tenant's chain. Verified live as a non-owner role, in both directions.
+  **`tenant_id` is nullable there, and NULL means platform scope** (ADR-0331) — a fact about the
+  deployment rather than about one tenant — reachable only through a **third**, `INSERT`-scoped policy
+  on its own grant `app.platform_audit_write`. Three decisions, each load-bearing: its own GUC, because
+  `app.platform_audit` is the *read* grant and the population holding it is the one whose conduct these
+  rows record; `INSERT`-scoped, so it carries only a `WITH CHECK` and cannot serve an `UPDATE`'s or
+  `DELETE`'s `USING`; and `tenant_id IS NULL` *inside* the check, so the write elevation buys no access
+  to any tenant's chain. `meta.forensic_chain_entries` and `_checkpoints` carry the same split on the
+  same grant, since the chain anchors that trail and the two are one privilege.
+  **The same `ALL`-scope shape is still on 28 other tables** and is a real hole there, not a
+  theoretical one — see *What's actually left*.
 - **Strict TypeScript.** No `any`. No `--no-verify`. Explicit return types on
   exported functions.
 
@@ -276,6 +293,30 @@ packages exist at only one layer, noted below where that is true.
   `buildPersistentEngine`, a replayer for drift repair, and the claim/lease layer that makes
   multiple workers safe: `claimDueTimers`/`Activities`/`Jobs` with renew + release, plus a
   `PostgresJobRunEngine` with a job handler registry and enqueue path.
+  **`PostgresWorkflowDefinitionStore` is the writer `meta.workflow_definitions` never had**
+  (ADR-0331), and definitions are **authored rather than compiled from a manifest** — the evidence is
+  in that ADR. `planDefinitionPublication` decides between `insert` / `replace_draft` /
+  `transition_status` / `unchanged` / `refused`, testing idempotency **before** every refusal so a
+  repeat is never a conflict with itself; a published version is immutable, so its content digest
+  (`crossengin.workflow.definition.content.v1`) covers `label` and `description` too and **preserves
+  array order**, since `chooseTransition` returns the first guard-passing candidate and reordering two
+  transitions is a behaviour change. Tenant scoping is **conditional** (copying `feature-flags-pg`),
+  because `tenantId` is nullable and an unconditional `withTenantContext` would hide the very row a
+  platform-wide write is inserting; there is no `revision` column, so a status change is guarded by
+  **the status itself** inside the `UPDATE` predicate — ADR-0321's "the row is the lock", and stronger
+  than a timestamp token because a caller cannot defeat it by reusing what it read. The summary digest
+  is recomputed from the **re-parsed row**, never from a stored column, so a row edited after
+  publication compares unequal (ADR-0323 in miniature). `surveyManifestWorkflows` classifies every
+  manifest workflow against the definitions that exist, with `MANIFEST_WORKFLOW_MECHANISM` a total map
+  so a fourth kind is a compile error. `signal-provenance.ts` is the fix for a store that could never
+  succeed: `PostgresSignalStore.upsert` named nine columns and omitted `delivery_guarantee` and
+  `source_system`, both NOT NULL with no default, so **every** `submitSignal` threw against a real
+  database. The record was wrong, not the column — `SignalDefinition.deliveryGuarantee` is required
+  and non-defaulted, so the definition is the only place a guarantee exists — and `sourceSystem` comes
+  from the event's `actorSystemId`, a recorded fact rather than a fabricated default. A signal whose
+  definition is absent **refuses** (`SignalProvenanceUnresolved`) rather than substituting a
+  guarantee: guessing `at_most_once` claims a weaker promise than was declared and
+  `exactly_once_idempotent` a stronger one, in the very table the guarantee is read back from.
 - **`workflow-worker`** — the thin generic worker loop over those claims: batch processing,
   lease renewal while a handler runs, and three concrete workers (timer, activity, job).
   Small by design — the logic lives in `workflow-runtime-pg`. `abortWhile` (ADR-0315) is the cooperative
@@ -723,7 +764,18 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`forensics-pg`** — the append-only chain in Postgres: an advisory-lock-serialized chain
   log writer, Ed25519 entry signer, chain-suffix verification and periodic checkpoints.
   `appendWithin(tx, …)` appends into a caller's transaction, so a record and its anchor
-  commit together (ADR-0286).
+  commit together (ADR-0286). **Every read carries its own scope predicate** (ADR-0331), beside RLS
+  rather than instead of it, because a table's owner bypasses its policies and connecting as the owner
+  is an ordinary deployment: with no predicate, `loadChain(null)` returned a *tenant's* entries
+  interleaved with the platform's and `tailWithin` handed the tenant's first-ever entry
+  `sequence_number = 1`, having seen the platform chain's `0` as the global maximum — so every scope's
+  `priorEntryHash` came from another scope and `verify()` reported a gap on healthy data. Observed
+  live as the owner. `scopeFilter` **branches** (`tenant_id = $1` / `tenant_id IS NULL`) rather than
+  using `tenant_id IS NOT DISTINCT FROM $1`, which is the one operator matching NULL to NULL and would
+  give a single code path: measured against 45k entries it is **not indexable** — 16 ms sequential scan
+  versus **0.09 ms** index scan — and this read runs on *every append*, to find the tail, against a
+  table that only grows. A platform append also sets `app.platform_audit_write`, transaction-locally,
+  for the `INSERT`-scoped policy that is now the only route to a platform-scope entry.
 - **`access-reviews`** — periodic attestation campaigns (SOC 2 / ISO 27001 / HIPAA / PCI /
   GDPR / 21 CFR Part 11): campaigns, scoped items, decisions with attestation kinds and
   four-eyes, exceptions with per-reason duration caps, templates, sealed evidence with
@@ -897,6 +949,13 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   mode runs the migration applier), `chat` (multi-vendor Architect chat with tool dispatch,
   human-in-the-loop write approval and optional Postgres transcript), `license`, `version`,
   `help`. Every subcommand takes `--format human|json`; exit 0 / 1 / 2.
+  **`apply` re-plans after a clean pass** (ADR-0331), because "executed 9, failed 0" is a report about
+  what ran and an operator reads it as a claim about the schema. A step can only be planned against the
+  schema as it was *before* the pass, so a plan does not always converge in one — found live, reporting
+  `failed: 0` with a CHECK still missing. `remaining.statements.length === 0` on the JSON payload is the
+  convergence claim, defaulting to `null` so absent cannot read as yes, and `standingDifferences`
+  decides which of the two plans may be *printed*: rendering the pre-apply plan afterwards announced
+  "1 statement(s) to apply" about work the same invocation had just done.
 - **`apps/operate-server`** — **long-running process**, the deployed serving binary and the
   largest app (80 modules). A Node `http` listener over `buildOperateGateway` plus a
   framework-neutral `dispatch` core with a Fetch/Workers edge adapter — **both** now enforce one
@@ -989,10 +1048,12 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   carries none. A **resolve** is deliberately *not* routed through `deliverAndRecord` — an
   all-`unsupported` resolve would land as `platform.page_undelivered`, claiming a page failed when none
   was sent — but it does get its own timeline note, through `resolveAndNote`.
-  **Every page is also appended to its incident's timeline** (ADR-0327), which is the record that
-  still lands when the audit row cannot: `meta.audit_log.tenant_id` is NOT NULL and an SLO surface is
-  never a tenant, so for that escalator the row is *structurally impossible* while the timeline — no
-  tenant column, append-only, on the record a review actually opens — takes it either way.
+  **Every page is also appended to its incident's timeline** (ADR-0327), which was the only record
+  that landed for the SLO escalator while `meta.audit_log.tenant_id` was NOT NULL: an SLO surface is
+  never a tenant, so the row was *structurally impossible* and the timeline — no tenant column,
+  append-only, on the record a review actually opens — took it either way. ADR-0331 made the row
+  possible (NULL is platform scope), so the two are now a **pair** rather than a substitute, and the
+  timeline keeps its job: it is what still lands when the emitter itself is unreachable.
   The **tombstone sweep** is reachable too: `GET /v1/platform/tombstones/unproven` (paged, `?after=`,
   recorded even when clean because the *examined* count is the claim — ADR-0323), plus one page per
   audit tick on the deletion scheduler, lapping when it reaches the end rather than sweeping the whole
@@ -1050,10 +1111,15 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `--deletion-escalation-config` beside `severity` and `severityByDefect`, because a second CLI knob
   would split one policy across two places. The recovery is applied **automatically**, which is the
   exception to this family's rule that an absence is only an inference: an advance is positive
-  evidence of motion. It writes **no audit row** and says so (`audited: false`): `meta.audit_log.tenant_id`
-  is NOT NULL with a foreign key to `meta.tenants`, and a sweep walks every tenant's proofs, so the
-  row is structurally impossible — the same wall ADR-0327 named for the SLO escalator, and there is in
-  fact **no platform-scope anchored record anywhere in this system**.
+  evidence of motion. It used to write **no audit row** and say so (`audited: false`), because
+  `meta.audit_log.tenant_id` was NOT NULL with a foreign key to `meta.tenants` and a sweep walks every
+  tenant's proofs, so the row was *structurally impossible* — the same wall ADR-0327 named for the SLO
+  escalator. **ADR-0331 removed that wall**: `tenant_id` is nullable, NULL means platform scope, and
+  all three escalators now leave anchored platform rows (verified live, including the ADR-0286
+  contrast — a tampered platform row reports `hash_mismatch` and `COMPROMISED` while the chain's own
+  `verify()` still answers `{"valid":true}`). The timeline note ADR-0327 added is **not** superseded by
+  it: the two are a pair, and the timeline is the one that still lands when the emitter itself is
+  unreachable, which is the condition a compromise finding escalates for.
   `PostgresReadStateStore` (ADR-0330) is the writer `meta.notification_read_states` and
   `meta.notification_read_watermarks` never had — ADR-0309 modelled both and nothing stored one, so the
   tables had sat unwritten and, in the way of ADR-0300, **drifted**: `dispatch_id` was `UUID` against a
@@ -1063,15 +1129,34 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   NOTHING` so re-opening a notice cannot move `readAt` (the field answers "when did you first see
   this"), and `GREATEST` inside the `DO UPDATE` so a stale client replaying an older position cannot
   un-read everything between the two — ADR-0321's "the row is the lock", applied to a different race.
-  **`--workflow-cancel-role` refuses to boot** (ADR-0330), naming the real reason: ADR-0329 built the
-  cancel route, its tests and the fence columns, but what is missing is upstream of all of it — this
-  binary instantiates no `WorkflowEngine` and `meta.workflow_definitions` has **no writer**, so there
-  is no source of `WorkflowDefinition` records for one to be built from, and nothing instantiates the
-  three workers in `workflow-worker` either. A route mounted against an empty definition map would
-  answer `unknown_instance` for every instance, which is the silent degradation ADR-0327 said a
-  surface must never choose. **Entity lifecycle transitions are a different mechanism**
-  (`operate-runtime`'s lifecycle handlers) and are unaffected; what is unreachable is the
-  `workflow-engine` orchestration layer — timers, activities, signals, sagas.
+  **`--workflow-cancel-role` mounts a real engine now** (ADR-0331). ADR-0330 refused the flag outright
+  and the premise it named was true: no `WorkflowEngine` was instantiated and
+  `meta.workflow_definitions` had **no writer**, so there was no source of definitions and a route over
+  an empty map would answer `unknown_instance` for every instance. There is a writer now, so the
+  refusal narrows to `--store memory` (neither table exists there) and the flag otherwise builds
+  `PostgresWorkflowDefinitionStore` → `loadEngineDefinitions({})` → `buildPersistentEngine`. The map is
+  keyed by `definitionId` and loads **every** status, not only `published`: a missing definition makes
+  the engine go quiet rather than raise (a due timer is skipped, a signal declined), so narrowing to
+  `published` would silently strand in-flight instances of a `deprecated` definition, while
+  `startInstance` already refuses a non-published one by name. An **empty** map warns loudly, because
+  under RLS as a non-owner role with no tenant context the load sees only platform-wide rows — and a
+  404 then reads as "no such instance" rather than "this server loaded no definitions".
+  `surveyManifestWorkflows` names every manifest workflow no published definition serves, since under
+  the authored model the cost of an absent definition is an *absent* workflow rather than a wrong one.
+  **Entity lifecycle transitions remain a different mechanism** (`operate-runtime`'s lifecycle
+  handlers) and are unaffected. Still unmounted: `workflow-worker`'s three workers, so timers and
+  activities are not *driven* by this binary even though the engine is now present.
+  **Per-viewer notification read state is reachable over HTTP** (`--read-state-routes`, ADR-0331),
+  closing ADR-0309's tables-with-no-writer: mark one notice read, move a read-through watermark, read
+  an unread count. The viewer is **always the credential** and a body naming one is *refused* rather
+  than ignored, because ignoring it would let a client believe it marked somebody else's notice read.
+  `--read-state-backfill-role` is additive on `--read-state-role` and gates the one privileged source
+  (`system_backfill`, watermark-only since a row-wise backfill is unbounded), recorded *before* the
+  write so an unrecordable one is refused; the ordinary per-notice mark is **not** audited, because the
+  read-state row *is* that record and the reader, subject and tenant are one principal by construction.
+  `--max-request-body-route <prefix>=<size>` gives ADR-0312's platform-wide cap a per-route form,
+  matched by path **prefix** rather than by the gateway's route template — the limit has to be chosen
+  before the body is read, and route matching happens after it.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -1241,6 +1326,59 @@ opened them.
 
 **Load-bearing**
 
+- **28 tables let a tenant session write a platform-wide row** (ADR-0313, ADR-0331). The pattern is a
+  single `ALL`-scope policy whose predicate is
+  `tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID`,
+  and **not one of the 28 declares a `command`** — so on an `ALL` policy, where the `USING` expression
+  also serves as the `WITH CHECK`, `tenant_id IS NULL` satisfies it unconditionally. Demonstrated live
+  as a non-owner role on the forensic chain before it was fixed: a tenant session appended a
+  platform-scope entry (`INSERT 0 1`) and the next verification reported `integrity BROKEN, signatures
+  INVALID` — poisoning rather than forgery, but a tenant could make the platform chain read compromised
+  on demand. ADR-0313 fixed `meta.audit_log`'s read half and ADR-0331 fixed its write half plus the two
+  chain tables; the class was never swept. The list includes `crypto_keys`, `sso_providers`,
+  `feature_flag_kill_switches`, `notification_templates`, `certification_reports`,
+  `workflow_definitions`, `gateway_pipeline_executions` and the three SLO tables. **Reported rather
+  than swept because the correct split differs per table**: an append-only table wants `INSERT`-only,
+  while mutable platform configuration (`feature_flags`, `workflow_definitions`, the plan catalog) needs
+  an elevated `UPDATE` too, and an `INSERT`-only policy makes platform rows immutable-by-RLS — right for
+  the chain, wrong for a flag, and wrong *silently and fail-closed*. `meta.audit_integrity_verdicts` is
+  in this group although ADR-0313 named it, because splitting it means narrowing its *isolation* policy
+  from `ALL` to `SELECT`, a different and larger edit than adding two policies beside one.
+- **Splitting a permissive policy takes two passes, and the second is manual** (ADR-0331).
+  `planSchemaReconciliation` creates the new policies and **refuses to drop the old permissive one**,
+  because dropping a policy loosens access (ADR-0290's invariant) and `allowLoosening` reaches foreign
+  keys only. Permissive policies are **OR'd**, so until that `DROP` runs the split buys *nothing* — the
+  old predicate still satisfies every `WITH CHECK`. The plan hands over the exact SQL. Verified on the
+  two chain tables: `apply` landed six `create_policy` statements and reported two `policy_removed`
+  differences, and only after the hand-run `DROP`s did the live schema converge and the forgery matrix
+  come out right.
+- **One signal id is reused across every matched instance** (ADR-0331, found by Lane F outside its
+  lane). `engine.ts` generates `signalId` *outside* the match loop, then appends a `signal_received`
+  event carrying that id to each matched instance. `meta.workflow_signals.signal_id` is UNIQUE, so N
+  deliveries collapse to **one** row. Verified live: two instances on one correlation key produced two
+  events with one id and one signal row, attributed to whichever instance was projected last — the
+  first instance's delivery is invisible in the projection table. `WorkflowSignal.instanceId` is
+  singular and `matchSignalToInstance` returns one id, so the contract expects one signal per instance;
+  the engine should mint an id per match. Related: `submitSignal`'s idempotency is a process-local
+  `Set` and `input.idempotencyKey` is never written to the event payload or the row, so
+  `meta.workflow_signals`'s unique `(tenant_id, signal_name, idempotency_key)` index has never enforced
+  anything, dedup does not survive a restart, and a declared `exactly_once_idempotent` signal persists
+  with a NULL key — legal in SQL, but a row that cannot be re-parsed against `WorkflowSignalSchema`.
+- **An API key that names no principal is a `service_account`, and the id collision is unfixable**
+  (ADR-0331). `buildPrincipalWiring` hardcoded `principalKind: "user"` for every API key while
+  `parseApiKeySpec` defaulted the optional fourth field to one shared placeholder UUID — so a bare
+  `key:role:tenant` claimed to be a person who does not exist, and *every* such key claimed to be the
+  **same** person. One line, three defects: it satisfied every per-person surface's guard, the
+  placeholder is not in `meta.users` so `notification_read_states.user_id` failed its foreign key
+  (reported as a 503 for something permanent) and `actorForInstanceCancel` would have handed the id to
+  `cancelled_by_user_id`, which has the same key — and two keys in one tenant would have *shared* read
+  state, so one person's clicks marked another's notices read. `principalKind` is the fact now, and
+  `namesPrincipal` carries it rather than a comparison against the placeholder (a spec may name that
+  very UUID, and then it means a real user who holds it). The **collision itself is not fixable in the
+  spec**: a bare spec does not carry the information to tell two keys apart, and the one thing that
+  would — the credential — must not be hashed into an id, because a principal id is not a secret and
+  lands in `meta.audit_log`, which would turn an audit reader into an offline brute-forcer. So it is
+  *declared* rather than papered over; a deployment wanting per-person API keys must name the principal.
 - **A composite foreign key is declarable but not reconciled** (ADR-0291, ADR-0299).
   `TableConstraint` has a `foreign_key` member now, but the emitter writes column-level foreign keys
   inline and unnamed, which is why ADR-0291 matches them *by column* — so a multi-column one in the
@@ -1438,9 +1576,11 @@ opened them.
   ADR-0325's own content rule means a `PageDeliveryReport` carries none and so a `tenantIdFor(report)`
   resolver has nothing to resolve from.
   **All six of ADR-0326's open ends are closed by ADR-0327.** A page is appended to its incident's
-  timeline as a `paged` entry, which is the record that still lands when the audit row *cannot* — an
-  SLO surface is never a tenant and `meta.audit_log.tenant_id` is NOT NULL, so for that escalator the
-  row is structurally impossible and the timeline has no tenant column to lie about. The retry honours
+  timeline as a `paged` entry, which was the record that still landed when the audit row *could not* —
+  an SLO surface is never a tenant and `meta.audit_log.tenant_id` was NOT NULL, so for that escalator
+  the row was structurally impossible and the timeline has no tenant column to lie about. (ADR-0331
+  made the row possible; the timeline note stays, as the half that survives an unreachable emitter.)
+  The retry honours
   `Retry-After` (`max` with the policy's floor; over the 30s ceiling it stops rather than holding a
   page past the point where it is still a page). And a resolve for an episode this process did not
   page is recovered from the store through the declarer's new `findById`, planned from the record's
@@ -1505,8 +1645,8 @@ opened them.
 **Contained**
 
 - `dispatched_at` is still unused (ADR-0277). A read state can be **stored** since ADR-0330 and no
-  route writes one yet, so the inbox still cannot mark a notice read over HTTP; nothing reads the
-  *template* audit trail over HTTP either (ADR-0279). The store also found both read-state tables had
+  route wrote one until ADR-0331, which added the three read-state routes — so the inbox can mark a
+  notice read over HTTP now; nothing reads the *template* audit trail over HTTP still (ADR-0279). The store also found both read-state tables had
   drifted (`dispatch_id` UUID against a `disp_…` contract) and **their column CHECK did not reach an
   already-applied database** — caught by this same increment's column-check comparison, which is the
   tidiest demonstration of why that hole mattered. A platform-scoped audit read is recorded against the reader's own
@@ -1516,18 +1656,20 @@ opened them.
   the wholesale form, reaching only classes no `=` entry names. A job handler that ignores its
   `AbortSignal` runs to completion and commits its effects while the run records `cancelled`; the
   guarantee is deliberately phrased as "no further work will be *started*" (ADR-0315). A **workflow
-  instance** has a cancel route, its tests and its fence columns since ADR-0330 — and it **cannot
-  mount**, which is the finding rather than the gap: this binary instantiates no `WorkflowEngine`,
-  `meta.workflow_definitions` has no writer, and nothing instantiates `workflow-worker`'s three
-  workers, so the whole `workflow-engine` orchestration layer is unreachable from the deployed
-  server. `--workflow-cancel-role` refuses to boot naming that. Entity lifecycle transitions are a
-  different mechanism and work. Where `WorkflowDefinition` records should come from — a manifest
-  compiler, or a definition store with its own authoring surface — is the open question. An in-flight activity is only `signalled`, and `signalDelivered` is `false`
+  instance** can be cancelled over HTTP since ADR-0331, which answered ADR-0330's open question —
+  definitions are **authored, not compiled from a manifest**, because every manifest workflow in the
+  catalog is `entityLifecycle` (19 in core, 1 in healthcare, zero orchestration or scheduled) so a
+  compiler had zero valid inputs, the other two kinds carry `z.unknown()`, and `createdBy` plus
+  `publishedBy !== createdBy` would have needed two fabricated constants differing from each other.
+  `workflow-worker`'s three workers are **still not instantiated**, so the engine is present but
+  timers and activities are not *driven* by this binary. Entity lifecycle transitions are a different
+  mechanism and work. An in-flight activity is only `signalled`, and `signalDelivered` is `false`
   when its handler belongs to another process: nothing propagates the abort across a process boundary.
   A `child_instance` is `not_cascaded` by design, and side effects with no compensation key are
   reported by neither disposition. `ESTIMATED_CHARS_PER_TOKEN` under-counts for CJK,
-  which is the unsafe direction for a ceiling (ADR-0311). A per-route or per-tenant request-body limit
-  is unaddressed; the cap is platform-wide (ADR-0312). A refused DDL application is invisible to the
+  which is the unsafe direction for a ceiling (ADR-0311). A per-route request-body limit exists since
+  ADR-0331 (`--max-request-body-route`, longest prefix wins); a per-**tenant** one is still
+  unaddressed, and the default remains platform-wide (ADR-0312). A refused DDL application is invisible to the
   tenant — they are served from the JSONB fallback rather than the tables they asked for (ADR-0314). A
   refused erasure leaves an operator to drop the collateral by hand; the refusal names it but does not
   hand over the SQL the way ADR-0290's `unreconciled` does (ADR-0316).
@@ -1575,9 +1717,34 @@ opened them.
   ISO strings, so the workflow replayer reported drift on **every healthy instance** that had any of
   them set. Fixed with one normaliser, and the stored row's timestamps typed `unknown` so the type
   system stops asserting something false. The offline fakes hand back strings, which is exactly why no
-  test caught it. **This is almost certainly not unique to that replayer**: every `StoredXRow`
-  interface in the workspace types a `TIMESTAMPTZ` column as `string | null`, and
-  `incident-response-runtime-pg`'s re-parsing replayer feeds the integrity escalator.
+  test caught it. **It was not unique to that replayer, and ADR-0331 swept the class** after measuring
+  what node-postgres really returns: `TIMESTAMP`/`TIMESTAMPTZ`/`DATE` → `Date` (and `DATE` parses to
+  **local** midnight, so `toISOString().slice(0,10)` answers `2026-01-31` under `TZ=Asia/Tokyo` for
+  `'2026-02-01'::date`), `NUMERIC`/`BIGINT` → **string**, `INTERVAL` → a `PostgresInterval` whose
+  `String()` is `[object Object]`, `JSONB` → parsed, `BYTEA` → `Buffer`. The fact that made it more
+  than a type lie: **Postgres refuses to parse its own `Date.toString()`**. So
+  `ColumnMappedEntityStore.rowToRecord` — which passed values through raw — put a `Date` into a keyset
+  cursor via `String(value)`, and page 2 raised `invalid input syntax for type timestamp with time
+  zone`. Reproduced live, across 21 `auditable` pack entities plus 43 `date` and 23 `datetime` fields;
+  the two implementations of one `EntityStore` disagreed, because `PostgresEntityStore` reads the same
+  value out of JSONB where it is already ISO text and *its* page 2 works. Four defects fixed
+  (`column-store.ts`, `idempotency-store.ts`, `route-registry.ts`, `event-log.ts`) plus one latent, with
+  **one normaliser** — `isoInstant` / `requireIsoInstant` / `isoCalendarDate` in `kernel-pg`'s
+  `connection.ts`, the module that defines `PgQueryResult`. The narrower lesson is the useful one:
+  **the packages that re-parse through zod were protected by the parse** (a `Date` fails
+  `z.string().datetime()` loudly on the first row), so `incident-response-runtime-pg` was never
+  affected; the damage landed where a record is hand-assembled from columns, and worst of all in the
+  *dynamic* store that has no `StoredXRow` interface for a grep to find. `NUMERIC` and `INTERVAL` are
+  deliberately **not** normalised — see the next entry.
+- **A `decimal` field's wire type is undecided, and the two stores disagree** (ADR-0331).
+  `NUMERIC` comes back as a string, so `ColumnMappedEntityStore` returns `price: "10.25"` where the
+  manifest says a number and `PostgresEntityStore` returns `10.25` — measured side by side, across 92
+  `decimal` fields in the packs. Not fixed, deliberately: converting a `NUMERIC(38,10)` to a JS number
+  is lossy by construction, which is *why* node-postgres returns a string, so this is a decision about
+  the contract rather than a normalisation. Nothing raises — Postgres parses `"11.25"` under `::NUMERIC`,
+  so the keyset cursor survives. `INTERVAL` is the third instance and unreached: a `duration` field maps
+  to it and nothing in the catalog or the seven packs declares one, so a keyset sort on one would put
+  `[object Object]` in the cursor the day somebody does. `readColumn` is the single place either lands.
 - **A column-level `check` expression is compared now** (ADR-0330), which closes ADR-0329's hole and
   removes the two table-level workarounds it needed. The naming ambiguity that made it look like a
   parser problem is answered by `pg_constraint.conkey` on the probe's own row — Postgres's own parser,
@@ -1608,7 +1775,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 325 records; 246 Accepted, 79 Proposed (the
+title or status change cannot drift. 326 records; 247 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

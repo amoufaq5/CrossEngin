@@ -26,13 +26,17 @@ import {
 } from "./tombstone-assembly.js";
 import {
   canonicalContentManifest,
+  canonicalContentManifestV3,
   computeContentManifestSha256,
   computeContentManifestSha256V2,
+  computeContentManifestSha256V3,
+  computeProofSha256,
   verifyTombstoneHashes,
 } from "./tombstone-proof.js";
 import {
   asCapabilityDeclaration,
   readDeclaredAbsences,
+  readRetentionClaim,
   type TombstoneAnchor,
 } from "./tombstones.js";
 
@@ -521,23 +525,47 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
     expect(tombstoneMatchesAttestations(out.record, [attest()])).toBe(true);
   });
 
-  it("puts the declaration inside the signed bytes as a v2 proof", () => {
-    // ADR-0329. Under v1 the digest could not tell "this deployment has no object storage" from
-    // "nobody asked about object storage", which is ADR-0317's defect one level up: the declaration
-    // travelled beside the record and nothing signed it.
+  it("puts the declaration and the retention claim inside the signed bytes as a v3 proof", () => {
+    // ADR-0329 put the declaration in the bytes, because under v1 the digest could not tell "this
+    // deployment has no object storage" from "nobody asked about object storage" — ADR-0317's defect
+    // one level up. ADR-0331 adds the retention claim for the same reason one place further on.
     const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.record.proofVersion).toBe("v2");
+    expect(out.record.proofVersion).toBe("v3");
     expect(out.record.capabilityDeclaration).toEqual(asCapabilityDeclaration(PERFORMED_ONLY));
-    // And the digest is the v2 one, not the v1 one over the same scope — which is the whole point:
-    // two records with identical scopes and different declarations now have different proofs.
+    expect(out.record.retainedObligations).toEqual([]);
+    // And the digest is the v3 one — neither the v2 one over the same scope and declaration nor the
+    // v1 one over the scope alone. Three tags, three different answers for the same destroyed rows.
     expect(out.record.contentManifestSha256).toBe(
+      computeContentManifestSha256V3(
+        out.record.scope,
+        asCapabilityDeclaration(PERFORMED_ONLY),
+        { obligations: [] },
+      ),
+    );
+    expect(out.record.contentManifestSha256).not.toBe(
       computeContentManifestSha256V2(out.record.scope, asCapabilityDeclaration(PERFORMED_ONLY)),
     );
     expect(out.record.contentManifestSha256).not.toBe(
       computeContentManifestSha256(out.record.scope),
     );
+  });
+
+  it("signs the empty retention claim rather than omitting the version", () => {
+    // The v3-versus-v2-default argument, as a test. A deployment that kept nothing still emits v3,
+    // so "nothing was lawfully retained" is a signed assertion. Had v3 been emitted only when there
+    // was a retention to carry, that sentence would have been expressed by the *absence* of the tag —
+    // which no reader can tell from a record written before the tag existed.
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(readRetentionClaim(out.record)).toEqual({
+      claimState: "covered_by_proof",
+      obligations: [],
+      retainedReason: null,
+      retainedDataReference: null,
+    });
   });
 
   it("makes a declared absence readable from the proof itself", () => {
@@ -762,6 +790,120 @@ describe("tombstoneMatchesAttestations", () => {
     expect(out.ok).toBe(true);
     if (!out.ok) return;
     expect(tombstoneMatchesAttestations(out.record, [])).toBe(false);
+  });
+
+  it("accepts a v3 record's own evidence, retention and all", () => {
+    const attestations = [
+      attest(),
+      attest({
+        subsystem: "shared_tables",
+        outcome: "erased_and_retained",
+        scope: { tables: ["meta.invoices"], rowCount: 4 },
+        retainedObligations: ["tax_records_7y"],
+        retainedDataReference: "meta.invoices",
+      }),
+    ];
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, { attestations }));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.proofVersion).toBe("v3");
+    expect(tombstoneMatchesAttestations(out.record, attestations)).toBe(true);
+  });
+
+  it("sees a retained attestation deleted out of the evidence on a v3 record", () => {
+    // The hole the scope comparison structurally cannot see (ADR-0331). A retention-bearing
+    // attestation contributes *nothing* to a `DeletionScope` — the figures describe only what was
+    // destroyed — so removing one from the stored evidence left the recomposed scope identical, the
+    // record's digests untouched, and both detectors satisfied. The record's signed obligations are
+    // the first thing that disagrees.
+    const attestations = [
+      attest(),
+      attest({
+        subsystem: "shared_tables",
+        outcome: "retained",
+        scope: undefined,
+        retentionObligation: "tax_records_7y",
+        retainedDataReference: "meta.invoices",
+      }),
+    ];
+    const out = assembleTombstone(
+      declaredInputOf(caps({ ...PERFORMED_ONLY, shared_tables: "retains" }), { attestations }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const withoutRetention = attestations.filter((a) => a.subsystem !== "shared_tables");
+    // The scope is unchanged by the deletion, which is exactly why the old check could not see it.
+    expect(composeDeletionScope(withoutRetention)).toEqual(out.record.scope);
+    expect(verifyTombstoneHashes(out.record)).toEqual({ contentManifestOk: true, proofOk: true });
+    expect(tombstoneMatchesAttestations(out.record, withoutRetention)).toBe(false);
+  });
+
+  it("sees an obligation swapped in the evidence on a v3 record", () => {
+    const attestations = [
+      attest(),
+      attest({
+        subsystem: "shared_tables",
+        outcome: "erased_and_retained",
+        scope: { tables: ["meta.invoices"], rowCount: 4 },
+        retainedObligations: ["tax_records_7y"],
+        retainedDataReference: "meta.invoices",
+      }),
+    ];
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, { attestations }));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const rewritten = attestations.map((a) =>
+      a.subsystem === "shared_tables"
+        ? ({ ...a, retainedObligations: ["medical_records_10y"] } as DeletionAttestation)
+        : a,
+    );
+    expect(tombstoneMatchesAttestations(out.record, rewritten)).toBe(false);
+  });
+
+  it("is insensitive to attestation order on a v3 record", () => {
+    // The obligations are compared as a sorted set and the prose deliberately is not, so a reordered
+    // evidence array — which `JSONB` can hand back — must not read as a finding. A false positive
+    // here pages somebody at `sev1` (ADR-0324).
+    const attestations = [
+      attest(),
+      attest({
+        subsystem: "shared_tables",
+        outcome: "erased_and_retained",
+        scope: { tables: ["meta.invoices"], rowCount: 4 },
+        retainedObligations: ["tax_records_7y"],
+        retainedDataReference: "meta.invoices",
+      }),
+    ];
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, { attestations }));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(tombstoneMatchesAttestations(out.record, [...attestations].reverse())).toBe(true);
+  });
+
+  it("leaves a v1 record's unsigned retention prose uncompared", () => {
+    // v1 and v2 records carry the prose outside their bytes, and this check must not tighten on them
+    // retroactively: there is no structured field to compare, and comparing the rendered sentence
+    // would make a finding depend on a wording choice.
+    const attestations = [
+      attest(),
+      attest({
+        subsystem: "backups",
+        outcome: "retained",
+        scope: undefined,
+        retentionObligation: "tax_records_7y",
+        retainedDataReference: "backup-vault://2026",
+      }),
+    ];
+    const out = assembleTombstone(
+      inputOf({ requiredSubsystems: ["tenant_schema", "backups"], attestations }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.proofVersion).toBe("v1");
+    expect(out.record.retainedReason).toBeDefined();
+    expect(
+      tombstoneMatchesAttestations(out.record, [attest()]),
+    ).toBe(true);
   });
 });
 
@@ -1129,6 +1271,29 @@ describe("the content manifest's bytes do not move", () => {
   });
 
   it("pins the v2 digests for the same input under a declaration", () => {
+    // Pinned over the assembler's own composed scope but computed directly, because the assembler
+    // emits v3 now (ADR-0331). The digests below are the ones a pre-ADR-0331 `dist/` produced for
+    // exactly this input, transcribed from a run of it — so every v2 record on file still verifies.
+    const scope = composeDeletionScope(FIXTURE_ATTESTATIONS);
+    const v2 = computeContentManifestSha256V2(
+      scope,
+      asCapabilityDeclaration(FIXTURE_CAPABILITIES),
+    );
+    expect(v2).toBe("132f4a6e2e5bfadd124507f7edbeaf14bd4e5bbf830f14c0ff9079af07a07858");
+    expect(
+      computeProofSha256({
+        id: FIXTURE_BASE.id,
+        kind: FIXTURE_BASE.kind,
+        tenantId: FIXTURE_BASE.tenantId,
+        deletedAt: FIXTURE_BASE.deletedAt,
+        executedBy: FIXTURE_BASE.executedBy,
+        approvedBy: FIXTURE_BASE.approvedBy,
+        contentManifestSha256: v2,
+      }),
+    ).toBe("7723c2c6fa72889c518559386607c94fc074ec98ff4154100c9de530b93cc5eb");
+  });
+
+  it("pins the v3 digests the capabilities path now emits", () => {
     const out = assembleTombstone({
       ...FIXTURE_BASE,
       capabilities: FIXTURE_CAPABILITIES,
@@ -1136,12 +1301,79 @@ describe("the content manifest's bytes do not move", () => {
     });
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.record.proofVersion).toBe("v2");
+    expect(out.record.proofVersion).toBe("v3");
     expect(out.record.contentManifestSha256).toBe(
-      "132f4a6e2e5bfadd124507f7edbeaf14bd4e5bbf830f14c0ff9079af07a07858",
+      "5703c8e68e44a108e82507951c33abb5553a339bb077e358ba945a04f5e0fe34",
     );
     expect(out.record.proofSha256).toBe(
-      "7723c2c6fa72889c518559386607c94fc074ec98ff4154100c9de530b93cc5eb",
+      "2b60f9bba61b40f0113d2b055119f3fb032ff88cb94f6f1a7589025f70662092",
+    );
+  });
+
+  it("pins the canonical v3 body, retention claim and all", () => {
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      capabilities: FIXTURE_CAPABILITIES,
+      attestations: FIXTURE_ATTESTATIONS,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const declaration = out.record.capabilityDeclaration;
+    expect(declaration).toBeDefined();
+    if (declaration === undefined) return;
+    expect(
+      canonicalContentManifestV3(out.record.scope, declaration, {
+        obligations: out.record.retainedObligations ?? [],
+        ...(out.record.retainedReason !== undefined
+          ? { retainedReason: out.record.retainedReason }
+          : {}),
+        ...(out.record.retainedDataReference !== undefined
+          ? { retainedDataReference: out.record.retainedDataReference }
+          : {}),
+      }),
+    ).toBe(
+      '{"backupGenerations":[],"cacheKeys":[],"capabilityDeclaration":{"backups":"retains",' +
+        '"caches":"absent","object_storage":"erases","search_indexes":"absent",' +
+        '"shared_tables":"erases","tenant_schema":"erases"},"fileCount":0,' +
+        '"objectStorageBuckets":[],"retentionClaim":{"obligations":["tax_records_7y"],' +
+        '"retainedDataReference":"backup-vault://2026","retainedReason":"retained under legal' +
+        ' obligation — backups: tax_records_7y"},"rowCount":120,"schemas":["tenant_abc"],' +
+        '"searchIndexes":[],"storageBytes":69632,' +
+        '"tables":["meta.operate_entity_records","meta.users","tenant_abc.invoice"]}',
+    );
+  });
+
+  it("gives an empty retention claim its own v3 digest, distinct from a populated one", () => {
+    // Two deployments, identical destroyed rows, one with a statutory retention and one without. The
+    // whole reason the claim is in the bytes: before ADR-0331 these two proofs were byte-identical.
+    const noRetention = FIXTURE_ATTESTATIONS.map((a) =>
+      a.subsystem === "backups"
+        ? ({
+            subsystem: "backups",
+            outcome: "nothing_to_erase",
+            attestedBy: "fixture",
+            attestedAt: "2026-10-05T00:00:00.000Z",
+          } as DeletionAttestation)
+        : a,
+    );
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      capabilities: { ...FIXTURE_CAPABILITIES, backups: "erases" },
+      attestations: noRetention,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.retainedObligations).toEqual([]);
+    expect(out.record.contentManifestSha256).toBe(
+      "b704258583e523390f2793f069fc6e50fb0b43c62aca86275ec4a0081d7826a9",
+    );
+    expect(out.record.proofSha256).toBe(
+      "7a81ca4fa3bee74d036d43abf7323673ee975b56c9ce8a1fc0dee13b46bcd4b2",
+    );
+    // The scope is identical to the populated-claim fixture's, and the digest is not.
+    expect(out.record.scope).toEqual(composeDeletionScope(FIXTURE_ATTESTATIONS));
+    expect(out.record.contentManifestSha256).not.toBe(
+      "5703c8e68e44a108e82507951c33abb5553a339bb077e358ba945a04f5e0fe34",
     );
   });
 
@@ -1189,8 +1421,11 @@ describe("the content manifest's bytes do not move", () => {
     expect(out.record.proofSha256).toBe(
       "cffebd50c3e87b001aad383d28b2a5406e7fc6800e46574646d095d8ec8a2f18",
     );
-    // And the retention *is* recorded — just outside the digest, which is the v3 question.
+    // And the retention *is* recorded. On the v1 path it is still outside the digest, which is the
+    // honest reading for the one path ADR-0331 deliberately left on v1: `requiredSubsystems` cannot
+    // say "we have no object storage", so its bytes carry neither a declaration nor a claim.
     expect(out.record.retainedReason).toContain("shared_tables: tax_records_7y");
+    expect(out.record.retainedObligations).toBeUndefined();
   });
 
   it("keeps the legacy retention prose byte-for-byte", () => {

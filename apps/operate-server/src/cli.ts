@@ -10,6 +10,7 @@ import {
 } from "./deletion-scheduler.js";
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
+import { DEFAULT_UNREAD_SCAN_LIMIT, MAX_UNREAD_SCAN_LIMIT } from "./read-state-routes.js";
 import { parseRequestBodyLimit, parseRouteBodyLimits } from "./request-body-limit.js";
 
 export type StoreKind = "memory" | "pg" | "pg-columns";
@@ -163,6 +164,22 @@ export interface ServeOptions {
    * expressible at all — `--audit-read-sensitive-class phi=` (no role) withholds phi from everyone.
    */
   readonly auditReadSensitiveClasses: Readonly<Record<string, readonly string[]>>;
+  /** Expose the per-viewer notification read-state routes under /v1/notifications (mark read, read-through watermark, unread count; needs --store pg). */
+  readonly readStateRoutes: boolean;
+  /** Roles permitted to record their own read state and read their own unread count (repeatable; default none ⇒ the routes refuse everyone). */
+  readonly readStateRoles: readonly string[];
+  /**
+   * Roles permitted to assert `source=system_backfill` on the watermark route (repeatable; default
+   * none ⇒ nobody).
+   *
+   * **Additive on top of `--read-state-role`, not a substitute** — a backfill role that is not also
+   * granted there is refused by the base grant first, which is the fail-closed order. A backfill
+   * marks an entire backlog read in one call, so it is in ADR-0313's class and is recorded before
+   * the write; it therefore also requires an audit emitter, i.e. `--store pg`.
+   */
+  readonly readStateBackfillRoles: readonly string[];
+  /** How many dispatches the unread count examines in one page (default 200, 1–1000). The response reports `examined` and `truncated` rather than a quietly wrong total. */
+  readonly readStateUnreadScan: number;
   /** Maximum queryable time range in days; null uses the route default. */
   readonly auditReadMaxRangeDays: number | null;
   /** Expose the tenant-schema survey and erasure under /v1/platform/tenants/{id} — the step that makes a tenant deletion true, since ADR-0314's per-tenant schema was never removed (needs --store pg + --audit-chain-config). */
@@ -337,6 +354,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const auditReadSensitiveRoles: string[] = [];
   const auditReadSensitiveClasses: Record<string, string[]> = {};
   let auditReadMaxRangeDays: number | null = null;
+  let readStateRoutes = false;
+  const readStateRoles: string[] = [];
+  const readStateBackfillRoles: string[] = [];
+  let readStateUnreadScan = DEFAULT_UNREAD_SCAN_LIMIT;
   let tenantErasureRoutes = false;
   const tenantErasureRoles: string[] = [];
   let tenantDeletionRoutes = false;
@@ -695,6 +716,32 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       }
       auditReadMaxRangeDays = n;
       i += consumed();
+    } else if (arg === "--read-state-routes") {
+      readStateRoutes = true;
+    } else if (arg === "--read-state-role" || arg.startsWith("--read-state-role=")) {
+      readStateRoles.push(takeValue(arg, next, "--read-state-role"));
+      i += consumed();
+      readStateRoutes = true;
+    } else if (
+      arg === "--read-state-backfill-role" ||
+      arg.startsWith("--read-state-backfill-role=")
+    ) {
+      readStateBackfillRoles.push(takeValue(arg, next, "--read-state-backfill-role"));
+      i += consumed();
+      readStateRoutes = true;
+    } else if (arg === "--read-state-unread-scan" || arg.startsWith("--read-state-unread-scan=")) {
+      const raw = takeValue(arg, next, "--read-state-unread-scan");
+      const n = Number(raw);
+      // Refused out of band rather than clamped, which is ADR-0312's rule: a deployment that asked
+      // for 5000 and silently got 1000 would render a badge it believes is exact.
+      if (!Number.isInteger(n) || n < 1 || n > MAX_UNREAD_SCAN_LIMIT) {
+        throw new CliUsageError(
+          `invalid --read-state-unread-scan: ${raw} (1–${MAX_UNREAD_SCAN_LIMIT.toString()})`,
+        );
+      }
+      readStateUnreadScan = n;
+      i += consumed();
+      readStateRoutes = true;
     } else if (arg === "--tenant-erasure-routes") {
       tenantErasureRoutes = true;
     } else if (arg === "--tenant-erasure-role" || arg.startsWith("--tenant-erasure-role=")) {
@@ -905,6 +952,30 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       "--audit-read-routes / --notification-template-routes require a Postgres store (--store pg or pg-columns)",
     );
   }
+  if (readStateRoutes && store === "memory") {
+    // Read state is a persisted per-viewer record and the store needs a `PgConnection`; on the
+    // memory store the routes would mount and 503 on every call.
+    throw new CliUsageError(
+      "--read-state-routes requires a Postgres store (--store pg or pg-columns)",
+    );
+  }
+  if (readStateBackfillRoles.length > 0) {
+    // `buildReadStateRoutes` already throws without an auditor, but the message it can give names a
+    // constructor argument rather than the flag the operator typed. A backfill marks a whole backlog
+    // read in one call and is recorded *before* the write, so an unrecordable one is refused — which
+    // would be a 503 the first time somebody used it rather than a refusal at boot.
+    const notAlsoGranted = readStateBackfillRoles.filter((r) => !readStateRoles.includes(r));
+    if (notAlsoGranted.length > 0) {
+      // Additive, not a substitute: the base grant is checked first, so a backfill role missing from
+      // it is refused by that check and the backfill grant never comes into play. Said at boot
+      // rather than discovered as a 403 that looks like the backfill grant not working.
+      throw new CliUsageError(
+        `--read-state-backfill-role is additive on top of --read-state-role: ${notAlsoGranted
+          .sort()
+          .join(", ")} must also be granted with --read-state-role`,
+      );
+    }
+  }
   if (stripeWebhookSecret !== null && store === "memory") {
     throw new CliUsageError("--stripe-webhook-secret requires a Postgres store (--store pg or pg-columns)");
   }
@@ -974,18 +1045,21 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   if (jobInvokeActionRoles.length > 0 && !enableJobInvoke) {
     throw new CliUsageError("--job-invoke-action-role requires --enable-job-invoke");
   }
-  // Refused rather than mounted-and-useless, and the message names the real reason. ADR-0329 built
-  // the route, its tests and the fence columns; what is missing is upstream of all of it — this
-  // binary never instantiates a `WorkflowEngine`, and `meta.workflow_definitions` has no writer, so
-  // there is no source of `WorkflowDefinition` records for one to be built from. A route mounted
-  // against an empty definition map would answer `unknown_instance` for every instance, which is
-  // the silent degradation ADR-0327 said a surface must never choose.
-  if (workflowCancelRoles.length > 0) {
+  // ADR-0329 refused this flag outright, because the premise it names was true: the binary
+  // instantiated no `WorkflowEngine` and `meta.workflow_definitions` had no writer, so there was no
+  // source of definitions for one to be built from, and a route over an empty map would have
+  // answered `unknown_instance` for every instance.
+  //
+  // There is a writer now (ADR-0331), so the refusal narrows to the one thing still required: the
+  // definitions live in Postgres, so the memory store cannot serve them. Still a refusal rather
+  // than a warning, for ADR-0329's reason — a cancellation route that cannot find any instance is
+  // worse than one that is absent, because the 404 reads as "no such instance" rather than as
+  // "this server has no engine".
+  if (workflowCancelRoles.length > 0 && store === "memory") {
     throw new CliUsageError(
-      "--workflow-cancel-role names a route that cannot mount yet: this server instantiates no" +
-        " WorkflowEngine, because meta.workflow_definitions has no writer and so there is no" +
-        " source of workflow definitions. Entity lifecycle transitions are a different mechanism" +
-        " and are unaffected.",
+      "--workflow-cancel-role requires a Postgres store (--store pg or pg-columns): the engine's" +
+        " definitions are loaded from meta.workflow_definitions and its instances are projected" +
+        " into meta.workflow_instances, neither of which the memory store has.",
     );
   }
   for (const spec of jobInvokeActionRoles) {
@@ -1125,6 +1199,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     auditReadSensitiveRoles,
     auditReadSensitiveClasses,
     auditReadMaxRangeDays,
+    readStateRoutes,
+    readStateRoles,
+    readStateBackfillRoles,
+    readStateUnreadScan,
     tenantErasureRoutes,
     // No default: irreversibly destroying a tenant's business data is nobody's privilege until it is
     // granted by name, not even the platform admin's by inheritance.
@@ -1477,12 +1555,26 @@ Options:
   --audit-read-platform-role <r>  Role permitted to read ANY tenant's trail (repeatable; default
                        platform_admin). Elevates via app.platform_audit, which is SELECT-only
   --audit-read-sensitive-role <r>  Role permitted to see pii/phi/regulated payload fields
+                       unredacted (repeatable). Default none: every reader gets the redacted view
   --audit-read-sensitive-class <class>=<role>  Narrower: grants ONE class to a role. A class named
                        here is authoritative for that class and --audit-read-sensitive-role no
                        longer reaches it, which is what makes "pii but not phi" expressible;
                        "<class>=" with no role withholds it from everyone
-                       unredacted (repeatable). Default none: every reader gets the redacted view
   --audit-read-max-range-days <n>  Largest queryable time range in days (>=1)
+  --read-state-routes  Expose per-viewer notification read state: POST /v1/notifications/{id}/read,
+                       POST /v1/notifications/read-through, GET /v1/notifications/unread. The viewer
+                       is ALWAYS the credential — a body naming one is refused, not ignored. Closes
+                       ADR-0309's gap, where the web badge stood in recency for unread. Needs --store pg
+  --read-state-role <r>  Role permitted to record its own read state and read its own unread count
+                       (repeatable). Default none ⇒ the routes refuse everyone
+  --read-state-backfill-role <r>  Role permitted to assert source=system_backfill on the watermark
+                       route (repeatable). Default none ⇒ nobody. ADDITIVE on top of
+                       --read-state-role, which is checked first. A backfill marks a whole backlog
+                       read in one call, so it is recorded BEFORE the write and an unrecordable one
+                       is refused. Watermark only: a row-wise backfill is unbounded
+  --read-state-unread-scan <n>  Notices one unread answer may examine (1-${MAX_UNREAD_SCAN_LIMIT.toString()}, default ${DEFAULT_UNREAD_SCAN_LIMIT.toString()}).
+                       The answer reports examined + truncated, so a client renders "200+" rather
+                       than a quietly wrong total; an exact count needs a store-side anti-join
   --tenant-erasure-routes  Expose GET /v1/platform/tenants/{id}/schema and POST .../erase-schema —
                        survey exactly what a tenant's own schema holds, then drop it. ADR-0314 gave a
                        tenant its own schema and nothing removed it, so a GDPR Article 17 tombstone

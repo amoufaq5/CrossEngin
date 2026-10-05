@@ -2,6 +2,8 @@ import { qualifyTable, quoteIdent } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   ensurePgcryptoExtension,
+  isoCalendarDate,
+  isoInstant,
   pgpSymDecryptExpr,
   pgpSymEncryptExpr,
   type PgConnection,
@@ -536,12 +538,49 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 }
 
+/**
+ * The temporal SQL types this store emits, keyed by the `sqlType` string `castSuffix` already
+ * casts with — one source for "which columns are temporal", so a filter cast and a read conversion
+ * cannot disagree. `TIME` is absent on purpose: node-postgres returns it as text already.
+ */
+const TEMPORAL_READERS: ReadonlyMap<string, (value: unknown) => string | null> = new Map([
+  ["TIMESTAMPTZ", isoInstant],
+  ["TIMESTAMP", isoInstant],
+  ["DATE", isoCalendarDate],
+]);
+
+/**
+ * One column's value as the `EntityRecord` contract holds it.
+ *
+ * node-postgres returns a `TIMESTAMPTZ` and a `DATE` as JS `Date`s, and handing one straight out
+ * broke this store in a way the JSONB store was never broken in — measured live:
+ * `keysetOf` renders a cursor component with `String(value)`, which for a `Date` is
+ * `Fri Jan 02 2026 03:04:05 GMT+0000 (Coordinated Universal Time)`, and the next page binds that
+ * back with a `::TIMESTAMPTZ` cast, which Postgres **refuses**. So listing an entity sorted by any
+ * `datetime` or `date` field — `created_at` and `updated_at` among them, which the `auditable`
+ * trait gives nearly every entity — raised `invalid input syntax` on page 2 and served page 1
+ * forever. `PostgresEntityStore` reads the same value out of a JSONB document, where it is already
+ * the ISO text the write put there, so the two implementations of one `EntityStore` disagreed about
+ * what a `datetime` field *is*.
+ */
+function readColumn(mapping: ColumnMapping, value: unknown): unknown {
+  const isArray = mapping.sqlType.endsWith("[]");
+  const reader = TEMPORAL_READERS.get(isArray ? mapping.sqlType.slice(0, -2) : mapping.sqlType);
+  if (reader === undefined) return value;
+  // Only a `Date` is rewritten. Text that is already a timestamp is left exactly as the write put
+  // it — canonicalising it would make a round trip hand back a different spelling than the JSONB
+  // store does, which is a parity gap of its own, and an encrypted temporal column decrypts to the
+  // text it was stored as.
+  const read = (element: unknown): unknown => (element instanceof Date ? reader(element) : element);
+  return isArray && Array.isArray(value) ? value.map(read) : read(value);
+}
+
 /** Reconstructs an `EntityRecord` from a DB row, mapping each column back to its field (nulls omitted). */
 function rowToRecord(plan: EntityTablePlan, row: Record<string, unknown>): EntityRecord {
   const out: EntityRecord = { id: row["id"] };
   for (const mapping of plan.columns) {
     const v = row[mapping.column];
-    if (v !== undefined && v !== null) out[mapping.field] = v;
+    if (v !== undefined && v !== null) out[mapping.field] = readColumn(mapping, v);
   }
   return out;
 }

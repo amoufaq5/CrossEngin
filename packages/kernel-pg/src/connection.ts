@@ -82,3 +82,70 @@ export function looksLikeProductionDatabase(database: string): boolean {
 }
 
 export type ConnectionFactory = (config: PgConfig) => PgConnection;
+
+/**
+ * A value a `PgConnection` handed back, as the ISO 8601 text every contract in this workspace
+ * declares a timestamp to be.
+ *
+ * It lives beside `PgQueryResult` because it is a fact about that interface's rows, and because it
+ * is wanted in four packages — every one of which already depends on this one. Measured against
+ * Postgres 16 through node-postgres: `TIMESTAMPTZ`, `TIMESTAMP` **and** `DATE` all arrive as a JS
+ * `Date`, never as text. So a stored-row interface that types one `string` makes the compiler vouch
+ * for something false, and the `!==` a drift comparison is written with then answers "different"
+ * for every row that has one set — which is what ADR-0330 found live in one replayer. The offline
+ * fakes hand back strings, which is exactly why no test caught it.
+ *
+ * `String(date)` is not a repair. It yields `Mon Oct 05 2026 03:38:51 GMT+0000 (Coordinated
+ * Universal Time)`: the milliseconds are gone, and Postgres **refuses** to parse it back
+ * (`invalid input syntax for type timestamp with time zone`), so a keyset cursor built that way
+ * raises on the very next page. Both measured.
+ *
+ * An unparseable string comes back **as it stands** rather than as `null`, because `null` means
+ * "no timestamp" and a garbage column must not compare equal to an absent one.
+ */
+export function isoInstant(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
+  }
+  if (typeof value === "string") {
+    const ms = Date.parse(value);
+    return Number.isNaN(ms) ? value : new Date(ms).toISOString();
+  }
+  return String(value);
+}
+
+/**
+ * `isoInstant` for a `NOT NULL` column, where an absent value means the row cannot be read at all.
+ *
+ * Throwing rather than substituting is ADR-0289's rule: a row that no longer satisfies the shape
+ * its table guarantees is a finding, and a reader handed a fabricated timestamp has no way to
+ * notice.
+ */
+export function requireIsoInstant(value: unknown, field: string): string {
+  const iso = isoInstant(value);
+  if (iso === null) throw new Error(`row is missing required timestamp: ${field}`);
+  return iso;
+}
+
+/**
+ * A `DATE` column as the `YYYY-MM-DD` text it was written as.
+ *
+ * Separate from `isoInstant` for a measured reason: node-postgres parses a `DATE` into **local**
+ * midnight, not UTC midnight. Against the same `'2026-10-05'::date`, `toISOString()` answers
+ * `2026-10-05T00:00:00.000Z` under `TZ=UTC`, `2026-10-05T04:00:00.000Z` under
+ * `TZ=America/New_York` and `2026-10-04T15:00:00.000Z` under `TZ=Asia/Tokyo` — so slicing the ISO
+ * text gives the **previous day** anywhere east of UTC. The local calendar parts are right in all
+ * three, so those are what this reads.
+ */
+export function isoCalendarDate(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return "Invalid Date";
+    const y = value.getFullYear().toString().padStart(4, "0");
+    const m = (value.getMonth() + 1).toString().padStart(2, "0");
+    const d = value.getDate().toString().padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+  return typeof value === "string" ? value : String(value);
+}

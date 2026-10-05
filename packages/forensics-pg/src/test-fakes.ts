@@ -8,11 +8,21 @@ function paramIndex(sql: string, re: RegExp): number | null {
 }
 
 /**
- * In-memory fake of both `meta.forensic_chain_entries` and `meta.forensic_chain_checkpoints`, routed by the
- * table name in the SQL, with RLS-like scoping: each transaction (and the top-level connection) tracks a
- * `set_config('app.current_tenant_id', …)` tenant, scoping SELECTs to that tenant's rows plus the platform
- * (null) default. Enough to exercise the chain append/read path, checkpoint record/read, and
+ * In-memory fake of both `meta.forensic_chain_entries` and `meta.forensic_chain_checkpoints`, routed by
+ * the table name in the SQL. Enough to exercise the chain append/read path, checkpoint record/read, and
  * checkpoint-anchored suffix verification offline.
+ *
+ * **Reads are filtered by the SQL's own `tenant_id` predicate, not by the session's context** — that is,
+ * the fake behaves like the *table owner*, for whom RLS is bypassed. The earlier fake filtered reads by
+ * the tenant the transaction had set, which made it **stricter than the real database** and so hid a live
+ * defect: the reader carried no predicate at all, and connected as the owner it returned every scope's
+ * entries to every scope. A fake that enforces an isolation the code never asked for cannot catch a
+ * missing predicate, and connecting as the owner is an ordinary deployment.
+ *
+ * **Writes are checked against the policy set instead**, which is where scope is enforced in the real
+ * database: a tenant row needs that tenant's context, and a platform row (`tenant_id IS NULL`) needs the
+ * `app.platform_audit_write` elevation and nothing else. Both refusals are the RLS error the server
+ * raises, so an append that forgot its elevation fails offline too.
  */
 export function fakeChainPg(): PgConnection {
   const entryRows: Record<string, unknown>[] = [];
@@ -20,12 +30,29 @@ export function fakeChainPg(): PgConnection {
 
   function makeClient(): PgConnection {
     let currentTenant: string | null = null;
+    let platformWrite = false;
+
+    /** What the real policies allow this transaction to insert. */
+    const writeRefusal = (rowTenant: string | null): string | null => {
+      if (rowTenant === null) {
+        return platformWrite
+          ? null
+          : "new row violates row-level security policy (platform write needs app.platform_audit_write)";
+      }
+      return rowTenant === currentTenant
+        ? null
+        : "new row violates row-level security policy (row tenant is not the session's)";
+    };
 
     const query = async (
       sql: string,
       params?: readonly unknown[],
     ): Promise<PgQueryResult> => {
       const p = params ?? [];
+      if (sql.includes("app.platform_audit_write")) {
+        platformWrite = true;
+        return { rows: [], rowCount: 0 };
+      }
       if (sql.includes("set_config")) {
         currentTenant = (p[0] as string | null) ?? null;
         return { rows: [], rowCount: 0 };
@@ -34,6 +61,8 @@ export function fakeChainPg(): PgConnection {
         return { rows: [], rowCount: 0 };
       }
       if (sql.includes("INSERT INTO")) {
+        const refusal = writeRefusal((p[0] as string | null) ?? null);
+        if (refusal !== null) throw new Error(refusal);
         if (sql.includes(CHECKPOINTS)) {
           const tenant = (p[0] as string | null) ?? null;
           const seq = Number(p[1]);
@@ -70,7 +99,16 @@ export function fakeChainPg(): PgConnection {
       }
       if (sql.includes("SELECT")) {
         const table = sql.includes(CHECKPOINTS) ? checkpointRows : entryRows;
-        let visible = table.filter((r) => (r["tenant_id"] ?? null) === currentTenant);
+        // The owner's view: every row, narrowed only by what the statement itself asks for. A read
+        // with no `tenant_id` predicate therefore sees every scope — which is the defect, visible.
+        let visible = table;
+        if (/tenant_id IS NULL/.test(sql)) {
+          visible = visible.filter((r) => (r["tenant_id"] ?? null) === null);
+        }
+        const tenantIdx = paramIndex(sql, /tenant_id = \$(\d+)/);
+        if (tenantIdx !== null && !Number.isNaN(tenantIdx)) {
+          visible = visible.filter((r) => (r["tenant_id"] ?? null) === p[tenantIdx]);
+        }
 
         const geIdx = paramIndex(sql, /sequence_number >= \$(\d+)/);
         if (geIdx !== null && !Number.isNaN(geIdx)) {

@@ -1083,6 +1083,73 @@ describe("replacing a changed index, constraint or policy", () => {
     ).toEqual([]);
   });
 
+  /**
+   * An INSERT-scoped policy carries only `WITH CHECK` — Postgres refuses `USING` on one — so these
+   * cover the two things that have to hold for such a policy to be declarable at all: it is planned
+   * with no `USING` clause, and a database that already has it reads as matching rather than as
+   * drifted (which is how an unplannable statement would otherwise be re-planned forever).
+   */
+  const INSERT_ONLY: TableDefinition = {
+    ...WIDGETS,
+    rls: {
+      enabled: true,
+      policies: [
+        {
+          name: "widgets_isolation",
+          using: "tenant_id = current_setting('x', true)::UUID",
+        },
+        {
+          name: "widgets_platform_write",
+          command: "INSERT",
+          check: "tenant_id IS NULL",
+        },
+      ],
+    },
+  };
+  const INSERT_RENDERED = {
+    byRequest: new Map<string, string | null>([
+      ...RENDERED.byRequest,
+      [expressionKey("widgets", "tenant_id IS NULL"), "(tenant_id IS NULL)"],
+    ]),
+  };
+
+  it("plans an INSERT-scoped policy with WITH CHECK and no USING", () => {
+    const plan = planSchemaReconciliation(
+      diffSchema([INSERT_ONLY], live([liveWidgets()]), INSERT_RENDERED),
+      [INSERT_ONLY],
+    );
+    const step = plan.steps.find(
+      (st) => st.kind === "create_policy" && st.target === "widgets_platform_write",
+    );
+    expect(step?.sql).toContain("FOR INSERT");
+    expect(step?.sql).toContain("WITH CHECK (tenant_id IS NULL)");
+    expect(step?.sql).not.toContain("USING");
+  });
+
+  it("reads an existing INSERT-scoped policy as matching, not as drifted", () => {
+    const liveSchema = live([
+      liveWidgets({
+        policies: [
+          ...liveWidgets().policies,
+          {
+            name: "widgets_platform_write",
+            using: null,
+            check: "(tenant_id IS NULL)",
+            command: "INSERT",
+            roles: ["PUBLIC"],
+            permissive: true,
+          },
+        ],
+      }),
+    ]);
+    const plan = planSchemaReconciliation(
+      diffSchema([INSERT_ONLY], liveSchema, INSERT_RENDERED),
+      [INSERT_ONLY],
+    );
+    expect(plan.steps).toEqual([]);
+    expect(plan.unreconciled).toEqual([]);
+  });
+
   it("refuses to replace an index covering a column it is not adding", () => {
     const grown: TableDefinition = {
       ...WIDGETS,

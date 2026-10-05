@@ -1,6 +1,6 @@
 import type { IdempotencyRecord } from "@crossengin/api-gateway";
 import type { IdempotencyStore } from "@crossengin/api-gateway-runtime";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { isoInstant, requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
 
 const SCHEMA = "meta";
 const TABLE = "gateway_idempotency_records";
@@ -13,13 +13,20 @@ interface Row {
   readonly idempotency_key: string;
   readonly request_hash_sha256: string;
   readonly principal_id: string | null;
-  readonly received_at: string;
-  readonly expires_at: string;
+  /**
+   * `unknown` for the three timestamps: node-postgres hands a `TIMESTAMPTZ` back as a `Date`, and
+   * `expires_at` is the one `evaluateIdempotency` *compares* — through `Date.parse`, which does
+   * parse a `Date`'s `toString()` form but drops its milliseconds, so a replay could be called
+   * expired up to 999 ms early. `IdempotencyRecordSchema` declares all three as ISO text, so a
+   * record built from the raw columns also does not satisfy its own contract.
+   */
+  readonly received_at: unknown;
+  readonly expires_at: unknown;
   readonly status: string;
   readonly response_status: number | null;
   readonly response_sha256: string | null;
   readonly response_storage_uri: string | null;
-  readonly completed_at: string | null;
+  readonly completed_at: unknown;
   readonly error_code: string | null;
   readonly error_message: string | null;
 }
@@ -33,13 +40,13 @@ function rowToRecord(row: Row): IdempotencyRecord {
     idempotencyKey: row.idempotency_key,
     requestHashSha256: row.request_hash_sha256,
     principalId: row.principal_id,
-    receivedAt: row.received_at,
-    expiresAt: row.expires_at,
+    receivedAt: requireIsoInstant(row.received_at, "received_at"),
+    expiresAt: requireIsoInstant(row.expires_at, "expires_at"),
     status: row.status as IdempotencyRecord["status"],
     responseStatus: row.response_status,
     responseSha256: row.response_sha256,
     responseStorageUri: row.response_storage_uri,
-    completedAt: row.completed_at,
+    completedAt: isoInstant(row.completed_at),
     errorCode: row.error_code,
     errorMessage: row.error_message,
   };

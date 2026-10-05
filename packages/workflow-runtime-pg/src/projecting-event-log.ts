@@ -4,7 +4,6 @@ import {
   type EventLog,
   projectActivities,
   projectInstance,
-  projectSignals,
   projectTimers,
 } from "@crossengin/workflow-runtime";
 
@@ -14,7 +13,8 @@ import {
   WorkflowInstanceIdResolver,
 } from "./id-mapping.js";
 import { PostgresInstanceStore } from "./instance-store.js";
-import { PostgresSignalStore, type SignalProjection } from "./signal-store.js";
+import { projectPersistableSignals } from "./signal-provenance.js";
+import { PostgresSignalStore } from "./signal-store.js";
 import { PostgresTimerStore, type TimerProjection } from "./timer-store.js";
 
 export interface ProjectingEventLogOptions {
@@ -107,20 +107,12 @@ export class ProjectingEventLog implements EventLog {
     const activities = projectActivities(events);
     await this.activityStore.upsertMany(activities as readonly ActivityProjection[]);
 
-    const signals = projectSignals(events);
+    // Refuses rather than persisting a signal whose declared delivery guarantee cannot be read off
+    // the definition. That aborts `submitSignal`, which is the loud outcome: the alternative is a
+    // row claiming a guarantee nobody promised, in the table the guarantee is read back from.
+    const signals = projectPersistableSignals(events, definition);
     if (signals.length > 0) {
-      const projections: SignalProjection[] = signals.map((s) => ({
-        id: s.id,
-        instanceId: s.instanceId,
-        tenantId: s.tenantId,
-        signalName: s.signalName,
-        correlationKey: s.correlationKey,
-        status: s.status,
-        receivedAt: s.receivedAt,
-        matchedAt: s.matchedAt,
-        consumedAt: s.consumedAt,
-      }));
-      await this.signalStore.upsertMany(projections);
+      await this.signalStore.upsertMany(signals);
     }
 
     const timers = projectTimers(events);

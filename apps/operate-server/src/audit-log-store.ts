@@ -46,6 +46,23 @@ export interface AuditLogQuery {
   readonly limit?: number;
 }
 
+/**
+ * The elevation that satisfies `audit_log_platform_audit_write`'s `WITH CHECK`.
+ *
+ * Separate from `app.platform_audit` (ADR-0313's cross-tenant **read** grant) on purpose: a read
+ * grant that also authorised a write would let a reader of the trail forge an entry, which is the
+ * precise failure ADR-0313 split one policy into two to prevent. Transaction-local
+ * (`set_config(..., true)`), never a session-wide `SET`, so no pooled connection carries it out of
+ * the statement that needed it.
+ *
+ * It lives beside the only writer and is deliberately **not exported**: a second caller able to set
+ * it is the thing this is trying not to have.
+ */
+const SET_PLATFORM_AUDIT_WRITE_SQL = "SELECT set_config('app.platform_audit_write', 'on', true)";
+
+/** ADR-0313's cross-tenant read elevation, used here only to read back a platform-scope row. */
+const SET_PLATFORM_AUDIT_SQL = "SELECT set_config('app.platform_audit', 'on', true)";
+
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -97,7 +114,10 @@ const ESignatureSchema = z
 const AuditLogEntrySchema = z
   .object({
     id: z.string().regex(UUID_RE),
-    tenantId: z.string().regex(UUID_RE),
+    // Nullable, never optional: a platform-scope row is `tenant_id IS NULL`, and an *omitted*
+    // key would be a third state the canonical payload renders the same as null while the
+    // re-parse-on-read discipline (ADR-0289) could not tell apart from a column that is gone.
+    tenantId: z.string().regex(UUID_RE).nullable(),
     occurredAt: z.string().datetime({ offset: true }),
     actor: ActorSchema,
     operation: z.string().min(1),
@@ -166,7 +186,8 @@ export function auditActor(input: {
 
 export function auditEntry(input: {
   readonly id: string;
-  readonly tenantId: string;
+  /** `null` is platform scope — a fact about the deployment, not about one tenant (ADR-0331). */
+  readonly tenantId: string | null;
   readonly occurredAt: string;
   readonly actor: AuditActor;
   readonly operation: string;
@@ -196,8 +217,11 @@ function assertEmittable(entry: AuditLogEntry): void {
   if (!UUID_RE.test(entry.id)) {
     throw new Error(`audit entry id must be a UUID: ${JSON.stringify(entry.id)}`);
   }
-  if (!UUID_RE.test(entry.tenantId)) {
-    throw new Error(`audit entry tenantId must be a UUID: ${JSON.stringify(entry.tenantId)}`);
+  // A platform-scope entry carries no tenant; anything else must be a real UUID, because
+  // `tenant_id` is a foreign key to `meta.tenants` and a non-UUID would only fail at the driver,
+  // after the transaction is open and the caller believes the record was written.
+  if (entry.tenantId !== null && !UUID_RE.test(entry.tenantId)) {
+    throw new Error(`audit entry tenantId must be a UUID or null: ${JSON.stringify(entry.tenantId)}`);
   }
   if (entry.operation.trim().length === 0) {
     throw new Error("audit entry operation must be a non-empty string");
@@ -210,7 +234,9 @@ function assertEmittable(entry: AuditLogEntry): void {
 export function auditEntryFromRow(row: Record<string, unknown>): AuditLogEntry {
   const candidate: Record<string, unknown> = {
     id: String(row["id"]),
-    tenantId: String(row["tenant_id"]),
+    // `String(null)` is `"null"`, which the schema would reject as a malformed UUID and the
+    // re-parse-on-read path would then drop — so a platform row would read as an unparseable one.
+    tenantId: row["tenant_id"] == null ? null : String(row["tenant_id"]),
     occurredAt: isoOf(row["occurred_at"]),
     actor: jsonObjectOrNull(row["actor"]),
     operation: String(row["operation"]),
@@ -299,7 +325,7 @@ export class PostgresAuditEmitter implements AuditEmitter {
 
   async emit(entry: AuditLogEntry): Promise<void> {
     assertEmittable(entry);
-    await withTenantContext(this.conn, entry.tenantId, async (tx) => {
+    await this.inScope(entry.tenantId, "write", async (tx) => {
       // The anchor is appended BEFORE the row, so the row can be inserted with its chain
       // coordinates already known — no UPDATE, which would give this append-only table a
       // rewrite path. Both statements are in the caller's transaction: a failed anchor rolls
@@ -338,13 +364,50 @@ export class PostgresAuditEmitter implements AuditEmitter {
     });
   }
 
+  /**
+   * Opens the transaction one write or read runs in, under the RLS context its scope requires.
+   *
+   * The two paths are not interchangeable, and the asymmetry is the security property.
+   *
+   * A **tenant** scope sets `app.current_tenant_id` and never the platform flag, so the isolation
+   * policy confines the statement even if the predicate were wrong.
+   *
+   * A **platform** scope (`null`) sets `app.platform_audit_write`, which satisfies the
+   * `INSERT`-scoped policy whose `WITH CHECK` is `tenant_id IS NULL AND …`. Three things about that
+   * are deliberate. It is a *different* GUC from `app.platform_audit`: that one is the cross-tenant
+   * **read** elevation (ADR-0313), and letting a read grant also authorise a write is the shape of
+   * forgery ADR-0313 split its policies to prevent — here it would let a reader of the trail forge a
+   * platform-scope entry claiming a page was delivered. It is `INSERT`-scoped, so it carries no
+   * `USING` and therefore cannot serve an `UPDATE` or `DELETE`: the table stays append-only at the
+   * policy as well as in this class. And because the elevation's check also demands
+   * `tenant_id IS NULL`, holding it buys no ability to write into any *tenant's* chain — the
+   * isolation policy is still the only route to a tenant row, and it still demands that tenant's
+   * context.
+   *
+   * `access` picks which platform elevation is set, and the narrower one is never widened: an
+   * `emit` transaction cannot read other scopes' rows and a verification read cannot insert.
+   */
+  private async inScope<T>(
+    scope: string | null,
+    access: "read" | "write",
+    fn: (tx: PgConnection) => Promise<T>,
+  ): Promise<T> {
+    if (scope !== null) return withTenantContext(this.conn, scope, fn);
+    return this.conn.transaction(async (tx) => {
+      await tx.query(access === "write" ? SET_PLATFORM_AUDIT_WRITE_SQL : SET_PLATFORM_AUDIT_SQL);
+      return fn(tx);
+    });
+  }
+
   /** Shared filter construction for both list paths, so they can never drift apart. */
-  private whereFor(tenantId: string, query: AuditLogQuery): {
+  private whereFor(scope: string | null, query: AuditLogQuery): {
     readonly conditions: readonly string[];
     readonly params: unknown[];
   } {
-    const params: unknown[] = [tenantId];
-    const conditions: string[] = ["tenant_id = $1"];
+    // `tenant_id = NULL` is never true, so the platform scope has to be asked for as `IS NULL`
+    // and cannot ride along as a bound parameter. The predicate is still the scope's, beside RLS.
+    const params: unknown[] = scope === null ? [] : [scope];
+    const conditions: string[] = scope === null ? ["tenant_id IS NULL"] : ["tenant_id = $1"];
     if (query.operation !== undefined) {
       params.push(query.operation);
       conditions.push(`operation = $${params.length}`);
@@ -377,9 +440,25 @@ export class PostgresAuditEmitter implements AuditEmitter {
     tenantId: string,
     query: AuditLogQuery = {},
   ): Promise<readonly AnchoredAuditEntry[]> {
+    return this.listAnchoredForScope(tenantId, query);
+  }
+
+  /**
+   * The same read for either scope, which is what makes a platform-scope row *verifiable* rather
+   * than merely writable.
+   *
+   * The anchor check is the only detector there is for an edited audit row (ADR-0286), and until
+   * this existed `proveScopeIntegrity` skipped it for the platform chain on the grounds that there
+   * were no platform audit rows. Writing them without this would have reproduced ADR-0327's shape
+   * exactly — a proof nobody reads — in the table the whole forensics stack exists to protect.
+   */
+  async listAnchoredForScope(
+    scope: string | null,
+    query: AuditLogQuery = {},
+  ): Promise<readonly AnchoredAuditEntry[]> {
     const limit = clampLimit(query.limit);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
-      const { conditions, params } = this.whereFor(tenantId, query);
+    return this.inScope(scope, "read", async (tx) => {
+      const { conditions, params } = this.whereFor(scope, query);
       params.push(limit);
       const sql =
         `SELECT ${SELECT_COLUMNS} FROM ${this.table} WHERE ${conditions.join(" AND ")}` +
@@ -396,9 +475,19 @@ export class PostgresAuditEmitter implements AuditEmitter {
     });
   }
 
-  async countSince(tenantId: string, since: Date, operation?: string): Promise<number> {    return withTenantContext(this.conn, tenantId, async (tx) => {
-      const params: unknown[] = [tenantId, since];
-      const conditions: string[] = ["tenant_id = $1", "occurred_at >= $2"];
+  /**
+   * `scope` is nullable because this is the "how often does our paging path fail" query
+   * `page-record.ts` names (`countSince(scope, since, PAGE_UNDELIVERED_OPERATION)`), and the SLO
+   * loop's pages are exactly the ones that land platform-scope — so a tenant-only counter would
+   * answer zero for the surface most likely to be failing.
+   */
+  async countSince(scope: string | null, since: Date, operation?: string): Promise<number> {
+    return this.inScope(scope, "read", async (tx) => {
+      const params: unknown[] = scope === null ? [since] : [scope, since];
+      const conditions: string[] =
+        scope === null
+          ? ["tenant_id IS NULL", "occurred_at >= $1"]
+          : ["tenant_id = $1", "occurred_at >= $2"];
       if (operation !== undefined) {
         params.push(operation);
         conditions.push(`operation = $${params.length}`);

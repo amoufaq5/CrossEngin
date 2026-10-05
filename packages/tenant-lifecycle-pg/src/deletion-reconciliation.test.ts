@@ -132,6 +132,68 @@ function tombstoneOf(id = TOMB): StoredTombstone {
 /** The honest fixture's real proof digest, so an assertion cannot drift from the arithmetic. */
 const PROOF = tombstoneOf().record.proofSha256;
 
+/**
+ * The same fixture with a real statutory retention in its proof (ADR-0330, signed by ADR-0331).
+ *
+ * Assembled rather than patched, because the retention claim is inside the v3 bytes now: spreading
+ * the three fields over a finished record would produce a proof that does not verify, which is the
+ * state these tests exist to tell apart from an honest one.
+ */
+function retainingTombstone(): StoredTombstone {
+  const retention: DeletionAttestation = {
+    subsystem: "backups",
+    outcome: "retained",
+    retentionObligation: "tax_records_7y",
+    retainedDataReference: "backup-vault://2026",
+    attestedBy: "operate-server/backups",
+    attestedAt: "2026-10-03T11:00:00.000Z",
+  };
+  const attestations = [ATTESTATION, SHARED_ATTESTATION, retention];
+  const assembled = assembleTombstone({
+    id: TOMB,
+    kind: "data_subject_erasure",
+    tenantId: TENANT,
+    relatedDeletionRequestId: REQ,
+    deletedAt: "2026-10-03T11:00:00.000Z",
+    executedBy: "system:deletion-runner",
+    approvedBy: "system:retention-policy",
+    anchors: [
+      {
+        kind: "internal_audit_log",
+        reference: "pending-chain-append",
+        anchoredAt: "2026-10-03T11:00:00.000Z",
+      },
+    ],
+    capabilities: {
+      tenant_schema: "erases",
+      shared_tables: "erases",
+      object_storage: "absent",
+      backups: "retains",
+      search_indexes: "absent",
+      caches: "absent",
+    },
+    attestations,
+  });
+  if (!assembled.ok) {
+    throw new Error(`fixture does not assemble: ${JSON.stringify(assembled.refusals)}`);
+  }
+  return {
+    record: {
+      ...assembled.record,
+      anchors: [
+        {
+          kind: "internal_audit_log",
+          reference: CHAIN_HASH,
+          anchoredAt: "2026-10-03T11:00:00.000Z",
+        },
+      ],
+    },
+    attestations,
+    chainEntryHash: CHAIN_HASH,
+    chainSequenceNumber: 7,
+  };
+}
+
 /** The same record with its scope edited in place — the tamper the chain cannot see. */
 function tamperedTombstone(): StoredTombstone {
   const honest = tombstoneOf();
@@ -526,6 +588,41 @@ describe("verifyStoredEvidence", () => {
     expect(check.matchesAttestations).toBe(false);
     // Proving the point: the proof itself still checks out.
     expect(check.defects).not.toContain("proof_mismatch");
+  });
+
+  it("catches a retention claim edited after signing", () => {
+    // ADR-0331. Until the claim went inside the v3 bytes, this edit was invisible to everything: the
+    // chain commits to the digests and the identity, `proofSha256` commits to `contentManifestSha256`,
+    // and neither commits to why a tenant's data survived. So a stored proof's answer to "what did
+    // you keep, and under what obligation" could be rewritten with every hash byte-identical.
+    const honest = retainingTombstone();
+    expect(verifyStoredEvidence(honest)).toEqual({ ok: true, defects: [], matchesAttestations: true });
+    const edited: StoredTombstone = {
+      ...honest,
+      record: { ...honest.record, retainedDataReference: "backup-vault://elsewhere" },
+    };
+    const check = verifyStoredEvidence(edited);
+    expect(check.ok).toBe(false);
+    expect(check.defects).toContain("scope_tampered");
+    // The proof still checks out, which is exactly why `contentManifestOk` is the only detector —
+    // the same division of labour the scope has had since ADR-0323.
+    expect(check.defects).not.toContain("proof_mismatch");
+  });
+
+  it("catches a retained attestation deleted out of the evidence", () => {
+    // The second detector's own contribution, and a gap the scope comparison could not close: a
+    // retention-bearing attestation composes *nothing* into a `DeletionScope`, so deleting one left
+    // the recomposed scope identical and both detectors satisfied before ADR-0331.
+    const honest = retainingTombstone();
+    const stripped: StoredTombstone = {
+      ...honest,
+      attestations: honest.attestations.filter((a) => a.subsystem !== "backups"),
+    };
+    const check = verifyStoredEvidence(stripped);
+    expect(check.matchesAttestations).toBe(false);
+    expect(check.defects).toContain("scope_disagrees_with_attestations");
+    // And the record itself is untouched, so the digest has nothing to say about it.
+    expect(check.defects).not.toContain("scope_tampered");
   });
 
   it("refuses a tombstone nothing in the chain witnesses", () => {
@@ -976,6 +1073,11 @@ describe("auditTombstones writes nothing", () => {
       proof_version: r.proofVersion,
       capability_declaration:
         r.capabilityDeclaration === undefined ? null : JSON.stringify(r.capabilityDeclaration),
+      // ADR-0331, and the same trap: a v3 row that drops its obligations gets no manifest subject,
+      // so `verifyStoredEvidence` reports `scope_tampered` on an honest proof and the sweep
+      // escalates a `sev1` about a falsified Article 17 proof that was never falsified.
+      retained_obligations:
+        r.retainedObligations === undefined ? null : JSON.stringify(r.retainedObligations),
       chain_entry_hash: stored.chainEntryHash,
       chain_sequence_number: stored.chainSequenceNumber,
     };

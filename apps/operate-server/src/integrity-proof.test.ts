@@ -2,6 +2,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { canonicalAuditEntryPayload, type AuditLogEntry } from "@crossengin/auth";
+import { sha256 } from "@crossengin/crypto";
+import type { ChainedLogEntry } from "@crossengin/forensics";
 import { describe, expect, it } from "vitest";
 
 import type { AuditAnchorReport, AuditAnchorResult } from "./audit-anchor.js";
@@ -16,6 +19,7 @@ import {
   integrityVerdictPayload,
   loadIntegrityProofConfig,
   parseIntegrityProofConfig,
+  proveScopeIntegrity,
   type ChainTruncationCheck,
   type IntegrityProofReport,
 } from "./integrity-proof.js";
@@ -607,5 +611,116 @@ describe("IntegrityProofScheduler — emptiness is judged by the tail, not the s
       intervalMs: 1000,
     });
     expect((await s.runOnce())[0]?.outcome).toBe("skipped_empty");
+  });
+});
+
+/**
+ * `proveScopeIntegrity` over the platform scope (ADR-0331).
+ *
+ * This used to skip the anchor half for `scope === null` because `audit_log.tenant_id` was NOT NULL
+ * and there was nothing to check. There is now: three escalators write platform rows, and the
+ * anchor check is the only detector for one that has been edited.
+ *
+ * The stores are structural stand-ins — the project's rule for Postgres-backed modules is to assert
+ * on what was asked for, not to boot a database.
+ */
+describe("proveScopeIntegrity — the platform scope is anchored too", () => {
+  const PLATFORM_ROW = "44444444-4444-4444-8444-444444444444";
+
+  /**
+   * The chain half is left deliberately unverifiable here — resolving a real Ed25519 fingerprint is
+   * the chain check's own test — so these assertions are about the *anchor* half only: that it runs
+   * at all for a null scope, which is the thing that used to be skipped.
+   */
+  function depsFor(over: { readonly tamper?: boolean } = {}): {
+    readonly asked: (string | null)[];
+    readonly deps: Parameters<typeof proveScopeIntegrity>[1];
+  } {
+    const asked: (string | null)[] = [];
+    const entry = {
+      id: PLATFORM_ROW,
+      tenantId: null,
+      occurredAt: AT,
+      actor: { kind: "system", userId: null, sessionId: null, ip: null, userAgent: null },
+      operation: "platform.page_undelivered",
+      entity: "incident",
+      entityId: "INC-2026-0007",
+      before: null,
+      after: { delivered: 0 },
+      diff: null,
+    } as unknown as AuditLogEntry;
+    const payload = canonicalAuditEntryPayload(entry);
+    const chainEntry = {
+      sequenceNumber: 0,
+      kind: "audit_event",
+      recordedAt: AT,
+      actorReference: "system",
+      payloadSha256: over.tamper === true ? "0".repeat(64) : sha256(payload),
+      payloadSizeBytes: Buffer.byteLength(payload, "utf8"),
+      priorEntryHash: "0".repeat(64),
+      entryHash: "e".repeat(64),
+      signingKeyFingerprint: "f".repeat(64),
+      signature: "sig",
+    } as unknown as ChainedLogEntry;
+    return {
+      asked,
+      deps: {
+        logStore: {
+          loadChain: async (scope: string | null) => {
+            asked.push(scope);
+            return [chainEntry];
+          },
+          tail: async () => ({ sequenceNumber: 0 }),
+          verify: async () => ({ valid: true, brokenAt: null }),
+        },
+        checkpoints: { latest: async () => null },
+        registry: { getByFingerprint: async () => null },
+        audit: {
+          listAnchoredForScope: async (scope: string | null) => {
+            asked.push(`audit:${String(scope)}`);
+            return [{ entry, anchor: { sequenceNumber: 0, entryHash: "e".repeat(64) } }];
+          },
+        },
+        auditRowLimit: 10,
+        fromCheckpoint: false,
+        now: () => new Date(AT),
+      } as unknown as Parameters<typeof proveScopeIntegrity>[1],
+    };
+  }
+
+  it("reads the audit rows for the platform scope rather than skipping them", async () => {
+    const d = depsFor();
+    const report = await proveScopeIntegrity(null, d.deps);
+    expect(d.asked).toContain("audit:null");
+    expect(report.anchors).not.toBeNull();
+    expect(report.anchors?.checked).toBe(1);
+  });
+
+  it("carries the null scope through to the anchor report", async () => {
+    const report = await proveScopeIntegrity(null, depsFor().deps);
+    expect(report.anchors?.tenantId).toBeNull();
+  });
+
+  it("verifies an intact platform row's anchor", async () => {
+    const report = await proveScopeIntegrity(null, depsFor().deps);
+    expect(report.anchors?.verified).toBe(1);
+    expect(report.anchors?.tampered).toEqual([]);
+  });
+
+  it("reports a tampered platform row as compromised", async () => {
+    const report = await proveScopeIntegrity(null, depsFor({ tamper: true }).deps);
+    expect(report.anchors?.tampered.map((t) => t.verdict)).toEqual(["hash_mismatch"]);
+    expect(report.verdict).toBe("compromised");
+  });
+
+  it("names the platform row in the finding, so the escalation can say which proof broke", async () => {
+    const report = await proveScopeIntegrity(null, depsFor({ tamper: true }).deps);
+    expect(report.anchors?.tampered[0]?.auditId).toBe(PLATFORM_ROW);
+  });
+
+  it("still reads a tenant scope the same way", async () => {
+    const d = depsFor();
+    await proveScopeIntegrity(TENANT_A, d.deps);
+    expect(d.asked).toContain(`audit:${TENANT_A}`);
   });
 });

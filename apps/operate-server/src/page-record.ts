@@ -35,11 +35,19 @@ import { auditActor, auditEntry, type PostgresAuditEmitter } from "./audit-log-s
  * name, and none of it is here. The one tenant-derived value is the `tenant_id` the row is scoped
  * to, which is the column, not the payload.
  *
- * **A page for a platform-scope incident cannot be recorded at all.** `meta.audit_log.tenant_id` is
- * NOT NULL, and `PageDeliveryReport` deliberately carries no tenant — so `tenantIdFor` may answer
- * null and then there is no row to write. Reported as `audited: false` with a reason, exactly as
- * `IntegrityEscalator.record` does for the platform chain. Inventing a tenant id would file one
- * tenant's record under another's RLS scope, which is worse than no record.
+ * **A page for a platform-scope incident is recorded at platform scope** (ADR-0331).
+ * `meta.audit_log.tenant_id` is nullable now, and `PageDeliveryReport` deliberately carries no
+ * tenant, so a caller that *declares* platform scope by passing `null` gets a `tenant_id IS NULL`
+ * row rather than nothing — which is what the SLO loop's pages have always needed, since an SLO
+ * surface is never a tenant. Inventing a tenant id is still refused: that would file one scope's
+ * record under another's RLS confinement, ADR-0327's rejected Option B.
+ *
+ * **A resolved null is platform scope; a resolver that threw is not.** `tenantIdFor` has documented
+ * `null` as "the incident is platform-scope" since it was written, so the existing resolution chain
+ * needed no new state — only a destination for its far end. What is *not* read as platform scope is
+ * a resolver that raised, or an answer that is blank: those are failures to find out, and reading
+ * them as "about the deployment" would put a claim in an append-only log on the strength of nobody
+ * having said otherwise.
  *
  * **Failing to record must never throw.** By the time this runs the page has already gone out or
  * already failed, and the incident record is already durable. Raising here would turn a successful
@@ -68,8 +76,9 @@ export interface PageRecorderOptions {
   readonly audit?: PostgresAuditEmitter;
   /**
    * Which tenant's audit scope this page's record belongs to, or null when the incident is
-   * platform-scope. There is no default beyond null: the report carries no tenant by design, so a
-   * deployment that wants the record has to say, and one that cannot is told rather than guessed at.
+   * platform-scope — which since ADR-0331 lands a `tenant_id IS NULL` row rather than nothing.
+   * A resolver that cannot tell should **throw** rather than answer null: the two used to be
+   * indistinguishable because neither produced a row, and now only one of them does.
    */
   readonly tenantIdFor?: (report: PageDeliveryReport) => string | null;
   readonly clock?: () => Date;
@@ -186,24 +195,26 @@ export class PageRecorder {
     }
     let resolved: string | null;
     try {
+      // The chain is unchanged, and so is what each step means (ADR-0326): the caller answers
+      // first because it holds the `IncidentRecord`; a `null` from it defers to a deployment that
+      // has a directory; and a `null` out the far end is **platform scope**, which is what
+      // `tenantIdFor` has documented null to mean since it was written.
       resolved = suppliedTenantId ?? this.opts.tenantIdFor?.(report) ?? null;
     } catch (err) {
       // The resolver may consult a directory. It is on the recording path, so its failure is a
-      // failure to record — never one that escapes over a page that already left.
+      // failure to record — never one that escapes over a page that already left. And it is NOT
+      // read as platform scope: a resolver that *threw* has told us nothing, and "about the
+      // deployment" is a claim rather than a default.
       this.opts.onError?.(err);
       return { audited: false, reason: "could not resolve the page's tenant scope" };
     }
-    // A blank answer is no answer: the emitter would reject it as a non-UUID anyway, and stopping
-    // here keeps the refusal a reported outcome rather than a caught exception.
-    const scopedTenantId = resolved !== null && resolved.trim().length > 0 ? resolved : null;
-    if (scopedTenantId === null) {
-      return {
-        audited: false,
-        reason:
-          "page has no tenant scope and meta.audit_log.tenant_id is NOT NULL," +
-          " so the delivery could not be recorded",
-      };
+    // A blank answer is no answer, and specifically not platform scope: the emitter would reject it
+    // as a non-UUID, and treating `""` as the platform would turn a misconfigured resolver into a
+    // run of rows claiming to be about the deployment.
+    if (resolved !== null && resolved.trim().length === 0) {
+      return { audited: false, reason: "the page's tenant scope resolved to a blank string" };
     }
+    const scopedTenantId = resolved;
     const operation = pageRecordOperation(report);
     const clock = this.opts.clock ?? (() => new Date());
     try {

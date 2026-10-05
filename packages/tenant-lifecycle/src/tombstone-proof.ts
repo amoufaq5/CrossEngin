@@ -1,10 +1,13 @@
 import { sha256 } from "@crossengin/crypto";
 
-import type {
-  DeletionScope,
-  TombstoneCapabilityDeclaration,
-  TombstoneProofVersion,
-  TombstoneRecord,
+import type { RetentionObligation } from "./gdpr-deletion.js";
+import {
+  proofVersionCoversDeclaration,
+  proofVersionCoversRetentionClaim,
+  type DeletionScope,
+  type TombstoneCapabilityDeclaration,
+  type TombstoneProofVersion,
+  type TombstoneRecord,
 } from "./tombstones.js";
 
 const CONTENT_MANIFEST_DOMAIN_TAG = "crossengin.tombstone.content.v1\n";
@@ -26,10 +29,27 @@ const CONTENT_MANIFEST_DOMAIN_TAG = "crossengin.tombstone.content.v1\n";
 const CONTENT_MANIFEST_DOMAIN_TAG_V2 = "crossengin.tombstone.content.v2\n";
 
 /**
- * Unchanged, for both versions. The proof payload commits to `contentManifestSha256`, which is itself
- * version-bound by its tag, so the proof inherits the version without its own bytes moving — and a v2
- * record's `proofSha256` therefore still verifies with the same function and the same stored digest
- * semantics the forensic chain anchors (ADR-0318).
+ * v3 adds the retention claim to the content manifest (ADR-0331).
+ *
+ * A **third tag**, for v2's reason restated: `crossengin.tombstone.content.v2` is what every stored v2
+ * digest commits to, so appending a key to the v2 body would stop every one of them verifying — and a
+ * digest that stops verifying is reported `scope_tampered` (ADR-0323), which is the one alarm the
+ * forensic chain cannot raise. Two tags were already untouchable; this makes three.
+ *
+ * What it buys is what v1 and v2 could not express. ADR-0330 made a statutory retention a real
+ * attestation outcome, and the claim it composes to — the obligations, the reason, the reference —
+ * was on the record and in neither digest. So "kept under a seven-year tax obligation, in
+ * `archive.invoices`" could be rewritten to "kept under a HIPAA obligation, in `somewhere_else`" with
+ * both digests and the chain entry byte-identical. The scope was signed and the *survival* was not.
+ */
+const CONTENT_MANIFEST_DOMAIN_TAG_V3 = "crossengin.tombstone.content.v3\n";
+
+/**
+ * Unchanged, for all three versions. The proof payload commits to `contentManifestSha256`, which is
+ * itself version-bound by its tag, so the proof inherits the version without its own bytes moving —
+ * and a v2 or v3 record's `proofSha256` therefore still verifies with the same function and the same
+ * stored digest semantics the forensic chain anchors (ADR-0318). The chain commits to `proofSha256`,
+ * so it transitively witnesses whatever the content manifest covers, whichever tag that is.
  */
 const PROOF_DOMAIN_TAG = "crossengin.tombstone.proof.v1\n";
 
@@ -111,13 +131,74 @@ export function computeContentManifestSha256V2(
   );
 }
 
-/** What a content manifest is computed over, once the version and the declaration agree. */
+/**
+ * The retention claim as the v3 bytes commit to it.
+ *
+ * Three fields, and **no count of any kind**. ADR-0317's whole subject is a figure in a proof meaning
+ * something other than what its reader assumes, and the figures in a `DeletionScope` mean "this was
+ * destroyed". A number on this side would be read as part of that total — so a retained row's
+ * existence is a legal fact with a pointer, and never a measurement. ADR-0330 kept the retained side
+ * to an obligation and a reference deliberately; signing it does not change what may be said.
+ */
+export interface TombstoneRetentionClaim {
+  readonly obligations: readonly RetentionObligation[];
+  readonly retainedReason?: string;
+  readonly retainedDataReference?: string;
+}
+
+/**
+ * The claim's canonical form: always three keys, with `null` where the record carries nothing.
+ *
+ * An explicit `null` rather than an omitted key, because `canonicalStringify` drops `undefined` and a
+ * dropped key would make the empty claim and a claim with the prose stripped render the *same* way —
+ * which is the one thing a signed claim has to distinguish. `obligations` is sorted and deduplicated
+ * like every other list in these bytes, so a round trip through `JSONB` cannot move a digest.
+ */
+function canonicalRetentionClaimFields(claim: TombstoneRetentionClaim): Record<string, unknown> {
+  return {
+    obligations: [...new Set(claim.obligations)].sort(),
+    retainedReason: claim.retainedReason ?? null,
+    retainedDataReference: claim.retainedDataReference ?? null,
+  };
+}
+
+/** The v3 body: the v2 fields plus the retention claim, under one more key. */
+export function canonicalContentManifestV3(
+  scope: DeletionScope,
+  capabilityDeclaration: TombstoneCapabilityDeclaration,
+  retentionClaim: TombstoneRetentionClaim,
+): string {
+  return canonicalStringify({
+    ...canonicalScopeFields(scope),
+    capabilityDeclaration,
+    retentionClaim: canonicalRetentionClaimFields(retentionClaim),
+  });
+}
+
+export function computeContentManifestSha256V3(
+  scope: DeletionScope,
+  capabilityDeclaration: TombstoneCapabilityDeclaration,
+  retentionClaim: TombstoneRetentionClaim,
+): string {
+  return sha256(
+    CONTENT_MANIFEST_DOMAIN_TAG_V3 +
+      canonicalContentManifestV3(scope, capabilityDeclaration, retentionClaim),
+  );
+}
+
+/** What a content manifest is computed over, once the version and what it carries agree. */
 export type ContentManifestSubject =
   | { readonly proofVersion: "v1"; readonly scope: DeletionScope }
   | {
       readonly proofVersion: "v2";
       readonly scope: DeletionScope;
       readonly capabilityDeclaration: TombstoneCapabilityDeclaration;
+    }
+  | {
+      readonly proofVersion: "v3";
+      readonly scope: DeletionScope;
+      readonly capabilityDeclaration: TombstoneCapabilityDeclaration;
+      readonly retentionClaim: TombstoneRetentionClaim;
     };
 
 /** The fields a content manifest is derived from. A `TombstoneRecord` satisfies it. */
@@ -125,44 +206,87 @@ export interface ContentManifestSource {
   readonly proofVersion?: TombstoneProofVersion;
   readonly scope: DeletionScope;
   readonly capabilityDeclaration?: TombstoneCapabilityDeclaration;
+  readonly retainedObligations?: readonly RetentionObligation[];
+  readonly retainedReason?: string;
+  readonly retainedDataReference?: string;
 }
 
 /**
- * The version and the declaration, reconciled — or `null` when they contradict each other.
+ * The version and what it claims to carry, reconciled — or `null` when they contradict each other.
  *
- * Both contradictions are the forged downgrade, in its two forms. `v2` with the declaration stripped
- * has nothing to hash; `v1` with a declaration still attached claims coverage the v1 tag does not
- * give. Neither gets a best-effort hash, because a best-effort hash here is a verdict: a v1 digest
- * computed for a record whose stored digest is v2 would read as a tamper, and one computed by
- * *ignoring* an attached declaration would read as clean. `null` makes the caller decide, and both
- * callers decide the same way — refuse.
+ * Every contradiction is the forged downgrade in one of its forms. A version that signs something it
+ * does not carry has nothing to hash; a version carrying something its tag does not cover claims
+ * coverage it never had. Neither gets a best-effort hash, because a best-effort hash here is a
+ * verdict: a digest computed under the wrong tag would read as a tamper, and one computed by
+ * *ignoring* an attached field would read as clean. `null` makes the caller decide, and both callers
+ * decide the same way — refuse.
+ *
+ * Note which field is paired and which is not. `retainedObligations` is paired, because it exists
+ * only inside the v3 bytes. `retainedReason` and `retainedDataReference` are **not**: a v1 or v2
+ * record may legitimately carry both as unsigned prose, which is precisely the state ADR-0331 ends
+ * going forward and may not refuse retroactively.
  */
 export function contentManifestSubjectOf(
   source: ContentManifestSource,
 ): ContentManifestSubject | null {
   const version = source.proofVersion ?? "v1";
-  if (version === "v2") {
-    if (source.capabilityDeclaration === undefined) return null;
+  const declaration = source.capabilityDeclaration;
+  if (proofVersionCoversDeclaration(version) !== (declaration !== undefined)) return null;
+  if (proofVersionCoversRetentionClaim(version) !== (source.retainedObligations !== undefined)) {
+    return null;
+  }
+  if (version === "v3") {
+    // Both narrowings are established by the two guards above; TypeScript cannot see through the
+    // membership tests, so the redundant checks are what make the types line up.
+    if (declaration === undefined || source.retainedObligations === undefined) return null;
     return {
-      proofVersion: "v2",
+      proofVersion: "v3",
       scope: source.scope,
-      capabilityDeclaration: source.capabilityDeclaration,
+      capabilityDeclaration: declaration,
+      retentionClaim: {
+        obligations: source.retainedObligations,
+        ...(source.retainedReason !== undefined ? { retainedReason: source.retainedReason } : {}),
+        ...(source.retainedDataReference !== undefined
+          ? { retainedDataReference: source.retainedDataReference }
+          : {}),
+      },
     };
   }
-  if (source.capabilityDeclaration !== undefined) return null;
+  if (version === "v2") {
+    if (declaration === undefined) return null;
+    return { proofVersion: "v2", scope: source.scope, capabilityDeclaration: declaration };
+  }
   return { proofVersion: "v1", scope: source.scope };
 }
 
 export function canonicalContentManifestFor(subject: ContentManifestSubject): string {
-  return subject.proofVersion === "v2"
-    ? canonicalContentManifestV2(subject.scope, subject.capabilityDeclaration)
-    : canonicalContentManifest(subject.scope);
+  switch (subject.proofVersion) {
+    case "v3":
+      return canonicalContentManifestV3(
+        subject.scope,
+        subject.capabilityDeclaration,
+        subject.retentionClaim,
+      );
+    case "v2":
+      return canonicalContentManifestV2(subject.scope, subject.capabilityDeclaration);
+    case "v1":
+      return canonicalContentManifest(subject.scope);
+  }
 }
 
 export function computeContentManifestSha256For(subject: ContentManifestSubject): string {
-  return subject.proofVersion === "v2"
-    ? computeContentManifestSha256V2(subject.scope, subject.capabilityDeclaration)
-    : computeContentManifestSha256(subject.scope);
+  switch (subject.proofVersion) {
+    case "v3":
+      return computeContentManifestSha256V3(
+        subject.scope,
+        subject.capabilityDeclaration,
+        subject.retentionClaim,
+      );
+    case "v2":
+      return computeContentManifestSha256V2(subject.scope, subject.capabilityDeclaration);
+    case "v1":
+      return computeContentManifestSha256(subject.scope);
+  }
 }
 
 export interface ProofInput {
@@ -194,15 +318,20 @@ export function computeProofSha256(input: ProofInput): string {
 }
 
 /**
- * Accepts both versions, deciding from the record's own `proofVersion`.
+ * Accepts all three versions, deciding from the record's own `proofVersion`.
  *
- * The downgrade this has to survive: an attacker who can edit the stored row sets `proofVersion` back
- * to `v1` and strips the declaration, so the record is checked against bytes that never covered it.
- * It fails here either way — the v2 tag is not the v1 tag, so recomputing the v1 digest does not
- * match the stored v2 one, and a `v2` label with no declaration (or a `v1` one with a declaration)
- * gets no subject at all. What this function cannot stop is an attacker who edits the declaration
- * **and** recomputes both digests; that is `proofSha256` moving, which the forensic chain entry
- * commits to (ADR-0318), so it is caught there and not here. Same division of labour as the scope.
+ * The downgrade this has to survive: an attacker who can edit the stored row relabels it to an older
+ * version and strips whatever that version does not carry, so the record is checked against bytes
+ * that never covered it. It fails here either way — no two tags are the same, so recomputing an
+ * older digest does not match the stored newer one, and a label that disagrees with what the record
+ * carries gets no subject at all. Under v3 that reaches the retention claim: editing
+ * `retainedReason`, `retainedDataReference` or `retainedObligations` moves the digest, which is the
+ * whole point of ADR-0331 — before it, all three were outside both digests and the chain entry, so
+ * rewriting why a tenant's data survived left every hash byte-identical.
+ *
+ * What this function cannot stop is an attacker who edits the record **and** recomputes both digests;
+ * that is `proofSha256` moving, which the forensic chain entry commits to (ADR-0318), so it is caught
+ * there and not here. Same division of labour as the scope.
  */
 export function verifyTombstoneHashes(record: TombstoneRecord): {
   readonly contentManifestOk: boolean;
@@ -227,10 +356,10 @@ export function verifyTombstoneHashes(record: TombstoneRecord): {
 
 /**
  * `proofVersion` is optional on the input and absent means `v1`, so a caller that predates ADR-0329
- * still produces exactly the bytes it did. Supplying `v2` without a declaration **throws**: this
- * function has no refusal channel, and the only alternative — hashing the v1 bytes under a record
- * labelled v2 — writes a digest that will never verify. An assembler has a refusal channel and must
- * use it rather than reaching here with the two disagreeing.
+ * still produces exactly the bytes it did. Supplying a version whose payload the input does not carry
+ * **throws**: this function has no refusal channel, and the only alternative — hashing an older body
+ * under a newer label — writes a digest that will never verify. An assembler has a refusal channel
+ * and must use it rather than reaching here with the two disagreeing.
  */
 export function populateTombstoneHashes<
   T extends Omit<TombstoneRecord, "contentManifestSha256" | "proofSha256" | "proofVersion"> & {
@@ -240,8 +369,8 @@ export function populateTombstoneHashes<
   const subject = contentManifestSubjectOf(input);
   if (subject === null) {
     throw new Error(
-      `cannot hash a tombstone whose proofVersion '${input.proofVersion ?? "v1"}' and` +
-        " capabilityDeclaration disagree",
+      `cannot hash a tombstone whose proofVersion '${input.proofVersion ?? "v1"}' disagrees with` +
+        " what it carries (capabilityDeclaration, retainedObligations)",
     );
   }
   const contentManifestSha256 = computeContentManifestSha256For(subject);

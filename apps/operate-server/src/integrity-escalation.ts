@@ -409,10 +409,11 @@ export class IntegrityEscalator {
     incidentId: string,
     operation: string,
   ): Promise<boolean> {
-    // The platform chain has no tenant, and `audit_log.tenant_id` is NOT NULL — so a
-    // platform-scope escalation pages but cannot leave a tenant-scoped audit row. Reported
-    // via `audited: false` rather than silently dropped.
-    if (this.opts.audit === undefined || report.scope === null) return false;
+    // A platform-chain finding lands as a **platform-scope** row (`tenant_id IS NULL`), not as
+    // nothing (ADR-0331). It is still not filed under a borrowed tenant — ADR-0327's rejected
+    // Option B — and the one escalation the platform chain exists to raise is now the one that
+    // leaves an anchored record of itself rather than only a log line.
+    if (this.opts.audit === undefined) return false;
     try {
       await this.opts.audit.emit(
         auditEntry({

@@ -212,3 +212,54 @@ describe("formatAuditAnchorReport", () => {
     expect(formatAuditAnchorReport(report)).toContain("unanchored: 1");
   });
 });
+
+/**
+ * The platform scope (ADR-0331). `meta.audit_log.tenant_id` is nullable, so there are platform
+ * rows to anchor — and the anchor check is the only detector there is for an edited audit row, so
+ * reading them is what keeps the new rows from being a proof nobody checks.
+ */
+describe("verifyAuditAnchors — platform scope", () => {
+  const platformEntry = (id: string, over: Partial<AuditLogEntry> = {}): AuditLogEntry =>
+    entryOf(id, { tenantId: null, operation: "platform.page_undelivered", ...over });
+
+  it("verifies a platform row against the platform chain", () => {
+    const entry = platformEntry(ID_A);
+    const anchor = anchorFor(entry, 0);
+    const report = verifyAuditAnchors(null, [rowOf(entry, anchor)], [anchor]);
+    expect(report.tenantId).toBeNull();
+    expect(report.ok).toBe(true);
+    expect(report.verified).toBe(1);
+  });
+
+  it("catches a tampered platform row", () => {
+    const entry = platformEntry(ID_A);
+    const anchor = anchorFor(entry, 0);
+    const edited = platformEntry(ID_A, { after: { incidentId: "INC-2026-9999" } });
+    const report = verifyAuditAnchors(null, [rowOf(edited, anchor)], [anchor]);
+    expect(report.tampered.map((t) => t.verdict)).toEqual(["hash_mismatch"]);
+  });
+
+  it("does not verify a platform row against a tenant-scoped anchor of the same content", () => {
+    // The scope is inside the committed bytes, so a tenant row's anchor cannot be reused to make a
+    // platform row look witnessed — which is what would let a borrowed scope be laundered.
+    const tenantScoped = entryOf(ID_A);
+    const anchor = anchorFor(tenantScoped, 0);
+    const report = verifyAuditAnchors(null, [rowOf(platformEntry(ID_A), anchor)], [anchor]);
+    expect(report.tampered.map((t) => t.verdict)).toEqual(["hash_mismatch"]);
+  });
+
+  it("reports an unanchored platform row as unproven, not intact", () => {
+    const report = verifyAuditAnchors(null, [rowOf(platformEntry(ID_B), null)], []);
+    expect(report.ok).toBe(false);
+    expect(report.unanchored).toBe(1);
+    expect(report.tampered).toEqual([]);
+  });
+
+  it("names the platform rather than printing a null tenant id", () => {
+    const entry = platformEntry(ID_A);
+    const anchor = anchorFor(entry, 0);
+    const text = formatAuditAnchorReport(verifyAuditAnchors(null, [rowOf(entry, anchor)], [anchor]));
+    expect(text).toContain("audit anchors for the platform: OK");
+    expect(text).not.toContain("null");
+  });
+});

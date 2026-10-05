@@ -181,6 +181,108 @@ export async function listNotifications(query: NotificationQuery = {}): Promise<
   return { data, nextCursor: json.page?.nextCursor ?? null };
 }
 
+// ---------------------------------------------------------------------------
+// Per-user read state (ADR-0309's tables, ADR-0330's store, the routes below it)
+// ---------------------------------------------------------------------------
+
+/**
+ * The server's own answer to "how many of these has this viewer not seen".
+ *
+ * `truncated` matters: the count examines a page of the inbox rather than the whole table, so a
+ * truncated answer is a floor and should render as "N+". `examined` is how many notices the figure
+ * was computed over, which is what makes the floor legible.
+ */
+export interface UnreadCount {
+  readonly unread: number;
+  readonly examined: number;
+  readonly truncated: boolean;
+  readonly readThroughAt: string | null;
+  /** `self` once the server resolves this credential to a recipient; `tenant` until then. */
+  readonly scope: string;
+}
+
+/** The viewer is always the credential, so none of these helpers takes a user id. */
+function readStatePath(suffix: string): string {
+  return `/api/v1/notifications${suffix}`;
+}
+
+export async function fetchUnreadCount(channel?: string): Promise<UnreadCount> {
+  const p = new URLSearchParams();
+  if (channel !== undefined && channel.trim() !== "") p.set("channel", channel.trim());
+  const qs = p.toString();
+  const res = await fetch(readStatePath(`/unread${qs ? `?${qs}` : ""}`), {
+    headers: { accept: "application/json" },
+  });
+  if (!res.ok) await throwProblem(res);
+  const json = (await res.json()) as Record<string, unknown>;
+  const unread = json["unread"];
+  const examined = json["examined"];
+  return {
+    unread: typeof unread === "number" && Number.isFinite(unread) ? unread : 0,
+    examined: typeof examined === "number" && Number.isFinite(examined) ? examined : 0,
+    truncated: json["truncated"] === true,
+    readThroughAt: nullableStr(json["readThroughAt"]),
+    scope: str(json["scope"], "tenant"),
+  };
+}
+
+export interface MarkReadResult {
+  readonly dispatchId: string;
+  /** `inserted` on the first read; `already_read` keeps the original `readAt`. */
+  readonly outcome: string;
+  readonly readAt: string | null;
+}
+
+export async function markNoticeRead(dispatchId: string): Promise<MarkReadResult> {
+  const res = await fetch(readStatePath(`/${encodeURIComponent(dispatchId)}/read`), {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    // No viewer in the body: the route refuses one, because a client that could name a user could
+    // mark somebody else's mail read.
+    body: "{}",
+  });
+  if (!res.ok) await throwProblem(res);
+  const json = (await res.json()) as Record<string, unknown>;
+  const state = json["readState"];
+  const readAt =
+    state !== null && typeof state === "object"
+      ? nullableStr((state as Record<string, unknown>)["readAt"])
+      : null;
+  return { dispatchId: str(json["dispatchId"], dispatchId), outcome: str(json["outcome"]), readAt };
+}
+
+export interface ReadThroughResult {
+  readonly outcome: string;
+  /** True when the server would not take the requested position literally. */
+  readonly clamped: boolean;
+  readonly readThroughAt: string | null;
+}
+
+/**
+ * Advances the viewer's "everything up to here is read" watermark.
+ *
+ * The position is sent and then *clamped by the server* to its own clock, so a browser whose clock
+ * runs fast cannot mark tomorrow's notices read. Sending `new Date()` is the mark-all-read action.
+ */
+export async function markReadThrough(at: Date = new Date()): Promise<ReadThroughResult> {
+  const res = await fetch(readStatePath("/read-through"), {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({ readThroughAt: at.toISOString() }),
+  });
+  if (!res.ok) await throwProblem(res);
+  const json = (await res.json()) as Record<string, unknown>;
+  const mark = json["watermark"];
+  return {
+    outcome: str(json["outcome"]),
+    clamped: json["clamped"] === true,
+    readThroughAt:
+      mark !== null && typeof mark === "object"
+        ? nullableStr((mark as Record<string, unknown>)["readThroughAt"])
+        : null,
+  };
+}
+
 const TEMPLATE_DECISIONS: Readonly<Record<string, ReviewDecision>> = {
   "design_review.approved": "approved",
   "design_review.rejected": "rejected",

@@ -5,7 +5,7 @@ import {
   type StageOutcome,
   type StageResult,
 } from "@crossengin/api-gateway";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
 
 const SCHEMA = "meta";
 const EXECUTIONS_TABLE = "gateway_pipeline_executions";
@@ -45,8 +45,13 @@ export interface ExecutionVerifyReport {
 interface ExecutionRow {
   readonly request_id: string;
   readonly tenant_id: string | null;
-  readonly started_at: string;
-  readonly completed_at: string;
+  /**
+   * `unknown`: node-postgres returns a `TIMESTAMPTZ` as a `Date`, and `getExecution` hands these
+   * two out inside a `PipelineExecution` — whose schema declares them as ISO text — so the object
+   * did not satisfy the contract it is typed as. Nothing compares them yet; the type was the lie.
+   */
+  readonly started_at: unknown;
+  readonly completed_at: unknown;
   readonly total_duration_ms: number;
   readonly final_stage: string;
   readonly final_outcome: string;
@@ -211,8 +216,8 @@ export class GatewayReplayer {
     return {
       requestId: row.request_id,
       tenantId: row.tenant_id,
-      startedAt: row.started_at,
-      completedAt: row.completed_at,
+      startedAt: requireIsoInstant(row.started_at, "started_at"),
+      completedAt: requireIsoInstant(row.completed_at, "completed_at"),
       totalDurationMs: row.total_duration_ms,
       finalStage: row.final_stage as PipelineExecution["finalStage"],
       finalOutcome: row.final_outcome as PipelineExecution["finalOutcome"],

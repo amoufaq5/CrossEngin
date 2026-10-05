@@ -1,4 +1,4 @@
-import type { IdempotencyRecord } from "@crossengin/api-gateway";
+import { IdempotencyRecordSchema, type IdempotencyRecord } from "@crossengin/api-gateway";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
@@ -80,6 +80,69 @@ describe("PostgresIdempotencyStore.get", () => {
     expect(rec?.status).toBe("completed_success");
     expect(rec?.responseStatus).toBe(201);
     expect(rec?.responseSha256).toBe("b".repeat(64));
+  });
+
+  // node-postgres returns these three columns as `Date`s; every offline fake here hands back
+  // strings, which is why nothing noticed that the record did not satisfy its own schema and that
+  // `evaluateIdempotency` was comparing a stringified `Date` with its milliseconds removed.
+  it("renders Date timestamps as ISO text, milliseconds kept", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        {
+          record_id: "idem_abcdefghijklmn",
+          tenant_id: TENANT,
+          operation_id: "tenants.create",
+          method: "POST",
+          idempotency_key: "key-00000001",
+          request_hash_sha256: "a".repeat(64),
+          principal_id: null,
+          received_at: new Date("2026-05-16T12:00:00.123Z"),
+          expires_at: new Date("2026-05-17T12:00:00.456Z"),
+          status: "completed_success",
+          response_status: 201,
+          response_sha256: "b".repeat(64),
+          response_storage_uri: null,
+          completed_at: new Date("2026-05-16T12:00:05.789Z"),
+          error_code: null,
+          error_message: null,
+        },
+      ],
+      rowCount: 1,
+    }));
+    const rec = await new PostgresIdempotencyStore(conn).get({ tenantId: TENANT, key: "key-1" });
+    expect(rec?.receivedAt).toBe("2026-05-16T12:00:00.123Z");
+    expect(rec?.expiresAt).toBe("2026-05-17T12:00:00.456Z");
+    expect(rec?.completedAt).toBe("2026-05-16T12:00:05.789Z");
+    expect(IdempotencyRecordSchema.safeParse(rec).success).toBe(true);
+  });
+
+  it("refuses a row whose NOT NULL expires_at is absent", async () => {
+    const conn = mockConnection(() => ({
+      rows: [
+        {
+          record_id: "idem_abcdefghijklmn",
+          tenant_id: TENANT,
+          operation_id: "tenants.create",
+          method: "POST",
+          idempotency_key: "key-1",
+          request_hash_sha256: "a".repeat(64),
+          principal_id: null,
+          received_at: new Date("2026-05-16T12:00:00.000Z"),
+          expires_at: null,
+          status: "in_progress",
+          response_status: null,
+          response_sha256: null,
+          response_storage_uri: null,
+          completed_at: null,
+          error_code: null,
+          error_message: null,
+        },
+      ],
+      rowCount: 1,
+    }));
+    await expect(
+      new PostgresIdempotencyStore(conn).get({ tenantId: TENANT, key: "key-1" }),
+    ).rejects.toThrow(/missing required timestamp: expires_at/);
   });
 
   it("queries with tenant + key bind parameters in order", async () => {

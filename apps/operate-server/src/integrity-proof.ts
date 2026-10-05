@@ -28,7 +28,7 @@ export const IntegrityProofConfigSchema = z
     /** Actor recorded on the verdict chain entry. */
     verifiedBy: z.string().min(1).default("operate-server"),
     tenants: z.array(z.string().uuid()).default([]),
-    /** Also prove the platform chain. Chain half only — `audit_log.tenant_id` is NOT NULL. */
+    /** Also prove the platform chain — both halves now, since it has audit rows (ADR-0331). */
     includePlatform: z.boolean().default(false),
     allTenants: z.boolean().default(false),
     tenantStatuses: z.array(z.string().min(1)).nonempty().optional(),
@@ -114,7 +114,11 @@ export interface IntegrityProofReport {
   readonly verdict: IntegrityVerdict;
   readonly verifiedAt: string;
   readonly chain: ChainVerificationReport;
-  /** Null for the platform chain, which has no audit rows to anchor. */
+  /**
+   * `proveScopeIntegrity` always fills this now, for the platform chain as well (ADR-0331). The
+   * field stays nullable because `meta.audit_integrity_verdicts` holds reports written while it
+   * meant "the platform chain has no audit rows to anchor", and a stored row must keep parsing.
+   */
   readonly anchors: AuditAnchorReport | null;
   readonly truncation: ChainTruncationCheck;
 }
@@ -151,8 +155,12 @@ export interface IntegrityProofPassResult {
  * entries off the chain's end leaves every link and signature valid, so truncation is asked about
  * separately, against a checkpoint.
  *
- * The platform chain (`scope === null`) gets no anchor check — `audit_log.tenant_id` is NOT NULL,
- * so there are no platform audit rows to anchor.
+ * The platform chain (`scope === null`) is checked the same way as a tenant's, because
+ * `audit_log.tenant_id` is nullable now and the three platform-scope escalators write rows into it
+ * (ADR-0331). Skipping it — which is what this did while the column was NOT NULL, correctly, since
+ * there was nothing to check — would leave the one table the forensics stack exists to protect
+ * holding rows that nothing verifies: ADR-0327's "built, correct, and read by nothing" in the worst
+ * possible place.
  */
 export async function proveScopeIntegrity(
   scope: string | null,
@@ -181,13 +189,14 @@ export async function proveScopeIntegrity(
       (tail === null || tail.sequenceNumber < checkpoint.sequenceNumber),
   };
 
-  let anchors: AuditAnchorReport | null = null;
-  if (scope !== null) {
-    const rows = await deps.audit.listAnchoredForTenant(scope, { limit: deps.auditRowLimit });
-    // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix
-    // may not contain, so it always reads the whole chain. The chain *half* stays bounded.
-    anchors = verifyAuditAnchors(scope, rows, await deps.logStore.loadChain(scope));
-  }
+  const rows = await deps.audit.listAnchoredForScope(scope, { limit: deps.auditRowLimit });
+  // The anchor check needs the entries the rows point at, which a checkpoint-bounded suffix
+  // may not contain, so it always reads the whole chain. The chain *half* stays bounded.
+  const anchors: AuditAnchorReport = verifyAuditAnchors(
+    scope,
+    rows,
+    await deps.logStore.loadChain(scope),
+  );
 
   return {
     scope,

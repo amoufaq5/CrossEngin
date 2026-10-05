@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { isoInstant, type PgConnection } from "@crossengin/kernel-pg";
 import {
   INSTANCE_CANCELLATION_DISPOSITIONS,
   type InstanceCancellationDisposition,
@@ -39,25 +39,12 @@ export interface StoredCancellationColumns {
 /**
  * A stored timestamp as the ISO text a `ProjectedInstance` holds.
  *
- * Load-bearing, and found live: node-postgres returns a `TIMESTAMPTZ` as a JS `Date`, so comparing a
- * stored timestamp to the projection's string with `!==` is true of *every* row that has one set.
- * The offline fakes hand back strings, which is exactly the class of defect CLAUDE.md says a fake
- * `PgConnection` cannot catch.
- *
- * An unparseable value comes back **as it stands** rather than as `null`, because `null` means "no
- * timestamp" and a garbage column must not compare equal to an absent one.
+ * Re-exported, not defined: the same normaliser is wanted in this package, `api-gateway-pg` and
+ * `operate-runtime-pg`, so it lives beside `PgQueryResult` in `@crossengin/kernel-pg` — the row
+ * interface whose behaviour it describes, and the one dependency all three already have. A second
+ * copy here is the shape this codebase keeps finding defects in.
  */
-export function isoInstant(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (value instanceof Date) {
-    return Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString();
-  }
-  if (typeof value === "string") {
-    const ms = Date.parse(value);
-    return Number.isNaN(ms) ? value : new Date(ms).toISOString();
-  }
-  return String(value);
-}
+export { isoInstant };
 
 /** The four `ProjectedInstance` cancellation fields, as read back off a row. */
 export interface CancellationProjectionFields {

@@ -9,14 +9,17 @@ import {
 import {
   canonicalContentManifest,
   canonicalContentManifestV2,
+  canonicalContentManifestV3,
   canonicalProofPayload,
   computeContentManifestSha256,
   computeContentManifestSha256For,
   computeContentManifestSha256V2,
+  computeContentManifestSha256V3,
   computeProofSha256,
   contentManifestSubjectOf,
   populateTombstoneHashes,
   verifyTombstoneHashes,
+  type TombstoneRetentionClaim,
 } from "./tombstone-proof.js";
 
 function fixtureScope(overrides: Partial<DeletionScope> = {}): DeletionScope {
@@ -447,6 +450,377 @@ describe("the version field cannot be forged to downgrade", () => {
       populateTombstoneHashes({
         ...stored,
         capabilityDeclaration: fixtureDeclaration({ object_storage: "erases" }),
+      }),
+    );
+    expect(verifyTombstoneHashes(forged)).toEqual({ contentManifestOk: true, proofOk: true });
+    expect(forged.proofSha256).not.toBe(stored.proofSha256);
+  });
+});
+
+/**
+ * The v2 bytes, pinned the way the v1 bytes already were.
+ *
+ * ADR-0329 shipped v2 without a digest fixture, so the only guard on its bytes was that nothing had
+ * touched them. ADR-0331 adds a third tag beside them, which is exactly the change that could move
+ * them by accident — the digests below were computed from the pre-ADR-0331 `dist/` and transcribed.
+ * A change here does not break a test; it reports `scope_tampered` on every v2 record on file, and
+ * that finding escalates to a paging `sev1` (ADR-0324).
+ */
+const V2_FIXTURE_MANIFEST =
+  '{"backupGenerations":["2026-05-15"],"cacheKeys":[],"capabilityDeclaration":' +
+  '{"backups":"absent","caches":"absent","object_storage":"absent","search_indexes":"absent",' +
+  '"shared_tables":"erases","tenant_schema":"erases"},"fileCount":25,' +
+  '"objectStorageBuckets":["files"],"rowCount":1000,"schemas":["tenant_a"],' +
+  '"searchIndexes":[],"storageBytes":50000000,"tables":["orders","users"]}';
+const V2_FIXTURE_SHA = "979750b9bc4d6ee8b1fc7853adc5b3252bd9dab5e478e63f10e7fa56c2be2f07";
+
+describe("v2 content manifest is frozen", () => {
+  it("renders the exact bytes stored v2 tombstones were hashed over", () => {
+    expect(canonicalContentManifestV2(fixtureScope(), fixtureDeclaration())).toBe(
+      V2_FIXTURE_MANIFEST,
+    );
+  });
+
+  it("produces the exact digest stored v2 tombstones carry", () => {
+    expect(computeContentManifestSha256V2(fixtureScope(), fixtureDeclaration())).toBe(
+      V2_FIXTURE_SHA,
+    );
+  });
+
+  it("still produces the v1 digest for the same scope with no declaration", () => {
+    expect(computeContentManifestSha256(fixtureScope())).toBe(V1_FIXTURE_SHA);
+  });
+});
+
+const POPULATED_CLAIM: TombstoneRetentionClaim = {
+  obligations: ["tax_records_7y"],
+  retainedReason: "retained under legal obligation — backups: tax_records_7y",
+  retainedDataReference: "backup-vault://2026",
+};
+const EMPTY_CLAIM: TombstoneRetentionClaim = { obligations: [] };
+
+describe("canonicalContentManifestV3", () => {
+  it("carries the retention claim into the bytes", () => {
+    const bytes = canonicalContentManifestV3(
+      fixtureScope(),
+      fixtureDeclaration(),
+      POPULATED_CLAIM,
+    );
+    expect(bytes).toContain('"retentionClaim":{');
+    expect(bytes).toContain('"obligations":["tax_records_7y"]');
+    expect(bytes).toContain('"retainedDataReference":"backup-vault://2026"');
+  });
+
+  it("extends the v2 body rather than replacing it", () => {
+    const bytes = canonicalContentManifestV3(
+      fixtureScope(),
+      fixtureDeclaration(),
+      POPULATED_CLAIM,
+    );
+    expect(bytes).toContain('"capabilityDeclaration":{');
+    expect(bytes).toContain('"tables":["orders","users"]');
+  });
+
+  it("renders an empty claim with explicit nulls, never with missing keys", () => {
+    // `canonicalStringify` drops `undefined`, so an omitted key would make the empty claim and a
+    // claim with its prose stripped render identically — the one pair a signed claim must separate.
+    const bytes = canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), EMPTY_CLAIM);
+    expect(bytes).toContain(
+      '"retentionClaim":{"obligations":[],"retainedDataReference":null,"retainedReason":null}',
+    );
+  });
+
+  it("carries no figure of any kind on the retained side", () => {
+    // ADR-0317's subject is a number in a proof meaning something other than what a reader assumes,
+    // and the figures in these bytes mean "destroyed". There is no field here that could hold a
+    // retained row count, and the rendered claim must not acquire one.
+    const bytes = canonicalContentManifestV3(
+      fixtureScope(),
+      fixtureDeclaration(),
+      POPULATED_CLAIM,
+    );
+    const claim = /"retentionClaim":\{[^}]*\}/.exec(bytes)?.[0] ?? "";
+    expect(claim).not.toBe("");
+    expect(claim).not.toMatch(/:\s*\d/);
+  });
+
+  it("changes when the obligations change", () => {
+    expect(
+      canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM),
+    ).not.toBe(
+      canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), {
+        ...POPULATED_CLAIM,
+        obligations: ["medical_records_10y"],
+      }),
+    );
+  });
+
+  it("changes when the retained reason prose changes", () => {
+    expect(
+      canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM),
+    ).not.toBe(
+      canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), {
+        ...POPULATED_CLAIM,
+        retainedReason: "retained under legal obligation — backups: medical_records_10y",
+      }),
+    );
+  });
+
+  it("changes when the retained data reference changes", () => {
+    expect(
+      canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM),
+    ).not.toBe(
+      canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), {
+        ...POPULATED_CLAIM,
+        retainedDataReference: "backup-vault://somewhere-else",
+      }),
+    );
+  });
+
+  it("sorts and deduplicates the obligations, so a JSONB round trip cannot move a digest", () => {
+    expect(
+      canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), {
+        ...POPULATED_CLAIM,
+        obligations: ["tax_records_7y", "audit_logs_3y", "tax_records_7y"],
+      }),
+    ).toBe(
+      canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), {
+        ...POPULATED_CLAIM,
+        obligations: ["audit_logs_3y", "tax_records_7y"],
+      }),
+    );
+  });
+});
+
+describe("computeContentManifestSha256V3", () => {
+  it("collides with neither the v1 nor the v2 digest for the same scope", () => {
+    const v3 = computeContentManifestSha256V3(
+      fixtureScope(),
+      fixtureDeclaration(),
+      EMPTY_CLAIM,
+    );
+    expect(v3).not.toBe(computeContentManifestSha256(fixtureScope()));
+    expect(v3).not.toBe(computeContentManifestSha256V2(fixtureScope(), fixtureDeclaration()));
+  });
+
+  it("separates 'nothing was retained' from a populated claim", () => {
+    expect(
+      computeContentManifestSha256V3(fixtureScope(), fixtureDeclaration(), EMPTY_CLAIM),
+    ).not.toBe(
+      computeContentManifestSha256V3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM),
+    );
+  });
+});
+
+describe("contentManifestSubjectOf refuses every version/payload mixture", () => {
+  it("accepts v3 with a declaration and obligations", () => {
+    const subject = contentManifestSubjectOf({
+      proofVersion: "v3",
+      scope: fixtureScope(),
+      capabilityDeclaration: fixtureDeclaration(),
+      retainedObligations: [],
+    });
+    expect(subject?.proofVersion).toBe("v3");
+  });
+
+  it("refuses v3 with no obligations", () => {
+    expect(
+      contentManifestSubjectOf({
+        proofVersion: "v3",
+        scope: fixtureScope(),
+        capabilityDeclaration: fixtureDeclaration(),
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses v3 with no declaration", () => {
+    expect(
+      contentManifestSubjectOf({
+        proofVersion: "v3",
+        scope: fixtureScope(),
+        retainedObligations: [],
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses v2 with obligations attached", () => {
+    expect(
+      contentManifestSubjectOf({
+        proofVersion: "v2",
+        scope: fixtureScope(),
+        capabilityDeclaration: fixtureDeclaration(),
+        retainedObligations: ["tax_records_7y"],
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses v1 with obligations attached", () => {
+    expect(
+      contentManifestSubjectOf({
+        proofVersion: "v1",
+        scope: fixtureScope(),
+        retainedObligations: [],
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts v1 and v2 carrying unsigned retention prose", () => {
+    // The field that is deliberately **not** paired with the version. Every stored v1 and v2 record
+    // with a retention has this prose on its face and outside its bytes; refusing it would be a
+    // retroactive tightening on honest records, which is the migration ADR-0329 ruled out.
+    expect(
+      contentManifestSubjectOf({
+        scope: fixtureScope(),
+        retainedReason: POPULATED_CLAIM.retainedReason,
+        retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+      })?.proofVersion,
+    ).toBe("v1");
+    expect(
+      contentManifestSubjectOf({
+        proofVersion: "v2",
+        scope: fixtureScope(),
+        capabilityDeclaration: fixtureDeclaration(),
+        retainedReason: POPULATED_CLAIM.retainedReason,
+        retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+      })?.proofVersion,
+    ).toBe("v2");
+  });
+
+  it("builds the v3 subject's claim from the record's three retention fields", () => {
+    const subject = contentManifestSubjectOf({
+      proofVersion: "v3",
+      scope: fixtureScope(),
+      capabilityDeclaration: fixtureDeclaration(),
+      retainedObligations: ["tax_records_7y"],
+      retainedReason: POPULATED_CLAIM.retainedReason,
+      retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+    });
+    expect(subject?.proofVersion).toBe("v3");
+    if (subject?.proofVersion !== "v3") return;
+    expect(subject.retentionClaim).toEqual(POPULATED_CLAIM);
+  });
+});
+
+describe("a v3 record verifies and a tampered retention claim does not", () => {
+  const stored = TombstoneRecordSchema.parse(
+    populateTombstoneHashes({
+      ...FIXTURE_BASE,
+      scope: fixtureScope(),
+      proofVersion: "v3" as const,
+      capabilityDeclaration: fixtureDeclaration(),
+      retainedObligations: ["tax_records_7y"],
+      retainedReason: POPULATED_CLAIM.retainedReason,
+      retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+    }),
+  );
+
+  it("round-trips", () => {
+    expect(stored.proofVersion).toBe("v3");
+    expect(verifyTombstoneHashes(stored)).toEqual({ contentManifestOk: true, proofOk: true });
+  });
+
+  it("hashes under the v3 tag", () => {
+    expect(stored.contentManifestSha256).toBe(
+      computeContentManifestSha256For({
+        proofVersion: "v3",
+        scope: fixtureScope(),
+        capabilityDeclaration: fixtureDeclaration(),
+        retentionClaim: POPULATED_CLAIM,
+      }),
+    );
+  });
+
+  it("fails verification when the retained reason prose is rewritten", () => {
+    // **This is the deliverable.** Before ADR-0331 this edit was invisible: the retention claim was
+    // on the record and in neither digest, so rewriting why a tenant's data survived left
+    // `contentManifestSha256`, `proofSha256` and the chain entry byte-identical. ADR-0323 established
+    // that `contentManifestOk` is the only detector for an edit the chain cannot see; now it sees it.
+    const check = verifyTombstoneHashes({
+      ...stored,
+      retainedReason: "retained under legal obligation — backups: medical_records_10y",
+    });
+    expect(check.contentManifestOk).toBe(false);
+    // The proof commits to the *stored* manifest digest, which the editor did not touch, so
+    // `proofOk` stays true and `contentManifestOk` is the only thing that can say otherwise.
+    expect(check.proofOk).toBe(true);
+  });
+
+  it("fails verification when the retained data reference is moved", () => {
+    expect(
+      verifyTombstoneHashes({ ...stored, retainedDataReference: "backup-vault://elsewhere" })
+        .contentManifestOk,
+    ).toBe(false);
+  });
+
+  it("fails verification when an obligation is swapped", () => {
+    expect(
+      verifyTombstoneHashes({ ...stored, retainedObligations: ["medical_records_10y"] })
+        .contentManifestOk,
+    ).toBe(false);
+  });
+
+  it("fails verification when the retention claim is emptied outright", () => {
+    // The tamper that matters most: a stored proof edited to say nothing was kept, over data that
+    // is still there. Under v2 the record would have been left byte-identical.
+    expect(
+      verifyTombstoneHashes({
+        ...stored,
+        retainedObligations: [],
+        retainedReason: undefined,
+        retainedDataReference: undefined,
+      }).contentManifestOk,
+    ).toBe(false);
+  });
+
+  it("fails when relabelled to v2 with the obligations stripped", () => {
+    // The self-covering downgrade, in its third form. An inference from "does it carry obligations?"
+    // would have read this as an older record and checked it against bytes that never covered it.
+    expect(
+      verifyTombstoneHashes({
+        ...stored,
+        proofVersion: "v2",
+        retainedObligations: undefined,
+      }).contentManifestOk,
+    ).toBe(false);
+  });
+
+  it("fails when relabelled to v2 with the obligations left attached", () => {
+    expect(
+      verifyTombstoneHashes({ ...stored, proofVersion: "v2" }).contentManifestOk,
+    ).toBe(false);
+  });
+
+  it("fails when relabelled to v1", () => {
+    expect(
+      verifyTombstoneHashes({
+        ...stored,
+        proofVersion: "v1",
+        capabilityDeclaration: undefined,
+        retainedObligations: undefined,
+      }).contentManifestOk,
+    ).toBe(false);
+  });
+
+  it("throws rather than hash a v3 record with no obligations", () => {
+    expect(() =>
+      populateTombstoneHashes({
+        ...FIXTURE_BASE,
+        scope: fixtureScope(),
+        proofVersion: "v3" as const,
+        capabilityDeclaration: fixtureDeclaration(),
+      }),
+    ).toThrow(/disagrees with what it carries/);
+  });
+
+  it("leaves a forged-and-rehashed claim to the forensic chain", () => {
+    // The division of labour, unchanged from the declaration's. An editor who rewrites the claim and
+    // recomputes both digests passes here, and moves `proofSha256` — which the chain entry commits
+    // to (ADR-0318), so it is caught there.
+    const forged = TombstoneRecordSchema.parse(
+      populateTombstoneHashes({
+        ...stored,
+        retainedObligations: ["medical_records_10y"],
+        retainedReason: "retained under legal obligation — backups: medical_records_10y",
       }),
     );
     expect(verifyTombstoneHashes(forged)).toEqual({ contentManifestOk: true, proofOk: true });

@@ -115,8 +115,15 @@ export async function runApply(
       printJson(ctx.io, applyJsonPayload(report, plan, converged));
     } else {
       printSuccess(ctx.io, formatApplyReport(report));
-      if (plan.unreconciled.length > 0) {
-        printSuccess(ctx.io, formatReconciliationPlan(plan));
+      // Which plan's differences to print is not cosmetic. After a clean apply the pre-apply plan's
+      // statements have all *run*, so rendering it prints "1 statement(s) to apply" about work this
+      // invocation just did — the same confusion between a report of the past and a claim about the
+      // present that the re-plan above exists to end. `converged` is the only one of the two that
+      // describes the schema as it now is; `plan` is the best available only when the apply did not
+      // finish, and there the failure report sits beside it.
+      const standing = standingDifferences(plan, converged);
+      if (standing.unreconciled.length > 0) {
+        printSuccess(ctx.io, formatReconciliationPlan(standing));
       }
       if (converged !== null && converged.statements.length > 0) {
         printSuccess(
@@ -163,6 +170,24 @@ export function applyJsonPayload(
   remaining: ReconciliationPlan | null = null,
 ): ApplyJsonPayload {
   return { report, plan, failures: applyFailures(report), remaining };
+}
+
+/**
+ * Which of the two plans describes the differences that **still** stand, for printing.
+ *
+ * Not cosmetic, and found live. After a clean apply the pre-apply plan's statements have all run, so
+ * rendering it prints "1 statement(s) to apply" about work this very invocation just did — a report
+ * of the past read as a claim about the present, which is the confusion ADR-0331's re-plan exists to
+ * end. The re-plan is the only one of the two that describes the schema as it now is.
+ *
+ * `null` means no re-plan was taken, which only happens when the apply did not finish; the pre-apply
+ * plan is then the best available and the failure report sits beside it to say so.
+ */
+export function standingDifferences(
+  plan: ReconciliationPlan,
+  converged: ReconciliationPlan | null,
+): ReconciliationPlan {
+  return converged ?? plan;
 }
 
 function emitDryRun(io: IoStreams, command: ParsedCommand): number {

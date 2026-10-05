@@ -978,6 +978,63 @@ describe("parseServeArgs — --audit-read-sensitive-class", () => {
       expect(message).toContain(cls);
     }
   });
+});
+
+/** Per-viewer notification read state over HTTP (ADR-0331), closing ADR-0309's never-read tables. */
+describe("parseServeArgs — --read-state-routes", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off, ungranted and default-scanned unless asked for", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.readStateRoutes).toBe(false);
+    expect(o.readStateRoles).toEqual([]);
+    expect(o.readStateBackfillRoles).toEqual([]);
+    expect(o.readStateUnreadScan).toBe(200);
+  });
+
+  it("a role turns the routes on, the way every sibling flag does", () => {
+    const o = parseServeArgs([...PG, "--read-state-role=cashier", "--read-state-role", "manager"]);
+    expect(o.readStateRoutes).toBe(true);
+    expect(o.readStateRoles).toEqual(["cashier", "manager"]);
+  });
+
+  it("refuses the routes on the memory store", () => {
+    expect(() => parseServeArgs(["--pack", "erp-core", "--read-state-routes"])).toThrow(
+      /--read-state-routes requires a Postgres store/,
+    );
+  });
+
+  it("refuses a backfill role that is not also granted the base role", () => {
+    // Additive, not a substitute. The base grant is checked first, so a backfill role missing from
+    // it is refused there and the backfill grant never comes into play — which reads as the backfill
+    // grant not working. Said at boot instead.
+    expect(() =>
+      parseServeArgs([...PG, "--read-state-role=staff", "--read-state-backfill-role=migrator"]),
+    ).toThrow(/additive on top of --read-state-role: migrator/);
+  });
+
+  it("accepts a backfill role that holds both grants", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--read-state-role=migrator",
+      "--read-state-role=staff",
+      "--read-state-backfill-role=migrator",
+    ]);
+    expect(o.readStateBackfillRoles).toEqual(["migrator"]);
+  });
+
+  it("takes a scan limit in band and refuses one out of it, rather than clamping", () => {
+    // ADR-0312's rule: a deployment that asked for 5000 and silently got 1000 would render a badge
+    // it believes is exact.
+    expect(parseServeArgs([...PG, "--read-state-unread-scan=750"]).readStateUnreadScan).toBe(750);
+    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=0"])).toThrow(/1–1000/);
+    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=5000"])).toThrow(/1–1000/);
+    expect(() => parseServeArgs([...PG, "--read-state-unread-scan=1.5"])).toThrow(/1–1000/);
+  });
+});
+
+describe("parseServeArgs — per-route body limits", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg", "--audit-read-routes"];
 
   it("parses per-route body limits, longest prefix independent of argv order", () => {
     const out = parseServeArgs([
@@ -1030,28 +1087,32 @@ describe("parseServeArgs — --audit-read-sensitive-class", () => {
     expect(parseServeArgs([...PG]).maxRequestBodyRoutes).toEqual([]);
   });
 
-  it("refuses --workflow-cancel-role rather than mounting a route that cannot work", () => {
-    // ADR-0330. The route, its tests and its fence columns exist; what is missing is upstream of
-    // all of it — this server instantiates no WorkflowEngine because `meta.workflow_definitions`
-    // has no writer. A route mounted against an empty definition map would answer
-    // `unknown_instance` for every instance, which is the silent degradation ADR-0327 said a
-    // surface must never choose.
-    expect(() => parseServeArgs([...PG, "--workflow-cancel-role", "ops"])).toThrow(CliUsageError);
+  it("accepts --workflow-cancel-role now that definitions have a writer", () => {
+    // ADR-0330 refused this flag outright and the premise it named was true: no WorkflowEngine was
+    // instantiated, because `meta.workflow_definitions` had no writer and so there was no source of
+    // definitions. ADR-0331 built the writer, so the refusal's reason has expired.
+    expect(parseServeArgs([...PG, "--workflow-cancel-role", "ops"]).workflowCancelRoles).toEqual([
+      "ops",
+    ]);
   });
 
-  it("names the real reason for that refusal, not just the flag", () => {
+  it("still refuses it on the memory store, which has neither table", () => {
+    // The refusal narrows rather than disappearing. ADR-0329's rule holds: a cancellation route
+    // that can find no instance is worse than an absent one, because its 404 reads as "no such
+    // instance" rather than "this server has no engine".
     let message = "";
     try {
-      parseServeArgs([...PG, "--workflow-cancel-role=ops"]);
+      parseServeArgs(["--pack", "erp-core", "--workflow-cancel-role=ops"]);
     } catch (err) {
       message = err instanceof Error ? err.message : String(err);
     }
-    expect(message).toContain("meta.workflow_definitions has no writer");
-    // And says what is *not* broken, so nobody reads this as "workflows do not work at all".
-    expect(message).toContain("Entity lifecycle transitions are a different mechanism");
+    expect(message).toContain("requires a Postgres store");
+    // And it names both tables, so the reason is the data and not the flag.
+    expect(message).toContain("meta.workflow_definitions");
+    expect(message).toContain("meta.workflow_instances");
   });
 
-  it("boots fine without it, which is every deployment today", () => {
+  it("boots fine without it", () => {
     expect(parseServeArgs([...PG]).workflowCancelRoles).toEqual([]);
   });
 });

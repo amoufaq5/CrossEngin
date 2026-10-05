@@ -43,6 +43,47 @@ const SHARED_ATTESTATION: DeletionAttestation = {
   attestedAt: AT,
 };
 
+/**
+ * A record whose proof carries a real statutory retention (ADR-0330, signed by ADR-0331).
+ *
+ * Assembled rather than patched onto `recordOf`'s output: the retention claim is inside the v3 bytes
+ * now, so spreading the three fields over a finished record would produce a proof that does not
+ * verify — which is the state every tamper test here is trying to tell apart from an honest one.
+ */
+function retainingRecordOf(): TombstoneRecord {
+  const out = assembleTombstone({
+    id: "tomb_store0002abc",
+    kind: "tenant_deletion",
+    tenantId: TENANT,
+    deletedAt: AT,
+    executedBy: "alice@example.test",
+    approvedBy: "bob@example.test",
+    anchors: [{ kind: "rfc3161_timestamp", reference: "caller-chose-this", anchoredAt: AT }],
+    capabilities: {
+      tenant_schema: "erases",
+      shared_tables: "erases",
+      object_storage: "absent",
+      backups: "retains",
+      search_indexes: "absent",
+      caches: "absent",
+    },
+    attestations: [
+      ATTESTATION,
+      SHARED_ATTESTATION,
+      {
+        subsystem: "backups",
+        outcome: "retained",
+        retentionObligation: "tax_records_7y",
+        retainedDataReference: "backup-vault://2026",
+        attestedBy: "operate-server/backups",
+        attestedAt: AT,
+      },
+    ],
+  });
+  if (!out.ok) throw new Error(`fixture failed: ${JSON.stringify(out.refusals)}`);
+  return out.record;
+}
+
 /** A real record, assembled the way production does, so the hashes are genuine. */
 function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
   const out = assembleTombstone({
@@ -112,8 +153,10 @@ function rowOf(record: TombstoneRecord, over: Record<string, unknown> = {}): Rec
     content_manifest_sha256: record.contentManifestSha256,
     proof_sha256: record.proofSha256,
     anchors: JSON.stringify(record.anchors),
-    retained_reason: null,
-    retained_data_reference: null,
+    // Derived rather than hardcoded null, because the retention prose is inside the v3 signed bytes
+    // (ADR-0331): a row that dropped it would make an honest retaining proof read as tampered.
+    retained_reason: record.retainedReason ?? null,
+    retained_data_reference: record.retainedDataReference ?? null,
     invalidation_of_prior_tombstone_id: null,
     attestations: JSON.stringify([ATTESTATION]),
     // ADR-0329. Omitting these two is not a shortcut: the version selects the domain tag the digest
@@ -126,6 +169,13 @@ function rowOf(record: TombstoneRecord, over: Record<string, unknown> = {}): Rec
       record.capabilityDeclaration === undefined
         ? null
         : JSON.stringify(record.capabilityDeclaration),
+    // ADR-0331, for the same reason one version further on: a v3 row read back without its
+    // obligations is a v3 label with nothing to hash, so it gets no manifest subject at all and
+    // `verify` reports a tamper on an honest proof. `null` and `'[]'` are different facts here.
+    retained_obligations:
+      record.retainedObligations === undefined
+        ? null
+        : JSON.stringify(record.retainedObligations),
     chain_entry_hash: ENTRY_HASH,
     chain_sequence_number: 7,
     ...over,
@@ -140,7 +190,9 @@ describe("the column list", () => {
     // ADR-0329: the proof version and the declaration it signs.
     expect(TOMBSTONE_COLUMNS).toContain("proof_version");
     expect(TOMBSTONE_COLUMNS).toContain("capability_declaration");
-    expect(TOMBSTONE_COLUMNS).toHaveLength(20);
+    // ADR-0331: the structured half of the retention claim the v3 bytes sign.
+    expect(TOMBSTONE_COLUMNS).toContain("retained_obligations");
+    expect(TOMBSTONE_COLUMNS).toHaveLength(21);
   });
 
   it("anchors as a deletion_event", () => {
@@ -233,6 +285,32 @@ describe("write", () => {
     await new PostgresTombstoneStore(conn, anchorer).write(recordOf());
     const insert = calls.find((c) => c.sql.startsWith("INSERT INTO"));
     const index = TOMBSTONE_COLUMNS.indexOf("attestations");
+    expect(JSON.parse(String(insert?.params[index]))).toEqual([]);
+  });
+
+  it("writes the signed retention claim's three fields", async () => {
+    const { conn, anchorer, calls } = fakePg();
+    const record = retainingRecordOf();
+    await new PostgresTombstoneStore(conn, anchorer).write(record);
+    const insert = calls.find((c) => c.sql.startsWith("INSERT INTO"));
+    const obligations = TOMBSTONE_COLUMNS.indexOf("retained_obligations");
+    const reason = TOMBSTONE_COLUMNS.indexOf("retained_reason");
+    const reference = TOMBSTONE_COLUMNS.indexOf("retained_data_reference");
+    expect(JSON.parse(String(insert?.params[obligations]))).toEqual(["tax_records_7y"]);
+    expect(insert?.params[reason]).toBe(record.retainedReason);
+    expect(insert?.params[reference]).toBe("backup-vault://2026");
+    // JSONB, so a round trip cannot reorder the array into a different digest's worth of bytes.
+    expect(insert?.sql).toContain(`$${(obligations + 1).toString()}::jsonb`);
+  });
+
+  it("writes an empty obligations array rather than NULL for a v3 proof that kept nothing", async () => {
+    const { conn, anchorer, calls } = fakePg();
+    await new PostgresTombstoneStore(conn, anchorer).write(recordOf());
+    const insert = calls.find((c) => c.sql.startsWith("INSERT INTO"));
+    const index = TOMBSTONE_COLUMNS.indexOf("retained_obligations");
+    // NULL would say "this record's bytes do not cover a retention claim", which is false of a v3
+    // record and would make it unreadable: the contract pairs the field with the version.
+    expect(insert?.params[index]).not.toBeNull();
     expect(JSON.parse(String(insert?.params[index]))).toEqual([]);
   });
 
@@ -536,14 +614,14 @@ describe("verify", () => {
     // coherent version at all — and `rowToStoredTombstone` throws rather than answering, which is
     // ADR-0289's rule: a row the contract cannot represent is a finding, not a shorter answer.
     const record = recordOf();
-    expect(record.proofVersion).toBe("v2");
+    expect(record.proofVersion).toBe("v3");
     const { conn, anchorer } = fakePg([rowOf(record, { proof_version: "v1" })]);
     await expect(new PostgresTombstoneStore(conn, anchorer).verify(record.id)).rejects.toThrow(
       /outside the signed bytes/,
     );
   });
 
-  it("reports a v2 proof tampered if both new columns are dropped on the way back", async () => {
+  it("reports a v3 proof tampered if the new columns are dropped on the way back", async () => {
     // The real shape of the hazard, and a regression guard rather than a hypothetical: this is what
     // every read did before the two columns existed. A v2 record whose row carries neither field
     // parses cleanly as a v1 record, the verifier recomputes the digest under the v1 domain tag,
@@ -553,7 +631,11 @@ describe("verify", () => {
     // only walks the happy path goes green again the moment a column leaves the SELECT list.
     const record = recordOf();
     const { conn, anchorer } = fakePg([
-      rowOf(record, { proof_version: "v1", capability_declaration: null }),
+      rowOf(record, {
+        proof_version: "v1",
+        capability_declaration: null,
+        retained_obligations: null,
+      }),
     ]);
     const out = await new PostgresTombstoneStore(conn, anchorer).verify(record.id);
     expect(out.contentManifestOk).toBe(false);
@@ -562,13 +644,35 @@ describe("verify", () => {
     expect(out.proofOk).toBe(true);
   });
 
-  it("round-trips a v2 proof through the row and verifies clean", async () => {
+  it("round-trips a v3 proof through the row and verifies clean", async () => {
     const record = recordOf();
     const { conn, anchorer } = fakePg([rowOf(record)]);
     const stored = await new PostgresTombstoneStore(conn, anchorer).read(record.id);
-    expect(stored?.record.proofVersion).toBe("v2");
+    expect(stored?.record.proofVersion).toBe("v3");
     expect(stored?.record.capabilityDeclaration).toEqual(record.capabilityDeclaration);
+    expect(stored?.record.retainedObligations).toEqual([]);
     expect(stored?.record.contentManifestSha256).toBe(record.contentManifestSha256);
+  });
+
+  it("throws rather than reading a v3 row whose obligations column was dropped", async () => {
+    // ADR-0331's version of the hazard above, and the narrower half of it: `proof_version` still
+    // says v3, so the row describes no coherent version at all and `rowToStoredTombstone` throws
+    // instead of answering. ADR-0289's rule — a row the contract cannot represent is a finding.
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([rowOf(record, { retained_obligations: null })]);
+    await expect(new PostgresTombstoneStore(conn, anchorer).verify(record.id)).rejects.toThrow(
+      /commits to a retention claim/,
+    );
+  });
+
+  it("keeps an empty obligations array distinct from a NULL column", async () => {
+    // `[]` is the v3 claim that nothing was lawfully kept; NULL is a record whose bytes do not cover
+    // the question at all. A truthiness test on the parsed JSON would have collapsed the two.
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([rowOf(record)]);
+    const stored = await new PostgresTombstoneStore(conn, anchorer).read(record.id);
+    expect(stored?.record.retainedObligations).toEqual([]);
+    expect(stored?.record.retainedObligations).not.toBeUndefined();
   });
 
   it("says null rather than false when there is no evidence to check against", async () => {
@@ -591,6 +695,51 @@ describe("verify", () => {
     // two classes of tamper.
     expect(out.proofOk).toBe(true);
     expect(out.matchesAttestations).toBe(false);
+  });
+
+  it("catches a retention claim edited after signing — the v3 deliverable", async () => {
+    // What ADR-0330 left open and this closes. The retention claim was on the record and in neither
+    // digest, so rewriting *why* a tenant's data survived left `content_manifest_sha256`,
+    // `proof_sha256` and the chain entry byte-identical — and `contentManifestOk` is the only thing
+    // in the system that can see an edit the chain cannot (ADR-0323). This row is the edit.
+    const record = retainingRecordOf();
+    const { conn, anchorer } = fakePg([
+      rowOf(record, { retained_reason: "retained under legal obligation — backups: audit_logs_3y" }),
+    ]);
+    const out = await new PostgresTombstoneStore(conn, anchorer).verify(record.id);
+    expect(out.contentManifestOk).toBe(false);
+    // The proof commits to the stored manifest digest, which the editor did not touch, so nothing
+    // upstream of `contentManifestOk` notices.
+    expect(out.proofOk).toBe(true);
+  });
+
+  it("catches a retained data reference moved after signing", async () => {
+    const record = retainingRecordOf();
+    const { conn, anchorer } = fakePg([
+      rowOf(record, { retained_data_reference: "backup-vault://elsewhere" }),
+    ]);
+    const out = await new PostgresTombstoneStore(conn, anchorer).verify(record.id);
+    expect(out.contentManifestOk).toBe(false);
+    expect(out.proofOk).toBe(true);
+  });
+
+  it("catches an obligation swapped after signing", async () => {
+    const record = retainingRecordOf();
+    const { conn, anchorer } = fakePg([
+      rowOf(record, { retained_obligations: JSON.stringify(["audit_logs_3y"]) }),
+    ]);
+    expect((await new PostgresTombstoneStore(conn, anchorer).verify(record.id)).contentManifestOk).toBe(
+      false,
+    );
+  });
+
+  it("verifies an honest retaining proof clean", async () => {
+    // The other half of the pair: the detector must not fire on a record nobody touched.
+    const record = retainingRecordOf();
+    const { conn, anchorer } = fakePg([rowOf(record)]);
+    const out = await new PostgresTombstoneStore(conn, anchorer).verify(record.id);
+    expect(out.contentManifestOk).toBe(true);
+    expect(out.proofOk).toBe(true);
   });
 
   it("reports not found without claiming anything verified", async () => {

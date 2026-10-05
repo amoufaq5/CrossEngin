@@ -255,9 +255,11 @@ export class IncidentExecutor {
    * Appends and changes nothing else: a page is a fact about the incident, not a step in its
    * lifecycle, so it must not move the status, stamp a timestamp or touch the severity. ADR-0326
    * made a page's delivery evidence by writing an audit row; this is the half an incident review
-   * actually opens, and it is also the *only* witness for a platform-scope page, whose audit row
-   * cannot exist at all because `meta.audit_log.tenant_id` is NOT NULL and an SLO surface is never
-   * a tenant.
+   * actually opens. It was for a time the *only* witness for a platform-scope page, because
+   * `meta.audit_log.tenant_id` was NOT NULL and an SLO surface is never a tenant; ADR-0331 made
+   * that row expressible, so the two are now a pair rather than a fallback — and this one still
+   * lands when the emitter is unreachable, which is the condition a compromise finding escalates
+   * for in the first place.
    *
    * Callable on an incident in **any** status, `closed` and `cancelled` included. A resolve's note
    * arrives after the close-out by construction, so refusing on a terminal status would drop

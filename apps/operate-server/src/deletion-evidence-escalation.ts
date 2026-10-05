@@ -581,13 +581,12 @@ export class DeletionEvidenceEscalator {
    * one would start a breach assessment over a monitoring gap, which is the same conflation the
    * grade avoids.
    *
-   * **It names no tenant, so it leaves no audit row.** A sweep is platform-wide: it walks every
-   * tenant's proofs, and a stall is about the walk, not about a row. `meta.audit_log.tenant_id` is
-   * NOT NULL *and* a foreign key to `meta.tenants`, so there is no tenant to file it under and
-   * inventing one would file a platform fact in one tenant's RLS scope — ADR-0327's rejected Option
-   * B. Reported as `audited: false` rather than dropped silently, which is `IntegrityEscalator`'s
-   * precedent for the same wall. The records that *do* land are the incident itself (the kind, the
-   * counter and the cursor are in its detail) and the `paged` timeline note its page leaves.
+   * **It names no tenant, so its audit row is platform-scope** (ADR-0331). A sweep is
+   * platform-wide: it walks every tenant's proofs, and a stall is about the walk, not about a row.
+   * It is filed as `tenant_id IS NULL`, which is neither a borrowed tenant (ADR-0327's rejected
+   * Option B) nor the silence this used to answer with. The figures that make the row worth reading
+   * — the kind, the counter, the cursor — were already composed by `record` for the day this became
+   * expressible. The incident itself and the `paged` timeline note still land beside it.
    */
   async onSweepStall(stall: EscalatableSweepStall): Promise<DeletionEscalationOutcome> {
     const surface = stall.surface ?? TOMBSTONE_SWEEP_SURFACE;
@@ -862,18 +861,17 @@ export class DeletionEvidenceEscalator {
     readonly attemptsWithoutAdvance?: number;
     readonly cursor?: string | null;
   }): Promise<boolean> {
-    // No tenant, no row. `meta.audit_log.tenant_id` is NOT NULL and references `meta.tenants`, so a
-    // platform-scope escalation — the sweep's — cannot leave one, and the alternative is filing it
-    // under a tenant it is not about (ADR-0327's rejected Option B). Reported through
-    // `audited: false`, which is `IntegrityEscalator.record`'s answer to the same wall; the incident
-    // and its timeline note are the records that still land.
-    if (this.opts.audit === undefined || input.tenantId === null) return false;
-    const tenantId = input.tenantId;
+    // A null tenant is now **platform scope**, not "no row" (ADR-0331): the sweep's stall is a fact
+    // about the deployment, so it is filed as `tenant_id IS NULL` rather than under a tenant it is
+    // not about (ADR-0327's rejected Option B) or dropped. The figures below — the stall kind, the
+    // counter, the cursor — were already written here for "the day a platform-scope audit row
+    // becomes expressible", and this is that day; no branch changed to accommodate them.
+    if (this.opts.audit === undefined) return false;
     try {
       await this.opts.audit.emit(
         auditEntry({
           id: randomUUID(),
-          tenantId,
+          tenantId: input.tenantId,
           occurredAt: this.now(),
           actor: auditActor({ kind: "system", userId: null }),
           operation: input.operation,

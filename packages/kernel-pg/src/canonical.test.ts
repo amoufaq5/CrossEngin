@@ -376,13 +376,22 @@ describe("policy role canonicalization", () => {
 
   /**
    * Policies that deliberately narrow `command`. Enumerated rather than skipped by predicate, so
-   * adding one is a visible edit here: each is a read grant that must not also satisfy a write's
-   * WITH CHECK, which is the only reason to leave the `ALL` default.
+   * adding one is a visible edit here.
+   *
+   * Three of them are read grants that must not also satisfy a write's WITH CHECK, which was the
+   * only reason to leave the `ALL` default until ADR-0331. The fourth is the other half of that
+   * same rule: a platform-scope **write** grant, `INSERT`-scoped precisely so it carries only a
+   * WITH CHECK and so cannot serve an UPDATE's or DELETE's USING.
    */
   const NARROWED_POLICIES: ReadonlySet<string> = new Set([
     "audit_log_platform_audit_read",
+    "audit_log_platform_audit_write",
     "tenant_tombstones_platform_audit_read",
     "gdpr_deletion_requests_platform_audit_read",
+    "forensic_chain_entries_platform_read",
+    "forensic_chain_entries_platform_write",
+    "forensic_chain_checkpoints_platform_read",
+    "forensic_chain_checkpoints_platform_write",
   ]);
 
   it("leaves every policy in the real catalog on the two defaults, bar the named exceptions", () => {

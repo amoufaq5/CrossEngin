@@ -57,7 +57,17 @@ function fixtureDefinition(): WorkflowDefinition {
     ],
     variables: [],
     timers: [],
-    signals: [],
+    // Declared: the `approve` transition triggers on it, and the declaration is the only place the
+    // delivery guarantee `meta.workflow_signals` demands can come from.
+    signals: [
+      {
+        name: "approve",
+        correlationVariable: "poNumber",
+        payloadSchemaSha256: null,
+        deliveryGuarantee: "at_least_once",
+        idempotencyKey: null,
+      },
+    ],
     initialState: "draft",
     compensationStrategy: "no_compensation",
     timeoutSeconds: 86_400,
@@ -96,6 +106,29 @@ function startedEvent(): WorkflowEvent {
       variables: { amount: 250 },
       timeoutAt: "2026-05-17T12:00:00.000Z",
     },
+    correlationId: null,
+    causationEventId: null,
+  };
+}
+
+function signalReceivedEvent(): WorkflowEvent {
+  return {
+    id: "wfe_event0002",
+    instanceId: "wfi_inst0001",
+    tenantId: TENANT,
+    sequenceNumber: 1,
+    kind: "signal_received",
+    occurredAt: "2026-05-16T12:00:01.000Z",
+    actorPrincipalId: null,
+    actorSystemId: "procurement-gateway",
+    previousState: null,
+    newState: null,
+    activityId: null,
+    signalId: "wfs_sig00001",
+    timerId: null,
+    childInstanceId: null,
+    variableName: null,
+    payload: { signalName: "approve", correlationKey: "po-1" },
     correlationId: null,
     causationEventId: null,
   };
@@ -169,13 +202,17 @@ function buildMockConnection(state: MockState): PgConnection {
   };
 }
 
-function buildReplayer(state: MockState) {
+function buildReplayer(
+  state: MockState,
+  opts: { readonly definitions?: ReadonlyMap<string, WorkflowDefinition> } = {},
+) {
   const conn = buildMockConnection(state);
   const instanceResolver = new WorkflowInstanceIdResolver(conn);
   instanceResolver.register("wfi_inst0001", INSTANCE_UUID);
   const definitionResolver = new WorkflowDefinitionIdResolver(conn);
   definitionResolver.register("wfd_def00001", "00000000-0000-4000-8000-000000000900");
-  const definitions = new Map([[fixtureDefinition().id, fixtureDefinition()]]);
+  const definitions =
+    opts.definitions ?? new Map([[fixtureDefinition().id, fixtureDefinition()]]);
   return new WorkflowReplayer({ conn, definitions, instanceResolver, definitionResolver });
 }
 
@@ -273,6 +310,26 @@ describe("WorkflowReplayer.resyncInstance", () => {
     const report = await replayer.resyncInstance("wfi_inst0001");
     expect(report.upserts.signals).toBe(1);
   });
+
+  it("binds the declared guarantee and the event's source system on the signal row", async () => {
+    const state = emptyState([startedEvent(), signalReceivedEvent()]);
+    const replayer = buildReplayer(state);
+    await replayer.resyncInstance("wfi_inst0001");
+    const insert = state.updates.find((u) =>
+      u.sql.includes("INSERT INTO meta.workflow_signals"),
+    );
+    expect(insert?.params?.[5]).toBe("at_least_once");
+    expect(insert?.params?.[6]).toBe("procurement-gateway");
+  });
+
+  it("refuses the resync, writing nothing, when the guarantee cannot be read", async () => {
+    const state = emptyState([startedEvent(), signalReceivedEvent()]);
+    const replayer = buildReplayer(state, { definitions: new Map() });
+    await expect(replayer.resyncInstance("wfi_inst0001")).rejects.toThrow(
+      /definition_unavailable/,
+    );
+    expect(state.updates).toEqual([]);
+  });
 });
 
 describe("WorkflowReplayer.verifyInstance", () => {
@@ -281,6 +338,24 @@ describe("WorkflowReplayer.verifyInstance", () => {
     const report = await replayer.verifyInstance("wfi_inst0001");
     expect(report.hasEvents).toBe(false);
     expect(report.drifted).toBe(false);
+  });
+
+  it("still answers for signals when the definition map is incomplete", async () => {
+    const state = emptyState([startedEvent(), signalReceivedEvent()]);
+    state.signals = [{ signal_id: "wfs_sig00001", status: "matched_to_instance" }];
+    const replayer = buildReplayer(state, { definitions: new Map() });
+    const report = await replayer.verifyInstance("wfi_inst0001");
+    expect(report.signals.missingIds).toEqual([]);
+    expect(report.signals.mismatchedIds).toEqual([]);
+  });
+
+  it("reports a stored signal whose status the log does not support", async () => {
+    const state = emptyState([startedEvent(), signalReceivedEvent()]);
+    state.signals = [{ signal_id: "wfs_sig00001", status: "consumed" }];
+    const replayer = buildReplayer(state);
+    const report = await replayer.verifyInstance("wfi_inst0001");
+    expect(report.signals.mismatchedIds).toEqual(["wfs_sig00001"]);
+    expect(report.drifted).toBe(true);
   });
 
   it("flags instance as drifted when stored row is missing but events exist", async () => {

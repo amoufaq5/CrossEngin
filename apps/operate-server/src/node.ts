@@ -92,7 +92,12 @@ import {
   PostgresPackVersionStore,
   buildPersistentPackSubmissionEngine,
 } from "@crossengin/marketplace-runtime-pg";
-import { requestJobCancellation } from "@crossengin/workflow-runtime-pg";
+import {
+  PostgresWorkflowDefinitionStore,
+  buildPersistentEngine,
+  requestJobCancellation,
+  surveyManifestWorkflows,
+} from "@crossengin/workflow-runtime-pg";
 import {
   DeletionReconciler,
   DeletionRunner,
@@ -143,6 +148,13 @@ import {
   type TombstoneSweepProgress,
 } from "./deletion-scheduler.js";
 import { buildAuditReadRoutes, entityFieldLookupFrom } from "./audit-read-routes.js";
+import {
+  BACKFILL_DENIED_OPERATION,
+  BACKFILL_GRANTED_OPERATION,
+  buildReadStateRoutes,
+} from "./read-state-routes.js";
+import { PostgresReadStateStore } from "./read-state-store.js";
+import { buildWorkflowCancellationRoutes } from "./workflow-cancellation-routes.js";
 import { PostgresAuditReadStore } from "./audit-read-store.js";
 import { buildNotificationTemplateRoutes } from "./notification-template-routes.js";
 import { PostgresNotificationTemplateStore } from "./notification-template-store.js";
@@ -654,7 +666,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       JSON.parse(await readFile(options.deletionCapabilities, "utf8")) as unknown,
     );
   }
-  if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
+  // `--read-state-routes` is in this list because it needs the notice source and the recipient
+  // resolver, and nothing else here. Left out, it mounted nothing and warned that it "requires a
+  // Postgres store" on a server started with `--store pg` — a refusal naming the wrong cause, which
+  // is the one thing worse than no refusal. Found by booting the real binary.
+  if (
+    (options.aiDesign ||
+      options.perTenantManifests ||
+      options.designReview ||
+      options.readStateRoutes) &&
+    conn !== undefined
+  ) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
     notificationStore = new PostgresNotificationStore(conn, schemaOpt);
     digestReadStore = new PostgresDigestStore(conn, schemaOpt);
@@ -1304,6 +1326,138 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             : {}),
           onRecordError: (err, scopeKind) =>
             console.error(`[audit] failed to record a ${scopeKind}-scoped audit read`, err),
+        }),
+      );
+    }
+  }
+
+  if (options.workflowCancelRoles.length > 0) {
+    if (conn === undefined) {
+      console.warn("[workflow] --workflow-cancel-role requires a Postgres store; skipping");
+    } else {
+      // Loaded with no tenant filter, because the engine's map is keyed by `definitionId`, which is
+      // unique table-wide: an instance's definition is determined by the id on its `instance_started`
+      // event, and tenant isolation on *instances* is enforced by the route and the canceller, not
+      // by narrowing this map. Every status is loaded, not only `published` — a missing definition
+      // makes the engine go quiet rather than raise (a due timer is skipped, a signal declined), so
+      // a map narrowed to `published` would silently strand in-flight instances of a `deprecated`
+      // definition; `startInstance` already refuses a non-published one by name.
+      const definitionStore = new PostgresWorkflowDefinitionStore(conn, schemaOpt);
+      const definitions = await definitionStore.loadEngineDefinitions({});
+      // Said out loud, because this is the degradation ADR-0329 refused to mount for. Under RLS as
+      // a non-owner role with no tenant context the load sees only platform-wide rows, so a
+      // deployment whose definitions are all tenant-scoped gets an empty map — and the route would
+      // then answer 404 for every instance, which reads as "no such instance" rather than as "this
+      // server loaded no definitions".
+      if (definitions.size === 0) {
+        console.warn(
+          "[workflow] no workflow definitions loaded: every cancellation will report an unknown" +
+            " instance. meta.workflow_definitions may be empty, or this connection's role may see" +
+            " only platform-wide rows under RLS",
+        );
+      } else {
+        console.log(`[workflow] ${definitions.size.toString()} definition(s) loaded`);
+      }
+      const bundle = buildPersistentEngine({ conn, definitions });
+      extraRouteList.push(
+        ...buildWorkflowCancellationRoutes({
+          canceller: bundle.engine,
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          allowedRoles: new Set(options.workflowCancelRoles),
+          onDecided: (result, tenantId, instanceId) =>
+            console.log(
+              `[workflow] cancel ${instanceId} (tenant ${tenantId}): ${result.outcome}`,
+            ),
+        }),
+      );
+      // A manifest workflow the engine cannot serve is the defect this survey exists to name. Under
+      // the authored model the cost of an absent definition is an *absent* workflow rather than a
+      // wrong one, so it has to be said rather than inferred from nothing happening.
+      const survey = surveyManifestWorkflows({
+        workflows: manifest.workflows,
+        publishedDefinitionKeys: [...definitions.values()]
+          .filter((d) => d.status === "published")
+          .map((d) => d.definitionKey),
+      });
+      for (const finding of survey.findings) {
+        if (!survey.unreachable.includes(finding.name)) continue;
+        console.warn(
+          `[workflow] manifest workflow '${finding.name}' (${finding.kind}) is` +
+            ` ${finding.verdict}: it will never run until a definition is published for it`,
+        );
+      }
+    }
+  }
+
+  if (options.readStateRoutes) {
+    if (conn === undefined) {
+      console.warn(
+        "[read-state] --read-state-routes requires a Postgres store (--store pg); skipping",
+      );
+    } else if (notificationStore === null) {
+      // Two conditions, two messages. Folded into the one above, this printed "requires a Postgres
+      // store" at an operator who had supplied exactly that, and the only way to find the real cause
+      // was to read this file. It is unreachable now that the flag constructs the store, which is
+      // why it names itself as a bug rather than as something to configure.
+      console.warn(
+        "[read-state] --read-state-routes has a Postgres store but no notification source was " +
+          "constructed; this is a wiring bug, not a configuration one — skipping",
+      );
+    } else if (options.readStateRoles.length === 0) {
+      // Fail-closed and said out loud. The routes would mount and refuse every request, which reads
+      // as the feature being broken rather than as ungranted.
+      console.warn(
+        "[read-state] --read-state-routes is on with no --read-state-role: every request will be refused",
+      );
+    } else {
+      const notices = notificationStore;
+      extraRouteList.push(
+        ...buildReadStateRoutes({
+          store: new PostgresReadStateStore(conn, schemaOpt),
+          notices,
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          allowedRoles: new Set(options.readStateRoles),
+          backfillRoles: new Set(options.readStateBackfillRoles),
+          unreadScanLimit: options.readStateUnreadScan,
+          // Per-recipient, the same resolver the inbox listing uses. Unwired, an unread count is
+          // tenant-wide — exactly how the listing already behaves, so the two agree either way.
+          ...(recipientResolver !== null
+            ? {
+                resolveIdentity: (tenantId: string, principalId: string) =>
+                  recipientResolver.identityFor(tenantId, principalId),
+              }
+            : {}),
+          // A granted backfill marks a whole backlog read in one call, which is ADR-0313's class:
+          // recorded *before* the write, and a failure to record refuses it. The ordinary per-notice
+          // mark is not recorded, because the read-state row **is** that record — reader, subject
+          // and tenant are one principal by construction, so a second row would protect nobody and
+          // would bury the entries ADR-0313 exists to surface under every inbox poll.
+          ...(options.readStateBackfillRoles.length > 0
+            ? {
+                auditBackfill: async (event): Promise<void> => {
+                  await requireEmitter("--read-state-backfill-role").emit(
+                    auditEntry({
+                      id: randomUUID(),
+                      tenantId: event.tenantId,
+                      occurredAt: event.at,
+                      operation: event.granted
+                        ? BACKFILL_GRANTED_OPERATION
+                        : BACKFILL_DENIED_OPERATION,
+                      entity: "NotificationReadWatermark",
+                      entityId: event.userId,
+                      actor: auditActor({ userId: event.principalId }),
+                      // The **clamped** position, which is what says how much was marked read; the
+                      // requested one may have been in the future and was not honoured.
+                      after: {
+                        readThroughAt: event.readThroughAt,
+                        roles: event.roles,
+                        granted: event.granted,
+                      },
+                    }),
+                  );
+                },
+              }
+            : {}),
         }),
       );
     }

@@ -338,9 +338,24 @@ export interface AuditReadEvent {
   readonly tenantId: string | null;
   /**
    * The reader's OWN tenant, which is not the same question as whose trail was read: a platform
-   * operator reading across tenants leaves `tenantId` null and this set. The recorder needs it
-   * because `meta.audit_log.tenant_id` is NOT NULL — without it a cross-tenant read is the one read
-   * that cannot be recorded, and so (fail-closed) the one that cannot be served.
+   * operator reading across tenants leaves `tenantId` null and this set.
+   *
+   * **A cross-tenant read is still recorded against the reader's own tenant, and the reason has
+   * changed** (ADR-0331). ADR-0313 gave a mechanical one — `meta.audit_log.tenant_id` was NOT NULL,
+   * so there was nowhere else to put it — and that reason is gone: the column is nullable now and a
+   * platform-scope row is expressible. The rule stays for the reason that was always the real one.
+   *
+   * This record is about a **person**, and that person belongs to a tenant. Filing it in their
+   * tenant's trail is what makes the read accountable to the people whose data it touched: their
+   * own `GET /v1/audit/entries` shows that somebody with a platform grant read across them. Moving
+   * it to platform scope would put it behind `app.platform_audit` — readable only by the same
+   * population that performed it — which removes the one reader the record exists for. A
+   * platform-scope row is the right home for a fact about the *deployment* (an SLO page, a stalled
+   * sweep); a privileged human's read is not one.
+   *
+   * So the fail-closed consequence stands too: a reader with no resolvable tenant still cannot
+   * read, and must not be given a platform row instead. That would admit an **unattributable**
+   * privileged read, which is worse than refusing one.
    */
   readonly readerTenantId: string | null;
   readonly principalId: string | null;

@@ -152,6 +152,7 @@ function fakeNotificationDb(): {
         .map((c) => c.trim());
       const channelParam = boundIndexes(sql, /channel = \$(\d+)/);
       const templateParam = boundIndexes(sql, /template_id = \$(\d+)/);
+      const dispatchParam = boundIndexes(sql, /(?<!d\.)dispatch_id = \$(\d+)/);
       const limitParam = boundIndexes(sql, /LIMIT \$(\d+)/) ?? 0;
       const offsetParam = boundIndexes(sql, /OFFSET \$(\d+)/) ?? 0;
       const recipientParam = boundIndexes(
@@ -176,6 +177,7 @@ function fakeNotificationDb(): {
         .filter((r) => r["tenant_id"] === currentTenant && r["tenant_id"] === tenantId)
         .filter((r) => channelParam === null || r["channel"] === p[channelParam - 1])
         .filter((r) => templateParam === null || r["template_id"] === p[templateParam - 1])
+        .filter((r) => dispatchParam === null || r["dispatch_id"] === p[dispatchParam - 1])
         .filter((r) => deliveredTo(String(r["id"])))
         .sort((a, b) => {
           const at = new Date(String(a["queued_at"])).getTime();
@@ -574,6 +576,28 @@ describe("notification-store — listForTenant", () => {
     const select = captured.find((c) => isSelect(c));
     expect(select?.sql).toContain("WHERE tenant_id = $1 AND template_id = $2");
     expect(select?.params).toEqual([TENANT_A, "quota_warning", 51, 0]);
+  });
+
+  it("filters by dispatchId with the value bound, inside the tenant predicate", async () => {
+    const { conn, captured } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{ id: "disp_one_00000001" }, { id: "disp_two_00000002" }]);
+    const page = await store.listForTenant(TENANT_A, {
+      dispatchId: "disp_two_00000002",
+      limit: 1,
+    });
+    expect(page.data.map((r) => r.dispatchId)).toEqual(["disp_two_00000002"]);
+    const select = captured.find((c) => isSelect(c));
+    expect(select?.sql).toContain("WHERE tenant_id = $1 AND dispatch_id = $2");
+    expect(select?.params).toEqual([TENANT_A, "disp_two_00000002", 2, 0]);
+  });
+
+  it("never reaches another tenant's dispatch by id", async () => {
+    const { conn } = fakeNotificationDb();
+    const store = new PostgresNotificationStore(conn);
+    await seed(store, [{ id: "disp_other_0000001", tenantId: TENANT_B }]);
+    const page = await store.listForTenant(TENANT_A, { dispatchId: "disp_other_0000001" });
+    expect(page.data).toEqual([]);
   });
 
   it("numbers parameters correctly when both filters are supplied", async () => {

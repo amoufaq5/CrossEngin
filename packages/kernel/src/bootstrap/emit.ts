@@ -428,6 +428,14 @@ function emitPolicyRole(role: string): string {
 
 export function emitRlsPolicy(table: TableDefinition, policy: RlsPolicy): string {
   const tableName = qualifyTable(table.schema, table.name);
+  // Refused before anything is built. A policy with neither clause is *legal* SQL and permits every
+  // row, and the one thing a policy must never be able to say by omission is yes.
+  if (policy.using === undefined && policy.check === undefined) {
+    throw new Error(
+      `RLS policy ${JSON.stringify(policy.name)} on ${tableName} declares neither USING nor` +
+        " WITH CHECK, which would permit every row",
+    );
+  }
   let stmt = `CREATE POLICY ${quoteIdent(policy.name)} ON ${tableName}`;
   // Every clause is written only when declared. Omitting one is not a weaker statement than writing
   // the default: `CREATE POLICY` means `AS PERMISSIVE FOR ALL TO PUBLIC` either way, which is what
@@ -442,7 +450,11 @@ export function emitRlsPolicy(table: TableDefinition, policy: RlsPolicy): string
   if (policy.roles !== undefined && policy.roles.length > 0) {
     stmt += ` TO ${policy.roles.map(emitPolicyRole).join(", ")}`;
   }
-  stmt += ` USING (${policy.using})`;
+  // `USING` is written only when declared, because `CREATE POLICY … FOR INSERT USING (…)` is
+  // refused by Postgres — an INSERT has no existing rows to filter.
+  if (policy.using !== undefined) {
+    stmt += ` USING (${policy.using})`;
+  }
   if (policy.check !== undefined) {
     stmt += ` WITH CHECK (${policy.check})`;
   }

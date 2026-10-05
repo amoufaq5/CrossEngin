@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { RETENTION_OBLIGATIONS, type RetentionObligation } from "./gdpr-deletion.js";
 // Type-only, so nothing is imported at runtime and the cycle `tombstone-assembly.ts` would otherwise
 // make does not exist. It exists to pin the restated declaration shape below to its one source.
 import type { DeletionCapabilities } from "./tombstone-assembly.js";
@@ -54,10 +55,48 @@ export type TombstoneAnchor = z.infer<typeof TombstoneAnchorSchema>;
  * The version is an **explicit field** rather than inferred from whether a declaration is present.
  * Inference would read a *removed* declaration as an older record — a tamper that downgrades itself
  * and is then checked against the rules it escaped.
+ *
+ * `v3` adds the **retention claim** (ADR-0331), for the third instance of the same defect. ADR-0330
+ * made a statutory retention expressible as a fourth attestation outcome, and the claim it produces —
+ * `retainedObligations`, `retainedReason`, `retainedDataReference` — sat on the record and in neither
+ * digest. So a stored proof could be made to say the data was kept for a different reason, or in a
+ * different place, with `contentManifestSha256` and `proofSha256` byte-identical and the chain entry
+ * untouched: exactly ADR-0323's `scope_tampered` with nothing able to see it.
+ *
+ * It is the **default for every capabilities-path assembly**, not only for a deletion that retained
+ * something. A version emitted only when there is a retention to carry would make the version a
+ * function of the data, and "nothing was lawfully retained" would then be expressed by the *absence*
+ * of a v3 tag — indistinguishable from a record written before v3 existed. That is the distinction
+ * this whole lineage exists to keep: ADR-0329 bought "we have no cache layer" versus "nobody asked",
+ * and a conditional v3 would sell back "nothing is retained" versus "this proof cannot say". A v3
+ * record signs the empty claim.
  */
-export const TOMBSTONE_PROOF_VERSIONS = ["v1", "v2"] as const;
+export const TOMBSTONE_PROOF_VERSIONS = ["v1", "v2", "v3"] as const;
 export type TombstoneProofVersion = (typeof TOMBSTONE_PROOF_VERSIONS)[number];
 export const TombstoneProofVersionSchema = z.enum(TOMBSTONE_PROOF_VERSIONS);
+
+/**
+ * Which versions' bytes cover the declaration, and which cover the retention claim.
+ *
+ * Two membership lists rather than an ordering test on the string: a version names a **domain tag**,
+ * not an ordinal, and nothing promises the next tag is a superset of this one. `>= "v2"` would quietly
+ * decide that question for a tag nobody has designed yet.
+ */
+export const DECLARATION_BEARING_PROOF_VERSIONS: readonly TombstoneProofVersion[] = Object.freeze([
+  "v2",
+  "v3",
+]);
+export const RETENTION_BEARING_PROOF_VERSIONS: readonly TombstoneProofVersion[] = Object.freeze([
+  "v3",
+]);
+
+export function proofVersionCoversDeclaration(version: TombstoneProofVersion): boolean {
+  return DECLARATION_BEARING_PROOF_VERSIONS.includes(version);
+}
+
+export function proofVersionCoversRetentionClaim(version: TombstoneProofVersion): boolean {
+  return RETENTION_BEARING_PROOF_VERSIONS.includes(version);
+}
 
 /**
  * The disposition vocabulary, restated rather than imported as a value: `tombstone-assembly.ts`
@@ -152,6 +191,19 @@ export const TombstoneRecordSchema = z
      * rather than a shape to accept.
      */
     capabilityDeclaration: TombstoneCapabilityDeclarationSchema.optional(),
+    /**
+     * Which obligations keep data back, when the proof commits to them (ADR-0331).
+     *
+     * The **structured** half of the retention claim, and the field that makes the claim signable at
+     * all: before this, the only machine-readable record of *why* data survived an Article 17 erasure
+     * was a substring of `retainedReason`'s prose, recoverable only by re-reading the attestations.
+     *
+     * Optional because v1 and v2 bytes do not cover it, and paired with `proofVersion` in both
+     * directions by the refinement below. An **empty array on a v3 record is a claim**, not a
+     * placeholder: it is the signed assertion that this deletion kept nothing, which is the one thing
+     * a v1 or v2 record can never say.
+     */
+    retainedObligations: z.array(z.enum(RETENTION_OBLIGATIONS)).optional(),
     contentManifestSha256: z.string().regex(SHA256_REGEX),
     proofSha256: z.string().regex(SHA256_REGEX),
     anchors: z.array(TombstoneAnchorSchema).min(1),
@@ -216,22 +268,81 @@ export const TombstoneRecordSchema = z
         message: "fileCount > 0 requires at least one objectStorageBucket in scope",
       });
     }
-    if (v.proofVersion === "v2" && v.capabilityDeclaration === undefined) {
+    if (proofVersionCoversDeclaration(v.proofVersion) && v.capabilityDeclaration === undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["capabilityDeclaration"],
         message:
-          "proofVersion 'v2' commits to a capabilityDeclaration; without it the digest covers a" +
-          " declaration the record does not carry",
+          `proofVersion '${v.proofVersion}' commits to a capabilityDeclaration; without it the` +
+          " digest covers a declaration the record does not carry",
       });
     }
-    if (v.proofVersion === "v1" && v.capabilityDeclaration !== undefined) {
+    if (!proofVersionCoversDeclaration(v.proofVersion) && v.capabilityDeclaration !== undefined) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["proofVersion"],
         message:
-          "a capabilityDeclaration on a 'v1' record is outside the signed bytes; declare" +
-          " proofVersion 'v2' or carry no declaration",
+          `a capabilityDeclaration on a '${v.proofVersion}' record is outside the signed bytes;` +
+          " declare proofVersion 'v2' or 'v3', or carry no declaration",
+      });
+    }
+    if (proofVersionCoversRetentionClaim(v.proofVersion)) {
+      if (v.retainedObligations === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["retainedObligations"],
+          message:
+            `proofVersion '${v.proofVersion}' commits to a retention claim; without` +
+            " retainedObligations the digest covers a claim the record does not carry",
+        });
+      } else if (v.retainedObligations.includes("none")) {
+        // `none` is the obligation enum's "no obligation", so a retention under it is not a
+        // retention. ADR-0330 refused it on both retention-bearing attestation outcomes; refusing it
+        // here too keeps the signed claim from asserting a lawful basis that says there is none.
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["retainedObligations"],
+          message: "'none' is not an obligation; a signed retention claim cannot name it",
+        });
+      } else if ((v.retainedObligations.length > 0) !== (v.retainedReason !== undefined)) {
+        // The two halves of one claim: the obligations are what a machine reads and the prose is what
+        // a person reads, and a proof that signs one without the other is a proof that says data was
+        // kept for no stated reason, or kept for a reason under no obligation. Both are the half-
+        // truths ADR-0317 refused, now inside the bytes where they would be anchored.
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["retainedObligations"],
+          message:
+            "a signed retention claim names obligations and a retainedReason together, or neither" +
+            ` (obligations: ${v.retainedObligations.length.toString()}, reason: ${
+              v.retainedReason === undefined ? "absent" : "present"
+            })`,
+        });
+      }
+    } else if (v.retainedObligations !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proofVersion"],
+        message:
+          `retainedObligations on a '${v.proofVersion}' record is outside the signed bytes;` +
+          " declare proofVersion 'v3' or carry no obligations",
+      });
+    }
+    if (
+      proofVersionCoversRetentionClaim(v.proofVersion) &&
+      v.retainedObligations !== undefined &&
+      v.retainedObligations.length === 0 &&
+      v.retainedDataReference !== undefined
+    ) {
+      // An empty claim says nothing was kept, so a pointer to where the kept data is contradicts the
+      // same sentence. Only refused on a version that *signs* the claim: on v1 and v2 the reference
+      // is prose outside the bytes and tightening it now would refuse stored records retroactively.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["retainedDataReference"],
+        message:
+          "a signed retention claim naming no obligations cannot locate retained data; the record" +
+          " claims both that nothing was kept and where it is",
       });
     }
     if (v.retainedReason !== undefined && v.retainedDataReference === undefined) {
@@ -311,7 +422,11 @@ export type DeclaredAbsenceReading =
 
 export function readDeclaredAbsences(record: TombstoneRecord): DeclaredAbsenceReading {
   const declaration = record.capabilityDeclaration;
-  if (record.proofVersion !== "v2") {
+  // Asked of the membership list and never of the string, because v3 carries the declaration too
+  // (ADR-0331). A literal `!== "v2"` here would have reported every v3 proof as having no declaration
+  // in its bytes, which is the self-downgrading misreading the explicit version field exists to stop
+  // — arrived at by the verifier rather than by a tamper.
+  if (!proofVersionCoversDeclaration(record.proofVersion)) {
     return { declarationState: "unknown_not_in_proof", reason: "v1_proof" };
   }
   if (declaration === undefined) {
@@ -321,6 +436,52 @@ export function readDeclaredAbsences(record: TombstoneRecord): DeclaredAbsenceRe
     declarationState: "covered_by_proof",
     absentSubsystems: DECLARED_SUBSYSTEMS.filter((s) => declaration[s] === "absent"),
     declaration,
+  };
+}
+
+/**
+ * What a stored tombstone says about data it lawfully kept — and whether the proof covers the answer.
+ *
+ * Deliberately the same two-state shape as `DeclaredAbsenceReading`, for the same reason. A v3
+ * record's claim is inside the signed bytes, so `covered_by_proof` carries it — including the
+ * legitimately empty case, which is the signed assertion that *nothing* was kept. A v1 or v2 record's
+ * bytes say nothing about a retention, so the reading is `unknown_not_in_proof` and carries **no
+ * claim at all**: there is no empty list for a caller to mistake for "nothing was retained", because
+ * such a record may well carry retention prose that simply was not signed. "We kept nothing" and
+ * "this proof cannot say what we kept" are the two facts ADR-0331 exists to separate.
+ */
+export type RetentionClaimReading =
+  | {
+      readonly claimState: "covered_by_proof";
+      readonly obligations: readonly RetentionObligation[];
+      readonly retainedReason: string | null;
+      readonly retainedDataReference: string | null;
+    }
+  | {
+      readonly claimState: "unknown_not_in_proof";
+      /**
+       * `pre_v3_proof` is the ordinary case: the record's bytes predate retention claims entirely,
+       * and its `retainedReason` — if it has one — is on the record's face and nowhere else.
+       * `obligations_missing` is a record labelled v3 carrying none, only reachable past the schema,
+       * and reported as its own reason rather than as an older proof for the reason the version field
+       * is explicit at all.
+       */
+      readonly reason: "pre_v3_proof" | "obligations_missing";
+    };
+
+export function readRetentionClaim(record: TombstoneRecord): RetentionClaimReading {
+  if (!proofVersionCoversRetentionClaim(record.proofVersion)) {
+    return { claimState: "unknown_not_in_proof", reason: "pre_v3_proof" };
+  }
+  const obligations = record.retainedObligations;
+  if (obligations === undefined) {
+    return { claimState: "unknown_not_in_proof", reason: "obligations_missing" };
+  }
+  return {
+    claimState: "covered_by_proof",
+    obligations: [...new Set(obligations)].sort(),
+    retainedReason: record.retainedReason ?? null,
+    retainedDataReference: record.retainedDataReference ?? null,
   };
 }
 

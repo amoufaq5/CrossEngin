@@ -6,6 +6,7 @@ import {
   DeletionScopeSchema,
   TombstoneRecordSchema,
   asCapabilityDeclaration,
+  proofVersionCoversRetentionClaim,
   type DeletionScope,
   type TombstoneAnchor,
   type TombstoneKind,
@@ -51,11 +52,13 @@ import {
  * only what was destroyed, and the retained side carries obligations and a reference with no numeric
  * field at all.
  *
- * **It moves no bytes.** `canonicalContentManifest` hashes the composed `DeletionScope` (plus the
- * declaration, under v2) and nothing else — attestations are not hashed and never were — so every
- * previously-valid input produces the digest it always did. The flip side is the limitation worth
- * stating: a *retention* is therefore outside the signed bytes, exactly as the capability declaration
- * was before ADR-0329 gave it a v2 tag. Putting it inside is a `v3` decision and is not taken here.
+ * ADR-0331 took that `v3` decision. The capabilities path emits `crossengin.tombstone.content.v3`,
+ * whose bytes carry the composed retention claim — the obligations, the prose and the reference — so
+ * rewriting why a tenant's data survived moves `contentManifestSha256`. It is the version for **every**
+ * capabilities-path assembly and not only for a deletion that kept something: a conditional version
+ * would express "nothing was retained" by the absence of a tag, which no reader can tell from a record
+ * written before the tag existed. The empty claim is signed. The `requiredSubsystems` path still emits
+ * v1, and v1 and v2 bytes are untouched, so every stored digest verifies exactly as it did.
  */
 
 /**
@@ -574,9 +577,10 @@ export type TombstoneAssembly =
        * The declaration the scope was derived from, when there was one — present iff `capabilities`
        * was supplied, so its absence means "named per call" rather than "nothing declared absent".
        *
-       * Since ADR-0329 the declaration is also **in** the record, inside the v2 signed bytes, so
+       * Since ADR-0329 the declaration is also **in** the record, inside the signed bytes, so
        * this field is a convenience rather than the only way to read it: `record.proofVersion` is
-       * `"v2"` and `readDeclaredAbsences(record)` answers from the proof itself. It is kept because
+       * `"v3"` (`"v2"` for a record written before ADR-0331) and `readDeclaredAbsences(record)`
+       * answers from the proof itself. It is kept because
        * a caller that supplied `capabilities` and wants them back should not have to know which
        * proof version the assembler chose, and because the `requiredSubsystems` path still emits v1
        * and so has no declaration in its bytes at all — there, the absence of this field and the
@@ -768,10 +772,18 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
     // tombstone verifying. So the capabilities path emits `v2` and the legacy `requiredSubsystems`
     // path stays `v1` — and the schema refuses the two mixed in either direction, so a relabelling
     // tamper cannot pass itself off as an older record.
+    //
+    // ADR-0331 moves the same path to `v3`, which adds the **retention claim** to those bytes for the
+    // reason that keeps recurring: the claim was derived from the attestations, written onto the
+    // record, and covered by neither digest — so a stored proof's answer to "why is this data still
+    // here" could be rewritten with every hash and the chain entry byte-identical. `retainedObligations`
+    // is the structured half, and the empty array is a *claim* rather than a placeholder: it is the
+    // signed assertion that nothing was kept, which v1 and v2 bytes cannot make.
     ...(declaration !== undefined
       ? {
-          proofVersion: "v2" as const,
+          proofVersion: "v3" as const,
           capabilityDeclaration: asCapabilityDeclaration(declaration),
+          retainedObligations: [...retainedObligations(parsed)],
         }
       : {}),
   };
@@ -870,6 +882,19 @@ export function retainedObligations(
  * compose to. A drift means the record and its evidence disagree — which is the question an auditor
  * actually asks, and which `verifyTombstoneHashes` alone cannot answer, because it only proves the
  * record is internally consistent with whatever it was given.
+ *
+ * On a **v3** record it also compares the obligations, and that closes a hole the scope comparison
+ * structurally cannot see (ADR-0331). A retention-bearing attestation contributes *nothing* to a
+ * `DeletionScope` — by design, since the figures describe only what was destroyed — so deleting one
+ * from the stored `attestations` column left the recomposed scope identical, the record's own digests
+ * untouched, and both detectors satisfied. The record's signed `retainedObligations` is the first
+ * thing that disagrees with evidence missing a retention.
+ *
+ * The **prose is deliberately not compared**, here, even though v3 signs it. `retainedReason` is
+ * rendered by `retainedReasonFor` in the attestations' own order, so comparing it would make a
+ * mismatch depend on array ordering and on a wording choice; the digest already covers it exactly.
+ * Two detectors, each asserting what it can assert without a false positive — and a false positive
+ * here pages somebody at `sev1` (ADR-0324).
  */
 export function tombstoneMatchesAttestations(
   record: TombstoneRecord,
@@ -877,8 +902,19 @@ export function tombstoneMatchesAttestations(
 ): boolean {
   const recomposed = DeletionScopeSchema.safeParse(composeDeletionScope(attestations));
   if (!recomposed.success) return false;
+  if (
+    JSON.stringify(canonicalScope(recomposed.data)) !== JSON.stringify(canonicalScope(record.scope))
+  ) {
+    return false;
+  }
+  if (!proofVersionCoversRetentionClaim(record.proofVersion)) return true;
+  const claimed = record.retainedObligations;
+  // Only reachable past `TombstoneRecordSchema`, which pairs the field with the version. A v3 record
+  // with no obligations at all does not agree with any evidence, including none.
+  if (claimed === undefined) return false;
   return (
-    JSON.stringify(canonicalScope(recomposed.data)) === JSON.stringify(canonicalScope(record.scope))
+    JSON.stringify([...new Set(claimed)].sort()) ===
+    JSON.stringify([...retainedObligations(attestations)])
   );
 }
 

@@ -119,7 +119,7 @@ function tombstoneFindingOf(
 
 interface EmittedEntry {
   readonly operation: string;
-  readonly tenantId: string;
+  readonly tenantId: string | null;
   readonly entity: string;
   readonly entityId: string | null;
   readonly after: Record<string, unknown> | null;
@@ -176,7 +176,7 @@ function harness(
   const audit = {
     emit: async (entry: {
       operation: string;
-      tenantId: string;
+      tenantId: string | null;
       entity: string;
       entityId: string | null;
       after: Record<string, unknown> | null;
@@ -1331,19 +1331,34 @@ describe("onSweepStall (ADR-0329)", () => {
     expect(outcome.subject.kind).toBe("sweep");
   });
 
-  it("leaves no audit row, and says so rather than dropping it silently", async () => {
+  it("leaves a PLATFORM-scope audit row, carrying the stall figures (ADR-0331)", async () => {
     const h = harness();
     const outcome = await h.escalator.onSweepStall(STALL);
-    // `meta.audit_log.tenant_id` is NOT NULL and references `meta.tenants`. A sweep walks every
-    // tenant's proofs and a stall is about the walk, so there is no tenant to file it under —
-    // the same wall ADR-0327 found for the SLO escalator. Filing it under a borrowed tenant would
-    // be ADR-0327's rejected Option B.
-    expect(outcome.audited).toBe(false);
-    expect(h.emitted).toEqual([]);
-    // The page still went out and the incident is still declared: the absence is the row, not the
-    // escalation.
+    // A sweep walks every tenant's proofs, so a stall is about the walk and not about a row. It is
+    // filed as `tenant_id IS NULL` — not under a borrowed tenant (ADR-0327's rejected Option B)
+    // and no longer dropped. The figures were already composed here for this day.
+    expect(outcome.audited).toBe(true);
+    expect(h.emitted).toHaveLength(1);
+    expect(h.emitted[0]?.tenantId).toBeNull();
+    expect(h.emitted[0]?.after).toMatchObject({
+      stallKind: STALL.kind,
+      attemptsWithoutAdvance: STALL.attemptsWithoutAdvance,
+      cursor: STALL.cursor,
+    });
     expect(outcome.incidentId).toBe(INC);
     expect(h.pages).toHaveLength(1);
+  });
+
+  it("still reports audited=false when no emitter is wired", async () => {
+    const h = harness({ audit: "off" });
+    expect((await h.escalator.onSweepStall(STALL)).audited).toBe(false);
+  });
+
+  it("reports audited=false when the platform row cannot be written, without failing the escalation", async () => {
+    const h = harness({ audit: "throws" });
+    const outcome = await h.escalator.onSweepStall(STALL);
+    expect(outcome.action).toBe("declared");
+    expect(outcome.audited).toBe(false);
   });
 
   it("reports a failed declaration rather than throwing, so the next tick retries", async () => {
@@ -1439,11 +1454,14 @@ describe("onSweepRecovered (ADR-0329)", () => {
     expect(outcome.action).toBe("closed_out");
   });
 
-  it("leaves no audit row either, for the same want of a tenant", async () => {
+  it("leaves a platform-scope audit row for the recovery too", async () => {
     const h = harness({ open: incidentOf(INC, "sev2") });
     const outcome = await h.escalator.onSweepRecovered();
-    expect(outcome.audited).toBe(false);
-    expect(h.emitted).toEqual([]);
+    expect(outcome.audited).toBe(true);
+    expect(h.emitted).toHaveLength(1);
+    expect(h.emitted[0]?.tenantId).toBeNull();
+    // The grade is read off the record rather than re-derived, which is unchanged by the scope.
+    expect(h.emitted[0]?.after).toMatchObject({ severity: "sev2" });
   });
 
   it("reports a failed close-out rather than claiming the episode closed", async () => {

@@ -1,4 +1,4 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { requireIsoInstant, type PgConnection } from "@crossengin/kernel-pg";
 import type { EventLog } from "@crossengin/workflow-runtime";
 import type { WorkflowEvent } from "@crossengin/workflow-engine";
 
@@ -12,7 +12,14 @@ interface Row {
   readonly tenant_id: string;
   readonly sequence_number: number;
   readonly kind: string;
-  readonly occurred_at: string;
+  /**
+   * `unknown`, not `string`: node-postgres hands this `TIMESTAMPTZ` back as a `Date`, so typing it
+   * `string` put a `Date` into `WorkflowEvent.occurredAt` — and from there into every timestamp the
+   * projection derives from an event (`startedAt`, `completedAt`, `timeoutAt`, …), each of which the
+   * contract declares as ISO text. Verified live. It only ever read as *correct* because the drift
+   * comparison normalises both of its sides (ADR-0330); nothing was defending the contract here.
+   */
+  readonly occurred_at: unknown;
   readonly actor_principal_id: string | null;
   readonly actor_system_id: string | null;
   readonly previous_state: string | null;
@@ -52,7 +59,7 @@ function rowToEvent(row: Row): WorkflowEvent {
     tenantId: row.tenant_id,
     sequenceNumber: row.sequence_number,
     kind: row.kind as WorkflowEvent["kind"],
-    occurredAt: row.occurred_at,
+    occurredAt: requireIsoInstant(row.occurred_at, "occurred_at"),
     actorPrincipalId: row.actor_principal_id,
     actorSystemId: row.actor_system_id,
     previousState: row.previous_state,

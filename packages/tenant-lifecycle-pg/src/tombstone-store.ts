@@ -77,6 +77,12 @@ export const TOMBSTONE_COLUMNS = [
   // because the record is correct at that point — the forgery would be introduced by the read.
   "proof_version",
   "capability_declaration",
+  // ADR-0331, and load-bearing for the same reason as the two above: a v3 row read back without its
+  // obligations is a v3 label with nothing to hash, so `contentManifestSubjectOf` yields no subject,
+  // `verifyTombstoneHashes` answers `contentManifestOk: false`, and `verifyStoredEvidence` reports
+  // `scope_tampered` on an honest proof — then escalates it at `sev1` (ADR-0324). The forgery would be
+  // introduced by the read; `assertWritable` passes, because the record is correct when it is written.
+  "retained_obligations",
   "chain_entry_hash",
   "chain_sequence_number",
 ] as const;
@@ -306,7 +312,8 @@ export class PostgresTombstoneStore {
           c === "scope" ||
           c === "anchors" ||
           c === "attestations" ||
-          c === "capability_declaration"
+          c === "capability_declaration" ||
+          c === "retained_obligations"
         )
           return `${n}::jsonb`;
         if (c === "chain_sequence_number") return `${n}::integer`;
@@ -336,6 +343,10 @@ export class PostgresTombstoneStore {
           stored.capabilityDeclaration === undefined
             ? null
             : jsonOf(stored.capabilityDeclaration),
+          // `null` and `'[]'` are different facts, so the empty array is written as an array. NULL
+          // means this record's bytes do not cover a retention claim; `[]` is the v3 claim that
+          // nothing was lawfully kept.
+          stored.retainedObligations === undefined ? null : jsonOf(stored.retainedObligations),
           entry.entryHash,
           entry.sequenceNumber,
         ],
@@ -533,6 +544,11 @@ export function rowToStoredTombstone(row: Record<string, unknown>): StoredTombst
   if (declaration !== null && declaration !== undefined) {
     candidate["capabilityDeclaration"] = declaration;
   }
+  // `Array.isArray` and not a truthiness test (ADR-0331): `[]` is a v3 record's signed claim that
+  // nothing was retained, and dropping it would relabel the record as carrying no claim — which the
+  // schema then refuses, and which a verifier that tolerated it would hash under the wrong tag.
+  const obligations = parseJson(row["retained_obligations"]);
+  if (Array.isArray(obligations)) candidate["retainedObligations"] = obligations;
 
   const record = TombstoneRecordSchema.parse(candidate);
   const attestations = parseJson(row["attestations"]);

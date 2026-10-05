@@ -316,7 +316,11 @@ export function expressionRequestsFor(
     if (idx.where !== undefined) out.push({ table: table.name, expr: idx.where });
   }
   for (const policy of table.rls?.policies ?? []) {
-    out.push({ table: table.name, expr: policy.using });
+    // `using` is absent on an INSERT-scoped policy, which Postgres refuses to let carry one.
+    // `comparePredicate` already reads an undeclared side correctly; what it must not be handed is
+    // an `undefined` keyed into the rendering map, where it would collide with every other policy
+    // on the table that also declares nothing.
+    if (policy.using !== undefined) out.push({ table: table.name, expr: policy.using });
     if (policy.check !== undefined) out.push({ table: table.name, expr: policy.check });
   }
   // A table-level CHECK is a boolean expression over the table's columns, exactly like an index

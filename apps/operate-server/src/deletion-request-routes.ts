@@ -583,8 +583,10 @@ function buildStrandedHandler(ctx: DeletionRequestRoutesContext): Handler {
     }
     const reconciler = ctx.reconciler;
     if (reconciler === undefined) return json(501, { error: "reconciliation_unavailable" });
-    // Same rule as `unproven`: the listing spans tenants, `meta.audit_log.tenant_id` is NOT NULL, and
-    // an unrecordable privileged read is refused rather than served unaudited (ADR-0313).
+    // Same rule as `unproven`: a privileged read is recorded against the *reader's* own tenant, and
+    // an unrecordable one is refused rather than served unaudited (ADR-0313). A platform-scope audit
+    // row exists since ADR-0331 and is deliberately NOT used here — see `AuditReadEvent.readerTenantId`
+    // for why a human's read belongs in their tenant's trail and an unattributable one is refused.
     const readerTenant = principal.tenantId;
     if (readerTenant === null) {
       return json(503, {
@@ -638,10 +640,11 @@ function buildUnprovenHandler(ctx: DeletionRequestRoutesContext): Handler {
     }
     const reconciler = ctx.reconciler;
     if (reconciler === undefined) return json(501, { error: "reconciliation_unavailable" });
-    // Recorded against the reader's own tenant, because `meta.audit_log.tenant_id` is NOT NULL and
-    // the findings may span several tenants or none. A reader with no resolvable tenant therefore
-    // cannot be recorded, and ADR-0313's rule is that an unrecordable privileged read is refused
-    // rather than served unaudited.
+    // Recorded against the reader's own tenant, although the findings may span several tenants or
+    // none. Not because nowhere else is possible — ADR-0331 made a platform-scope row expressible —
+    // but because this record is about a person, and their tenant's trail is where it is accountable
+    // (see `AuditReadEvent.readerTenantId`). A reader with no resolvable tenant is refused rather
+    // than recorded at platform scope, which would be an unattributable privileged read.
     const readerTenant = principal.tenantId;
     if (readerTenant === null) {
       return json(503, {
@@ -726,8 +729,9 @@ function buildTombstoneSweepHandler(ctx: DeletionRequestRoutesContext): Handler 
     if (reconciler?.auditTombstones === undefined) {
       return json(501, { error: "reconciliation_unavailable" });
     }
-    // ADR-0313's rule, as on `unproven`: the findings span tenants or none, `meta.audit_log.tenant_id`
-    // is NOT NULL, and an unrecordable privileged read is refused rather than served unaudited.
+    // ADR-0313's rule, as on `unproven`: the findings span tenants or none, the read is recorded
+    // against the reader's own tenant, and an unrecordable privileged read is refused rather than
+    // served unaudited. ADR-0331 does not change it; see `AuditReadEvent.readerTenantId`.
     const readerTenant = principal.tenantId;
     if (readerTenant === null) {
       return json(503, {

@@ -1,4 +1,8 @@
-import type { PipelineExecution, StageResult } from "@crossengin/api-gateway";
+import {
+  PipelineExecutionSchema,
+  type PipelineExecution,
+  type StageResult,
+} from "@crossengin/api-gateway";
 import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
 import { describe, expect, it, vi } from "vitest";
 
@@ -62,6 +66,11 @@ interface MockState {
   readonly executions: Map<string, PipelineExecution>;
   readonly decisionIds: Set<string>;
   readonly recentIds: string[];
+  /**
+   * Hand `started_at` / `completed_at` back as `Date`s, which is what node-postgres actually does
+   * for a `TIMESTAMPTZ`. Default off so the existing cases keep exercising the libpq-text path.
+   */
+  readonly timestampsAsDates?: boolean;
 }
 
 function buildMock(state: MockState): PgConnection {
@@ -76,8 +85,9 @@ function buildMock(state: MockState): PgConnection {
             {
               request_id: ex.requestId,
               tenant_id: ex.tenantId,
-              started_at: ex.startedAt,
-              completed_at: ex.completedAt,
+              started_at: state.timestampsAsDates === true ? new Date(ex.startedAt) : ex.startedAt,
+              completed_at:
+                state.timestampsAsDates === true ? new Date(ex.completedAt) : ex.completedAt,
               total_duration_ms: ex.totalDurationMs,
               final_stage: ex.finalStage,
               final_outcome: ex.finalOutcome,
@@ -288,6 +298,19 @@ describe("GatewayReplayer.getExecution", () => {
     expect(ex?.requestId).toBe("req_test00000001");
     expect(ex?.stages).toHaveLength(2);
     expect(ex?.tenantId).toBe(TENANT);
+  });
+
+  // `started_at` / `completed_at` arrive as `Date`s from a real connection, and this read hands them
+  // straight out inside a `PipelineExecution`, whose schema declares ISO text.
+  it("renders Date timestamps as ISO text a PipelineExecution can hold", async () => {
+    const state: MockState = { ...emptyState(), timestampsAsDates: true };
+    state.executions.set("req_test00000001", fixtureExecution());
+    const replayer = new GatewayReplayer({ conn: buildMock(state) });
+    const ex = await replayer.getExecution("req_test00000001");
+    expect(typeof ex?.startedAt).toBe("string");
+    expect(ex?.startedAt).toBe(fixtureExecution().startedAt);
+    expect(ex?.completedAt).toBe(fixtureExecution().completedAt);
+    expect(PipelineExecutionSchema.safeParse(ex).success).toBe(true);
   });
 
   it("converts numeric strings for bytesIn/bytesOut", async () => {

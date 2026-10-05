@@ -107,8 +107,19 @@ export const indexReadState = (
   return { readDispatchIds, readThroughMs };
 };
 
+/**
+ * The two fields "is this unread" actually reads.
+ *
+ * Named and widened to here rather than taking a whole `NotificationDispatch`, because the inbox
+ * *projection* a reader is served deliberately omits `audienceJson` and `variablesSha256` (PII
+ * minimisation), so a caller answering this question for a reader never holds a full dispatch. The
+ * alternative was a second copy of the rule beside the projection, which is how the two come to
+ * disagree. Every existing caller passing a `NotificationDispatch` still satisfies it.
+ */
+export type ReadStateProbe = Pick<NotificationDispatch, "id" | "queuedAt">;
+
 export const isUnread = (
-  dispatch: NotificationDispatch,
+  dispatch: ReadStateProbe,
   index: ReadStateIndex,
 ): boolean => {
   if (index.readDispatchIds.has(dispatch.id)) return false;
@@ -121,17 +132,19 @@ export const isUnread = (
   return queuedMs > index.readThroughMs;
 };
 
-export interface ReadPartition {
-  readonly read: readonly NotificationDispatch[];
-  readonly unread: readonly NotificationDispatch[];
+export interface ReadPartitionOf<T extends ReadStateProbe> {
+  readonly read: readonly T[];
+  readonly unread: readonly T[];
 }
 
-export const partitionByRead = (
-  dispatches: readonly NotificationDispatch[],
+export type ReadPartition = ReadPartitionOf<NotificationDispatch>;
+
+export const partitionByRead = <T extends ReadStateProbe>(
+  dispatches: readonly T[],
   index: ReadStateIndex,
-): ReadPartition => {
-  const read: NotificationDispatch[] = [];
-  const unread: NotificationDispatch[] = [];
+): ReadPartitionOf<T> => {
+  const read: T[] = [];
+  const unread: T[] = [];
   for (const dispatch of dispatches) {
     if (isUnread(dispatch, index)) unread.push(dispatch);
     else read.push(dispatch);
@@ -140,7 +153,7 @@ export const partitionByRead = (
 };
 
 export const countUnread = (
-  dispatches: readonly NotificationDispatch[],
+  dispatches: readonly ReadStateProbe[],
   index: ReadStateIndex,
 ): number => {
   let count = 0;

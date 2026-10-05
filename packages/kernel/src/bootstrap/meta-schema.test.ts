@@ -1289,10 +1289,17 @@ describe("table column shapes", () => {
     expect(col("proof_version")?.type).toBe("TEXT");
     expect(col("proof_version")?.notNull).toBe(true);
     expect(col("proof_version")?.default).toBe("'v1'");
-    expect(col("proof_version")?.check).toBe("proof_version IN ('v1', 'v2')");
+    expect(col("proof_version")?.check).toBe("proof_version IN ('v1', 'v2', 'v3')");
     // Nullable, and paired with the version by the contract: v2 must carry it, v1 must not.
     expect(col("capability_declaration")?.type).toBe("JSONB");
     expect(col("capability_declaration")?.notNull).toBeUndefined();
+    // ADR-0331. Nullable with **no default**: NULL means "these bytes do not cover a retention
+    // claim" (every v1 and v2 row), while `[]` is the v3 claim that nothing was kept. A default
+    // would make every pre-v3 row read back as a signed empty claim — and the contract pairs the
+    // field with the version, so those rows would then fail to parse at all.
+    expect(col("retained_obligations")?.type).toBe("JSONB");
+    expect(col("retained_obligations")?.notNull).toBeUndefined();
+    expect(col("retained_obligations")?.default).toBeUndefined();
   });
 
   it("META_TENANT_CREDITS names its issuer without making that issuer undeletable", () => {
@@ -1449,7 +1456,7 @@ describe("table column shapes", () => {
 
   it("META_AUDIT_LOG splits the platform read off as SELECT rather than widening isolation", () => {
     const policies = META_AUDIT_LOG.rls?.policies ?? [];
-    expect(policies).toHaveLength(2);
+    expect(policies).toHaveLength(3);
     const isolation = policies.find((p) => p.name === "audit_log_tenant_isolation");
     const platform = policies.find((p) => p.name === "audit_log_platform_audit_read");
     // The isolation half stays at the `ALL` default and never mentions the flag: an elevated
@@ -1463,6 +1470,31 @@ describe("table column shapes", () => {
     // pooled connection that previously served a tenant — adding the SELECT policy alone does not
     // help, because the other policy's cast still evaluates.
     expect(isolation?.using).toContain("NULLIF(");
+  });
+
+  it("META_AUDIT_LOG opens platform scope by an INSERT policy on its own grant", () => {
+    // ADR-0331. `tenant_id` is nullable now, which is what makes a platform-scope row expressible
+    // at all — three escalators previously wrote nothing because the row could not exist.
+    const tenantId = META_AUDIT_LOG.columns.find((c) => c.name === "tenant_id");
+    expect(tenantId?.notNull).toBeUndefined();
+    // The foreign key stays: a NULL satisfies it, and a non-NULL must still name a real tenant.
+    expect(tenantId?.references?.table).toBe("tenants");
+
+    const policies = META_AUDIT_LOG.rls?.policies ?? [];
+    const write = policies.find((p) => p.name === "audit_log_platform_audit_write");
+    const platform = policies.find((p) => p.name === "audit_log_platform_audit_read");
+    expect(write?.command).toBe("INSERT");
+    // Postgres refuses `USING` on a `FOR INSERT` policy — there are no existing rows to filter —
+    // so the clause must be absent rather than duplicated from the check.
+    expect(write?.using).toBeUndefined();
+    // Scoped to platform rows, so the write grant buys no access to any tenant's chain.
+    expect(write?.check).toContain("tenant_id IS NULL");
+    // Its own grant. Reusing the read flag would let a reader of the trail forge an entry about
+    // their own conduct, which is ADR-0313's hole arriving from the other direction.
+    expect(write?.check).toContain("app.platform_audit_write");
+    expect(write?.check).not.toContain("'app.platform_audit'");
+    // And the read policy still carries no `WITH CHECK`, which is what keeps it a read.
+    expect(platform?.check).toBeUndefined();
   });
 
   it("META_INCIDENT_COMMUNICATIONS holds its two cross-column rules in the database", () => {

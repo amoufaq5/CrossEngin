@@ -10,7 +10,7 @@ import {
 import { PostgresChainLogReader, PostgresChainLogStore, advisoryKeyFor } from "./chain-log-store.js";
 import { keyStoreChainSigner } from "./signer.js";
 import { fakeChainPg } from "./test-fakes.js";
-import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
+import { SET_PLATFORM_AUDIT_WRITE_SQL, SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
@@ -300,6 +300,9 @@ describe("PostgresChainLogStore.appendWithin", () => {
         return conn.query(sql, params);
       }) as PgConnection["query"],
     };
+    // The context is the caller's to set, and without it the insert is refused — by the fake and by
+    // the real policy alike, since a tenant row only ever passes the isolation policy.
+    await spy.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
     await store.appendWithin(spy, {
       tenantId: TENANT_A,
       kind: "audit_event",
@@ -324,5 +327,138 @@ describe("PostgresChainLogStore.appendWithin", () => {
         }),
       ),
     ).rejects.toThrow();
+  });
+});
+
+/**
+ * Every read binds its scope, so a deployment connected as the table owner — for whom RLS is
+ * bypassed — cannot be served another scope's chain. Asserted on the recorded SQL and parameters as
+ * well as on the rows, because the rows are only right while the fake is right.
+ */
+describe("scope predicates on reads", () => {
+  function recordingConn(): { conn: PgConnection; seen: { sql: string; params: unknown[] }[] } {
+    const inner = fakeChainPg();
+    const seen: { sql: string; params: unknown[] }[] = [];
+    const wrap = (c: PgConnection): PgConnection => ({
+      ...c,
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        seen.push({ sql, params: [...(params ?? [])] });
+        return c.query(sql, params);
+      }) as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+        inner.transaction((tx) => fn(wrap(tx)))) as PgConnection["transaction"],
+    });
+    return { conn: wrap(inner), seen };
+  }
+
+  function selects(seen: { sql: string; params: unknown[] }[]) {
+    return seen.filter((q) => q.sql.includes("SELECT") && q.sql.includes("forensic_chain_entries"));
+  }
+
+  it("keeps a tenant's chain out of the platform's, and the platform's out of a tenant's", async () => {
+    const { signer } = await newSignerAndKey();
+    const conn = fakeChainPg();
+    const store = new PostgresChainLogStore(conn, signer);
+    const platform0 = await append(store, null, 0);
+    const tenant0 = await append(store, TENANT_A, 0);
+
+    // The defect this pins: the tenant's FIRST entry took sequence 1 and chained onto the
+    // platform tail, because `tailWithin` read the global maximum.
+    expect(platform0.sequenceNumber).toBe(0);
+    expect(tenant0.sequenceNumber).toBe(0);
+    expect(tenant0.priorEntryHash).toBe(GENESIS_HASH);
+
+    const reader = new PostgresChainLogReader(conn);
+    expect(await reader.loadChain(null)).toHaveLength(1);
+    expect(await reader.loadChain(TENANT_A)).toHaveLength(1);
+    expect(await reader.tail(null)).toEqual({ sequenceNumber: 0, entryHash: platform0.entryHash });
+    expect(await reader.tail(TENANT_A)).toEqual({ sequenceNumber: 0, entryHash: tenant0.entryHash });
+    // Two independent single-entry chains, each valid — where one interleaved chain of
+    // [0, 0] reports a sequence gap.
+    expect(await reader.verify(null)).toEqual({ valid: true, brokenAt: null });
+    expect(await reader.verify(TENANT_A)).toEqual({ valid: true, brokenAt: null });
+  });
+
+  it("binds the tenant as an equality parameter, which is the indexable form", async () => {
+    const { conn, seen } = recordingConn();
+    const reader = new PostgresChainLogReader(conn);
+    await reader.loadChain(TENANT_A);
+    await reader.loadFrom(TENANT_A, 7);
+    await reader.tail(TENANT_A);
+    const reads = selects(seen);
+    expect(reads).toHaveLength(3);
+    for (const q of reads) {
+      expect(q.sql).toMatch(/tenant_id = \$\d/);
+      expect(q.params).toContain(TENANT_A);
+    }
+    expect(reads[1]?.params).toEqual([7, TENANT_A]);
+  });
+
+  it("asks for the platform scope as IS NULL, since `tenant_id = NULL` is never true", async () => {
+    const { conn, seen } = recordingConn();
+    const reader = new PostgresChainLogReader(conn);
+    await reader.loadChain(null);
+    await reader.loadFrom(null, 7);
+    await reader.tail(null);
+    const reads = selects(seen);
+    expect(reads).toHaveLength(3);
+    for (const q of reads) {
+      expect(q.sql).toContain("tenant_id IS NULL");
+      expect(q.params).not.toContain(null);
+    }
+    expect(reads[1]?.params).toEqual([7]);
+  });
+});
+
+describe("the platform write elevation", () => {
+  it("is set for a platform append and never for a tenant one", async () => {
+    const { signer } = await newSignerAndKey();
+    const inner = fakeChainPg();
+    const seen: string[] = [];
+    const conn: PgConnection = {
+      ...inner,
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+        inner.transaction((tx) =>
+          fn({
+            ...tx,
+            query: (async (sql: string, params?: readonly unknown[]) => {
+              seen.push(sql);
+              return tx.query(sql, params);
+            }) as PgConnection["query"],
+          }),
+        )) as PgConnection["transaction"],
+    };
+    const store = new PostgresChainLogStore(conn, signer);
+
+    await append(store, null, 0);
+    expect(seen.some((s) => s.includes("app.platform_audit_write"))).toBe(true);
+    expect(seen.some((s) => s.includes("app.current_tenant_id"))).toBe(false);
+
+    seen.length = 0;
+    await append(store, TENANT_A, 0);
+    expect(seen.some((s) => s.includes("app.current_tenant_id"))).toBe(true);
+    // The narrower elevation is never widened: a tenant append cannot reach the platform chain.
+    expect(seen.some((s) => s.includes("app.platform_audit_write"))).toBe(false);
+  });
+
+  it("is the caller's to set on appendWithin, and the insert is refused without it", async () => {
+    const { signer } = await newSignerAndKey();
+    const conn = fakeChainPg();
+    const store = new PostgresChainLogStore(conn, signer);
+    const input = {
+      tenantId: null,
+      kind: "security_event" as const,
+      actorReference: "system:integrity",
+      recordedAt: AT,
+      payload: "platform",
+    };
+    await expect(conn.transaction((tx) => store.appendWithin(tx, input))).rejects.toThrow(
+      /row-level security/,
+    );
+    const entry = await conn.transaction(async (tx) => {
+      await tx.query(SET_PLATFORM_AUDIT_WRITE_SQL);
+      return store.appendWithin(tx, input);
+    });
+    expect(entry.sequenceNumber).toBe(0);
   });
 });

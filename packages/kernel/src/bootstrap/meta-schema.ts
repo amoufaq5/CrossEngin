@@ -312,7 +312,17 @@ export const META_AUDIT_LOG: TableDefinition = {
   name: "audit_log",
   columns: [
     { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
-    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    // NULL is **platform scope**: a fact about the deployment rather than about one tenant.
+    //
+    // Three escalation paths produce them and not one can honestly name a tenant — an SLO surface
+    // is not a tenant, the platform forensic chain has none, and a sweep that walks every tenant's
+    // proofs is about the walk rather than about a row. So each of them wrote **nothing at all**:
+    // the row was structurally impossible, which is why ADR-0327 had to put the page on the
+    // incident's timeline instead and why "it cannot be recorded" was stated as a constraint in
+    // four places rather than fixed in one.
+    //
+    // The foreign key stays: a NULL satisfies it, and a non-NULL still has to name a real tenant.
+    { name: "tenant_id", type: "UUID", references: TENANT_FK },
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "actor", type: "JSONB", notNull: true },
     { name: "operation", type: "TEXT", notNull: true },
@@ -360,6 +370,28 @@ export const META_AUDIT_LOG: TableDefinition = {
         name: "audit_log_platform_audit_read",
         command: "SELECT",
         using: "current_setting('app.platform_audit', true) = 'on'",
+      },
+      {
+        // The only route to a platform-scope row, and every part of it is load-bearing.
+        //
+        // **Its own GUC**, because `app.platform_audit` above is the cross-tenant *read* grant:
+        // reusing it would let a reader of the trail forge an entry claiming a page was delivered.
+        // That is precisely the failure ADR-0313 split one policy into two to prevent, arriving
+        // from the other direction — and the population that holds the read grant is the one whose
+        // own conduct these rows record.
+        //
+        // **`INSERT`-scoped**, because an INSERT policy carries only `WITH CHECK` and so is
+        // structurally incapable of serving as an `UPDATE`'s or `DELETE`'s `USING`. The table stays
+        // append-only at the policy as well as in `PostgresAuditEmitter`.
+        //
+        // **`tenant_id IS NULL` inside the check**, so holding this elevation buys no access to any
+        // *tenant's* chain: the isolation policy remains the only route to a tenant row and it
+        // still demands that tenant's context. All eight directions were verified live as a
+        // non-owner role, including the two that matter most — a read elevation cannot insert, and
+        // this write elevation cannot reach a tenant.
+        name: "audit_log_platform_audit_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
       },
     ],
   },
@@ -3830,7 +3862,7 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
       type: "TEXT",
       notNull: true,
       default: "'v1'",
-      check: "proof_version IN ('v1', 'v2')",
+      check: "proof_version IN ('v1', 'v2', 'v3')",
     },
     /**
      * The deployment's capability declaration, inside the v2 signed bytes (ADR-0329).
@@ -3840,6 +3872,16 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
      * populated table is manual (ADR-0299) and the schema refuses both mixtures already.
      */
     { name: "capability_declaration", type: "JSONB" },
+    /**
+     * The obligations keeping data back, inside the v3 signed bytes (ADR-0331).
+     *
+     * Nullable with **no default**, which is the whole decision. NULL means "this record's bytes do
+     * not cover a retention claim", which is true of every v1 and v2 row; `'[]'::jsonb` is the v3
+     * claim that nothing was lawfully kept. A `DEFAULT '[]'::jsonb` would make every pre-v3 row
+     * read back as a signed empty claim — ADR-0328's "a default is applied to silence" — and since
+     * the contract pairs the field with the version, those rows would then fail to parse at all.
+     */
+    { name: "retained_obligations", type: "JSONB" },
     /** The chain entry this record was anchored by, written in the same transaction (ADR-0286). */
     {
       name: "chain_entry_hash",
@@ -6743,8 +6785,16 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
       check:
         "status IN ('draft', 'in_review', 'published', 'deprecated', 'retired')",
     },
-    { name: "states", type: "JSONB", notNull: true },
-    { name: "transitions", type: "JSONB", notNull: true },
+    // The contract's cardinality floors, in the database. A `states: '[]'` row was accepted live
+    // and then re-parse-failed on read — an ADR-0289 finding the table could simply have refused.
+    // Cheap to declare now that ADR-0330 compares a column-level CHECK rather than ignoring it.
+    { name: "states", type: "JSONB", notNull: true, check: "jsonb_array_length(states) BETWEEN 2 AND 200" },
+    {
+      name: "transitions",
+      type: "JSONB",
+      notNull: true,
+      check: "jsonb_array_length(transitions) BETWEEN 1 AND 500",
+    },
     { name: "variables", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "timers", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
     { name: "signals", type: "JSONB", notNull: true, default: "'[]'::jsonb" },
@@ -6787,6 +6837,28 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
       columns: ["tenant_id", "definition_key", "version"],
     },
   ],
+  // The three rules the contract enforced in `superRefine` and the table did not. Each was proved
+  // live by inserting the row it should refuse, before it was declared here.
+  constraints: [
+    {
+      kind: "check",
+      name: "workflow_definitions_four_eyes_check",
+      // A published row where the author approved their own definition was accepted. Cross-column,
+      // so it can only live at the table level.
+      expression: "published_by IS NULL OR published_by <> created_by",
+    },
+    {
+      kind: "check",
+      name: "workflow_definitions_published_fields_check",
+      expression:
+        "status <> 'published' OR (published_at IS NOT NULL AND published_by IS NOT NULL)",
+    },
+    {
+      kind: "check",
+      name: "workflow_definitions_deprecated_fields_check",
+      expression: "status <> 'deprecated' OR deprecated_at IS NOT NULL",
+    },
+  ],
   indexes: [
     {
       name: "idx_workflow_definitions_tenant_key",
@@ -6795,6 +6867,21 @@ export const META_WORKFLOW_DEFINITIONS: TableDefinition = {
     { name: "idx_workflow_definitions_status", columns: ["status"] },
     { name: "idx_workflow_definitions_created_by", columns: ["created_by"] },
     { name: "idx_workflow_definitions_published_by", columns: ["published_by"] },
+    {
+      // Two **platform-wide** rows could claim one `(definition_key, version)`, because the unique
+      // constraint above leads with the nullable `tenant_id` and Postgres treats NULLs as distinct.
+      // `resolveChildDefinition` filters published rows by key, version-sorts and takes `[0]`, so
+      // two rows both claiming `checkout 1.0.0` resolved to whichever the map iteration reached
+      // first. Verified live: the pair was accepted platform-wide and refused tenant-scoped.
+      //
+      // A partial unique index rather than `UNIQUE NULLS NOT DISTINCT`, which the DDL vocabulary
+      // has no spelling for (ADR-0302's rule); `tenant_id IS NULL` is IMMUTABLE, so Postgres
+      // accepts it as an index predicate.
+      name: "idx_workflow_definitions_platform_key_version",
+      columns: ["definition_key", "version"],
+      unique: true,
+      where: "tenant_id IS NULL",
+    },
   ],
   rls: {
     enabled: true,
@@ -10409,9 +10496,32 @@ export const META_FORENSIC_CHAIN_ENTRIES: TableDefinition = {
     enabled: true,
     policies: [
       {
-        name: "forensic_chain_entries_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        // Three policies rather than one, for ADR-0313's reason arriving on a second table. The
+        // combined `tenant_id IS NULL OR tenant_id = <guc>` was `ALL`-scope, and on an `ALL` policy
+        // the `USING` expression *also* serves as the `WITH CHECK` — so `tenant_id IS NULL` satisfied
+        // it unconditionally and **a tenant session could append to the platform chain**. Verified
+        // live as a non-owner role under a tenant's context: `INSERT 0 1`, and the next verification
+        // reported `integrity BROKEN, signatures INVALID`. Poisoning rather than forgery, but a
+        // tenant could make the platform chain read compromised on demand — which is the alarm this
+        // whole stack exists to raise.
+        name: "forensic_chain_entries_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        // The platform arm, read-only. Anyone may *read* the platform chain — an integrity pass
+        // needs to — and a `SELECT` policy carries no `WITH CHECK`, so reading cannot become writing.
+        name: "forensic_chain_entries_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        // And the write, on the same grant `meta.audit_log` uses: the chain anchors that trail, so
+        // appending to one and appending to the other are one privilege, and a second flag would be
+        // two things to configure for it. `PostgresChainLogStore`/`PostgresChainCheckpointStore` set
+        // it per platform append, transaction-locally.
+        name: "forensic_chain_entries_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
       },
     ],
   },
@@ -10451,9 +10561,32 @@ export const META_FORENSIC_CHAIN_CHECKPOINTS: TableDefinition = {
     enabled: true,
     policies: [
       {
-        name: "forensic_chain_checkpoints_tenant_or_platform",
-        using:
-          "tenant_id IS NULL OR tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')::UUID",
+        // Three policies rather than one, for ADR-0313's reason arriving on a second table. The
+        // combined `tenant_id IS NULL OR tenant_id = <guc>` was `ALL`-scope, and on an `ALL` policy
+        // the `USING` expression *also* serves as the `WITH CHECK` — so `tenant_id IS NULL` satisfied
+        // it unconditionally and **a tenant session could append to the platform chain**. Verified
+        // live as a non-owner role under a tenant's context: `INSERT 0 1`, and the next verification
+        // reported `integrity BROKEN, signatures INVALID`. Poisoning rather than forgery, but a
+        // tenant could make the platform chain read compromised on demand — which is the alarm this
+        // whole stack exists to raise.
+        name: "forensic_chain_checkpoints_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+      {
+        // The platform arm, read-only. Anyone may *read* the platform chain — an integrity pass
+        // needs to — and a `SELECT` policy carries no `WITH CHECK`, so reading cannot become writing.
+        name: "forensic_chain_checkpoints_platform_read",
+        command: "SELECT",
+        using: "tenant_id IS NULL",
+      },
+      {
+        // And the write, on the same grant `meta.audit_log` uses: the chain anchors that trail, so
+        // appending to one and appending to the other are one privilege, and a second flag would be
+        // two things to configure for it. `PostgresChainLogStore`/`PostgresChainCheckpointStore` set
+        // it per platform append, transaction-locally.
+        name: "forensic_chain_checkpoints_platform_write",
+        command: "INSERT",
+        check: "tenant_id IS NULL AND current_setting('app.platform_audit_write', true) = 'on'",
       },
     ],
   },

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { CONSERVATIVE_DELETION_CAPABILITIES } from "./tombstone-assembly.js";
 import {
   ANCHOR_KINDS,
+  DECLARATION_BEARING_PROOF_VERSIONS,
+  RETENTION_BEARING_PROOF_VERSIONS,
   TOMBSTONE_KINDS,
   TOMBSTONE_PROOF_VERSIONS,
   TombstoneCapabilityDeclarationSchema,
@@ -9,7 +11,10 @@ import {
   asCapabilityDeclaration,
   asDeletionCapabilities,
   isCryptographicallyAnchored,
+  proofVersionCoversDeclaration,
+  proofVersionCoversRetentionClaim,
   readDeclaredAbsences,
+  readRetentionClaim,
   tombstoneAge,
   tombstoneChainFor,
   tombstonesByKind,
@@ -41,8 +46,27 @@ describe("constants", () => {
     expect(ANCHOR_KINDS).toContain("rfc3161_timestamp");
   });
 
-  it("TOMBSTONE_PROOF_VERSIONS is v1 then v2", () => {
-    expect(TOMBSTONE_PROOF_VERSIONS).toEqual(["v1", "v2"]);
+  it("TOMBSTONE_PROOF_VERSIONS is v1 then v2 then v3", () => {
+    expect(TOMBSTONE_PROOF_VERSIONS).toEqual(["v1", "v2", "v3"]);
+  });
+
+  it("names which versions carry the declaration and which carry the retention claim", () => {
+    expect(DECLARATION_BEARING_PROOF_VERSIONS).toEqual(["v2", "v3"]);
+    expect(RETENTION_BEARING_PROOF_VERSIONS).toEqual(["v3"]);
+  });
+
+  it("every proof version is covered by the two membership lists or by neither", () => {
+    // A fourth tag added to neither list would silently sign nothing new, which is the kind of
+    // omission `SCOPE_BEARING_OUTCOMES` has a partition test for.
+    for (const version of TOMBSTONE_PROOF_VERSIONS) {
+      expect(typeof proofVersionCoversDeclaration(version)).toBe("boolean");
+      expect(typeof proofVersionCoversRetentionClaim(version)).toBe("boolean");
+      // A version that signs a retention claim must also sign the declaration: v3's body is v2's
+      // plus one key, so the reverse would be a tag whose bytes skip a layer.
+      if (proofVersionCoversRetentionClaim(version)) {
+        expect(proofVersionCoversDeclaration(version)).toBe(true);
+      }
+    }
   });
 });
 
@@ -263,6 +287,109 @@ describe("TombstoneRecordSchema", () => {
       TombstoneRecordSchema.parse({ ...base, capabilityDeclaration: DECLARATION }),
     ).toThrow(/outside the signed bytes/);
   });
+
+  const v3 = {
+    ...base,
+    proofVersion: "v3" as const,
+    capabilityDeclaration: DECLARATION,
+    retainedObligations: [] as readonly string[],
+  };
+
+  it("accepts a v3 record whose retention claim is empty", () => {
+    const parsed = TombstoneRecordSchema.parse(v3);
+    expect(parsed.proofVersion).toBe("v3");
+    expect(parsed.retainedObligations).toEqual([]);
+    expect(parsed.retainedReason).toBeUndefined();
+  });
+
+  it("accepts a v3 record carrying obligations, a reason and a reference together", () => {
+    const parsed = TombstoneRecordSchema.parse({
+      ...v3,
+      retainedObligations: ["tax_records_7y"],
+      retainedReason: "retained under legal obligation — backups: tax_records_7y",
+      retainedDataReference: "backup-vault://2026",
+    });
+    expect(parsed.retainedObligations).toEqual(["tax_records_7y"]);
+  });
+
+  it("rejects a v3 record carrying no obligations field at all", () => {
+    const { retainedObligations: _dropped, ...withoutObligations } = v3;
+    expect(() => TombstoneRecordSchema.parse(withoutObligations)).toThrow(
+      /commits to a retention claim/,
+    );
+  });
+
+  it("still requires the declaration on a v3 record", () => {
+    const { capabilityDeclaration: _dropped, ...withoutDeclaration } = v3;
+    expect(() => TombstoneRecordSchema.parse(withoutDeclaration)).toThrow(
+      /commits to a capabilityDeclaration/,
+    );
+  });
+
+  it("rejects obligations on a v2 record (outside the v2 signed bytes)", () => {
+    expect(() =>
+      TombstoneRecordSchema.parse({
+        ...base,
+        proofVersion: "v2",
+        capabilityDeclaration: DECLARATION,
+        retainedObligations: ["tax_records_7y"],
+      }),
+    ).toThrow(/outside the signed bytes/);
+  });
+
+  it("rejects obligations on a v1 record", () => {
+    expect(() =>
+      TombstoneRecordSchema.parse({ ...base, retainedObligations: ["tax_records_7y"] }),
+    ).toThrow(/outside the signed bytes/);
+  });
+
+  it("rejects 'none' inside a signed retention claim", () => {
+    expect(() =>
+      TombstoneRecordSchema.parse({
+        ...v3,
+        retainedObligations: ["none"],
+        retainedReason: "kept for no reason",
+        retainedDataReference: "nowhere",
+      }),
+    ).toThrow(/'none' is not an obligation/);
+  });
+
+  it("rejects obligations with no retainedReason beside them", () => {
+    expect(() =>
+      TombstoneRecordSchema.parse({
+        ...v3,
+        retainedObligations: ["tax_records_7y"],
+        retainedDataReference: "backup-vault://2026",
+      }),
+    ).toThrow(/names obligations and a retainedReason together/);
+  });
+
+  it("rejects a retainedReason with no obligations beside it on a v3 record", () => {
+    expect(() =>
+      TombstoneRecordSchema.parse({
+        ...v3,
+        retainedReason: "retained, somehow",
+        retainedDataReference: "backup-vault://2026",
+      }),
+    ).toThrow(/names obligations and a retainedReason together/);
+  });
+
+  it("rejects an empty signed claim that nevertheless locates retained data", () => {
+    expect(() =>
+      TombstoneRecordSchema.parse({ ...v3, retainedDataReference: "backup-vault://2026" }),
+    ).toThrow(/cannot locate retained data/);
+  });
+
+  it("still permits unsigned retention prose on a v1 record", () => {
+    // The compatibility half: every stored v1 and v2 record carrying retention prose outside its
+    // bytes must keep parsing. Tightening this would refuse honest records retroactively.
+    const parsed = TombstoneRecordSchema.parse({
+      ...base,
+      retainedReason: "retained under legal obligation — backups: tax_records_7y",
+      retainedDataReference: "backup-vault://2026",
+    });
+    expect(parsed.retainedObligations).toBeUndefined();
+  });
 });
 
 describe("readDeclaredAbsences", () => {
@@ -342,6 +469,120 @@ describe("readDeclaredAbsences", () => {
     expect(reading.declarationState).toBe("unknown_not_in_proof");
     if (reading.declarationState === "unknown_not_in_proof") {
       expect(reading.reason).toBe("declaration_missing");
+    }
+  });
+
+  it("reads the declaration off a v3 record too", () => {
+    // The near-miss ADR-0331 had to avoid: this function tested `proofVersion !== "v2"` literally, so
+    // a v3 proof — which carries the declaration inside its bytes — would have read as having none.
+    const reading = readDeclaredAbsences({
+      ...base,
+      proofVersion: "v3",
+      capabilityDeclaration: DECLARATION,
+      retainedObligations: [],
+    });
+    expect(reading.declarationState).toBe("covered_by_proof");
+    if (reading.declarationState === "covered_by_proof") {
+      expect(reading.absentSubsystems).toEqual(["backups", "caches", "object_storage"]);
+    }
+  });
+});
+
+describe("readRetentionClaim", () => {
+  const base: TombstoneRecord = {
+    id: "tomb_abc12345abc12345",
+    kind: "tenant_deletion",
+    tenantId: "t-1",
+    deletedAt: "2026-05-14T10:00:00Z",
+    executedBy: "u-executor",
+    approvedBy: "u-approver",
+    proofVersion: "v1",
+    scope: {
+      schemas: ["tenant_t1"],
+      tables: ["tenant_t1.users"],
+      objectStorageBuckets: [],
+      backupGenerations: [],
+      searchIndexes: [],
+      cacheKeys: [],
+      rowCount: 100,
+      storageBytes: 1000,
+      fileCount: 0,
+    },
+    contentManifestSha256: SHA,
+    proofSha256: SHA,
+    anchors: [
+      { kind: "internal_audit_log", reference: "audit-1", anchoredAt: "2026-05-14T10:00:00Z" },
+    ],
+    invalidationOfPriorTombstoneId: null,
+  };
+
+  it("answers 'unknown', never 'nothing retained', for a v1 record", () => {
+    const reading = readRetentionClaim(base);
+    expect(reading.claimState).toBe("unknown_not_in_proof");
+    expect(reading).not.toHaveProperty("obligations");
+    if (reading.claimState === "unknown_not_in_proof") {
+      expect(reading.reason).toBe("pre_v3_proof");
+    }
+  });
+
+  it("answers 'unknown' for a v2 record even when it carries retention prose", () => {
+    // The distinction ADR-0331 buys. This record *says* data was kept; its bytes do not, so the
+    // prose is a claim on the record's face and not part of the proof.
+    const reading = readRetentionClaim({
+      ...base,
+      proofVersion: "v2",
+      capabilityDeclaration: DECLARATION,
+      retainedReason: "retained under legal obligation — backups: tax_records_7y",
+      retainedDataReference: "backup-vault://2026",
+    });
+    expect(reading.claimState).toBe("unknown_not_in_proof");
+    if (reading.claimState === "unknown_not_in_proof") {
+      expect(reading.reason).toBe("pre_v3_proof");
+    }
+  });
+
+  it("carries the signed claim for a v3 record", () => {
+    const reading = readRetentionClaim({
+      ...base,
+      proofVersion: "v3",
+      capabilityDeclaration: DECLARATION,
+      retainedObligations: ["tax_records_7y", "audit_logs_3y"],
+      retainedReason: "retained under legal obligation — backups: tax_records_7y",
+      retainedDataReference: "backup-vault://2026",
+    });
+    expect(reading.claimState).toBe("covered_by_proof");
+    if (reading.claimState === "covered_by_proof") {
+      expect(reading.obligations).toEqual(["audit_logs_3y", "tax_records_7y"]);
+      expect(reading.retainedDataReference).toBe("backup-vault://2026");
+    }
+  });
+
+  it("distinguishes a signed 'nothing was retained' from 'unknown'", () => {
+    const reading = readRetentionClaim({
+      ...base,
+      proofVersion: "v3",
+      capabilityDeclaration: DECLARATION,
+      retainedObligations: [],
+    });
+    expect(reading.claimState).toBe("covered_by_proof");
+    if (reading.claimState === "covered_by_proof") {
+      expect(reading.obligations).toEqual([]);
+      expect(reading.retainedReason).toBeNull();
+      expect(reading.retainedDataReference).toBeNull();
+    }
+  });
+
+  it("refuses to read a claim off a record labelled v3 without one", () => {
+    const reading = readRetentionClaim({
+      ...base,
+      proofVersion: "v3",
+      capabilityDeclaration: DECLARATION,
+    });
+    expect(reading.claimState).toBe("unknown_not_in_proof");
+    if (reading.claimState === "unknown_not_in_proof") {
+      // Not `pre_v3_proof`: calling a v3 record an older one is the self-downgrading misreading the
+      // explicit version field exists to prevent.
+      expect(reading.reason).toBe("obligations_missing");
     }
   });
 });

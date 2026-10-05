@@ -80,13 +80,13 @@ function report(over: Partial<IntegrityProofReport> = {}): IntegrityProofReport 
 
 /** Records what the emitter was asked to write, without a database. */
 function fakeAudit() {
-  const emitted: { operation: string; tenantId: string; after: unknown }[] = [];
+  const emitted: { operation: string; tenantId: string | null; after: unknown }[] = [];
   return {
     emitted,
     audit: {
       emit: async (entry: {
         operation: string;
-        tenantId: string;
+        tenantId: string | null;
         after: unknown;
       }): Promise<void> => {
         emitted.push({ operation: entry.operation, tenantId: entry.tenantId, after: entry.after });
@@ -284,8 +284,10 @@ describe("IntegrityEscalator — failure handling", () => {
     await expect(e.observe(report())).resolves.toMatchObject({ kind: "opened" });
   });
 
-  it("cannot audit a platform-scope escalation, and says so rather than dropping it", async () => {
-    // `audit_log.tenant_id` is NOT NULL, so the platform chain has no tenant-scoped row to write.
+  it("audits a platform-scope escalation at platform scope (ADR-0331)", async () => {
+    // The platform chain's own compromise finding is the one escalation that could never leave a
+    // record of itself, because `audit_log.tenant_id` was NOT NULL. It lands as `tenant_id IS
+    // NULL` now, and is anchored in the platform chain it is about.
     const { audit, emitted } = fakeAudit();
     const paged: string[] = [];
     const e = new IntegrityEscalator({
@@ -298,9 +300,26 @@ describe("IntegrityEscalator — failure handling", () => {
     });
     const out = await e.observe(report({ scope: null, anchors: null }));
     expect(out.kind).toBe("opened");
-    expect(out.audited).toBe(false);
-    expect(emitted).toEqual([]);
+    expect(out.audited).toBe(true);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0]?.tenantId).toBeNull();
     expect(paged).toEqual(["x"]);
+  });
+
+  it("records a platform-scope recovery at platform scope too", async () => {
+    const { audit, emitted } = fakeAudit();
+    const e = new IntegrityEscalator({ config: config(), audit, now: () => new Date(AT) });
+    await e.observe(report({ scope: null, anchors: null }));
+    const out = await e.observe(report({ scope: null, anchors: null, verdict: "verified" }));
+    expect(out.kind).toBe("recovered");
+    expect(out.audited).toBe(true);
+    expect(emitted.map((e2) => e2.tenantId)).toEqual([null, null]);
+  });
+
+  it("still reports audited=false for a platform escalation with no emitter wired", async () => {
+    const e = new IntegrityEscalator({ config: config(), now: () => new Date(AT) });
+    const out = await e.observe(report({ scope: null, anchors: null }));
+    expect(out.audited).toBe(false);
   });
 });
 

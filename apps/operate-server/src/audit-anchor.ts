@@ -41,7 +41,8 @@ export interface AuditAnchorResult {
 }
 
 export interface AuditAnchorReport {
-  readonly tenantId: string;
+  /** The scope the rows were read under; `null` is the platform chain (ADR-0331). */
+  readonly tenantId: string | null;
   /** True only when nothing is disproven **and** nothing is unproven. */
   readonly ok: boolean;
   readonly checked: number;
@@ -67,7 +68,7 @@ export interface AuditAnchorReport {
  * the forged row.
  */
 export function verifyAuditAnchors(
-  tenantId: string,
+  tenantId: string | null,
   rows: readonly AnchoredAuditEntry[],
   chain: readonly ChainedLogEntry[],
 ): AuditAnchorReport {
@@ -114,7 +115,8 @@ function verdictFor(
 
 export function formatAuditAnchorReport(report: AuditAnchorReport): string {
   const lines: string[] = [
-    `audit anchors for tenant ${report.tenantId}: ${report.ok ? "OK" : "FAILED"}`,
+    `audit anchors for ${report.tenantId === null ? "the platform" : `tenant ${report.tenantId}`}` +
+      `: ${report.ok ? "OK" : "FAILED"}`,
     `  checked: ${report.checked.toString()}` +
       `  verified: ${report.verified.toString()}` +
       `  unanchored: ${report.unanchored.toString()}` +

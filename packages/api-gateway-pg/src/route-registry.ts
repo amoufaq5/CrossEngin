@@ -4,7 +4,7 @@ import type {
   RouteLookupResult,
   RouteRegistry,
 } from "@crossengin/api-gateway-runtime";
-import type { PgConnection } from "@crossengin/kernel-pg";
+import { isoInstant, type PgConnection } from "@crossengin/kernel-pg";
 
 const SCHEMA = "meta";
 const TABLE = "gateway_routes";
@@ -16,8 +16,14 @@ interface RouteRow {
   readonly path_segments: unknown;
   readonly api_version: string;
   readonly is_deprecated: boolean;
-  readonly deprecated_since: string | null;
-  readonly sunset_at: string | null;
+  /**
+   * `unknown`: node-postgres returns a `TIMESTAMPTZ` as a `Date`. `sunset_at` is compared in
+   * `matchRoute` (`now.getTime() >= Date.parse(r.sunsetAt)`) and, worse, emitted verbatim as the
+   * RFC 8594 `Sunset` response header — where a `Date`'s `toString()` form is not a valid
+   * HTTP-date and tells a client nothing it can parse.
+   */
+  readonly deprecated_since: unknown;
+  readonly sunset_at: unknown;
   readonly successor_operation_id: string | null;
   readonly required_scopes: unknown;
   readonly rate_limit_policy_id: string | null;
@@ -49,8 +55,8 @@ function rowToRoute(row: RouteRow): RouteDefinition {
     pathSegments: segments,
     apiVersion: row.api_version,
     isDeprecated: row.is_deprecated,
-    deprecatedSince: row.deprecated_since,
-    sunsetAt: row.sunset_at,
+    deprecatedSince: isoInstant(row.deprecated_since),
+    sunsetAt: isoInstant(row.sunset_at),
     successorOperationId: row.successor_operation_id,
     requiredScopes: scopes,
     rateLimitPolicyId: row.rate_limit_policy_id,

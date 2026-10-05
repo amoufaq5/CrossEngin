@@ -17,8 +17,27 @@ export interface ApiKeySpec {
   readonly role: string;
   readonly tenantId: string;
   readonly principalId: string;
+  /**
+   * Whether the spec **named** the principal id, as opposed to falling back to the placeholder.
+   *
+   * This is what decides `principalKind`, and it has to be a separate field rather than a comparison
+   * against `DEFAULT_PRINCIPAL_ID`: a spec is free to name that UUID explicitly, and then it means a
+   * real provisioned user who happens to hold it.
+   */
+  readonly namesPrincipal: boolean;
 }
 
+/**
+ * The principal id a `key:role:tenant` spec gets when it names none.
+ *
+ * It is **shared by every such key**, and that is not fixable here: a bare spec does not carry the
+ * information to tell two keys apart, and the one thing that would — the key itself — must not be
+ * hashed into an id, because a principal id is not a secret (it lands in `meta.audit_log`) and a
+ * reversible-by-brute-force function of a credential turns an audit reader into an offline attacker.
+ *
+ * So the collision is declared rather than papered over: a spec that does not name a principal
+ * resolves as a `service_account`, which is what any surface keyed on a *person* checks.
+ */
 const DEFAULT_PRINCIPAL_ID = "00000000-0000-4000-8000-0000000000aa";
 
 /**
@@ -34,7 +53,14 @@ export function parseApiKeySpec(raw: string): ApiKeySpec {
   if (!key || !role || !tenantId) {
     throw new Error(`invalid --api-key (empty field): ${JSON.stringify(raw)}`);
   }
-  return { key, role, tenantId, principalId: principalId && principalId.length > 0 ? principalId : DEFAULT_PRINCIPAL_ID };
+  const named = principalId !== undefined && principalId.length > 0;
+  return {
+    key,
+    role,
+    tenantId,
+    principalId: named ? principalId : DEFAULT_PRINCIPAL_ID,
+    namesPrincipal: named,
+  };
 }
 
 export interface PrincipalWiring {
@@ -97,7 +123,14 @@ export function buildPrincipalWiring(
     apiKeyResolver.register(spec.key, {
       principalId: spec.principalId,
       tenantId: spec.tenantId,
-      principalKind: "user",
+      // `user` only when the spec actually named a principal. A bare `key:role:tenant` names no
+      // person and every one of them shares `DEFAULT_PRINCIPAL_ID`, so calling it a user was wrong
+      // twice over: a surface keyed on a viewer accepted it, and `meta.notification_read_states`
+      // then failed its `meta.users` foreign key — reported as a 503 for something permanent. Worse
+      // than the 503, two keys in one tenant would have *shared* read state, so one person's clicks
+      // marked another's notices read. `service_account` is the fact, and it is what a per-person
+      // surface checks; a key that names its principal is unchanged.
+      principalKind: spec.namesPrincipal ? "user" : "service_account",
       authScheme: "api_key_header",
       grantedScopes: [spec.role],
       mfaProofAgeSeconds: null,

@@ -20,7 +20,8 @@ import {
   cancellationProjectionFromRow,
   isoInstant,
 } from "./instance-store.js";
-import { PostgresSignalStore, type SignalProjection } from "./signal-store.js";
+import { projectPersistableSignals } from "./signal-provenance.js";
+import { PostgresSignalStore } from "./signal-store.js";
 import { PostgresTimerStore, type TimerProjection } from "./timer-store.js";
 
 const SCHEMA = "meta";
@@ -170,6 +171,10 @@ export class WorkflowReplayer {
     }
     const definition = this.resolveDefinitionFor(events);
     const projection = projectInstance(events, definition);
+    // Resolved before the first write: this is the one projection that can refuse, and a refusal
+    // that has already upserted the instance and its activities leaves a half-resynced instance
+    // for a tool whose whole job is to make the projections agree with the log.
+    const signals = projectPersistableSignals(events, definition);
     let instanceUpserted = false;
     if (projection !== null) {
       await this.instanceStore.upsertProjection(projection);
@@ -177,17 +182,6 @@ export class WorkflowReplayer {
     }
     const activities = projectActivities(events) as readonly ActivityProjection[];
     await this.activityStore.upsertMany(activities);
-    const signals = projectSignals(events).map((s): SignalProjection => ({
-      id: s.id,
-      instanceId: s.instanceId,
-      tenantId: s.tenantId,
-      signalName: s.signalName,
-      correlationKey: s.correlationKey,
-      status: s.status,
-      receivedAt: s.receivedAt,
-      matchedAt: s.matchedAt,
-      consumedAt: s.consumedAt,
-    }));
     await this.signalStore.upsertMany(signals);
     const timers = projectTimers(events).map((t): TimerProjection => ({
       id: t.id,
@@ -241,6 +235,14 @@ export class WorkflowReplayer {
       storedActivities,
     );
 
+    // `projectSignals`, not `projectPersistableSignals`: this is the read-only report, and it
+    // compares the two fields a resync can actually repair. Provenance — the delivery guarantee,
+    // the source system, the principal — is written once at receipt and deliberately left out of
+    // the upsert's DO UPDATE set, so reporting a provenance mismatch here would be a finding no
+    // repair clears, and a standing finding is one an operator mutes. The non-throwing projection
+    // also keeps the report answerable when the definition map is incomplete, which is the
+    // opposite choice from the write path above — a diagnostic that refuses to diagnose is worse
+    // than one that reports less, while a write that invents a guarantee is worse than no write.
     const expectedSignals = projectSignals(events);
     const storedSignals = await this.fetchSignalRows(instanceId);
     const signalDrift = compareSimpleProjections(
