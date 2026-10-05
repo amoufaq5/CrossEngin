@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 322 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 323 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 143 meta-schema tables, ~12,553 tests**, all green, no
+**87 packages + 3 apps, 143 meta-schema tables, ~12,780 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -375,6 +375,18 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   assembler re-verifies its own output. `tombstoneMatchesAttestations` answers the question a hash cannot:
   whether a stored record still agrees with its evidence — a tampered scope flips `contentManifestOk`
   while `proofOk` stays true, since the proof commits to the stored digest.
+  **And the scope itself is declared by the deployment, not by the caller** (ADR-0328).
+  `DeletionCapabilities` is a **total** map — one of `erases` / `retains` / `absent` for every one of
+  the six `DELETION_SUBSYSTEMS`, no optionality — and `requiredSubsystemsFor` derives the scope from
+  it. That closed ADR-0317's defect one level up: the rule refuses a subsystem *in scope* that did
+  not attest, and scope was a list the caller passed — which on the HTTP route was the **request
+  body**, defaulting to `[]`, so a remote client chose how much of the proof covered and omitting the
+  field covered nothing. `retains` stays **in** scope, because a lawful retention is a claim the
+  proof must carry rather than a licence to go quiet; `tenant_schema` may never be `absent`; and
+  `CONSERVATIVE_DELETION_CAPABILITIES` (everything `erases`) is an exported *starting point*, never a
+  `z.default()` — a schema default is applied to silence, which is the thing ADR-0317 refused, and
+  `safeParse({})` fails. The map is a literal `z.object`, not `z.record(z.enum(...))`, because zod 3's
+  record **accepts** a partial object while typing it as total.
 - **`tenant-lifecycle-pg`** — the tombstone's store (ADR-0318), and the first writer
   `meta.tenant_tombstones` ever had: declared in Phase 1, it had drifted behind its contract in the way
   ADR-0300 found for `meta.feature_flags`, and in the table where it mattered most. `executed_by` and
@@ -652,6 +664,13 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `rejected` is a decision, and retrying collects it again at the one moment the attempts matter.
   `classifyPageFailure` is shared by all three HTTP senders because each had classified **429** as
   `rejected`, which is the never-retried set, for the most ordinary transient failure a provider emits.
+  **The gap grows and jitters** (ADR-0328): exponential from the configured delay, jittered *upward*
+  over `[gap, gap × 2)` — not full or equal jitter, which decorrelate by spreading *below* the delay
+  and so re-open the hot loop ADR-0327's floor exists to stop — and stopped when the next wait would
+  exceed a total budget (30s default, 60s ceiling). The failure it answers is several replicas of one
+  process retrying one degraded provider in lockstep, which no single deployment can see and so none
+  would configure; `waitedMs` on every outcome makes the waiting legible afterwards, and with
+  `attemptsMade` and `retryAfterMs` beside it separates the three ways a retry stops.
   **And the retry honours `Retry-After`** (ADR-0327, `retry-after.ts`): both RFC 9110 forms, with the
   wait `max(policy.delayMs, retryAfterMs)` — the policy's delay is the platform's floor, so a
   `Retry-After: 0` cannot become a hot loop, and the provider's figure is the floor when longer — and a
@@ -672,6 +691,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   FCM itself refuses is discarded from the cache, via one `fcmRefusedTheCredential(status, code)` with
   two readers — deriving it from the resulting `errorCode` was wrong and a test caught it, since the
   code carries the provider's status suffix so `PERMISSION_DENIED` yields `fcm_permission_denied`.
+  `metadata-token.ts` (ADR-0328) is the **other** FCM credential route — GKE/Cloud Run workload
+  identity, where there is no key file and the *network position* is the credential. Plain `http://`
+  to a link-local address is correct rather than a mistake (no CA can certify
+  `metadata.google.internal`) and a test pins it so nobody "fixes" it; `Metadata-Flavor: Google` is
+  built in one function every path calls, because Google requires it specifically so a
+  confused-deputy request cannot reach the server; an endpoint override allows https anywhere but
+  plain http **only** for the known link-local hosts. It shares `fcm-token.ts`'s clock and expiry
+  skew so the two age tokens identically and nothing else. The sharp distinction is **not on GCE**
+  (`metadata_server_unreachable`, dug out of undici's nested `cause`, *not* retryable, and its message
+  says to supply a key file) from **on GCE and refused** (`service_account_not_attached`, an IAM
+  problem) from a **timeout**, which is its own kind and *is* retryable — a silence cannot tell them
+  apart and the mistakes are not symmetric: calling a wedged node terminal drops a notification,
+  calling an unroutable address retryable only delays one.
 - **`pwa`** — PWA manifest, service-worker cache strategies, IndexedDB outbox with
   conflict strategies, background sync, push (PHI-safe), Capacitor native wrapper config.
 - **`integrations`** — thin: 12 integration kinds (outbound/inbound HTTP, GraphQL, HL7,
@@ -801,7 +833,23 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   table, since that table only grows and a full sweep per tick would eventually outlast its interval.
   Mobile **push** is finally built from the environment (`FCM_PROJECT_ID` plus either
   `FCM_SERVICE_ACCOUNT_JSON` or the client-email/private-key pair, which `normalizePrivateKeyPem`
-  absorbs the literal-`\n` form of), closing ADR-0310's last open end.
+  absorbs the literal-`\n` form of), and since ADR-0328 also from the **GCE metadata server** —
+  `FCM_CREDENTIAL_SOURCE=metadata_server`, declared rather than probed, because a key file is
+  unambiguous evidence of intent while the metadata route is configured by nothing. **Voice** is wired
+  too, sharing the SMS account and credential by default but **never** the number: `TWILIO_FROM_NUMBER`
+  may legitimately be unable to place a call (a short code, an alphanumeric sender id) or be absent
+  entirely when SMS uses a messaging service, and defaulting it produces a channel that registers at
+  boot, reads as healthy and fails at the provider on every call. A separate subaccount is available,
+  with one refusal: a `TWILIO_VOICE_ACCOUNT_SID` naming another account requires its own credential.
+  Voice deliberately does **not** warn about a missing status callback where SMS does, because
+  ADR-0310 gave it no bounce source — warning would promise handling that does not exist.
+  **The deletion flow now requires `--deletion-capabilities`** and refuses to mount without it: both
+  the synchronous route and the runner, loudly, because the scope of an Article 17 proof is a property
+  of the deployment and the field it replaced was read from the request body with `[]` as its default
+  (ADR-0328). The **tombstone sweep escalates** as well as logs, keyed on the evidence record — a
+  referenced tombstone adopts its request's episode, one no request names gets
+  `deletion_evidence:tombstone:<id>` — and its log line leads with the **lap**, since "every stored
+  proof has been verified since ⟨time⟩" is only true per completed lap.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -977,12 +1025,14 @@ opened them.
   every row satisfies, and the table is empty in every deployment — so declaring it would be correct on
   a fresh install and reported as drift on every existing one, forever. It becomes available once a
   deployment has flags.
-- **Removing a foreign key from the catalog requires an explicit flag** (ADR-0296, ADR-0308).
+- **Removing a foreign key from the catalog requires an explicit flag** (ADR-0296, ADR-0308, ADR-0328).
   `ReconciliationOptions.allowLoosening` turns the undeclared-foreign-key refusal into a real drop, which
   is what the four kill-switch `meta.users` references of ADR-0296 needed. It is off by default and
   reaches **foreign keys only** — not a column, table, index, policy or CHECK — because dropping a
   foreign key is the one loosening that cannot fail against existing rows, which is what keeps
-  ADR-0290's invariant true. Nothing passes it yet; `crossengin-pg apply` would need a flag.
+  ADR-0290's invariant true. **`--allow-loosening` now reaches it** on both `crossengin apply` and
+  `crossengin-pg apply`, announced on stderr before anything runs, since this is the one invocation
+  that removes a constraint the database is currently enforcing. ADR-0296's drift can be cleared.
 - **Six indexes now have no reader** (ADR-0296) — they existed to make `ON DELETE RESTRICT` cheap on
   the foreign keys that reconciliation removed. Left in place deliberately: removing them from the
   catalog would leave them reported as undeclared on every drift check until someone drops them.
@@ -1039,15 +1089,16 @@ opened them.
   alternative is a row that never matches) and deliberately does **not** collapse subaddressing or parse
   a display name off, since both would widen a suppression to addresses that never bounced.
 
-- **Mobile push is wired; voice is not** (ADR-0310, ADR-0327). `ServiceAccountFcmTokenProvider` is the
-  `FcmAccessTokenProvider` ADR-0310 left as a seam, and `buildSenderRegistryFromEnv` now constructs
-  `FcmPushSender` from `FCM_PROJECT_ID` plus the service-account key — one variable holding the key file
-  verbatim, because splitting it is what produces the literal-`\n` PEM that OpenSSL refuses (the split
-  pair is supported and normalised; a test caught that branch passing the key through *un*normalised).
-  Partial configuration is still skipped rather than guessed, per ADR-0301, and the refusal costs that
-  channel and never the boot. **GKE metadata-server credentials are not implemented**, so a deployment
-  relying on workload identity has to supply a key file; and `TwilioVoiceSender` is still not built
-  from the environment, with its status callbacks unused.
+- **Push and voice are both wired; the bounce loop for voice is not** (ADR-0310, ADR-0327, ADR-0328).
+  `buildSenderRegistryFromEnv` now constructs `FcmPushSender` from a service-account key **or** from
+  the GCE metadata server (`FCM_CREDENTIAL_SOURCE=metadata_server`, declared rather than probed), and
+  `TwilioVoiceSender` from `TWILIO_VOICE_FROM_NUMBER` plus the SMS account's credential. Partial
+  configuration is still skipped rather than guessed, per ADR-0301, and a refusal costs that channel
+  and never the boot — which is now the live state for all four: `in_app, sms, voice_call, push_mobile`.
+  What is left is **the other end of voice**: `bounce-webhook.ts` has no voice source, so Twilio's
+  `CallStatus`/`AnsweredBy` posts land on a route that does not know their shape and a carrier failure
+  produces no suppression. With voice unwired that was unreachable; it is reachable now, and whoever
+  owns the webhook has to decide whether that endpoint 404s, 204s or grows a branch.
 - **Per-tenant column schemas are additive only** (ADR-0314). A removed field's column is never dropped,
   a changed type is never altered, and ADR-0308's rename machinery does not reach there. A **refused**
   application is loud in the log and silent to the tenant: they are served from the JSONB fallback, so
@@ -1064,11 +1115,17 @@ opened them.
   in both directions), and confirms absence before it commits. `assembleTombstone` then composes a
   `DeletionScope` **only** from per-subsystem attestations and refuses when a subsystem in scope has not
   attested, because the original defect was a subsystem nobody asked whose silence read as nothing to
-  delete. What remains: `requiredSubsystems` is still caller-supplied, so omitting one yields a tombstone
-  that visibly covers less rather than one that silently claims everything — better, not done; and four
-  of the six subsystems cannot attest because their erasures do not exist, so every deletion today
-  declares object storage, backups, search and caches out of scope by omission — now on a schedule as
-  well, since the runner supplies no attestations but the schema's. The ordering against `meta.tenants` is
+  delete. **The scope is no longer caller-supplied** (ADR-0328): `DeletionCapabilities` is declared once
+  per deployment through `--deletion-capabilities`, and both the synchronous route and the runner refuse
+  to mount without it. That closed a defect worse than the one it was meant to close — the route read
+  `requiredSubsystems` from the **request body** with `[]` as its default, so a remote caller chose how
+  much of the deployment its Article 17 proof covered and omitting the field covered nothing, while the
+  runner's `?? []` did the same unattended on every scheduled deletion. What remains: four of the six
+  subsystems still cannot attest because their erasures do not exist, so a deployment must declare them
+  `absent` — honest, and now *visible* on the assembly rather than silent — or `erases`, which refuses
+  every deletion until the erasure exists. A declared absence is **not** inside the signed bytes yet;
+  carrying it there needs a `crossengin.tombstone.content.v1` → `v2` domain tag rather than an edit in
+  place, or every stored digest stops verifying. The ordering against `meta.tenants` is
   **unenforced**: the audit record's `tenant_id` is a foreign key to that table, so retiring the tenant
   row *first* makes every erasure unrecordable — the 500 fires, visibly, and the data is gone with no
   provenance. Erase, record, then retire the row.
@@ -1088,12 +1145,21 @@ opened them.
   **And ADR-0327 closes the last hole in that audit**: a tombstone with no `relatedDeletionRequestId` —
   every one the synchronous route of ADR-0320 writes — was outside *both* directions, because both start
   from a request. `auditTombstones` starts from the proofs instead, over a keyset-paged `scanAll`, and it
-  found a real unreferenced `scope_tampered` row on the first live run. Its findings are **reported, not
-  escalated**: the escalator's episode key is `deletion_evidence:<requestId>` and these may have no
-  request, so a tombstone-keyed episode is a real decision — a tampered tombstone that *is* referenced
-  would otherwise declare twice for one fact — left open deliberately rather than guessed at.
+  found a real unreferenced `scope_tampered` row on the first live run. **Those findings now escalate**
+  (ADR-0328), on the rule "one episode per evidence record, whichever handle names it": a tombstone a
+  request names keys on the **request**, so the sweep adopts whatever `auditCompleted` already declared
+  rather than declaring a second for one tampered row; one no request names keys on
+  `deletion_evidence:tombstone:<id>`, namespaced so it cannot collide with a request id; and a
+  `dangling` finding keys on the tombstone, because nothing can adopt an episode for a row that no
+  longer exists. The sweep also reports its **laps** (`sweepProgress()`), since "every stored proof has
+  been verified since ⟨time⟩" is only true per completed lap, with `pagesAdvanced` / `pagesSwept` as the
+  pair that distinguishes "pages are not arriving" from "pages arrive but the cursor is pinned".
   `meta.tenant_tombstones` also gained the index `findForRequest` had always lacked, partial because the
   column is NULL for exactly the rows that can never match a lookup by request id.
+  What is left there: `onTombstoneResolved` exists but nothing calls it, because a clean sweep page does
+  **not** say a particular tombstone verifies — it may simply not have been on the page, since the sweep
+  laps — so closing an episode needs a caller that can prove the id was among the rows a clean page
+  examined. Nothing reads `pagesAdvanced` either, so a stalled sweep is detectable and undetected.
 - **A page now really leaves the process, and closes itself when the finding is put right**
   (ADR-0325, ADR-0326). `PageDispatcher` delivers over PagerDuty, Slack, a signed webhook and SMS, and
   **reports** rather than throws: `delivered === 0` is `undelivered`, logged at error, because the
@@ -1121,12 +1187,16 @@ opened them.
   page is recovered from the store through the declarer's new `findById`, planned from the record's
   own severity — remembered beats recovered, because the remembered directives are what actually went
   out, and all three ways of not knowing answer `[]`, which leaves the alert up for a human.
-  What is left: the retry does not jitter or back off, and reads `Retry-After` only from a *response*
-  — a sender that throws has no instruction and falls back to the policy delay; `email_digest` stays
-  `unroutable` by design, so a deployment with only email has no page at all and is told so once per
-  page; and `appendPagedNote` bypasses `PersistentIncidentEngine.apply`, so the store's
-  `assertAppendOnly` check does not cover it (the executor's append-only behaviour is pinned by a test
-  instead).
+  **ADR-0328 closes the last three of ADR-0327's open ends**: the retry grows and jitters, bounded by a
+  total budget; `assertAppendOnly` moved to `records.ts` so `appendPagedNote` passes it too; and the
+  store has an injectable clock. A throw is deliberately *not* given its own cadence — all three HTTP
+  senders catch their own transport failures and report them as **results**, so a timeout never reaches
+  the dispatcher's `catch`; what does is a sender that broke its contract, and a special cadence would
+  go to a bug rather than the network failure it was written for.
+  What is left: `email_digest` stays `unroutable` by design, so a deployment with only email has no
+  page at all and is told so once per page; and the jitter spreads load rather than shedding it — the
+  call count is unchanged, and a `Retry-After` longer than the jittered gap re-synchronises every
+  replica it binds, accepted because the alternative is holding a page longer than the provider asked.
   There is also no tooling to *resolve* an unverified tombstone (the attestations beside it are enough to
   recompute what the scope should have been, but rewriting a proof is not something to automate blindly),
   and a tombstone with no `relatedDeletionRequestId` — every one the synchronous route of ADR-0320 writes —
@@ -1181,10 +1251,13 @@ opened them.
   refused erasure leaves an operator to drop the collateral by hand; the refusal names it but does not
   hand over the SQL the way ADR-0290's `unreconciled` does (ADR-0316).
 - A tombstone-sweep **lap** is the coverage guarantee, so a tamper is found within one pass of the
-  table rather than at once, and nothing reports how long a lap takes or whether one completed
-  (ADR-0327). `PostgresIncidentStore` has no injectable clock, so a paged note with no `at` reads the
-  wall clock rather than a `Clock`. A revoked FCM key can still 401 once before the cached token is
-  discarded.
+  table rather than at once (ADR-0327); `sweepProgress()` reports the lap now, and nothing reads it.
+  A revoked FCM key can still 401 once before the cached token is discarded. `node.ts` casts the
+  delete route's `attestations` into `DeletionAttestation[]` unchecked — it fails closed, but a bad
+  body reads as a platform bug rather than a bad request (ADR-0328). There is no root prettier config
+  or script, so a bare `npx prettier --write` silently reformats at width 80 rather than the
+  workspace's. `FCM_TOKEN_ENDPOINT` and `FCM_BASE_URL` are not in `FCM_VARS`, so setting only one of
+  them is silent where every other half-configuration warns.
 - Column-store migration is **additive only** (ADR-0283, ADR-0314): a removed field's column
   is never dropped and a changed type is never altered, since both need a decision
   about existing data. Per-tenant activated manifests now *do* get DDL, into the tenant's
@@ -1202,7 +1275,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 322 records; 243 Accepted, 79 Proposed (the
+title or status change cannot drift. 323 records; 244 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

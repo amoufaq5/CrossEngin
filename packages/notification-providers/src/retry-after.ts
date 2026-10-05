@@ -12,6 +12,11 @@ import type { FetchLike } from "./email-ses.js";
  * than no retry there.
  *
  * Two rules shape the parser, and both are about not inventing an instruction.
+ *
+ * This file also owns the two other figures that bound how long a page may wait — the ceiling on a
+ * single instruction and the ceiling on a whole retry's summed waiting — because all three answer the
+ * same question against the same target (`SEVERITY_PROFILES.sev1.ackMinutes`, five minutes), and
+ * three numbers with one argument behind them drift the moment they live in three places.
  */
 
 /**
@@ -26,6 +31,48 @@ import type { FetchLike } from "./email-ses.js";
  * an `undelivered` line — both beat one HTTP call held open past the point where it is still a page.
  */
 export const MAX_RETRY_AFTER_MS = 30_000;
+
+/**
+ * The longest a whole retry may spend *waiting*, summed across every gap between its attempts.
+ *
+ * The same figure as `MAX_RETRY_AFTER_MS`, and deliberately the same number rather than a coincidence:
+ * a tenth of the `sev1` acknowledgement target, affordable once. ADR-0327 was willing to spend it on
+ * a single instruction, so it is exactly the amount this platform has already decided a page may be
+ * held for — and spending it twice over two gaps was never argued for, it was merely never bounded.
+ *
+ * It is a budget on waiting, not on attempts: a policy with a zero delay retries freely, because it
+ * spends none of this. And it is the one field of a retry policy that defaults to **active**, because
+ * a budget a caller has to opt into bounds nothing. Before it, `PAGE_RETRY_ATTEMPTS=10
+ * PAGE_RETRY_DELAY_MS=60000` — both inside the ranges `pageRetryFromEnv` accepts — would have held a
+ * `sev1` for nine minutes, past the point where anybody was still waiting to be woken by it.
+ */
+export const DEFAULT_PAGE_RETRY_BUDGET_MS = 30_000;
+
+/**
+ * The highest a caller may raise that budget to: a fifth of the acknowledgement target.
+ *
+ * Above this the retry is no longer spending its own slack, it is spending the window in which a
+ * human was supposed to have answered — so a deployment that wants more is told no rather than
+ * handed a page that arrives after the SLA it exists to protect.
+ */
+export const MAX_PAGE_RETRY_BUDGET_MS = 60_000;
+
+/**
+ * The budget a policy's `totalBudgetMs` actually means.
+ *
+ * Absent and unusable both read as the default, since a budget is a safety bound and the unsafe
+ * direction for a bound is "unbounded". `0` is honoured as itself — a caller asking for no waiting at
+ * all still gets its attempts, it just gets no gaps between them. `Infinity` is **not** treated as
+ * unsaid: it is an ordering-valid request for as much as possible, so it clamps to the ceiling like
+ * any other over-long figure, where `NaN` and a negative are not quantities and read as unsaid.
+ */
+export function pageRetryBudgetMs(configured: number | null | undefined): number {
+  if (configured === null || configured === undefined || Number.isNaN(configured)) {
+    return DEFAULT_PAGE_RETRY_BUDGET_MS;
+  }
+  if (configured < 0) return DEFAULT_PAGE_RETRY_BUDGET_MS;
+  return Math.min(Math.trunc(configured), MAX_PAGE_RETRY_BUDGET_MS);
+}
 
 /** Lowercase, because a plain-`Record` test double cannot do `Headers`' case-insensitive lookup. */
 export const RETRY_AFTER_HEADER = "retry-after";

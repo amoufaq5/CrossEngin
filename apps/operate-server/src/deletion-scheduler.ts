@@ -46,6 +46,49 @@ export interface TombstoneSweepPage {
 }
 
 /**
+ * What the tombstone sweep has covered (ADR-0328).
+ *
+ * The sweep is the only thing that verifies a tombstone the synchronous deletion route wrote, and
+ * `verifyStoredEvidence` is the only detector for a tampered scope (ADR-0323) — so "every stored
+ * Article 17 proof has been verified since <time>" is a claim someone will be asked to make, and a
+ * lap is the unit it can be made in. ADR-0327 left the lap unmeasured; this is the measurement.
+ */
+export interface TombstoneSweepProgress {
+  readonly lapsCompleted: number;
+  /** Rows examined in the lap currently in progress. */
+  readonly examinedThisLap: number;
+  /** Rows examined in the last lap that finished, or null before the first one does. */
+  readonly examinedLastLap: number | null;
+  /** When the last lap finished, ISO-8601, or null. */
+  readonly lastLapCompletedAt: string | null;
+  /** The cursor the next page will resume from; null means "at the start of a lap". */
+  readonly cursor: string | null;
+  readonly findingsThisLap: number;
+  /** Findings in the last lap that finished, kept because the per-lap figure is the reportable one. */
+  readonly findingsLastLap: number | null;
+  /**
+   * Pages that **moved** the sweep's position — a new cursor, or the end of the table.
+   *
+   * This is the stall signal, and it is deliberately not a count of pages *taken*: a store that
+   * answers the same page forever, a `limit` that resolves to 0, a cursor pinned on a row that
+   * always throws — all three take pages without ever covering a row that was not covered before,
+   * and a counter that incremented for them would read exactly like a healthy sweep.
+   *
+   * A caller is entitled to conclude: if this has not changed across a window spanning several audit
+   * ticks (or if `lastAdvanceAt` is older than that), the sweep is covering no new ground, and
+   * `pagesSwept` says which kind — equal to this means pages are not coming back at all (no cadence,
+   * no store, or every page throwing), ahead of it means pages come back but the position does not
+   * move. A caller is **not** entitled to conclude that the rows are verifying: this measures motion
+   * across the table, not the verdicts, which are what `findingsThisLap` is for.
+   */
+  readonly pagesAdvanced: number;
+  /** Pages taken, advancing or not. Present only to tell the two stall shapes apart; see above. */
+  readonly pagesSwept: number;
+  /** When a page last moved the sweep's position, ISO-8601, or null. */
+  readonly lastAdvanceAt: string | null;
+}
+
+/**
  * One `auditCompleted` finding (ADR-0323): a *completed* request whose proof no longer stands up.
  *
  * Written out structurally here rather than imported, like `DeletionRunnerLike` above, so this file
@@ -168,9 +211,17 @@ export interface DeletionSchedulerOptions {
    * name a *proof* — and the ones that matter most name no request at all, which is exactly why the
    * two could not share a shape.
    */
-  readonly onTombstoneFindings?: (page: TombstoneSweepPage) => void | Promise<void>;
+  readonly onTombstoneFindings?: (
+    page: TombstoneSweepPage,
+    progress: TombstoneSweepProgress,
+  ) => void | Promise<void>;
   /** Forwarded as-is, so the reconciler's own default governs when it is absent. */
   readonly auditLimit?: number;
+  /**
+   * Injected, because `lastLapCompletedAt` is a figure a regulator is shown and a test must not wait
+   * on the wall clock. Same shape as every other clock option in this app (`() => Date`).
+   */
+  readonly clock?: () => Date;
 }
 
 /**
@@ -215,8 +266,39 @@ export class DeletionScheduler {
    * stopping, and a tombstone tampered with after the sweep passed it is found on the next lap.
    */
   private sweepCursor: string | null = null;
+  /**
+   * Lap accounting (ADR-0328). On the instance and untouched by `start()`/`stop()`, for the reason
+   * `ticks` is: a scheduler restarted around a config reload has not swept the table again, and a
+   * counter that reset there would make a lap boundary a statement about the process rather than
+   * about the table.
+   */
+  private lapsCompleted = 0;
+  private examinedThisLap = 0;
+  private examinedLastLap: number | null = null;
+  private findingsThisLap = 0;
+  private findingsLastLap: number | null = null;
+  private lastLapCompletedAt: string | null = null;
+  private pagesSwept = 0;
+  private pagesAdvanced = 0;
+  private lastAdvanceAt: string | null = null;
 
   constructor(private readonly opts: DeletionSchedulerOptions) {}
+
+  /** A snapshot, so a caller cannot hold a view that mutates under it on the next tick. */
+  sweepProgress(): TombstoneSweepProgress {
+    return {
+      lapsCompleted: this.lapsCompleted,
+      examinedThisLap: this.examinedThisLap,
+      examinedLastLap: this.examinedLastLap,
+      lastLapCompletedAt: this.lastLapCompletedAt,
+      cursor: this.sweepCursor,
+      findingsThisLap: this.findingsThisLap,
+      findingsLastLap: this.findingsLastLap,
+      pagesAdvanced: this.pagesAdvanced,
+      pagesSwept: this.pagesSwept,
+      lastAdvanceAt: this.lastAdvanceAt,
+    };
+  }
 
   start(): void {
     if (this.handle !== null) return;
@@ -304,19 +386,57 @@ export class DeletionScheduler {
    *
    * Reported even when clean, unlike `auditCompleted` above, because the *examined* count is the
    * claim: "we verified 412 proofs this lap" is what an auditor can use, and ADR-0323's rule is that
-   * it cannot be inferred from the absence of a log line.
+   * it cannot be inferred from the absence of a log line. The lap is also what makes that claim
+   * bounded in time, which is why the page is accounted for in `sweepProgress()` (ADR-0328) rather
+   * than only handed to a callback that may not be wired.
    */
   private async sweepOnce(): Promise<void> {
     const sweep = this.opts.reconciler?.auditTombstones;
     const reconciler = this.opts.reconciler;
     if (sweep === undefined || reconciler === undefined) return;
+    const resumedFrom = this.sweepCursor;
     const page = await sweep.call(reconciler, {
       ...(this.opts.auditLimit !== undefined ? { limit: this.opts.auditLimit } : {}),
       ...(this.sweepCursor !== null ? { afterTombstoneId: this.sweepCursor } : {}),
     });
+    // Everything below happens *after* the await, which is the whole of rule 3 (ADR-0328): a page
+    // that threw examined nothing, so it must leave the cursor and every counter exactly as they
+    // were and be retried from the same place. The cursor already behaved this way; the counters now
+    // behave the same way for the same reason, because a sweep whose figures move on a page that
+    // never arrived is the "looks like it is running" failure this accounting exists to expose.
+    const at = this.nowIso();
+    this.pagesSwept += 1;
+    this.examinedThisLap += page.examined;
+    this.findingsThisLap += page.findings.length;
     // Null means the page did not fill, i.e. the end of the table — so the next lap starts over.
+    // Lap accounting keys on this same signal and derives nothing of its own: two sources of truth
+    // for "the lap ended" is how they come to disagree.
+    const lapCompleted = page.nextAfterTombstoneId === null;
     this.sweepCursor = page.nextAfterTombstoneId;
-    await this.opts.onTombstoneFindings?.(page);
+    // The end of the table counts as motion even though the cursor lands back on null, because a lap
+    // finishing is the one thing that most certainly is not a stall.
+    if (lapCompleted || page.nextAfterTombstoneId !== resumedFrom) {
+      this.pagesAdvanced += 1;
+      this.lastAdvanceAt = at;
+    }
+    if (lapCompleted) {
+      this.lapsCompleted += 1;
+      // Taken before the reset, in this order: the running figure *is* the finished lap's total, and
+      // resetting first would destroy the only number the caller actually wants.
+      this.examinedLastLap = this.examinedThisLap;
+      this.findingsLastLap = this.findingsThisLap;
+      this.examinedThisLap = 0;
+      this.findingsThisLap = 0;
+      this.lastLapCompletedAt = at;
+    }
+    // Given the progress as well as the page, so a sink can log "lap 3 complete, 412 proofs
+    // verified" — the claim — rather than only this page's slice of it. Accounted first, so the
+    // snapshot the callback sees already includes this page and its lap boundary.
+    await this.opts.onTombstoneFindings?.(page, this.sweepProgress());
+  }
+
+  private nowIso(): string {
+    return (this.opts.clock ?? ((): Date => new Date()))().toISOString();
   }
 
   private auditEveryTicks(): number {

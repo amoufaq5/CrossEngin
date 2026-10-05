@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_PAGE_RETRY_BUDGET_MS,
+  MAX_PAGE_RETRY_BUDGET_MS,
   MAX_RETRY_AFTER_MS,
   RETRY_AFTER_HEADER,
+  pageRetryBudgetMs,
   parseRetryAfter,
   retryAfterExceedsCeiling,
   retryAfterFromResponse,
 } from "./retry-after.js";
+
+/** The `sev1` acknowledgement target every figure in this file is argued against. */
+const SEV1_ACK_MS = 5 * 60 * 1000;
 
 /** A fixed `now`, so the HTTP-date branch never touches the wall clock. */
 const NOW = new Date("2026-10-04T12:00:00.000Z");
@@ -150,6 +156,44 @@ describe("the ceiling", () => {
     expect(retryAfterExceedsCeiling(null)).toBe(false);
     expect(retryAfterExceedsCeiling(undefined)).toBe(false);
     expect(retryAfterExceedsCeiling(0)).toBe(false);
+  });
+});
+
+describe("the whole retry's budget", () => {
+  it("is the same figure as the ceiling on one instruction, deliberately", () => {
+    // ADR-0327 was already willing to spend 30s on a single `Retry-After`, so that is exactly the
+    // amount this platform has decided a page may be held for. Spending it twice over two gaps was
+    // never argued for — it was merely never bounded. One instruction may therefore consume the
+    // whole budget, and nothing may consume more.
+    expect(DEFAULT_PAGE_RETRY_BUDGET_MS).toBe(MAX_RETRY_AFTER_MS);
+    expect(DEFAULT_PAGE_RETRY_BUDGET_MS).toBe(SEV1_ACK_MS / 10);
+    expect(MAX_PAGE_RETRY_BUDGET_MS).toBe(SEV1_ACK_MS / 5);
+  });
+
+  it("reads an absent budget as the default, because unbounded is the unsafe direction", () => {
+    expect(pageRetryBudgetMs(undefined)).toBe(DEFAULT_PAGE_RETRY_BUDGET_MS);
+    expect(pageRetryBudgetMs(null)).toBe(DEFAULT_PAGE_RETRY_BUDGET_MS);
+  });
+
+  it("honours zero as itself, which is a caller asking for no waiting at all", () => {
+    // Distinct from absent: it still permits attempts, it permits no gaps between them.
+    expect(pageRetryBudgetMs(0)).toBe(0);
+  });
+
+  it("takes a figure it cannot use as not having been said", () => {
+    expect(pageRetryBudgetMs(-1)).toBe(DEFAULT_PAGE_RETRY_BUDGET_MS);
+    expect(pageRetryBudgetMs(Number.NaN)).toBe(DEFAULT_PAGE_RETRY_BUDGET_MS);
+    expect(pageRetryBudgetMs(Number.POSITIVE_INFINITY)).toBe(MAX_PAGE_RETRY_BUDGET_MS);
+  });
+
+  it("keeps a usable figure, truncated", () => {
+    expect(pageRetryBudgetMs(10_000)).toBe(10_000);
+    expect(pageRetryBudgetMs(1500.7)).toBe(1500);
+  });
+
+  it("clamps a figure that would spend the acknowledgement window itself", () => {
+    expect(pageRetryBudgetMs(600_000)).toBe(MAX_PAGE_RETRY_BUDGET_MS);
+    expect(pageRetryBudgetMs(MAX_PAGE_RETRY_BUDGET_MS)).toBe(MAX_PAGE_RETRY_BUDGET_MS);
   });
 });
 

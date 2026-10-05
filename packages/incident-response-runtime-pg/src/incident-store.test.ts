@@ -638,3 +638,85 @@ describe("appendPagedNote", () => {
     expect(PAGED_NOTE_MAX_ATTEMPTS).toBe(3);
   });
 });
+
+/**
+ * The two things `appendPagedNote` decides for itself (ADR-0328).
+ *
+ * Every other write here takes its instant from the caller and goes through
+ * `PersistentIncidentEngine.apply`, which is why this store had no clock and the append-only guard
+ * lived in the engine. ADR-0327 added the one method that does neither, and recorded both gaps.
+ */
+describe("appendPagedNote — its clock and its append-only guard (ADR-0328)", () => {
+  const FACTS = {
+    channels: ["pagerduty_phone"],
+    delivered: 1,
+    attempted: 1,
+  } as const;
+  const FIXED = "2026-10-04T12:00:00.000Z";
+
+  function loading(record: IncidentRecord, capture?: Captured[], revision = 1) {
+    return mockConnection(capture, (sql) =>
+      sql.includes("SELECT")
+        ? { rows: [incidentRow(record, revision)], rowCount: 1 }
+        : { rows: [], rowCount: 1 },
+    );
+  }
+
+  function appended(capture: Captured[]): TimelineEntry[] {
+    const update = capture.find((c) => c.sql.includes("UPDATE"));
+    const idx = INCIDENT_COLUMN_NAMES.indexOf("timeline");
+    return JSON.parse(String(update?.params?.[idx])) as TimelineEntry[];
+  }
+
+  it("stamps an omitted `at` from the injected clock, not the wall clock", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, capture), {
+      clock: () => new Date(FIXED),
+    }).appendPagedNote(record.id, { facts: FACTS, actorUserId: "system-slo" });
+    const timeline = appended(capture);
+    expect(timeline[timeline.length - 1]?.occurredAt).toBe(FIXED);
+  });
+
+  it("stamps the row's updated_at from the same clock", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    await new PostgresIncidentStore(loading(record, capture), {
+      clock: () => new Date(FIXED),
+    }).appendPagedNote(record.id, { facts: FACTS, actorUserId: "system-slo" });
+    const update = capture.find((c) => c.sql.includes("UPDATE"));
+    // The last bound value before the revision guard is `updated_at` — see `incidentUpdateAssignments`.
+    expect(update?.params).toContain(FIXED);
+  });
+
+  it("still prefers an explicit `at`, which is the page's own instant", async () => {
+    const capture: Captured[] = [];
+    const record = declaredIncident();
+    const paged = "2026-10-04T03:14:00.000Z";
+    await new PostgresIncidentStore(loading(record, capture), {
+      clock: () => new Date(FIXED),
+    }).appendPagedNote(record.id, { facts: FACTS, actorUserId: "system-slo", at: paged });
+    expect(appended(capture)[appended(capture).length - 1]?.occurredAt).toBe(paged);
+  });
+
+  it("defaults the clock, so no existing caller has to supply one", async () => {
+    const record = declaredIncident();
+    const outcome = await new PostgresIncidentStore(loading(record)).appendPagedNote(record.id, {
+      facts: FACTS,
+      actorUserId: "system-slo",
+    });
+    expect(outcome.recorded).toBe(true);
+  });
+
+  it("reports a refusal rather than throwing, like every other outcome here", async () => {
+    const record = declaredIncident();
+    const outcome = await new PostgresIncidentStore(loading(record)).appendPagedNote(record.id, {
+      // `delivered > attempted` is refused by the contract, which is the reachable refusal.
+      facts: { channels: ["slack"], delivered: 5, attempted: 1 },
+      actorUserId: "system-slo",
+      at: FIXED,
+    });
+    expect(outcome.recorded).toBe(false);
+    expect(outcome.reason).toContain("note_refused");
+  });
+});

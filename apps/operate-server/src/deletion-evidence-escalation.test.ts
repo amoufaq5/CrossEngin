@@ -18,9 +18,14 @@ import {
   DeletionEvidenceEscalator,
   ESCALATING_VERDICTS,
   RESOLVING_VERDICTS,
+  TOMBSTONE_EPISODE_PREFIX,
   deletionEvidenceKey,
+  deletionEvidenceTombstoneKey,
+  episodeKeyFor,
   severityForDefects,
+  tombstoneFindingSubject,
   type EscalatableFinding,
+  type EscalatableTombstoneFinding,
   type EscalatableVerdict,
 } from "./deletion-evidence-escalation.js";
 
@@ -35,15 +40,24 @@ const ALERT_POLICY: AlertPolicy = {
   routes: [
     // The route's severity is the ALERT vocabulary (P0..P3); `planPageDirective` maps the incident
     // severity (`sev1`) onto it. Two vocabularies, one bridge.
-    { severity: "P0", channels: [{ kind: "pagerduty_phone", serviceKey: "deletion-oncall" }] },
+    {
+      severity: "P0",
+      channels: [{ kind: "pagerduty_phone", serviceKey: "deletion-oncall" }],
+    },
     // A second route so a downgraded grade has somewhere else to land — the page must follow the
     // grade that was declared, not the configured default.
-    { severity: "P2", channels: [{ kind: "slack", channel: "#deletion-evidence" }] },
+    {
+      severity: "P2",
+      channels: [{ kind: "slack", channel: "#deletion-evidence" }],
+    },
   ],
 };
 
 function configOf(over: Record<string, unknown> = {}) {
-  return DeletionEscalationConfigSchema.parse({ alertPolicy: ALERT_POLICY, ...over });
+  return DeletionEscalationConfigSchema.parse({
+    alertPolicy: ALERT_POLICY,
+    ...over,
+  });
 }
 
 function incidentOf(id = INC, severity = "sev1"): IncidentRecord {
@@ -71,6 +85,22 @@ function findingOf(over: Partial<EscalatableFinding> = {}): EscalatableFinding {
     present: true,
     defects: ["scope_tampered"],
     detail: "tombstone does not verify: scope_tampered",
+    ...over,
+  };
+}
+
+function tombstoneFindingOf(
+  over: Partial<EscalatableTombstoneFinding> = {},
+): EscalatableTombstoneFinding {
+  return {
+    tombstoneId: TOMB,
+    tenantId: TENANT,
+    // The majority case this direction exists for: a proof the synchronous deletion route wrote,
+    // which both request-shaped audits walk straight past.
+    reference: "unreferenced",
+    relatedDeletionRequestId: null,
+    defects: ["scope_tampered"],
+    detail: "does not verify: scope_tampered",
     ...over,
   };
 }
@@ -160,7 +190,16 @@ function harness(
     onError: (err) => errors.push(err),
     clock: () => new Date(AT),
   });
-  return { escalator, declared, findOpenKeys, closedOut, pages, directives, emitted, errors };
+  return {
+    escalator,
+    declared,
+    findOpenKeys,
+    closedOut,
+    pages,
+    directives,
+    emitted,
+    errors,
+  };
 }
 
 describe("the config", () => {
@@ -210,7 +249,9 @@ describe("severityForDefects", () => {
   });
 
   it("takes the highest severity when a record has several defects", () => {
-    const config = configOf({ severityByDefect: { unwitnessed: "sev3", proof_mismatch: "sev2" } });
+    const config = configOf({
+      severityByDefect: { unwitnessed: "sev3", proof_mismatch: "sev2" },
+    });
     // A record with two defects is at least as bad as its worst one. An averaging or last-wins
     // scheme would let `unwitnessed` mask `proof_mismatch`.
     expect(severityForDefects(["unwitnessed", "proof_mismatch"], config)).toBe("sev2");
@@ -251,6 +292,82 @@ describe("which verdicts escalate", () => {
 
   it("keys an episode on the request", () => {
     expect(deletionEvidenceKey(REQ)).toBe(`${DELETION_EVIDENCE_SIGNAL}:${REQ}`);
+  });
+
+  it("keys an evidence record no request names on the tombstone, namespaced", () => {
+    expect(deletionEvidenceTombstoneKey(TOMB)).toBe(
+      `${DELETION_EVIDENCE_SIGNAL}:${TOMBSTONE_EPISODE_PREFIX}${TOMB}`,
+    );
+    expect(TOMBSTONE_EPISODE_PREFIX).toBe("tombstone:");
+  });
+
+  it("derives both keys from the subject, so nothing picks one by hand", () => {
+    expect(episodeKeyFor({ kind: "request", id: REQ })).toBe(deletionEvidenceKey(REQ));
+    expect(episodeKeyFor({ kind: "tombstone", id: TOMB })).toBe(deletionEvidenceTombstoneKey(TOMB));
+  });
+
+  it("cannot confuse the two spaces, which is what the prefix is for", () => {
+    // Both ids are opaque strings from different tables and nothing stops one from looking like the
+    // other. An unprefixed tombstone key would adopt an incident declared about a different record
+    // — the exact failure this module exists to prevent, in its own index.
+    expect(deletionEvidenceTombstoneKey(TOMB)).not.toBe(deletionEvidenceKey(TOMB));
+    expect(deletionEvidenceKey(`${TOMBSTONE_EPISODE_PREFIX}${TOMB}`)).toBe(
+      deletionEvidenceTombstoneKey(TOMB),
+    );
+  });
+});
+
+describe("which handle a sweep finding keys on", () => {
+  it("keys an unreferenced finding on the tombstone, because there is nothing else", () => {
+    expect(tombstoneFindingSubject(tombstoneFindingOf())).toEqual({
+      kind: "tombstone",
+      id: TOMB,
+    });
+  });
+
+  it("keys a referenced finding on its request, because they are one fact", () => {
+    expect(
+      tombstoneFindingSubject(
+        tombstoneFindingOf({
+          reference: "referenced",
+          relatedDeletionRequestId: REQ,
+        }),
+      ),
+    ).toEqual({ kind: "request", id: REQ });
+  });
+
+  it("keys a dangling finding on the tombstone, not on the request that is gone", () => {
+    // Nothing can adopt an episode for a row that no longer exists — the request paths cannot reach
+    // it — and the finding is about the proof, which is the thing still present and still wrong.
+    expect(
+      tombstoneFindingSubject(
+        tombstoneFindingOf({
+          reference: "dangling",
+          relatedDeletionRequestId: REQ,
+        }),
+      ),
+    ).toEqual({ kind: "tombstone", id: TOMB });
+  });
+
+  it("keys on the tombstone when the two fields disagree", () => {
+    // What makes `requestId` on the outcome structurally unable to name a request that is not there:
+    // the id is only used when the finding also says the request is reachable.
+    expect(
+      tombstoneFindingSubject(
+        tombstoneFindingOf({
+          reference: "referenced",
+          relatedDeletionRequestId: null,
+        }),
+      ),
+    ).toEqual({ kind: "tombstone", id: TOMB });
+    expect(
+      tombstoneFindingSubject(
+        tombstoneFindingOf({
+          reference: "unreferenced",
+          relatedDeletionRequestId: REQ,
+        }),
+      ),
+    ).toEqual({ kind: "tombstone", id: TOMB });
   });
 });
 
@@ -703,5 +820,324 @@ describe("closing the provider's alert (ADR-0326)", () => {
     // A `sev1` here would be a false record of which grade was resolved — the same class of defect
     // the module exists to catch, in the module's own row.
     expect(entry?.after).toMatchObject({ severity: "sev3" });
+  });
+});
+
+describe("onTombstoneFinding (ADR-0328)", () => {
+  it("declares under the tombstone's key for a proof no request names", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onTombstoneFinding(tombstoneFindingOf());
+    expect(outcome.action).toBe("declared");
+    expect(h.findOpenKeys).toEqual([deletionEvidenceTombstoneKey(TOMB)]);
+    expect(h.declared[0]?.autoDeclaredFor).toBe(deletionEvidenceTombstoneKey(TOMB));
+    expect(h.declared[0]?.severity).toBe("sev1");
+    expect(h.declared[0]?.securityIncident).toBe(true);
+    expect(h.declared[0]?.affectedTenantIds).toEqual([TENANT]);
+    expect(h.pages).toEqual([`${INC}:1`]);
+  });
+
+  it("reports no request id for a tombstone episode rather than inventing one", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onTombstoneFinding(tombstoneFindingOf());
+    // The field is widened, not reused: a tombstone id in `requestId` would make the outcome claim
+    // a request that does not exist, which is the class of false record this module catches.
+    expect(outcome.requestId).toBeNull();
+    expect(outcome.subject).toEqual({ kind: "tombstone", id: TOMB });
+    expect(outcome.episodeKey).toBe(deletionEvidenceTombstoneKey(TOMB));
+  });
+
+  it("declares under the request's key when a live request names the tombstone", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onTombstoneFinding(
+      tombstoneFindingOf({
+        reference: "referenced",
+        relatedDeletionRequestId: REQ,
+      }),
+    );
+    expect(outcome.action).toBe("declared");
+    expect(outcome.requestId).toBe(REQ);
+    expect(outcome.subject).toEqual({ kind: "request", id: REQ });
+    expect(h.declared[0]?.autoDeclaredFor).toBe(deletionEvidenceKey(REQ));
+  });
+
+  it("adopts the incident its request already has open rather than declaring a second", async () => {
+    // The test the whole design turns on. A tombstone and the request that names it are the same
+    // fact, reached by three paths — `reconcileStranded`, `auditCompleted` and this sweep. Keying
+    // every sweep finding on the tombstone would declare a second incident for one tampered row,
+    // once per direction that noticed it.
+    const asked: string[] = [];
+    const declared: IncidentDeclarationRequest[] = [];
+    const escalator = new DeletionEvidenceEscalator({
+      declarer: {
+        declare: async (request): Promise<IncidentRecord> => {
+          declared.push(request);
+          return incidentOf();
+        },
+        // Open for the REQUEST's key only. So an adoption here proves the sweep asked under that
+        // key — not merely that the double is returned whatever is asked.
+        findOpen: async (key): Promise<IncidentRecord | null> => {
+          asked.push(key);
+          return key === deletionEvidenceKey(REQ) ? incidentOf() : null;
+        },
+        closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+      },
+      config: configOf(),
+      clock: () => new Date(AT),
+    });
+    const outcome = await escalator.onTombstoneFinding(
+      tombstoneFindingOf({
+        reference: "referenced",
+        relatedDeletionRequestId: REQ,
+      }),
+    );
+    expect(asked).toEqual([deletionEvidenceKey(REQ)]);
+    expect(outcome.action).toBe("adopted");
+    expect(outcome.incidentId).toBe(INC);
+    expect(declared).toEqual([]);
+    // And the mirror: the same row reached by the other two directions still adopts, because all
+    // three ask the same question.
+    const viaAudit = await escalator.onAuditFinding(findingOf());
+    const viaVerdict = await escalator.onVerdict(verdictOf());
+    expect([viaAudit.action, viaVerdict.action]).toEqual(["adopted", "adopted"]);
+    expect(declared).toEqual([]);
+  });
+
+  it("declares its own episode for a dangling proof, since nothing can adopt a vanished request", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onTombstoneFinding(
+      tombstoneFindingOf({
+        reference: "dangling",
+        relatedDeletionRequestId: REQ,
+      }),
+    );
+    expect(outcome.action).toBe("declared");
+    expect(outcome.requestId).toBeNull();
+    expect(h.findOpenKeys).toEqual([deletionEvidenceTombstoneKey(TOMB)]);
+  });
+
+  it("names the tombstone and says plainly that the proof does not verify", async () => {
+    const h = harness();
+    await h.escalator.onTombstoneFinding(tombstoneFindingOf());
+    expect(h.declared[0]?.title).toBe(
+      `Deletion proof does not verify for unreferenced tombstone ${TOMB}`,
+    );
+    expect(h.declared[0]?.detail).toContain(TOMB);
+    expect(h.declared[0]?.detail).toContain(TENANT);
+    expect(h.declared[0]?.detail).toContain("scope_tampered");
+  });
+
+  it("does not claim a verification failure for an intact proof whose request is gone", async () => {
+    const h = harness();
+    await h.escalator.onTombstoneFinding(
+      tombstoneFindingOf({
+        reference: "dangling",
+        relatedDeletionRequestId: REQ,
+        defects: [],
+        detail: `names deletion request ${REQ}, which does not exist`,
+      }),
+    );
+    // A dangling finding is reported even when it verifies, so the usual sentence would be false.
+    // A title that overstates the finding costs the credibility a sev1 depends on.
+    expect(h.declared[0]?.title).toBe(
+      `Deletion proof ${TOMB} names a deletion request that does not exist`,
+    );
+    expect(h.declared[0]?.title).not.toContain("does not verify");
+  });
+
+  it("carries nothing in the title or detail the other paths do not already carry", async () => {
+    const h = harness();
+    await h.escalator.onTombstoneFinding(tombstoneFindingOf());
+    // Tenant id, tombstone id, reference state and defect names — the same vocabulary the verdict
+    // and audit paths put in their own details. Nothing from inside the scope.
+    const text = `${h.declared[0]?.title ?? ""} ${h.declared[0]?.detail ?? ""}`;
+    expect(text).toContain("unreferenced");
+    for (const leak of ["invoice", "rowsDeleted", "contentManifest", "proofSha256"]) {
+      expect(text).not.toContain(leak);
+    }
+  });
+
+  it("grades per defect by the same rule as every other path", async () => {
+    const graded = configOf({ severityByDefect: { unwitnessed: "sev3" } });
+    const h = harness({}, graded);
+    const outcome = await h.escalator.onTombstoneFinding(
+      tombstoneFindingOf({ defects: ["unwitnessed"] }),
+    );
+    expect(outcome.severity).toBe("sev3");
+    expect(h.declared[0]?.severity).toBe("sev3");
+  });
+
+  it("pages at the graded severity, over the route that grade chose", async () => {
+    const graded = configOf({ severityByDefect: { unwitnessed: "sev3" } });
+    const h = harness({}, graded);
+    await h.escalator.onTombstoneFinding(tombstoneFindingOf({ defects: ["unwitnessed"] }));
+    expect(h.directives[0]?.severity).toBe(h.declared[0]?.severity);
+    expect(h.directives[0]?.alertSeverity).toBe("P2");
+    expect(h.directives[0]?.channels[0]?.kind).toBe("slack");
+  });
+
+  it("falls back to the configured grade for a finding that reports no defects", async () => {
+    const h = harness({}, configOf({ severityByDefect: { unwitnessed: "sev3" } }));
+    const outcome = await h.escalator.onTombstoneFinding(
+      tombstoneFindingOf({
+        reference: "dangling",
+        relatedDeletionRequestId: REQ,
+        defects: [],
+      }),
+    );
+    expect(outcome.severity).toBe("sev1");
+    expect(h.directives[0]?.alertSeverity).toBe("P0");
+  });
+
+  it("files the anchored row against the tombstone, which is the record at fault", async () => {
+    const h = harness();
+    const outcome = await h.escalator.onTombstoneFinding(tombstoneFindingOf());
+    expect(outcome.audited).toBe(true);
+    const row = h.emitted[0];
+    expect(row?.operation).toBe(DELETION_EVIDENCE_ESCALATED_OPERATION);
+    expect(row?.tenantId).toBe(TENANT);
+    // Filing it as a `GdprDeletionRequest` with a tombstone id would be a row whose entity and id
+    // disagree — and an unreferenced tombstone has no request to file it under at all.
+    expect(row?.entity).toBe("TenantTombstone");
+    expect(row?.entityId).toBe(TOMB);
+    expect(row?.after).toMatchObject({
+      incidentId: INC,
+      severity: "sev1",
+      defects: ["scope_tampered"],
+      tombstoneId: TOMB,
+      reference: "unreferenced",
+      verdict: null,
+    });
+  });
+
+  it("still names the tombstone in a row filed under the request", async () => {
+    const h = harness();
+    await h.escalator.onTombstoneFinding(
+      tombstoneFindingOf({
+        reference: "referenced",
+        relatedDeletionRequestId: REQ,
+      }),
+    );
+    const row = h.emitted[0];
+    expect(row?.entity).toBe("GdprDeletionRequest");
+    expect(row?.entityId).toBe(REQ);
+    // Without this the row would not name the proof that is wrong.
+    expect(row?.after).toMatchObject({
+      tombstoneId: TOMB,
+      reference: "referenced",
+    });
+  });
+
+  it("writes nothing when the episode is adopted", async () => {
+    const h = harness({ open: incidentOf() });
+    const outcome = await h.escalator.onTombstoneFinding(tombstoneFindingOf());
+    expect(outcome.action).toBe("adopted");
+    expect(outcome.audited).toBe(false);
+    expect(h.emitted).toEqual([]);
+  });
+
+  it("reports a declarer failure, so the next lap re-derives it and retries", async () => {
+    const errors: string[] = [];
+    const escalator = new DeletionEvidenceEscalator({
+      declarer: {
+        declare: async (): Promise<IncidentRecord> => {
+          throw new Error("incident store unreachable");
+        },
+        findOpen: async (): Promise<IncidentRecord | null> => null,
+        closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+      },
+      config: configOf(),
+      onError: (_e, id) => errors.push(id),
+      clock: () => new Date(AT),
+    });
+    const outcome = await escalator.onTombstoneFinding(tombstoneFindingOf());
+    expect(outcome.action).toBe("failed");
+    expect(outcome.incidentId).toBeNull();
+    expect(outcome.subject).toEqual({ kind: "tombstone", id: TOMB });
+    // The id names the row to go and look at, which for this episode is the tombstone.
+    expect(errors).toEqual([TOMB]);
+  });
+});
+
+describe("onTombstoneResolved (ADR-0328)", () => {
+  it("closes out the tombstone's own episode and resolves its alert", async () => {
+    const resolved: PageDirective[] = [];
+    const asked: string[] = [];
+    const escalator = new DeletionEvidenceEscalator({
+      declarer: {
+        declare: async (): Promise<IncidentRecord> => incidentOf(),
+        findOpen: async (key): Promise<IncidentRecord | null> => {
+          asked.push(key);
+          return incidentOf(INC, "sev3");
+        },
+        closeOut: async (): Promise<IncidentCloseOut> => "cancelled",
+      },
+      config: configOf(),
+      resolvePage: (page) => {
+        resolved.push(page);
+      },
+      clock: () => new Date(AT),
+    });
+    const outcome = await escalator.onTombstoneResolved(TOMB, TENANT);
+    expect(asked).toEqual([deletionEvidenceTombstoneKey(TOMB)]);
+    expect(outcome.action).toBe("closed_out");
+    expect(outcome.closeOut).toBe("cancelled");
+    expect(outcome.requestId).toBeNull();
+    // Routed at the incident's own grade, so the resolve reaches exactly where the trigger did.
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.severity).toBe("sev3");
+    expect(resolved[0]?.channels.map((c) => c.kind)).toEqual(["slack"]);
+  });
+
+  it("answers none for a tombstone whose episode belongs to its request", async () => {
+    // A referenced finding escalated under the request's key, and the request path owns its
+    // recovery — `onVerdict`'s resolving verdicts, which can actually see the request's status.
+    // This asking and finding nothing open is correct, not a miss.
+    const h = harness({ open: null });
+    const outcome = await h.escalator.onTombstoneResolved(TOMB, TENANT);
+    expect(outcome.action).toBe("none");
+    expect(h.closedOut).toEqual([]);
+    expect(h.findOpenKeys).toEqual([deletionEvidenceTombstoneKey(TOMB)]);
+  });
+
+  it("does not resolve the alert of an incident a human has triaged", async () => {
+    const resolved: string[] = [];
+    const escalator = new DeletionEvidenceEscalator({
+      declarer: {
+        declare: async (): Promise<IncidentRecord> => incidentOf(),
+        findOpen: async (): Promise<IncidentRecord | null> => incidentOf(),
+        closeOut: async (): Promise<IncidentCloseOut> => "human_owned",
+      },
+      config: configOf(),
+      resolvePage: (page) => {
+        resolved.push(page.incidentId);
+      },
+      clock: () => new Date(AT),
+    });
+    const outcome = await escalator.onTombstoneResolved(TOMB, TENANT);
+    expect(outcome.closeOut).toBe("human_owned");
+    expect(resolved).toEqual([]);
+  });
+
+  it("records the resolution against the tombstone at its declared grade", async () => {
+    const h = harness({ open: incidentOf(INC, "sev2") });
+    const outcome = await h.escalator.onTombstoneResolved(TOMB, TENANT);
+    expect(outcome.audited).toBe(true);
+    const row = h.emitted[0];
+    expect(row?.operation).toBe(DELETION_EVIDENCE_RESOLVED_OPERATION);
+    expect(row?.entity).toBe("TenantTombstone");
+    expect(row?.entityId).toBe(TOMB);
+    expect(row?.after).toMatchObject({
+      severity: "sev2",
+      tombstoneId: TOMB,
+      defects: [],
+    });
+  });
+
+  it("reports a failed close-out rather than claiming the proof's episode closed", async () => {
+    const h = harness({ open: incidentOf(), closeOutThrows: true });
+    const outcome = await h.escalator.onTombstoneResolved(TOMB, TENANT);
+    expect(outcome.action).toBe("failed");
+    expect(outcome.closeOut).toBeNull();
+    expect(outcome.subject).toEqual({ kind: "tombstone", id: TOMB });
   });
 });

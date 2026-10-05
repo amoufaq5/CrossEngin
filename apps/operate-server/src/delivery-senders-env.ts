@@ -1,10 +1,15 @@
 import {
   FcmPushSender,
+  MACHINE_DETECTION_MODES,
+  MAX_VOICE_REPEAT_COUNT,
+  MetadataServerFcmTokenProvider,
   SesEmailSender,
   ServiceAccountFcmTokenProvider,
   TwilioSmsSender,
+  TwilioVoiceSender,
   normalizePrivateKeyPem,
   parseServiceAccountJson,
+  type MachineDetectionMode,
 } from "@crossengin/notification-providers";
 
 import { InAppSender, SenderRegistry, type ChannelSender } from "./delivery-senders.js";
@@ -68,9 +73,40 @@ const TWILIO_VARS = [
 
 const FCM_VARS = [
   "FCM_PROJECT_ID",
+  "FCM_CREDENTIAL_SOURCE",
   "FCM_SERVICE_ACCOUNT_JSON",
   "FCM_SERVICE_ACCOUNT_CLIENT_EMAIL",
   "FCM_SERVICE_ACCOUNT_PRIVATE_KEY",
+  "FCM_METADATA_ENDPOINT",
+  "FCM_METADATA_SERVICE_ACCOUNT",
+] as const;
+
+/**
+ * Where an FCM access token comes from. Two routes, named rather than probed for.
+ *
+ * `service_account` is a key file; `metadata_server` is the GCE/GKE instance metadata server, which
+ * is the configuration Google recommends and the one where there *is* no key file — with workload
+ * identity the platform holds the credential and the network position is the credential.
+ */
+const FCM_CREDENTIAL_SOURCES = ["service_account", "metadata_server"] as const;
+type FcmCredentialSource = (typeof FCM_CREDENTIAL_SOURCES)[number];
+
+/**
+ * Voice's **own** variables, and only its own, so a deployment that configures SMS alone stays
+ * silent about voice (`anyPresent` below is what makes "not wanted" differ from "wanted but
+ * incomplete", and a shared name here would collapse the two).
+ */
+const TWILIO_VOICE_VARS = [
+  "TWILIO_VOICE_FROM_NUMBER",
+  "TWILIO_VOICE_ACCOUNT_SID",
+  "TWILIO_VOICE_AUTH_TOKEN",
+  "TWILIO_VOICE_API_KEY_SID",
+  "TWILIO_VOICE_API_KEY_SECRET",
+  "TWILIO_VOICE_STATUS_CALLBACK_URL",
+  "TWILIO_VOICE_MACHINE_DETECTION",
+  "TWILIO_VOICE_REPEAT_COUNT",
+  "TWILIO_VOICE_LANGUAGE",
+  "TWILIO_VOICE_BASE_URL",
 ] as const;
 
 /**
@@ -205,6 +241,180 @@ function buildTwilio(env: NodeJS.ProcessEnv, skipped: string[]): ChannelSender |
   );
 }
 
+/*
+ * Voice, which ADR-0310 built and nothing constructed (ADR-0328). `voice_call` had a sender, a
+ * contract, templates and a dispatch ledger, and every delivery for it was refused
+ * `no_sender_configured`.
+ *
+ * **The credential-sharing decision.** Voice shares the SMS sender's Twilio *account* and
+ * credential by default, and takes its own caller id, which it never inherits. Both halves of that
+ * are deliberate.
+ *
+ * Why it shares where ADR-0326's `PAGE_SMS_*` deliberately did not: that separation is about
+ * *purpose*, not about Twilio. `SmsPageSender` exists to bypass preferences, suppressions and quiet
+ * hours — a different job from delivering a tenant's notification, on a transport that must not be
+ * able to acquire a reason not to arrive — so borrowing credentials configured for the notification
+ * stack would have been exactly the implicit coupling ADR-0325 refused. `TwilioVoiceSender` is the
+ * opposite case: it is a `ChannelSender` in that same notification stack, subject to the same
+ * preferences, the same suppressions and the same drain, differing from `TwilioSmsSender` only in
+ * the medium. Making an operator restate the same account sid and the same API key under a second
+ * prefix would buy nothing and would add a second copy of a credential to rotate.
+ *
+ * Why the number is never inherited, and is required: `TWILIO_FROM_NUMBER` may legitimately be
+ * unable to place a call. A short code, an alphanumeric sender id and a 10DLC number registered for
+ * messaging are all valid SMS identities with no voice capability, and `TWILIO_FROM_NUMBER` may be
+ * absent entirely because SMS is configured with a messaging service instead — which Calls has no
+ * analogue for, so `TwilioVoiceSenderOptions.fromNumber` is required rather than one of two
+ * identities. Defaulting it would produce a channel that registers at boot, looks healthy, and
+ * fails on every call at the provider.
+ *
+ * And a deployment that *does* want a separate subaccount for voice can have one, per-variable. The
+ * one thing that is refused is borrowing across accounts: if `TWILIO_VOICE_ACCOUNT_SID` names an
+ * account other than the one SMS uses, a voice credential is required, because quietly presenting
+ * one account's API key to another is a configuration mistake that only Twilio would catch.
+ */
+function buildTwilioVoice(
+  env: NodeJS.ProcessEnv,
+  skipped: string[],
+): ChannelSender | null {
+  const fromNumber = value(env, "TWILIO_VOICE_FROM_NUMBER");
+  const smsAccountSid = value(env, "TWILIO_ACCOUNT_SID");
+  const voiceAccountSid = value(env, "TWILIO_VOICE_ACCOUNT_SID");
+  const accountSid = voiceAccountSid ?? smsAccountSid;
+
+  if (fromNumber === null || accountSid === null) {
+    if (anyPresent(env, TWILIO_VOICE_VARS)) {
+      skipped.push(
+        "voice (Twilio): needs TWILIO_VOICE_FROM_NUMBER (a voice-capable caller id in E.164, " +
+          "never inherited from TWILIO_FROM_NUMBER, which may be messaging-only) and an account " +
+          "(TWILIO_ACCOUNT_SID, or TWILIO_VOICE_ACCOUNT_SID for a separate subaccount); partial " +
+          "configuration is ignored rather than guessed",
+      );
+    }
+    return null;
+  }
+
+  const credential = resolveVoiceCredential(env, {
+    accountSid,
+    sharesSmsAccount: smsAccountSid !== null && accountSid === smsAccountSid,
+  });
+  if (typeof credential === "string") {
+    skipped.push(`voice (Twilio): ${credential}`);
+    return null;
+  }
+
+  // Every one of these is refused rather than defaulted when it is malformed. A `repeatCount` of
+  // `two` silently becoming 2, or an unknown detection mode silently becoming off, is a deployment
+  // believing something about an automated phone call that is not true.
+  const rawRepeatCount = value(env, "TWILIO_VOICE_REPEAT_COUNT");
+  let repeatCount: number | null = null;
+  if (rawRepeatCount !== null) {
+    if (!/^\d+$/.test(rawRepeatCount)) {
+      skipped.push(
+        `voice (Twilio): TWILIO_VOICE_REPEAT_COUNT must be a whole number in 1..${String(MAX_VOICE_REPEAT_COUNT)}`,
+      );
+      return null;
+    }
+    repeatCount = Number.parseInt(rawRepeatCount, 10);
+  }
+
+  const rawMachineDetection = value(env, "TWILIO_VOICE_MACHINE_DETECTION");
+  let machineDetection: MachineDetectionMode | null = null;
+  if (rawMachineDetection !== null) {
+    const mode = MACHINE_DETECTION_MODES.find((m) => m === rawMachineDetection);
+    if (mode === undefined) {
+      skipped.push(
+        `voice (Twilio): TWILIO_VOICE_MACHINE_DETECTION must be one of ${MACHINE_DETECTION_MODES.join(", ")}`,
+      );
+      return null;
+    }
+    machineDetection = mode;
+  }
+
+  /*
+   * Twilio reports a call's real outcome only to a status callback — `CallStatus=completed` with a
+   * duration, and `AnsweredBy` when machine detection is on. Nothing consumes it: ADR-0310 gave
+   * voice no bounce-webhook source on purpose, because a busy line is not an invalid number the way
+   * a hard bounce is an invalid address. So a **carrier failure on a call produces no suppression**
+   * — the dispatch's retry ladder is the whole of the handling — and a missing callback URL is
+   * therefore not warned about here, unlike SMS's, where its absence means no bounce can ever
+   * arrive. That is a known open end, not something this wiring resolves.
+   */
+  const statusCallbackUrl = value(env, "TWILIO_VOICE_STATUS_CALLBACK_URL");
+  const language = value(env, "TWILIO_VOICE_LANGUAGE");
+  // The endpoint override falls back to SMS's: Calls and Messages are the same `api.twilio.com`
+  // host, so a deployment behind one egress proxy should configure it once. Inheriting it is safe
+  // in the way inheriting a credential across accounts is not — it is a route, not a secret.
+  const baseUrl = value(env, "TWILIO_VOICE_BASE_URL") ?? value(env, "TWILIO_BASE_URL");
+
+  return construct(
+    "voice (Twilio)",
+    skipped,
+    () =>
+      new TwilioVoiceSender({
+        accountSid,
+        ...credential,
+        fromNumber,
+        ...(statusCallbackUrl !== null ? { statusCallbackUrl } : {}),
+        ...(machineDetection !== null ? { machineDetection } : {}),
+        ...(repeatCount !== null ? { repeatCount } : {}),
+        ...(language !== null ? { language } : {}),
+        ...(baseUrl !== null ? { baseUrl } : {}),
+      }),
+  );
+}
+
+type TwilioCredential =
+  | { readonly apiKeySid: string; readonly apiKeySecret: string }
+  | { readonly authToken: string };
+
+/**
+ * Resolves voice's Twilio credential, or returns the reason it could not be.
+ *
+ * An API key pair is preferred over the account's auth token wherever both exist, for `buildTwilio`'s
+ * reason: it is revocable on its own and scoped, where the auth token is the account's root
+ * credential. Half a pair is refused rather than falling back to the auth token — the same rule and
+ * the same reason, that silently substituting the root credential is a privilege escalation nobody
+ * asked for.
+ */
+function resolveVoiceCredential(
+  env: NodeJS.ProcessEnv,
+  ctx: { readonly accountSid: string; readonly sharesSmsAccount: boolean },
+): TwilioCredential | string {
+  const apiKeySid = value(env, "TWILIO_VOICE_API_KEY_SID");
+  const apiKeySecret = value(env, "TWILIO_VOICE_API_KEY_SECRET");
+  const authToken = value(env, "TWILIO_VOICE_AUTH_TOKEN");
+
+  if (apiKeySid !== null || apiKeySecret !== null) {
+    return apiKeySid !== null && apiKeySecret !== null
+      ? { apiKeySid, apiKeySecret }
+      : "TWILIO_VOICE_API_KEY_SID and TWILIO_VOICE_API_KEY_SECRET go together; half a pair is " +
+          "refused rather than falling back to an account auth token";
+  }
+  if (authToken !== null) return { authToken };
+
+  if (!ctx.sharesSmsAccount) {
+    return (
+      "TWILIO_VOICE_ACCOUNT_SID names an account other than TWILIO_ACCOUNT_SID, so it needs its " +
+      "own credential (TWILIO_VOICE_API_KEY_SID + TWILIO_VOICE_API_KEY_SECRET, or " +
+      "TWILIO_VOICE_AUTH_TOKEN); one account's credential is never presented to another"
+    );
+  }
+
+  const sharedKeySid = value(env, "TWILIO_API_KEY_SID");
+  const sharedKeySecret = value(env, "TWILIO_API_KEY_SECRET");
+  if (sharedKeySid !== null && sharedKeySecret !== null) {
+    return { apiKeySid: sharedKeySid, apiKeySecret: sharedKeySecret };
+  }
+  const sharedAuthToken = value(env, "TWILIO_AUTH_TOKEN");
+  if (sharedAuthToken !== null) return { authToken: sharedAuthToken };
+
+  return (
+    "no credential for the Twilio account; set TWILIO_API_KEY_SID + TWILIO_API_KEY_SECRET (shared " +
+    "with sms) or TWILIO_VOICE_API_KEY_SID + TWILIO_VOICE_API_KEY_SECRET"
+  );
+}
+
 /**
  * Mobile push, which ADR-0310 built and could not wire (ADR-0327).
  *
@@ -225,47 +435,122 @@ function buildFcm(env: NodeJS.ProcessEnv, skipped: string[]): ChannelSender | nu
   const json = value(env, "FCM_SERVICE_ACCOUNT_JSON");
   const clientEmail = value(env, "FCM_SERVICE_ACCOUNT_CLIENT_EMAIL");
   const privateKeyPem = value(env, "FCM_SERVICE_ACCOUNT_PRIVATE_KEY");
-  const hasPair = clientEmail !== null && privateKeyPem !== null;
-  if (projectId === null || (json === null && !hasPair)) {
+  const hasKey = json !== null || (clientEmail !== null && privateKeyPem !== null);
+
+  const declared = value(env, "FCM_CREDENTIAL_SOURCE");
+  if (declared !== null && !isFcmCredentialSource(declared)) {
+    skipped.push(
+      `push_mobile (FCM): FCM_CREDENTIAL_SOURCE must be one of ${FCM_CREDENTIAL_SOURCES.join(", ")}`,
+    );
+    return null;
+  }
+  /*
+   * The selection, and why it is asymmetric.
+   *
+   * A key file is unambiguous evidence of intent: there is no reason to set
+   * `FCM_SERVICE_ACCOUNT_JSON` other than to use it, so that route stays inferred from its own
+   * presence and existing deployments are unaffected. The metadata route is configured by
+   * **nothing** — the network position is the credential — so there is no evidence to infer from,
+   * and its absence of configuration is indistinguishable from "push was never wanted". That is the
+   * one route that has to be *declared*, which is also why nothing here probes the metadata server
+   * to find out: a boot-time link-local request would add this module's timeout to every start and
+   * answer a question the deployment is better placed to answer than we are.
+   */
+  const source: FcmCredentialSource | null =
+    declared ?? (hasKey ? "service_account" : null);
+  const configured = source === "metadata_server" || hasKey;
+  if (projectId === null || source === null || !configured) {
     if (anyPresent(env, FCM_VARS)) {
       skipped.push(
-        "push_mobile (FCM): needs FCM_PROJECT_ID and either FCM_SERVICE_ACCOUNT_JSON or both " +
-          "FCM_SERVICE_ACCOUNT_CLIENT_EMAIL and FCM_SERVICE_ACCOUNT_PRIVATE_KEY; partial " +
-          "configuration is ignored rather than guessed",
+        "push_mobile (FCM): needs FCM_PROJECT_ID and a credential source — either " +
+          "FCM_SERVICE_ACCOUNT_JSON, or both FCM_SERVICE_ACCOUNT_CLIENT_EMAIL and " +
+          "FCM_SERVICE_ACCOUNT_PRIVATE_KEY, or FCM_CREDENTIAL_SOURCE=metadata_server on " +
+          "GCE/GKE; partial configuration is ignored rather than guessed",
       );
     }
     return null;
   }
+  if (source === "metadata_server" && hasKey) {
+    // Two plausible configurations, resolved here rather than refused — `buildTwilio`'s rule for
+    // two sender identities. The explicit declaration wins over inferred evidence, and the one that
+    // lost is named, because a key left beside a metadata deployment is usually a stale secret.
+    skipped.push(
+      "push_mobile (FCM): FCM_CREDENTIAL_SOURCE=metadata_server, so the service-account key " +
+        "configured beside it is ignored",
+    );
+  }
+
   const tokenEndpoint = value(env, "FCM_TOKEN_ENDPOINT");
+  const metadataEndpoint = value(env, "FCM_METADATA_ENDPOINT");
+  const metadataServiceAccount = value(env, "FCM_METADATA_SERVICE_ACCOUNT");
   const baseUrl = value(env, "FCM_BASE_URL");
   return construct("push_mobile (FCM)", skipped, () => {
-    // Parsed and validated here, inside `construct`, so a malformed key costs this channel and not
-    // the boot — and the provider refuses an EC key, a non-https token endpoint and a malformed PEM
-    // at construction rather than at 3am. Its errors never echo the key material.
-    const credentials =
-      json !== null
-        ? parseServiceAccountJson(json)
-        : {
-            clientEmail: clientEmail as string,
-            // `parseServiceAccountJson` normalises the key it reads; the split form has to do the
-            // same, or the literal-`\n` key an env var or Kubernetes secret produces — the most
-            // common way this configuration goes wrong — is refused as undecodable.
-            privateKeyPem: normalizePrivateKeyPem(privateKeyPem as string),
-          };
-    const tokens = new ServiceAccountFcmTokenProvider({
-      credentials: {
-        ...credentials,
-        ...(tokenEndpoint !== null ? { tokenUri: tokenEndpoint } : {}),
-      },
-    });
+    // Built here, inside `construct`, so a malformed key or a bad endpoint override costs this
+    // channel and not the boot — both providers refuse at construction (an EC key, a non-https
+    // token endpoint, a plaintext metadata endpoint off the instance) rather than at 3am, and
+    // neither echoes credential material into the reason.
+    const tokens: FcmTokenSource =
+      source === "metadata_server"
+        ? new MetadataServerFcmTokenProvider({
+            ...(metadataEndpoint !== null ? { endpoint: metadataEndpoint } : {}),
+            ...(metadataServiceAccount !== null
+              ? { serviceAccount: metadataServiceAccount }
+              : {}),
+          })
+        : buildServiceAccountTokens({
+            json,
+            clientEmail,
+            privateKeyPem,
+            tokenEndpoint,
+          });
     return new FcmPushSender({
       projectId,
       accessToken: tokens.asProvider(),
       // So a credential FCM refuses is not re-presented on every send for the rest of its cached
-      // lifetime (ADR-0327).
+      // lifetime (ADR-0327). Both routes answer it, which is what makes them interchangeable here.
       invalidateToken: () => tokens.invalidate(),
       ...(baseUrl !== null ? { baseUrl } : {}),
     });
+  });
+}
+
+function isFcmCredentialSource(raw: string): raw is FcmCredentialSource {
+  return (FCM_CREDENTIAL_SOURCES as readonly string[]).includes(raw);
+}
+
+/**
+ * What this wiring needs of a token provider, which is all the two routes have in common.
+ *
+ * Structural on purpose: ADR-0310's seam is the bare function type `() => Promise<string>`, so
+ * neither provider class can `implements` it, and naming the pair here keeps the selection above a
+ * choice of constructor rather than a branch repeated at every use.
+ */
+interface FcmTokenSource {
+  asProvider(): () => Promise<string>;
+  invalidate(): void;
+}
+
+function buildServiceAccountTokens(input: {
+  readonly json: string | null;
+  readonly clientEmail: string | null;
+  readonly privateKeyPem: string | null;
+  readonly tokenEndpoint: string | null;
+}): FcmTokenSource {
+  const credentials =
+    input.json !== null
+      ? parseServiceAccountJson(input.json)
+      : {
+          clientEmail: input.clientEmail as string,
+          // `parseServiceAccountJson` normalises the key it reads; the split form has to do the
+          // same, or the literal-`\n` key an env var or Kubernetes secret produces — the most
+          // common way this configuration goes wrong — is refused as undecodable.
+          privateKeyPem: normalizePrivateKeyPem(input.privateKeyPem as string),
+        };
+  return new ServiceAccountFcmTokenProvider({
+    credentials: {
+      ...credentials,
+      ...(input.tokenEndpoint !== null ? { tokenUri: input.tokenEndpoint } : {}),
+    },
   });
 }
 
@@ -282,6 +567,8 @@ export function buildSenderRegistryFromEnv(
   if (ses !== null) senders.push(ses);
   const twilio = buildTwilio(env, skipped);
   if (twilio !== null) senders.push(twilio);
+  const voice = buildTwilioVoice(env, skipped);
+  if (voice !== null) senders.push(voice);
   const fcm = buildFcm(env, skipped);
   if (fcm !== null) senders.push(fcm);
   const registry = new SenderRegistry(senders);

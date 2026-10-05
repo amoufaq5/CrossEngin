@@ -985,3 +985,405 @@ describe("DeletionScheduler — the tombstone sweep (ADR-0327)", () => {
     expect(errors).toHaveLength(2);
   });
 });
+
+describe("DeletionScheduler — lap accounting (ADR-0328)", () => {
+  const TOMB = "tomb_aaaabbbbccccdddd";
+  const NEXT = "tomb_bbbbccccddddeeee";
+
+  function pageOf(over: Partial<TombstoneSweepPage> = {}): TombstoneSweepPage {
+    return { examined: 10, findings: [], nextAfterTombstoneId: null, ...over };
+  }
+
+  function sweepFinding(id = TOMB): TombstoneSweepPage["findings"][number] {
+    return {
+      tombstoneId: id,
+      tenantId: "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8",
+      reference: "unreferenced",
+      relatedDeletionRequestId: null,
+      detail: "does not verify: scope_tampered",
+    };
+  }
+
+  /** Pages in order, the last repeating, so the counters are observable across ticks. */
+  function sweeper(
+    behaviour: { throws?: boolean; pages?: readonly TombstoneSweepPage[] } = {},
+  ): StrandedReconcilerLike {
+    let n = 0;
+    return {
+      reconcileStranded: async () => [],
+      auditTombstones: async (): Promise<TombstoneSweepPage> => {
+        if (behaviour.throws === true) throw new Error("the connection dropped mid-page");
+        const pages = behaviour.pages ?? [pageOf()];
+        const page = pages[Math.min(n, pages.length - 1)] ?? pageOf();
+        n += 1;
+        return page;
+      },
+    };
+  }
+
+  /** A clock that steps a whole minute per read, so each timestamp is distinguishable. */
+  function steppingClock(): () => Date {
+    let ms = Date.parse("2026-10-04T00:00:00.000Z");
+    return (): Date => {
+      const d = new Date(ms);
+      ms += 60_000;
+      return d;
+    };
+  }
+
+  function build(
+    over: Partial<ConstructorParameters<typeof DeletionScheduler>[0]> = {},
+  ): DeletionScheduler {
+    return new DeletionScheduler({
+      runner: runner().runner,
+      intervalMs: 1000,
+      auditEveryTicks: 1,
+      scheduler: fakeScheduler(),
+      clock: steppingClock(),
+      ...over,
+    });
+  }
+
+  it("reports an untouched sweep before anything has run", () => {
+    const p = build({ reconciler: sweeper() }).sweepProgress();
+    // Zero laps with a null `examinedLastLap` is the one state that means "no claim can be made
+    // yet" — distinct from a lap that examined nothing, which is a figure.
+    expect(p).toEqual({
+      lapsCompleted: 0,
+      examinedThisLap: 0,
+      examinedLastLap: null,
+      lastLapCompletedAt: null,
+      cursor: null,
+      findingsThisLap: 0,
+      findingsLastLap: null,
+      pagesAdvanced: 0,
+      pagesSwept: 0,
+      lastAdvanceAt: null,
+    });
+  });
+
+  it("accumulates examined across two part-pages of one lap", async () => {
+    const s = build({
+      reconciler: sweeper({
+        pages: [
+          pageOf({ examined: 100, nextAfterTombstoneId: TOMB }),
+          pageOf({ examined: 60, nextAfterTombstoneId: NEXT }),
+        ],
+      }),
+    });
+    await s.runOnce();
+    expect(s.sweepProgress().examinedThisLap).toBe(100);
+    await s.runOnce();
+    // The lap is the unit of the claim, so a page is a contribution to it and not a claim of its own.
+    expect(s.sweepProgress()).toMatchObject({
+      examinedThisLap: 160,
+      examinedLastLap: null,
+      lapsCompleted: 0,
+      cursor: NEXT,
+    });
+  });
+
+  it("completes a lap on the page that does not fill, keying on the same null the cursor does", async () => {
+    const s = build({
+      reconciler: sweeper({
+        pages: [
+          pageOf({ examined: 100, nextAfterTombstoneId: TOMB }),
+          pageOf({ examined: 12, nextAfterTombstoneId: null }),
+        ],
+      }),
+    });
+    await s.runOnce();
+    await s.runOnce();
+    // One signal for "the lap ended": the null that also resets the cursor. A second, independently
+    // derived one (examined < limit, say) is how the two come to disagree.
+    expect(s.sweepProgress()).toMatchObject({
+      lapsCompleted: 1,
+      examinedLastLap: 112,
+      examinedThisLap: 0,
+      cursor: null,
+    });
+  });
+
+  it("takes examinedLastLap from the running figure before resetting it", async () => {
+    const s = build({ reconciler: sweeper({ pages: [pageOf({ examined: 412 })] }) });
+    await s.runOnce();
+    const p = s.sweepProgress();
+    // Reset first and the only number the caller wants is destroyed; this pins the order.
+    expect(p.examinedLastLap).toBe(412);
+    expect(p.examinedThisLap).toBe(0);
+  });
+
+  it("stamps lastLapCompletedAt from the injected clock, not the wall clock", async () => {
+    const s = build({
+      reconciler: sweeper({ pages: [pageOf()] }),
+      clock: () => new Date("2026-10-04T11:22:33.000Z"),
+    });
+    await s.runOnce();
+    expect(s.sweepProgress().lastLapCompletedAt).toBe("2026-10-04T11:22:33.000Z");
+  });
+
+  it("leaves lastLapCompletedAt alone on a page that does not end the lap", async () => {
+    const s = build({
+      reconciler: sweeper({ pages: [pageOf({ nextAfterTombstoneId: TOMB })] }),
+    });
+    await s.runOnce();
+    expect(s.sweepProgress().lastLapCompletedAt).toBeNull();
+    // But the page still moved the sweep, which is a different question and gets a different field.
+    expect(s.sweepProgress().lastAdvanceAt).not.toBeNull();
+  });
+
+  it("counts a second lap and re-stamps the timestamp", async () => {
+    const s = build({
+      reconciler: sweeper({
+        pages: [
+          pageOf({ examined: 5, nextAfterTombstoneId: TOMB }),
+          pageOf({ examined: 7, nextAfterTombstoneId: null }),
+          pageOf({ examined: 9, nextAfterTombstoneId: null }),
+        ],
+      }),
+    });
+    for (let i = 0; i < 3; i += 1) await s.runOnce();
+    const p = s.sweepProgress();
+    expect(p.lapsCompleted).toBe(2);
+    // The second lap's own total, not a running sum across laps: "verified since <time>" is a claim
+    // about one pass of the table.
+    expect(p.examinedLastLap).toBe(9);
+    expect(p.lastLapCompletedAt).toBe("2026-10-04T00:02:00.000Z");
+  });
+
+  it("counts findings per lap and resets them with the lap", async () => {
+    const s = build({
+      reconciler: sweeper({
+        pages: [
+          pageOf({ examined: 3, findings: [sweepFinding()], nextAfterTombstoneId: TOMB }),
+          pageOf({ examined: 3, findings: [sweepFinding(NEXT)], nextAfterTombstoneId: null }),
+          pageOf({ examined: 3, nextAfterTombstoneId: null }),
+        ],
+      }),
+    });
+    await s.runOnce();
+    expect(s.sweepProgress().findingsThisLap).toBe(1);
+    await s.runOnce();
+    expect(s.sweepProgress()).toMatchObject({ findingsLastLap: 2, findingsThisLap: 0 });
+    await s.runOnce();
+    // A clean lap after a dirty one reports zero, which is the whole point of a per-lap figure: a
+    // running total would never come back down once a tamper had been found and put right.
+    expect(s.sweepProgress()).toMatchObject({ findingsLastLap: 0, findingsThisLap: 0 });
+  });
+
+  it("leaves every counter untouched when a page throws", async () => {
+    let n = 0;
+    const s = build({
+      reconciler: {
+        reconcileStranded: async () => [],
+        auditTombstones: async (): Promise<TombstoneSweepPage> => {
+          n += 1;
+          if (n === 2) throw new Error("the connection dropped mid-page");
+          return pageOf({ examined: 40, nextAfterTombstoneId: TOMB });
+        },
+      },
+      onError: () => undefined,
+    });
+    await s.runOnce();
+    const before = s.sweepProgress();
+    await s.runOnce();
+    // A page that threw examined nothing. Every figure moving on a page that never arrived is
+    // exactly the "sweep that looks like it is running" this accounting exists to expose.
+    expect(s.sweepProgress()).toEqual(before);
+  });
+
+  it("resumes the lap's total after a throw rather than restarting it", async () => {
+    let n = 0;
+    const s = build({
+      reconciler: {
+        reconcileStranded: async () => [],
+        auditTombstones: async (): Promise<TombstoneSweepPage> => {
+          n += 1;
+          if (n === 2) throw new Error("the connection dropped mid-page");
+          return pageOf({ examined: 40, nextAfterTombstoneId: n === 1 ? TOMB : null });
+        },
+      },
+      onError: () => undefined,
+    });
+    for (let i = 0; i < 3; i += 1) await s.runOnce();
+    // The cursor did not move, so the retried page is the same rows — and the lap's total is the
+    // first page plus the retry's, with nothing counted for the attempt that failed.
+    expect(s.sweepProgress()).toMatchObject({ lapsCompleted: 1, examinedLastLap: 80, pagesSwept: 2 });
+  });
+
+  it("counts a page as advancing only when it moves the sweep's position", async () => {
+    const s = build({
+      reconciler: sweeper({ pages: [pageOf({ examined: 10, nextAfterTombstoneId: TOMB })] }),
+    });
+    for (let i = 0; i < 3; i += 1) await s.runOnce();
+    const p = s.sweepProgress();
+    // A store answering the same page forever: pages keep coming back, the cursor never moves, and
+    // the rows a tamper is hiding in are never reached. `pagesSwept` says pages arrive;
+    // `pagesAdvanced` says they covered nothing new — which is what a caller reads to tell the two
+    // stall shapes apart.
+    expect(p.pagesSwept).toBe(3);
+    expect(p.pagesAdvanced).toBe(1);
+    expect(p.lastAdvanceAt).toBe("2026-10-04T00:00:00.000Z");
+  });
+
+  it("keeps advancing while the cursor walks the table", async () => {
+    const s = build({
+      reconciler: sweeper({
+        pages: [
+          pageOf({ nextAfterTombstoneId: TOMB }),
+          pageOf({ nextAfterTombstoneId: NEXT }),
+          pageOf({ nextAfterTombstoneId: null }),
+        ],
+      }),
+    });
+    for (let i = 0; i < 3; i += 1) await s.runOnce();
+    const p = s.sweepProgress();
+    // The healthy direction, pinned beside the stuck one: three pages, three advances, and the last
+    // one lands back on null because it finished the lap rather than because it stopped moving.
+    expect(p.pagesAdvanced).toBe(3);
+    expect(p.pagesSwept).toBe(3);
+    expect(p.lastAdvanceAt).toBe("2026-10-04T00:02:00.000Z");
+  });
+
+  it("counts the end of the table as an advance even though the cursor lands back on null", async () => {
+    const s = build({ reconciler: sweeper({ pages: [pageOf({ examined: 0 })] }) });
+    await s.runOnce();
+    await s.runOnce();
+    // An empty or single-page table laps every tick. The cursor is null before and after, so a
+    // cursor-changed test alone would read a working sweep as stuck.
+    expect(s.sweepProgress()).toMatchObject({ lapsCompleted: 2, pagesAdvanced: 2 });
+  });
+
+  it("does not advance when the sweep is never called at all", async () => {
+    const s = build({ reconciler: { reconcileStranded: async () => [] } });
+    await s.runOnce();
+    await s.runOnce();
+    // The other stall shape: no store offers `auditTombstones`, so nothing is being verified. Equal
+    // counters is what tells a caller it is this one rather than a pinned cursor.
+    expect(s.sweepProgress()).toMatchObject({ pagesSwept: 0, pagesAdvanced: 0, lastAdvanceAt: null });
+  });
+
+  it("does not advance on ticks the audit cadence skips", async () => {
+    const s = build({
+      reconciler: sweeper({ pages: [pageOf({ nextAfterTombstoneId: TOMB })] }),
+      auditEveryTicks: 3,
+    });
+    await s.runOnce();
+    await s.runOnce();
+    expect(s.sweepProgress().pagesSwept).toBe(0);
+    await s.runOnce();
+    // So `lastAdvanceAt` must be read against the *audit* cadence, not the tick interval.
+    expect(s.sweepProgress().pagesSwept).toBe(1);
+  });
+
+  it("hands the progress to onTombstoneFindings alongside the page", async () => {
+    const lines: string[] = [];
+    const s = build({
+      reconciler: sweeper({
+        pages: [
+          pageOf({ examined: 200, nextAfterTombstoneId: TOMB }),
+          pageOf({ examined: 212, nextAfterTombstoneId: null }),
+        ],
+      }),
+      onTombstoneFindings: (page, progress) => {
+        lines.push(
+          `${page.examined.toString()}/${progress.examinedThisLap.toString()}/${progress.lapsCompleted.toString()}`,
+        );
+      },
+    });
+    await s.runOnce();
+    await s.runOnce();
+    // A sink can log the lap and not just the page — "lap 1 complete, 412 proofs verified" — which is
+    // the sentence the claim is actually made in.
+    expect(lines).toEqual(["200/200/0", "212/0/1"]);
+  });
+
+  it("gives the callback a snapshot that already includes this page's lap boundary", async () => {
+    const seen: number[] = [];
+    const s = build({
+      reconciler: sweeper({ pages: [pageOf({ examined: 412 })] }),
+      onTombstoneFindings: (_page, progress) => {
+        seen.push(progress.examinedLastLap ?? -1);
+      },
+    });
+    await s.runOnce();
+    // Accounted before the callback, so a sink that reports the finished lap does not have to wait
+    // for the next tick to learn its total.
+    expect(seen).toEqual([412]);
+  });
+
+  it("gives the callback a snapshot, not a live view of the scheduler", async () => {
+    const held: ReturnType<DeletionScheduler["sweepProgress"]>[] = [];
+    const s = build({
+      reconciler: sweeper({
+        pages: [pageOf({ examined: 1, nextAfterTombstoneId: TOMB }), pageOf({ examined: 1 })],
+      }),
+      onTombstoneFindings: (_page, progress) => {
+        held.push(progress);
+      },
+    });
+    await s.runOnce();
+    await s.runOnce();
+    expect(held[0]?.examinedThisLap).toBe(1);
+    expect(held[1]?.lapsCompleted).toBe(1);
+  });
+
+  it("accounts for the page even when the findings callback throws", async () => {
+    const errors: unknown[] = [];
+    const s = build({
+      reconciler: sweeper({ pages: [pageOf({ examined: 412 })] }),
+      onTombstoneFindings: () => {
+        throw new Error("the log sink is gone");
+      },
+      onError: (e) => errors.push(e),
+    });
+    await s.runOnce();
+    // The rows *were* examined. A logging failure must not retract a verification that happened, or
+    // the lap's coverage would depend on whether anybody was listening.
+    expect(errors).toHaveLength(1);
+    expect(s.sweepProgress()).toMatchObject({ lapsCompleted: 1, examinedLastLap: 412 });
+  });
+
+  it("does not reset lap accounting across stop() and start()", async () => {
+    const sched = fakeScheduler();
+    const s = build({ reconciler: sweeper({ pages: [pageOf({ examined: 9 })] }), scheduler: sched });
+    await s.runOnce();
+    s.start();
+    s.stop();
+    s.start();
+    // A config reload has not swept the table again. Resetting here would make a lap boundary a
+    // statement about the process rather than about the table, which is the same reason `ticks`
+    // survives a restart.
+    expect(s.sweepProgress()).toMatchObject({ lapsCompleted: 1, examinedLastLap: 9 });
+  });
+
+  it("reads the clock once per page, so a lap's two timestamps agree", async () => {
+    const s = build({ reconciler: sweeper({ pages: [pageOf()] }) });
+    await s.runOnce();
+    const p = s.sweepProgress();
+    // One read per page rather than one per field: with a real clock, two reads could stamp an
+    // advance and the lap it completed a millisecond apart for no reason a reader could explain.
+    expect(p.lastAdvanceAt).toBe(p.lastLapCompletedAt);
+  });
+
+  it("does not read the clock at all on a tick that sweeps nothing", async () => {
+    let reads = 0;
+    const s = build({
+      reconciler: { reconcileStranded: async () => [] },
+      clock: (): Date => {
+        reads += 1;
+        return new Date("2026-10-04T00:00:00.000Z");
+      },
+    });
+    await s.runOnce();
+    expect(reads).toBe(0);
+  });
+
+  it("counts the lap the page reports even when a limit makes every lap empty", async () => {
+    const s = build({ reconciler: sweeper({ pages: [pageOf({ examined: 0 })] }) });
+    for (let i = 0; i < 4; i += 1) await s.runOnce();
+    // A `limit` that resolves to 0 laps constantly over nothing. The counters do not hide it: laps
+    // climb while `examinedLastLap` stays 0, which reads as "covering no rows" rather than as health.
+    expect(s.sweepProgress()).toMatchObject({ lapsCompleted: 4, examinedLastLap: 0 });
+  });
+});

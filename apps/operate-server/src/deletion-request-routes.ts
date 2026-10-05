@@ -213,6 +213,15 @@ export interface DeletionRequestRoutesContext {
    */
   readonly escalate?: (finding: EvidenceAuditLike) => Promise<void>;
   /**
+   * The same, for a finding the **tombstone sweep** produced (ADR-0328).
+   *
+   * Separate from `escalate` because the input differs where it matters: a sweep finding names a
+   * proof and may name no request at all, which is the whole reason the sweep exists. Escalated
+   * even though a human triggered the look, for the reason `unproven` already carries — the
+   * escalator is idempotent per episode, so re-running the sweep adopts rather than re-declares.
+   */
+  readonly escalateTombstone?: (finding: TombstoneAuditLike) => Promise<void>;
+  /**
    * The same, for a verdict reached through `POST .../{id}/reconcile`. Separate from `escalate`
    * because the inputs genuinely differ — a finding always names a tombstone, a verdict need not —
    * and because a deployment may expose these routes without running the scheduler (ADR-0321), in
@@ -754,6 +763,16 @@ function buildTombstoneSweepHandler(ctx: DeletionRequestRoutesContext): Handler 
       detail: `${page.examined.toString()} examined, ${page.findings.length.toString()} finding(s)`,
       at,
     });
+    // Escalated even though a human asked, exactly as `unproven` does: this sweep's whole purpose
+    // is to find a falsified proof the forensic chain cannot see, so one found gets an incident and
+    // a page regardless of who was looking (ADR-0324, ADR-0328).
+    for (const finding of page.findings) {
+      try {
+        await ctx.escalateTombstone?.(finding);
+      } catch (err) {
+        ctx.onRecordError?.(err, TOMBSTONE_SWEEP_AUDITED_OPERATION);
+      }
+    }
     return json(200, {
       examined: page.examined,
       findings: page.findings,

@@ -91,7 +91,7 @@ function tombstoneOf(id = TOMB): StoredTombstone {
         anchoredAt: "2026-10-03T11:00:00.000Z",
       },
     ],
-    requiredSubsystems: ["tenant_schema"],
+    capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
     attestations: [ATTESTATION],
   });
   if (!assembled.ok) throw new Error(`fixture does not assemble: ${JSON.stringify(assembled.refusals)}`);
@@ -146,7 +146,7 @@ function unreferencedTombstone(id = "tomb_unref0001aaaa"): StoredTombstone {
         anchoredAt: "2026-10-03T11:00:00.000Z",
       },
     ],
-    requiredSubsystems: ["tenant_schema"],
+    capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
     attestations: [ATTESTATION],
   });
   if (!assembled.ok) {

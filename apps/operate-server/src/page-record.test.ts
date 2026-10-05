@@ -79,6 +79,7 @@ function outcome(over: OutcomeOver = {}): PageChannelOutcome {
     errorMessage: null,
     attemptsMade: 1,
     retryAfterMs: null,
+    waitedMs: 0,
   };
   return { ...base, ...over };
 }
@@ -215,6 +216,7 @@ describe("PageRecorder.record", () => {
       errorMessage: null,
       attemptsMade: 1,
       retryAfterMs: null,
+      waitedMs: 0,
     });
     expect(rows[1]).toMatchObject({
       kind: "slack",
@@ -241,6 +243,17 @@ describe("PageRecorder.record", () => {
     // On a page that burned its whole budget this is the sharpest field on the row: "PagerDuty asked
     // for 45s and we stopped" is a different finding from "the transport was down" (ADR-0327).
     expect(outcomesOf(emitted[0] as Emitted)[0]).toMatchObject({ retryAfterMs: 45_000 });
+  });
+
+  it("records how long the page spent waiting before it settled", async () => {
+    const { audit, emitted } = fakeAudit();
+    await new PageRecorder({ audit }).record(
+      report({ outcomes: [outcome({ disposition: "failed", attemptsMade: 3, waitedMs: 11_400 })] }),
+      TENANT_A,
+    );
+    // "Retried three times" and "retried three times over eleven seconds" are different answers to
+    // "why did nobody come" (ADR-0328).
+    expect(outcomesOf(emitted[0] as Emitted)[0]).toMatchObject({ waitedMs: 11_400 });
   });
 
   it("records an absent Retry-After as null, never as zero", async () => {
@@ -278,9 +291,11 @@ describe("PageRecorder.record", () => {
       "provider",
       "reference",
       // Added deliberately, not by accident: this list is the guard that makes a new field on
-      // `PageChannelOutcome` a decision here rather than a silent passthrough, and it caught
-      // `retryAfterMs` the moment the dispatcher grew it (ADR-0327).
+      // `PageChannelOutcome` a decision here rather than a silent passthrough. It caught
+      // `retryAfterMs` the moment the dispatcher grew it (ADR-0327) and `waitedMs` the next time
+      // (ADR-0328).
       "retryAfterMs",
+      "waitedMs",
     ]);
   });
 

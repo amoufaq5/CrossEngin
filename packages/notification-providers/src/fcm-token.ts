@@ -18,9 +18,10 @@ import { truncateErrorMessage, type FetchLike } from "./email-ses.js";
  * metadata server (`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/
  * default/token`), which is the correct source on GKE, Cloud Run and GCE because there is no key
  * file there at all — the platform holds the credential and hands out tokens directly, so none of
- * the signing below exists on that path. A deployment on those hosts wants a second, much smaller
- * provider against that endpoint, not a flag on this one; the two share only the cache, and the
- * cache is the easy part.
+ * the signing below exists on that path. That second, much smaller provider is
+ * `metadata-token.ts` (ADR-0328), a separate module rather than a flag on this one: it shares this
+ * module's clock and expiry skew so the two age tokens identically, and nothing else, because
+ * `invalid_grant` has no meaning there and "you are not on GCE" has no expression here.
  *
  * Why `node:crypto` directly and not `@crossengin/crypto`: that package signs Ed25519 and HMACs
  * SHA-256, and Google requires RS256 over a 2048-bit RSA key. There is no primitive there to reuse,

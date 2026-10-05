@@ -94,7 +94,7 @@ function inputOf(over: Partial<Parameters<typeof deleteTenantAtomically>[3]> = {
     kind: "tenant_deletion",
     executedBy: ALICE,
     approvedBy: BOB,
-    requiredSubsystems: [],
+    capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
     clock: () => new Date(AT),
     ...over,
   };
@@ -161,7 +161,7 @@ describe("deleteTenantAtomically", () => {
 
   it("always covers tenant_schema, even when the caller leaves it out", async () => {
     const h = harness();
-    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf({ requiredSubsystems: [] }));
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf({ capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" } }));
     expect(out.ok).toBe(true);
     if (!out.ok) return;
     expect(out.stored.record.scope.schemas).toEqual(["t_abc"]);
@@ -173,7 +173,7 @@ describe("deleteTenantAtomically", () => {
       h.conn,
       h.store,
       h.erase,
-      inputOf({ requiredSubsystems: ["object_storage", "backups"] }),
+      inputOf({ capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "erases", backups: "erases", search_indexes: "absent", caches: "absent" } }),
     ).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(DeletionPipelineAborted);
     const refusals = (err as DeletionPipelineAborted).refusals;
@@ -192,7 +192,7 @@ describe("deleteTenantAtomically", () => {
       h.store,
       h.erase,
       inputOf({
-        requiredSubsystems: ["caches"],
+        capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "erases" },
         attestations: [
           { subsystem: "caches", outcome: "nothing_to_erase", attestedBy: "cache-op", attestedAt: AT },
         ],

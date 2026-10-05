@@ -2,8 +2,8 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   assembleTombstone,
   type AssemblyRefusal,
+  type DeletionCapabilities,
   type DeletionAttestation,
-  type DeletionSubsystem,
   type TombstoneAnchor,
   type TombstoneKind,
   type TombstoneRecord,
@@ -75,7 +75,16 @@ export interface DeleteTenantInput {
    * Subsystems this deletion covers. `tenant_schema` is **always** added, because the pipeline erases
    * it: a caller cannot declare it out of scope and then have it erased anyway.
    */
-  readonly requiredSubsystems: readonly DeletionSubsystem[];
+  /**
+   * What this *deployment* holds, declared once (ADR-0328) rather than listed per deletion.
+   *
+   * It replaced a `requiredSubsystems` list for one reason: the list was supplied by the caller, and
+   * on the HTTP route the caller was the **request body** with `[]` as its default — so a remote
+   * client chose how much of the deployment the Article 17 proof covered, and omitting the field
+   * covered nothing. That is ADR-0321's defect exactly, in the field that decides a proof's reach:
+   * the deadline is computed from the deployment rather than accepted from the body, and so is this.
+   */
+  readonly capabilities: DeletionCapabilities;
   /**
    * Attestations from every *other* subsystem. The pipeline supplies `tenant_schema`'s from its own
    * erasure — a caller passing one would be asserting what this transaction is about to measure.
@@ -176,8 +185,9 @@ export async function deleteTenantAtomically(
       attestationFor(erasure, attestedBy),
       ...(input.attestations ?? []).filter((a) => a.subsystem !== "tenant_schema"),
     ];
-    const required = new Set<DeletionSubsystem>([...input.requiredSubsystems, "tenant_schema"]);
-
+    // The union with `tenant_schema` that used to stand here is gone with the list it guarded:
+    // `DeletionCapabilitiesSchema` refuses `absent` for that subsystem, so `requiredSubsystemsFor`
+    // always includes it and `assembleTombstone` derives the whole required set itself.
     const assembled = assembleTombstone({
       id: input.tombstoneId,
       kind: input.kind,
@@ -192,7 +202,7 @@ export async function deleteTenantAtomically(
       // Replaced by the store with the chain entry it appends; present only because the contract
       // requires one to parse (ADR-0318).
       anchors: [PLACEHOLDER_ANCHOR(now)],
-      requiredSubsystems: [...required],
+      capabilities: input.capabilities,
       attestations,
     });
     if (!assembled.ok) {

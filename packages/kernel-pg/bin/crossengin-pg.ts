@@ -68,6 +68,7 @@ function printHelp(): void {
       "  apply                Reconcile the meta-schema with the database",
       "  apply --dry-run      Print the full bootstrap SQL without running it",
       "  apply --plan         Introspect and print the reconciliation plan without running it",
+      "  apply --allow-loosening  Also DROP foreign keys the catalog no longer declares",
       "  drift                Introspect the live schema and report drift vs META_TABLES",
       "  inspect              Print the live schema as JSON",
       "  encrypt --verify     Report at-rest encryption coverage for hinted columns",
@@ -112,7 +113,25 @@ async function runApply(flags: ReadonlySet<string>): Promise<number> {
   try {
     // Same reconciliation path as `crossengin apply`: replaying the bootstrap SQL against a
     // database that already has the schema re-runs CREATE TABLE and halts.
-    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES);
+    // `--allow-loosening` is the one reconciliation refusal an operator can override from here
+    // (ADR-0328). It has existed on `ReconciliationOptions` since ADR-0308 and nothing could pass
+    // it, so the four kill-switch `meta.users` foreign keys ADR-0296 removed from the catalog have
+    // been reported as undeclared drift on every existing deployment ever since, with no way to
+    // drop them but by hand. It reaches **foreign keys only** — not a column, table, index, policy
+    // or CHECK — because dropping a foreign key is the one loosening that cannot fail against
+    // existing rows, which is what keeps ADR-0290's "every step is expected to succeed" true.
+    const allowLoosening = flags.has("--allow-loosening");
+    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
+      ...(allowLoosening ? { allowLoosening: true } : {}),
+    });
+    if (allowLoosening && !flags.has("--plan")) {
+      // Said out loud before anything runs, because this is the one invocation that *removes* a
+      // constraint the database is currently enforcing, and the plan it prints afterwards is the
+      // only other place it would be visible.
+      process.stderr.write(
+        "--allow-loosening: undeclared foreign keys will be DROPPED rather than reported.\n",
+      );
+    }
     if (flags.has("--plan")) {
       process.stdout.write(formatReconciliationPlan(plan) + "\n");
       return 0;

@@ -192,7 +192,9 @@ describe("DeleteTenantInputSchema", () => {
   it("defaults the kind and the optional lists", () => {
     const parsed = DeleteTenantInputSchema.parse(BODY);
     expect(parsed.kind).toBe("tenant_deletion");
-    expect(parsed.requiredSubsystems).toEqual([]);
+    // The field is gone from the body: a remote caller cannot narrow the proof's reach, and an
+    // omitted field cannot make it cover nothing (ADR-0328).
+    expect("requiredSubsystems" in parsed).toBe(false);
     expect(parsed.attestations).toEqual([]);
   });
 

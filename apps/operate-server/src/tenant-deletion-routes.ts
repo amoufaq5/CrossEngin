@@ -97,7 +97,6 @@ export interface TenantDeleterLike {
     readonly kind: DeletableTombstoneKind;
     readonly executedBy: string;
     readonly approvedBy: string;
-    readonly requiredSubsystems: readonly string[];
     readonly attestations: readonly AttestationLike[];
     readonly relatedDeletionRequestId?: string;
   }): Promise<DeletionOutcomeLike>;
@@ -154,11 +153,13 @@ export const DeleteTenantInputSchema = z
     /** An irreversible act should not be one mistyped path segment away. */
     confirmTenantId: z.string().regex(UUID_RE),
     kind: z.enum(DELETABLE_TOMBSTONE_KINDS).default("tenant_deletion"),
-    /**
-     * Subsystems beyond `tenant_schema`, which the pipeline always covers. Naming one obliges it to
-     * attest: its silence refuses the deletion rather than being read as nothing to delete (ADR-0317).
+    /*
+     * `requiredSubsystems` used to stand here, read from this body with `[]` as its default — so a
+     * remote caller chose how much of the deployment the Article 17 proof covered, and omitting the
+     * field covered nothing (ADR-0328). What a deployment holds is a property of the deployment, not
+     * of a request, exactly as ADR-0321 found for the Article 12(3) deadline: it is declared once
+     * with `--deletion-capabilities` and the route cannot narrow it.
      */
-    requiredSubsystems: z.array(z.string().min(1)).default([]),
     attestations: z
       .array(
         z
@@ -279,7 +280,6 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
         kind: parsed.data.kind,
         executedBy,
         approvedBy: parsed.data.approvedBy,
-        requiredSubsystems: parsed.data.requiredSubsystems,
         attestations: parsed.data.attestations,
         ...(parsed.data.relatedDeletionRequestId !== undefined
           ? { relatedDeletionRequestId: parsed.data.relatedDeletionRequestId }

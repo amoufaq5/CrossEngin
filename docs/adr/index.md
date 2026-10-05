@@ -1,10 +1,10 @@
 # ADR index
 
-322 records. Generated from the ADR files themselves — regenerate rather than
+323 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 243  **Proposed:** 79
+- **Accepted:** 244  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -334,3 +334,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0325](0325-a-page-is-delivered-or-loudly-undelivered.md) | A page is delivered, or it is loudly undelivered | — | Accepted | 2026-10-03 |
 | [0326](0326-a-page-that-closes-itself.md) | A page that closes itself, retries itself, and leaves a record | — | Accepted | 2026-10-03 |
 | [0327](0327-the-record-a-page-leaves-and-the-proofs-nobody-read.md) | The record a page leaves, and the proofs nobody was reading | — | Accepted | 2026-10-04 |
+| [0328](0328-a-proof-nobody-asked-for-and-an-alarm-nobody-raised.md) | A proof nobody asked for, and an alarm nobody raised | — | Accepted | 2026-10-05 |

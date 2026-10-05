@@ -104,6 +104,55 @@ describe("runApply --plan", () => {
   });
 });
 
+/**
+ * The one reconciliation refusal an operator can override (ADR-0328).
+ *
+ * `ReconciliationOptions.allowLoosening` has existed since ADR-0308 and **nothing could pass it**,
+ * so the four kill-switch `meta.users` foreign keys ADR-0296 removed from the catalog have been
+ * reported as undeclared drift on every existing deployment ever since, droppable only by hand.
+ */
+describe("runApply --allow-loosening (ADR-0328)", () => {
+  it("is a recognised flag rather than an unknown-argument error", () => {
+    // `parseArgs` rejects an unknown flag, so this is the assertion that the flag exists at all —
+    // and `parsed()` throws on a parse failure, which is the test.
+    expect(() => parsed("apply", "--allow-loosening")).not.toThrow();
+    expect(() => parsed("apply", "--plan", "--allow-loosening")).not.toThrow();
+  });
+
+  it("is documented in the help text, because it removes a live constraint", () => {
+    expect(helpText()).toContain("--allow-loosening");
+    expect(helpText()).toContain("DROP foreign keys");
+  });
+
+  it("does not bypass the production guard", async () => {
+    // Loosening referential integrity is the last thing that should get a free pass against a
+    // production-looking database.
+    const { ctx, err } = buffers({
+      PGHOST: "db.internal",
+      PGUSER: "postgres",
+      PGDATABASE: "crossengin_production",
+    });
+    const code = await runApply(parsed("apply", "--allow-loosening"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("--confirm");
+  });
+
+  it("does not bypass environment validation either", async () => {
+    const { ctx, err } = buffers({});
+    const code = await runApply(parsed("apply", "--allow-loosening"), ctx);
+    expect(code).toBe(2);
+    expect(err()).toContain("apply:");
+  });
+
+  it("leaves --dry-run alone, which never touches a database", async () => {
+    const { ctx, out } = buffers({});
+    const code = await runApply(parsed("apply", "--dry-run", "--allow-loosening"), ctx);
+    expect(code).toBe(0);
+    // A dry run emits the bootstrap SQL and reconciles nothing, so the flag has nothing to reach.
+    expect(out()).toContain("CREATE SCHEMA");
+  });
+});
+
 function record(
   index: number,
   outcome: ApplyStatementRecord["outcome"],

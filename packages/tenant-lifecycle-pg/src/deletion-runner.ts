@@ -1,4 +1,4 @@
-import type { DeletionSubsystem, GdprDeletionRequest } from "@crossengin/tenant-lifecycle";
+import type { DeletionCapabilities, GdprDeletionRequest } from "@crossengin/tenant-lifecycle";
 
 import { DeletionPipelineAborted, type DeleteTenantOutcome } from "./deletion-pipeline.js";
 import type { PostgresDeletionRequestStore } from "./deletion-request-store.js";
@@ -86,7 +86,7 @@ export interface DeletionRunnerOptions {
     readonly executedBy: string;
     readonly approvedBy: string;
     readonly relatedDeletionRequestId: string;
-    readonly requiredSubsystems: readonly DeletionSubsystem[];
+    readonly capabilities: DeletionCapabilities;
   }) => Promise<DeleteTenantOutcome>;
   /**
    * The actor the scheduler runs as. It is **not** the request's `submittedBy`: a data subject asking
@@ -98,7 +98,12 @@ export interface DeletionRunnerOptions {
   readonly approvedBy: string;
   readonly newTombstoneId: () => string;
   /** Subsystems every deletion must cover beyond `tenant_schema`. Default none. */
-  readonly requiredSubsystems?: readonly DeletionSubsystem[];
+  /**
+   * What this deployment holds (ADR-0328). **Required**, where `requiredSubsystems` was optional
+   * with `?? []` — which meant every scheduled deletion declared five of the six subsystems out of
+   * scope by omission, and signed an anchored proof that was silent about them.
+   */
+  readonly capabilities: DeletionCapabilities;
   readonly clock?: () => Date;
   readonly onRun?: (result: DeletionRunResult) => void;
 }
@@ -156,7 +161,7 @@ export class DeletionRunner {
         executedBy: this.opts.executedBy,
         approvedBy: this.opts.approvedBy,
         relatedDeletionRequestId: request.id,
-        requiredSubsystems: this.opts.requiredSubsystems ?? [],
+        capabilities: this.opts.capabilities,
       });
     } catch (err) {
       const detail = detailOf(err);

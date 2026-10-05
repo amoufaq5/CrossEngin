@@ -166,6 +166,16 @@ export interface ServeOptions {
   readonly deletionStrandedAfterMs: number | null;
   /** JSON escalation config ({severity?, category?, declaredBy?, severityByDefect?, alertPolicy}) — declares a sev1 and pages when a deletion proof does not verify, which is the one tamper the forensic chain cannot see. */
   readonly deletionEscalationConfig: string | null;
+  /**
+   * The deployment's `DeletionCapabilities`, as a JSON file (ADR-0328).
+   *
+   * Required by the deletion flow rather than defaulted, because every default is wrong: `absent`
+   * for the unimplemented subsystems signs a proof that is silent about four places a tenant's data
+   * may still be, and that silence is exactly what ADR-0317 refused. It replaced a field read from
+   * the **request body** with `[]` as its default, so a remote caller chose how much of the
+   * deployment the proof covered.
+   */
+  readonly deletionCapabilities: string | null;
   /** Run the reverse-direction audit (completed requests whose proof no longer stands up) every Nth deletion-runner tick. Default 0 = never; it re-hashes every completed request's tombstone, so it is far more expensive than the forward pass. */
   readonly deletionAuditEveryTicks: number | null;
   /** Days from submission to the Article 12(3) deadline (default 30, cap 90). Set per deployment rather than per request. */
@@ -293,6 +303,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const deletionRequestReconcileRoles: string[] = [];
   let deletionStrandedAfterMs: number | null = null;
   let deletionEscalationConfig: string | null = null;
+  let deletionCapabilities: string | null = null;
   let deletionAuditEveryTicks: number | null = null;
   let deletionRequestDeadlineDays: number | null = null;
   let deletionRunnerMs: number | null = null;
@@ -690,6 +701,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
       deletionRequestRoutes = true;
     } else if (
+      arg === "--deletion-capabilities" ||
+      arg.startsWith("--deletion-capabilities=")
+    ) {
+      deletionCapabilities = takeValue(arg, next, "--deletion-capabilities");
+      i += consumed();
+    } else if (
       arg === "--deletion-audit-every-ticks" ||
       arg.startsWith("--deletion-audit-every-ticks=")
     ) {
@@ -1008,6 +1025,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     deletionRequestReconcileRoles,
     deletionStrandedAfterMs,
     deletionEscalationConfig,
+    deletionCapabilities,
     deletionAuditEveryTicks,
     deletionRequestDeadlineDays,
     deletionRunnerMs,
@@ -1372,6 +1390,12 @@ Options:
   --deletion-stranded-after-ms <n>  How long a request must sit in_progress before an ABSENCE of
                        evidence is read as "never committed" (>=60000, default 3600000). A tombstone
                        naming the request is conclusive at any age; an absence never is
+  --deletion-capabilities <file>  JSON: one of "erases" | "retains" | "absent" for every one of the
+                       six deletion subsystems. REQUIRED by the deletion routes and the runner,
+                       because every default is wrong: "absent" signs an Article 17 proof that is
+                       silent about a place the tenant's data may still be, and that silence is the
+                       defect ADR-0317 was written for. It replaced a field read from the request
+                       BODY with [] as its default, so a remote caller chose the proof's reach
   --deletion-escalation-config <file>  JSON ({severity?, category?, declaredBy?, alertPolicy}) —
                        declares an incident and pages when a deletion proof does not verify or two
                        tombstones name one request. These are the findings the forensic chain

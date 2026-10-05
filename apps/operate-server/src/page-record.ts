@@ -98,6 +98,7 @@ interface PageOutcomeFields {
   readonly errorMessage: string | null;
   readonly attemptsMade?: number;
   readonly retryAfterMs?: number | null;
+  readonly waitedMs?: number;
 }
 
 /** The slice of an outcome that is evidence. Nothing here derives from the finding. */
@@ -110,6 +111,7 @@ interface RecordedChannelOutcome {
   readonly errorMessage: string | null;
   readonly attemptsMade: number | null;
   readonly retryAfterMs: number | null;
+  readonly waitedMs: number | null;
 }
 
 function recordedOutcome(outcome: PageOutcomeFields): RecordedChannelOutcome {
@@ -133,6 +135,13 @@ function recordedOutcome(outcome: PageOutcomeFields): RecordedChannelOutcome {
     // we stopped rather than hold the page that long" is a different incident-review finding from
     // "the transport was down", and the two are indistinguishable without it.
     retryAfterMs: outcome.retryAfterMs ?? null,
+    // How long the page spent *waiting* before the attempt that settled it (ADR-0328). "Retried
+    // three times" and "retried three times over eleven seconds" answer different questions for a
+    // review asking why nobody came, and with `attemptsMade` and `retryAfterMs` beside it this also
+    // separates the three ways a retry stops: short of the policy's attempts with `waitedMs` near
+    // the budget is exhaustion, with `retryAfterMs` at the ceiling it is the ceiling, otherwise it
+    // succeeded. A duration, so nothing here derives from the finding.
+    waitedMs: outcome.waitedMs ?? null,
   };
 }
 

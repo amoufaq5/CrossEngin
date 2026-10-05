@@ -1,11 +1,18 @@
 import {
+  DEFAULT_PAGE_BACKOFF_FACTOR,
+  DEFAULT_PAGE_JITTER_RATIO,
+  DEFAULT_PAGE_RETRY_BUDGET_MS,
+  JITTERED_PAGE_RETRY,
+  MAX_PAGE_RETRY_BUDGET_MS,
   PageDispatcher,
   PagerDutyPageSender,
   SlackPageSender,
   SmsPageSender,
   WebhookPageSender,
+  pageRetryBudgetMs,
   type PageChannelSender,
   type PageDeliveryReport,
+  type PageRetryPolicy,
 } from "@crossengin/notification-providers";
 
 /**
@@ -148,7 +155,7 @@ export function buildPageDispatcher(
   onReport: (report: PageDeliveryReport) => void,
   /** Overrides for the retry budget and the delay between attempts. Used by tests. */
   overrides: {
-    readonly retry?: { readonly attempts: number; readonly delayMs: number };
+    readonly retry?: PageRetryPolicy;
     readonly sleep?: (ms: number) => Promise<void>;
   } = {},
 ): PageDispatcher {
@@ -168,18 +175,23 @@ export function buildPageDispatcher(
 }
 
 /**
- * The default page retry: three calls, two seconds apart.
+ * The default page retry: three calls, growing and jittered, bounded in total.
  *
  * Three because a single transient failure is the common case and a third attempt costs nothing
- * against a provider that is up; two seconds because the dispatcher's fan-out is sequential and a
- * page is the most latency-sensitive thing this process does — 4s of worst-case added delay to
- * reach somebody is a trade worth making, 30s is not. `failed` is the only retryable disposition
- * (`page-dispatch.ts` reasons through the rest), so a provider that *refused* the page is never
- * called again.
+ * against a provider that is up. The gap starts at two seconds because the dispatcher's fan-out is
+ * sequential and a page is the most latency-sensitive thing this process does — and it **grows and
+ * jitters** from there (ADR-0328), because the provider a page retries against is degraded for
+ * everyone, so every replica of this process used to retry at the same two offsets and arrive as a
+ * spike precisely when the provider could least take it. Bounded by a total budget rather than by
+ * the attempt count alone, so the worst case is a number: under 12s unjittered, 30s with a
+ * provider instruction, against `sev1`'s five-minute ack target. `failed` is the only retryable
+ * disposition (`page-dispatch.ts` reasons through the rest), so a provider that *refused* the page
+ * is never called again.
  */
-export const DEFAULT_PAGE_RETRY = { attempts: 3, delayMs: 2_000 } as const;
+export const DEFAULT_PAGE_RETRY = JITTERED_PAGE_RETRY;
 export const PAGE_RETRY_ATTEMPTS_VAR = "PAGE_RETRY_ATTEMPTS";
 export const PAGE_RETRY_DELAY_MS_VAR = "PAGE_RETRY_DELAY_MS";
+export const PAGE_RETRY_BUDGET_MS_VAR = "PAGE_RETRY_BUDGET_MS";
 
 /**
  * Overrides from the environment, for a deployment whose provider is slower or flakier than ours.
@@ -189,12 +201,27 @@ export const PAGE_RETRY_DELAY_MS_VAR = "PAGE_RETRY_DELAY_MS";
  * will not boot and therefore cannot page at all. `attempts` is clamped at 1 (no retry) and 10, and
  * the delay at 60s, because the retry budget is spent in front of a human waiting to be woken.
  */
-export function pageRetryFromEnv(
-  env: NodeJS.ProcessEnv = process.env,
-): { readonly attempts: number; readonly delayMs: number } {
+export function pageRetryFromEnv(env: NodeJS.ProcessEnv = process.env): PageRetryPolicy {
   const attempts = clampedInt(env[PAGE_RETRY_ATTEMPTS_VAR], DEFAULT_PAGE_RETRY.attempts, 1, 10);
   const delayMs = clampedInt(env[PAGE_RETRY_DELAY_MS_VAR], DEFAULT_PAGE_RETRY.delayMs, 0, 60_000);
-  return { attempts, delayMs };
+  // The budget is what makes the two knobs above safe. `PAGE_RETRY_ATTEMPTS=10` with
+  // `PAGE_RETRY_DELAY_MS=60000` are both inside the ranges this function already accepted, and
+  // together they would have held a `sev1` for nine minutes — past the ack target the whole retry
+  // is sized against. Overridable, and clamped by `pageRetryBudgetMs` to a ceiling the override
+  // cannot cross (ADR-0328).
+  const totalBudgetMs = pageRetryBudgetMs(
+    clampedInt(env[PAGE_RETRY_BUDGET_MS_VAR], DEFAULT_PAGE_RETRY_BUDGET_MS, 0, MAX_PAGE_RETRY_BUDGET_MS),
+  );
+  return {
+    attempts,
+    delayMs,
+    // Growth and jitter are the platform's, not a deployment's: the failure they answer is several
+    // replicas of *this* process retrying one degraded provider in lockstep, which no single
+    // deployment can see and so none would think to configure.
+    backoffFactor: DEFAULT_PAGE_RETRY.backoffFactor ?? DEFAULT_PAGE_BACKOFF_FACTOR,
+    jitterRatio: DEFAULT_PAGE_RETRY.jitterRatio ?? DEFAULT_PAGE_JITTER_RATIO,
+    totalBudgetMs,
+  };
 }
 
 function clampedInt(raw: string | undefined, fallback: number, min: number, max: number): number {

@@ -30,6 +30,14 @@ export async function runApply(
   const dryRun = getBooleanFlag(command, "dry-run");
   const planOnly = getBooleanFlag(command, "plan");
   const confirm = getBooleanFlag(command, "confirm");
+  // The one reconciliation refusal an operator can override (ADR-0328). It has existed on
+  // `ReconciliationOptions` since ADR-0308 with no way to pass it, so the four kill-switch
+  // `meta.users` foreign keys ADR-0296 removed from the catalog have been reported as undeclared
+  // drift on every existing deployment since, with no way to drop them but by hand. It reaches
+  // **foreign keys only**, because dropping one is the single loosening that cannot fail against
+  // existing rows — which is what keeps ADR-0290's "every step in the plan is expected to succeed"
+  // true.
+  const allowLoosening = getBooleanFlag(command, "allow-loosening");
   if (dryRun) {
     return emitDryRun(ctx.io, command);
   }
@@ -53,7 +61,9 @@ export async function runApply(
     // database the plan *is* the bootstrap SQL, so a fresh install is unchanged; on a database
     // that already has the schema, only the differences are applied — which is what lets an
     // edited table definition migrate instead of re-running `CREATE TABLE` and halting.
-    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES);
+    const plan = await planLiveReconciliation(conn, META_SCHEMA_NAME, META_TABLES, {
+      ...(allowLoosening ? { allowLoosening: true } : {}),
+    });
     if (planOnly) {
       if (command.format === "json") {
         printJson(ctx.io, plan);
@@ -61,6 +71,14 @@ export async function runApply(
         printSuccess(ctx.io, formatReconciliationPlan(plan));
       }
       return 0;
+    }
+    if (allowLoosening) {
+      // Said out loud before anything runs: this is the one invocation that *removes* a constraint
+      // the database is currently enforcing, and the apply report alone would not say so.
+      printError(
+        ctx.io,
+        "apply: --allow-loosening — undeclared foreign keys will be DROPPED rather than reported",
+      );
     }
     const applier = new MigrationApplier({
       connection: conn,

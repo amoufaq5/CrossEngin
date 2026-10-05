@@ -97,7 +97,11 @@ import {
   PostgresTombstoneStore,
   deleteTenantAtomically,
 } from "@crossengin/tenant-lifecycle-pg";
-import type { DeletionAttestation, DeletionSubsystem } from "@crossengin/tenant-lifecycle";
+import {
+  DeletionCapabilitiesSchema,
+  type DeletionAttestation,
+  type DeletionCapabilities,
+} from "@crossengin/tenant-lifecycle";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
@@ -134,6 +138,7 @@ import {
   DEFAULT_DELETION_EXECUTED_BY,
   DeletionScheduler,
   type TombstoneSweepPage,
+  type TombstoneSweepProgress,
 } from "./deletion-scheduler.js";
 import { buildAuditReadRoutes, entityFieldLookupFrom } from "./audit-read-routes.js";
 import { PostgresAuditReadStore } from "./audit-read-store.js";
@@ -614,6 +619,22 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     }
     return auditEmitter;
   };
+  /**
+   * What this deployment holds, declared once (ADR-0328).
+   *
+   * Loaded here rather than defaulted, and **required** by every path that signs a tombstone: the
+   * field it replaced was read from the request body with `[]` as its default, so a remote caller
+   * chose how much of the deployment the Article 17 proof covered. Every possible default is wrong —
+   * `absent` signs a proof that is silent about a place the tenant's data may still be, which is the
+   * defect ADR-0317 exists for, and `erases` refuses every deletion until the operator declares.
+   * Refusing to mount is the loud failure, and the loud failure is the right one for a proof.
+   */
+  let deletionCapabilities: DeletionCapabilities | null = null;
+  if (options.deletionCapabilities !== null) {
+    deletionCapabilities = DeletionCapabilitiesSchema.parse(
+      JSON.parse(await readFile(options.deletionCapabilities, "utf8")) as unknown,
+    );
+  }
   if ((options.aiDesign || options.perTenantManifests || options.designReview) && conn !== undefined) {
     manifestStore = new PostgresTenantManifestStore(conn, schemaOpt);
     notificationStore = new PostgresNotificationStore(conn, schemaOpt);
@@ -805,7 +826,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       console.warn(
         "[platform] --tenant-deletion-routes needs the forensic chain (--audit-chain-config); skipping",
       );
+    } else if (deletionCapabilities === null) {
+      // Refused, not defaulted (ADR-0328). The scope of an Article 17 proof is a property of the
+      // deployment, and until the deployment says what it holds there is no honest value: `absent`
+      // for the unimplemented subsystems signs a proof that is silent about four places a tenant's
+      // data may still be — the exact silence ADR-0317 was written for.
+      console.warn(
+        "[platform] --tenant-deletion-routes requires --deletion-capabilities (what this deployment " +
+          "holds decides what its tombstones can claim); skipping",
+      );
     } else {
+      const capabilities = deletionCapabilities;
       if (options.tenantDeletionRoles.length === 0) {
         console.warn(
           "[platform] --tenant-deletion-routes is on with no --tenant-deletion-role: every request " +
@@ -833,7 +864,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   kind: req.kind,
                   executedBy: req.executedBy,
                   approvedBy: req.approvedBy,
-                  requiredSubsystems: req.requiredSubsystems as readonly DeletionSubsystem[],
+                  capabilities,
                   attestations: req.attestations as readonly DeletionAttestation[],
                   ...(req.relatedDeletionRequestId !== undefined
                     ? { relatedDeletionRequestId: req.relatedDeletionRequestId }
@@ -997,9 +1028,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // The SLO loop's pages, which `EnforcementPlan.pages` has planned since Phase 2 and nothing has
   // ever read (ADR-0326).
   const sloPager = buildPageDispatcher("slo", pageSenders, pageLogger("slo"));
-  // Escalation for the two deletion-evidence findings the forensic chain cannot raise (ADR-0324).
-  // Built once and shared by the routes and the scheduler, so one tampered row examined by both is
-  // still one episode — the episode key is the request, and `findOpen` is what enforces it.
+  // Escalation for the deletion-evidence findings the forensic chain cannot raise (ADR-0324).
+  // Built once and shared by the routes and the scheduler, so one tampered record examined by
+  // several paths is still one episode. The key is the **evidence record**, whichever handle names
+  // it (ADR-0328): a tombstone a request names keys on the request, so the sweep adopts whatever
+  // `auditCompleted` already declared; one no request names keys on `tombstone:<id>`, namespaced so
+  // it cannot collide with a request id. `findOpen` is what enforces it.
   let deletionEscalator: DeletionEvidenceEscalator | null = null;
   if (options.deletionEscalationConfig !== null && conn !== undefined) {
     const parsed = DeletionEscalationConfigSchema.parse(
@@ -1030,8 +1064,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           incident.affectedTenantIds[0] ?? null,
         );
       },
-      onError: (err, requestId) =>
-        console.error(`[deletion-evidence] escalation error for ${requestId}`, err),
+      // The subject id, not a request id: a tombstone episode's error would otherwise read as
+      // though `tomb_…` were a request (ADR-0328).
+      onError: (err, subjectId) =>
+        console.error(`[deletion-evidence] escalation error for ${subjectId}`, err),
     });
   }
   // The handle (ADR-0321). ADR-0320 left the deletion synchronous and named the cost: a large
@@ -1097,6 +1133,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   if (outcome.action !== "none") {
                     console.error(
                       `[deletion-evidence] ${finding.requestId} → ${outcome.action}` +
+                        ` ${outcome.incidentId ?? "-"}`,
+                    );
+                  }
+                },
+                // The sweep's own findings, which may name no request (ADR-0328). The episode key
+                // follows the evidence record, so a referenced one adopts the request's incident
+                // rather than declaring a second for the same tampered row.
+                escalateTombstone: async (finding): Promise<void> => {
+                  const outcome = await escalator.onTombstoneFinding({
+                    tombstoneId: finding.tombstoneId,
+                    tenantId: finding.tenantId,
+                    reference: finding.reference,
+                    relatedDeletionRequestId: finding.relatedDeletionRequestId,
+                    detail: finding.detail,
+                  });
+                  if (outcome.action !== "none") {
+                    console.error(
+                      `[deletion-evidence] ${finding.tombstoneId} → ${outcome.action}` +
                         ` ${outcome.incidentId ?? "-"}`,
                     );
                   }
@@ -1846,8 +1900,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         "[platform] --deletion-runner-ms requires --audit-chain-config (the tombstone is anchored " +
           "in the chain, and the deletion is recorded); skipping",
       );
+    } else if (deletionCapabilities === null) {
+      // Refused for the same reason as the synchronous route (ADR-0328), and more sharply: the
+      // runner's old `requiredSubsystems ?? []` made **every scheduled deletion** declare five of
+      // the six subsystems out of scope by omission, unattended and with nobody looking.
+      console.warn(
+        "[platform] --deletion-runner-ms requires --deletion-capabilities (an unattended deletion " +
+          "signs a proof nobody reviews); skipping",
+      );
     } else {
       const runConn = conn;
+      const runnerCapabilities = deletionCapabilities;
       const emitter = auditEmitter;
       const tombstones = new PostgresTombstoneStore(runConn, auditChainProducer, schemaOpt);
       const requests = new PostgresDeletionRequestStore(runConn, schemaOpt);
@@ -1860,6 +1923,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         executedBy,
         approvedBy,
         newTombstoneId: () => newTombstoneId(randomUUID()),
+        capabilities: runnerCapabilities,
         run: async (input) => {
           const outcome = await deleteTenantAtomically(
             runConn,
@@ -1873,7 +1937,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               kind: "data_subject_erasure",
               executedBy: input.executedBy,
               approvedBy: input.approvedBy,
-              requiredSubsystems: input.requiredSubsystems,
+              capabilities: input.capabilities,
               attestations: [],
               relatedDeletionRequestId: input.relatedDeletionRequestId,
             },
@@ -1978,27 +2042,58 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               },
             }))(deletionEscalator)
           : {}),
-        // The tombstone sweep (ADR-0327). Reported, not escalated: these findings name a *proof*,
-        // and the ones that matter most name no request at all, so the escalator's episode key
-        // (`deletion_evidence:<requestId>`) cannot identify them. Choosing a tombstone-keyed
-        // episode is a real decision — a tampered tombstone that *is* referenced would otherwise
-        // declare twice for one fact — and it is left open deliberately rather than guessed at.
-        onTombstoneFindings: ((): ((page: TombstoneSweepPage) => void) => {
-          // Deduped here rather than in the scheduler, which reports every page honestly. An
-          // unproven tombstone is a *standing* fact — nothing in this increment repairs one, and a
+        // The tombstone sweep (ADR-0327), now escalated as well as logged (ADR-0328). Its
+        // findings name a *proof*, and the ones that matter most name no request at all — so the
+        // episode is keyed on the evidence record: a tombstone a request names adopts that
+        // request's episode, one no request names gets `tombstone:<id>`.
+        onTombstoneFindings: ((): ((page: TombstoneSweepPage, progress: TombstoneSweepProgress) => Promise<void>) => {
+          // Logging is deduped here rather than in the scheduler, which reports every page
+          // honestly. An unproven tombstone is a *standing* fact — nothing repairs one yet, and a
           // short lap re-reads the same rows — so logging it on every tick is how an operator
           // learns to mute the log, which would defeat the sweep. ADR-0322 answered the same shape
           // by logging only what it wrote; there is nothing written here, so the equivalent is to
-          // log only what **changed**.
+          // log only what **changed**. The *escalation* is not deduped and does not need to be:
+          // `findOpen` makes a re-declaration an adoption, which writes nothing.
           let last: string | null = null;
-          return (page): void => {
+          return async (page, progress): Promise<void> => {
+            for (const finding of page.findings) {
+              try {
+                const outcome = await deletionEscalator?.onTombstoneFinding({
+                  tombstoneId: finding.tombstoneId,
+                  tenantId: finding.tenantId,
+                  reference: finding.reference,
+                  relatedDeletionRequestId: finding.relatedDeletionRequestId,
+                  detail: finding.detail,
+                });
+                if (outcome?.action === "declared") {
+                  console.error(
+                    `[deletion-evidence] sweep found ${finding.tombstoneId} → declared` +
+                      ` ${outcome.incidentId ?? "-"}`,
+                  );
+                }
+              } catch (err) {
+                console.error(`[deletion-evidence] escalating ${finding.tombstoneId} failed`, err);
+              }
+            }
             const fingerprint = JSON.stringify([
+              progress.lapsCompleted,
               page.examined,
               page.findings.map((f) => [f.tombstoneId, f.detail]),
             ]);
             if (fingerprint === last) return;
             last = fingerprint;
-            const lap = `${page.examined.toString()} proof(s) verified`;
+            // The lap is the coverage claim, so it is what the line leads with: "every stored
+            // Article 17 proof has been verified since <time>" is only true per *completed* lap.
+            // And on the page that completes one, `examinedThisLap` has already reset to 0 —
+            // `examinedLastLap` is where the figure went, which is the whole reason it exists. A
+            // line reading "0 proofs verified" beside a finding was the first thing the live run
+            // showed (ADR-0328).
+            const completed = page.nextAfterTombstoneId === null;
+            const lap = completed
+              ? `lap ${progress.lapsCompleted.toString()} complete,` +
+                ` ${(progress.examinedLastLap ?? 0).toString()} proof(s) verified`
+              : `lap ${(progress.lapsCompleted + 1).toString()} in progress,` +
+                ` ${progress.examinedThisLap.toString()} proof(s) verified so far`;
             if (page.findings.length === 0) {
               console.info(`[platform] tombstone sweep: ${lap}, clean`);
               return;

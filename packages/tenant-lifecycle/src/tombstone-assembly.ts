@@ -34,6 +34,12 @@ import {
  * `populateTombstoneHashes`, validates through `TombstoneRecordSchema`, and — because this is the one
  * place the lesson applies hardest — **re-verifies its own output** before returning it. An assembler
  * that emitted a record whose proof does not check out would be the same class of bug one level up.
+ *
+ * ADR-0328 closed the last way around that rule. Refusing an unattested subsystem *in scope* left the
+ * scope itself a list the caller passed, so forgetting a subsystem produced a tombstone that never
+ * mentioned it and refused nothing — and every deletion in practice omitted four of the six. The
+ * required list is now derived from `DeletionCapabilities`, which a deployment declares once and
+ * totally: silence is not a disposition there either.
  */
 
 /**
@@ -74,6 +80,128 @@ export const SUBSYSTEM_SCOPE_FIELDS: Readonly<
   search_indexes: ["searchIndexes"],
   caches: ["cacheKeys"],
 });
+
+/**
+ * What a deployment *holds*, declared once rather than listed per deletion.
+ *
+ * ADR-0317 closed the hole where a subsystem's silence read as "nothing to delete", by refusing a
+ * tombstone whose in-scope subsystem did not attest. That left the same hole one level up: *scope*
+ * was a list the caller passed, so a caller who forgot a subsystem got a tombstone that never
+ * mentioned it and refused nothing. The defect moved rather than closing — and in practice every
+ * deletion declared four of the six subsystems out of scope by simply omitting them.
+ *
+ * So the required list is **derived** from a deployment-level declaration. Forgetting a subsystem at
+ * a call site stops being expressible, because no call site names subsystems any more.
+ */
+export const SUBSYSTEM_DISPOSITIONS = [
+  /** This deployment has it and will erase it, so it must attest. */
+  "erases",
+  /** This deployment has it and is lawfully obliged to keep it, so it must attest too. */
+  "retains",
+  /** This deployment does not have this subsystem at all. The only disposition that leaves scope. */
+  "absent",
+] as const;
+export type SubsystemDisposition = (typeof SUBSYSTEM_DISPOSITIONS)[number];
+export const SubsystemDispositionSchema = z.enum(SUBSYSTEM_DISPOSITIONS);
+
+/**
+ * Written out one key per subsystem rather than as a `z.record` over the enum, because zod 3's record
+ * validates the keys it is *given* and never notices a missing one — which is this module's defect in
+ * a new shape. `satisfies Record<DeletionSubsystem, …>` makes a seventh subsystem a `tsc` failure here
+ * instead of a silent `absent`.
+ */
+const CAPABILITY_SHAPE = {
+  tenant_schema: SubsystemDispositionSchema,
+  shared_tables: SubsystemDispositionSchema,
+  object_storage: SubsystemDispositionSchema,
+  backups: SubsystemDispositionSchema,
+  search_indexes: SubsystemDispositionSchema,
+  caches: SubsystemDispositionSchema,
+} satisfies Record<DeletionSubsystem, typeof SubsystemDispositionSchema>;
+
+/**
+ * The declaration is **total**: every member of `DELETION_SUBSYSTEMS` must appear, and no key is
+ * optional. An optional map would let an unmentioned subsystem mean whatever the reader assumed,
+ * which is the silence ADR-0317 refused — only now in the configuration rather than in the evidence.
+ *
+ * `retains` stays **in scope**, which is why there are three dispositions and not two. A retention
+ * obligation is a claim the proof has to carry — ADR-0317 gave it an outcome, a named
+ * `RetentionObligation` and a reference for exactly that purpose — not a licence to go quiet about
+ * the subsystem. Treating it as out of scope would reproduce the original defect with a lawful
+ * excuse: the data is still there, and the proof would not say so.
+ */
+export const DeletionCapabilitiesSchema = z
+  .object(CAPABILITY_SHAPE)
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.tenant_schema === "absent") {
+      // Every deployment has one (ADR-0314) and the pipeline erases and attests it unconditionally
+      // (ADR-0319), so a declaration saying otherwise is a configuration error, not a deployment
+      // shape. Refusing it here means the contradiction is caught at boot rather than by a tombstone
+      // that omits the one subsystem the deletion definitely touched.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tenant_schema"],
+        message:
+          "tenant_schema cannot be 'absent': every deployment has one and the deletion pipeline" +
+          " erases and attests it unconditionally",
+      });
+    }
+  });
+export type DeletionCapabilities = z.infer<typeof DeletionCapabilitiesSchema>;
+
+/**
+ * The declaration a deployment gets if it reaches for one: **every subsystem erases**.
+ *
+ * Deliberately not `absent` for the four subsystems whose erasures do not exist yet, and deliberately
+ * an exported constant rather than a `z.default()` on the schema — a schema default is applied to
+ * *silence*, which is the one thing this module exists to make impossible.
+ *
+ * The choice is between two ways of being wrong, and they are not symmetric:
+ *
+ *   - A wrong `erases` refuses the next deletion with `subsystem_unattested`, naming the subsystem.
+ *     Inside the pipeline that refusal aborts the transaction, so nothing is destroyed. An operator
+ *     meets it on the first deletion and answers it with one line of configuration.
+ *   - A wrong `absent` succeeds, and signs an Article 17 proof that is silent about a place the
+ *     tenant's data still is. Nobody meets it, and the proof is anchored before anyone could.
+ *
+ * A proof takes the loud failure every time. The quiet one is the defect.
+ */
+export const CONSERVATIVE_DELETION_CAPABILITIES: DeletionCapabilities = Object.freeze({
+  tenant_schema: "erases",
+  shared_tables: "erases",
+  object_storage: "erases",
+  backups: "erases",
+  search_indexes: "erases",
+  caches: "erases",
+});
+
+/**
+ * The subsystems a deletion must hear from, derived from what the deployment declared.
+ *
+ * `erases` and `retains` are both in scope; only `absent` is out. The disposition says what the
+ * deployment *has*, never what a given deletion found — a subsystem declared `erases` may perfectly
+ * well attest `nothing_to_erase`, and one declared `retains` may attest `erased` once the obligation
+ * lapses. What it may not do is stay quiet.
+ */
+export function requiredSubsystemsFor(
+  capabilities: DeletionCapabilities,
+): readonly DeletionSubsystem[] {
+  return DELETION_SUBSYSTEMS.filter((s) => capabilities[s] !== "absent");
+}
+
+/**
+ * The subsystems this deployment declared it does not have.
+ *
+ * Carried out of the assembly so a reader of the result can tell "this deployment has no object
+ * storage" from "nobody asked about object storage" — the two states ADR-0317's refusal is about,
+ * which look identical in a scope that merely omits them.
+ */
+export function absentSubsystemsFor(
+  capabilities: DeletionCapabilities,
+): readonly DeletionSubsystem[] {
+  return DELETION_SUBSYSTEMS.filter((s) => capabilities[s] === "absent");
+}
 
 export const ATTESTATION_OUTCOMES = [
   /** Something was destroyed; `scope` says what, measured. */
@@ -184,6 +312,14 @@ export const ASSEMBLY_REFUSAL_REASONS = [
   "scope_empty",
   "record_invalid",
   "proof_unverifiable",
+  /** Neither a `capabilities` declaration nor a `requiredSubsystems` list: nothing says who must speak. */
+  "scope_undeclared",
+  /** Both were given. One required list, one source — the same rule as one subsystem, one attestation. */
+  "scope_declaration_ambiguous",
+  /** The declaration itself does not parse: a missing subsystem, or `tenant_schema: "absent"`. */
+  "capabilities_invalid",
+  /** A subsystem the deployment declared it does not have reported anyway. */
+  "absent_subsystem_attested",
 ] as const;
 export type AssemblyRefusalReason = (typeof ASSEMBLY_REFUSAL_REASONS)[number];
 
@@ -267,16 +403,45 @@ export interface TombstoneAssemblyInput {
   readonly approvedBy: string;
   readonly anchors: readonly TombstoneAnchor[];
   /**
-   * The subsystems this deletion covers. **Every one must attest**, and an absent attestation is the
-   * refusal this module exists for — a `DeletionScope` is not allowed to be silently short.
+   * What this deployment holds. The required list is derived from it, so a subsystem cannot be left
+   * out of scope by being forgotten at a call site — which is the hole ADR-0317 left open.
+   *
+   * Exactly one of this and `requiredSubsystems` is supplied. Both is `scope_declaration_ambiguous`
+   * and neither is `scope_undeclared`: a required list with two sources, or none, is the provenance
+   * problem this module is about.
    */
-  readonly requiredSubsystems: readonly DeletionSubsystem[];
+  readonly capabilities?: DeletionCapabilities;
+  /**
+   * The subsystems this deletion covers, named per call. **Every one must attest**, and an absent
+   * attestation is the refusal this module exists for — a `DeletionScope` is not allowed to be
+   * silently short.
+   *
+   * Superseded by `capabilities`, and kept because it is what a caller that knows the exact subsystem
+   * set of *one* deletion has: this list cannot say "we have no object storage", only "do not ask it
+   * this time", and those are different claims.
+   */
+  readonly requiredSubsystems?: readonly DeletionSubsystem[];
   readonly attestations: readonly DeletionAttestation[];
   readonly invalidationOfPriorTombstoneId?: string | null;
 }
 
 export type TombstoneAssembly =
-  | { readonly ok: true; readonly record: TombstoneRecord; readonly scope: DeletionScope }
+  | {
+      readonly ok: true;
+      readonly record: TombstoneRecord;
+      readonly scope: DeletionScope;
+      /**
+       * The declaration the scope was derived from, when there was one — present iff `capabilities`
+       * was supplied, so its absence means "named per call" rather than "nothing declared absent".
+       *
+       * This is the smallest honest way to carry a declared absence out of the assembler: a reader
+       * can ask `absentSubsystemsFor(declaration)` and distinguish "this deployment has no object
+       * storage" from "nobody asked". It is deliberately *beside* the record and not in it —
+       * `TombstoneRecordSchema` and the content manifest both live in files this change does not own,
+       * and putting it inside the signed bytes is a change to what a proof commits to.
+       */
+      readonly declaration?: DeletionCapabilities;
+    }
   | { readonly ok: false; readonly refusals: readonly AssemblyRefusal[] };
 
 /**
@@ -295,6 +460,39 @@ export type TombstoneAssembly =
  */
 export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssembly {
   const refusals: AssemblyRefusal[] = [];
+
+  // Who must speak is settled before anything is read, because every later check depends on it. The
+  // declaration is re-parsed even though it is typed: it arrives from a deployment's configuration,
+  // and a totality rule enforced only at the boundary is a totality rule one `as` defeats.
+  let declaration: DeletionCapabilities | undefined;
+  if (input.capabilities !== undefined) {
+    const parsedCapabilities = DeletionCapabilitiesSchema.safeParse(input.capabilities);
+    if (parsedCapabilities.success) {
+      declaration = parsedCapabilities.data;
+    } else {
+      refusals.push({
+        reason: "capabilities_invalid",
+        detail: parsedCapabilities.error.issues
+          .map((i) => `${i.path.join(".")}: ${i.message}`)
+          .join("; "),
+      });
+    }
+    if (input.requiredSubsystems !== undefined) {
+      refusals.push({
+        reason: "scope_declaration_ambiguous",
+        detail:
+          "both capabilities and requiredSubsystems were declared; the required list has one source" +
+          " or the narrower of the two silently wins",
+      });
+    }
+  } else if (input.requiredSubsystems === undefined) {
+    refusals.push({
+      reason: "scope_undeclared",
+      detail:
+        "neither capabilities nor requiredSubsystems was declared; nothing says which subsystems" +
+        " must attest, and an empty required list claims a deletion nobody checked",
+    });
+  }
 
   // Validate each attestation first: a malformed one must not be folded into a scope, and its own
   // rules (an `erased` with no figures, a `retained` with no obligation) are where provenance is won.
@@ -327,7 +525,9 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
     }
   }
 
-  const required = new Set(input.requiredSubsystems);
+  const required = new Set(
+    declaration !== undefined ? requiredSubsystemsFor(declaration) : (input.requiredSubsystems ?? []),
+  );
   for (const subsystem of [...required].sort()) {
     if (!seen.has(subsystem)) {
       refusals.push({
@@ -336,6 +536,22 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
           `${subsystem} is in scope and did not attest; its silence is not 'nothing to delete'` +
           " and the tombstone cannot claim otherwise",
       });
+    }
+  }
+  if (declaration !== undefined) {
+    for (const subsystem of absentSubsystemsFor(declaration)) {
+      if (seen.has(subsystem)) {
+        // The declaration and the evidence contradict each other, and there is no safe way to pick a
+        // winner: either the deployment grew a subsystem nobody declared, or something attested for
+        // one that does not exist. Folding the report in would put figures in the proof from a
+        // subsystem the same proof says is absent.
+        refusals.push({
+          reason: "absent_subsystem_attested",
+          detail:
+            `${subsystem} is declared absent in this deployment and attested anyway;` +
+            " the declaration and the evidence disagree about what exists",
+        });
+      }
     }
   }
 
@@ -431,7 +647,12 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
     };
   }
 
-  return { ok: true, record: validated.data, scope };
+  return {
+    ok: true,
+    record: validated.data,
+    scope,
+    ...(declaration !== undefined ? { declaration } : {}),
+  };
 }
 
 /** One readable sentence naming every obligation keeping data back. */

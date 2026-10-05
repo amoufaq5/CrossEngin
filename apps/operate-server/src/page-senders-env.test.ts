@@ -127,16 +127,46 @@ describe("SMS paging credentials", () => {
  * finding is one-shot — so for that one a transport blip is the whole alarm.
  */
 describe("pageRetryFromEnv", () => {
-  it("retries three times, two seconds apart, with nothing configured", () => {
-    expect(pageRetryFromEnv({})).toEqual({ attempts: 3, delayMs: 2_000 });
-    expect(pageRetryFromEnv({})).toEqual(DEFAULT_PAGE_RETRY);
+  it("retries three times from a two-second gap, growing and jittered, with nothing configured", () => {
+    // The gap grows and jitters because the provider a page retries against is degraded for
+    // everyone, so a flat delay had every replica arriving at the same two offsets (ADR-0328).
+    expect(pageRetryFromEnv({})).toEqual({
+      attempts: 3,
+      delayMs: 2_000,
+      backoffFactor: 2,
+      jitterRatio: 1,
+      totalBudgetMs: 30_000,
+    });
+  });
+
+  it("keeps the dispatcher's own default policy as its starting point", () => {
+    const fromEnv = pageRetryFromEnv({});
+    expect(fromEnv.attempts).toBe(DEFAULT_PAGE_RETRY.attempts);
+    expect(fromEnv.delayMs).toBe(DEFAULT_PAGE_RETRY.delayMs);
+    expect(fromEnv.backoffFactor).toBe(DEFAULT_PAGE_RETRY.backoffFactor);
   });
 
   it("takes an override from the environment", () => {
-    expect(pageRetryFromEnv({ PAGE_RETRY_ATTEMPTS: "5", PAGE_RETRY_DELAY_MS: "500" })).toEqual({
-      attempts: 5,
-      delayMs: 500,
+    expect(
+      pageRetryFromEnv({ PAGE_RETRY_ATTEMPTS: "5", PAGE_RETRY_DELAY_MS: "500" }),
+    ).toMatchObject({ attempts: 5, delayMs: 500 });
+  });
+
+  it("bounds the total wait, which is what makes the two knobs above safe", () => {
+    // Both of these are inside the ranges this function already accepted, and together they would
+    // have held a sev1 for nine minutes — past the ack target the retry is sized against.
+    const reckless = pageRetryFromEnv({
+      PAGE_RETRY_ATTEMPTS: "10",
+      PAGE_RETRY_DELAY_MS: "60000",
     });
+    expect(reckless.totalBudgetMs).toBe(30_000);
+  });
+
+  it("takes a budget override, clamped to a ceiling the override cannot cross", () => {
+    expect(pageRetryFromEnv({ PAGE_RETRY_BUDGET_MS: "10000" }).totalBudgetMs).toBe(10_000);
+    // Out of range falls back to the default, as every other knob here does, rather than clamping —
+    // clamping honours half of an instruction that was clearly a mistake.
+    expect(pageRetryFromEnv({ PAGE_RETRY_BUDGET_MS: "600000" }).totalBudgetMs).toBe(30_000);
   });
 
   it("allows 1 attempt, which is no retry at all", () => {

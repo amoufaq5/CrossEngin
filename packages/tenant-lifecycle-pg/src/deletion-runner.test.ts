@@ -1,4 +1,7 @@
-import type { GdprDeletionRequest } from "@crossengin/tenant-lifecycle";
+import {
+  CONSERVATIVE_DELETION_CAPABILITIES,
+  type GdprDeletionRequest,
+} from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -110,6 +113,9 @@ function harness(
     },
     executedBy: "system:deletion-runner",
     approvedBy: "system:retention-policy",
+    // Required since ADR-0328, where it replaced a `requiredSubsystems ?? []` that made every
+    // scheduled deletion silent about five of the six subsystems.
+    capabilities: CONSERVATIVE_DELETION_CAPABILITIES,
     newTombstoneId: () => TOMB,
     clock: () => new Date(AT),
     onRun: (r) => reported.push(r),
@@ -127,6 +133,7 @@ describe("construction", () => {
         new DeletionRunner({
           store: {} as PostgresDeletionRequestStore,
           run: async () => OK,
+          capabilities: CONSERVATIVE_DELETION_CAPABILITIES,
           executedBy: "same",
           approvedBy: "same",
           newTombstoneId: () => TOMB,
@@ -169,6 +176,7 @@ describe("runOne", () => {
         order.push("pipeline");
         return OK;
       },
+      capabilities: CONSERVATIVE_DELETION_CAPABILITIES,
       executedBy: "a",
       approvedBy: "b",
       newTombstoneId: () => TOMB,
@@ -259,10 +267,31 @@ describe("runOne", () => {
     expect(h.reported[0]?.outcome).toBe("completed");
   });
 
-  it("forwards the configured required subsystems", async () => {
-    const h = harness({}, { requiredSubsystems: ["backups", "caches"] });
+  it("forwards the deployment's declared capabilities verbatim", async () => {
+    const h = harness(
+      {},
+      {
+        capabilities: {
+          tenant_schema: "erases",
+          shared_tables: "absent",
+          object_storage: "absent",
+          backups: "erases",
+          search_indexes: "absent",
+          caches: "erases",
+        },
+      },
+    );
     await h.runner.runOne(requestOf());
-    expect(h.runs[0]?.["requiredSubsystems"]).toEqual(["backups", "caches"]);
+    // Forwarded verbatim, including the absences: a declared `absent` is what tells a reader of the
+    // proof "this deployment has no object storage" rather than "nobody asked" (ADR-0328).
+    expect(h.runs[0]?.["capabilities"]).toEqual({
+      tenant_schema: "erases",
+      shared_tables: "absent",
+      object_storage: "absent",
+      backups: "erases",
+      search_indexes: "absent",
+      caches: "erases",
+    });
   });
 });
 

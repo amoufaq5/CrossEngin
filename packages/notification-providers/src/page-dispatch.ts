@@ -1,5 +1,9 @@
 import type { PageContent, PageSendResult } from "./page-pagerduty.js";
-import { retryAfterExceedsCeiling } from "./retry-after.js";
+import {
+  DEFAULT_PAGE_RETRY_BUDGET_MS,
+  pageRetryBudgetMs,
+  retryAfterExceedsCeiling,
+} from "./retry-after.js";
 
 /**
  * Delivering a page, or saying loudly that it was not delivered.
@@ -45,6 +49,16 @@ import { retryAfterExceedsCeiling } from "./retry-after.js";
  * the policy is the floor so `Retry-After: 0` cannot become a hot loop, the provider's figure is
  * the floor when longer — and an instruction past `MAX_RETRY_AFTER_MS` ends the retry instead of
  * being obeyed, because a page held that long is no longer a page.
+ *
+ * **And the retry does not arrive as a spike, and its total wait is a number we can state.** Three
+ * attempts at a flat two seconds is the worst shape for the condition the retry exists for. A
+ * provider that is rate-limiting or degraded is degraded for *everyone*, so every replica of this
+ * process retried at the same two offsets and the retries arrived together, at the one moment the
+ * provider could least take them. So the gap grows, it is jittered upward from a floor, and the
+ * summed waiting is capped — see `PageRetryPolicy`, `pageBackoffMs` and
+ * `DEFAULT_PAGE_RETRY_BUDGET_MS`. All three are additive: a policy naming only `attempts` and
+ * `delayMs` still behaves exactly as ADR-0326 left it, because a change of shape in the delay in
+ * front of a human is something a deployment opts into.
  */
 
 /** The channel kinds an `AlertPolicy` can name. Mirrored, so this package needs no observability dep. */
@@ -130,6 +144,21 @@ export interface PageChannelOutcome {
    * instruction" stated rather than inferred from an absent key.
    */
   readonly retryAfterMs: number | null;
+  /**
+   * How long this channel spent **waiting** before the attempt that settled it, summed over the
+   * gaps. 0 whenever nothing waited, including every disposition settled before a call.
+   *
+   * The question an incident review asks is not "how many times did it try" but "how long before
+   * anybody was told", and once the gap grows and jitters, `attemptsMade` no longer implies it:
+   * three attempts is anywhere from 4s to 12s under the recommended policy, and up to the whole
+   * budget once a provider's `Retry-After` is in play. One field rather than a per-attempt list,
+   * because the three ways a retry stops are already separable with it — `attemptsMade` short of
+   * the policy's with `waitedMs` near the budget is budget exhaustion, with
+   * `retryAfterMs >= MAX_RETRY_AFTER_MS` it is the ceiling, and otherwise it succeeded.
+   *
+   * A duration, so it carries nothing from the finding (ADR-0310, ADR-0325).
+   */
+  readonly waitedMs: number;
 }
 
 export interface PageDeliveryReport {
@@ -179,9 +208,116 @@ export interface PageRetryPolicy {
   readonly attempts: number;
   /**
    * The platform's **floor** between attempts, not the whole rule: a provider's `Retry-After` wins
-   * when it is longer. See `waitBefore`.
+   * when it is longer, and the backoff grows from here. See `waitBefore` and `pageBackoffMs`.
    */
   readonly delayMs: number;
+  /**
+   * What each gap is multiplied by, compounding: gap *n* is `delayMs × factor^(n-1)`.
+   *
+   * Defaults to **1**, which is ADR-0326's flat retry, so a policy that names only the two fields
+   * above is unchanged. `JITTERED_PAGE_RETRY` sets 2.
+   *
+   * Exponential rather than linear because the two cases want opposite things from the same budget:
+   * a blip clears in the first gap and should not have paid for the outage, while an outage wants
+   * the later attempts spread out. Compounding is the only growth where almost all of the budget is
+   * spent on the last gap, so the blip keeps the short first attempt and the outage still gets its
+   * spread. A factor below 1 is clamped to 1 — a shrinking gap is not a backoff, and it would push
+   * the wait under the floor `delayMs` exists to be.
+   */
+  readonly backoffFactor?: number;
+  /**
+   * How much of the gap may be added to it at random, as a fraction: the wait is uniform over
+   * `[gap, gap × (1 + jitterRatio))`. Clamped to `[0, 1]`, and **0** by default — no jitter, which
+   * is again ADR-0326's behaviour.
+   *
+   * **Jitter upward from a floor, not around a midpoint.** The failure mode is several replicas of
+   * this process retrying one degraded provider in lockstep, which full or equal jitter both
+   * decorrelate — but both do it by spreading *below* the configured delay, and this platform has
+   * already decided that delay is a floor it owns: ADR-0327 made `max(policy, provider)` the rule so
+   * that `Retry-After: 0` could not become a hot loop against a provider already struggling. A
+   * scheme that halves the gap re-opens exactly that. Jittering upward keeps the floor and still
+   * spreads the arrivals over a window as wide as equal jitter's (a 2× window at ratio 1), at the
+   * cost of a slightly later worst case — which the budget bounds.
+   *
+   * What it fixes: the *second and later* attempts of many replicas no longer land together, so a
+   * degraded provider sees a wave instead of a spike. What it does not: the **first** attempts are
+   * not jittered at all and never will be, because a page goes out at once; the total number of
+   * calls is unchanged, so this spreads load rather than shedding it; and a `Retry-After` longer
+   * than the jittered gap re-synchronises every replica it binds, which is accepted, because the
+   * alternative is holding a page longer than the provider asked for.
+   */
+  readonly jitterRatio?: number;
+  /**
+   * The ceiling on this policy's **summed** waiting, defaulting to `DEFAULT_PAGE_RETRY_BUDGET_MS`
+   * and clamped to `MAX_PAGE_RETRY_BUDGET_MS`. The dispatcher stops when the next gap would not fit
+   * rather than sleeping past it, so a worst case is a number and not an argument.
+   */
+  readonly totalBudgetMs?: number;
+}
+
+/** A gap that grows by this much is one a blip does not pay for and an outage is spread by. */
+export const DEFAULT_PAGE_BACKOFF_FACTOR = 2;
+
+/** Full jitter on the increment: a 2× window above the floor, equal jitter's spread without its dip. */
+export const DEFAULT_PAGE_JITTER_RATIO = 1;
+
+/**
+ * ADR-0326's three-attempts-two-seconds, grown, jittered and bounded.
+ *
+ * Recognisably the same policy — the attempt count and the first gap's floor are untouched — so a
+ * deployment reading `PAGE_RETRY_ATTEMPTS` / `PAGE_RETRY_DELAY_MS` still gets what those names say.
+ * Worst case: a gap of under 4s then one of under 8s, so **under 12 seconds** of waiting with no
+ * provider instruction in play, and never more than `DEFAULT_PAGE_RETRY_BUDGET_MS` (30s) with one —
+ * against a five-minute `sev1` acknowledgement target.
+ */
+export const JITTERED_PAGE_RETRY: PageRetryPolicy = {
+  attempts: 3,
+  delayMs: 2_000,
+  backoffFactor: DEFAULT_PAGE_BACKOFF_FACTOR,
+  jitterRatio: DEFAULT_PAGE_JITTER_RATIO,
+  totalBudgetMs: DEFAULT_PAGE_RETRY_BUDGET_MS,
+};
+
+/**
+ * The gap this policy asks for after `attemptsMade` attempts, jitter included.
+ *
+ * `random` must answer `[0, 1)` and is injected rather than taken from `Math.random` so that every
+ * assertion about a sequence of waits is exact. A source that answers outside its contract, or not a
+ * number at all, contributes **no** jitter: this value is a delay in front of somebody waiting to be
+ * woken, so a broken source costs the spread and never the floor.
+ */
+export function pageBackoffMs(
+  policy: PageRetryPolicy,
+  attemptsMade: number,
+  random: () => number,
+): number {
+  const factor = Math.max(1, policy.backoffFactor ?? 1);
+  const steps = Math.max(0, Math.trunc(attemptsMade) - 1);
+  const gap = policy.delayMs * Math.pow(factor, steps);
+  if (!Number.isFinite(gap)) return Number.MAX_SAFE_INTEGER;
+  const ratio = Math.min(1, Math.max(0, policy.jitterRatio ?? 0));
+  // Not called at all at ratio 0, so a flat policy consumes no randomness — which is what makes
+  // "unchanged from ADR-0326" assertable rather than merely true of the numbers.
+  if (ratio === 0) return Math.trunc(gap);
+  const r = random();
+  const draw = Number.isFinite(r) ? Math.min(1, Math.max(0, r)) : 0;
+  return Math.trunc(gap + gap * ratio * draw);
+}
+
+/**
+ * Whether the next gap fits in what is left of the policy's total waiting budget.
+ *
+ * Asked **before** sleeping, and answered about the whole gap: a retry that slept the remainder and
+ * then called anyway would arrive before the provider's own instruction allowed, which is ADR-0327's
+ * defect in a new place. Stopping instead reports `failed`, and every escalator either re-derives its
+ * finding on the next tick or has a human reading an `undelivered` line.
+ */
+export function fitsPageRetryBudget(
+  policy: PageRetryPolicy,
+  waitedMs: number,
+  nextWaitMs: number,
+): boolean {
+  return waitedMs + nextWaitMs <= pageRetryBudgetMs(policy.totalBudgetMs);
 }
 
 /**
@@ -193,6 +329,10 @@ export interface PageRetryPolicy {
  * because it is the one number that knows when the next attempt can succeed: ADR-0326's uniform
  * two seconds spent a `sev1`'s whole budget inside a window the provider had already said it would
  * refuse, which made the retry *less* likely to land than a single attempt.
+ *
+ * Its first argument is the policy's *backoff for this attempt* (`pageBackoffMs`), not the raw
+ * `delayMs`, so growth and jitter compose into the floor rather than competing with the provider:
+ * the longer of "what the platform will wait anyway" and "what the provider asked for" still wins.
  */
 export function waitBefore(policyDelayMs: number, retryAfterMs: number | null): number {
   return Math.max(policyDelayMs, retryAfterMs ?? 0);
@@ -216,6 +356,13 @@ export interface PageDispatcherOptions {
   readonly retry?: PageRetryPolicy;
   /** Injected so a test does not wait. Defaults to a real timer. */
   readonly sleep?: (ms: number) => Promise<void>;
+  /**
+   * The jitter's source, answering `[0, 1)`. Injected for the same reason `sleep` is — a retry whose
+   * waits cannot be asserted exactly is a retry nothing pins — and defaulting to `Math.random`,
+   * which is the right quality here: the point is that two replicas disagree, not that nobody can
+   * predict them.
+   */
+  readonly random?: () => number;
 }
 
 /** Which dispositions a retry may be attempted for. Exactly one, and the rest are reasoned below. */
@@ -321,10 +468,12 @@ export class PageDispatcher {
         ? (): Promise<PageSendResult> => sender.send(content, address)
         : (): Promise<PageSendResult> => resolveFn.call(sender, content.incidentId, address);
 
-    const attempts = Math.max(1, Math.trunc(this.opts.retry?.attempts ?? 1));
-    const delayMs = this.opts.retry?.delayMs ?? 0;
+    const policy = this.opts.retry ?? NO_RETRY;
+    const attempts = Math.max(1, Math.trunc(policy.attempts));
     const sleep = this.opts.sleep ?? defaultSleep;
-    let outcome = await this.callOnce(invoke, sender.provider, target.kind, 1);
+    const random = this.opts.random ?? Math.random;
+    let waited = 0;
+    let outcome = await this.callOnce(invoke, sender.provider, target.kind, 1, waited);
     while (isRetryable(outcome.disposition) && outcome.attemptsMade < attempts) {
       // A provider asking for longer than the ceiling ends the retry here, with the outcome as it
       // stands. The alternative is holding the page for however long it asked, and past
@@ -332,8 +481,22 @@ export class PageDispatcher {
       // caller back its own cadence, which for two of the three escalators re-derives the finding
       // and pages again anyway.
       if (retryAfterExceedsCeiling(outcome.retryAfterMs)) break;
-      await sleep(waitBefore(delayMs, outcome.retryAfterMs));
-      outcome = await this.callOnce(invoke, sender.provider, target.kind, outcome.attemptsMade + 1);
+      const wait = waitBefore(
+        pageBackoffMs(policy, outcome.attemptsMade, random),
+        outcome.retryAfterMs,
+      );
+      // The budget is checked against the gap it is about to sleep, not against the one it already
+      // slept, so the worst case is the budget and not the budget plus one more gap.
+      if (!fitsPageRetryBudget(policy, waited, wait)) break;
+      await sleep(wait);
+      waited += wait;
+      outcome = await this.callOnce(
+        invoke,
+        sender.provider,
+        target.kind,
+        outcome.attemptsMade + 1,
+        waited,
+      );
     }
     return outcome;
   }
@@ -343,6 +506,7 @@ export class PageDispatcher {
     provider: string,
     kind: string,
     attemptsMade: number,
+    waitedMs: number,
   ): Promise<PageChannelOutcome> {
     try {
       const result = await invoke();
@@ -356,10 +520,24 @@ export class PageDispatcher {
         attemptsMade,
         // Optional on the sender's result, stated here: absent and null both mean "said nothing".
         retryAfterMs: result.retryAfterMs ?? null,
+        waitedMs,
       };
     } catch (err) {
       // A sender that throws rather than returning a result. Caught per channel so one dead
       // provider cannot stop the others from being tried — and `failed`, so it is retryable.
+      //
+      // **A throw gets the same delay as a `failed` response, deliberately.** The tempting rule is
+      // that a connection which never opened is a different signal from a provider that answered
+      // 503, and so deserves its own first gap. But the dispatcher cannot see that distinction: all
+      // three HTTP senders catch their own transport failures and report them *as results* with a
+      // null `httpStatus` (`page-pagerduty.ts` is pinned by a test for exactly this), so a timeout
+      // or a DNS failure — the case the rule is aimed at — never arrives here. What arrives here is
+      // a sender that broke its own contract. Giving that its own cadence would hand the special
+      // delay to a bug and the ordinary one to the network failure it was written for.
+      //
+      // What a throw *does* now get is the growing, jittered gap below, which is the right answer
+      // to "no instruction": ADR-0327 could only fall back to a flat delay, and a flat delay is
+      // what synchronised the replicas in the first place.
       return {
         kind,
         disposition: "failed",
@@ -370,10 +548,14 @@ export class PageDispatcher {
         attemptsMade,
         // A sender that threw never reached a response, so there is no instruction to honour.
         retryAfterMs: null,
+        waitedMs,
       };
     }
   }
 }
+
+/** Stands in for an absent policy so the loop has one shape. One attempt, so it never waits. */
+const NO_RETRY: PageRetryPolicy = { attempts: 1, delayMs: 0 };
 
 /** A disposition reached without calling the transport, so `attemptsMade` is 0. */
 function settled(
@@ -391,6 +573,7 @@ function settled(
     errorMessage,
     attemptsMade: 0,
     retryAfterMs: null,
+    waitedMs: 0,
   };
 }
 
@@ -408,8 +591,11 @@ export function formatPageReport(report: PageDeliveryReport): string {
   const lines = report.outcomes.map(
     (o) =>
       `  ${o.kind} → ${o.disposition}` +
-      // Only when it retried, so the common line stays as short as it was.
+      // Only when it retried, so the common line stays as short as it was. The elapsed wait goes
+      // beside the count because once the gap grows the count no longer implies it: "×3" is
+      // anywhere from four seconds to the whole budget.
       `${o.attemptsMade > 1 ? ` ×${o.attemptsMade.toString()}` : ""}` +
+      `${o.waitedMs > 0 ? ` over ${(o.waitedMs / 1000).toFixed(1)}s` : ""}` +
       `${o.httpStatus === null ? "" : ` http=${o.httpStatus.toString()}`}` +
       `${o.errorMessage === null ? "" : ` (${o.errorMessage})`}`,
   );

@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_PAGE_BACKOFF_FACTOR,
+  DEFAULT_PAGE_JITTER_RATIO,
+  JITTERED_PAGE_RETRY,
   PAGE_CHANNEL_DISPOSITIONS,
   PAGE_CHANNEL_KINDS,
   PageDispatcher,
+  fitsPageRetryBudget,
   formatPageReport,
   pageAddressFor,
+  pageBackoffMs,
   waitBefore,
   type PageChannelSender,
   type PageDirectiveLike,
+  type PageRetryPolicy,
 } from "./page-dispatch.js";
 import {
   PAGERDUTY_EVENTS_URL,
@@ -29,7 +35,12 @@ import {
   WebhookPageSender,
   slackPageBody,
 } from "./page-slack.js";
-import { MAX_RETRY_AFTER_MS, type PageFetchLike } from "./retry-after.js";
+import {
+  DEFAULT_PAGE_RETRY_BUDGET_MS,
+  MAX_PAGE_RETRY_BUDGET_MS,
+  MAX_RETRY_AFTER_MS,
+  type PageFetchLike,
+} from "./retry-after.js";
 
 const INC = "INC-2026-0007";
 const CONTENT: PageContent = { incidentId: INC, severity: "sev1", signal: "deletion-evidence" };
@@ -181,6 +192,26 @@ function rateLimitedSender(
           ...(step?.retryAfterMs === undefined ? {} : { retryAfterMs: step.retryAfterMs }),
         };
       },
+    },
+  };
+}
+
+/**
+ * A jitter source answering a scripted sequence of draws, repeating the last, and counting how many
+ * were taken — because "a flat policy consumes no randomness" is itself a rule worth pinning.
+ */
+function scriptedRandom(draws: readonly number[]): {
+  readonly random: () => number;
+  readonly taken: number[];
+} {
+  const taken: number[] = [];
+  let i = 0;
+  return {
+    taken,
+    random: (): number => {
+      const draw = draws[Math.min(i++, draws.length - 1)] ?? 0;
+      taken.push(draw);
+      return draw;
     },
   };
 }
@@ -1084,9 +1115,8 @@ describe("a 429 read off a real page sender", () => {
 
   it("carries no instruction from a 400, which is not retryable", async () => {
     const result = await new PagerDutyPageSender({
-      fetch: fakeFetch([
-        { ok: false, status: 400, text: "bad routing key", retryAfter: "5" },
-      ]).fetch,
+      fetch: fakeFetch([{ ok: false, status: 400, text: "bad routing key", retryAfter: "5" }])
+        .fetch,
     }).send(CONTENT, "k");
     expect(result.outcome).toBe("rejected");
     expect(result.retryAfterMs).toBeNull();
@@ -1134,5 +1164,500 @@ describe("a 429 read off a real page sender", () => {
       fetch: fakeFetch([{ ok: false, status: 429, text: "slow down", retryAfter: "600" }]).fetch,
     }).send(CONTENT, "k");
     expect(result.retryAfterMs).toBe(MAX_RETRY_AFTER_MS);
+  });
+});
+
+describe("backing off instead of retrying in lockstep", () => {
+  it("leaves a policy naming only attempts and delayMs exactly as ADR-0326 left it", async () => {
+    const sleep = recordingSleep();
+    const rng = scriptedRandom([0.5]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000 },
+      sleep: sleep.sleep,
+      random: rng.random,
+    }).deliver(DIRECTIVE);
+    // The flat two seconds, twice. A change of shape in the delay in front of a human is opt-in.
+    expect(sleep.waits).toEqual([2000, 2000]);
+    // And no randomness consumed at all, which is what makes "unchanged" assertable rather than
+    // merely true of these two numbers.
+    expect(rng.taken).toEqual([]);
+    expect(report.outcomes[0]?.attemptsMade).toBe(3);
+  });
+
+  it("multiplies each gap by the factor, compounding", async () => {
+    const sleep = recordingSleep();
+    await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 4, delayMs: 1000, backoffFactor: 2 },
+      sleep: sleep.sleep,
+      random: scriptedRandom([0]).random,
+    }).deliver(DIRECTIVE);
+    // A blip clears in the first 1s gap and never pays for the outage; an outage gets the spread.
+    expect(sleep.waits).toEqual([1000, 2000, 4000]);
+  });
+
+  it("clamps a factor below 1, because a shrinking gap is not a backoff", async () => {
+    const sleep = recordingSleep();
+    await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      // It would also push the wait under the floor `delayMs` exists to be.
+      retry: { attempts: 3, delayMs: 1000, backoffFactor: 0.5 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([1000, 1000]);
+  });
+
+  it("spreads the wait over a window above the gap, never below it", async () => {
+    const sleep = recordingSleep();
+    const rng = scriptedRandom([0, 1]);
+    await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000, jitterRatio: 1 },
+      sleep: sleep.sleep,
+      random: rng.random,
+    }).deliver(DIRECTIVE);
+    // A draw of 0 is the floor itself and a draw of 1 is the top of the window: `[2000, 4000]`.
+    // Equal jitter's 2× spread, shifted above the floor rather than straddling it, because
+    // ADR-0327 made that floor the thing that stops `Retry-After: 0` becoming a hot loop.
+    expect(sleep.waits).toEqual([2000, 4000]);
+    expect(rng.taken).toEqual([0, 1]);
+  });
+
+  it("scales a mid-window draw linearly", async () => {
+    const sleep = recordingSleep();
+    await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000, jitterRatio: 1 },
+      sleep: sleep.sleep,
+      random: scriptedRandom([0.5, 0.25]).random,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([3000, 2500]);
+  });
+
+  it("clamps the ratio to one gap's worth, so the window is never wider than 2×", async () => {
+    const sleep = recordingSleep();
+    await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 4, delayMs: 1000, jitterRatio: 5 },
+      sleep: sleep.sleep,
+      random: scriptedRandom([1]).random,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([2000, 2000, 2000]);
+  });
+
+  it("takes no jitter from a source answering outside its contract", async () => {
+    const sleep = recordingSleep();
+    await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 4, delayMs: 1000, jitterRatio: 1 },
+      sleep: sleep.sleep,
+      random: scriptedRandom([Number.NaN, -1, 2]).random,
+    }).deliver(DIRECTIVE);
+    // A broken source costs the spread and never the floor: NaN and a negative draw contribute
+    // nothing, and an over-range one is the top of the window rather than a multiple of it.
+    expect(sleep.waits).toEqual([1000, 1000, 2000]);
+  });
+
+  it("never returns a gap below the floor, for any draw in range", () => {
+    const policy: PageRetryPolicy = { attempts: 2, delayMs: 2000, jitterRatio: 1 };
+    for (let i = 0; i <= 10; i += 1) {
+      const draw = i / 10;
+      const ms = pageBackoffMs(policy, 1, () => draw);
+      expect(ms).toBeGreaterThanOrEqual(2000);
+      expect(ms).toBeLessThanOrEqual(4000);
+    }
+  });
+
+  it("computes the gap from the attempts already made, not from the attempt number", () => {
+    const rng = scriptedRandom([0]);
+    // The first gap follows one attempt, so it is the un-grown `delayMs`.
+    expect(pageBackoffMs({ attempts: 9, delayMs: 1000, backoffFactor: 3 }, 1, rng.random)).toBe(
+      1000,
+    );
+    expect(pageBackoffMs({ attempts: 9, delayMs: 1000, backoffFactor: 3 }, 3, rng.random)).toBe(
+      9000,
+    );
+    // A nonsensical count floors at the first gap rather than inverting the exponent.
+    expect(pageBackoffMs({ attempts: 9, delayMs: 1000, backoffFactor: 3 }, 0, rng.random)).toBe(
+      1000,
+    );
+    expect(rng.taken).toEqual([]);
+  });
+
+  it("answers an unsleepably large gap rather than Infinity", () => {
+    // Compounding overflows eventually, and a budget comparison against Infinity is not a number
+    // the dispatcher can act on. Any finite budget refuses this, which is the point.
+    const ms = pageBackoffMs({ attempts: 2, delayMs: 1000, backoffFactor: 2 }, 5000, () => 0);
+    expect(ms).toBe(Number.MAX_SAFE_INTEGER);
+    expect(fitsPageRetryBudget({ attempts: 2, delayMs: 1000 }, 0, ms)).toBe(false);
+  });
+});
+
+describe("the total waiting budget", () => {
+  it("stops retrying when the next gap would not fit, rather than sleeping the remainder", async () => {
+    const sleep = recordingSleep();
+    const s = sequenceSender(["failed"]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 10, delayMs: 1000, backoffFactor: 2, totalBudgetMs: 5000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    // 1000 then 2000 fit; the 4000 would make 7000, so it is not slept at all. A retry that slept
+    // the remainder and called anyway would arrive before the gap it computed was over.
+    expect(sleep.waits).toEqual([1000, 2000]);
+    expect(s.sends).toHaveLength(3);
+    expect(report.outcomes[0]).toMatchObject({
+      disposition: "failed",
+      attemptsMade: 3,
+      waitedMs: 3000,
+    });
+    expect(report.undelivered).toBe(true);
+  });
+
+  it("spends a budget exactly to its limit", async () => {
+    const sleep = recordingSleep();
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 10, delayMs: 1000, backoffFactor: 2, totalBudgetMs: 7000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([1000, 2000, 4000]);
+    expect(report.outcomes[0]?.waitedMs).toBe(7000);
+  });
+
+  it("is on by default, so an unbounded policy cannot be configured by accident", async () => {
+    const sleep = recordingSleep();
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      // Both inside the ranges `pageRetryFromEnv` accepts, and nine minutes of waiting in front of
+      // a `sev1` before this bound existed. The one new field that defaults to active: a budget a
+      // caller opts into bounds nothing.
+      retry: { attempts: 10, delayMs: 20_000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([20_000]);
+    expect(report.outcomes[0]?.waitedMs).toBe(20_000);
+    expect(DEFAULT_PAGE_RETRY_BUDGET_MS).toBe(30_000);
+  });
+
+  it("cannot be raised past the platform's hard ceiling", async () => {
+    const sleep = recordingSleep();
+    await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 10, delayMs: 25_000, totalBudgetMs: 600_000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    // Clamped to 60s, so two gaps fit and the third does not. Above that the retry is spending the
+    // window in which a human was supposed to have answered.
+    expect(sleep.waits).toEqual([25_000, 25_000]);
+    expect(MAX_PAGE_RETRY_BUDGET_MS).toBe(60_000);
+  });
+
+  it("bounds waiting, not attempts: a zero-delay policy still retries on a zero budget", async () => {
+    const sleep = recordingSleep();
+    const s = sequenceSender(["failed"]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 0, totalBudgetMs: 0 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([0, 0]);
+    expect(s.sends).toHaveLength(3);
+    expect(report.outcomes[0]?.waitedMs).toBe(0);
+  });
+
+  it("counts a provider's own instruction against the budget too", async () => {
+    const sleep = recordingSleep();
+    const s = rateLimitedSender([
+      { outcome: "failed", retryAfterMs: 20_000 },
+      { outcome: "failed", retryAfterMs: 20_000 },
+      { outcome: "delivered" },
+    ]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 5, delayMs: 2000 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    // Two instructions this long exceed the whole budget, so the second is refused — the ceiling on
+    // one wait and the ceiling on all of them are separate bounds and both apply.
+    expect(sleep.waits).toEqual([20_000]);
+    expect(report.outcomes[0]).toMatchObject({ attemptsMade: 2, waitedMs: 20_000 });
+  });
+
+  it("answers the budget question on the summed wait", () => {
+    const flat: PageRetryPolicy = { attempts: 3, delayMs: 1000 };
+    expect(fitsPageRetryBudget(flat, 0, DEFAULT_PAGE_RETRY_BUDGET_MS)).toBe(true);
+    expect(fitsPageRetryBudget(flat, 0, DEFAULT_PAGE_RETRY_BUDGET_MS + 1)).toBe(false);
+    expect(fitsPageRetryBudget(flat, 29_000, 1000)).toBe(true);
+    expect(fitsPageRetryBudget(flat, 29_000, 1001)).toBe(false);
+    expect(fitsPageRetryBudget({ ...flat, totalBudgetMs: 1500 }, 1000, 500)).toBe(true);
+    expect(fitsPageRetryBudget({ ...flat, totalBudgetMs: 1500 }, 1000, 501)).toBe(false);
+  });
+});
+
+describe("a backoff that still obeys Retry-After", () => {
+  it("waits the provider's figure when it is longer than the grown gap", async () => {
+    const sleep = recordingSleep();
+    const s = rateLimitedSender([
+      { outcome: "failed", retryAfterMs: 9000 },
+      { outcome: "failed" },
+      { outcome: "delivered" },
+    ]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000, backoffFactor: 2 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    // ADR-0327's rule, unchanged by the backoff: 9s because the provider said so, then 4s because
+    // the gap grew and the provider said nothing.
+    expect(sleep.waits).toEqual([9000, 4000]);
+    expect(report.outcomes[0]).toMatchObject({ disposition: "delivered", waitedMs: 13_000 });
+  });
+
+  it("keeps the grown gap as the floor when the instruction is shorter", async () => {
+    const sleep = recordingSleep();
+    const s = rateLimitedSender([
+      { outcome: "failed", retryAfterMs: 3000 },
+      { outcome: "failed", retryAfterMs: 3000 },
+      { outcome: "delivered" },
+    ]);
+    await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000, backoffFactor: 2 },
+      sleep: sleep.sleep,
+    }).deliver(DIRECTIVE);
+    // The same instruction twice, honoured once: the second gap has grown past it, and the floor
+    // is the platform's to raise.
+    expect(sleep.waits).toEqual([3000, 4000]);
+  });
+
+  it("still stops at an over-ceiling instruction, and draws no jitter doing it", async () => {
+    const sleep = recordingSleep();
+    const rng = scriptedRandom([1]);
+    const s = rateLimitedSender([
+      { outcome: "failed", retryAfterMs: MAX_RETRY_AFTER_MS },
+      { outcome: "delivered" },
+    ]);
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: JITTERED_PAGE_RETRY,
+      sleep: sleep.sleep,
+      random: rng.random,
+    }).deliver(DIRECTIVE);
+    expect(s.calls).toHaveLength(1);
+    expect(sleep.waits).toEqual([]);
+    // The ceiling is answered before a gap is computed, so no draw is spent on a retry that is not
+    // going to happen.
+    expect(rng.taken).toEqual([]);
+    expect(report.outcomes[0]).toMatchObject({
+      disposition: "failed",
+      attemptsMade: 1,
+      retryAfterMs: MAX_RETRY_AFTER_MS,
+      waitedMs: 0,
+    });
+  });
+
+  it("never retries a settled disposition, and spends no randomness on one", async () => {
+    const sleep = recordingSleep();
+    const rng = scriptedRandom([1]);
+    const opts = {
+      signal: "s",
+      retry: JITTERED_PAGE_RETRY,
+      sleep: sleep.sleep,
+      random: rng.random,
+    } as const;
+    const rejected = await new PageDispatcher({
+      ...opts,
+      senders: { pagerduty_phone: sequenceSender(["rejected", "delivered"]).sender },
+    }).deliver(DIRECTIVE);
+    const unroutable = await new PageDispatcher({ ...opts, senders: {} }).deliver(DIRECTIVE);
+    const noAddress = await new PageDispatcher({
+      ...opts,
+      senders: { slack: sequenceSender(["failed"]).sender },
+    }).deliver({ severity: "sev1", incidentId: INC, channels: [{ kind: "slack" }] });
+    const unsupported = await new PageDispatcher({
+      ...opts,
+      senders: { slack: sequenceSender(["failed"], { resolvable: false }).sender },
+    }).resolve({ severity: "sev1", incidentId: INC, channels: [{ kind: "slack", channel: "#o" }] });
+    expect(
+      [rejected, unroutable, noAddress, unsupported].map((r) => r.outcomes[0]?.disposition),
+    ).toEqual(["rejected", "unroutable", "no_address", "unsupported"]);
+    expect(sleep.waits).toEqual([]);
+    expect(rng.taken).toEqual([]);
+  });
+});
+
+describe("the policy a deployment should run", () => {
+  it("is ADR-0326's three attempts and two-second floor, grown and bounded", () => {
+    expect(JITTERED_PAGE_RETRY).toEqual({
+      attempts: 3,
+      delayMs: 2000,
+      backoffFactor: DEFAULT_PAGE_BACKOFF_FACTOR,
+      jitterRatio: DEFAULT_PAGE_JITTER_RATIO,
+      totalBudgetMs: DEFAULT_PAGE_RETRY_BUDGET_MS,
+    });
+    expect(DEFAULT_PAGE_BACKOFF_FACTOR).toBe(2);
+    expect(DEFAULT_PAGE_JITTER_RATIO).toBe(1);
+  });
+
+  it("waits under twelve seconds in the worst case, against a five-minute ack target", async () => {
+    const sleep = recordingSleep();
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: JITTERED_PAGE_RETRY,
+      sleep: sleep.sleep,
+      // The top of both windows, which is the worst case this policy can produce unaided.
+      random: scriptedRandom([1, 1]).random,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([4000, 8000]);
+    expect(report.outcomes[0]?.waitedMs).toBe(12_000);
+    expect(report.outcomes[0]?.waitedMs).toBeLessThanOrEqual(DEFAULT_PAGE_RETRY_BUDGET_MS);
+  });
+
+  it("waits six seconds at the bottom of both windows, and pages at once either way", async () => {
+    const sleep = recordingSleep();
+    const s = sequenceSender(["failed"]);
+    await new PageDispatcher({
+      senders: { pagerduty_phone: s.sender },
+      signal: "s",
+      retry: JITTERED_PAGE_RETRY,
+      sleep: sleep.sleep,
+      random: scriptedRandom([0]).random,
+    }).deliver(DIRECTIVE);
+    expect(sleep.waits).toEqual([2000, 4000]);
+    // Three calls, two gaps: the first attempt is never delayed, jitter or not. A page goes out at
+    // once, which is why the *first* attempts of several replicas stay correlated by design.
+    expect(s.sends).toHaveLength(3);
+  });
+
+  it("decorrelates two replicas that fail at the same instant", async () => {
+    const waitsFor = async (draws: readonly number[]): Promise<number[]> => {
+      const sleep = recordingSleep();
+      await new PageDispatcher({
+        senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+        signal: "s",
+        retry: JITTERED_PAGE_RETRY,
+        sleep: sleep.sleep,
+        random: scriptedRandom(draws).random,
+      }).deliver(DIRECTIVE);
+      return sleep.waits;
+    };
+    const a = await waitsFor([0.1, 0.1]);
+    const b = await waitsFor([0.9, 0.9]);
+    // The failure mode is every replica of this process retrying one degraded provider at the same
+    // two offsets. Same policy, same failure, different offsets — which spreads the second wave
+    // without shedding a single call.
+    expect(a).toEqual([2200, 4400]);
+    expect(b).toEqual([3800, 7600]);
+  });
+});
+
+describe("reporting how long it waited", () => {
+  it("reports nothing waited for a single attempt or a settled disposition", async () => {
+    const delivered = await new PageDispatcher({
+      senders: { pagerduty_phone: senderStub().sender },
+      signal: "s",
+    }).deliver(DIRECTIVE);
+    expect(delivered.outcomes[0]?.waitedMs).toBe(0);
+    const unroutable = await new PageDispatcher({ senders: {}, signal: "s" }).deliver(DIRECTIVE);
+    expect(unroutable.outcomes[0]?.waitedMs).toBe(0);
+  });
+
+  it("reports the wait that preceded the attempt that settled it", async () => {
+    const report = await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed", "failed", "delivered"]).sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000 },
+      sleep: recordingSleep().sleep,
+    }).deliver(DIRECTIVE);
+    // "Retried three times" is no longer enough on its own: under a growing, jittered gap three
+    // attempts is anywhere from 4s to the whole budget, and the question an incident review asks
+    // is how long before anybody was told.
+    expect(report.outcomes[0]).toMatchObject({ attemptsMade: 3, waitedMs: 4000 });
+  });
+
+  it("keeps each channel's wait its own", async () => {
+    const report = await new PageDispatcher({
+      senders: {
+        pagerduty_phone: sequenceSender(["failed", "failed", "delivered"]).sender,
+        pagerduty_business_hours: sequenceSender(["failed", "delivered"]).sender,
+      },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 1000, backoffFactor: 2 },
+      sleep: recordingSleep().sleep,
+    }).deliver({
+      severity: "sev1",
+      incidentId: INC,
+      channels: [
+        { kind: "pagerduty_phone", serviceKey: "a" },
+        { kind: "pagerduty_business_hours", serviceKey: "b" },
+      ],
+    });
+    expect(report.outcomes.map((o) => o.waitedMs)).toEqual([3000, 1000]);
+  });
+
+  it("distinguishes the three ways a retry stops, with no fourth field", async () => {
+    const budget = await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 9, delayMs: 2000, totalBudgetMs: 4000 },
+      sleep: recordingSleep().sleep,
+    }).deliver(DIRECTIVE);
+    // Short of the policy's attempts, nothing left of the budget, no instruction: exhausted.
+    expect(budget.outcomes[0]).toMatchObject({
+      attemptsMade: 3,
+      waitedMs: 4000,
+      retryAfterMs: null,
+    });
+    const ceiling = await new PageDispatcher({
+      senders: {
+        pagerduty_phone: rateLimitedSender([
+          { outcome: "failed", retryAfterMs: MAX_RETRY_AFTER_MS },
+        ]).sender,
+      },
+      signal: "s",
+      retry: { attempts: 9, delayMs: 2000 },
+      sleep: recordingSleep().sleep,
+    }).deliver(DIRECTIVE);
+    // Short of the policy's attempts with budget to spare: the instruction stopped it.
+    expect(ceiling.outcomes[0]).toMatchObject({
+      attemptsMade: 1,
+      waitedMs: 0,
+      retryAfterMs: MAX_RETRY_AFTER_MS,
+    });
+  });
+
+  it("puts the elapsed wait beside the attempt count in the 3am log line", async () => {
+    const retried = await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["failed"]).sender },
+      signal: "s",
+      retry: { attempts: 3, delayMs: 2000, backoffFactor: 2 },
+      sleep: recordingSleep().sleep,
+    }).deliver(DIRECTIVE);
+    expect(formatPageReport(retried)).toContain("pagerduty_phone → failed ×3 over 6.0s");
+    const once = await new PageDispatcher({
+      senders: { pagerduty_phone: sequenceSender(["delivered"]).sender },
+      signal: "s",
+    }).deliver(DIRECTIVE);
+    // The common line stays as short as it was.
+    expect(formatPageReport(once)).not.toContain("over");
   });
 });

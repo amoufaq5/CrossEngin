@@ -3,15 +3,21 @@ import { describe, expect, it } from "vitest";
 import {
   ASSEMBLY_REFUSAL_REASONS,
   ATTESTATION_OUTCOMES,
+  CONSERVATIVE_DELETION_CAPABILITIES,
   DELETION_SUBSYSTEMS,
   DeletionAttestationSchema,
+  DeletionCapabilitiesSchema,
   EMPTY_DELETION_SCOPE,
+  SUBSYSTEM_DISPOSITIONS,
   SUBSYSTEM_SCOPE_FIELDS,
+  absentSubsystemsFor,
   assembleTombstone,
   composeDeletionScope,
+  requiredSubsystemsFor,
   retainedObligations,
   tombstoneMatchesAttestations,
   type DeletionAttestation,
+  type DeletionCapabilities,
   type DeletionSubsystem,
   type TombstoneAssemblyInput,
 } from "./tombstone-assembly.js";
@@ -65,14 +71,138 @@ describe("the vocabulary", () => {
     expect(owners).toEqual(["tenant_schema"]);
   });
 
-  it("declares three outcomes and eight refusal reasons", () => {
+  it("declares three outcomes, three dispositions and twelve refusal reasons", () => {
     expect([...ATTESTATION_OUTCOMES]).toEqual(["erased", "nothing_to_erase", "retained"]);
-    expect(ASSEMBLY_REFUSAL_REASONS).toHaveLength(8);
+    expect([...SUBSYSTEM_DISPOSITIONS]).toEqual(["erases", "retains", "absent"]);
+    expect(ASSEMBLY_REFUSAL_REASONS).toHaveLength(12);
   });
 
   it("exports an empty scope rather than making a caller invent one", () => {
     expect(EMPTY_DELETION_SCOPE.rowCount).toBe(0);
     expect(EMPTY_DELETION_SCOPE.schemas).toEqual([]);
+  });
+});
+
+function caps(over: Partial<DeletionCapabilities> = {}): DeletionCapabilities {
+  return { ...CONSERVATIVE_DELETION_CAPABILITIES, ...over };
+}
+
+/** An input whose scope comes from a declaration rather than a per-call list. */
+function declaredInputOf(
+  capabilities: DeletionCapabilities,
+  over: Partial<TombstoneAssemblyInput> = {},
+): TombstoneAssemblyInput {
+  return { ...inputOf(over), requiredSubsystems: undefined, capabilities };
+}
+
+/** What a deployment looks like today: a tenant schema, and the other five not built yet. */
+const ONLY_SCHEMA: DeletionCapabilities = caps({
+  shared_tables: "absent",
+  object_storage: "absent",
+  backups: "absent",
+  search_indexes: "absent",
+  caches: "absent",
+});
+
+describe("DeletionCapabilitiesSchema", () => {
+  it("accepts a total declaration", () => {
+    expect(DeletionCapabilitiesSchema.safeParse(ONLY_SCHEMA).success).toBe(true);
+    expect(DeletionCapabilitiesSchema.safeParse(CONSERVATIVE_DELETION_CAPABILITIES).success).toBe(true);
+  });
+
+  it("refuses a declaration missing a subsystem", () => {
+    const partial: Record<string, string> = { ...CONSERVATIVE_DELETION_CAPABILITIES };
+    delete partial["caches"];
+    expect(DeletionCapabilitiesSchema.safeParse(partial).success).toBe(false);
+  });
+
+  it("demands every member of DELETION_SUBSYSTEMS, so a seventh cannot default to absent", () => {
+    // The point of the whole declaration: adding a subsystem to the enum must fail here rather than
+    // quietly falling out of every scope.
+    for (const subsystem of DELETION_SUBSYSTEMS) {
+      const partial: Record<string, string> = { ...CONSERVATIVE_DELETION_CAPABILITIES };
+      delete partial[subsystem];
+      expect(DeletionCapabilitiesSchema.safeParse(partial).success, subsystem).toBe(false);
+    }
+  });
+
+  it("refuses an empty declaration rather than filling one in", () => {
+    // No `z.default()` anywhere: a default applied to silence is this module's defect in a new shape.
+    expect(DeletionCapabilitiesSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("rejects an unknown subsystem and an unknown disposition", () => {
+    expect(DeletionCapabilitiesSchema.safeParse({ ...ONLY_SCHEMA, blobs: "absent" }).success).toBe(false);
+    expect(DeletionCapabilitiesSchema.safeParse({ ...ONLY_SCHEMA, caches: "maybe" }).success).toBe(false);
+  });
+
+  it("refuses tenant_schema: absent, naming why", () => {
+    const r = DeletionCapabilitiesSchema.safeParse(caps({ tenant_schema: "absent" }));
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    expect(r.error.issues[0]?.message).toContain("every deployment has one");
+  });
+
+  it("accepts tenant_schema as erases or retains", () => {
+    for (const disposition of ["erases", "retains"] as const) {
+      expect(
+        DeletionCapabilitiesSchema.safeParse(caps({ tenant_schema: disposition })).success,
+        disposition,
+      ).toBe(true);
+    }
+  });
+});
+
+describe("requiredSubsystemsFor", () => {
+  it("keeps erases and retains in scope and drops only absent", () => {
+    // `retains` stays in scope deliberately: a retention obligation is a claim the proof carries, not
+    // a reason to go quiet about the subsystem.
+    const required = requiredSubsystemsFor(
+      caps({ backups: "retains", object_storage: "absent", caches: "absent" }),
+    );
+    expect(required).toContain("backups");
+    expect(required).not.toContain("object_storage");
+    expect(required).not.toContain("caches");
+  });
+
+  it("reports every subsystem for the conservative declaration", () => {
+    expect(requiredSubsystemsFor(CONSERVATIVE_DELETION_CAPABILITIES)).toEqual([...DELETION_SUBSYSTEMS]);
+  });
+
+  it("returns DELETION_SUBSYSTEMS order, so the derived list is stable", () => {
+    const required = requiredSubsystemsFor(caps({ shared_tables: "absent" }));
+    expect(required).toEqual(DELETION_SUBSYSTEMS.filter((s) => s !== "shared_tables"));
+  });
+
+  it("narrows to tenant_schema alone for a deployment that has nothing else", () => {
+    expect(requiredSubsystemsFor(ONLY_SCHEMA)).toEqual(["tenant_schema"]);
+  });
+
+  it("is the exact complement of absentSubsystemsFor", () => {
+    const declaration = caps({ backups: "absent", caches: "retains" });
+    expect([...requiredSubsystemsFor(declaration), ...absentSubsystemsFor(declaration)].sort()).toEqual(
+      [...DELETION_SUBSYSTEMS].sort(),
+    );
+    expect(absentSubsystemsFor(declaration)).toEqual(["backups"]);
+  });
+});
+
+describe("CONSERVATIVE_DELETION_CAPABILITIES", () => {
+  it("declares nothing absent", () => {
+    // The two ways of being wrong are not symmetric: a wrong `erases` refuses the next deletion and
+    // names the subsystem, a wrong `absent` signs a proof that is silent about live data.
+    expect(absentSubsystemsFor(CONSERVATIVE_DELETION_CAPABILITIES)).toEqual([]);
+    for (const subsystem of DELETION_SUBSYSTEMS) {
+      expect(CONSERVATIVE_DELETION_CAPABILITIES[subsystem], subsystem).toBe("erases");
+    }
+  });
+
+  it("refuses today's single-subsystem deletion, naming the five nobody asked", () => {
+    const out = assembleTombstone(declaredInputOf(CONSERVATIVE_DELETION_CAPABILITIES));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    const unattested = out.refusals.filter((r) => r.reason === "subsystem_unattested");
+    expect(unattested).toHaveLength(5);
   });
 });
 
@@ -317,6 +447,126 @@ describe("assembleTombstone", () => {
     expect(out.ok).toBe(true);
     if (!out.ok) return;
     expect(out.scope).toEqual(out.record.scope);
+  });
+});
+
+describe("assembleTombstone, with scope derived from a declaration", () => {
+  it("assembles from a declaration and carries it on the result", () => {
+    const out = assembleTombstone(declaredInputOf(ONLY_SCHEMA));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(verifyTombstoneHashes(out.record)).toEqual({ contentManifestOk: true, proofOk: true });
+    expect(out.declaration).toEqual(ONLY_SCHEMA);
+    // What a reader of the result can now tell apart: five subsystems this deployment does not have,
+    // rather than five nobody asked about.
+    expect(absentSubsystemsFor(out.declaration ?? ONLY_SCHEMA)).toHaveLength(5);
+    expect(tombstoneMatchesAttestations(out.record, [attest()])).toBe(true);
+  });
+
+  it("refuses a retains subsystem that did not attest", () => {
+    // The rule `retains` exists for: a lawful retention is a claim the proof must carry, so the
+    // subsystem is still obliged to speak.
+    const out = assembleTombstone(
+      declaredInputOf(caps({ ...ONLY_SCHEMA, backups: "retains" })),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    const unattested = out.refusals.filter((r) => r.reason === "subsystem_unattested");
+    expect(unattested).toHaveLength(1);
+    expect(unattested[0]?.detail).toContain("backups");
+  });
+
+  it("accepts a retains subsystem that attested its obligation", () => {
+    const out = assembleTombstone(
+      declaredInputOf(caps({ ...ONLY_SCHEMA, backups: "retains" }), {
+        attestations: [
+          attest(),
+          attest({
+            subsystem: "backups",
+            outcome: "retained",
+            scope: undefined,
+            retentionObligation: "tax_records_7y",
+            retainedDataReference: "vault://backups/2026",
+          }),
+        ],
+      }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.retainedReason).toContain("tax_records_7y");
+  });
+
+  it("does not require an absent subsystem to attest", () => {
+    const out = assembleTombstone(declaredInputOf(ONLY_SCHEMA));
+    expect(out.ok).toBe(true);
+  });
+
+  it("refuses an absent subsystem that attested anyway", () => {
+    // The declaration and the evidence disagree about what exists, and folding the report in would
+    // put figures in a proof that says the subsystem is not there.
+    const out = assembleTombstone(
+      declaredInputOf(ONLY_SCHEMA, {
+        attestations: [attest(), attest({ subsystem: "caches", outcome: "nothing_to_erase", scope: undefined })],
+      }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    const conflict = out.refusals.filter((r) => r.reason === "absent_subsystem_attested");
+    expect(conflict).toHaveLength(1);
+    expect(conflict[0]?.detail).toContain("caches");
+  });
+
+  it("refuses when neither a declaration nor a list says who must speak", () => {
+    const out = assembleTombstone(inputOf({ requiredSubsystems: undefined }));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toContain("scope_undeclared");
+  });
+
+  it("refuses when both are declared", () => {
+    const out = assembleTombstone(
+      inputOf({ capabilities: ONLY_SCHEMA, requiredSubsystems: ["tenant_schema"] }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toContain("scope_declaration_ambiguous");
+  });
+
+  it("refuses a declaration that does not parse, before deriving anything from it", () => {
+    // Re-parsed at the point of use, because a totality rule enforced only at the config boundary is
+    // one `as` away from being no rule.
+    const out = assembleTombstone(
+      declaredInputOf({ tenant_schema: "erases", caches: "absent" } as unknown as DeletionCapabilities),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toContain("capabilities_invalid");
+  });
+
+  it("refuses a declaration that puts tenant_schema out of scope", () => {
+    const out = assembleTombstone(
+      declaredInputOf({ ...ONLY_SCHEMA, tenant_schema: "absent" } as DeletionCapabilities),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.find((r) => r.reason === "capabilities_invalid")?.detail).toContain(
+      "tenant_schema",
+    );
+  });
+
+  it("leaves a per-call list working exactly as before, with no declaration on the result", () => {
+    const out = assembleTombstone(inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // Undefined means "named per call", which is a different fact from "nothing declared absent".
+    expect(out.declaration).toBeUndefined();
+  });
+
+  it("computes no hash for a declaration it is about to refuse", () => {
+    const out = assembleTombstone(declaredInputOf(CONSERVATIVE_DELETION_CAPABILITIES));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(JSON.stringify(out)).not.toContain("contentManifestSha256");
   });
 });
 

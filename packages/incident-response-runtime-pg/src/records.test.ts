@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { IncidentRecordSchema } from "@crossengin/incident-response";
+import { IncidentRecordSchema, type IncidentRecord } from "@crossengin/incident-response";
 
 import {
   INCIDENT_COLUMNS,
   INCIDENT_COLUMN_NAMES,
   INCIDENT_JSONB_COLUMNS,
+  IncidentTimelineRewriteError,
+  assertAppendOnly,
   incidentPlaceholders,
   incidentRowValues,
   incidentUpdateAssignments,
@@ -205,5 +207,68 @@ describe("rowToIncident", () => {
     const row = incidentRow(declaredIncident());
     row["timeline"] = "[]";
     expect(() => rowToIncident(row)).toThrow();
+  });
+});
+
+/**
+ * The append-only guard, which moved here to gain a second caller (ADR-0328).
+ *
+ * It started as a private function in `persisting-engine.ts`, so every write through
+ * `PersistentIncidentEngine.apply` passed it and `appendPagedNote` — added by ADR-0327, writing a
+ * timeline entry directly — did not. The engine imports the store, so the store could not import
+ * the guard from the engine; it lives in this module, which both already depend on.
+ */
+describe("assertAppendOnly (ADR-0328)", () => {
+  const base = declaredIncident();
+
+  function withTimeline(entries: IncidentRecord["timeline"]): IncidentRecord {
+    return { ...base, timeline: entries };
+  }
+
+  it("accepts a timeline that is the stored one plus an entry", () => {
+    const next = withTimeline([
+      ...base.timeline,
+      { ...base.timeline[0], kind: "paged", message: "paged 1/1 over slack" },
+    ] as IncidentRecord["timeline"]);
+    expect(() => assertAppendOnly(base, next)).not.toThrow();
+  });
+
+  it("accepts an unchanged timeline, since a write may touch other fields only", () => {
+    expect(() => assertAppendOnly(base, { ...base, severity: "sev2" })).not.toThrow();
+  });
+
+  it("refuses a shorter timeline", () => {
+    expect(() => assertAppendOnly(base, withTimeline([]))).toThrow(IncidentTimelineRewriteError);
+  });
+
+  it("refuses an *edited* entry at the same length, which is the defect it exists for", () => {
+    // A CHECK constraint cannot express this and the column is JSONB, so before the row is written
+    // is the only place it can be caught. Length alone would let it through.
+    const edited = withTimeline([
+      { ...base.timeline[0], message: "rewritten" },
+    ] as IncidentRecord["timeline"]);
+    expect(() => assertAppendOnly(base, edited)).toThrow(IncidentTimelineRewriteError);
+  });
+
+  it("refuses an edit buried behind a legitimate append", () => {
+    const sneaky = withTimeline([
+      { ...base.timeline[0], message: "rewritten" },
+      { ...base.timeline[0], kind: "paged", message: "paged 1/1 over slack" },
+    ] as IncidentRecord["timeline"]);
+    expect(() => assertAppendOnly(base, sneaky)).toThrow(IncidentTimelineRewriteError);
+  });
+
+  it("names the incident in the error, so a log line identifies the row", () => {
+    expect(() => assertAppendOnly(base, withTimeline([]))).toThrow(new RegExp(base.id));
+  });
+
+  it("compares serialised entries, so both sides must come from one load", () => {
+    // `JSON.stringify` is key-order sensitive, so this guard is too. That is safe only because the
+    // candidate is always built by spreading the record `rowToIncident` just returned — one source,
+    // one key order. A caller that constructed an entry from scratch with the same fields in a
+    // different order would be refused, which is why `appendPagedNote` goes through the executor.
+    const first = base.timeline[0];
+    if (first === undefined) throw new Error("fixture has no timeline entry");
+    expect(() => assertAppendOnly(base, withTimeline([{ ...first }]))).not.toThrow();
   });
 });

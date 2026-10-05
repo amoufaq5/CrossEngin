@@ -9,6 +9,7 @@ import { IncidentExecutor } from "@crossengin/incident-response-runtime";
 import {
   INCIDENT_COLUMNS,
   INCIDENT_COLUMN_NAMES,
+  assertAppendOnly,
   incidentPlaceholders,
   incidentRowValues,
   incidentUpdateAssignments,
@@ -91,11 +92,25 @@ const REVISION_GUARD_PARAM = INCIDENT_COLUMN_NAMES.length + 1;
  * incidents exist to describe. Reads are therefore unfiltered by design, which is why nothing
  * tenant-facing is wired to this store.
  */
+export interface PostgresIncidentStoreOptions {
+  /**
+   * The clock for the two instants this store stamps itself: a paged note with no explicit `at`,
+   * and the row's `updated_at` on that write (ADR-0328).
+   *
+   * Every other write takes its instant from the caller, which is why this store had no clock at
+   * all — and then ADR-0327's `appendPagedNote` read `new Date()` directly, so the one method that
+   * decides an instant for itself was the one a test could not control.
+   */
+  readonly clock?: () => Date;
+}
+
 export class PostgresIncidentStore {
   private readonly conn: PgConnection;
+  private readonly clock: () => Date;
 
-  constructor(conn: PgConnection) {
+  constructor(conn: PgConnection, opts: PostgresIncidentStoreOptions = {}) {
     this.conn = conn;
+    this.clock = opts.clock ?? ((): Date => new Date());
   }
 
   /**
@@ -199,7 +214,7 @@ export class PostgresIncidentStore {
   ): Promise<PagedNoteOutcome> {
     // Resolved once, so every attempt records the instant the page happened rather than the
     // instant the last retry got through.
-    const at = input.at ?? new Date().toISOString();
+    const at = input.at ?? this.clock().toISOString();
     for (let attempt = 0; attempt < PAGED_NOTE_MAX_ATTEMPTS; attempt++) {
       let loaded: StoredIncident | null;
       try {
@@ -215,15 +230,21 @@ export class PostgresIncidentStore {
           actorUserId: input.actorUserId,
           at,
         });
+        // The same guard every write through `PersistentIncidentEngine.apply` passes, and the
+        // reason it moved into `records.ts` (ADR-0328): this was the one writer it did not cover,
+        // so a note that rewrote an earlier entry would have been accepted by the only check
+        // standing between a JSONB column and an edited timeline.
+        assertAppendOnly(loaded.record, next);
       } catch (err) {
-        // The contract refused the facts — a caller bug, and one that cannot be fixed by
-        // retrying. Reported rather than raised for the same reason as everything else here.
+        // The contract refused the facts, or the candidate was not an extension of the stored
+        // timeline — a caller bug either way, and one retrying cannot fix. Reported rather than
+        // raised for the same reason as everything else here.
         return { recorded: false, reason: `note_refused: ${messageOf(err)}` };
       }
       try {
         // The entry keeps the instant the page happened; the row's `updated_at` is when it was
         // written, which is this attempt and not the one before it.
-        await this.update(next, loaded.revision, new Date().toISOString());
+        await this.update(next, loaded.revision, this.clock().toISOString());
         return { recorded: true, reason: null };
       } catch (err) {
         if (err instanceof IncidentRevisionConflictError) continue;

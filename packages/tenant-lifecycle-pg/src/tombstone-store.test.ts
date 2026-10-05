@@ -41,7 +41,7 @@ function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
     executedBy: "alice@example.test",
     approvedBy: "bob@example.test",
     anchors: [{ kind: "rfc3161_timestamp", reference: "caller-chose-this", anchoredAt: AT }],
-    requiredSubsystems: ["tenant_schema"],
+    capabilities: { tenant_schema: "erases", shared_tables: "absent", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
     attestations: [ATTESTATION],
   });
   if (!out.ok) throw new Error(`fixture failed: ${JSON.stringify(out.refusals)}`);
