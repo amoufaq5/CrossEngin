@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 333 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 334 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~16,290 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~16,410 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -183,6 +183,26 @@ type errors.
   for the **fourth** time, and a static helper could never have been right: a transition's operationId
   comes from the manifest's workflow, which a `(name: string) => string[]` cannot know. It is derived
   from the routes actually derived now.
+
+  ADR-0339 is the mirror of ADR-0338, and the class is **a rule with one half wired**. ADR-0329 put
+  `privilegedForClass` behind both the read redaction and the write mask *specifically* so the two
+  could not diverge — and only the read half was ever called, which made that property
+  unenforceable rather than merely unchecked. What the measurement showed is an asymmetry that is
+  total and in the dangerous direction: of **46** sensitive-classified fields in the seven packs,
+  **39 were unreadable by every role in every deployment** (the policy had no producer, so an
+  empty policy refused everyone and only an explicit per-field `read` grant came back) and **39
+  were writable by anybody** with entity `update` (the mask had no caller). Neither side had a
+  symptom, because total redaction looks exactly like classification working. Live: `case_worker`
+  changed `Citizen.national_id` against the pack's own `update: ["gov_admin"]`, and `front_desk`
+  **blind-overwrote** `Patient.mrn` — replacing a medical record identifier it cannot read before
+  or after, in the column ADR-0338 had just made ciphertext.
+  The split that made it shippable is the whole decision: an **explicitly declared** grant is
+  enforced always (7 fields, each deliberate, and it cannot make anything uncreatable), while the
+  **classification default** is opt-in because with no declaration all 46 are unwritable and 12 are
+  `required`, so seven entities become uncreatable by every role — so the flag refuses at boot and
+  names them, and that list is the migration guide. The recurring rule held a fifth time: the honest
+  fix sits one level up from the pain. The pain was a callerless function; the fix was the
+  declaration surface that function needed and never had.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -665,7 +685,13 @@ packages exist at only one layer, noted below where that is true.
   wholesale grantee could never be withheld from `phi`, which is the one narrowing the feature exists
   for — so `{phi: []}` is a refusal, not a fall-through. One function behind both
   `computeClassifiedFieldRedaction` and `validateClassifiedWriteMask`, so a role cannot write a class
-  it may not read.
+  it may not read — **and until ADR-0339 only the read half had a caller**, which made the property
+  that comment claims unenforceable: three of this module's four field-level functions were
+  callerless and the policy parameterising them had no producer, so the read side refused everyone
+  and the write side refused nobody. `validateClassifiedWriteMask` is reached from
+  `operate-runtime`'s create and update handlers now, with the **same policy object** the redaction
+  registry gets. `computeFieldRedaction` and `validateWriteMask` — the classification-unaware
+  originals — are still callerless and superseded by the classified pair.
 - **`sso`** — federated identity contracts: SAML 2.0 + OIDC provider configs, SCIM 2.0
   provisioning, claim mappings with transforms and JIT user policies, session lifecycle,
   login audit.
@@ -1753,6 +1779,23 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `--max-request-body-route <prefix>=<size>` gives ADR-0312's platform-wide cap a per-route form,
   matched by path **prefix** rather than by the gateway's route template — the limit has to be chosen
   before the body is read, and route matching happens after it.
+  **Field-level write authorization is enforced, and who is privileged is declarable** (ADR-0339).
+  `--sensitive-field-role` / `--sensitive-field-class <class>=<role>` are the entity-route
+  counterparts of `--audit-read-sensitive-*`, with that pair's grammar, empty-value meaning and
+  unknown-class refusal copied byte for byte — and they feed **one** `SensitiveFieldPolicy` to the
+  response-redaction registry *and* the write mask, because `privilegedForClass` has a single
+  definition so a role cannot write a class it may not read. They deliberately do **not** imply
+  `--classified-write-mask`, which is where this parser departs from the audit one: the declaration
+  says who may see a class, the mask says writes are enforced against it, and a deployment fixing
+  its reads must not silently acquire a write refusal on the 39 fields no manifest grants.
+  `--classified-write-mask` **refuses at boot** when the declaration would leave a required
+  classified field writable by nobody, naming the entities and fields; a declared grantee the
+  manifest does not define is **warned** about, since a grant that reaches nobody through a typo is
+  a declaration that does nothing. The survey runs over the **manifest's** roles rather than the
+  api-key roles — a JWT deployment can present any role the manifest declares, so the narrower set
+  would produce a false boot refusal — and measures `uncreatable` with the mask **on** whatever the
+  flag says, because a refusal computed under the regime the operator is leaving could never gate
+  the change.
   **At-rest PHI is decided at boot** (ADR-0338): `resolveStore` surveys the manifest's
   `phi`/`regulated` fields (through `resolvedFields`, so a classified *trait* field cannot be missed),
   calls `decidePhiStorage`, and either refuses or builds one `buildColumnKeySource` shared by the boot
@@ -2275,15 +2318,50 @@ opened them.
   `KEY_MANAGEMENT_KINDS`' `customer-managed-byok` models; `ColumnEncryptionKeySource` is the seam.
   **(6)** an encrypted field is dropped from `?sort` and filters **silently**, which ADR-0091 decided
   and matters more now that the ciphertext is real.
-- **`validateClassifiedWriteMask` is called by nothing on the request path** (ADR-0338 Q7), which is
-  the write-mask mirror of the response defect that increment fixed. ADR-0329 built it on the rule
-  *a role cannot write a class it may not read*, and deliberately put **one function behind both
-  halves** so the two could not diverge — and only the read half is wired. It has **zero non-test
-  consumers** in `operate-runtime` or `api-gateway-runtime`, so a principal with `update` on the
-  entity and no field-level `update` grant can **write** a `phi` field it cannot read back. ADR-0336's
-  callerless shape: a rule built, tested and connected to nothing, and the one case where the
-  callerless thing is a *function* rather than a class, which is the blind spot ADR-0337 measured and
-  refused to fence. Its own increment, because wiring it refuses writes that currently succeed.
+- **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
+  Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
+  sensitive-classified fields across the seven packs, **39 were unreadable by every role in every
+  deployment** and **39 were writable by anybody** with entity `update`. The read side was closed by
+  an empty policy — `policyForEntity` had no producer in `operate-server`, so `privilegedForClass`
+  answered false for everyone and only the 7 fields with an explicit per-field `read` grant came
+  back; the write side was open because `validateClassifiedWriteMask` had no caller. Neither had a
+  symptom anybody reported, because total redaction looks exactly like classification working.
+  Verified live as a non-owner: `case_worker` changed `Citizen.national_id` against the pack's own
+  `update: ["gov_admin"]`, and `front_desk` **blind-overwrote** `Patient.mrn` — replaced a medical
+  record identifier it cannot read before or after, in the column ADR-0338 had just made ciphertext.
+  Three parts, one of them a new default. **(1)** An explicitly declared per-field `update` grant is
+  enforced **always**, no flag: 7 fields, each deliberate, and it cannot make anything uncreatable.
+  **(2)** `--sensitive-field-role` / `--sensitive-field-class <class>=<role>` declare who is
+  privileged per class for entity routes, with `--audit-read-sensitive-*`'s grammar copied byte for
+  byte and feeding **one** policy to the redaction registry *and* the write mask — so
+  `privilegedForClass` finally keeps the property its own comment claims. Separate flags from the
+  audit pair, because reading the trail is reading every tenant's conduct (ADR-0313) and one
+  declaration spanning both would hand a deployment's clinicians the platform's audit log.
+  **(3)** `--classified-write-mask` adds the classification default and is **opt-in**, because with
+  no declaration all 46 are unwritable and **12 are `required: true`**, so `Employee`, `Lead`,
+  `Opportunity`, `FixedAsset`, `Patient`, `Student` and `Permit` become uncreatable by every role.
+  It **refuses at boot** naming them — ADR-0334's conversion a third time, and the refusal's list
+  *is* the migration guide, which is why there is no opt-out past it.
+  The mask runs in the **handler**, after entity RBAC and before schema validation, and the gateway
+  was refused on measured grounds rather than unavailability: `create` injects settings, literal and
+  sequence defaults *after* dispatch, so a pre-handler mask would mask the client's patch and not
+  the write; the redaction registry is keyed by response-carrying operationId while a write mask is
+  keyed by entity; and the handler already holds four of the five arguments. A 403 precedes the 422,
+  so a field you may not write is not answered with a list of which other fields are required.
+  What remains: **(1)** the **39 unauthored grants** — the end state is a per-field `update` and
+  `read` grant on every classified field in every pack, at which point the mask becomes the default
+  and the deployment declaration becomes the exception; the 12 required fields are the blocking
+  subset and the boot survey names them. **(2)** `computeFieldRedaction` and `validateWriteMask`,
+  the classification-unaware originals, still have no callers and are probably deletable —
+  a mechanical increment, and `pg-unreachable-stores.ts` does not fence *functions* (ADR-0337
+  measured why). **(3)** **an ABAC-qualified grant grants unconditionally**: `rbacCheck` returns
+  `allowed: true` with `requiresAbac` attached and **nothing reads it**, so the qualifier is an
+  obligation handed back and dropped. Latent — no pack declares one — and fixing it needs an
+  attribute *source*, since both principal bridges hardcode `abacAttributes: {}`. **(4)** the mask
+  answers "may this principal write this field", never "this value", which is the write guards'
+  question. **(5)** the survey is boot-time, so a *per-tenant* manifest activated later is not
+  surveyed; that check belongs beside ADR-0334's `unservable_field_type` in
+  `applyTenantManifestSchema`.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3205,7 +3283,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 333 records; 254 Accepted, 79 Proposed (the
+title or status change cannot drift. 334 records; 255 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -101,6 +101,14 @@ import {
   surveyPhiFields,
 } from "./column-encryption.js";
 import {
+  CLASSIFIED_WRITE_MASK_FLAG,
+  buildSensitiveFieldPolicy,
+  checkClassifiedWriteMask,
+  formatSensitiveFieldSurvey,
+  surveySensitiveFields,
+  type SensitiveFieldDeclaration,
+} from "./sensitive-field-policy.js";
+import {
   IDEMPOTENCY_FK_HINT,
   IDEMPOTENCY_GUARANTEE,
   IdempotencyPruneScheduler,
@@ -169,7 +177,7 @@ import {
   DeletionCapabilitiesSchema,
   type DeletionCapabilities,
 } from "@crossengin/tenant-lifecycle";
-import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
+import type { ExtraGatewayRoute, WriteMaskMode } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
 import { buildMarketplaceAuthoringRoutes } from "./marketplace-authoring.js";
 import { PostgresTenantStore, buildPlatformAdminRoutes } from "./platform-admin.js";
@@ -617,6 +625,62 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options,
     manifest,
   );
+  // Who may read and write each sensitive class. One declaration, both directions: the same policy
+  // object reaches the response-redaction registry and the write mask, because `privilegedForClass`
+  // has a single definition precisely so a role cannot end up able to write a class it may not read
+  // (ADR-0329) — and two policy sources would have made that property unenforceable.
+  const sensitiveFieldDeclaration = {
+    privilegedRoles: options.sensitiveFieldRoles,
+    privilegedRolesByClass: options.sensitiveFieldClasses as SensitiveFieldDeclaration["privilegedRolesByClass"],
+  } satisfies SensitiveFieldDeclaration;
+  const sensitivePolicyForEntity = buildSensitiveFieldPolicy(sensitiveFieldDeclaration);
+  const writeMaskMode: WriteMaskMode = options.classifiedWriteMask ? "classified" : "explicit_only";
+  // Surveyed over the *manifest's* roles rather than the api-key roles: `uncreatable` answers
+  // "can this required field be written by anybody at all", and a JWT deployment can present any
+  // role the manifest declares, so the narrower set would produce a false boot refusal.
+  const sensitiveSurvey = surveySensitiveFields({
+    manifest,
+    declaration: sensitiveFieldDeclaration,
+    roles: Object.keys(manifest.roles ?? {}),
+    classifiedWriteMask: options.classifiedWriteMask,
+  });
+  if (options.classifiedWriteMask) {
+    const admissible = checkClassifiedWriteMask(sensitiveSurvey);
+    if (!admissible.ok) {
+      // ADR-0334's conversion a third time: without this the deployment discovers it as a 403 on
+      // create with nothing naming the missing declaration. The refusal's list *is* the migration
+      // guide, which is why there is no `--allow-…` past it — declare the roles, or do not mount.
+      throw new Error(
+        `${CLASSIFIED_WRITE_MASK_FLAG} refused (${admissible.reason}): ${admissible.detail}`,
+      );
+    }
+  }
+  // A declared role the manifest does not define grants nothing, and silently: every predicate
+  // wraps `resolveEffectiveRoles`, which throws `UnknownRoleError` for an undeclared name, and
+  // answers false — fail-closed, and for an undefined role also the true answer. But a grant that
+  // reaches nobody because of a typo is a declaration that does nothing, which is the whole class
+  // this increment exists to end, so it is said rather than left to be inferred from a field that
+  // stayed redacted.
+  const manifestRoleNames = new Set(Object.keys(manifest.roles ?? {}));
+  const undeclaredGrantees = [
+    ...new Set([
+      ...options.sensitiveFieldRoles,
+      ...Object.values(options.sensitiveFieldClasses).flat(),
+    ]),
+  ].filter((r) => !manifestRoleNames.has(r));
+  if (undeclaredGrantees.length > 0) {
+    console.warn(
+      `[sensitive] ${undeclaredGrantees.length} declared grantee(s) are not roles this manifest` +
+        ` defines, so they grant nothing: ${undeclaredGrantees.join(", ")}` +
+        ` (manifest roles: ${[...manifestRoleNames].sort().join(", ") || "none"})`,
+    );
+  }
+  if (sensitiveSurvey.totalSensitive > 0) {
+    // Said at boot either way. A deployment that declares nothing has every classified field
+    // readable by nobody and writable by anybody, which is the state this closes and is invisible
+    // from the outside — total redaction looks exactly like classification working.
+    console.info(`[sensitive] ${formatSensitiveFieldSurvey(sensitiveSurvey)}`);
+  }
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
@@ -2639,6 +2703,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     apiKeys,
     allocator,
     settingsStore,
+    policyForEntity: sensitivePolicyForEntity,
+    writeMaskMode,
     ...(regionGuard !== undefined ? { regionGuard } : {}),
     ...(extraRoutes !== undefined ? { extraRoutes } : {}),
     ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
@@ -3280,6 +3346,13 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         return buildOperateHttpServer({
           manifest: tenantManifest,
           store: tenantStoreFor(tenantManifest),
+          // The same declaration a per-tenant gateway gets, because the policy is a property of
+          // the deployment rather than of one manifest. The *survey* is not re-run here — see
+          // ADR-0339 Q6: a tenant activating a manifest whose required classified field no role
+          // can write discovers it as a 403 on create, and the check belongs beside ADR-0334's
+          // `unservable_field_type` in `applyTenantManifestSchema`.
+          policyForEntity: sensitivePolicyForEntity,
+          writeMaskMode,
           apiKeys,
           allocator,
           settingsStore,

@@ -78,12 +78,27 @@ import { temporalFieldIndexFromManifest, withDatetimeWireType } from "./datetime
 import { decimalFieldIndexFromManifest, withDecimalWireType } from "./decimal-store.js";
 import { listValueTypesForManifest, withListValueTypes } from "./list-value-types.js";
 import { buildUiSchema, buildUiSchemaHandler } from "./ui-schema.js";
+import { buildClassifiedFieldIndex, type WriteMaskMode } from "./write-mask.js";
 
 export interface OperateRuntimeOptions {
   readonly store: EntityStore;
   /** Bridges the gateway's scope-bearing principal to its effective roles. */
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   readonly policyForEntity?: (entity: string) => SensitiveFieldPolicy | undefined;
+  /**
+   * Which half of the field-level write rule the handlers enforce. Defaults to `explicit_only`,
+   * which honours the per-field `update` grants the manifest already declares and nothing more —
+   * 7 fields across the seven packs, each one a pack author's deliberate restriction, and a set
+   * that cannot make an entity uncreatable because a declared grant names a role that holds it.
+   *
+   * `classified` additionally applies ADR-0329's symmetric default (a sensitive field with no
+   * `update` grant needs a role privileged for its class) and is opt-in: nothing in
+   * `apps/operate-server` produces a `policyForEntity` yet, so the policy is `{}` and the default
+   * would refuse the 12 `required: true` sensitive fields in the packs for every role, making
+   * `Patient`, `Lead`, `Employee`, `Opportunity`, `FixedAsset`, `Student` and `Permit`
+   * uncreatable. See `write-mask.ts`.
+   */
+  readonly writeMaskMode?: WriteMaskMode;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /** Backs the admin settings endpoints + runtime numbering overrides. */
@@ -603,6 +618,13 @@ export function compileOperateServer(
     defaultPlans: buildDefaultPlans(manifest),
     settingsDefaultPlans: buildSettingsDefaultPlans(manifest),
     validationPlans: buildValidationPlans(manifest),
+    // Field-level write authorization. Keyed by **entity**, deliberately not off
+    // `entityOperationIndex` below: that index is a *response* mapping keyed by operationId, and
+    // a write mask answers "may this principal write this field of this entity" — reusing it
+    // would be a category error. The classifications come from `entityClassifiedFields`, the same
+    // function the redaction registry reads, so one declaration drives both halves of ADR-0329.
+    classifiedFields: buildClassifiedFieldIndex(manifest),
+    writeMaskMode: options.writeMaskMode ?? "explicit_only",
     writeGuards: options.writeGuards ?? defaultWriteGuards(manifest),
     writeEffects: [
       ...(options.writeEffects ?? defaultWriteEffects(manifest, options.clock, options.settingsStore)),
@@ -610,6 +632,7 @@ export function compileOperateServer(
     ],
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
+    ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   };
 

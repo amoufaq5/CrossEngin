@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildOperateGateway, compileOperateServer } from "./compile.js";
 import { InMemoryEntityStore } from "./store.js";
+import { buildClassifiedFieldIndex } from "./write-mask.js";
 
 // Classification redaction used to be keyed off `[<camel>.list, <camel>.read]`, so every write
 // response returned every classified field in the clear: a credential with update permission read
@@ -374,5 +375,174 @@ describe("compileOperateServer — coverage over a real pack", () => {
     for (const [entity, ids] of compiled.redactionOperationIds) {
       for (const id of ids) expect(served.has(id), `${entity}: ${id}`).toBe(true);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Field-level write authorization is wired from the compile, and derived from the same
+// declaration as the response redaction.
+//
+// The live reproduction this models: `erp-government` declares `Citizen.national_id` as
+// `regulated` with `update: {roles: ["gov_admin"]}`, and a `case_worker` PATCH rewrote it and got
+// a 200 — `validateClassifiedWriteMask` existed, was per-class aware and tested, and was called by
+// nothing on the request path.
+// ---------------------------------------------------------------------------
+
+const GOV = {
+  meta: { name: "gov", version: "1.0.0" },
+  entities: [
+    {
+      name: "Citizen",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        { name: "full_name", type: { kind: "text", maxLength: 100 }, required: true, classification: "pii" },
+        { name: "national_id", type: { kind: "text", maxLength: 32 }, classification: "regulated" },
+      ],
+    },
+  ],
+  roles: { gov_admin: { name: "gov_admin" }, case_worker: { name: "case_worker" } },
+  permissions: {
+    Citizen: {
+      list: { roles: ["gov_admin", "case_worker"] },
+      read: { roles: ["gov_admin", "case_worker"] },
+      create: { roles: ["gov_admin", "case_worker"] },
+      update: { roles: ["gov_admin", "case_worker"] },
+      delete: { roles: ["gov_admin"] },
+      fields: {
+        national_id: { read: { roles: ["gov_admin"] }, update: { roles: ["gov_admin"] } },
+      },
+    },
+  },
+} as unknown as Manifest;
+
+function govServer(options: Partial<Parameters<typeof buildOperateGateway>[1]> = {}) {
+  const store = new InMemoryEntityStore();
+  const principalResolver = new InMemoryPrincipalResolver();
+  const keys: Record<string, string> = { "key-gov": "gov_admin", "key-case": "case_worker" };
+  for (const role of Object.values(keys)) {
+    principalResolver.register(role, {
+      principalId: "00000000-0000-4000-8000-0000000000aa",
+      tenantId: TENANT,
+      principalKind: "user",
+      authScheme: "api_key_header",
+      grantedScopes: [role],
+      mfaProofAgeSeconds: null,
+      resolvedAt: "2026-06-03T12:00:00.000Z",
+    });
+  }
+  const opaqueTokenLookup: OpaqueTokenLookup = {
+    async lookup(_req: IncomingRequest, token: string) {
+      const role = keys[token];
+      return role === undefined ? null : { principalRef: role, scopes: [role], tenantId: TENANT };
+    },
+  };
+  const server = buildOperateGateway(GOV, {
+    store,
+    principalRoles: (p: ResolvedPrincipal | null) => ({ primaryRole: p?.grantedScopes[0] ?? "anonymous" }),
+    principalResolver,
+    opaqueTokenLookup,
+    clock: { now: () => new Date("2026-06-03T12:00:00.000Z") },
+    ...options,
+  });
+  return { server, store };
+}
+
+describe("compileOperateServer — the write mask is reached through the real gateway pipeline", () => {
+  it("403s the PATCH that silently rewrote a regulated national identifier", async () => {
+    const { server, store } = govServer();
+    await store.create(TENANT, "Citizen", { id: "cit-1", full_name: "Ada", national_id: "NID-1" });
+    const out = await server.runtime.handleRequest(
+      req("PATCH", "/v1/citizens/cit-1", "key-case", { national_id: "NID-CHANGED-BY-CASE-WORKER" }),
+    );
+    expect(out.response.status).toBe(403);
+    expect(out.execution.routeOperationId).toBe("citizen.update");
+    const body = bodyOf(out.response.bodyBytes);
+    expect(body["field"]).toBe("national_id");
+    expect(body["rule"]).toBe("explicit_update_grant");
+    // Never the value, on a surface that already redacts the field from this caller's reads.
+    expect(JSON.stringify(body)).not.toContain("NID-CHANGED-BY-CASE-WORKER");
+    // The stored value is untouched.
+    expect((await store.get(TENANT, "Citizen", "cit-1"))?.["national_id"]).toBe("NID-1");
+  });
+
+  it("403s the POST that wrote a regulated field the caller can never read back", async () => {
+    const { server, store } = govServer();
+    const out = await server.runtime.handleRequest(
+      req("POST", "/v1/citizens", "key-case", { full_name: "Grace", national_id: "NID-BY-CASE-WORKER" }),
+    );
+    expect(out.response.status).toBe(403);
+    expect((await store.list(TENANT, "Citizen")).length).toBe(0);
+  });
+
+  it("lets the granted role write it, and still redacts it from the ungranted one's own writes", async () => {
+    const { server } = govServer();
+    const created = await server.runtime.handleRequest(
+      req("POST", "/v1/citizens", "key-gov", { full_name: "Grace", national_id: "NID-2" }),
+    );
+    expect(created.response.status).toBe(201);
+    expect(bodyOf(created.response.bodyBytes)["national_id"]).toBe("NID-2");
+
+    // A case_worker may create a Citizen without naming the restricted field — `full_name` is
+    // pii, required and governed only by the classification default, so the default mode permits
+    // it. If it did not, Citizen would be uncreatable by this role in every deployment.
+    const mine = await server.runtime.handleRequest(
+      req("POST", "/v1/citizens", "key-case", { full_name: "Ada" }),
+    );
+    expect(mine.response.status).toBe(201);
+    expect(bodyOf(mine.response.bodyBytes)).not.toHaveProperty("national_id");
+  });
+
+  it("refuses the pii field too once the symmetric rule is switched on", async () => {
+    const { server } = govServer({ writeMaskMode: "classified" });
+    const out = await server.runtime.handleRequest(
+      req("POST", "/v1/citizens", "key-case", { full_name: "Ada" }),
+    );
+    expect(out.response.status).toBe(403);
+    expect(bodyOf(out.response.bodyBytes)["rule"]).toBe("classification_default");
+  });
+
+  it("and admits it again for a role the deployment's policy privileges for that class", async () => {
+    const { server } = govServer({
+      writeMaskMode: "classified",
+      policyForEntity: () => ({ privilegedRolesByClass: { pii: ["case_worker"] } }),
+    });
+    const out = await server.runtime.handleRequest(
+      req("POST", "/v1/citizens", "key-case", { full_name: "Ada" }),
+    );
+    expect(out.response.status).toBe(201);
+  });
+});
+
+describe("buildClassifiedFieldIndex — over the real packs", () => {
+  const index = buildClassifiedFieldIndex(resolved);
+
+  it("agrees with entityClassifiedFields in both directions", () => {
+    // The same source the redaction registry reads, so what a role may write and what it may read
+    // are derived from one declaration. Compared against the manifest rather than a list here: a
+    // list would be the test agreeing with the code about an incomplete set.
+    const expected = new Map<string, readonly string[]>();
+    for (const entity of resolved.entities ?? []) {
+      const classified = entityClassifiedFields(entity);
+      if (classified.length > 0) expected.set(entity.name, classified.map((c) => c.field));
+    }
+    expect(expected.size).toBeGreaterThan(0);
+    expect([...index.keys()].sort()).toEqual([...expected.keys()].sort());
+    for (const [name, fields] of expected) {
+      expect((index.get(name) ?? []).map((f) => f.name)).toEqual(fields);
+    }
+  });
+
+  it("carries the classification, not just the name", () => {
+    const product = index.get("Product") ?? [];
+    expect(product).toContainEqual({ name: "unit_cost", classification: "commercial_sensitive" });
+  });
+
+  it("names a field the retail pack deliberately restricts with an explicit update grant", () => {
+    // `Product.unit_cost` is one of the 7 fields across the packs carrying a declared `update`
+    // grant — the set `explicit_only` enforces and nothing more.
+    expect(resolved.permissions?.["Product"]?.fields?.["unit_cost"]?.update?.roles).toEqual([
+      "retail_admin",
+      "store_manager",
+    ]);
   });
 });

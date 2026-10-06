@@ -1224,6 +1224,59 @@ describe("--workflow-workers", () => {
     expect(message).toContain("--workflow-workers");
   });
 
+  it("parses the entity sensitive-field grant with the audit flag's grammar", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--sensitive-field-role",
+      "support",
+      "--sensitive-field-class",
+      "phi=clinician",
+      "--sensitive-field-class",
+      "phi=clinical_admin",
+    ]);
+    expect(o.sensitiveFieldRoles).toEqual(["support"]);
+    expect(o.sensitiveFieldClasses).toEqual({ phi: ["clinician", "clinical_admin"] });
+  });
+
+  it("reads `<class>=` with no role as a refusal, not an error", () => {
+    // ADR-0329's rule, and the whole reason the per-class map exists: a class named here is
+    // authoritative for it, so an empty list withholds that class from everyone including a
+    // wholesale grantee. Identical to --audit-read-sensitive-class by design.
+    const o = parseServeArgs([...PG, "--sensitive-field-role", "support", "--sensitive-field-class", "phi="]);
+    expect(o.sensitiveFieldClasses).toEqual({ phi: [] });
+    expect(o.sensitiveFieldRoles).toEqual(["support"]);
+  });
+
+  it("refuses an unknown sensitive class rather than letting a typo narrow nothing", () => {
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--sensitive-field-class", "phj=clinician"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("unknown sensitive class 'phj'");
+  });
+
+  it("does not let the declaration imply the write mask", () => {
+    // Where this parser departs from the audit one, which does imply its feature flag. The
+    // declaration says who may see a class; the mask says writes are enforced against it. A
+    // deployment declaring a grant to make PHI readable must not silently acquire a write refusal.
+    const declared = parseServeArgs([...PG, "--sensitive-field-class", "phi=clinician"]);
+    expect(declared.classifiedWriteMask).toBe(false);
+    expect(parseServeArgs([...PG]).classifiedWriteMask).toBe(false);
+    expect(parseServeArgs([...PG, "--classified-write-mask"]).classifiedWriteMask).toBe(true);
+  });
+
+  it("documents both halves and why the mask is off by default", () => {
+    expect(helpText).toContain("--sensitive-field-role");
+    expect(helpText).toContain("--sensitive-field-class");
+    expect(helpText).toContain("--classified-write-mask");
+    // The figures are the argument for the default; a help entry that said only "off by default"
+    // would leave an operator unable to tell whether turning it on is safe.
+    expect(helpText).toContain("12 required fields");
+    expect(helpText).toContain("writable by nobody");
+  });
+
   it("defaults --allow-plaintext-phi off, so a classified field is refused rather than stored bare", () => {
     expect(parseServeArgs([...PG]).allowPlaintextPhi).toBe(false);
     expect(parseServeArgs([...PG, "--allow-plaintext-phi"]).allowPlaintextPhi).toBe(true);

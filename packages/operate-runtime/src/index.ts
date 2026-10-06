@@ -19,6 +19,7 @@ export * from "./job-invoke-handler.js";
 export * from "./handlers.js";
 export * from "./admin-handlers.js";
 export * from "./ui-schema.js";
+export * from "./write-mask.js";
 export * from "./compile.js";
 export * from "./entitlement.js";
 export * from "./entitlement-handler.js";

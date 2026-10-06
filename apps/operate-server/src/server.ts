@@ -1,4 +1,5 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
+import type { SensitiveFieldPolicy } from "@crossengin/auth";
 import type { IdempotencyStore, RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
@@ -14,6 +15,7 @@ import {
   type SequenceAllocator,
   type SettingsStore,
   type WriteEffect,
+  type WriteMaskMode,
 } from "@crossengin/operate-runtime";
 
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
@@ -188,6 +190,24 @@ export interface BuildOperateHttpServerOptions {
   readonly apiKeys: readonly ApiKeySpec[];
   /** Optional production identity: verify Bearer JWTs against a JWKS. */
   readonly jwt?: JwtVerifyConfig;
+  /**
+   * Who is privileged for each sensitive data class, for **both** the response redaction and the
+   * write mask (ADR-0339).
+   *
+   * Absent until this option existed, which is why 39 of the 46 classified fields in the packs
+   * were unreadable by every role: the redaction policy was `{}`, so `privilegedForClass` answered
+   * false for everyone and only a field with an explicit per-field `read` grant came back. One
+   * policy reaches both directions deliberately — `privilegedForClass` has one definition so that a
+   * role cannot end up able to write a class it may not read (ADR-0329), and two policy sources
+   * would have made that property unenforceable.
+   */
+  readonly policyForEntity?: (entity: string) => SensitiveFieldPolicy | undefined;
+  /**
+   * `explicit_only` (the default) enforces a per-field `update` grant the manifest declares;
+   * `classified` adds the classification default. See `--classified-write-mask` for why the second
+   * is opt-in and refuses at boot.
+   */
+  readonly writeMaskMode?: WriteMaskMode;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /** Backs the `/v1/admin/settings` endpoints + runtime numbering overrides. */
@@ -275,6 +295,8 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
     ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
     ...(options.idempotencyStore !== undefined ? { idempotencyStore: options.idempotencyStore } : {}),
+    ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
+    ...(options.writeMaskMode !== undefined ? { writeMaskMode: options.writeMaskMode } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   // After every registration and before the first request. The gate goes on the registry rather than

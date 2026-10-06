@@ -1,9 +1,11 @@
 import {
   rbacCheck,
+  type ClassifiedField,
   type PermissionMap,
   type Principal,
   type RoleDefinition,
   type RoleName,
+  type SensitiveFieldPolicy,
 } from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
@@ -17,6 +19,7 @@ import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { validateBody, type EntityValidationPlan } from "./validation.js";
 import { isTransactional, projectRecord, type EntityStore } from "./store.js";
+import { maskWrite, type WriteMaskMode } from "./write-mask.js";
 import type { RouteSpec } from "./operations.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
@@ -49,6 +52,17 @@ export interface HandlerContext {
   readonly validationPlans?: ReadonlyMap<string, EntityValidationPlan>;
   /** Lets tenant settings override a sequence's format/start/resetPeriod at runtime. */
   readonly settingsStore?: SettingsStore;
+  /**
+   * Per-entity sensitive-field policy (privileged roles, per class). The *same* seam the
+   * gateway's response redaction reads, deliberately: ADR-0329 put one function behind both
+   * halves so a role cannot end up able to write a class it may not read, and two policy
+   * sources would reintroduce exactly that divergence.
+   */
+  readonly policyForEntity?: (entity: string) => SensitiveFieldPolicy | undefined;
+  /** Entity → its classified fields, from `buildClassifiedFieldIndex`. */
+  readonly classifiedFields?: ReadonlyMap<string, readonly ClassifiedField[]>;
+  /** Which half of the field-level write rule is in force. Defaults to `explicit_only`. */
+  readonly writeMaskMode?: WriteMaskMode;
   readonly clock?: { now(): Date };
 }
 
@@ -85,8 +99,11 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
       return json(401, { error: "tenant_required", detail: "request principal has no tenant" });
     }
 
+    // Hoisted rather than re-derived per call site: the write mask asks the same question of the
+    // same principal, and two independent constructions could answer it from two role sets.
+    const auth = authPrincipal(principal, ctx.principalRoles);
     const decision = rbacCheck({
-      principal: authPrincipal(principal, ctx.principalRoles),
+      principal: auth,
       permissions: ctx.permissions,
       roles: ctx.roles,
       entity: spec.entity,
@@ -116,6 +133,17 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         return json(200, fields === null ? record : projectRecord(record, fields));
       }
       case "create": {
+        // Field-level write authorization, on the **caller's own keys** and nothing else. It runs
+        // here, before the settings read and before any default is applied, for two reasons:
+        //
+        // 1. A sequence / literal / settings default and the `created_at`/`updated_at` stamp are
+        //    the *server* writing a field, not the caller writing it. Masking those would refuse
+        //    an entity whose classified field carries a server default for every role on earth.
+        // 2. The 403 must precede `validateEntity`'s 422. A 422 enumerates the fields the body is
+        //    missing, so answering it first would hand an unauthorized caller a map of what to
+        //    send next. The authorization answer comes first.
+        const createMask = maskRefusal(ctx, spec.entity, auth, Object.keys(parsedBody ?? {}));
+        if (createMask !== null) return createMask;
         const settings =
           ctx.settingsStore !== undefined ? await ctx.settingsStore.get(tenantId) : undefined;
         let body = parsedBody ?? {};
@@ -162,6 +190,11 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         const raw = { ...(parsedBody ?? {}) };
         const expectedUpdatedAt = typeof raw["expectedUpdatedAt"] === "string" ? (raw["expectedUpdatedAt"] as string) : null;
         delete raw["expectedUpdatedAt"];
+        // `raw` with the concurrency token removed is exactly the caller's field set, and
+        // `updated_at` is merged below rather than above for that reason. Before `validateEntity`,
+        // so a 403 for a field you may not write is never preceded by a 422 naming the others.
+        const updateMask = maskRefusal(ctx, spec.entity, auth, Object.keys(raw));
+        if (updateMask !== null) return updateMask;
         const updateErrors = validateEntity(ctx, spec.entity, raw, "update");
         if (updateErrors !== null) return updateErrors;
         const patch = { ...raw, updated_at: nowIso(ctx) };
@@ -204,6 +237,9 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         });
       }
       case "delete": {
+        // No write mask: a delete carries no body, so there is no caller-supplied field to mask.
+        // Whether this principal may destroy the record is the entity-level `delete` grant,
+        // already checked above.
         return writeTxn(ctx, tenantId, async (store) => {
           const needsBefore = hasGuards(ctx) || hasEffects(ctx);
           const before = needsBefore ? await store.get(tenantId, spec.entity, id) : null;
@@ -233,6 +269,11 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         });
       }
       case "transition":
+        // No write mask: a transition takes no body and writes `{[stateField]: toState,
+        // updated_at}` — both values chosen by the manifest's workflow and the clock, neither
+        // supplied by the caller. Masking a server-chosen patch would refuse a transition whose
+        // state field happens to be classified, for every role, on behalf of nobody. Which
+        // principals may fire it is the per-transition grant, already checked above.
         return applyTransition(spec, ctx, tenantId, id);
     }
   };
@@ -324,6 +365,43 @@ function validateEntity(
   if (plan === undefined) return null;
   const errors = validateBody(plan, body, mode);
   return errors.length > 0 ? json(422, { error: "validation_failed", fields: errors }) : null;
+}
+
+/**
+ * Field-level write authorization: returns a 403 output for the first field the caller may not
+ * write, else null. `writtenKeys` must be the caller's own keys — see the call sites.
+ *
+ * The detail names the field and the rule that refused and **never a value**: this runs on a body
+ * the caller just sent, so echoing one back would be harmless here and a template for a handler
+ * that echoes a value the caller did *not* send.
+ */
+function maskRefusal(
+  ctx: HandlerContext,
+  entity: string,
+  principal: Principal,
+  writtenKeys: readonly string[],
+): HandlerOutput | null {
+  if (writtenKeys.length === 0) return null;
+  const policy = ctx.policyForEntity?.(entity);
+  const refusal = maskWrite({
+    mode: ctx.writeMaskMode ?? "explicit_only",
+    principal,
+    // Unreachable: `rbacCheck` already 403'd an entity with no declared permissions. `{}` is also
+    // the fail-closed reading — no explicit grant satisfies anyone, and under `classified` a
+    // sensitive field still needs a privileged role.
+    entityPerms: ctx.permissions[entity] ?? {},
+    roles: ctx.roles,
+    classifiedFields: ctx.classifiedFields?.get(entity) ?? [],
+    writtenKeys,
+    ...(policy !== undefined ? { policy } : {}),
+  });
+  if (refusal === null) return null;
+  return json(403, {
+    error: "forbidden",
+    detail: `field '${refusal.field}' on '${entity}' is not writable by this principal`,
+    field: refusal.field,
+    rule: refusal.rule,
+  });
 }
 
 function hasGuards(ctx: HandlerContext): boolean {

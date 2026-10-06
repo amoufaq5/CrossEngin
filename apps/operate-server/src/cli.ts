@@ -13,6 +13,10 @@ import {
 
 import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
 import {
+  SENSITIVE_FIELD_CLASS_FLAG,
+  SENSITIVE_FIELD_ROLE_FLAG,
+} from "./sensitive-field-policy.js";
+import {
   DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
 } from "./deletion-scheduler.js";
@@ -296,6 +300,39 @@ export interface ServeOptions {
    * expressible at all — `--audit-read-sensitive-class phi=` (no role) withholds phi from everyone.
    */
   readonly auditReadSensitiveClasses: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Roles privileged for every sensitive class on the **entity** routes (repeatable).
+   *
+   * The counterpart of `--audit-read-sensitive-role`, which governs the audit trail and nothing
+   * else. `policyForEntity` has never had a producer, so entity responses have been redacted with
+   * an empty policy — **39 of the 46 sensitive fields across the seven packs are unreadable by
+   * every role in every deployment**, and only the 7 carrying an explicit per-field `read` grant
+   * come back at all. This is the declaration that was missing, and it governs reads and writes
+   * through the one `privilegedForClass` both sides already share.
+   */
+  readonly sensitiveFieldRoles: readonly string[];
+  /**
+   * Per-class entity grants, as `<class>=<role>` repeated — the same grammar and the same
+   * authoritative-per-class rule as `--audit-read-sensitive-class` (ADR-0329), deliberately,
+   * because two grant vocabularies that look alike and differ is worse than either.
+   * `--sensitive-field-class phi=` withholds phi from everyone, wholesale grantees included.
+   */
+  readonly sensitiveFieldClasses: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Enforce the **classification default** on writes: a sensitive field with no declared `update`
+   * grant is writable only by a privileged role.
+   *
+   * Opt-in, and separate from the declaration above on purpose — the declaration fixes what a role
+   * may *read*, this turns on write enforcement, and conflating them would mean a deployment fixing
+   * its reads silently acquired a write refusal. An explicitly declared per-field `update` grant is
+   * enforced either way, without this flag: honouring a declaration the manifest actually makes
+   * needs no opt-in.
+   *
+   * It refuses at boot when the declaration would leave a *required* sensitive field writable by
+   * nobody, because that makes its entity uncreatable — true of 12 fields across 7 entities in the
+   * shipped packs today, so the refusal and its list are the migration guide.
+   */
+  readonly classifiedWriteMask: boolean;
   /** Expose the per-viewer notification read-state routes under /v1/notifications (mark read, read-through watermark, unread count; needs --store pg). */
   readonly readStateRoutes: boolean;
   /** Roles permitted to record their own read state and read their own unread count (repeatable; default none ⇒ the routes refuse everyone). */
@@ -504,6 +541,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   const auditReadPlatformRoles: string[] = [];
   const auditReadSensitiveRoles: string[] = [];
   const auditReadSensitiveClasses: Record<string, string[]> = {};
+  const sensitiveFieldRoles: string[] = [];
+  const sensitiveFieldClasses: Record<string, string[]> = {};
+  let classifiedWriteMask = false;
   let auditReadMaxRangeDays: number | null = null;
   let readStateRoutes = false;
   const readStateRoles: string[] = [];
@@ -693,6 +733,49 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--allow-plaintext-phi") {
       allowPlaintextPhi = true;
+    } else if (arg === "--classified-write-mask") {
+      classifiedWriteMask = true;
+    } else if (
+      arg === SENSITIVE_FIELD_ROLE_FLAG ||
+      arg.startsWith(`${SENSITIVE_FIELD_ROLE_FLAG}=`)
+    ) {
+      sensitiveFieldRoles.push(takeValue(arg, next, SENSITIVE_FIELD_ROLE_FLAG));
+      i += consumed();
+    } else if (
+      arg === SENSITIVE_FIELD_CLASS_FLAG ||
+      arg.startsWith(`${SENSITIVE_FIELD_CLASS_FLAG}=`)
+    ) {
+      // Deliberately byte-for-byte the grammar of `--audit-read-sensitive-class`, including the
+      // empty-role meaning and the refusal of an unknown class: these two declarations describe the
+      // same privilege over the same classes on two surfaces, and a reader who learns one must not
+      // have to re-learn the other.
+      const raw = takeValue(arg, next, SENSITIVE_FIELD_CLASS_FLAG);
+      const eq = raw.indexOf("=");
+      if (eq < 1) {
+        throw new CliUsageError(
+          `invalid ${SENSITIVE_FIELD_CLASS_FLAG}: ${raw} (expected <class>=<role>, or <class>= to grant it to nobody)`,
+        );
+      }
+      const cls = raw.slice(0, eq).trim();
+      const role = raw.slice(eq + 1).trim();
+      // Checked against the real set for the same reason the audit flag checks it: a typo'd class
+      // would be accepted, apply to nothing, and leave the wholesale grant quietly reaching the
+      // class the operator meant to withhold.
+      if (!SENSITIVE_DATA_CLASSIFICATIONS.has(cls as DataClassification)) {
+        throw new CliUsageError(
+          `invalid ${SENSITIVE_FIELD_CLASS_FLAG}: unknown sensitive class '${cls}' (one of ` +
+            `${[...SENSITIVE_DATA_CLASSIFICATIONS].sort().join(", ")})`,
+        );
+      }
+      const bucket = sensitiveFieldClasses[cls] ?? [];
+      if (role.length > 0) bucket.push(role);
+      sensitiveFieldClasses[cls] = bucket;
+      i += consumed();
+      // And deliberately **not** `classifiedWriteMask = true`, which is where this parser departs
+      // from the audit one (that flag implies `--audit-read-routes`). The declaration says who may
+      // see a class; the mask says writes are enforced against it. A deployment declaring a grant
+      // to make PHI readable by its clinicians must not silently acquire a write refusal on the 39
+      // fields no manifest grants.
     } else if (arg === "--workflow-workers") {
       workflowWorkers = true;
     } else if (arg === "--workflow-worker-config" || arg.startsWith("--workflow-worker-config=")) {
@@ -1601,6 +1684,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jobInvokeRoles,
     workflowCancelRoles,
     allowPlaintextPhi,
+    sensitiveFieldRoles,
+    sensitiveFieldClasses,
+    classifiedWriteMask,
     workflowWorkers,
     workflowWorkerConfig,
     workflowDeferActivities,
@@ -2118,6 +2204,20 @@ Options:
                        longer reaches it, which is what makes "pii but not phi" expressible;
                        "<class>=" with no role withholds it from everyone
   --audit-read-max-range-days <n>  Largest queryable time range in days (>=1)
+  --sensitive-field-role <r>  The same grant, for the ENTITY routes rather than the audit trail
+                       (repeatable). Default none, which is why 39 of the 46 classified fields in
+                       the packs are unreadable by every role: only the 7 carrying an explicit
+                       per-field read grant come back. Governs reads and writes through one rule
+  --sensitive-field-class <class>=<role>  Per-class entity grant, same grammar and same
+                       authoritative-per-class rule as --audit-read-sensitive-class;
+                       "<class>=" withholds it from everyone. Does NOT imply the write mask below
+  --classified-write-mask  Enforce the classification default on writes: a sensitive field with no
+                       declared update grant is writable only by a privileged role. Off by default
+                       because a declared per-field update grant is enforced either way, and
+                       because the default alone would make 12 required fields across 7 entities
+                       (Patient, Employee, Lead, Opportunity, FixedAsset, Student, Permit)
+                       writable by nobody. Refuses at boot, naming them, rather than 403ing on
+                       the first create
   --read-state-routes  Expose per-viewer notification read state: POST /v1/notifications/{id}/read,
                        POST /v1/notifications/read-through, GET /v1/notifications/unread. The viewer
                        is ALWAYS the credential — a body naming one is refused, not ignored. Closes
