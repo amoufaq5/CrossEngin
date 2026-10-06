@@ -1158,11 +1158,20 @@ describe("table column shapes", () => {
     expect(action?.check).toContain("'cancel_deletion'");
   });
 
-  it("META_TENANT_LIFECYCLE_EVENTS check-constrains from/to_state to seven lifecycle states", () => {
-    const fromState = META_TENANT_LIFECYCLE_EVENTS.columns.find((c) => c.name === "from_state");
-    expect(fromState?.check).toContain("'trial'");
-    expect(fromState?.check).toContain("'pending_deletion'");
-    expect(fromState?.check).toContain("'deleted'");
+  it("META_TENANT_LIFECYCLE_EVENTS check-constrains from/to_state to the five lifecycle states", () => {
+    // Five since ADR-0335. ADR-0334 narrowed `TENANT_LIFECYCLE_STATES` to five and narrowed
+    // `meta.tenants.status`' CHECK with it, and **missed this table** — so the column accepted
+    // `trial` and `past_due`, two values the contract refuses, which is ADR-0289's class. The states
+    // are spelled locally because the kernel cannot depend on `@crossengin/tenant-lifecycle`.
+    const table = META_TABLES.find((t) => t.name === "tenant_lifecycle_events");
+    for (const column of ["from_state", "to_state"]) {
+      const check = table?.columns.find((c) => c.name === column)?.check ?? "";
+      for (const state of ["active", "suspended", "archived", "pending_deletion", "deleted"]) {
+        expect(check, `${column}/${state}`).toContain(`'${state}'`);
+      }
+      expect(check, column).not.toContain("'trial'");
+      expect(check, column).not.toContain("'past_due'");
+    }
   });
 
   it("META_GDPR_DELETION_REQUESTS check-constrains legal_basis to six bases", () => {
@@ -1676,8 +1685,15 @@ describe("table column shapes", () => {
     // at all — three escalators previously wrote nothing because the row could not exist.
     const tenantId = META_AUDIT_LOG.columns.find((c) => c.name === "tenant_id");
     expect(tenantId?.notNull).toBeUndefined();
-    // The foreign key stays: a NULL satisfies it, and a non-NULL must still name a real tenant.
-    expect(tenantId?.references?.table).toBe("tenants");
+    // The foreign key is **gone** as of ADR-0335, and ADR-0331's note here ("the foreign key stays:
+    // a NULL satisfies it, and a non-NULL must still name a real tenant") was right about what the
+    // reference does and wrong about whether this table wants it. `ON DELETE CASCADE` into
+    // `meta.tenants` made the one row that matters most impossible: `tenant-deletion-routes.ts`
+    // retires the tenant and *then* records, so inserting `platform.tenant_deleted` raised
+    // `violates foreign key constraint "audit_log_tenant_id_fkey"` and `record()` swallowed it into
+    // `onRecordError` while the route answered 200. A row recording what happened *to* a tenant is
+    // precisely a row whose `tenant_id` names a tenant that no longer exists.
+    expect(tenantId?.references).toBeUndefined();
 
     const policies = META_AUDIT_LOG.rls?.policies ?? [];
     const write = policies.find((p) => p.name === "audit_log_platform_audit_write");
@@ -2782,5 +2798,159 @@ describe("emitMetaBootstrapSql", () => {
     ).length;
     const tenantScoped = META_TABLES.filter((t) => t.rls?.enabled === true);
     expect(rlsEnableCount).toBe(tenantScoped.length);
+  });
+});
+
+/**
+ * Both sides of a cross-column comparison are one type, or the constraint is not a constraint.
+ *
+ * The fourth catalog invariant, and it exists because the third defect of this class nearly shipped:
+ * `workflow_definitions.created_by` became TEXT while `published_by` stayed UUID, so
+ * `workflow_definitions_four_eyes_check` rendered `published_by <> created_by` — and Postgres has no
+ * `uuid <> text` operator, so the `CREATE TABLE` raised `operator does not exist` and took the
+ * **entire 609-statement bootstrap** with it, at statement #0.
+ *
+ * Every offline test passed, including this file's: the emitted-SQL assertions compare *strings*, and
+ * a string containing a comparison between two types Postgres cannot relate is a perfectly
+ * well-formed string. So the fence is this, not a more careful reading of the emitted text.
+ *
+ * `IS NULL` / `IS NOT NULL` are unary and deliberately not comparisons: a naive "two columns of
+ * different types appear in one expression" rule reports `status <> 'published' OR (published_at IS
+ * NOT NULL AND published_by IS NOT NULL)` as a disagreement, which is wrong and would train people
+ * to add exemptions.
+ */
+function crossColumnComparisons(): readonly {
+  readonly table: string;
+  readonly constraint: string;
+  readonly left: string;
+  readonly right: string;
+  readonly leftType: string;
+  readonly rightType: string;
+}[] {
+  const COMPARISON = /\b([a-z_][a-z0-9_]*)\s*(=|<>|!=|<=|>=|<|>)\s*([a-z_][a-z0-9_]*)\b/g;
+  const found: {
+    table: string;
+    constraint: string;
+    left: string;
+    right: string;
+    leftType: string;
+    rightType: string;
+  }[] = [];
+  for (const table of META_TABLES) {
+    const types = new Map(table.columns.map((c) => [c.name, c.type]));
+    for (const constraint of table.constraints ?? []) {
+      if (constraint.kind !== "check") continue;
+      for (const match of constraint.expression.matchAll(COMPARISON)) {
+        const [, left, , right] = match;
+        const leftType = left !== undefined ? types.get(left) : undefined;
+        const rightType = right !== undefined ? types.get(right) : undefined;
+        // Both operands must be columns of this table. One column against a literal is a comparison
+        // Postgres resolves by the literal's inferred type, which is not this rule's business.
+        if (left === undefined || right === undefined) continue;
+        if (leftType === undefined || rightType === undefined) continue;
+        found.push({ table: table.name, constraint: constraint.name, left, right, leftType, rightType });
+      }
+    }
+  }
+  return found;
+}
+
+describe("a cross-column CHECK compares two columns of one type", () => {
+  it("finds no disagreement", () => {
+    const disagreements = crossColumnComparisons().filter((c) => c.leftType !== c.rightType);
+    expect(
+      disagreements.map(
+        (c) => `${c.table}.${c.constraint}: ${c.left} (${c.leftType}) vs ${c.right} (${c.rightType})`,
+      ),
+    ).toEqual([]);
+  });
+
+  it("is not vacuous: it really does examine the four-eyes checks", () => {
+    // The guard that matters. If the extractor stopped matching anything — a renamed operator, a
+    // reformatted expression — the rule above would pass having looked at nothing, which is the
+    // failure mode of every fence in this repo that turned out to be wrong.
+    // Five today: two four-eyes inequalities (`tenant_tombstones`, `workflow_definitions`) and three
+    // orderings (a bounce count against a recipient count, a publication against a breach deadline,
+    // a read watermark against its own `updated_at`).
+    const comparisons = crossColumnComparisons();
+    expect(comparisons.length).toBeGreaterThanOrEqual(5);
+    const fourEyes = comparisons.filter((c) => c.constraint.includes("four_eyes"));
+    expect(fourEyes.map((c) => c.table).sort()).toEqual(["tenant_tombstones", "workflow_definitions"]);
+    // Both four-eyes pairs are actor columns, and an actor column is TEXT in this catalog because it
+    // records who did a thing and must outlive the actor. A UUID here means somebody re-added a
+    // `meta.users` reference to one side of a four-eyes rule.
+    for (const c of fourEyes) {
+      expect(c.leftType, `${c.table}.${c.constraint} left`).toBe("TEXT");
+      expect(c.rightType, `${c.table}.${c.constraint} right`).toBe("TEXT");
+    }
+  });
+
+  it("does not read a unary IS NOT NULL as a comparison", () => {
+    // The false positive this rule was deliberately narrowed to avoid, pinned so the narrowing
+    // cannot be undone by somebody widening the regex.
+    const published = crossColumnComparisons().filter(
+      (c) => c.constraint === "workflow_definitions_published_fields_check",
+    );
+    expect(published).toEqual([]);
+  });
+});
+
+describe("the platform's record of a tenant outlives the tenant", () => {
+  /**
+   * The sixteen tables `PLATFORM_RECORD_TABLES` protects from the Article 17 erasure, spelled here
+   * because the kernel cannot depend on `tenant-lifecycle-pg` (that package depends on the kernel).
+   * `packages/testing/src/strategy/pg-record-retention.ts` asserts the two lists agree, reading both
+   * from disk — which is the forcing function; this one is the catalog-side invariant.
+   */
+  const PLATFORM_RECORD = [
+    "audit_log",
+    "audit_integrity_verdicts",
+    "compliance_attestations",
+    "certification_reports",
+    "crypto_keys",
+    "forensic_chain_entries",
+    "forensic_chain_checkpoints",
+    "gdpr_deletion_requests",
+    "tenant_lifecycle_events",
+    "tenant_tombstones",
+    "access_review_templates",
+    "access_review_campaigns",
+    "access_review_items",
+    "access_review_decisions",
+    "access_review_exceptions",
+    "access_review_evidence",
+  ] as const;
+
+  it("names sixteen tables", () => {
+    expect(PLATFORM_RECORD).toHaveLength(16);
+    expect(new Set(PLATFORM_RECORD).size).toBe(16);
+  });
+
+  it("gives none of them a cascading tenant_id, so retiring the tenant cannot erase the record", () => {
+    // The defect this pins: 15 of the 16 carried `ON DELETE CASCADE` into `meta.tenants`, so the
+    // erasure skipped them by name and then ADR-0316's retirement of the tenant row destroyed them
+    // anyway. `forensic_chain_entries` was among them, so the entry a tombstone's anchor names was
+    // deleted — making `verifyStoredEvidence`'s `unwitnessed` defect, a paging `sev1` under
+    // ADR-0324, true of every Article 17 proof the platform had ever produced.
+    const offenders: string[] = [];
+    for (const name of PLATFORM_RECORD) {
+      const table = META_TABLES.find((t) => t.name === name);
+      expect(table, name).toBeDefined();
+      const tenantId = table?.columns.find((c) => c.name === "tenant_id");
+      if (tenantId?.references?.table === "tenants") offenders.push(name);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("still cascades a tenant DATA table, where the cascade is belt-and-braces", () => {
+    // The rule is per class, not wholesale: a row of the tenant's own data has no meaning once the
+    // tenant is gone, and the cascade backs up `eraseSharedTablesWithin`'s explicit delete.
+    const protectedNames = new Set<string>(PLATFORM_RECORD);
+    const cascading = META_TABLES.filter((t) => {
+      const c = t.columns.find((x) => x.name === "tenant_id");
+      return c?.references?.table === "tenants" && c.references.onDelete === "CASCADE";
+    });
+    expect(cascading.length).toBeGreaterThan(80);
+    for (const t of cascading) expect(protectedNames.has(t.name), t.name).toBe(false);
   });
 });

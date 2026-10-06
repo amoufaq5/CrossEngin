@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 329 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 330 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~15,150 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~15,810 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -68,6 +68,26 @@ type errors.
   once, every job producer filling a queue with no consumer (and `no_definitions` refusing the one
   worker that does not read a definition), and **83 of 145 tables with no writer** and nothing saying
   which of those are deliberate.
+  ADR-0335 closes six of those 83, and the class is **a record nobody could write** — three
+  different things wearing one costume. *Nothing could write it, and a reference made that
+  load-bearing*: `meta.users` had no writer while **97 catalogued columns reference it**, ten of them
+  `NOT NULL ON DELETE RESTRICT` on a table with a live store, so with one row provisioned
+  `PostgresRecipientResolver` resolved a real audience **for the first time** — every notification
+  audience in every deployment had been resolving to `[]`; `meta.notification_preferences` was read on
+  every dispatch and written by nothing, so the consent half of `computeDispatchEligibility` was
+  unreachable; and `meta.access_review_evidence` had a reader with its exact column list and no
+  writer, so `certifiable` was **false in every certification report ever produced**.
+  *The deletion cascaded it away*: **15 of the 16 `PLATFORM_RECORD_TABLES` were `ON DELETE CASCADE`
+  children of `meta.tenants`**, and ADR-0320 retires that row after the pipeline commits — so the
+  compile-time retention set was correct and a foreign key undid it one statement later, leaving
+  **every Article 17 proof `unwitnessed`**, one of ADR-0324's paging `sev1` defects.
+  *Built, tested, never connected*: `@crossengin/api-gateway-pg` had **zero importers**.
+  The recurring rule, arrived at for the **third** time (ADR-0318, ADR-0321): **a column recording
+  who performed an act is a record of the past, and a referential constraint on it makes the actor
+  undeletable as a consequence of having acted.** Two defects were visible only live and only as a
+  non-owner — the whole asynchronous Article 17 flow could not write a single row — and one was
+  visible only by applying the catalog to a real cluster, where a `uuid <> text` four-eyes CHECK took
+  the entire bootstrap down at statement #0 of 960 while every offline test passed.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -283,6 +303,17 @@ packages exist at only one layer, noted below where that is true.
   (idempotency, route registry with TTL cache, sliding-window rate-limit checker,
   pipeline-execution store) plus a replayer that flags out-of-order stages, pass-with-4xx,
   orphaned rate-limit decisions, and summarizes p50/p95 latency.
+  **The package had zero importers until ADR-0335** — four stores and a replayer, none reachable from
+  the deployed binary, so `meta.rate_limit_decisions` had never held a row and the sliding window was
+  per-replica and per-restart. `--rate-limit-policy <rlp_id>:<limit>:<windowSeconds>` declares the
+  policies and `node.ts` builds `PostgresRateLimitChecker` from them. `rate-limit-policy.ts` holds the
+  declaration and `surveyRoutePolicies` (`surveyManifestJobs`' shape for routes), said at boot because
+  an undeclared policy is a *refusal* at request time and the one thing worse than refusing is
+  refusing without having said it would. `decision-schema-probe.ts` asks the catalog once at boot
+  rather than lazily per request: the remedy for an unpatched catalog is standing manual SQL an
+  operator runs once, which a boot line can carry and a per-request error cannot. The checker mounts
+  **either way, loudly** (ADR-0322's rule) — the limit is enforced whether or not the decision row can
+  be written, and refusing would cost the enforcement to protect its own projection.
 - **`rate-limiting`** — contracts only: 6 algorithms × 10 scope kinds, policies with 5
   overage handlings, 10 quota targets × 7 periods × 6 classes, IETF rate-limit headers,
   exception kinds with duration caps, throttle event audit.
@@ -402,11 +433,25 @@ packages exist at only one layer, noted below where that is true.
   kind. `workflow` and `cdc` are `"none"`, so a job of those kinds reports `no_producer` **in
   preference to** `handler_missing`: naming a fix that would not work is worse than naming none.
   `cron.ts`'s evaluator is complete and correct (5-/6-field, IANA zones via `Intl`, pure) and is what
-  `scheduledJobsDue` has always used — but it **constructs an `Intl.DateTimeFormat` per stepped
-  minute**, and takes that path for any non-`undefined` zone including the literal `"UTC"`, which is
-  `ScheduledTrigger.timezone`'s and `TimerDefinition.timezone`'s effective default. Measured: 30 ms
-  without a zone against **9,427 ms** with `"UTC"` on one sparse expression, 314×, and it runs per
-  scheduled job per tenant per tick. See *What's actually left*.
+  `scheduledJobsDue` has always used — and until ADR-0335 it **constructed an `Intl.DateTimeFormat`
+  per stepped minute**, taking that path for any non-`undefined` zone including the literal `"UTC"`,
+  which is `ScheduledTrigger.timezone`'s and `TimerDefinition.timezone`'s effective default.
+  Measured: one sparse expression went from **9,427 ms to 30 ms**. The formatter is cached per zone
+  (bounded at 512, so a pathological zone set cannot grow the map without limit) and the fourteen
+  **UTC-equivalent zone names** map to `undefined`, which skips the formatter entirely —
+  `Etc/GMT+0` and `Etc/GMT-0` are both in that set, because POSIX's sign inversion does not apply at
+  zero. `"Z"` is deliberately **not** in it: it is a legal ISO designator that `Intl` *rejects* as a
+  zone, so listing it would route an unresolvable zone to the UTC reader and turn
+  `isResolvableTimeZone`'s refusal into a silent accept. An invariant test asserts every member
+  resolves.
+  `cronCanEverMatch` answers the question the old evaluator answered with a silent `null` — a
+  29 February expression in a non-leap window, a day-30 February — and `JobTriggerSchema` **refuses**
+  `timezone_unresolvable` and `cron_never_matches` at parse time rather than at the first tick, with
+  `scheduledJobsDue` reporting through `onUnschedulable` instead of skipping. The refinement sits on
+  `JobTriggerSchema` and **not** on `ScheduledTriggerSchema`, which is not a style choice: zod 3's
+  `z.discriminatedUnion` rejects a `ZodEffects` member **without erroring at the union**, degrading
+  every reader's `trigger.kind` to `unknown`. `CRON_FIELD`/`CRON_REGEX`/`CronExpressionSchema` moved
+  from `types.ts` to `cron.ts` to break the runtime cycle that creates; `types.ts` re-exports them.
 
 ### Identity, security, data protection
 
@@ -614,6 +659,30 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   "we have a cache layer and it held nothing" compose **byte-identical** scopes, since
   `nothing_to_erase` may carry no figures at all, so under v1 a deployment could answer the harder
   claim with the cheaper one.
+- **`tenant-lifecycle-pg`** — also the tenant lifecycle **trail** (ADR-0335). `lifecycle-event-store.ts`
+  is the first writer `meta.tenant_lifecycle_events` ever had, whose own `PLATFORM_RECORD_TABLES`
+  comment says why it matters: *without it nothing in the database distinguishes a tenant that was
+  deleted from one that never existed.* Constructed **unconditionally under `--store pg`** with no
+  flag, because a transition the deployment already performs either leaves a record or does not, and
+  making the record opt-in is what left this table empty for four phases. `lifecycleEventFor` derives
+  `toState` from `ACTION_TARGET_STATE` and `requiresFourEyesApproval` from `actionRequiresFourEyes` —
+  never accepting either — so a caller passing `false` cannot record an unapproved privileged act as
+  an approved-not-required one. `probeLifecycleTrail` reports `durable` / `cascades_with_tenant` /
+  `unreadable_after_deletion` / `absent` at boot, and `lifecycleTrailGaps()` names the actions with no
+  producer; neither refuses, because the trail degrades to *no record* rather than to a wrong one
+  (ADR-0322).
+  **`tenant-context.ts` is here because two of this package's stores could never write at all.**
+  `PostgresLifecycleEventStore`'s insert and `PostgresDeletionRequestStore`'s `submit`/`transition`
+  set no tenant context, and on both tables the isolation policy is the **only** arm carrying a
+  `WITH CHECK` — the platform arm is `SELECT`-scoped by ADR-0332's rule — so as a non-owner every
+  write raised `42501`. For the deletion-request store that is **ADR-0321's store, shipped and never
+  exercised live as a non-owner: the entire asynchronous Article 17 flow was unreachable outside an
+  owner connection.** The *reads* were fine, which is what hid it — they elevate through
+  `app.platform_audit`, so an operator could list requests and never create one. Two properties are
+  load-bearing and each is pinned: the scope names the **row's own** tenant (a fact about the record,
+  not something a caller supplies and could get wrong), and a bare `conn.query` is **not enough**,
+  because `set_config(…, true)` is transaction-local and is discarded with the implicit
+  single-statement transaction before the statement it was set for.
 - **`tenant-lifecycle-pg`** — the tombstone's store (ADR-0318), and the first writer
   `meta.tenant_tombstones` ever had: declared in Phase 1, it had drifted behind its contract in the way
   ADR-0300 found for `meta.feature_flags`, and in the table where it mattered most. `executed_by` and
@@ -869,6 +938,13 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   real database while every offline test passed, since a fake connection asserts SQL *shape* and
   cannot know a column does not exist. The same class as ADR-0331's signal store, and the reason the
   assertion is against `META_TABLES` rather than a second copy of the names.
+  `targeting-rule-store.ts` (ADR-0335) is the writer `meta.feature_flag_targeting_rules` never had, so
+  a flag read back from the database no longer round-trips `ftr_…` ids pointing at nothing and can be
+  evaluated against its own targeting. `flag_id` is TEXT referencing `meta.feature_flags(flag_id)`
+  (`CASCADE`), not the UUID surrogate, because the contract's own id is what a rule names. There is no
+  HTTP surface for authoring one and deliberately so: a rule changes what the deployment serves, so it
+  is at least `config`-grade and would need `--notification-template-routes`' four-eyes apparatus
+  (ADR-0313).
 - **`deploy`** — apps × 4 environments × 4 strategies, artifact kinds, migration records,
   release channels, on-prem/BYOC packaging (Helm/Terraform).
 - **`edge`** — region routing strategies, per-route latency budgets and percentiles,
@@ -908,9 +984,25 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   per-framework control mappings.
 - **`access-reviews-runtime`** — drives them: due-campaign scheduling and next-occurrence
   planning, item generation from live grants with reviewer resolution, overdue/past-grace
-  detection, and auto-revocation planning for unattested items.
+  detection, and auto-revocation planning for unattested items. `evidence-compilation.ts`
+  (ADR-0335) composes a sealed `AccessReviewEvidence` pack from finished campaigns and their
+  decisions, with six refusals (`no_campaigns` / `framework_mismatch` / `tenant_mismatch` /
+  `campaign_unfinished` / `period_invalid` / `foreign_item`). `EVIDENCE_RATE_SCALE = 4` is
+  load-bearing, and it is ADR-0332's `decimal` question read in the other direction:
+  `computeCampaignEvidenceMetrics` divides, so 2 of 3 resolved items is `0.6666666666666666`, the
+  schema accepts it, `computeEvidenceSealSha256` **commits to it**, and the `NUMERIC(5,4)` column
+  then stores `0.6667` — so the digest is over figures the row does not hold and `verifyEvidenceSeal`
+  fails against the stored record from the moment it is written, which is worse than no proof because
+  it reads as one. The rates are therefore quantised **in the producer, before the digest**, and the
+  store refuses one that is not; quantising at the store boundary is what ADR-0332 does for a
+  computed `decimal` and is exactly wrong here.
 - **`access-reviews-runtime-pg`** — persists campaigns/items/decisions, wraps the runtime,
-  and ships a replayer.
+  and ships a replayer. `evidence-store.ts` (ADR-0335) is the writer `meta.access_review_evidence`
+  never had: `certification.ts:177–199` read it with its exact column list, so the adapter answered
+  `null`, the engine read that as *no evidence* rather than *not wired*, and `certifiable` was **false
+  in every certification report ever produced**. `latestSealed` had no tenant predicate either, so as
+  the table's owner tenant A's SOC 2 report read *satisfied at 100% citing tenant B's digest* — the
+  owner-bypass class of ADR-0331/ADR-0333, in the one table a compliance claim is built from.
 - **`certification-runtime`** — runtime-only (no contracts sibling): a control catalog
   mapped to frameworks, evidence adapters that pull real signals from other packages
   (encryption coverage, DR readiness, forensic chain integrity, access-review completion),
@@ -944,6 +1036,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   and dispatch/delivery audit with retry, throttle, digest and quiet-hours decisions. Also the
   consent-vs-deliverability split: `UNCONDITIONAL_SUPPRESSION_REASONS` are the reasons a
   non-suppressible category does *not* override, because a hard bounce is not a preference (ADR-0302).
+  **A non-suppressible category cannot be opted out of by anybody** since ADR-0335: the refusal was
+  conditioned on `source === "user_set"`, so an `admin_set` or `system_default` row could switch off
+  the one category that overrides consent. The check is on the category alone now, in one place that
+  `computeDispatchEligibility`'s consent arm reads.
   Plus (ADR-0309) per-user **read state** — a row per notice opened *and* a per-viewer watermark, because
   only a watermark can answer for notices the reader was never shown, which is what a go-live backfill
   needs; per-user **quiet hours**, where the timezone is the user's while the window may be the tenant's
@@ -1403,6 +1499,35 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   type is applied by `compileOperateServer` itself (ADR-0332) rather than by a flag — the decorator
   needs both the store and the manifest, and that is the one place holding both, so no app wiring was
   needed and the write effects are covered by the same seam as a client request.
+  **Three registries that nothing could write are reachable** (ADR-0335).
+  `--platform-user-routes` + `--platform-user-role` mount `/v1/platform/users` — provision a
+  principal, grant it a membership in a tenant, retire it — which is the first writer `meta.users` and
+  `meta.user_tenant_membership` ever had; the grant is **separate** from `--platform-admin-role`,
+  which administers tenants. `--preference-routes` + `--preference-role` mount per-user notification
+  preferences, where the viewer is **always the credential** and a body naming another user is
+  *refused* rather than ignored (ADR-0331's rule), with `--preference-admin-role` additive for the one
+  on-behalf route, recorded before the write so an unrecordable privileged write is refused.
+  `--rate-limit-policy` + `--rate-limit-default-policy` declare the policies that make
+  `api-gateway-pg` reachable at all.
+  A `surveyUserFkReadiness` boot survey runs **unconditionally** and names unprovisioned api-key
+  principals — only specs that *name* one, because a bare `key:role:tenant` resolves as a
+  `service_account` on `DEFAULT_PRINCIPAL_ID` and provisioning *that* would undo ADR-0331's fix by
+  making the shared placeholder satisfy every per-person guard again.
+  **The tenant lifecycle trail is wired into all four transition surfaces** — the console's
+  suspend/archive/activate, the synchronous deletion's `… -> deleted`, and the asynchronous route's
+  verify (`schedule_deletion`) and reject (`restore`) — and each **reports** whether the append landed
+  rather than throwing, which is ADR-0320's `tenantRetired` rule: a verify that moved the request and
+  could not move the trail has happened, and a 5xx would say otherwise. `lifecycleRecorded` is
+  **three-valued** (`null` / `false` / `true`), because `false` for both *no store configured* and
+  *the store was asked and nothing landed* reproduces in the response exactly the confusion this table
+  exists to end. The console's `CONSOLE_ACTION` map has **three** non-null entries, not four:
+  `TENANT_STATUS_TRANSITIONS` has no set targeting `pending_deletion` or `deleted`, so a fourth would
+  be an entry for an unreachable state — pinned by `consoleActionsNeedNoApprover()`, which must be
+  empty, so adding one fails with the reason rather than at the first click.
+  `transitionStatus` reads `SELECT status … FOR UPDATE` and runs the guarded `UPDATE` **in one
+  transaction**, because `RETURNING` answers with the *new* row and `PENDING_DELETION_SOURCES` has
+  three members, so the predicate's candidate list does not say which one matched (and there is no
+  `RETURNING OLD` before PG 18 against a floor of 14).
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -1447,7 +1572,7 @@ platform-level Postgres tables. Each new package adds tables there and updates
 `_meta_migrations` is created by `kernel-pg`'s applier for its own per-statement hash bookkeeping and
 is deliberately not emitted from the catalog. Verified. Count the catalog, not the database.
 
-Three invariants the test suite enforces:
+Four invariants the test suite enforces:
 
 1. Every `tenant_id`-bearing table has RLS enabled.
 2. Foreign-key references resolve to a table declared **earlier** in
@@ -1460,6 +1585,29 @@ Three invariants the test suite enforces:
    a maintained list is what ADR-0288's `needsAuditEmitter` was and it was wrong three times —
    `kernel-pg`'s canonical test matches `/_platform_(audit_)?(read|write|update)$/` and asserts
    **78**, so a 30th table cannot land without the number moving.
+4. **Both sides of a cross-column comparison are one type** (ADR-0335), or the constraint is not a
+   constraint. `crossColumnTypeDisagreements` extracts binary comparisons between two bare column
+   identifiers and requires their declared types to agree. It exists because making
+   `workflow_definitions.created_by` TEXT while `published_by` stayed UUID rendered the four-eyes
+   CHECK as `published_by <> created_by` — and Postgres has **no `uuid <> text` operator**, so the
+   `CREATE TABLE` raised `operator does not exist` and took the **entire bootstrap** with it at
+   statement #0 of 960, while every offline test passed: the emitted-SQL assertions compare
+   *strings*, and a string containing a comparison between two types Postgres cannot relate is a
+   perfectly well-formed string. `IS NULL`/`IS NOT NULL` are unary and deliberately excluded, since a
+   naive "two columns of different types in one expression" rule false-positives on
+   `published_at IS NOT NULL AND published_by IS NOT NULL` and would train people to add exemptions.
+   Five comparisons today, with a vacuity guard asserting both four-eyes pairs are found and both
+   sides of each are TEXT.
+
+**`TENANT_FK` is absent from the 16 `PLATFORM_RECORD_TABLES`** (ADR-0335), on the rule that *a table
+whose purpose is to outlive the tenant it describes cannot be a `CASCADE` child of that tenant's
+row*. Fifteen of them were, and ADR-0320 retires the tenant row after the pipeline commits — so the
+erasure's compile-time retention set was correct and the foreign key undid it one statement later,
+leaving every Article 17 proof `unwitnessed`. Isolation is unchanged: RLS still confines these rows
+per tenant and the erasure still skips them by name. Reordering the retirement does **not** fix it —
+ADR-0329 records that `meta.audit_log.tenant_id` references `meta.tenants`, so retiring first makes
+every erasure unrecordable. `packages/testing/src/strategy/pg-record-retention.ts` compares the two
+halves from disk in **both directions**, with a negative control.
 
 Append new tables to the bottom of the array in build order, not alphabetically —
 the expected-names test sorts independently.
@@ -1490,12 +1638,18 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **three** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **four** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
-column is named by every `INSERT` — and `pg-storeless-tables.ts` (ADR-0334), which declares every
-catalogued table with **no writer** and why. All three read the real workspace from disk rather than
+column is named by every `INSERT` — `pg-storeless-tables.ts` (ADR-0334), which declares every
+catalogued table with **no writer** and why, and `pg-record-retention.ts` (ADR-0335), which reads the
+Article 17 erasure's `PLATFORM_RECORD_TABLES` and the catalog's cascading tenant tables and compares
+them **in both directions** (`protected_table_cascades` / `_not_in_catalog` / `_undeclared_here` /
+`expected_protection_absent`), with a negative control that re-adds `audit_log`'s reference and
+demands exactly one finding naming it. Both directions is the part that carries the weight: ADR-0334
+established that *location* was never what made ADR-0288's `needsAuditEmitter` wrong, the absence of a
+both-ways comparison was. All four read the real workspace from disk rather than
 importing it, which is what keeps them unconditional: importing `@crossengin/kernel` would make the
 dependency graph cyclic, and reading `kernel/dist` would make the answer depend on whether someone ran
 `pnpm -r build`. A rule that is green only after a build is not a rule.
@@ -1565,6 +1719,16 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   failure now unless declared with a reason
   (`pg-storeless-tables.ts`), because a table with no store cannot have a wrong store
   and so never appeared in either SQL rule.
+  **ADR-0335 found two more members and they are the sharpest yet**: a write that sets no tenant
+  context. `PostgresLifecycleEventStore` and `PostgresDeletionRequestStore` both issued correct SQL
+  that no non-owner database would ever accept — on both tables the isolation policy is the only arm
+  carrying a `WITH CHECK`, so the write raised `42501` — and for the second that is **ADR-0321's
+  store, meaning the whole asynchronous Article 17 flow could not write a row outside an owner
+  connection**. The *reads* worked, which is what hid it. And one defect was invisible even to a live
+  *request*: making an actor column TEXT while the other side of its four-eyes CHECK stayed UUID is a
+  `uuid <> text` comparison Postgres has no operator for, so the `CREATE TABLE` failed and took the
+  whole bootstrap with it — caught only by **applying the catalog to a real cluster**, which is now
+  the fourth meta-schema invariant rather than a thing to remember.
 - **Comments are rare and earn their place.** No JSDoc on every export. Comment
   a non-obvious invariant — why this order, why fail-closed here, why this
   outcome and not that one — not what the code plainly says.
@@ -1627,50 +1791,90 @@ opened them.
 
 **Load-bearing**
 
-- **83 of 145 catalogued tables have no writer, and every one is now declared with a reason**
-  (ADR-0334). `packages/testing/src/strategy/pg-storeless-tables.ts` classifies them —
-  `static_catalog` (2), `out_of_band` (3), `dynamic_writer` (1), `superseded` (8), `unwritten_table`
-  (29, ADR-0300's class: a live store writes the siblings), `unbuilt_subsystem` (40) — each with an
+- **Nine actor columns became TEXT, and that is standing manual SQL on every existing deployment**
+  (ADR-0335). `planSchemaReconciliation` will not drop a foreign key without `--allow-loosening`, and
+  a type change on a populated table is its deliberate refusal — so an operator runs two `ALTER`s per
+  column plus fifteen FK drops for the `PLATFORM_RECORD_TABLES`. The tables are empty in every
+  deployment today, because nothing could write them, which is the cheapest moment this change will
+  ever have. `meta.rate_limit_decisions` additionally needs a `DROP COLUMN quota_definition_id`, which
+  `allowLoosening` reaches by design **never** (it covers foreign keys only, since that is the one
+  loosening that cannot fail against existing rows), so that statement is manual forever and the
+  catalog will report it as drift on every drift check until it is run. A **fresh** database gets the
+  patched shape straight out of `emitBootstrapSql` with no manual SQL at all. The exact seven
+  statements for the decision row, with the measured `steps`/`unreconciled` either side of
+  `--allow-loosening`, are in ADR-0335's implementation notes.
+- **The console's transition routes now require a `reason`** (ADR-0335), which is caller-visible: the
+  three routes previously parsed no body at all and now 400 without one. `LifecycleEvent.reason` is
+  `z.string().min(1)` and a transition whose reason is `"(none given)"` is the field ADR-0317 refused
+  a default for. No in-repo caller exists — `operate-web` does not call them — but an external one
+  breaks. Required unconditionally rather than only when a trail store is wired, because an API shape
+  that depends on deployment config is worse than a required field.
+- **`ACTION_TARGET_STATE.cancel_deletion` is `"archived"` and the reject route returns a tenant to
+  `active`** (ADR-0335), so the action that *means* "the deletion was cancelled" cannot express what
+  the route does, and `cancel_deletion` has **no producer** — `lifecycleTrailGaps()` returns exactly
+  that one, and the boot line says so. The reject records `restore` instead. ADR-0334's reasoning for
+  going to `active` stands (routing through `archived` would cost a tenant their write access for
+  somebody else's mistake), so which of the two actions should name the reject is a vocabulary
+  decision rather than a defect, and changing `ACTION_TARGET_STATE` forces a workspace rebuild before
+  any consumer's tests mean anything (ADR-0329).
+- **77 of 145 catalogued tables have no writer, and every one is declared with a reason**
+  (ADR-0334, ADR-0335). `packages/testing/src/strategy/pg-storeless-tables.ts` classifies them —
+  `static_catalog` (2), `out_of_band` (1), `dynamic_writer` (1), `superseded` (8), `unwritten_table`
+  (25, ADR-0300's class: a live store writes the siblings), `unbuilt_subsystem` (40) — each with an
   owner package asserted to exist, a note carrying the evidence and, for the two gap reasons, a
   required consequence. Compared against `META_TABLES` **in both directions** every run
   (`undeclared` / `overtaken` / `unknown_table` / `duplicate`), which is the part that matters:
   ADR-0288's list had no forcing function, and *location* was never what made `needsAuditEmitter`
   wrong — the absence of a both-ways comparison was. A new Phase-1 table with no writer is a test
   failure the moment it lands. Vacuity floors include an **upper**-bound-shaped one (`writerless ≥
-  75`, the opposite of the usual), because the dangerous direction is over-counting writers: if
-  everything looked written, nothing would need declaring and the fence would pass having examined
-  nothing. What it cannot check is whether a declared *reason* is true — only shape, referential
-  integrity and both directions of membership.
-  The gaps judged **real**, in rough cost order:
-  **`meta.access_review_evidence`** is the cheapest: the reader exists with its exact column list
-  (`certification.ts:177–199`), `sealEvidence` exists in the contracts, and three sibling stores exist
-  — so today the access-review signal is **silently missing from every certification report**, because
-  the adapter answers `null` and the engine reads that as "no evidence" rather than "not wired".
-  **`meta.users`** is load-bearing and bigger: **73 catalogued tables carry a `USER_FK` column** and
-  **9 of them have a live writer and a NOT NULL one** (`pack_installations.requested_by`,
-  `notification_templates.created_by`, `notification_digests.user_id`,
-  `access_review_campaigns.created_by`, `access_review_decisions.decided_by_user_id`,
-  `workflow_definitions.created_by`, `gateway_routes.created_by`,
-  `notification_read_states.user_id`, `notification_read_watermarks.user_id`), so each store cannot
-  insert unless `meta.users` already holds the id and nothing writes it — while `deploy/README.md`
-  tells operators to put a real `meta.users.id` in an api-key spec with no documented way to create
-  one. ADR-0331 hit this for read states and answered it by *refusing* non-user principals, which
-  presumes the row. The repo has twice concluded a `RESTRICT` FK into `meta.users` is wrong (ADR-0318,
-  ADR-0321, which made those columns TEXT); applying that to these nine is the cheaper half.
-  Relatedly **`meta.rate_limit_decisions.principal_id` is a `RESTRICT` FK into `meta.users`** and
-  `rate-limit-checker.ts` passes `input.principalId` straight through, with no equivalent refusal.
-  Also: **`meta.notification_preferences`** is read and never written, so every user's preferences are
-  the built-in defaults for ever; **`meta.tenant_lifecycle_events`**, whose own
-  `PLATFORM_RECORD_TABLES` comment says *"without it nothing in the database distinguishes a tenant
-  that was deleted from one that never existed"*, and the deletion pipeline is already one transaction
-  that would write it; **`meta.feature_flag_targeting_rules`**, so a flag read back from the database
-  round-trips `ftr_…` ids pointing at nothing and cannot be evaluated against its own targeting; and
-  **`meta.rate_limit_policies` / `quota_definitions`**, which are a *decision* rather than a store —
-  `rate-limit-checker.ts` hardcodes both FK columns to `NULL` *because* the tables are empty, so if
-  policies are config (like the plan catalog) the correct fix is to **drop the two columns**, not add
-  two stores. `meta.job_costs` is not built because it needs a cost model, which is a decision too.
-  One consequence worth knowing: the Article 17 erasure's `PLATFORM_RECORD_TABLES` protects **five
-  tables nothing writes**, so that protection is vacuous today.
+  65`, the opposite of the usual, lowered from 75 by ADR-0335's six closures), because the dangerous
+  direction is over-counting writers: if everything looked written, nothing would need declaring and
+  the fence would pass having examined nothing. What it cannot check is whether a declared *reason* is
+  true — only shape, referential integrity and both directions of membership.
+  **ADR-0335 closed the six judged real**, and each one had a consequence that was live rather than
+  theoretical. `meta.users` + `meta.user_tenant_membership` now have a writer behind
+  `--platform-user-routes`; with one row provisioned `PostgresRecipientResolver` resolved a real
+  audience **for the first time**, so every notification audience in every deployment had been
+  resolving to `[]`. `meta.notification_preferences` has one behind `--preference-routes`; it was read
+  on every dispatch and written by nothing, so the consent half of `computeDispatchEligibility` was
+  unreachable and every user's preferences were the built-in defaults for ever.
+  `meta.access_review_evidence` has one, which is why `certifiable` can now be true — the adapter
+  answered `null` and the engine read that as *no evidence* rather than *not wired*, so it was
+  **false in every certification report ever produced**. `meta.tenant_lifecycle_events` has one,
+  unconditionally under `--store pg` and deliberately behind no flag. And
+  `meta.feature_flag_targeting_rules` has one, so a flag read back from the database no longer
+  round-trips `ftr_…` ids pointing at nothing.
+  **The `meta.users` reference class is settled, for the third time.** Nine `NOT NULL ON DELETE
+  RESTRICT` references became plain **TEXT** on the rule the repo had already reached in ADR-0318 and
+  ADR-0321: *a column recording who performed an act is a record of the past, and a referential
+  constraint on it makes the actor undeletable as a consequence of having acted.* ADR-0331 sharpens it
+  — a bare `--api-key 'key:role:tenant'` is a `service_account`, so a *person* is not even the normal
+  case for most of these. **Three** references were kept and **strengthened** to `CASCADE`
+  (`USER_OWNED_FK`): `notification_read_states`, `_read_watermarks` and `notification_digests` hold a
+  user's own per-viewer state, which must go when the user does. Two keep `RESTRICT` because they are
+  *about* the user rather than about something the user did (`user_tenant_membership`,
+  `notification_preferences`). `LIVE_USER_FK_WRITERS` is five now and **derived** rather than
+  restated: a table is on it iff the catalog declares a `NOT NULL` `meta.users` reference *and*
+  `STORELESS_TABLES` does not declare it writerless — so somebody writing a store for one of the
+  other 37 does not fail that test, their increment moves the table into the derived set and the test
+  then names it.
+  What is **left**: `meta.rate_limit_policies` / `quota_definitions` remain a *decision* rather than a
+  gap, and ADR-0335 took the half it could — `rate_limit_decisions.policy_id` is TEXT carrying the
+  `rlp_` id `--rate-limit-policy` declares (matching `meta.gateway_routes.rate_limit_policy_id`), and
+  `quota_definition_id` was **dropped rather than re-typed**, because unlike a policy an `rlq_` id has
+  no declaration site anywhere, so a TEXT column would have been the same hole in a different type.
+  A store becomes wanted when `meta.rate_limit_exceptions` is built, whose `policy_id` is NOT NULL.
+  `meta.job_costs` still needs a cost model, which is a decision too. `meta.feature_flag_changes` is
+  deliberately **not half-built**: to be worth anything it must be written in the same transaction as
+  the change it records, which needs a `recordWithin(tx, …)` seam through `insert`/`update`/
+  `transition` plus the kill-switch store — a store recording rule additions and not flag toggles
+  would make `summarizeChangeHistory` report a history that *looks* complete.
+  `meta.feature_flag_evaluations` should **never** get a Postgres writer, measured: 394 bytes per row
+  including its four indexes, so a gateway at 1,000 req/s evaluating 10 flags per request writes
+  **124 TB/year** into the database that serves the ERP, under RLS, on the request path.
+  And the erasure's `PLATFORM_RECORD_TABLES` no longer protects five tables nothing writes — it
+  protects **three** (`access_review_exceptions`, `access_review_templates`,
+  `compliance_attestations`), so that much of the protection is still vacuous.
 - **The tenant-status gate is opt-in, and what that leaves** (ADR-0334). `--tenant-status-gate` is off
   by default because it 403s a credential whose tenant has no `meta.tenants` row and
   `--api-key 'key:role:tenant'` names arbitrary UUIDs — so on-by-default would refuse every request of
@@ -2381,7 +2585,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 329 records; 250 Accepted, 79 Proposed (the
+title or status change cannot drift. 330 records; 251 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

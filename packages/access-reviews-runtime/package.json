@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@crossengin/access-reviews": "workspace:*",
+    "@crossengin/crypto": "workspace:*",
     "zod": "^3.23.0"
   },
   "devDependencies": {

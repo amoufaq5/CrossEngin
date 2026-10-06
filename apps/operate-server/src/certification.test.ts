@@ -15,7 +15,10 @@ import type { IntervalScheduler } from "./jwks.js";
 
 import {
   CertificationScheduler,
+  PostgresAccessReviewEvidenceReader,
   accessReviewSource,
+  AccessReviewEvidenceUnavailableError,
+  type AccessReviewEvidenceLookup,
   buildCertificationLifecycle,
   drReadinessSource,
   encryptionCoverageSource,
@@ -175,21 +178,184 @@ describe("evidence sources", () => {
 
   it("accessReviewSource is framework-aware and skips a missing pack", async () => {
     const reader = {
-      latestSealed: async (fw: ComplianceFramework) =>
+      latestSealed: async (fw: ComplianceFramework): Promise<AccessReviewEvidenceLookup> =>
         fw === "soc2_type2"
           ? {
-              framework: fw,
-              status: "sealed",
-              sealedSha256: "a".repeat(64),
-              completionRate: 1,
-              strongAttestationRate: 1,
-              controlMappings: ["CC6.1"],
+              kind: "evidence",
+              evidence: {
+                framework: fw,
+                status: "sealed",
+                sealedSha256: "a".repeat(64),
+                completionRate: 1,
+                strongAttestationRate: 1,
+                controlMappings: ["CC6.1"],
+              },
             }
-          : null,
+          : { kind: "none" },
     };
     const src = accessReviewSource(reader);
     expect((await src.collect("soc2_type2", AT))[0]?.satisfied).toBe(true);
     expect(await src.collect("hipaa_security_rule", AT)).toEqual([]);
+  });
+
+  it("accessReviewSource throws on `unscoped`, so `could not look` is not `found none`", async () => {
+    const src = accessReviewSource({
+      latestSealed: async (): Promise<AccessReviewEvidenceLookup> => ({
+        kind: "unscoped",
+        detail: "this certification names no tenant",
+      }),
+    });
+    await expect(src.collect("soc2_type2", AT)).rejects.toBeInstanceOf(
+      AccessReviewEvidenceUnavailableError,
+    );
+  });
+
+  it("the unavailable error names the control's consequence, not just the cause", async () => {
+    const err = new AccessReviewEvidenceUnavailableError("iso27001", "no tenant");
+    expect(err.message).toContain("iso27001");
+    expect(err.message).toContain("not_assessed");
+    expect(err.message).toContain("cannot be certifiable");
+  });
+
+  it("an `unscoped` source leaves the control not_assessed rather than deficient", async () => {
+    const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
+    const errors: unknown[] = [];
+    const lc = buildCertificationLifecycle(
+      fakeConn(captured),
+      parseCertificationConfig({ tenantId: TENANT, frameworks: ["soc2_type2"] }),
+      {
+        sources: [
+          satisfiedEncryptionSource(),
+          accessReviewSource({
+            latestSealed: async (): Promise<AccessReviewEvidenceLookup> => ({
+              kind: "unscoped",
+              detail: "no tenant",
+            }),
+          }),
+        ],
+        clock: new FixedClock(new Date(AT)),
+        ids: new RandomIdGenerator(),
+        now: () => new Date(AT),
+        onSourceError: (e) => errors.push(e),
+      },
+    );
+    const [report] = await lc.certifyOnce();
+    const control = report?.assessment.controls.find(
+      (c) => c.controlId === "access.periodic_review",
+    );
+    expect(control?.status).toBe("not_assessed");
+    expect(report?.certifiable).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(AccessReviewEvidenceUnavailableError);
+  });
+});
+
+describe("PostgresAccessReviewEvidenceReader", () => {
+  function recordingConn(
+    rows: Record<string, unknown>[],
+    captured: { sql: string; params: readonly unknown[] | undefined }[],
+  ): PgConnection {
+    const conn: PgConnection = {
+      query: (async (sql: string, params?: readonly unknown[]) => {
+        captured.push({ sql, params });
+        if (sql.includes("access_review_evidence")) {
+          return { rows, rowCount: rows.length } as PgQueryResult;
+        }
+        return { rows: [], rowCount: 0 } as PgQueryResult;
+      }) as PgConnection["query"],
+      transaction: (async <T,>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
+      withAdvisoryLock: (async <T,>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+      close: (async () => {}) as PgConnection["close"],
+    };
+    return conn;
+  }
+
+  const sealedRow = {
+    framework: "soc2_type2",
+    status: "sealed",
+    sealed_sha256: "f".repeat(64),
+    // NUMERIC arrives as a string from node-postgres, which is what the live row looks like.
+    completion_rate: "0.8333",
+    strong_attestation_rate: "0.5000",
+    control_mappings: ["CC6.1"],
+  };
+
+  it("answers `unscoped` for a null tenant rather than `none`", async () => {
+    const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
+    const reader = new PostgresAccessReviewEvidenceReader(recordingConn([], captured), null);
+    const lookup = await reader.latestSealed("soc2_type2");
+    expect(lookup.kind).toBe("unscoped");
+    expect(captured).toHaveLength(0);
+  });
+
+  it("the unscoped detail names both remedies", async () => {
+    const reader = new PostgresAccessReviewEvidenceReader(recordingConn([], []), null);
+    const lookup = await reader.latestSealed("soc2_type2");
+    if (lookup.kind !== "unscoped") throw new Error("expected unscoped");
+    expect(lookup.detail).toContain("tenantId");
+    expect(lookup.detail).toContain("accessReviews:false");
+  });
+
+  it("carries a strict tenant_id predicate beside RLS", async () => {
+    const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
+    const reader = new PostgresAccessReviewEvidenceReader(recordingConn([], captured), TENANT);
+    await reader.latestSealed("soc2_type2");
+    const select = captured.find((c) => c.sql.includes("FROM meta.access_review_evidence"));
+    expect(select?.sql).toContain("tenant_id = $2");
+    expect(select?.sql).not.toContain("tenant_id IS NULL");
+    expect(select?.params).toEqual(["soc2_type2", TENANT]);
+  });
+
+  it("sets the tenant RLS context before reading", async () => {
+    const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
+    const reader = new PostgresAccessReviewEvidenceReader(recordingConn([], captured), TENANT);
+    await reader.latestSealed("soc2_type2");
+    expect(captured[0]?.sql).toContain("set_config('app.current_tenant_id'");
+    expect(captured[0]?.params).toEqual([TENANT]);
+  });
+
+  it("filters to the three statuses the assessor treats as sealed", async () => {
+    const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
+    const reader = new PostgresAccessReviewEvidenceReader(recordingConn([], captured), TENANT);
+    await reader.latestSealed("soc2_type2");
+    const select = captured.find((c) => c.sql.includes("FROM meta.access_review_evidence"));
+    expect(select?.sql).toContain("status IN ('sealed', 'submitted_to_auditor', 'accepted_by_auditor')");
+  });
+
+  it("orders totally, so two packs sharing a period end cannot flip", async () => {
+    const captured: { sql: string; params: readonly unknown[] | undefined }[] = [];
+    const reader = new PostgresAccessReviewEvidenceReader(recordingConn([], captured), TENANT);
+    await reader.latestSealed("soc2_type2");
+    const select = captured.find((c) => c.sql.includes("FROM meta.access_review_evidence"));
+    expect(select?.sql).toContain("ORDER BY period_end_at DESC, evidence_id DESC");
+  });
+
+  it("answers `none` when the scope holds no sealed pack", async () => {
+    const reader = new PostgresAccessReviewEvidenceReader(recordingConn([], []), TENANT);
+    expect((await reader.latestSealed("soc2_type2")).kind).toBe("none");
+  });
+
+  it("parses a NUMERIC rate arriving as a string", async () => {
+    const reader = new PostgresAccessReviewEvidenceReader(recordingConn([sealedRow], []), TENANT);
+    const lookup = await reader.latestSealed("soc2_type2");
+    if (lookup.kind !== "evidence") throw new Error("expected evidence");
+    expect(lookup.evidence.completionRate).toBeCloseTo(0.8333, 6);
+    expect(lookup.evidence.strongAttestationRate).toBeCloseTo(0.5, 6);
+    expect(lookup.evidence.sealedSha256).toBe("f".repeat(64));
+  });
+
+  it("refuses an unreadable rate rather than reporting it as 0%", async () => {
+    const reader = new PostgresAccessReviewEvidenceReader(
+      recordingConn([{ ...sealedRow, completion_rate: null }], []),
+      TENANT,
+    );
+    await expect(reader.latestSealed("soc2_type2")).rejects.toThrow(/completion_rate/);
+  });
+
+  it("rejects a schema identifier that is not a bare identifier", () => {
+    expect(
+      () => new PostgresAccessReviewEvidenceReader(recordingConn([], []), TENANT, "me ta"),
+    ).toThrow(/invalid schema identifier/);
   });
 });
 
@@ -259,12 +425,15 @@ describe("buildCertificationLifecycle", () => {
     );
     const arSource = accessReviewSource({
       latestSealed: async (fw) => ({
-        framework: fw,
-        status: "sealed",
-        sealedSha256: "c".repeat(64),
-        completionRate: 1,
-        strongAttestationRate: 1,
-        controlMappings: ["X"],
+        kind: "evidence",
+        evidence: {
+          framework: fw,
+          status: "sealed",
+          sealedSha256: "c".repeat(64),
+          completionRate: 1,
+          strongAttestationRate: 1,
+          controlMappings: ["X"],
+        },
       }),
     });
     const forensicSource: EvidenceSource = {

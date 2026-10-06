@@ -1,3 +1,10 @@
+import {
+  RateLimitPolicyDeclarationError,
+  declareRateLimitPolicies,
+  parseRateLimitPolicySpec,
+  type DeclaredRateLimitPolicy,
+  type RateLimitPolicyDeclaration,
+} from "@crossengin/api-gateway-pg";
 import { REGIONS } from "@crossengin/residency";
 import {
   SENSITIVE_DATA_CLASSIFICATIONS,
@@ -119,6 +126,41 @@ export interface ServeOptions {
   readonly tenantStatusGate: boolean;
   /** How long a resolved tenant status is cached (ms). Default 30s. */
   readonly tenantStatusTtlMs: number | null;
+  /**
+   * Mount the platform **user registry** (`meta.users` + `meta.user_tenant_membership`).
+   *
+   * Neither table had a writer, while 50 catalogued columns carry a `NOT NULL ON DELETE RESTRICT`
+   * reference into `meta.users` — ten of them on tables with a live writer, so ten stores could not
+   * insert a row. `deploy/README.md` told operators to put a real `meta.users.id` into an
+   * `--api-key` spec with no documented way to make one. And with one row provisioned,
+   * `PostgresRecipientResolver` resolved a real audience for the first time: until then every
+   * audience in every deployment resolved to `[]`, so the notification stack had never had a
+   * recipient (ADR-0335).
+   */
+  /**
+   * The rate-limit policies this deployment declares, or `null` for none — in which case the
+   * gateway keeps `InMemoryRateLimitChecker`'s hardcoded 10,000/60s and persists nothing, as today.
+   *
+   * **Not** defaulted to `CONSERVATIVE_RATE_LIMIT_POLICY`: which limit a deployment permits is not
+   * something silence may answer (ADR-0328's rule), and switching an existing deployment from
+   * 10,000/60s to 600/60s on upgrade would refuse traffic that works today.
+   */
+  readonly rateLimitPolicies: RateLimitPolicyDeclaration | null;
+  readonly platformUserRoutes: boolean;
+  /**
+   * Roles permitted to administer that registry. Fail-closed: empty ⇒ the routes refuse everything.
+   *
+   * Separate from `--platform-admin-role`, which administers *tenants*: a deployment may well want
+   * the people who can create tenants to be a different set from the people who can create the
+   * identities inside them.
+   */
+  readonly platformUserRoles: readonly string[];
+  /** Mount the per-user notification preference routes (`meta.notification_preferences`). */
+  readonly preferenceRoutes: boolean;
+  /** Roles permitted to read and set one's own preferences. Fail-closed on empty. */
+  readonly preferenceRoles: readonly string[];
+  /** Additive grant for setting another user's preferences, recorded before the write. */
+  readonly preferenceAdminRoles: readonly string[];
   /** Path to a marketplace pack-catalog JSON ({packs:[...]}) — enables the /v1/admin/packs routes (needs pg). */
   readonly packCatalogFile: string | null;
   /** Enable the third-party authoring routes (/v1/authoring/packs — submit/review/publish pack versions). Needs pg. */
@@ -360,6 +402,13 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let workflowWorkers = false;
   let workflowWorkerConfig: string | null = null;
   let workflowDeferActivities = false;
+  const rateLimitPolicySpecs: string[] = [];
+  let rateLimitDefaultPolicyId: string | null = null;
+  let platformUserRoutes = false;
+  const platformUserRoles: string[] = [];
+  let preferenceRoutes = false;
+  const preferenceRoles: string[] = [];
+  const preferenceAdminRoles: string[] = [];
   let tenantStatusGate = false;
   let tenantStatusTtlMs: number | null = null;
   const jobInvokeActionRoles: string[] = [];
@@ -599,6 +648,28 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--workflow-defer-activities") {
       workflowDeferActivities = true;
+    } else if (arg === "--rate-limit-policy" || arg.startsWith("--rate-limit-policy=")) {
+      rateLimitPolicySpecs.push(takeValue(arg, next, "--rate-limit-policy"));
+      i += consumed();
+    } else if (
+      arg === "--rate-limit-default-policy" ||
+      arg.startsWith("--rate-limit-default-policy=")
+    ) {
+      rateLimitDefaultPolicyId = takeValue(arg, next, "--rate-limit-default-policy");
+      i += consumed();
+    } else if (arg === "--platform-user-routes") {
+      platformUserRoutes = true;
+    } else if (arg === "--platform-user-role" || arg.startsWith("--platform-user-role=")) {
+      platformUserRoles.push(takeValue(arg, next, "--platform-user-role"));
+      i += consumed();
+    } else if (arg === "--preference-routes") {
+      preferenceRoutes = true;
+    } else if (arg === "--preference-role" || arg.startsWith("--preference-role=")) {
+      preferenceRoles.push(takeValue(arg, next, "--preference-role"));
+      i += consumed();
+    } else if (arg === "--preference-admin-role" || arg.startsWith("--preference-admin-role=")) {
+      preferenceAdminRoles.push(takeValue(arg, next, "--preference-admin-role"));
+      i += consumed();
     } else if (arg === "--tenant-status-gate") {
       tenantStatusGate = true;
     } else if (arg === "--tenant-status-ttl-ms" || arg.startsWith("--tenant-status-ttl-ms=")) {
@@ -1210,6 +1281,91 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         " at its first activity and nothing reports it.",
     );
   }
+  let rateLimitPolicies: RateLimitPolicyDeclaration | null = null;
+  if (rateLimitPolicySpecs.length > 0 || rateLimitDefaultPolicyId !== null) {
+    // A default with no policies. The declaration needs exactly one policy for the routes that name
+    // none — which today is every route — and picking one would be choosing the operator's ceiling.
+    if (rateLimitPolicySpecs.length === 0) {
+      throw new CliUsageError(
+        "--rate-limit-default-policy requires at least one" +
+          " --rate-limit-policy <rlp_id>:<limit>:<windowSeconds>",
+      );
+    }
+    let parsedPolicies: readonly DeclaredRateLimitPolicy[];
+    try {
+      parsedPolicies = rateLimitPolicySpecs.map((spec) => parseRateLimitPolicySpec(spec));
+    } catch (err) {
+      throw new CliUsageError(
+        `invalid --rate-limit-policy: ${err instanceof RateLimitPolicyDeclarationError ? err.message : String(err)}`,
+      );
+    }
+    // With more than one policy the default must be named; with exactly one it is unambiguous, so
+    // requiring the operator to say it twice would be ceremony.
+    const defaultId =
+      rateLimitDefaultPolicyId ?? (parsedPolicies.length === 1 ? parsedPolicies[0]!.policyId : null);
+    if (defaultId === null) {
+      throw new CliUsageError(
+        "--rate-limit-default-policy is required when more than one --rate-limit-policy is declared",
+      );
+    }
+    const defaultPolicy = parsedPolicies.find((policy) => policy.policyId === defaultId);
+    // A default naming a policy nobody declared. Falling back would apply terms the operator did not
+    // write down, which is the defect being fixed.
+    if (defaultPolicy === undefined) {
+      throw new CliUsageError(
+        `--rate-limit-default-policy ${defaultId} is not among the declared policies` +
+          ` (${parsedPolicies.map((policy) => policy.policyId).join(", ")})`,
+      );
+    }
+    try {
+      rateLimitPolicies = declareRateLimitPolicies({ defaultPolicy, policies: parsedPolicies });
+    } catch (err) {
+      throw new CliUsageError(
+        `invalid rate-limit declaration: ${err instanceof RateLimitPolicyDeclarationError ? err.message : String(err)}`,
+      );
+    }
+    // The decision row is the point; under `--store memory` there is no
+    // `meta.rate_limit_decisions` to write and the declaration would silently buy only a different
+    // in-memory number (`--workflow-cancel-role`'s shape, ADR-0331).
+    if (store === "memory") {
+      throw new CliUsageError(
+        "--rate-limit-policy requires a Postgres store (--store pg or pg-columns): a policy is" +
+          " declared so the persisted decision can name it, and there is no" +
+          " meta.rate_limit_decisions under --store memory",
+      );
+    }
+  }
+  // A grant with no surface mounted reads as configured and does nothing — the same shape as
+  // `--workflow-defer-activities` without `--workflow-workers` (ADR-0333).
+  if (platformUserRoles.length > 0 && !platformUserRoutes) {
+    throw new CliUsageError(
+      "--platform-user-role requires --platform-user-routes: a registry grant with no registry" +
+        " surface mounted is silently inert",
+    );
+  }
+  if (platformUserRoutes && store === "memory") {
+    throw new CliUsageError(
+      "--platform-user-routes requires a Postgres store (--store pg or pg-columns): the registry is" +
+        " meta.users and meta.user_tenant_membership, which the memory store has no tables for",
+    );
+  }
+  if (preferenceRoles.length > 0 && !preferenceRoutes) {
+    throw new CliUsageError(
+      "--preference-role requires --preference-routes: a grant with no surface mounted is silently" +
+        " inert",
+    );
+  }
+  if (preferenceAdminRoles.length > 0 && !preferenceRoutes) {
+    throw new CliUsageError(
+      "--preference-admin-role requires --preference-routes: it is additive on --preference-role",
+    );
+  }
+  if (preferenceRoutes && store === "memory") {
+    throw new CliUsageError(
+      "--preference-routes requires a Postgres store (--store pg or pg-columns):" +
+        " meta.notification_preferences has no in-memory equivalent",
+    );
+  }
   // The gate reads `meta.tenants`, which the memory store does not have — and unlike a scheduler
   // that would merely go quiet, a gate whose directory throws refuses *every* request with a 503.
   if (tenantStatusGate && store === "memory") {
@@ -1317,6 +1473,12 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     workflowWorkers,
     workflowWorkerConfig,
     workflowDeferActivities,
+    rateLimitPolicies,
+    platformUserRoutes,
+    platformUserRoles,
+    preferenceRoutes,
+    preferenceRoles,
+    preferenceAdminRoles,
     tenantStatusGate,
     tenantStatusTtlMs,
     jobInvokeActionRoles,
@@ -1714,6 +1876,28 @@ Options:
   --workflow-defer-activities  Leave a scheduled activity at rest for the activity worker instead
                        of running its handler inline. REQUIRES --workflow-workers: with no worker
                        claiming, every instance stalls at its first activity and nothing says so
+  --rate-limit-policy <rlp_id>:<limit>:<windowSeconds>  Declare a rate-limit policy (repeatable).
+                       Until this existed, api-gateway-pg had ZERO importers: the checker, the
+                       idempotency store, the route registry, the pipeline-execution store and the
+                       replayer were all unreachable from this binary, and meta.rate_limit_decisions
+                       had never held a row. A starting point: rlp_conservativedefault:600:60.
+                       Needs --store pg|pg-columns
+  --rate-limit-default-policy <rlp_id>  Which declared policy governs a route that names none
+                       (required when more than one is declared; unambiguous with exactly one)
+  --platform-user-routes  Mount the platform user registry under /v1/platform/users — provision a
+                       principal, grant it a membership in a tenant, retire it. NOTHING wrote
+                       meta.users before this, while 50 catalogued columns reference it NOT NULL
+                       ON DELETE RESTRICT (ten on tables with a live writer), and every notification
+                       audience resolved to the empty set. Needs --store pg|pg-columns
+  --platform-user-role <role>  Role permitted to administer the registry (repeatable, fail-closed).
+                       Separate from --platform-admin-role, which administers tenants
+  --preference-routes  Mount the per-user notification preference routes. Without them every user's
+                       preferences are the built-in defaults for ever, so the consent half of
+                       computeDispatchEligibility was unreachable. Needs --store pg|pg-columns
+  --preference-role <role>  Role permitted to read and set one's OWN preferences (repeatable,
+                       fail-closed). A body naming another user is refused, not ignored
+  --preference-admin-role <role>  Additive on --preference-role: may set another user's preference,
+                       recorded before the write so an unrecordable privileged write is refused
   --tenant-status-gate  Enforce meta.tenants.status on EVERY request: a suspended, archived or
                        pending_deletion tenant is read-only and a deleted one is refused outright.
                        Without it the status is a column nothing on the request path reads, so a

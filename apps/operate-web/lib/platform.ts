@@ -123,11 +123,21 @@ export async function createTenant(body: CreateTenantBody): Promise<Tenant> {
   return json.tenant;
 }
 
-export async function setTenantStatus(id: string, action: TenantAction): Promise<Tenant> {
+/**
+ * `reason` is required by the server (a non-empty string, max 500) and the body is parsed
+ * `.strict()`, so it is sent alone. It lands in the tenant's permanent lifecycle trail as why the
+ * tenant's access changed, which is why the caller must supply it rather than this helper
+ * defaulting one.
+ */
+export async function setTenantStatus(
+  id: string,
+  action: TenantAction,
+  reason: string,
+): Promise<Tenant> {
   const res = await fetch(apiPath(`/tenants/${encodeURIComponent(id)}/${action}`), {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
-    body: "{}",
+    body: JSON.stringify({ reason }),
   });
   if (!res.ok) await throwProblem(res);
   const json = (await res.json()) as { tenant: Tenant };

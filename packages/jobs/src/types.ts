@@ -1,12 +1,18 @@
 import { z } from "zod";
 
+// `CronExpressionSchema` lives in `cron.ts` with the evaluator that reads the expression, and is
+// re-exported here so its public name is unchanged. The direction matters: `ScheduledTriggerSchema`
+// below needs `scheduledTriggerDefects`, and leaving the schema here would have made the two modules
+// a runtime cycle. `cron.ts` imports only `type JobDeclaration` from this file, which is erased.
+import { CronExpressionSchema, scheduledTriggerDefects } from "./cron.js";
+
+export { CronExpressionSchema };
+
 const JOB_ID_REGEX = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 const EVENT_NAME_REGEX = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/;
 const ISO_DURATION_REGEX =
   /^P(?=.)(?:\d+Y)?(?:\d+M)?(?:\d+W)?(?:\d+D)?(?:T(?=\d)(?:\d+H)?(?:\d+M)?(?:\d+S)?)?$/;
 const RATE_LIMIT_REGEX = /^\d+\/(sec|min|hour|day)$/;
-const CRON_FIELD = String.raw`(?:\*|(?:\*\/\d+)|(?:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)(?:\/\d+)?)`;
-const CRON_REGEX = new RegExp(`^${CRON_FIELD}(?: ${CRON_FIELD}){4,5}$`);
 
 export const JobIdSchema = z.string().min(1).max(80).regex(JOB_ID_REGEX, {
   message: "job id must be lowercase alphanumeric with hyphens (e.g., 'notify-patient')",
@@ -17,9 +23,6 @@ export const EventNameSchema = z.string().regex(EVENT_NAME_REGEX, {
     "event name must be dotted snake_case with at least one dot (e.g., 'prescription.verified')",
 });
 
-export const CronExpressionSchema = z.string().regex(CRON_REGEX, {
-  message: "schedule must be a 5- or 6-field crontab expression",
-});
 
 export const Iso8601DurationSchema = z.string().regex(ISO_DURATION_REGEX, {
   message: "duration must be ISO 8601 (e.g., 'PT5M', 'P28D')",
@@ -73,14 +76,56 @@ export const CdcTriggerSchema = z.object({
   operation: z.enum(["insert", "update", "delete", "any"]),
 });
 
-export const JobTriggerSchema = z.discriminatedUnion("kind", [
-  EventTriggerSchema,
-  ScheduledTriggerSchema,
-  DelayedTriggerSchema,
-  UserInvokedTriggerSchema,
-  WorkflowTriggerSchema,
-  CdcTriggerSchema,
-]);
+/**
+ * The trigger, with two declarations the evaluator **cannot serve** refused here rather than at the
+ * `scheduled` member.
+ *
+ * The refinement sits on the union and not on `ScheduledTriggerSchema` because zod 3's
+ * `discriminatedUnion` takes `ZodObject` members only — a `.superRefine()` yields `ZodEffects`, and
+ * passing one makes the union fail to build (and, found while doing it, degrades every reader's
+ * `trigger.kind` to `unknown` rather than erroring at the union itself). So the invariant lives one
+ * level up, which is also where this repo puts its cross-cutting `superRefine` rules.
+ *
+ * The two refusals:
+ *
+ * - **An unresolvable `timezone`.** `cronMatches` falls back to UTC for a zone `Intl` cannot
+ *   resolve, so a job declaring `Erope/London` ran on UTC's schedule in silence — for a month-end
+ *   close in Asia/Tokyo that is nine hours early, every month, with nothing anywhere to look at.
+ *   ADR-0334 refused exactly this at *publication* for workflow timers; a job has no publication
+ *   step, so the parse is the one place that covers every path into a declaration.
+ * - **A cron that can never match.** Crontab syntax lets you write 30 February (`0 0 30 2 *`), and
+ *   the search answers `null` for it — which `scheduledJobsDue` skips, so the job never ran and
+ *   nothing said so. `cronCanEverMatch` asks the parsed sets instead of searching, which separates
+ *   "cannot ever" from "not found", the conflation that hid it.
+ *
+ * Both read **this process's** tzdata and nothing else, which is the honest caveat: a zone added in
+ * a later ICU release resolves on one node and not another, so one manifest can be valid on one
+ * replica and refused on another. Still better than substituting a schedule nobody declared.
+ * Blast radius: all eight scheduled jobs in the seven shipped packs declare `timezone: "UTC"` with a
+ * monthly, daily or hourly cron, so none is affected.
+ */
+export const JobTriggerSchema = z
+  .discriminatedUnion("kind", [
+    EventTriggerSchema,
+    ScheduledTriggerSchema,
+    DelayedTriggerSchema,
+    UserInvokedTriggerSchema,
+    WorkflowTriggerSchema,
+    CdcTriggerSchema,
+  ])
+  .superRefine((value, ctx) => {
+    if (value.kind !== "scheduled") return;
+    for (const defect of scheduledTriggerDefects(value)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [defect === "timezone_unresolvable" ? "timezone" : "cron"],
+        message:
+          defect === "timezone_unresolvable"
+            ? `timezone ${JSON.stringify(value.timezone)} is not resolvable on this runtime; an unresolvable zone is read as UTC, so the job would run at the wrong hour`
+            : `cron ${JSON.stringify(value.cron)} can never match a real calendar date, so the job would never run`,
+      });
+    }
+  });
 export type JobTrigger = z.infer<typeof JobTriggerSchema>;
 
 export const ConcurrencyKeySchema = z

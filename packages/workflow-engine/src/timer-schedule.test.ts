@@ -337,14 +337,38 @@ describe("resolveTimerFireAt — cron_schedule", () => {
     if (!r.ok) expect(r.defect).toBe("cron_expression_unparsable");
   });
 
-  it("refuses an expression with no occurrence inside the search horizon", () => {
-    // 29 February is four years away from 2024-03-01, past the evaluator's ~382-day search.
+  it("schedules a leap-day timer, which the old search horizon could not reach", () => {
+    // This asserted a refusal until the evaluator's step budget learned to skip whole
+    // date-mismatched days: 550,000 minutes is 382 days, so a 29 February was outside it and the
+    // declaration was rejected as `cron_no_occurrence_in_horizon`. The refusal was a symptom of the
+    // search, not a property of the schedule, and a leap-day timer is a legal one.
     const r = resolveTimerFireAt(cron("0 0 29 2 *"), {
       now: new Date("2024-03-01T00:00:00.000Z"),
       variables: {},
     });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.defect).toBe("cron_no_occurrence_in_horizon");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.fireAt).toBe("2028-02-29T00:00:00.000Z");
+  });
+
+  it("refuses a date that can never exist, and says so rather than blaming the horizon", () => {
+    // `cronNextAfter` answers the same `null` for "impossible" and "not found", which is the
+    // conflation that hid the leap-day case. `cronCanEverMatch` is asked first so the two are
+    // distinguishable, and only this one is a declaration defect.
+    for (const expr of ["0 0 30 2 *", "0 0 31 2 *", "0 0 31 4 *"]) {
+      const r = resolveTimerFireAt(cron(expr), { now: NOW, variables: {} });
+      expect(r.ok, expr).toBe(false);
+      if (!r.ok) {
+        expect(r.defect).toBe("cron_never_matches");
+        expect(r.detail).toContain("never match");
+      }
+    }
+  });
+
+  it("still accepts an impossible dom when the dom/dow OR rule saves it", () => {
+    // `31 2` is impossible by date, but with the day-of-week field restricted crontab's rule is OR,
+    // so every Monday in February matches. Refusing it would reject a timer that does fire.
+    const r = resolveTimerFireAt(cron("0 0 31 2 1"), { now: NOW, variables: {} });
+    expect(r.ok).toBe(true);
   });
 
   it("applies crontab(5)'s OR rule when both day fields are restricted", () => {
@@ -394,35 +418,23 @@ describe("resolveNextTimerFireAt", () => {
 });
 
 describe("evaluatorTimezone", () => {
-  it("hands a UTC-equivalent zone over as undefined, selecting the evaluator's UTC field reader", () => {
-    for (const zone of ["UTC", "Etc/UTC", "Etc/GMT", "GMT", "Universal", "Zulu", "Etc/Greenwich"]) {
-      expect(evaluatorTimezone(zone)).toBeUndefined();
+  it("is a pass-through now that the evaluator short-circuits UTC-equivalent zones itself", () => {
+    // It used to map UTC-equivalent names to `undefined` to dodge a 314x penalty from
+    // `Intl.DateTimeFormat` being constructed per stepped minute. That is fixed at the source in
+    // `@crossengin/jobs`, where the formatter is cached and the zone set lives once for every
+    // caller — so a second local copy of that set here would be ADR-0332's
+    // `FEATURE_FLAG_COLUMN_NAMES` drift in a new place. The seam stays because the evaluator takes
+    // `undefined` to mean UTC and a declaration cannot.
+    for (const zone of ["UTC", "Etc/UTC", "GMT", "Europe/London", "America/New_York"]) {
+      expect(evaluatorTimezone(zone), zone).toBe(zone);
     }
   });
 
-  it("does not treat Europe/London as UTC, because BST exists", () => {
-    expect(evaluatorTimezone("Europe/London")).toBe("Europe/London");
-    expect(evaluatorTimezone("America/New_York")).toBe("America/New_York");
-  });
-
-  it("every zone it elides really is UTC at every month of a year", () => {
-    // The substitution is only sound if the two field readers agree, so this asserts it rather than
-    // asserting the list. A zone with any offset or DST transition inside a cron horizon fails here.
-    for (const zone of ["UTC", "Etc/UTC", "Etc/GMT", "GMT", "Universal", "Zulu", "Etc/Greenwich"]) {
-      for (let month = 0; month < 12; month += 1) {
-        const instant = new Date(Date.UTC(2026, month, 15, 13, 45)).toISOString();
-        const asZone = wall(instant, zone);
-        const asUtc = wall(instant, "UTC");
-        expect(asZone, `${zone} @ month ${String(month)}`).toBe(asUtc);
-      }
+  it("gives the same answer for a UTC-equivalent zone as for no zone at all", () => {
+    const from = new Date("2026-01-31T12:00:00.000Z");
+    const bare = cronNextAfter("0 0 31 * *", from)?.toISOString();
+    for (const zone of ["UTC", "Etc/UTC", "GMT", "Etc/GMT", "Universal", "Zulu"]) {
+      expect(cronNextAfter("0 0 31 * *", from, evaluatorTimezone(zone))?.toISOString(), zone).toBe(bare);
     }
-  });
-
-  it("gives the identical answer through both paths", () => {
-    const expr = "0 2 * * *";
-    const from = new Date("2026-05-16T12:00:00.000Z");
-    expect(cronNextAfter(expr, from, undefined)?.toISOString()).toBe(
-      cronNextAfter(expr, from, "UTC")?.toISOString(),
-    );
   });
 });

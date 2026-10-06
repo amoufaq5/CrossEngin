@@ -7,12 +7,20 @@ import {
 } from "@crossengin/access-reviews";
 import { SystemClock, RandomIdGenerator, type Clock, type IdGenerator } from "./clock.js";
 import {
+  completeCampaign,
   dueCampaigns,
+  isCampaignCompletable,
   overdueCampaigns,
   pastGraceCampaigns,
   planNextOccurrence,
   startCampaign,
 } from "./scheduling.js";
+import {
+  compileCampaignEvidence,
+  sealCompiledEvidence,
+  type CompileCampaignEvidenceInput,
+  type CompiledEvidence,
+} from "./evidence-compilation.js";
 import {
   generateItems,
   type GenerateItemsOptions,
@@ -93,6 +101,41 @@ export class AccessReviewRuntime {
     now: Date = this.clock.now(),
   ): readonly AccessReviewItem[] {
     return items.filter((item) => isItemOverdue(item, now));
+  }
+
+  isCampaignCompletable(
+    campaign: AccessReviewCampaign,
+    items: readonly AccessReviewItem[],
+  ): boolean {
+    return isCampaignCompletable(campaign, items);
+  }
+
+  completeCampaign(
+    campaign: AccessReviewCampaign,
+    items: readonly AccessReviewItem[],
+    now: Date = this.clock.now(),
+  ): AccessReviewCampaign {
+    return completeCampaign(campaign, items, now);
+  }
+
+  /**
+   * Compiles and seals a pack in one call, which is the only order the two may be used in: the
+   * digest commits to the compiled figures, so a seal over anything but the record just compiled
+   * would be a digest over figures nobody holds.
+   */
+  compileAndSealEvidence(
+    input: Omit<CompileCampaignEvidenceInput, "now"> & {
+      readonly now?: Date;
+      readonly storageUri?: string;
+    },
+  ): CompiledEvidence {
+    const now = input.now ?? this.clock.now();
+    const compiled = compileCampaignEvidence({ ...input, now });
+    return sealCompiledEvidence({
+      compiled,
+      now,
+      ...(input.storageUri !== undefined ? { storageUri: input.storageUri } : {}),
+    });
   }
 
   planAutoRevocations(

@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import { AccessReviewCampaignSchema } from "@crossengin/access-reviews";
 import { CountingIdGenerator } from "./clock.js";
 import {
+  RESOLVED_ITEM_STATUSES,
   STARTABLE_CAMPAIGN_STATUSES,
   TERMINAL_CAMPAIGN_STATUSES,
+  completeCampaign,
+  isCampaignCompletable,
+  unresolvedItems,
   dueCampaigns,
   isCampaignOverdue,
   isCampaignPastGrace,
@@ -13,7 +17,7 @@ import {
   planNextOccurrence,
   startCampaign,
 } from "./scheduling.js";
-import { makeCampaign } from "./fixtures.js";
+import { makeCampaign, makeItem, UUID } from "./fixtures.js";
 
 const AFTER_START = new Date("2026-01-02T00:00:00.000Z");
 const BEFORE_START = new Date("2025-12-30T00:00:00.000Z");
@@ -187,5 +191,114 @@ describe("planNextOccurrence", () => {
       frequency: "ad_hoc",
     });
     expect(planNextOccurrence(c, AFTER_DEADLINE, ids)).toBeNull();
+  });
+});
+
+describe("completeCampaign", () => {
+  const NOW = new Date("2026-01-20T00:00:00.000Z");
+  const running = () =>
+    makeCampaign({ status: "in_progress", startedAt: "2026-01-01T00:00:00.000Z" });
+  const reviewerState = {
+    reviewerUserId: UUID.reviewer,
+    reviewerKind: "human_user" as const,
+    assignedAt: "2026-01-05T00:00:00.000Z",
+    reminderCount: 0,
+    lastReminderAt: null,
+    escalationLevel: 0,
+  };
+  const resolved = (id: string) =>
+    makeItem({ id, status: "decided", decisionId: "ard_aaaaaaaa", decidedAt: "2026-01-09T00:00:00.000Z" });
+
+  it("names the four statuses nobody is still waiting on", () => {
+    expect([...RESOLVED_ITEM_STATUSES].sort()).toEqual([
+      "auto_revoked",
+      "decided",
+      "deferred_to_next_campaign",
+      "withdrawn",
+    ]);
+  });
+
+  it("treats escalated and exception_pending as unresolved", () => {
+    expect(RESOLVED_ITEM_STATUSES.has("escalated")).toBe(false);
+    expect(RESOLVED_ITEM_STATUSES.has("exception_pending")).toBe(false);
+  });
+
+  it("completes a campaign whose items are all resolved", () => {
+    const done = completeCampaign(running(), [resolved("ari_00000001")], NOW);
+    expect(done.status).toBe("completed");
+    expect(done.completedAt).toBe(NOW.toISOString());
+  });
+
+  it("completes a campaign with no items at all", () => {
+    expect(completeCampaign(running(), [], NOW).status).toBe("completed");
+  });
+
+  it("stamps the item counts from the items it was handed", () => {
+    const done = completeCampaign(
+      running(),
+      [
+        resolved("ari_00000001"),
+        makeItem({ id: "ari_00000002", status: "auto_revoked", autoRevokedAt: "2026-01-11T00:00:00.000Z", autoRevokeReason: "no_reviewer_response" }),
+      ],
+      NOW,
+    );
+    expect(done.totalItems).toBe(2);
+    expect(done.decidedItems).toBe(1);
+    expect(done.autoRevokedItems).toBe(1);
+  });
+
+  it("keeps an already-stamped completedAt rather than moving it", () => {
+    const already = makeCampaign({
+      status: "in_remediation",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      completedAt: "2026-01-15T00:00:00.000Z",
+    });
+    expect(completeCampaign(already, [], NOW).completedAt).toBe("2026-01-15T00:00:00.000Z");
+  });
+
+  it("completes from in_remediation, which the transition map permits", () => {
+    const remediating = makeCampaign({
+      status: "in_remediation",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(completeCampaign(remediating, [], NOW).status).toBe("completed");
+  });
+
+  it("refuses an unresolved item by name", () => {
+    expect(() =>
+      completeCampaign(running(), [makeItem({ id: "ari_00000009", status: "in_review", openedForReviewAt: "2026-01-05T00:00:00.000Z", currentReviewer: reviewerState })], NOW),
+    ).toThrow(/unresolved/);
+  });
+
+  it("refuses a status the transition map forbids", () => {
+    expect(() => completeCampaign(makeCampaign({ status: "scheduled" }), [], NOW)).toThrow(
+      /not a valid transition/,
+    );
+    expect(() =>
+      completeCampaign(makeCampaign({ status: "completed", completedAt: "2026-01-15T00:00:00.000Z" }), [], NOW),
+    ).toThrow(/not a valid transition/);
+  });
+
+  it("isCampaignCompletable agrees with completeCampaign in both directions", () => {
+    expect(isCampaignCompletable(running(), [resolved("ari_00000001")])).toBe(true);
+    expect(
+      isCampaignCompletable(running(), [makeItem({ id: "ari_00000002", status: "pending" })]),
+    ).toBe(false);
+    expect(isCampaignCompletable(makeCampaign({ status: "scheduled" }), [])).toBe(false);
+  });
+
+  it("unresolvedItems lists exactly what blocks the close", () => {
+    const items = [
+      resolved("ari_00000001"),
+      makeItem({ id: "ari_00000002", status: "pending" }),
+      makeItem({ id: "ari_00000003", status: "escalated", openedForReviewAt: "2026-01-05T00:00:00.000Z", currentReviewer: reviewerState }),
+    ];
+    expect(unresolvedItems(items).map((i) => i.id)).toEqual(["ari_00000002", "ari_00000003"]);
+  });
+
+  it("unblocks planNextOccurrence, which could not fire before anything completed", () => {
+    const ids = new CountingIdGenerator();
+    const done = completeCampaign(running(), [], NOW);
+    expect(planNextOccurrence(done, NOW, ids)).not.toBeNull();
   });
 });

@@ -1,4 +1,4 @@
-import { cronNextAfter, parseCron } from "@crossengin/jobs";
+import { cronExpressionCanEverMatch, cronNextAfter, parseCron } from "@crossengin/jobs";
 
 import type { TimerDefinition } from "./definitions.js";
 import { TIMER_KINDS, type TimerKind } from "./timers.js";
@@ -24,6 +24,7 @@ export const TIMER_SCHEDULE_DEFECTS = [
   "absolute_instant_not_in_future",
   "cron_expression_undeclared",
   "cron_expression_unparsable",
+  "cron_never_matches",
   "cron_no_occurrence_in_horizon",
   "business_hours_unschedulable",
 ] as const;
@@ -127,41 +128,28 @@ function refuse(defect: TimerScheduleDefect, detail: string): TimerScheduleResol
 }
 
 /**
- * Zone names that are UTC at every instant: zero offset, no DST, no historical transition inside a
- * cron search horizon. `Europe/London` is **not** one of them (BST), which is the whole reason this
- * is a list and not a prefix match.
+ * The zone to hand the evaluator.
  *
- * It exists for one reason, and it is a measurement rather than a tidiness. `cronNextAfter` reads
- * wall-clock fields by constructing a **new `Intl.DateTimeFormat` on every minute it steps**, and
- * takes that path for any non-`undefined` zone — including the string `"UTC"`, which is
- * `TimerDefinition.timezone`'s default and therefore what nearly every declared timer carries. The
- * same question, asked the same way:
+ * This used to map UTC-equivalent names to `undefined` to dodge a 314x penalty: `cronNextAfter` read
+ * wall-clock fields by constructing a **new `Intl.DateTimeFormat` on every minute it stepped**, and
+ * took that path for any non-`undefined` zone — including the literal `"UTC"`, which is
+ * `TimerDefinition.timezone`'s default and so what nearly every declared timer carries.
  *
- *     cronNextAfter("0 0 31 * *", 2026-01-31T12:00Z)           →  30 ms
- *     cronNextAfter("0 0 31 * *", 2026-01-31T12:00Z, "UTC")    →  9,427 ms
+ * **That is fixed at the source now**, in `packages/jobs/src/cron.ts`: the formatter is cached per
+ * zone for the life of the process, `UTC_EQUIVALENT_ZONES` lives there so *every* caller gets the
+ * short-circuit rather than only this one, and a date-mismatched step skips the whole local day.
+ * Measured on the same question, `cronPrevOnOrBefore("0 0 1 * *", …, "UTC")`: **4,644 ms before,
+ * 2.8 ms after.** So this is a pass-through, kept as a named seam because the declaration's zone and
+ * the evaluator's argument are not the same concept — the evaluator takes `undefined` to mean UTC
+ * and a declaration cannot — and because deleting the seam would scatter that distinction across
+ * three call sites.
  *
- * A 314× penalty for naming the zone a timer would name anyway, paid inside a worker's claim lease.
- * So a UTC-equivalent zone is handed to the evaluator as `undefined`, which selects its
- * `getUTC*`-based field reader — the same answer by construction, and a test asserts the two agree.
- *
- * The underlying defect is the per-step construction and it is not fixable from here: hoisting that
- * formatter is a one-line change in `packages/jobs/src/cron.ts` worth a further 14× on a genuinely
- * zoned expression (5,540 ms → 392 ms over a month of minutes, measured). `JobScheduler` pays it
- * too, on every tick, for every scheduled job that declares a `timezone`.
+ * Its old local name set was also **wrong in both directions** relative to the one in `cron.ts`: it
+ * lacked `Etc/GMT+0`, `Etc/GMT-0`, `Etc/GMT0`, `UCT`, `Etc/UCT`, `Etc/Universal` and `Etc/Zulu`, and
+ * a second copy of a list like that drifting is ADR-0332's `FEATURE_FLAG_COLUMN_NAMES` exactly.
  */
-const UTC_EQUIVALENT_ZONES: ReadonlySet<string> = new Set([
-  "UTC",
-  "Etc/UTC",
-  "Etc/GMT",
-  "Etc/Greenwich",
-  "GMT",
-  "Universal",
-  "Zulu",
-]);
-
-/** The zone to hand the evaluator: `undefined` selects its UTC field reader. */
 export function evaluatorTimezone(timezone: string): string | undefined {
-  return UTC_EQUIVALENT_ZONES.has(timezone) ? undefined : timezone;
+  return timezone;
 }
 
 /**
@@ -286,6 +274,19 @@ function resolveCronOccurrence(
   const parseFailure = cronParseFailure(expression);
   if (parseFailure !== null) {
     return refuse("cron_expression_unparsable", `cronExpression ${JSON.stringify(expression)}: ${parseFailure}`);
+  }
+  // Asked before the search, because the two answers are different facts and `cronNextAfter` returns
+  // the same `null` for both. `0 0 30 2 *` names 30 February and can never fire; `0 0 29 2 *` fires
+  // every four years and **used to be refused here as "no occurrence in horizon"** — the evaluator's
+  // step budget was 382 days of minutes, so a leap day was outside it. The budget now skips whole
+  // date-mismatched days and reaches it (verified: 0.7 ms, `2028-02-29` from a 2026 start), so a
+  // leap-day timer is schedulable and only a genuinely impossible date is refused.
+  if (!cronExpressionCanEverMatch(expression)) {
+    return refuse(
+      "cron_never_matches",
+      `cronExpression ${JSON.stringify(expression)} can never match a real calendar date, ` +
+        `so the timer would never fire`,
+    );
   }
   const next = cronNextAfter(expression, after, evaluatorTimezone(timezone));
   if (next === null) {

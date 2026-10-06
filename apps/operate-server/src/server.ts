@@ -1,4 +1,5 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
+import type { RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
 import { decideRegionRouting, type TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -222,6 +223,12 @@ export interface BuildOperateHttpServerOptions {
    * read, so a `pending_deletion` tenant went on accepting writes into data about to be destroyed.
    */
   readonly tenantStatusGate?: TenantStatusGateOptions;
+  /**
+   * The per-request rate-limit decision maker. Absent ⇒ `buildOperateGateway` installs
+   * `InMemoryRateLimitChecker` at 10,000/window, which is today's behaviour and persists nothing:
+   * `meta.rate_limit_decisions` had a store and no caller, so no deployment has ever written a row.
+   */
+  readonly rateLimitChecker?: RateLimitChecker;
 }
 
 export interface BuiltOperateHttpServer {
@@ -258,6 +265,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.jobInvokeRoles !== undefined ? { jobInvokeRoles: options.jobInvokeRoles as never } : {}),
     ...(options.jobInvokeActionRoles !== undefined ? { jobInvokeActionRoles: options.jobInvokeActionRoles } : {}),
     ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
+    ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   // After every registration and before the first request. The gate goes on the registry rather than

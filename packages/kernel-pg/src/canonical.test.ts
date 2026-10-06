@@ -416,7 +416,13 @@ describe("policy role canonicalization", () => {
     // reading its INSERT-only store rather than its contract — the one place that increment applied
     // its own shape axis the way it said it had not. A drill result is an amendment to an existing
     // record, so the arm is required for the store to be able to complete one.
-    expect(narrowed).toBe(81);
+    //
+    // **82 since ADR-0335**: `meta.tenant_lifecycle_events` gains a `SELECT`-scoped
+    // `_platform_audit_read` arm, which is ADR-0318's argument in the table it applies to most
+    // directly — a lifecycle trail is read *because* the subject no longer exists, so isolation
+    // alone served it only for the readers who do not need it. Verified as a non-owner after a real
+    // deletion: the isolation-only read answered 0 events and the elevated read answered the record.
+    expect(narrowed).toBe(82);
   });
 });
 

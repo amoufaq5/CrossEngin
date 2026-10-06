@@ -142,15 +142,23 @@ export const UserPreferenceMatrixSchema = z
       seen.add(key);
     }
     for (const e of m.entries) {
-      if (
-        e.optedIn === false &&
-        !isCategorySuppressible(e.category) &&
-        e.source === "user_set"
-      ) {
+      // **Every** source, not only `user_set`. The qualifier used to be `e.source === "user_set"`,
+      // which read as "a user may not opt out of a security alert but an administrator may" — and
+      // that cannot be right, because non-suppressibility is a property of the *message*, not of who
+      // is asking. Reproduced before the fix: an entry `{category: "security_alert", optedIn: false,
+      // source: "admin_set"}` parsed, and `computeDispatchEligibility` then answered
+      // `not_opted_in` — a **silently withheld security alert**. `regulatory_requirement` and
+      // `default_policy` did the same.
+      //
+      // The table is empty in every deployment (its first writer landed in this increment), so
+      // tightening this refuses no stored row. A row in that shape now fails the re-parse on read,
+      // and the reader's fail-*open* arm for a non-suppressible category drops it and delivers —
+      // which is the direction that matters for an alert.
+      if (e.optedIn === false && !isCategorySuppressible(e.category)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["entries"],
-          message: `category ${e.category} cannot be opted-out by user`,
+          message: `category ${e.category} cannot be opted out of, by any source`,
         });
         return;
       }
@@ -308,6 +316,15 @@ export const computeDispatchEligibility = (input: {
     input.category,
     input.channel,
   );
+  // The second layer of the rule the comment above already states: a non-suppressible category
+  // "overrides consent". That override existed only on the suppression branch, so a matrix built in
+  // code — or stored before the schema was tightened — could still withhold a security alert here.
+  // Safe because `NON_SUPPRESSIBLE_CATEGORIES` and `REQUIRES_EXPLICIT_OPT_IN` are disjoint, so this
+  // can never send something that needs consent it was never given; a test asserts that, because an
+  // overlap added later is what would turn this line into unconsented mail.
+  if (!optedIn && !isCategorySuppressible(input.category)) {
+    return { eligible: true, reason: "ok", suppressionId: null };
+  }
   if (!optedIn) {
     return { eligible: false, reason: "not_opted_in", suppressionId: null };
   }

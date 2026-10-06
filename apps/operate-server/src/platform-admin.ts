@@ -2,6 +2,9 @@ import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengi
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
+import { actionRequiresFourEyes, type LifecycleAction } from "@crossengin/tenant-lifecycle";
+import { lifecycleEventFor, type PostgresLifecycleEventStore } from "@crossengin/tenant-lifecycle-pg";
+import { z } from "zod";
 
 import {
   CreateTenantInputSchema,
@@ -61,6 +64,18 @@ function emptyTenantStatusCounts(): Record<TenantStatus, number> {
 
 export interface PostgresTenantStoreOptions {
   readonly schema?: string;
+}
+
+/**
+ * A guarded status change that landed: the row as it now stands, and the state it was moved out of.
+ *
+ * The second field is not a convenience. A lifecycle event's `fromState` is a required, non-defaulted
+ * field of the permanent record (ADR-0317's rule), and the only place that knows it is the statement
+ * whose predicate matched it.
+ */
+export interface TenantTransition {
+  readonly tenant: TenantRecord;
+  readonly previousStatus: TenantStatus;
 }
 
 function isoOf(value: unknown): string {
@@ -219,21 +234,48 @@ export class PostgresTenantStore {
    * `from`" on purpose: both mean the caller's premise was wrong, and the caller that needs to tell
    * them apart can read the row. Used by the deletion flow, where an unguarded `setStatus` would let
    * a rejection restore a tenant that a console suspension had meanwhile moved somewhere else.
+   *
+   * **It reports the state it moved the row out of**, because the lifecycle trail's `fromState` is
+   * that state and nothing else can supply it: `RETURNING` answers with the row as it now stands,
+   * and `PENDING_DELETION_SOURCES` has more than one member, so the predicate's candidate list does
+   * not determine which one matched. Read under `FOR UPDATE` in the same transaction as the write,
+   * which is what makes the figure the trail records the same figure the predicate matched — a read
+   * on its own connection would leave a window in which the trail disagrees with the row, and
+   * Postgres has no `RETURNING OLD` before 18 against a floor of 14.
    */
   async transitionStatus(
     id: string,
     to: TenantStatus,
     from: readonly TenantStatus[],
-  ): Promise<TenantRecord | null> {
+  ): Promise<TenantTransition | null> {
     if (from.length === 0) return null;
     const placeholders = from.map((_s, i) => `$${(i + 3).toString()}`).join(", ");
-    const result = await this.conn.query(
-      `UPDATE ${this.table} SET status = $2, updated_at = now()` +
-        ` WHERE id = $1 AND status IN (${placeholders}) RETURNING ${SELECT_COLUMNS}`,
-      [id, to, ...from],
-    );
-    const row = result.rows[0];
-    return row === undefined ? null : this.rowToTenant(row);
+    return this.conn.transaction(async (tx) => {
+      const before = await tx.query<Record<string, unknown>>(
+        `SELECT status FROM ${this.table} WHERE id = $1 FOR UPDATE`,
+        [id],
+      );
+      const previous = before.rows[0];
+      if (previous === undefined) return null;
+      const result = await tx.query(
+        `UPDATE ${this.table} SET status = $2, updated_at = now()` +
+          ` WHERE id = $1 AND status IN (${placeholders}) RETURNING ${SELECT_COLUMNS}`,
+        [id, to, ...from],
+      );
+      const row = result.rows[0];
+      if (row === undefined) return null;
+      // Parsed rather than cast: the column's CHECK still lists the seven states ADR-0334 narrowed
+      // to five, so a row holding `trial` must read as a finding here and not be carried into a
+      // lifecycle event the contract would then refuse one layer later.
+      const previousStatus = String(previous["status"]);
+      if (!(TENANT_STATUSES as readonly string[]).includes(previousStatus)) {
+        throw new Error(
+          `${this.table}.status holds ${JSON.stringify(previousStatus)}, which is not a` +
+            " TENANT_STATUSES member — the column's CHECK is wider than the contract",
+        );
+      }
+      return { tenant: this.rowToTenant(row), previousStatus: previousStatus as TenantStatus };
+    });
   }
 
   async counts(): Promise<TenantStatusCounts> {
@@ -256,11 +298,71 @@ export class PostgresTenantStore {
   }
 }
 
+/**
+ * Which lifecycle action a console transition *is* — a **total map over `TenantStatus`**, keyed on
+ * the target state, so a sixth state is a compile error rather than a console button that records
+ * nothing.
+ *
+ * `null` is a declaration that the console does not reach that state, and it is checked against
+ * `TENANT_STATUS_TRANSITIONS` rather than asserted: no set in that map targets `pending_deletion` or
+ * `deleted`, each for its own reason. `deleted` is the Article 17 flow's terminus. `pending_deletion`
+ * is reached by *verifying* a deletion request — four-eyes, a named verifier, an Article 12(3)
+ * deadline — so a console button that set it would be a second path to the same state under weaker
+ * controls, and `deletion-request-routes` records that transition itself.
+ *
+ * That absence is also what keeps this route four-eyes-free: `actionRequiresFourEyes` demands
+ * approval for `schedule_deletion` under `platform_admin`, which is precisely the pair a
+ * `pending_deletion: "schedule_deletion"` entry would create — and this route collects no approver,
+ * so `lifecycleEventFor` would refuse every such transition. A test pins the implication rather than
+ * the entry, so adding one fails with the reason rather than at the first click.
+ */
+export const CONSOLE_ACTION: Readonly<Record<TenantStatus, LifecycleAction | null>> = Object.freeze({
+  active: "activate",
+  suspended: "suspend",
+  archived: "archive",
+  pending_deletion: null,
+  deleted: null,
+});
+
+/** The console actions that need no approver under `platform_admin` — i.e. all of them, asserted. */
+export function consoleActionsNeedNoApprover(): readonly LifecycleAction[] {
+  return TENANT_STATUSES.map((s) => CONSOLE_ACTION[s])
+    .filter((a): a is LifecycleAction => a !== null)
+    .filter((a) => actionRequiresFourEyes(a, "platform_admin"));
+}
+
+/**
+ * The body of a console status transition. `reason` is **required**, and that is a caller-visible
+ * change: the route took no body at all before.
+ *
+ * `LifecycleEvent.reason` is `z.string().min(1)` with no default, and defaulting it here would put
+ * `"(none given)"` in the permanent record of why a tenant lost access — ADR-0317's silence
+ * deciding what a record says. Required unconditionally rather than only when a trail store is
+ * configured, because an API whose accepted shape depends on deployment wiring is worse than one
+ * that asks for one more field.
+ */
+export const TransitionTenantBodySchema = z
+  .object({ reason: z.string().min(1).max(500) })
+  .strict();
+
 export interface PlatformAdminContext {
   readonly store: PostgresTenantStore;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   /** Roles permitted to manage the platform. Fail-closed: empty ⇒ nobody. */
   readonly adminRoles: ReadonlySet<string>;
+  /**
+   * Where a console transition is recorded as a lifecycle event. Optional, so a deployment without
+   * it still transitions tenants — and the response **says which**, because a trail quietly not
+   * written is indistinguishable from a tenant that never existed.
+   *
+   * Appended **after** the status write, which is the authoritative act, and a failure is reported
+   * rather than thrown: the tenant really is suspended, and a 5xx would say otherwise.
+   */
+  readonly lifecycleEvents?: PostgresLifecycleEventStore;
+  /** Event ids. A UUID, because the column is `UUID`; injectable so a test can name the row. */
+  readonly newEventId?: () => string;
+  readonly clock?: () => Date;
+  readonly onLifecycleError?: (err: unknown, action: LifecycleAction) => void;
 }
 
 function json(status: number, body: unknown): HandlerOutput {
@@ -336,11 +438,73 @@ function buildGetHandler(ctx: PlatformAdminContext): Handler {
   };
 }
 
+/**
+ * Records a console transition on the lifecycle trail. Never fails the request.
+ *
+ * Three answers, not two: `null` is "this deployment keeps no trail", `false` is "it keeps one and
+ * this transition is not in it", `true` is recorded. Collapsing the first two would put back in the
+ * response the confusion the table exists to resolve.
+ *
+ * `fromState` is the status the gate above read and `canTransitionTenant` approved — the same value,
+ * not a second read. The write is a `setStatus` with no source predicate, so a concurrent change
+ * between the two is possible and pre-dates this: the trail then records the transition the console
+ * believed it was making, which is also what the 200 reports.
+ */
+async function recordConsoleTransition(
+  ctx: PlatformAdminContext,
+  input: {
+    readonly tenantId: string;
+    readonly action: LifecycleAction;
+    readonly fromState: TenantStatus;
+    readonly reason: string;
+    readonly actorUserId: string;
+  },
+): Promise<boolean | null> {
+  const store = ctx.lifecycleEvents;
+  if (store === undefined) return null;
+  const at = (ctx.clock ?? ((): Date => new Date()))().toISOString();
+  try {
+    await store.append(
+      lifecycleEventFor({
+        id: (ctx.newEventId ?? ((): string => crypto.randomUUID()))(),
+        tenantId: input.tenantId,
+        action: input.action,
+        fromState: input.fromState,
+        // The console *is* the platform admin acting. None of the three console actions requires an
+        // approver under this trigger, which `consoleActionsNeedNoApprover` asserts — so no approval
+        // is fabricated, and none is silently omitted either.
+        trigger: "platform_admin",
+        occurredAt: at,
+        reason: input.reason,
+        actorUserId: input.actorUserId,
+      }),
+    );
+    return true;
+  } catch (err) {
+    ctx.onLifecycleError?.(err, input.action);
+    console.error(
+      `[platform] lifecycle ${input.action} for ${input.tenantId} not recorded:` +
+        ` ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
+}
+
 /** A status-transition handler (suspend / archive / reactivate) gated on `canTransitionTenant`. */
 function buildTransitionHandler(ctx: PlatformAdminContext, target: TenantStatus): Handler {
-  return async ({ principal, params }) => {
+  return async ({ principal, params, parsedBody }) => {
     const denial = guard(ctx, principal);
     if (denial !== null) return denial;
+    // `guard` has already refused a null principal; narrowing again rather than defaulting the
+    // actor, because `actorUserId` names who did this and a placeholder would be a fabricated one.
+    if (principal === null) return json(401, { error: "authentication_required" });
+    const parsed = TransitionTenantBodySchema.safeParse(parsedBody ?? {});
+    if (!parsed.success) {
+      return json(400, {
+        error: "invalid_request",
+        detail: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
+      });
+    }
     const id = params["id"] ?? "";
     const current = await ctx.store.getById(id);
     if (current === null) return json(404, { error: "tenant_not_found", detail: id });
@@ -352,7 +516,22 @@ function buildTransitionHandler(ctx: PlatformAdminContext, target: TenantStatus)
     }
     const tenant = await ctx.store.setStatus(id, target);
     if (tenant === null) return json(404, { error: "tenant_not_found", detail: id });
-    return json(200, { tenant });
+    const action = CONSOLE_ACTION[target];
+    // Non-null for every state the console can reach, which is a property of `CONSOLE_ACTION` and
+    // `TENANT_STATUS_TRANSITIONS` together rather than of this call site — so a `null` here means
+    // somebody mounted a route to a state the map declares unreachable, and the honest answer is to
+    // leave the trail silent and say so rather than to invent an action for it.
+    const lifecycleRecorded =
+      action === null
+        ? null
+        : await recordConsoleTransition(ctx, {
+            tenantId: id,
+            action,
+            fromState: current.status,
+            reason: parsed.data.reason,
+            actorUserId: principal.principalId,
+          });
+    return json(200, { tenant, lifecycleRecorded });
   };
 }
 

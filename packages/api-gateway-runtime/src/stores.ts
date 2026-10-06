@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import type {
   IdempotencyRecord,
   IncomingRequest,
@@ -108,15 +110,61 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
   }
 }
 
+const DECISION_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz";
+
+/**
+ * A per-instance prefix, because a counter alone is not an id.
+ *
+ * `rld_` + a zero-padded counter made **every** process mint `rld_…0001` first. Harmless while
+ * nothing persisted a decision, and not harmless now: this is the checker `buildOperateGateway`
+ * installs by default, `PipelineExecution.rateLimitDecisionId` carries whatever it minted, and
+ * `PostgresPipelineExecutionStore` writes that column — so two replicas' executions would name one
+ * decision and `GatewayReplayer.rate_limit_decision_not_found` would be unreliable in both
+ * directions. The same defect `PostgresRateLimitChecker` was built with and fixed.
+ *
+ * Deliberately not `hostname():pid` the way a worker id is: that one exists so an operator can find
+ * the process holding a lease, while this one has to be *unique*, and two containers can share a
+ * hostname and a pid.
+ */
+function randomDecisionInstanceId(): string {
+  let out = "";
+  for (const byte of randomBytes(12)) out += DECISION_ALPHABET[byte & 0x1f];
+  return out;
+}
+
 export class InMemoryRateLimitChecker implements RateLimitChecker {
   private readonly buckets: Map<string, { count: number; resetAtMs: number }> = new Map();
   private decisionCounter = 0;
+  private readonly instanceId: string;
   private readonly limit: number;
   private readonly windowSeconds: number;
 
-  constructor(opts: { readonly limit?: number; readonly windowSeconds?: number } = {}) {
+  constructor(
+    opts: {
+      readonly limit?: number;
+      readonly windowSeconds?: number;
+      /** Pinned by a test; a deployment never passes one. 12 lowercase alphanumerics. */
+      readonly instanceId?: string;
+    } = {},
+  ) {
     this.limit = opts.limit ?? 100;
     this.windowSeconds = opts.windowSeconds ?? 60;
+    const instanceId = opts.instanceId ?? randomDecisionInstanceId();
+    if (!/^[a-z0-9]{12}$/.test(instanceId)) {
+      throw new Error(`instanceId must be 12 lowercase alphanumeric characters, got ${JSON.stringify(instanceId)}`);
+    }
+    this.instanceId = instanceId;
+  }
+
+  private nextDecisionId(): string {
+    this.decisionCounter += 1;
+    let n = this.decisionCounter;
+    let counter = "";
+    while (counter.length < 8) {
+      counter = DECISION_ALPHABET[n & 0x1f] + counter;
+      n = n >>> 5;
+    }
+    return `rld_${this.instanceId}${counter}`;
   }
 
   async check(input: RateLimitCheckInput): Promise<RateLimitDecision> {
@@ -128,7 +176,7 @@ export class InMemoryRateLimitChecker implements RateLimitChecker {
       this.buckets.set(bucketKey, bucket);
     }
     bucket.count += 1;
-    const decisionId = `rld_${(++this.decisionCounter).toString().padStart(20, "0")}`;
+    const decisionId = this.nextDecisionId();
     const remaining = Math.max(0, this.limit - bucket.count);
     const resetAt = new Date(bucket.resetAtMs).toISOString();
     if (bucket.count > this.limit) {
@@ -194,6 +242,20 @@ export class InMemoryRouteRegistry implements RouteRegistry {
       }
     }
     return [...versions];
+  }
+
+  /**
+   * Every registered route, so a caller surveying the served surface reads the registry rather than
+   * a list it maintains by hand — `HandlerRegistry.operationIds()`'s reason (ADR-0334), on the other
+   * half of the pair. Deliberately **not** on `RouteRegistry`: `PostgresRouteRegistry` answers
+   * `lookup` from a TTL cache over a table, so enumerating it is a query with a different cost and a
+   * different answer, and an interface method would make every implementor owe one.
+   *
+   * Registration order. The compiled `pathRegex`/`paramNames` are stripped, since they are this
+   * class's own matching state and not part of the declaration.
+   */
+  list(): readonly RouteDefinition[] {
+    return this.routes.map(({ pathRegex: _pathRegex, paramNames: _paramNames, ...route }) => route);
   }
 }
 

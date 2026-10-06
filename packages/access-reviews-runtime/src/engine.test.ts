@@ -283,3 +283,61 @@ describe("CampaignScheduler start/stop", () => {
     expect(onTick).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("AccessReviewRuntime: closing a campaign and sealing its pack", () => {
+  const AT = new Date("2026-03-31T00:00:00.000Z");
+  const runtime = () =>
+    new AccessReviewRuntime({
+      systemActorUserId: UUID.system,
+      clock: new FixedClock(AT),
+      ids: new CountingIdGenerator(),
+    });
+  const running = () =>
+    makeCampaign({ status: "in_progress", startedAt: "2026-01-01T00:00:00.000Z" });
+
+  it("completes a campaign through the engine's own clock", () => {
+    const done = runtime().completeCampaign(running(), []);
+    expect(done.status).toBe("completed");
+    expect(done.completedAt).toBe(AT.toISOString());
+  });
+
+  it("answers isCampaignCompletable in both directions", () => {
+    const r = runtime();
+    expect(r.isCampaignCompletable(running(), [])).toBe(true);
+    expect(r.isCampaignCompletable(makeCampaign({ status: "draft" }), [])).toBe(false);
+  });
+
+  it("compiles and seals in one call, which is the only valid order", () => {
+    const r = runtime();
+    const done = r.completeCampaign(running(), []);
+    const { evidence } = r.compileAndSealEvidence({
+      tenantId: done.tenantId,
+      framework: done.framework,
+      periodStartAt: done.startedAt ?? done.scheduledStartAt,
+      periodEndAt: done.completedAt ?? AT.toISOString(),
+      campaigns: [done],
+      items: [],
+      decisions: [],
+      createdBy: UUID.creator,
+    });
+    expect(evidence.status).toBe("sealed");
+    expect(evidence.sealedSha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(evidence.sealedAt).toBe(AT.toISOString());
+  });
+
+  it("refuses to seal a pack over a campaign that is still running", () => {
+    const r = runtime();
+    expect(() =>
+      r.compileAndSealEvidence({
+        tenantId: UUID.tenant,
+        framework: "soc2_type2",
+        periodStartAt: "2026-01-01T00:00:00.000Z",
+        periodEndAt: "2026-03-31T00:00:00.000Z",
+        campaigns: [running()],
+        items: [],
+        decisions: [],
+        createdBy: UUID.creator,
+      }),
+    ).toThrow(/campaign_unfinished/);
+  });
+});

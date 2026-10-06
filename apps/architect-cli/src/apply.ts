@@ -1,6 +1,5 @@
 import {
   emitMetaBootstrapSql,
-  emitSchemaCreate,
   META_SCHEMA_NAME,
   META_TABLES,
 } from "@crossengin/kernel/bootstrap";
@@ -83,7 +82,15 @@ export async function runApply(
     const applier = new MigrationApplier({
       connection: conn,
       schema: META_SCHEMA_NAME,
-      statements: [emitSchemaCreate(META_SCHEMA_NAME), ...plan.statements],
+      // The plan's own statements, and nothing prepended. `emitSchemaCreate` used to lead this
+      // list and was redundant twice over: `MigrationApplier` calls `ensureMigrationLog` before the
+      // first statement and *its* first DDL is `CREATE SCHEMA IF NOT EXISTS`, and on an empty
+      // database the plan is `emitBootstrapSql`, which already begins with the same statement. The
+      // cost was a report that read as a claim about the schema: on a fully converged database the
+      // plan is empty, so the applier ran exactly that one idempotent statement and printed
+      // `total: 1, executed: 1` — "one change was made" where nothing had changed, which is the
+      // confusion ADR-0331 added the re-plan to remove.
+      statements: [...plan.statements],
       // The plan was computed from the live schema, so every statement in it is needed; the hash
       // log records what ran, not what the database holds, and skipping on it here would leave a
       // dropped object missing.

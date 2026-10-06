@@ -344,18 +344,6 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
 
   /* ----------------------------------------------------------- out_of_band (3) */
   {
-    table: "meta.users",
-    reason: "out_of_band",
-    owner: "kernel",
-    note: "Read by apps/operate-server/src/recipient-resolver.ts (joined to the membership table to resolve an audience) and never written here: the platform has no user-provisioning surface, since SSO and SCIM are contracts-only. Seventy-three catalogued tables carry a RESTRICT foreign key into it, nine of them from tables with live writers and NOT NULL — see the test's cross-check.",
-  },
-  {
-    table: "meta.user_tenant_membership",
-    reason: "out_of_band",
-    owner: "kernel",
-    note: "The other half of the same read: recipient-resolver.ts selects `m.primary_role`/`m.secondary_roles` from it to resolve `role_in_tenant` and `tenant_all_users` audiences. Memberships are seeded with the users, by the same out-of-band provisioning.",
-  },
-  {
     table: "meta.api_keys",
     reason: "out_of_band",
     owner: "api-gateway",
@@ -431,22 +419,6 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
 
   /* ------------------------------------------------------- unwritten_table (29) */
   {
-    table: "meta.access_review_evidence",
-    reason: "unwritten_table",
-    owner: "access-reviews",
-    consequence:
-      "apps/operate-server/src/certification.ts READS this table (`latestSealed(framework)`) and nothing writes it, so the access-review evidence adapter answers null on every call and the certification engine scores that as `no evidence` rather than `this check is not wired` — a framework assessment that is silently missing one of its four real signals.",
-    note: "access-reviews-runtime-pg writes campaigns, items and decisions and stops there. This is the sharpest member of the class: a live reader over a table with no writer.",
-  },
-  {
-    table: "meta.notification_preferences",
-    reason: "unwritten_table",
-    owner: "notifications",
-    consequence:
-      "apps/operate-server/src/recipient-resolver.ts READS it (`preferencesFor`) to build each recipient's `UserPreferenceMatrix`, and nothing writes it — so every user's preferences are the built-in defaults for ever, and a tenant that turns a category off in the UI has nowhere for that to land. ADR-0331 gave read state three HTTP routes; preferences never got theirs.",
-    note: "operate-server writes dispatches, deliveries, digests, suppressions, templates, read states and watermarks. Preferences is the one table in the notification stack with a reader and no writer.",
-  },
-  {
     table: "meta.notification_user_quiet_hours",
     reason: "unwritten_table",
     owner: "notifications",
@@ -469,14 +441,6 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     consequence:
       "A time-boxed exception with a per-reason duration cap cannot be recorded, so the only expressible outcome of a review item is an attestation or a revocation.",
     note: "The same live store writes its three siblings; also in PLATFORM_RECORD_TABLES.",
-  },
-  {
-    table: "meta.feature_flag_targeting_rules",
-    reason: "unwritten_table",
-    owner: "feature-flags",
-    consequence:
-      "`FlagDefinition.targetingRuleIds` is persisted by PostgresFeatureFlagStore as a `ftr_…` id list and the rules those ids name are stored nowhere, so a flag read back from the database cannot be evaluated against its own targeting — the ten rule kinds and the sticky FNV-1a bucketing work only on rules held in memory.",
-    note: "feature-flags-pg writes meta.feature_flags (ADR-0300) and meta.feature_flag_kill_switches. This table is the one its rows point at.",
   },
   {
     table: "meta.feature_flag_evaluations",
@@ -507,16 +471,16 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     reason: "unwritten_table",
     owner: "rate-limiting",
     consequence:
-      "meta.rate_limit_decisions.policy_id is a RESTRICT foreign key into it, and api-gateway-pg's checker hardcodes that column to NULL for exactly this reason — so every persisted rate-limit decision is unable to name the policy it applied.",
-    note: "A live store (meta.rate_limit_decisions) writes a row that points here, which is what makes this a skipped table rather than an unbuilt subsystem.",
+      "A policy's governance lifecycle — the five states, the four-eyes activation, supersedence — cannot be exercised: a limit can be declared and applied but not authored, reviewed or retired through the platform. What a decision row records is the identifier the deployment declared on argv, not a row here.",
+    note: "Deliberate. meta.rate_limit_decisions.policy_id is TEXT carrying the rlp_ id --rate-limit-policy declares, matching meta.gateway_routes.rate_limit_policy_id, so there is no longer a RESTRICT reference into this table to satisfy. A store becomes wanted when meta.rate_limit_exceptions is built, whose policy_id is NOT NULL — and when meta.users has a writer, since created_by is NOT NULL into it.",
   },
   {
     table: "meta.quota_definitions",
     reason: "unwritten_table",
     owner: "rate-limiting",
     consequence:
-      "The same shape one column over: `quota_definition_id` is also a RESTRICT foreign key hardcoded to NULL, so a quota denial does not record which quota was exceeded. Entitlement limits are enforced from the plan catalog instead, which has no `rld_` audit trail.",
-    note: "Sits on `app.platform_config_write` because a hard limit decides what the deployment permits (ADR-0332) — a write arm with no caller.",
+      "A quota is not expressible: entitlement limits are enforced from the plan catalog, which has no `rld_` audit trail, so a quota denial is recorded as denied_quota_exceeded with nothing naming which quota.",
+    note: "meta.rate_limit_decisions.quota_definition_id was dropped rather than re-typed, because unlike a policy an rlq_ id has no declaration site anywhere — no route, no manifest, no contract field carries one — so a TEXT column would have been the same hole in a different type. Sits on `app.platform_config_write` because a hard limit decides what the deployment permits (ADR-0332) — a write arm with no caller.",
   },
   {
     table: "meta.quota_usage",
@@ -540,7 +504,7 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     owner: "rate-limiting",
     consequence:
       "A soft throttle is applied and not recorded, so the `throttled_soft_delayed` outcome is observable only in the decision row the gateway happens to write.",
-    note: "The gateway writes meta.rate_limit_decisions on the same request path.",
+    note: "The gateway writes meta.rate_limit_decisions on the same request path, when --rate-limit-policy is declared; before that flag existed nothing constructed the checker at all.",
   },
   {
     table: "meta.forensic_evidence",
@@ -572,14 +536,6 @@ export const STORELESS_TABLES: readonly StorelessDeclaration[] = Object.freeze([
     owner: "forensics",
     consequence: "An e-discovery request has no handle, so its scope and fulfilment are untracked.",
     note: "Beside the live chain store.",
-  },
-  {
-    table: "meta.tenant_lifecycle_events",
-    reason: "unwritten_table",
-    owner: "tenant-lifecycle",
-    consequence:
-      "The seven-state transition log is empty, so — in PLATFORM_RECORD_TABLES' own words — `without it nothing in the database distinguishes a tenant that was deleted from one that never existed`. The deletion pipeline writes the tombstone and the audit row and not this.",
-    note: "tenant-lifecycle-pg writes meta.tenant_tombstones and meta.gdpr_deletion_requests, both of which were this same class until ADR-0318 and ADR-0321.",
   },
   {
     table: "meta.tenant_data_exports",

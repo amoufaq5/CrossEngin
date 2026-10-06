@@ -1,6 +1,8 @@
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { ExtraGatewayRoute } from "@crossengin/operate-runtime";
+import type { LifecycleAction, TenantLifecycleState } from "@crossengin/tenant-lifecycle";
+import { lifecycleEventFor, type PostgresLifecycleEventStore } from "@crossengin/tenant-lifecycle-pg";
 import { z } from "zod";
 
 /**
@@ -78,8 +80,24 @@ export interface DeletionRequestLike {
  * question for whatever implements this, not for the route.
  */
 export interface TenantStateMover {
-  markPendingDeletion(tenantId: string): Promise<void>;
-  restore(tenantId: string): Promise<void>;
+  markPendingDeletion(tenantId: string): Promise<TenantMoveOutcome>;
+  restore(tenantId: string): Promise<TenantMoveOutcome>;
+}
+
+/**
+ * What one guarded tenant move did, and what it moved *out of*.
+ *
+ * `fromState` is here because the lifecycle trail needs it and nothing else can answer: the route
+ * does not read `meta.tenants`, and re-reading it after the move would be reading the state the move
+ * produced — while reading it before would open a window in which the trail records a source state
+ * the predicate did not match. So the mover, which issued the statement, reports it.
+ *
+ * `moved: false` with `fromState: null` is a **no-match**, not a failure: the tenant was not in one
+ * of the transition's source states. Nothing transitioned, so there is nothing to record.
+ */
+export interface TenantMoveOutcome {
+  readonly moved: boolean;
+  readonly fromState: TenantLifecycleState | null;
 }
 
 /** Structural mirror of a `ReconciliationResult` (ADR-0322, ADR-0323). */
@@ -224,6 +242,23 @@ export interface DeletionRequestRoutesContext {
    * `tenantReadOnly: false` on the 202 is what tells an operator the window is still open.
    */
   readonly tenantState?: TenantStateMover;
+  /**
+   * Where the tenant move is recorded as a lifecycle transition. Optional, like `tenantState`, so a
+   * deployment without it still verifies and rejects — and the response **says which**, because
+   * `meta.tenant_lifecycle_events`' own protection note is that without it nothing in the database
+   * distinguishes a tenant that was deleted from one that never existed. A trail quietly not written
+   * is the defect, so `lifecycleRecorded` is `null` for "this deployment keeps no trail" and `false`
+   * for "it keeps one and this transition is not in it".
+   *
+   * Appended **after** the request's transition and the tenant move, both of which are the
+   * authoritative acts, and a failure here is *reported* rather than thrown: ADR-0320's rule — a
+   * verify that moved the request and could not write its trail has happened, and a 5xx would say
+   * otherwise.
+   */
+  readonly lifecycleEvents?: PostgresLifecycleEventStore;
+  /** Event ids. A UUID, because the column is `UUID`; injectable so a test can name the row. */
+  readonly newEventId?: () => string;
+  readonly onLifecycleError?: (err: unknown, action: LifecycleAction) => void;
   /**
    * Reconciling a stranded request (ADR-0322). Absent ⇒ the two routes are not mounted at all, since
    * a reconciler is needed to serve them.
@@ -487,8 +522,21 @@ function buildVerifyHandler(ctx: DeletionRequestRoutesContext): Handler {
     // The tenant goes read-only here, which is the point of the state existing: between this moment
     // and the runner's commit the tenant is serving data that is about to be destroyed.
     const readOnly = await moveTenant(ctx, "markPendingDeletion", moved.tenantId);
+    // Last, because it is the record of the two acts above and not one of them.
+    const lifecycleRecorded = await recordLifecycle(ctx, {
+      tenantId: moved.tenantId,
+      action: "schedule_deletion",
+      fromState: readOnly.fromState,
+      occurredAt: at,
+      reason: `deletion request ${moved.id} verified`,
+      actorUserId: principal.principalId,
+    });
     // Verified is the queue: nothing here runs the deletion, and a 202 says so.
-    return json(202, { ...requestHandle(moved), tenantReadOnly: readOnly });
+    return json(202, {
+      ...requestHandle(moved),
+      tenantReadOnly: readOnly.claim,
+      lifecycleRecorded,
+    });
   };
 }
 
@@ -502,15 +550,71 @@ async function moveTenant(
   ctx: DeletionRequestRoutesContext,
   method: keyof TenantStateMover,
   tenantId: string,
-): Promise<boolean | null> {
+): Promise<{ readonly claim: boolean | null; readonly fromState: TenantLifecycleState | null }> {
   const mover = ctx.tenantState;
-  if (mover === undefined) return null;
+  if (mover === undefined) return { claim: null, fromState: null };
   try {
-    await mover[method](tenantId);
-    return true;
+    const outcome = await mover[method](tenantId);
+    // `true` through a no-match is the existing claim and stays: the source sets are chosen so the
+    // complement of each already satisfies what `tenantReadOnly` / `tenantRestored` assert. What a
+    // no-match does change is the trail, which has nothing to record — hence `fromState: null`.
+    return { claim: true, fromState: outcome.fromState };
   } catch (err) {
     console.error(
       `[deletion-request] tenant ${method} failed for ${tenantId}: ${messageOf(err)}`,
+    );
+    return { claim: false, fromState: null };
+  }
+}
+
+/**
+ * Appends one lifecycle event for a tenant move that actually happened, and never fails the request.
+ *
+ * Three answers rather than two, following `moveTenant`'s own precedent in this file: `null` is "this
+ * deployment keeps no trail", `false` is "it keeps one and this transition is not in it", `true` is
+ * recorded. Collapsing the first two would reproduce in the response the very confusion the table
+ * exists to resolve.
+ *
+ * `fromState === null` means no row moved, and then there is nothing to record — not a failure, so it
+ * reports `false` beside a `tenantReadOnly` that already explains why.
+ *
+ * The trigger is `customer_request` for both verify and reject: an Article 17 request *is* a data
+ * subject request, and the alternatives that read as more official — `compliance_directive` among
+ * them — are in `PROTECTED_TRIGGERS`, which the contract requires a `relatedIncidentId` for. These
+ * routes hold no incident and must not name a trigger they cannot substantiate.
+ */
+async function recordLifecycle(
+  ctx: DeletionRequestRoutesContext,
+  input: {
+    readonly tenantId: string;
+    readonly action: LifecycleAction;
+    readonly fromState: TenantLifecycleState | null;
+    readonly occurredAt: string;
+    readonly reason: string;
+    readonly actorUserId: string;
+  },
+): Promise<boolean | null> {
+  const store = ctx.lifecycleEvents;
+  if (store === undefined) return null;
+  if (input.fromState === null) return false;
+  try {
+    await store.append(
+      lifecycleEventFor({
+        id: (ctx.newEventId ?? ((): string => crypto.randomUUID()))(),
+        tenantId: input.tenantId,
+        action: input.action,
+        fromState: input.fromState,
+        trigger: "customer_request",
+        occurredAt: input.occurredAt,
+        reason: input.reason,
+        actorUserId: input.actorUserId,
+      }),
+    );
+    return true;
+  } catch (err) {
+    ctx.onLifecycleError?.(err, input.action);
+    console.error(
+      `[deletion-request] lifecycle ${input.action} for ${input.tenantId} not recorded: ${messageOf(err)}`,
     );
     return false;
   }
@@ -567,7 +671,25 @@ function buildRejectHandler(ctx: DeletionRequestRoutesContext): Handler {
     // tenant this flow already made read-only. Restoring is conditional on the tenant actually
     // being in `pending_deletion` — the mover decides that, not this route.
     const restored = await moveTenant(ctx, "restore", moved.tenantId);
-    return json(200, { ...requestHandle(moved), tenantRestored: restored });
+    // `restore` and **not** `cancel_deletion`, which is the action whose name fits and whose target
+    // state does not: `ACTION_TARGET_STATE.cancel_deletion` is `archived`, while a rejected request
+    // returns the tenant to `active` on ADR-0334's stated grounds that routing through `archived`
+    // would cost a tenant their write access for somebody else's mistake. So the action that *means*
+    // "the deletion was cancelled" cannot express what this route does, and `cancel_deletion` is
+    // declared to have no producer rather than being bent to fit.
+    const lifecycleRecorded = await recordLifecycle(ctx, {
+      tenantId: moved.tenantId,
+      action: "restore",
+      fromState: restored.fromState,
+      occurredAt: at,
+      reason: `deletion request ${moved.id} rejected`,
+      actorUserId: principal.principalId,
+    });
+    return json(200, {
+      ...requestHandle(moved),
+      tenantRestored: restored.claim,
+      lifecycleRecorded,
+    });
   };
 }
 

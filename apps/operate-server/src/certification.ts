@@ -16,7 +16,11 @@ import {
   type IdGenerator,
 } from "@crossengin/certification-runtime";
 import { buildPersistentCertificationEngine } from "@crossengin/certification-runtime-pg";
-import { EncryptionApplier, type PgConnection } from "@crossengin/kernel-pg";
+import {
+  EncryptionApplier,
+  scopeFilter,
+  type PgConnection,
+} from "@crossengin/kernel-pg";
 import { PostgresDrReadinessStore } from "@crossengin/dr-runtime-pg";
 import { withTenantContext } from "@crossengin/access-reviews-runtime-pg";
 import {
@@ -132,10 +136,52 @@ export function drReadinessSource(
   };
 }
 
+/**
+ * What an access-review lookup found, with **"looked and found none" kept apart from "could not
+ * look"**.
+ *
+ * Those were one `null` before, and the conflation was the costly half of ADR-0334's finding. The
+ * table had no writer at all, so the adapter answered `null` on every call for every deployment —
+ * and `assessControl` turns an empty evidence list into `not_assessed` with the finding *"no
+ * access_review_campaign evidence supplied"*. That sentence is a claim about the **tenant**: it
+ * reads as *you did not run your access reviews*. The truth was a claim about the **deployment**:
+ * nothing in the build could supply it, so `access.periodic_review` could never be assessed and
+ * `certifiable` was therefore `false` in every report ever produced — a verdict that carried no
+ * information while looking like one. The two call for opposite remedies (run a campaign; ship a
+ * store) and the report could not tell them apart.
+ *
+ * `unscoped` is what survives now that a writer exists: `--certification-config` defaults
+ * `tenantId` to `null` and this table is tenant-isolated with no platform arm, so the default
+ * configuration still cannot look. That is reported rather than inferred — `accessReviewSource`
+ * **throws** `AccessReviewEvidenceUnavailableError` for it, which reaches the existing
+ * `onSourceError` sink and prints as `[certification] evidence source error`, while the control
+ * stays `not_assessed` exactly as before. Fail-closed on the verdict, loud on the cause.
+ */
+export type AccessReviewEvidenceLookup =
+  | { readonly kind: "evidence"; readonly evidence: AccessReviewEvidenceLike }
+  /** The table was read in a real scope and holds no sealed pack for this framework. */
+  | { readonly kind: "none" }
+  /** No scope was in hand, so no answer about any tenant is available. */
+  | { readonly kind: "unscoped"; readonly detail: string };
+
 export interface AccessReviewEvidenceReader {
   latestSealed(
     framework: ComplianceFramework,
-  ): Promise<AccessReviewEvidenceLike | null>;
+  ): Promise<AccessReviewEvidenceLookup>;
+}
+
+/** Raised when the access-review signal could not be gathered at all, as opposed to gathered empty. */
+export class AccessReviewEvidenceUnavailableError extends Error {
+  constructor(
+    readonly framework: ComplianceFramework,
+    detail: string,
+  ) {
+    super(
+      `access-review evidence for ${framework} could not be gathered: ${detail}. ` +
+        `The control stays not_assessed, so the framework cannot be certifiable until this is fixed.`,
+    );
+    this.name = "AccessReviewEvidenceUnavailableError";
+  }
 }
 
 /** The latest sealed access-review evidence pack for the framework (per-framework, tenant-scoped). */
@@ -145,17 +191,37 @@ export function accessReviewSource(
 ): EvidenceSource {
   return {
     async collect(framework, at) {
-      const evidence = await reader.latestSealed(framework);
-      if (evidence === null) return [];
-      return [evidenceFromAccessReviewEvidence(controlId, evidence, at)];
+      const lookup = await reader.latestSealed(framework);
+      if (lookup.kind === "unscoped") {
+        throw new AccessReviewEvidenceUnavailableError(framework, lookup.detail);
+      }
+      if (lookup.kind === "none") return [];
+      return [evidenceFromAccessReviewEvidence(controlId, lookup.evidence, at)];
     },
   };
 }
 
 /**
- * Reads the latest `access_review_evidence` row for a framework within the tenant's RLS context. Only
- * meaningful for a tenant-scoped certification (the evidence table is tenant-isolated); a null tenant
- * yields no rows.
+ * Reads the latest sealed `access_review_evidence` row for a framework.
+ *
+ * Two things were wrong with this read and the second was live.
+ *
+ * It carried **no `tenant_id` predicate**, leaning on `withTenantContext` alone — and a table's
+ * owner bypasses RLS, which is an ordinary deployment. Measured on a fresh cluster as the owner,
+ * with one sealed pack belonging to tenant B and none to tenant A: `latestSealed` answered A's
+ * certification with **B's pack**, and A's SOC 2 report then read `access.periodic_review`
+ * *satisfied* at 100% completion with B's `sealedSha256` as its `detailRef` — a compliance report
+ * citing, as its proof, a digest over another tenant's bundle. As a non-owner the same call
+ * answered `null`. That is ADR-0333's class in the one place where a wrong scalar is a false
+ * compliance claim, and `scopeFilter`'s **strict** spelling is the fix: `tenant_id` is `NOT NULL`
+ * here with a single `ALL`-scope isolation policy and no platform arm, so a scope's rows are a
+ * closed set and there is no platform pack a tenant is meant to be shown.
+ *
+ * And it took **any** status, ordered by `period_end_at` alone. `evidenceFromAccessReviewEvidence`
+ * then reported an unsealed pack as a *deficiency* — so one `draft` row with a later period end
+ * hid the sealed pack behind it and turned a satisfied control into a failing one. The statuses are
+ * filtered to the three `SEALED_EVIDENCE_STATUSES` the assessor accepts, and `evidence_id` is the
+ * tiebreak so the ordering is total.
  */
 export class PostgresAccessReviewEvidenceReader
   implements AccessReviewEvidenceReader
@@ -175,27 +241,49 @@ export class PostgresAccessReviewEvidenceReader
 
   async latestSealed(
     framework: ComplianceFramework,
-  ): Promise<AccessReviewEvidenceLike | null> {
-    if (this.tenantId === null) return null;
-    const row = await withTenantContext(this.conn, this.tenantId, async (tx) => {
+  ): Promise<AccessReviewEvidenceLookup> {
+    const tenantId = this.tenantId;
+    if (tenantId === null) {
+      return {
+        kind: "unscoped",
+        detail:
+          `${this.schema}.access_review_evidence is tenant-scoped (tenant_id is NOT NULL with one ` +
+          `isolation policy and no platform arm) and this certification names no tenant — set ` +
+          `tenantId in --certification-config, or set accessReviews:false to certify without the signal`,
+      };
+    }
+    const scope = scopeFilter(tenantId, 2);
+    const row = await withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<Record<string, unknown>>(
         `SELECT framework, status, sealed_sha256, completion_rate, strong_attestation_rate, control_mappings
          FROM ${this.schema}.access_review_evidence
          WHERE framework = $1
-         ORDER BY period_end_at DESC
+           AND ${scope.sql}
+           AND status IN ('sealed', 'submitted_to_auditor', 'accepted_by_auditor')
+         ORDER BY period_end_at DESC, evidence_id DESC
          LIMIT 1`,
-        [framework],
+        [framework, ...scope.params],
       );
       return result.rows[0];
     });
-    if (row === undefined) return null;
+    if (row === undefined) return { kind: "none" };
     return {
-      framework,
-      status: String(row["status"]),
-      sealedSha256: row["sealed_sha256"] === null ? null : String(row["sealed_sha256"]),
-      completionRate: Number(row["completion_rate"] ?? 0),
-      strongAttestationRate: Number(row["strong_attestation_rate"] ?? 0),
-      controlMappings: toStringArray(row["control_mappings"]),
+      kind: "evidence",
+      evidence: {
+        framework,
+        status: String(row["status"]),
+        sealedSha256:
+          row["sealed_sha256"] === null ? null : String(row["sealed_sha256"]),
+        // `NUMERIC` arrives from node-postgres as a **string** (ADR-0331), so these two have always
+        // needed the coercion; what changed is that a non-finite column now refuses rather than
+        // becoming `0`, which would have read as a 0% completion rate.
+        completionRate: requireRate(row["completion_rate"], "completion_rate"),
+        strongAttestationRate: requireRate(
+          row["strong_attestation_rate"],
+          "strong_attestation_rate",
+        ),
+        controlMappings: toStringArray(row["control_mappings"]),
+      },
     };
   }
 }
@@ -422,6 +510,31 @@ function toStringArray(value: unknown): string[] {
   const raw = typeof value === "string" ? safeParse(value) : value;
   if (!Array.isArray(raw)) return [];
   return raw.filter((v): v is string => typeof v === "string");
+}
+
+/**
+ * A `NUMERIC(5, 4)` column as a rate, refusing rather than defaulting.
+ *
+ * The old `Number(row[...] ?? 0)` turned an unreadable column into `0`, i.e. into a **0% completion
+ * rate** — a figure that fails the control. Fail-closed is right for a verdict and wrong for an
+ * input: a value nobody can read is not evidence of a deficient review, and the throw reaches
+ * `onSourceError` where the row id can be chased.
+ */
+function requireRate(value: unknown, column: string): number {
+  // `Number(null)` is `0` and `Number("")` is `0`, so a finiteness check alone is exactly the hole
+  // the old `?? 0` was: both would have read as a 0% completion rate rather than as unreadable.
+  const n =
+    value === null || value === undefined || value === ""
+      ? Number.NaN
+      : typeof value === "number"
+        ? value
+        : Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(
+      `access_review_evidence.${column} is not a finite number: ${JSON.stringify(value)}`,
+    );
+  }
+  return n;
 }
 
 function toIso(value: unknown): string {

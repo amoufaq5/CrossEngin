@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { matchRoute, type ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerInput } from "@crossengin/api-gateway-runtime";
+import type { PgConnection } from "@crossengin/kernel-pg";
+import type { TenantLifecycleState } from "@crossengin/tenant-lifecycle";
+import { PostgresLifecycleEventStore } from "@crossengin/tenant-lifecycle-pg";
 
 import {
   DELETION_REQUEST_READ_OPERATION,
@@ -21,6 +24,7 @@ import {
   type ReconciliationLike,
   type TombstoneAuditLike,
   type TombstoneAuditPageLike,
+  type TenantMoveOutcome,
 } from "./deletion-request-routes.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -28,6 +32,38 @@ const CALLER = "11111111-1111-1111-1111-111111111111";
 const REQ = "dreq_abcdefgh1234";
 const TOMB = "tomb_aaaabbbbccccdddd";
 const AT = "2026-10-03T13:00:00.000Z";
+
+/** A mover that really moved a row, reporting the state it moved out of — the trail's `fromState`. */
+function moveFrom(fromState: TenantLifecycleState): TenantMoveOutcome {
+  return { moved: true, fromState };
+}
+/** A guarded transition that matched nothing: nothing moved, so there is nothing to record. */
+const NO_MOVE: TenantMoveOutcome = { moved: false, fromState: null };
+
+const EVENT_ID = "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
+
+/**
+ * A fake `PgConnection` that records `{sql, params}` — the repo's offline idiom (ADR-0333's floor).
+ * It cannot know whether a column exists or a policy permits the statement, so these tests assert
+ * what a route *issues*, and the store's own suite plus a live pass cover the rest.
+ */
+function recordingPg(opts: { readonly throws?: boolean } = {}): {
+  readonly conn: PgConnection;
+  readonly statements: Array<{ sql: string; params: readonly unknown[] }>;
+} {
+  const statements: Array<{ sql: string; params: readonly unknown[] }> = [];
+  const conn: PgConnection = {
+    query: (async (sql: string, params?: readonly unknown[]) => {
+      statements.push({ sql, params: params ?? [] });
+      if (opts.throws === true) throw new Error("relation does not exist");
+      return { rows: [], rowCount: 1 };
+    }) as PgConnection["query"],
+    transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => fn(conn)) as PgConnection["transaction"],
+    withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
+    close: (async () => undefined) as PgConnection["close"],
+  };
+  return { conn, statements };
+}
 
 function principal(over: Partial<ResolvedPrincipal> = {}): ResolvedPrincipal {
   return {
@@ -417,8 +453,9 @@ describe("verify", () => {
       tenantState: {
         markPendingDeletion: async (t) => {
           moved.push(t);
+          return moveFrom("active");
         },
-        restore: async () => undefined,
+        restore: async () => NO_MOVE,
       },
     });
     const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
@@ -433,7 +470,7 @@ describe("verify", () => {
         markPendingDeletion: async () => {
           throw new Error("deadlock detected");
         },
-        restore: async () => undefined,
+        restore: async () => NO_MOVE,
       },
     });
     const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
@@ -452,8 +489,9 @@ describe("verify", () => {
         tenantState: {
           markPendingDeletion: async (t) => {
             moved.push(t);
+            return moveFrom("active");
           },
-          restore: async () => undefined,
+          restore: async () => NO_MOVE,
         },
       },
       { transitionReturnsNull: true },
@@ -538,9 +576,10 @@ describe("reject", () => {
     const restored: string[] = [];
     const h = harness({
       tenantState: {
-        markPendingDeletion: async () => undefined,
+        markPendingDeletion: async () => NO_MOVE,
         restore: async (t) => {
           restored.push(t);
+          return moveFrom("pending_deletion");
         },
       },
     });
@@ -553,7 +592,7 @@ describe("reject", () => {
   it("still answers 200 when the restore fails, with tenantRestored: false", async () => {
     const h = harness({
       tenantState: {
-        markPendingDeletion: async () => undefined,
+        markPendingDeletion: async () => NO_MOVE,
         restore: async () => {
           throw new Error("connection terminated");
         },
@@ -1068,5 +1107,136 @@ describe("the tombstone sweep (ADR-0327)", () => {
     const res = await call(h.ctx, SWEEP);
     expect(res.status).toBe(200);
     expect(errors).toEqual([TOMBSTONE_SWEEP_AUDITED_OPERATION]);
+  });
+});
+
+describe("the lifecycle trail (meta.tenant_lifecycle_events)", () => {
+  function withTrail(
+    mover: TenantMoveOutcome,
+    opts: { readonly throws?: boolean } = {},
+  ): {
+    readonly h: Harness;
+    readonly statements: Array<{ sql: string; params: readonly unknown[] }>;
+    readonly errors: string[];
+  } {
+    const pg = recordingPg(opts.throws === true ? { throws: true } : {});
+    const errors: string[] = [];
+    const h = harness({
+      tenantState: {
+        markPendingDeletion: async () => mover,
+        restore: async () => mover,
+      },
+      lifecycleEvents: new PostgresLifecycleEventStore(pg.conn),
+      newEventId: () => EVENT_ID,
+      onLifecycleError: (_err, action): void => {
+        errors.push(action);
+      },
+    });
+    return { h, statements: pg.statements, errors };
+  }
+
+  const insertOf = (
+    statements: Array<{ sql: string; params: readonly unknown[] }>,
+  ): { sql: string; params: readonly unknown[] } | undefined =>
+    statements.find((s) => s.sql.includes("INSERT INTO meta.tenant_lifecycle_events"));
+
+  it("appends schedule_deletion on verify, from the state the mover moved the tenant out of", async () => {
+    const { h, statements } = withTrail(moveFrom("suspended"));
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    expect(res.status).toBe(202);
+    expect(res.body["lifecycleRecorded"]).toBe(true);
+    const insert = insertOf(statements);
+    expect(insert).toBeDefined();
+    const p = insert?.params ?? [];
+    expect(p[0]).toBe(EVENT_ID);
+    expect(p[1]).toBe(TENANT);
+    expect(p[2]).toBe("schedule_deletion");
+    // `suspended` and not a guess from the predicate's candidate list: a suspended tenant whose
+    // deletion is verified transitioned out of `suspended`, and the trail has to say so.
+    expect(p[3]).toBe("suspended");
+    expect(p[4]).toBe("pending_deletion");
+    // `customer_request`, not `compliance_directive`: the latter is a PROTECTED_TRIGGER and the
+    // contract requires a `relatedIncidentId` this route does not hold.
+    expect(p[5]).toBe("customer_request");
+    expect(p[7]).toBe(CALLER);
+    expect(String(p[9])).toContain(REQ);
+  });
+
+  it("appends restore on reject, out of pending_deletion", async () => {
+    const { h, statements } = withTrail(moveFrom("pending_deletion"));
+    const res = await call(h.ctx, REJECT, { parsedBody: { reason: "submitted in error" } });
+    expect(res.status).toBe(200);
+    expect(res.body["lifecycleRecorded"]).toBe(true);
+    const p = insertOf(statements)?.params ?? [];
+    // `restore`, not `cancel_deletion`: ACTION_TARGET_STATE.cancel_deletion is `archived`, and this
+    // route returns the tenant to `active`.
+    expect(p[2]).toBe("restore");
+    expect(p[3]).toBe("pending_deletion");
+    expect(p[4]).toBe("active");
+  });
+
+  it("records the transition after the request's own, so the request is the authoritative act", async () => {
+    const { h, statements } = withTrail(moveFrom("active"));
+    await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    // The request's transition and its audit row are both already done by the time the trail is
+    // touched; the trail is the record of them, not one of them.
+    expect(h.transitions.map((t) => t.to)).toEqual(["verified"]);
+    expect(h.events.map((e) => e.operation)).toEqual([DELETION_REQUEST_VERIFIED_OPERATION]);
+    expect(insertOf(statements)).toBeDefined();
+  });
+
+  it("reports lifecycleRecorded: false and still answers 202 when the append fails", async () => {
+    const { h, errors } = withTrail(moveFrom("active"), { throws: true });
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    // The request moved and the tenant is read-only. A 5xx would report a verification that
+    // happened as one that did not (ADR-0320's rule, as for `tenantRetired`).
+    expect(res.status).toBe(202);
+    expect(res.body["status"]).toBe("verified");
+    expect(res.body["tenantReadOnly"]).toBe(true);
+    expect(res.body["lifecycleRecorded"]).toBe(false);
+    expect(errors).toEqual(["schedule_deletion"]);
+  });
+
+  it("reports lifecycleRecorded: null when no trail store is configured", async () => {
+    const h = harness({
+      tenantState: { markPendingDeletion: async () => moveFrom("active"), restore: async () => NO_MOVE },
+    });
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    // `null` is "this deployment keeps no trail", which is a different fact from a store that was
+    // asked and did not write — the distinction the table itself exists to make.
+    expect(res.body["lifecycleRecorded"]).toBeNull();
+  });
+
+  it("records nothing when the guarded move matched no row", async () => {
+    const { h, statements, errors } = withTrail(NO_MOVE);
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    // No transition happened, so there is none to record — and no error either. `false` says the
+    // store was there and holds nothing for this moment.
+    expect(res.body["lifecycleRecorded"]).toBe(false);
+    expect(insertOf(statements)).toBeUndefined();
+    expect(errors).toEqual([]);
+  });
+
+  it("records nothing when the request's own transition did not land", async () => {
+    const pg = recordingPg();
+    const h = harness(
+      {
+        tenantState: { markPendingDeletion: async () => moveFrom("active"), restore: async () => NO_MOVE },
+        lifecycleEvents: new PostgresLifecycleEventStore(pg.conn),
+        newEventId: () => EVENT_ID,
+      },
+      { transitionReturnsNull: true },
+    );
+    const res = await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    expect(res.status).toBe(409);
+    expect(insertOf(pg.statements)).toBeUndefined();
+  });
+
+  it("issues a plain INSERT, because the trail is append-only", async () => {
+    const { h, statements } = withTrail(moveFrom("active"));
+    await call(h.ctx, VERIFY, { parsedBody: { verificationMethod: "email_link" } });
+    const sql = insertOf(statements)?.sql ?? "";
+    expect(sql.startsWith("INSERT INTO")).toBe(true);
+    expect(sql.toUpperCase()).not.toContain("DO UPDATE");
   });
 });

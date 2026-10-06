@@ -5,6 +5,7 @@ import {
   TARGETING_RULE_KINDS,
   TargetingRuleConditionSchema,
   TargetingRuleSchema,
+  chooseTargetingRule,
   computeStableBucket,
   evaluateTargetingCondition,
   sortRulesByPriority,
@@ -308,5 +309,144 @@ describe("sortRulesByPriority", () => {
     const r2 = { ...base, id: "ftr_c0000001", priority: 100 };
     const sorted = sortRulesByPriority([base, r1, r2]);
     expect(sorted.map((r) => r.priority)).toEqual([10, 50, 100]);
+  });
+});
+
+describe("sortRulesByPriority tiebreak", () => {
+  const base: TargetingRule = {
+    id: "ftr_a0000001",
+    tenantId: null,
+    flagId: "ff_newcheck01",
+    priority: 10,
+    label: "Mid",
+    condition: { kind: "all_users" },
+    servedVariantKey: null,
+    servedValueJson: "true",
+    isExclusion: false,
+    createdAt: "2026-05-15T10:00:00.000Z",
+    createdBy: "22222222-2222-2222-2222-222222222222",
+  };
+
+  it("breaks a priority tie by id, so the order is total", () => {
+    const b = { ...base, id: "ftr_b0000001" };
+    const c = { ...base, id: "ftr_c0000001" };
+    expect(sortRulesByPriority([c, base, b]).map((r) => r.id)).toEqual([
+      "ftr_a0000001",
+      "ftr_b0000001",
+      "ftr_c0000001",
+    ]);
+  });
+
+  it("answers the same order whichever order the rules arrived in", () => {
+    const b = { ...base, id: "ftr_b0000001" };
+    const forward = sortRulesByPriority([base, b]).map((r) => r.id);
+    const reversed = sortRulesByPriority([b, base]).map((r) => r.id);
+    expect(forward).toEqual(reversed);
+  });
+
+  it("still puts a lower priority first regardless of id", () => {
+    const earlier = { ...base, id: "ftr_z0000001", priority: 1 };
+    expect(sortRulesByPriority([base, earlier]).map((r) => r.id)).toEqual([
+      "ftr_z0000001",
+      "ftr_a0000001",
+    ]);
+  });
+});
+
+describe("chooseTargetingRule", () => {
+  const base: TargetingRule = {
+    id: "ftr_a0000001",
+    tenantId: null,
+    flagId: "ff_newcheck01",
+    priority: 50,
+    label: "All",
+    condition: { kind: "all_users" },
+    servedVariantKey: null,
+    servedValueJson: "true",
+    isExclusion: false,
+    createdAt: "2026-05-15T10:00:00.000Z",
+    createdBy: "22222222-2222-2222-2222-222222222222",
+  };
+
+  it("matches nothing for an empty rule set", () => {
+    expect(chooseTargetingRule([], baseContext)).toEqual({ matched: null, excluded: false });
+  });
+
+  it("returns the first matching rule in priority order", () => {
+    const low = { ...base, id: "ftr_b0000001", priority: 10, servedValueJson: '"low"' };
+    expect(chooseTargetingRule([base, low], baseContext).matched?.id).toBe("ftr_b0000001");
+  });
+
+  it("skips a rule whose condition does not match", () => {
+    const miss = {
+      ...base,
+      id: "ftr_c0000001",
+      priority: 1,
+      condition: {
+        kind: "specific_tenants" as const,
+        tenantIds: ["00000000-0000-4000-8000-000000000000"],
+      },
+    };
+    expect(chooseTargetingRule([miss, base], baseContext).matched?.id).toBe("ftr_a0000001");
+  });
+
+  it("reports an exclusion rule as excluded rather than skipping it", () => {
+    const exclusion = { ...base, id: "ftr_d0000001", priority: 1, isExclusion: true };
+    const decision = chooseTargetingRule([exclusion, base], baseContext);
+    expect(decision.matched?.id).toBe("ftr_d0000001");
+    expect(decision.excluded).toBe(true);
+  });
+
+  it("serves the sticky percentage bucket a value falls in", () => {
+    const bucket = computeStableBucket(baseContext.tenantId ?? "", "checkout-v2");
+    const inside = {
+      ...base,
+      id: "ftr_e0000001",
+      condition: {
+        kind: "percentage_bucket" as const,
+        bucketingKey: "tenant_id" as const,
+        salt: "checkout-v2",
+        minBucketInclusive: bucket,
+        maxBucketExclusive: bucket + 1,
+      },
+    };
+    expect(chooseTargetingRule([inside], baseContext).matched?.id).toBe("ftr_e0000001");
+  });
+
+  it("does not match a percentage bucket the value falls outside", () => {
+    const bucket = computeStableBucket(baseContext.tenantId ?? "", "checkout-v2");
+    const outside = {
+      ...base,
+      id: "ftr_f0000001",
+      condition: {
+        kind: "percentage_bucket" as const,
+        bucketingKey: "tenant_id" as const,
+        salt: "checkout-v2",
+        minBucketInclusive: (bucket + 1) % 10_000,
+        maxBucketExclusive: ((bucket + 1) % 10_000) + 1,
+      },
+    };
+    expect(chooseTargetingRule([outside], baseContext).matched).toBeNull();
+  });
+
+  it("is deterministic across a priority tie", () => {
+    const a = { ...base, id: "ftr_a0000001", servedValueJson: '"a"' };
+    const b = { ...base, id: "ftr_b0000001", servedValueJson: '"b"' };
+    expect(chooseTargetingRule([b, a], baseContext).matched?.servedValueJson).toBe(
+      chooseTargetingRule([a, b], baseContext).matched?.servedValueJson,
+    );
+  });
+
+  it("never matches a custom_predicate rule, since nothing evaluates a predicate string", () => {
+    const custom = {
+      ...base,
+      id: "ftr_g0000001",
+      condition: {
+        kind: "custom_predicate" as const,
+        predicate: "tenant.tier == 'enterprise'",
+        description: "enterprise only",
+      },
+    };
+    expect(chooseTargetingRule([custom], baseContext).matched).toBeNull();
   });
 });

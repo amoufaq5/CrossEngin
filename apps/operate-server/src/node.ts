@@ -3,6 +3,11 @@ import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
 
 import type { PipelineExecution } from "@crossengin/api-gateway";
+import {
+  PostgresRateLimitChecker,
+  probeDecisionSchema,
+  surveyRoutePolicies,
+} from "@crossengin/api-gateway-pg";
 import { StripeClient } from "@crossengin/billing-stripe";
 import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
@@ -108,8 +113,11 @@ import {
   DeletionReconciler,
   DeletionRunner,
   PostgresDeletionRequestStore,
+  PostgresLifecycleEventStore,
   PostgresTombstoneStore,
   deleteTenantAtomically,
+  lifecycleTrailGaps,
+  probeLifecycleTrail,
 } from "@crossengin/tenant-lifecycle-pg";
 import {
   DeletionCapabilitiesSchema,
@@ -126,6 +134,22 @@ import {
   type TenantStatusGateOptions,
 } from "./tenant-status-gate.js";
 import { buildTenantStateMover } from "./tenant-state-mover.js";
+import {
+  MEMBERSHIP_GRANTED_OPERATION,
+  MEMBERSHIP_TRANSITIONED_OPERATION,
+  PostgresUserStore,
+  REGISTRY_REFUSED_OPERATION,
+  buildPlatformUserRoutes,
+} from "./platform-users.js";
+import { formatUserFkReadiness, surveyUserFkReadiness } from "./user-fk-readiness.js";
+import {
+  PREFERENCE_ADMIN_OPERATION,
+  PREFERENCE_CLEARED_OPERATION,
+  PREFERENCE_DENIED_OPERATION,
+  PREFERENCE_SET_OPERATION,
+  buildPreferenceRoutes,
+} from "./preference-routes.js";
+import { PostgresNotificationPreferenceStore } from "./preference-store.js";
 import { PostgresTenantManifestStore, manifestSummary } from "./tenant-manifests.js";
 import { buildDesignDesigner, buildDesignProviderFromEnv } from "./ai-design.js";
 import { buildAiDesignRoutes } from "./ai-design-routes.js";
@@ -612,6 +636,39 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       }),
     );
   }
+  // The tenant lifecycle trail. One store for every transition surface — the console, the
+  // synchronous deletion, the asynchronous verify and reject — because they record one tenant's
+  // history and a second instance would be a second schema resolution of the same table.
+  //
+  // Constructed unconditionally under `--store pg`, with **no flag**: a transition the deployment
+  // already performs either leaves a record or does not, and making the record opt-in would be the
+  // thing that made this table empty in every deployment for four phases. `meta.tenant_lifecycle_events`
+  // was declared in Phase 1 and its own `PLATFORM_RECORD_TABLES` comment says why it matters —
+  // without it nothing in the database distinguishes a tenant that was deleted from one that never
+  // existed.
+  const lifecycleEvents = conn !== undefined ? new PostgresLifecycleEventStore(conn, schemaOpt) : null;
+  if (conn !== undefined) {
+    // Not a refusal: ADR-0322's rule, that a surface which degrades rather than refusing has to say
+    // so out loud. The trail degrades to *no record* rather than to a wrong one, so a boot line is
+    // the proportionate response — and `cascades_with_tenant` is the verdict worth shouting, since
+    // under it the record is destroyed by the very deletion it exists to witness.
+    try {
+      const trail = await probeLifecycleTrail(conn, options.schema ?? "meta");
+      if (trail.verdict !== "durable") {
+        console.warn(`[lifecycle] trail is not durable (${trail.verdict}): ${trail.detail}`);
+      }
+    } catch (err) {
+      console.warn(
+        `[lifecycle] trail probe failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // A compile-time census read at boot: an action with no producer is an outcome the trail can
+    // never show, and saying which is the difference between a gap and a silence.
+    const gaps = lifecycleTrailGaps();
+    if (gaps.length > 0) {
+      console.warn(`[lifecycle] actions with no producer: ${gaps.join(", ")}`);
+    }
+  }
   // Platform super-admin: the /v1/platform routes manage the meta.tenants registry (list/create/suspend/
   // archive/reactivate + stats) across all tenants, gated to the configured platform-admin role(s). Enabled
   // by --platform-admin over a pg store.
@@ -621,6 +678,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         store: new PostgresTenantStore(conn),
         principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
         adminRoles: new Set(options.platformAdminRoles),
+        ...(lifecycleEvents !== null ? { lifecycleEvents } : {}),
+        onLifecycleError: (err, action) =>
+          console.error(`[lifecycle] console ${action} not recorded`, err),
       }),
     );
   }
@@ -933,6 +993,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                   ...(req.relatedDeletionRequestId !== undefined
                     ? { relatedDeletionRequestId: req.relatedDeletionRequestId }
                     : {}),
+                  ...(lifecycleEvents !== null
+                    ? {
+                        lifecycle: {
+                          store: lifecycleEvents,
+                          eventId: randomUUID(),
+                          // `customer_request`, not `compliance_directive`: an Article 17 erasure
+                          // *is* a data subject request, and `compliance_directive` is in
+                          // `PROTECTED_TRIGGERS`, which the contract requires a `relatedIncidentId`
+                          // for — a route with none in hand must not name a trigger it cannot
+                          // substantiate.
+                          trigger: "customer_request" as const,
+                          // A constant rather than a request field, because this route collects no
+                          // reason: the act it performs *is* the reason, and `LifecycleEvent.reason`
+                          // is `z.string().min(1)`, so there is nothing to default from.
+                          reason: "article 17 right to erasure",
+                        },
+                      }
+                    : {}),
                 },
               );
               // Forget only on success: a rolled-back deletion left the schema in place, and
@@ -1222,6 +1300,9 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
           submitRoles: new Set(options.deletionRequestSubmitRoles),
           verifyRoles: new Set(options.deletionRequestVerifyRoles),
+          ...(lifecycleEvents !== null ? { lifecycleEvents } : {}),
+          onLifecycleError: (err, action) =>
+            console.error(`[lifecycle] deletion request ${action} not recorded`, err),
           ...(requestReconciler !== undefined ? { reconciler: requestReconciler } : {}),
           ...(options.deletionRequestReconcileRoles.length > 0
             ? { reconcileRoles: new Set(options.deletionRequestReconcileRoles) }
@@ -1487,6 +1568,132 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     }
   }
 
+  // Per-user notification preferences (ADR-0335). The table was read by `preferencesFor` on every
+  // drained dispatch and written by nothing, so every user's preferences were the built-in defaults
+  // for ever and `isPreferenceOptedIn` could only ever answer from an absent entry — which made the
+  // whole consent half of `computeDispatchEligibility` unreachable by construction.
+  if (options.preferenceRoutes) {
+    if (conn === undefined) {
+      console.warn(
+        "[preferences] --preference-routes requires a Postgres store (--store pg); skipping",
+      );
+    } else if (options.preferenceRoles.length === 0) {
+      // Fail-closed and said out loud: the routes would mount and refuse everything, which reads as
+      // the feature being broken rather than as ungranted.
+      console.warn(
+        "[preferences] --preference-routes is on with no --preference-role: every request will be" +
+          " refused",
+      );
+    } else {
+      extraRouteList.push(
+        ...buildPreferenceRoutes({
+          store: new PostgresNotificationPreferenceStore(conn, schemaOpt),
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          allowedRoles: new Set(options.preferenceRoles),
+          adminRoles: new Set(options.preferenceAdminRoles),
+          // Every preference write is recorded, which is where this parts company with read state.
+          // ADR-0331 refused an audit row for a per-notice mark because the row *is* the record;
+          // that is true here too but not sufficient — the row holds only the **current** value, so
+          // a preference flipped off and on again leaves nothing saying it was ever off, and a
+          // consent record whose history cannot be reconstructed is what ADR-0302's rule exists to
+          // prevent.
+          audit: async (event): Promise<void> => {
+            await requireEmitter("--preference-routes").emit(
+              auditEntry({
+                id: randomUUID(),
+                tenantId: event.tenantId,
+                occurredAt: event.at,
+                operation: event.granted
+                  ? event.onBehalf
+                    ? PREFERENCE_ADMIN_OPERATION
+                    : event.optedIn === null
+                      ? PREFERENCE_CLEARED_OPERATION
+                      : PREFERENCE_SET_OPERATION
+                  : PREFERENCE_DENIED_OPERATION,
+                entity: "NotificationPreference",
+                // The **subject**, not the caller: this row's job is to say whose consent moved.
+                entityId: event.subjectUserId,
+                actor: auditActor({ userId: event.principalId }),
+                after: {
+                  category: event.category,
+                  channel: event.channel,
+                  optedIn: event.optedIn,
+                  source: event.source,
+                  onBehalf: event.onBehalf,
+                  granted: event.granted,
+                  roles: event.roles,
+                },
+              }),
+            );
+          },
+        }),
+      );
+      if (options.preferenceAdminRoles.length === 0) {
+        // Not a refusal — the self-service surface is the point and works without it — but worth one
+        // line, because a deployment expecting support staff to fix somebody's preferences gets a
+        // route that is not mounted rather than a 403.
+        console.info("[preferences] no --preference-admin-role: the on-behalf route is not mounted");
+      }
+    }
+  }
+  // The platform user registry (ADR-0335). Neither `meta.users` nor `meta.user_tenant_membership`
+  // had a writer, while 50 catalogued columns reference the former NOT NULL ON DELETE RESTRICT —
+  // ten on tables with a live writer — and every notification audience resolved to the empty set.
+  if (options.platformUserRoutes) {
+    if (conn === undefined) {
+      console.warn(
+        "[platform-users] --platform-user-routes requires a Postgres store (--store pg); skipping",
+      );
+    } else if (options.platformUserRoles.length === 0) {
+      console.warn(
+        "[platform-users] --platform-user-routes is on with no --platform-user-role: every request" +
+          " will be refused",
+      );
+    } else {
+      const emitter = requireEmitter("--platform-user-routes");
+      extraRouteList.push(
+        ...buildPlatformUserRoutes({
+          store: new PostgresUserStore(conn, schemaOpt),
+          principalRoles: buildPrincipalWiring(apiKeys).principalRoles,
+          adminRoles: new Set(options.platformUserRoles),
+          // Required rather than optional: every route here mints a principal or grants it a role
+          // inside a tenant, so it is ADR-0313's privileged-write class without exception.
+          //
+          // `tenantId` is the tenant the act is *about* — null for a bare user write, which is
+          // platform scope since ADR-0331 made the column nullable — and never the caller's: a
+          // platform operator provisions into tenants they are not a member of, so recording their
+          // own tenant would file the grant under the wrong one.
+          audit: async (event): Promise<void> => {
+            await emitter.emit(
+              auditEntry({
+                id: randomUUID(),
+                tenantId: event.tenantId,
+                occurredAt: event.at,
+                operation: event.operation,
+                // A refused row carries the attempted operation in `detail.attempted`, so it is
+                // filed against whichever entity the attempt was about: a reader counting refusals
+                // against their pair needs both on the same entity.
+                entity:
+                  event.operation === MEMBERSHIP_GRANTED_OPERATION ||
+                  event.operation === MEMBERSHIP_TRANSITIONED_OPERATION ||
+                  (event.operation === REGISTRY_REFUSED_OPERATION &&
+                    typeof event.detail["attempted"] === "string" &&
+                    event.detail["attempted"].startsWith("platform.membership"))
+                    ? "UserTenantMembership"
+                    : "User",
+                entityId: event.subjectUserId,
+                actor: auditActor({ userId: event.principalId }),
+                after: { roles: event.roles, ...event.detail },
+              }),
+            );
+          },
+        }),
+      );
+      console.info(
+        `[platform-users] registry routes mounted for roles: ${options.platformUserRoles.join(", ")}`,
+      );
+    }
+  }
   if (options.readStateRoutes) {
     if (conn === undefined) {
       console.warn(
@@ -2185,6 +2392,57 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       );
     }
   }
+  // Unconditional, and deliberately so. ADR-0334's `--tenant-status-gate` survey runs only when
+  // the gate is on, because the gate is what would 403. This finding is a property of the
+  // deployment's own `--api-key` specs and is true whether or not a registry surface is mounted: the
+  // ten stores carrying a NOT NULL `meta.users` reference fail at their first INSERT either way, and
+  // nothing else in the boot path said so.
+  //
+  // Only specs that **name** a principal. A bare `key:role:tenant` resolves as a `service_account`
+  // sharing `DEFAULT_PRINCIPAL_ID` (ADR-0331) and every per-person surface already refuses it, so
+  // listing it would name a row that must *not* be created — provisioning it would undo ADR-0331's
+  // fix by making the shared placeholder satisfy those guards again.
+  if (conn !== undefined) {
+    try {
+      const readiness = await surveyUserFkReadiness(
+        conn,
+        apiKeys.filter((spec) => spec.namesPrincipal).map((spec) => spec.principalId),
+        schemaOpt,
+      );
+      const line = formatUserFkReadiness(readiness);
+      if (line !== null) console.warn(`[platform-users] ${line}`);
+    } catch (err) {
+      // A survey that cannot run must not stop the boot: this is a finding, not a gate.
+      console.warn(
+        `[platform-users] readiness survey failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  // The rate-limit checker. Absent ⇒ `buildOperateGateway` installs `InMemoryRateLimitChecker` at
+  // 10,000/window, which is what every deployment has had: `PostgresRateLimitChecker` existed with
+  // tests and nothing in this binary constructed it, so `meta.rate_limit_decisions` has never held
+  // a row and the sliding window was per-replica and per-restart.
+  let rateLimitChecker: PostgresRateLimitChecker | undefined;
+  if (options.rateLimitPolicies !== null && conn !== undefined) {
+    // Probed **once at boot** rather than lazily on the request path: the remedy for an unpatched
+    // catalog is standing manual SQL an operator runs once, and a per-request error cannot carry
+    // that legibly where a boot line can.
+    const decisionSchema = await probeDecisionSchema(conn);
+    for (const defect of decisionSchema.defects) console.error(`[rate-limit] ${defect}`);
+    if (decisionSchema.remediationSql.length > 0) {
+      console.error(
+        `[rate-limit] run once, as the table owner:\n  ${decisionSchema.remediationSql.join("\n  ")}`,
+      );
+    }
+    // Mounted either way, loudly — ADR-0322's rule rather than a refusal that never fires. The limit
+    // is enforced correctly whether or not the decision row can be written; what is lost is the
+    // record, and refusing here would cost the enforcement to protect its own projection.
+    rateLimitChecker = new PostgresRateLimitChecker({
+      conn,
+      policies: options.rateLimitPolicies,
+      schema: decisionSchema,
+    });
+  }
   // Compose the per-request observers (SLO + metering + audit chain) into one execution sink.
   const executionSinks: ((execution: PipelineExecution) => void)[] = [];
   if (sloEnforcement !== null) executionSinks.push(sloEnforcement.observer.asExecutionSink());
@@ -2196,7 +2454,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           for (const sink of executionSinks) sink(execution);
         }
       : undefined;
-  const { httpServer } = buildOperateHttpServer({
+  const { httpServer, gateway } = buildOperateHttpServer({
     manifest,
     store,
     apiKeys,
@@ -2219,7 +2477,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(jwt !== null ? { jwt } : {}),
     ...(onExecution !== undefined ? { onExecution } : {}),
     ...(tenantStatusGate !== undefined ? { tenantStatusGate } : {}),
+    ...(rateLimitChecker !== undefined ? { rateLimitChecker } : {}),
   });
+  if (rateLimitChecker !== undefined && options.rateLimitPolicies !== null) {
+    const policySurvey = surveyRoutePolicies(options.rateLimitPolicies, gateway.routes.list());
+    // Said before the first request, because an undeclared policy is a *refusal* at request time and
+    // the one thing worse than refusing is refusing without having said it would.
+    for (const finding of policySurvey.undeclared) {
+      console.error(
+        `[rate-limit] route ${finding.operationId} names undeclared policy ${finding.policyId}; every request to it will be refused`,
+      );
+    }
+    if (policySurvey.unusedPolicyIds.length > 0) {
+      console.warn(`[rate-limit] declared and unused: ${policySurvey.unusedPolicyIds.join(", ")}`);
+    }
+    const def = options.rateLimitPolicies.defaultPolicy;
+    console.info(
+      `[rate-limit] ${String(policySurvey.findings.length)} route(s); default ${def.policyId} ` +
+        `(${String(def.limit)}/${String(def.windowSeconds)}s)`,
+    );
+  }
   // The manifest's job declarations, read once. Two readers (the handler registry and the cron
   // scheduler) over two copies of one expression is the `FEATURE_FLAG_COLUMN_NAMES` shape (ADR-0332).
   const manifestJobs = Object.values(manifest.jobs ?? {});
@@ -2421,6 +2698,20 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
               capabilities: input.capabilities,
               attestations: [],
               relatedDeletionRequestId: input.relatedDeletionRequestId,
+              ...(lifecycleEvents !== null
+                ? {
+                    lifecycle: {
+                      store: lifecycleEvents,
+                      eventId: randomUUID(),
+                      trigger: "customer_request" as const,
+                      // Names the request, which is what makes this trail joinable to the handle a
+                      // caller holds — and unlike the synchronous route, this transition's
+                      // `fromState` is `pending_deletion`, so `transitionLegal` is true here and
+                      // false there. The difference is visible in the row rather than inferred.
+                      reason: `deletion request ${input.relatedDeletionRequestId} executed`,
+                    },
+                  }
+                : {}),
             },
           );
           if (outcome.ok) registry()?.forget(input.tenantId);

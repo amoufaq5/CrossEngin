@@ -34,6 +34,9 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
   const [notFound, setNotFound] = useState(false);
   const [acting, setActing] = useState<TenantAction | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Required by the server and recorded in the tenant's permanent lifecycle trail, so there is no
+  // default: every action button stays disabled until an operator has typed one.
+  const [reason, setReason] = useState("");
 
   const load = useCallback(() => {
     setBusy(true);
@@ -51,6 +54,8 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
   useEffect(() => load(), [load]);
 
   async function runAction(action: TenantAction) {
+    const trimmed = reason.trim();
+    if (trimmed === "") return;
     if (action === "archive") {
       if (!confirm("Archive this tenant? Its workspace becomes inaccessible until reactivated.")) return;
     }
@@ -58,8 +63,9 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
     setError(null);
     setNotice(null);
     try {
-      const updated = await setTenantStatus(id, action);
+      const updated = await setTenantStatus(id, action, trimmed);
       setTenant(updated);
+      setReason("");
       setNotice(`Tenant ${action === "reactivate" ? "reactivated" : `${action}d`}.`);
     } catch (e) {
       if (e instanceof PlatformError && e.status === 409) {
@@ -80,6 +86,7 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
   const canReactivate = status === "suspended";
   const canArchive = status === "active" || status === "suspended";
   const hasActions = canSuspend || canReactivate || canArchive;
+  const reasonGiven = reason.trim() !== "";
 
   return (
     <>
@@ -116,10 +123,19 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
             {hasActions && (
               <div className="mb-5 flex flex-wrap items-center gap-2 rounded-xl border border-line bg-white p-4">
                 <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Actions</span>
+                <input
+                  aria-label="Reason for this change"
+                  className="field w-72"
+                  maxLength={500}
+                  placeholder="Reason (required, recorded permanently)"
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  disabled={acting !== null}
+                />
                 {canSuspend && (
                   <button
                     onClick={() => void runAction("suspend")}
-                    disabled={acting !== null}
+                    disabled={acting !== null || !reasonGiven}
                     className="rounded-lg bg-brand-50 px-3 py-1.5 text-sm font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-60"
                   >
                     {acting === "suspend" ? "Suspending…" : "Suspend"}
@@ -128,7 +144,7 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
                 {canReactivate && (
                   <button
                     onClick={() => void runAction("reactivate")}
-                    disabled={acting !== null}
+                    disabled={acting !== null || !reasonGiven}
                     className="rounded-lg bg-emerald-50 px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
                   >
                     {acting === "reactivate" ? "Reactivating…" : "Reactivate"}
@@ -137,7 +153,7 @@ export default function TenantDetailPage({ params }: { params: { id: string } })
                 {canArchive && (
                   <button
                     onClick={() => void runAction("archive")}
-                    disabled={acting !== null}
+                    disabled={acting !== null || !reasonGiven}
                     className="ml-auto rounded-lg bg-brand px-3 py-1.5 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
                   >
                     {acting === "archive" ? "Archiving…" : "Archive"}

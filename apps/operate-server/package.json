@@ -38,6 +38,7 @@
     "@crossengin/ai-providers-local": "workspace:*",
     "@crossengin/ai-providers-openai": "workspace:*",
     "@crossengin/api-gateway": "workspace:*",
+    "@crossengin/api-gateway-pg": "workspace:*",
     "@crossengin/api-gateway-runtime": "workspace:*",
     "@crossengin/auth": "workspace:*",
     "@crossengin/billing": "workspace:*",

@@ -7,6 +7,7 @@ import {
   type GdprLegalBasis,
   type RetentionObligation,
 } from "@crossengin/tenant-lifecycle";
+import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 /**
  * `meta.gdpr_deletion_requests` — the request a deletion answers, and the handle a caller holds while
@@ -211,25 +212,38 @@ export class PostgresDeletionRequestStore {
       ...(input.notes !== undefined ? { notes: input.notes } : {}),
     });
 
-    await this.conn.query(
-      `INSERT INTO ${this.table} (request_id, tenant_id, subject_identifier, legal_basis, status,
+    // Scoped, and in a transaction so the scope survives to the statement it is for.
+    //
+    // This was the defect, and it is ADR-0321's store rather than this increment's: the only policy
+    // on `meta.gdpr_deletion_requests` with a `WITH CHECK` is the isolation one (the platform arm is
+    // `SELECT`-scoped, ADR-0332), and this write set no tenant context — so as a non-owner role
+    // every submission raised `42501 new row violates row-level security policy` and the whole
+    // asynchronous Article 17 flow was unreachable outside an owner connection. The reads were fine,
+    // which is what hid it: they elevate through `app.platform_audit`, so an operator could list
+    // requests and never create one. Observed live; `set_config` is transaction-local, so without
+    // the wrapping transaction it would be discarded before the INSERT it was set for.
+    await this.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [candidate.tenantId]);
+      await tx.query(
+        `INSERT INTO ${this.table} (request_id, tenant_id, subject_identifier, legal_basis, status,
          submitted_at, submitted_by, deadline_at, retention_obligations, retained_data_categories, notes)
        VALUES ($1, $2::uuid, $3, $4, $5, $6::timestamptz, $7, $8::timestamptz, $9::jsonb, $10::jsonb, $11)
        ON CONFLICT (request_id) DO NOTHING`,
-      [
-        candidate.id,
-        candidate.tenantId,
-        candidate.subjectIdentifier,
-        candidate.legalBasis,
-        candidate.status,
-        candidate.submittedAt,
-        candidate.submittedBy,
-        candidate.deadlineAt,
-        JSON.stringify(candidate.retentionObligations),
-        JSON.stringify(candidate.retainedDataCategories),
-        candidate.notes ?? null,
-      ],
-    );
+        [
+          candidate.id,
+          candidate.tenantId,
+          candidate.subjectIdentifier,
+          candidate.legalBasis,
+          candidate.status,
+          candidate.submittedAt,
+          candidate.submittedBy,
+          candidate.deadlineAt,
+          JSON.stringify(candidate.retentionObligations),
+          JSON.stringify(candidate.retainedDataCategories),
+          candidate.notes ?? null,
+        ],
+      );
+    });
     const stored = await this.read(candidate.id);
     if (stored === null) {
       throw new DeletionRequestRefused("not_found", `request ${candidate.id} vanished after insert`);
@@ -373,12 +387,19 @@ export class PostgresDeletionRequestStore {
     }
 
     params.push(current.status);
-    const result = await this.conn.query<Record<string, unknown>>(
-      `UPDATE ${this.table} SET ${sets.join(", ")}
+    // The same scope the submit needs, from the row this transition already read — so the scope is a
+    // fact about the request rather than something the caller supplies. The in-predicate status
+    // guard stays exactly as it was: the row is the lock (ADR-0321), and RLS is a second fence
+    // beside it, not a replacement.
+    const result = await this.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [current.tenantId]);
+      return tx.query<Record<string, unknown>>(
+        `UPDATE ${this.table} SET ${sets.join(", ")}
         WHERE request_id = $1 AND status = $${params.length.toString()}
         RETURNING ${REQUEST_COLUMNS.join(", ")}`,
-      params,
-    );
+        params,
+      );
+    });
     const row = result.rows[0];
     // Null means another worker moved it between the read and the write. The caller treats that as
     // "not mine", never as an error.

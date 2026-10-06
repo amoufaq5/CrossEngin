@@ -7,6 +7,7 @@ import {
   REQUEST_COLUMNS,
   rowToDeletionRequest,
 } from "./deletion-request-store.js";
+import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
 const REQ = "dreq_abcdefgh1234";
@@ -153,6 +154,33 @@ describe("submit", () => {
     expect(insert?.sql).toContain("::jsonb");
   });
 
+  it("scopes the insert to the request's tenant, inside a transaction, before the INSERT", async () => {
+    // The defect, observed live as a non-owner role: `gdpr_deletion_requests_isolation` is the only
+    // policy with a `WITH CHECK` (the platform arm is SELECT-scoped), so an unscoped INSERT raised
+    // 42501 and the whole asynchronous Article 17 flow was unreachable. The reads elevate through
+    // `app.platform_audit` and worked, which is what hid it.
+    //
+    // Three things are asserted, each of which alone would leave the fix broken: the scope is set,
+    // it names the *request's* tenant, and it is inside the transaction that carries the INSERT —
+    // `set_config(…, true)` is transaction-local, so a bare `conn.query` would discard it first.
+    const { conn, calls } = fakePg([rowOf({ status: "submitted", verified_at: null, verified_by: null })]);
+    await new PostgresDeletionRequestStore(conn).submit({
+      requestId: REQ,
+      tenantId: TENANT,
+      subjectIdentifier: "subject@example.test",
+      legalBasis: "article_17_right_to_erasure",
+      submittedBy: "subject@example.test",
+      submittedAt: "2026-10-01T00:00:00.000Z",
+      deadlineAt: "2026-10-28T00:00:00.000Z",
+    });
+    const scopeAt = calls.findIndex((c) => c.sql === SET_TENANT_CONTEXT_SQL);
+    const insertAt = calls.findIndex((c) => c.sql.startsWith("INSERT INTO"));
+    expect(scopeAt).toBeGreaterThanOrEqual(0);
+    expect(insertAt).toBeGreaterThan(scopeAt);
+    expect(calls[scopeAt]?.params).toEqual([TENANT]);
+    expect(SET_TENANT_CONTEXT_SQL).toContain(", true)");
+  });
+
   it("refuses an id the column's CHECK would reject", async () => {
     const { conn, sql } = fakePg();
     const err = await new PostgresDeletionRequestStore(conn)
@@ -273,6 +301,10 @@ describe("transition", () => {
     // Two schedulers reading `verified` would both pass a pre-check; only the one whose predicate
     // still matches may proceed. The row is the lock.
     expect(update?.sql).toContain("WHERE request_id = $1 AND status = $");
+    // And the scope comes from the row this transition already read, so RLS is a second fence
+    // beside the status guard rather than a replacement for it.
+    const scope = calls.find((c) => c.sql === SET_TENANT_CONTEXT_SQL);
+    expect(scope?.params).toEqual([TENANT]);
     expect(update?.params[update.params.length - 1]).toBe("verified");
   });
 

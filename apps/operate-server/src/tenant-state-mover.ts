@@ -4,8 +4,9 @@ import {
   type TenantLifecycleState,
 } from "@crossengin/tenant-lifecycle";
 
-import type { TenantStateMover } from "./deletion-request-routes.js";
-import type { TenantRecord, TenantStatus } from "./platform-tenants.js";
+import type { TenantMoveOutcome, TenantStateMover } from "./deletion-request-routes.js";
+import type { TenantTransition } from "./platform-admin.js";
+import type { TenantStatus } from "./platform-tenants.js";
 
 /** The subset of `PostgresTenantStore` the mover writes through. */
 export interface TenantStatusWriter {
@@ -13,7 +14,7 @@ export interface TenantStatusWriter {
     id: string,
     to: TenantStatus,
     from: readonly TenantStatus[],
-  ): Promise<TenantRecord | null>;
+  ): Promise<TenantTransition | null>;
 }
 
 /**
@@ -92,9 +93,16 @@ export function buildTenantStateMover(
     tenantId: string,
     to: TenantLifecycleState,
     from: readonly TenantLifecycleState[],
-  ): Promise<void> => {
+  ): Promise<TenantMoveOutcome> => {
     const moved = await store.transitionStatus(tenantId, to, from);
-    if (moved === null) opts.onNoMatch?.({ tenantId, to, from });
+    if (moved === null) {
+      opts.onNoMatch?.({ tenantId, to, from });
+      // `fromState: null` and not a guess from `from`: the lifecycle trail records a transition that
+      // happened, and on a no-match none did. A fabricated source state would put a transition in
+      // the permanent record that the row never made.
+      return { moved: false, fromState: null };
+    }
+    return { moved: true, fromState: moved.previousStatus };
   };
   return {
     markPendingDeletion: (tenantId) => move(tenantId, "pending_deletion", PENDING_DELETION_SOURCES),

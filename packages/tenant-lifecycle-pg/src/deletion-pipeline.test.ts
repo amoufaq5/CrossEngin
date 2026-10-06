@@ -14,6 +14,7 @@ import {
   isAnchoredByChain,
   type SchemaEraserWithin,
 } from "./deletion-pipeline.js";
+import { PostgresLifecycleEventStore } from "./lifecycle-event-store.js";
 import { RETAINED_SHARED_TABLES } from "./shared-table-erasure.js";
 import { PostgresTombstoneStore, type TombstoneAnchorer } from "./tombstone-store.js";
 
@@ -63,14 +64,33 @@ function harness(
      * is the retention being claimed).
      */
     readonly remaining?: Readonly<Record<string, number>>;
+    /**
+     * What `meta.tenants.status` holds, for the lifecycle event's `fromState`. `null` means the row
+     * is absent, which is the refusal rather than a substituted state.
+     */
+    readonly tenantStatus?: string | null;
+    readonly lifecycleInsertThrows?: boolean;
   } = {},
 ): Harness {
   const calls: { sql: string; params: readonly unknown[] }[] = [];
   const conn: PgConnection = {
     query: (async (sql: string, params?: readonly unknown[]) => {
       calls.push({ sql, params: params ?? [] });
+      if (
+        opts.lifecycleInsertThrows === true &&
+        sql.startsWith("INSERT INTO") &&
+        sql.includes("tenant_lifecycle_events")
+      ) {
+        throw new Error("lifecycle insert exploded");
+      }
       if (opts.insertThrows === true && sql.startsWith("INSERT INTO")) {
         throw new Error("insert exploded");
+      }
+      if (sql.startsWith("SELECT status FROM")) {
+        const status = opts.tenantStatus;
+        return status === undefined || status === null
+          ? { rows: [], rowCount: 0 }
+          : { rows: [{ status }], rowCount: 1 };
       }
       if (sql.includes("row_security_active")) {
         const requested = (params?.[1] ?? []) as readonly string[];
@@ -587,5 +607,207 @@ describe("isAnchoredByChain", () => {
     if (!out.ok) return;
     expect(isAnchoredByChain({ ...out.stored, chainEntryHash: null })).toBe(false);
     expect(isAnchoredByChain({ ...out.stored, chainEntryHash: "e".repeat(64) })).toBe(false);
+  });
+});
+
+/**
+ * The `… -> deleted` transition, written inside the same transaction as the erasure and the proof.
+ *
+ * What these pin is the *ordering*, which is the load-bearing part: the state is read before the
+ * first destructive statement (so an unresolvable one is a returned refusal), and the event is
+ * appended after the tombstone (so a trail never points at a proof the assembler refused).
+ */
+describe("the lifecycle event", () => {
+  const LIFECYCLE_EVENT_ID = "0193a0f1-9999-7888-8777-666655554444";
+
+  function lifecycleOf(
+    store: PostgresLifecycleEventStore,
+    over: Record<string, unknown> = {},
+  ): NonNullable<Parameters<typeof deleteTenantAtomically>[3]["lifecycle"]> {
+    return {
+      store,
+      eventId: LIFECYCLE_EVENT_ID,
+      trigger: "customer_request",
+      reason: "article 17 right to erasure",
+      ...over,
+    } as NonNullable<Parameters<typeof deleteTenantAtomically>[3]["lifecycle"]>;
+  }
+
+  it("is not written when no lifecycle block is supplied, and says so", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // Reported rather than assumed: a trail that is silently not written is indistinguishable from
+    // a tenant that never existed, which is this table's whole purpose.
+    expect(out.lifecycleEvent).toBeNull();
+    expect(h.sql().some((s) => s.includes("tenant_lifecycle_events"))).toBe(false);
+  });
+
+  it("records the transition with fromState read from meta.tenants", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: "pending_deletion" });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ lifecycle: lifecycleOf(events) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.lifecycleEvent).toEqual({
+      id: LIFECYCLE_EVENT_ID,
+      fromState: "pending_deletion",
+      toState: "deleted",
+      transitionLegal: true,
+    });
+  });
+
+  it("reads the tenant state before the first destructive statement", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: "pending_deletion" });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ lifecycle: lifecycleOf(events) }),
+    );
+    const statusAt = h.sql().findIndex((s) => s.startsWith("SELECT status FROM"));
+    const firstDelete = h.sql().findIndex((s) => s.startsWith("WITH deleted AS (DELETE FROM"));
+    expect(statusAt).toBeGreaterThanOrEqual(0);
+    expect(firstDelete).toBeGreaterThan(statusAt);
+  });
+
+  it("appends the event after the tombstone, in the same transaction", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: "pending_deletion" });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ lifecycle: lifecycleOf(events) }),
+    );
+    const sql = h.sql();
+    const tombstoneAt = sql.findIndex((s) => s.includes("tenant_tombstones"));
+    const eventAt = sql.findIndex((s) => s.includes("tenant_lifecycle_events"));
+    expect(tombstoneAt).toBeGreaterThanOrEqual(0);
+    expect(eventAt).toBeGreaterThan(tombstoneAt);
+    // One transaction, and it committed.
+    expect(sql.filter((s) => s === "BEGIN")).toHaveLength(1);
+    expect(sql[sql.length - 1]).toBe("COMMIT");
+  });
+
+  it("returns a refusal — destroying nothing — when the tenant row is absent", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: null });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ lifecycle: lifecycleOf(events) }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals[0]?.stage).toBe("input");
+    expect(out.refusals[0]?.reason).toBe("tenant_state_unresolvable");
+    // The refusal is a *return*, so nothing was deleted and nothing was dropped.
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS (DELETE FROM"))).toBe(false);
+    expect(h.sql().some((s) => s.startsWith("DROP SCHEMA"))).toBe(false);
+  });
+
+  it("flags active -> deleted as an illegal transition and records it anyway", async () => {
+    // The synchronous deletion route still deletes straight from `active`: ADR-0334 moved the
+    // tenant to `pending_deletion` on the asynchronous route's verify only. Recording it silently
+    // would hide the gap; refusing it would drop the only record of a deletion that happened.
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: "active" });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ lifecycle: lifecycleOf(events) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.lifecycleEvent?.fromState).toBe("active");
+    expect(out.lifecycleEvent?.transitionLegal).toBe(false);
+    expect(h.sql().some((s) => s.includes("tenant_lifecycle_events"))).toBe(true);
+  });
+
+  it("rolls the whole deletion back when the event cannot be written", async () => {
+    // The opposite of ADR-0320's `tenantRetired: false`: nothing has committed yet, so a failed
+    // append must not leave a destruction whose trail the caller was told would exist.
+    const h = harness(
+      {},
+      { sharedRows: SHARED_ROWS, tenantStatus: "pending_deletion", lifecycleInsertThrows: true },
+    );
+    const events = new PostgresLifecycleEventStore(h.conn);
+    await expect(
+      deleteTenantAtomically(h.conn, h.store, h.erase, inputOf({ lifecycle: lifecycleOf(events) })),
+    ).rejects.toThrow(/lifecycle insert exploded/);
+    expect(h.sql()).toContain("ROLLBACK");
+    expect(h.sql()).not.toContain("COMMIT");
+  });
+
+  it("carries the executor and the approver, which the tombstone store already forced to differ", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: "pending_deletion" });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ lifecycle: lifecycleOf(events) }),
+    );
+    const insert = h.calls.find(
+      (c) => c.sql.startsWith("INSERT INTO") && c.sql.includes("tenant_lifecycle_events"),
+    );
+    expect(insert?.params).toContain(ALICE);
+    expect(insert?.params).toContain(BOB);
+    // `execute_deletion` always requires four-eyes approval, by contract.
+    expect(insert?.params).toContain(true);
+  });
+
+  it("refuses the whole deletion when the event id is not a uuid", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: "pending_deletion" });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    await expect(
+      deleteTenantAtomically(
+        h.conn,
+        h.store,
+        h.erase,
+        inputOf({ lifecycle: lifecycleOf(events, { eventId: "evt_1" }) }),
+      ),
+    ).rejects.toThrow(/must be a uuid/);
+    expect(h.sql()).toContain("ROLLBACK");
+  });
+
+  it("requires an incident id for a protected trigger, and refuses without one", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: "pending_deletion" });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    await expect(
+      deleteTenantAtomically(
+        h.conn,
+        h.store,
+        h.erase,
+        inputOf({ lifecycle: lifecycleOf(events, { trigger: "compliance_directive" }) }),
+      ),
+    ).rejects.toThrow(/relatedIncidentId/);
+  });
+
+  it("accepts a protected trigger that names its incident", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, tenantStatus: "pending_deletion" });
+    const events = new PostgresLifecycleEventStore(h.conn);
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({
+        lifecycle: lifecycleOf(events, {
+          trigger: "compliance_directive",
+          relatedIncidentId: "INC-2026-0042",
+        }),
+      }),
+    );
+    expect(out.ok).toBe(true);
   });
 });

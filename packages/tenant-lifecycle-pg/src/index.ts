@@ -1,3 +1,5 @@
+export * from "./tenant-context.js";
+export * from "./lifecycle-event-store.js";
 export * from "./tombstone-store.js";
 export * from "./shared-table-erasure.js";
 export * from "./deletion-pipeline.js";

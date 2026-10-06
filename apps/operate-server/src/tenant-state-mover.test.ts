@@ -9,6 +9,7 @@ import {
   buildTenantStateMover,
   type TenantStatusWriter,
 } from "./tenant-state-mover.js";
+import type { TenantTransition } from "./platform-admin.js";
 import type { TenantRecord, TenantStatus } from "./platform-tenants.js";
 
 const TENANT = "11111111-1111-4111-8111-111111111111";
@@ -28,8 +29,15 @@ function record(status: TenantStatus): TenantRecord {
   };
 }
 
+/**
+ * A writer that reports a landed transition out of `previousStatus`, or `null` for a no-match.
+ *
+ * The previous state is a *parameter* of the fake rather than derived from the record it returns,
+ * because that is the asymmetry the real store has: `RETURNING` answers with the row as it now
+ * stands, so the state the predicate matched has to be carried separately or it is lost.
+ */
 function writer(
-  result: TenantRecord | null,
+  result: TenantTransition | null,
 ): TenantStatusWriter & {
   calls: { id: string; to: TenantStatus; from: readonly TenantStatus[] }[];
 } {
@@ -41,6 +49,10 @@ function writer(
       return result;
     },
   };
+}
+
+function landed(to: TenantStatus, previousStatus: TenantStatus): TenantTransition {
+  return { tenant: record(to), previousStatus };
 }
 
 describe("source sets", () => {
@@ -80,7 +92,7 @@ describe("source sets", () => {
 
 describe("buildTenantStateMover", () => {
   it("marks pending_deletion with the derived source set in the predicate", async () => {
-    const store = writer(record("pending_deletion"));
+    const store = writer(landed("pending_deletion", "active"));
     await buildTenantStateMover(store).markPendingDeletion(TENANT);
     expect(store.calls).toEqual([
       { id: TENANT, to: "pending_deletion", from: ["active", "suspended", "archived"] },
@@ -88,7 +100,7 @@ describe("buildTenantStateMover", () => {
   });
 
   it("restores to active only from pending_deletion", async () => {
-    const store = writer(record("active"));
+    const store = writer(landed("active", "pending_deletion"));
     await buildTenantStateMover(store).restore(TENANT);
     expect(store.calls).toEqual([
       { id: TENANT, to: "active", from: ["pending_deletion"] },
@@ -97,7 +109,30 @@ describe("buildTenantStateMover", () => {
 
   it("does not throw when nothing matched — the premise was wrong, not broken", async () => {
     const store = writer(null);
-    await expect(buildTenantStateMover(store).restore(TENANT)).resolves.toBeUndefined();
+    await expect(buildTenantStateMover(store).restore(TENANT)).resolves.toEqual({
+      moved: false,
+      fromState: null,
+    });
+  });
+
+  it("reports the state it moved the tenant out of, so the trail's fromState is not a guess", async () => {
+    // The whole reason `transitionStatus` reports a previous state: `PENDING_DELETION_SOURCES` has
+    // three members, so the predicate's candidate list does not say which one matched, and a
+    // lifecycle event's `fromState` is a required field of a permanent record.
+    const store = writer(landed("pending_deletion", "suspended"));
+    await expect(buildTenantStateMover(store).markPendingDeletion(TENANT)).resolves.toEqual({
+      moved: true,
+      fromState: "suspended",
+    });
+  });
+
+  it("reports fromState: null on a no-match rather than guessing from the source set", async () => {
+    // Even for `restore`, whose source set is a singleton and so would *look* inferable: nothing
+    // moved, and a fabricated source state would put a transition in the trail the row never made.
+    await expect(buildTenantStateMover(writer(null)).restore(TENANT)).resolves.toEqual({
+      moved: false,
+      fromState: null,
+    });
   });
 
   it("reports a no-match through onNoMatch with the attempted transition", async () => {
@@ -113,7 +148,7 @@ describe("buildTenantStateMover", () => {
 
   it("does not report a no-match when the row moved", async () => {
     const onNoMatch = vi.fn();
-    await buildTenantStateMover(writer(record("active")), { onNoMatch }).restore(TENANT);
+    await buildTenantStateMover(writer(landed("active", "pending_deletion")), { onNoMatch }).restore(TENANT);
     expect(onNoMatch).not.toHaveBeenCalled();
   });
 

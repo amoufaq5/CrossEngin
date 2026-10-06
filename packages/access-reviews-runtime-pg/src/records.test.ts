@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   requireIso,
+  requireNumeric,
   rowToCampaign,
+  rowToEvidence,
   rowToDecision,
   rowToItem,
   toIso,
@@ -10,6 +12,7 @@ import {
   type DecisionRow,
   type ItemRow,
 } from "./records.js";
+import { evidenceRowFor, makeSealedEvidence } from "./test-fakes.js";
 import { UUIDS } from "./test-fakes.js";
 
 describe("toIso / requireIso", () => {
@@ -174,5 +177,55 @@ describe("rowToDecision", () => {
     expect(d.attestation.attestedByUserId).toBe(UUIDS.system);
     expect(d.attestation.attestedAt).toBe("2026-02-01T00:00:00.000Z");
     expect(d.attestation.ipAddress).toBe("127.0.0.1");
+  });
+});
+
+describe("requireNumeric", () => {
+  it("passes a number through", () => {
+    expect(requireNumeric(0.6667, "completion_rate")).toBe(0.6667);
+  });
+
+  it("parses the string node-postgres returns for NUMERIC", () => {
+    expect(requireNumeric("0.6667", "completion_rate")).toBe(0.6667);
+    expect(requireNumeric("1.0000", "keep_rate")).toBe(1);
+  });
+
+  it("refuses null rather than coercing it to 0, which would read as a 0% rate", () => {
+    expect(() => requireNumeric(null, "completion_rate")).toThrow(/completion_rate/);
+  });
+
+  it("refuses an unparseable value and names the column", () => {
+    expect(() => requireNumeric("not-a-number", "overdue_rate")).toThrow(/overdue_rate/);
+  });
+
+  it("refuses an empty string, which Number() also turns into 0", () => {
+    expect(() => requireNumeric("", "keep_rate")).toThrow(/keep_rate/);
+  });
+
+  it("refuses a non-finite number", () => {
+    expect(() => requireNumeric(Number.POSITIVE_INFINITY, "revoke_rate")).toThrow(/revoke_rate/);
+  });
+});
+
+describe("rowToEvidence", () => {
+  it("round-trips a sealed record through the row spelling", () => {
+    const sealed = makeSealedEvidence();
+    expect(rowToEvidence(evidenceRowFor(sealed) as never)).toEqual(sealed);
+  });
+
+  it("parses a JSONB array arriving as text", () => {
+    const sealed = makeSealedEvidence();
+    const row = { ...evidenceRowFor(sealed), campaign_ids: JSON.stringify(sealed.campaignIds) };
+    expect(rowToEvidence(row as never).campaignIds).toEqual(sealed.campaignIds);
+  });
+
+  it("refuses a JSONB column that is not a string array", () => {
+    const row = { ...evidenceRowFor(makeSealedEvidence()), control_mappings: [1, 2] };
+    expect(() => rowToEvidence(row as never)).toThrow(/control_mappings/);
+  });
+
+  it("refuses a sealed row with no digest, which only the superRefine catches", () => {
+    const row = { ...evidenceRowFor(makeSealedEvidence()), sealed_sha256: null };
+    expect(() => rowToEvidence(row as never)).toThrow();
   });
 });

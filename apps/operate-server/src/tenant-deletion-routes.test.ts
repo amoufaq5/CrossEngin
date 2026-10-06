@@ -9,6 +9,7 @@ import {
   TENANT_DELETE_REFUSED_OPERATION,
   TENANT_TOMBSTONES_READ_OPERATION,
   buildTenantDeletionRoutes,
+  lifecycleReceipt,
   newTombstoneId,
   tombstoneReceipt,
   type DeletionOutcomeLike,
@@ -84,6 +85,15 @@ const OK_OUTCOME: DeletionOutcomeLike = {
       obligations: ["tax_records_7y"],
       dataReference: "meta.invoices; meta.tenant_credits",
     },
+  },
+  // `transitionLegal: false` is the honest value here and not a broken fixture: this route deletes
+  // straight from `active`, and `active -> deleted` is not in `TENANT_LIFECYCLE_TRANSITIONS` —
+  // ADR-0334 moved the tenant to `pending_deletion` on the asynchronous route's verify only.
+  lifecycleEvent: {
+    id: "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+    fromState: "active",
+    toState: "deleted",
+    transitionLegal: false,
   },
 };
 
@@ -573,5 +583,54 @@ describe("tombstoneReceipt", () => {
     const receipt = tombstoneReceipt(storedOf({ proofVersion: "v3", retainedObligations: [] }));
     expect(receipt).toHaveProperty("retainedObligations");
     expect(receipt["retainedObligations"]).toEqual([]);
+  });
+});
+
+describe("the lifecycle receipt", () => {
+  it("carries the recorded transition on the 200, beside tenantRetired", async () => {
+    const h = harness();
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(200);
+    expect(res.body["lifecycleEvent"]).toEqual({
+      recorded: true,
+      id: "9c1d2e3f-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+      fromState: "active",
+      toState: "deleted",
+      // Reported, never enforced: this route deletes straight from `active`, and the flag is how a
+      // reader learns the gap instead of the record being refused or silently recorded as fine.
+      transitionLegal: false,
+    });
+  });
+
+  it("says a trail was not recorded rather than omitting the field", async () => {
+    const h = harness({}, { outcome: { ...OK_OUTCOME, lifecycleEvent: null } as DeletionOutcomeLike });
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    expect(res.status).toBe(200);
+    const receipt = res.body["lifecycleEvent"] as Record<string, unknown>;
+    // The distinction the table exists to make: an absent trail has to be *stated*, because a
+    // missing key reads identically to a response written before the field existed.
+    expect(receipt["recorded"]).toBe(false);
+    expect(String(receipt["detail"])).toContain("no tenant lifecycle trail");
+  });
+
+  it("the deletion still succeeds when no trail was written", async () => {
+    const h = harness({}, { outcome: { ...OK_OUTCOME, lifecycleEvent: null } as DeletionOutcomeLike });
+    const res = await call(h.ctx, DELETE, { parsedBody: BODY });
+    // The tombstone is the proof; the trail is the index to it. One missing does not unmake the other.
+    expect(res.body["deleted"]).toBe(true);
+    expect((res.body["tombstone"] as Record<string, unknown>)["tombstoneId"]).toBe(TOMB);
+  });
+
+  it("lifecycleReceipt always answers with a recorded flag", () => {
+    expect(lifecycleReceipt(null)["recorded"]).toBe(false);
+    expect(
+      lifecycleReceipt({ id: "x", fromState: "pending_deletion", toState: "deleted", transitionLegal: true }),
+    ).toEqual({
+      recorded: true,
+      id: "x",
+      fromState: "pending_deletion",
+      toState: "deleted",
+      transitionLegal: true,
+    });
   });
 });

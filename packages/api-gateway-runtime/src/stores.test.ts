@@ -156,7 +156,7 @@ describe("InMemoryRateLimitChecker", () => {
     const d = await r.check({ tenantId: TENANT, principalId: "p1", route, request: req, now });
     expect(d.allowed).toBe(false);
     expect(d.retryAfterSeconds).toBeGreaterThan(0);
-    expect(d.decisionId).toMatch(/^rld_\d{20}$/);
+    expect(d.decisionId).toMatch(/^rld_[a-z0-9]{20}$/);
   });
 
   it("resets after the window", async () => {
@@ -171,6 +171,44 @@ describe("InMemoryRateLimitChecker", () => {
     expect(a.allowed).toBe(true);
     expect(b.allowed).toBe(false);
     expect(c.allowed).toBe(true);
+  });
+
+  it("mints a decision id per instance, not per counter", async () => {
+    // Two processes, one counter each. The old form made both mint `rld_…0001` first, which is
+    // harmless while nothing persists a decision and not harmless once
+    // `PipelineExecution.rateLimitDecisionId` is written: two replicas' executions would name one
+    // decision row.
+    const a = new InMemoryRateLimitChecker({ limit: 10 });
+    const b = new InMemoryRateLimitChecker({ limit: 10 });
+    const route = fixtureRoute();
+    const req = {} as never;
+    const now = new Date();
+    const first = await a.check({ tenantId: TENANT, principalId: "p1", route, request: req, now });
+    const second = await b.check({ tenantId: TENANT, principalId: "p1", route, request: req, now });
+    expect(first.decisionId).not.toBe(second.decisionId);
+    expect(first.decisionId).toMatch(/^rld_[a-z0-9]{8,40}$/);
+    expect(second.decisionId).toMatch(/^rld_[a-z0-9]{8,40}$/);
+  });
+
+  it("the counter still advances within one instance", async () => {
+    const r = new InMemoryRateLimitChecker({ limit: 10, instanceId: "abcdefghjkmn" });
+    const route = fixtureRoute();
+    const req = {} as never;
+    const now = new Date();
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      ids.push((await r.check({ tenantId: TENANT, principalId: "p1", route, request: req, now })).decisionId);
+    }
+    expect(ids).toEqual(["rld_abcdefghjkmn00000001", "rld_abcdefghjkmn00000002", "rld_abcdefghjkmn00000003"]);
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it("refuses an instanceId that would not render a valid decision id", () => {
+    // The id goes into `PipelineExecution.rateLimitDecisionId`, whose schema is
+    // `/^rld_[a-z0-9]{8,40}$/` — a bad prefix would fail that parse on every request rather than
+    // here, once.
+    expect(() => new InMemoryRateLimitChecker({ instanceId: "TOOSHORT" })).toThrow(/12 lowercase/);
+    expect(() => new InMemoryRateLimitChecker({ instanceId: "ABCDEFGHJKMN" })).toThrow(/12 lowercase/);
   });
 
   it("setLimitForKey jumps the bucket count to trigger denial", async () => {
@@ -244,5 +282,41 @@ describe("InMemoryRouteRegistry", () => {
     const v2 = r.listVersionsFor("POST", "/v2/tenants");
     expect(v1).toEqual(["v1"]);
     expect(v2).toEqual(["v2"]);
+  });
+
+  it("list() is empty before anything is registered", () => {
+    expect(new InMemoryRouteRegistry().list()).toEqual([]);
+  });
+
+  it("list() returns every registered route in registration order", () => {
+    const r = new InMemoryRouteRegistry();
+    r.register(fixtureRoute());
+    r.register(fixtureRoute({ id: "rt_route0009", operationId: "tenants.list", method: "GET" }));
+    expect(r.list().map((route) => route.operationId)).toEqual(["tenants.create", "tenants.list"]);
+  });
+
+  it("list() hands back the declaration, not the registry's compiled matching state", () => {
+    // `register` stores `pathRegex`/`paramNames` alongside the route. Leaking them would make a
+    // surveyed route unequal to the one that was registered, and a `RegExp` is not serialisable.
+    const r = new InMemoryRouteRegistry();
+    const route = fixtureRoute();
+    r.register(route);
+    const [listed] = r.list();
+    expect(listed).toEqual(route);
+    expect(listed).not.toHaveProperty("pathRegex");
+    expect(listed).not.toHaveProperty("paramNames");
+  });
+
+  it("list() covers the whole surface, which is why it exists", () => {
+    // The survey's totality is the point: a caller reading the registry cannot omit a route the way
+    // a hand-maintained list can (ADR-0288's `needsAuditEmitter`, ADR-0334's `operationIds()`).
+    const r = new InMemoryRouteRegistry();
+    for (let i = 0; i < 25; i += 1) {
+      r.register(fixtureRoute({ id: `rt_route${String(i).padStart(4, "0")}`, operationId: `op.${String(i)}` }));
+    }
+    expect(r.list()).toHaveLength(25);
+    for (const route of r.list()) {
+      expect(r.lookup({ method: route.method, path: "/v1/tenants", apiVersion: route.apiVersion })).not.toBeNull();
+    }
   });
 });

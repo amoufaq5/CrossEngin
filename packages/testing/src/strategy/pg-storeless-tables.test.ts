@@ -308,8 +308,14 @@ describe("the real workspace", () => {
     // nothing would need declaring and this file would pass having examined nothing. So the
     // writerless count is asserted as a *floor* — the opposite of the usual shape, because here the
     // risk is over-counting writers.
+    //
+    // The floor moved 75 → 65 in ADR-0335, and the reason it has to move is itself the finding: six
+    // tables gained a writer in one increment, so a floor set tight against the *current* count
+    // fails the next increment of this kind and gets raised reflexively — which is how a vacuity
+    // guard turns into a number somebody edits to make the suite pass. 65 keeps a dozen of headroom
+    // against 77, and a blanket `written: true` still fails it by a mile.
     expect(tableFacts.filter((f) => f.written).length).toBeGreaterThanOrEqual(55);
-    expect(writerless.length).toBeGreaterThanOrEqual(75);
+    expect(writerless.length).toBeGreaterThanOrEqual(65);
     // And two tables known to have no writer in any form, so a blanket `written: true` fails here.
     for (const name of ["meta.sso_providers", "meta.ml_models", "meta.cdc_checkpoints"]) {
       expect(writerless.map((f) => f.table)).toContain(name);
@@ -320,31 +326,39 @@ describe("the real workspace", () => {
     }
   });
 
-  it("reads the three tables only a reference reaches", () => {
-    // The floor that decides whether this whole census is trustworthy. The statement extractor
-    // deliberately skips a `SELECT` with an unresolvable target, a join or a non-bare column list,
-    // so three catalogued tables are reached by nothing else: `meta.access_review_evidence`
-    // (certification.ts, through an unresolvable `${this.schema}`), and `meta.users` plus
-    // `meta.user_tenant_membership` (recipient-resolver.ts, through a two-table join). Reading "no
-    // statement names it" as "no SQL names it" would have declared all three deliberately
-    // storeless, which is false of every one. If the reference collector ever stops working, this
-    // fails here rather than being absorbed into a wrong declaration.
-    const readOnly = writerless.filter((f) => f.read).map((f) => f.table).sort();
-    expect(readOnly).toEqual([
-      "meta.access_review_evidence",
-      "meta.notification_preferences",
-      "meta.operate_entity_records",
-      "meta.user_tenant_membership",
-      "meta.users",
-    ]);
+  it("still reaches a table only a reference can see, so the collector is doing something", () => {
+    // **This is the half worth keeping, and ADR-0335 split it out for that reason.** The statement
+    // extractor deliberately skips a `SELECT` with an unresolvable target, a join or a non-bare
+    // column list, so some catalogued tables are reached by nothing else. Reading "no statement
+    // names it" as "no SQL names it" declared three tables deliberately storeless when it was false
+    // of every one. The assertion is on the *collector*, not on a list of table names, because the
+    // names move every time a lane lands a writer — which is exactly what eroded the old version of
+    // this test from five names to one.
     const viaReference = new Set(
-      scan.references
-        .filter((r) => r.via === "from" || r.via === "join")
-        .map((r) => r.table),
+      scan.references.filter((r) => r.via === "from" || r.via === "join").map((r) => r.table),
     );
-    for (const name of ["users", "user_tenant_membership", "access_review_evidence"]) {
-      expect(viaReference).toContain(name);
+    // A floor, not an equality: the collector found 312 references across 862 files when it was
+    // written, and a collapse toward zero is the failure that would make every rule over it vacuous.
+    expect(scan.references.length).toBeGreaterThan(200);
+    expect(viaReference.size).toBeGreaterThan(20);
+    // `meta.users` and `meta.user_tenant_membership` are the pair that proved the point: both are
+    // reached only through `recipient-resolver.ts`' two-table join, and both now have a writer.
+    for (const name of ["users", "user_tenant_membership"]) {
+      expect(viaReference, name).toContain(name);
     }
+  });
+
+  it("names every writerless table that is nonetheless read", () => {
+    // Reported rather than fixed to a list: a table read by something and written by nothing is a
+    // surface that answers "nothing" indistinguishably from "nothing is there", and the set shrinks
+    // as writers land. `meta.operate_entity_records` is the remaining member and is declared
+    // `dynamic_writer` — its writer interpolates the table name, so no scan can resolve it.
+    const readOnly = writerless.filter((f) => f.read).map((f) => f.table).sort();
+    for (const table of readOnly) {
+      const declared = STORELESS_TABLES.find((d) => d.table === table);
+      expect(declared, `${table} is read and writerless but undeclared`).toBeDefined();
+    }
+    expect(readOnly).toContain("meta.operate_entity_records");
   });
 
   it("no catalogued table is writerless without a declaration saying why", () => {
@@ -401,14 +415,21 @@ describe("the real workspace", () => {
     expect(overtaken.map((f) => `${f.kind}:${f.table}`)).toEqual(["overtaken:meta.tenants"]);
   });
 
-  it("names the two gaps whose reader is already being served nothing", () => {
-    // The sharp subset, asserted exactly rather than reported: a third member means somebody added
-    // a reader over a table nothing writes, which is the defect shape at its worst — a surface that
-    // answers "nothing" indistinguishably from "nothing is there".
-    expect(readersWithNoWriter(tableFacts, STORELESS_TABLES).map((d) => d.table)).toEqual([
-      "meta.access_review_evidence",
-      "meta.notification_preferences",
-    ]);
+  it("has no reader left that nothing writes, except the one declared unscannable", () => {
+    // **Inverted by ADR-0335 rather than renumbered**, which is the point. This used to assert the
+    // two members exactly — `meta.access_review_evidence` and `meta.notification_preferences` — and
+    // both now have writers, so the old form would have passed by becoming vacuous: the shape this
+    // whole file exists to refuse. So the assertion is now that the set is *empty*, and the one
+    // table that can never leave it is named explicitly with its reason.
+    //
+    // A new member means somebody added a reader over a table nothing writes, which is the defect
+    // shape at its worst — ADR-0335 found three of them at once (a certification control that could
+    // not be gathered, preferences that were always the defaults, and audiences that always resolved
+    // to the empty set).
+    const stillUnserved = readersWithNoWriter(tableFacts, STORELESS_TABLES)
+      .map((d) => d.table)
+      .filter((t) => t !== "meta.operate_entity_records");
+    expect(stillUnserved).toEqual([]);
   });
 
   it("every superseded declaration names a successor that is really written", () => {

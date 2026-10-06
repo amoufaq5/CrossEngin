@@ -144,6 +144,26 @@ export type DeletionOutcomeLike =
           readonly dataReference: string;
         } | null;
       };
+      /**
+       * The `… -> deleted` transition as the pipeline recorded it, or `null` when the deployment
+       * supplied no lifecycle store.
+       *
+       * A **required key with a nullable value**, not an optional field, which is the whole point:
+       * `meta.tenant_lifecycle_events`' own protection note is that *"without it nothing in the
+       * database distinguishes a tenant that was deleted from one that never existed"*, so an
+       * absent trail has to be a thing this type can say rather than a field a mirror can forget.
+       *
+       * `transitionLegal` is **reported, never enforced**, and it is `false` here: this route
+       * deletes straight from `active`, because ADR-0334 moved the tenant to `pending_deletion` on
+       * the *asynchronous* route's verify only. Refusing would drop the only record of a deletion
+       * that happened, and recording it silently would hide the gap — so the flag is on the receipt.
+       */
+      readonly lifecycleEvent: {
+        readonly id: string;
+        readonly fromState: string;
+        readonly toState: string;
+        readonly transitionLegal: boolean;
+      } | null;
     }
   | {
       readonly ok: false;
@@ -305,6 +325,31 @@ export function tombstoneReceipt(stored: StoredTombstoneLike): Record<string, un
   };
 }
 
+/**
+ * The lifecycle trail's half of the receipt, which **always has a `recorded` flag**.
+ *
+ * Emitting the pipeline's `null` straight through would make "this deployment records no trail" and
+ * "this response predates the field" the same bytes to a caller, and that is the exact confusion the
+ * trail exists to end: a deleted tenant and one that never existed look identical without it. So the
+ * absence is stated rather than left as a missing key.
+ */
+export function lifecycleReceipt(
+  event: {
+    readonly id: string;
+    readonly fromState: string;
+    readonly toState: string;
+    readonly transitionLegal: boolean;
+  } | null,
+): Record<string, unknown> {
+  if (event === null) {
+    return {
+      recorded: false,
+      detail: "this deployment records no tenant lifecycle trail; the deletion is proven by the tombstone alone",
+    };
+  }
+  return { recorded: true, ...event };
+}
+
 function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
   return async (input) => {
     const principal = input.principal;
@@ -434,6 +479,7 @@ function buildDeleteHandler(ctx: TenantDeletionRoutesContext): Handler {
       tenantId,
       deleted: true,
       tenantRetired: retired,
+      lifecycleEvent: lifecycleReceipt(outcome.lifecycleEvent),
       erased: outcome.erased,
       erasedSharedTables: outcome.erasedSharedTables,
       // The receipt, not a bare "deleted": it is the only thing that can later establish what was

@@ -77,6 +77,14 @@ const OK: DeleteTenantOutcome = {
       dataReference: "meta.invoices",
     },
   },
+  // The runner reads nothing off this, but the field is required so a committed result cannot
+  // be silent about whether the transition was recorded.
+  lifecycleEvent: {
+    id: "0193a0f1-9999-7888-8777-666655554444",
+    fromState: "pending_deletion",
+    toState: "deleted",
+    transitionLegal: true,
+  },
 };
 
 interface Harness {

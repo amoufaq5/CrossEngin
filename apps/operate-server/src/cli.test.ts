@@ -1320,3 +1320,240 @@ describe("--tenant-status-gate", () => {
     expect(helpText).toContain("/v1/platform routes are exempt");
   });
 });
+
+describe("--rate-limit-policy", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is undeclared by default, which keeps the in-memory 10,000/60s every deployment has had", () => {
+    expect(parseServeArgs([...PG]).rateLimitPolicies).toBeNull();
+  });
+
+  it("declares one policy and infers the default from it", () => {
+    const o = parseServeArgs([...PG, "--rate-limit-policy", "rlp_standard:600:60"]);
+    expect(o.rateLimitPolicies?.defaultPolicy).toEqual({
+      policyId: "rlp_standard",
+      limit: 600,
+      windowSeconds: 60,
+    });
+    expect(Object.keys(o.rateLimitPolicies?.byPolicyId ?? {})).toEqual(["rlp_standard"]);
+  });
+
+  it("takes several policies with a named default, in both spellings", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--rate-limit-policy",
+      "rlp_standard:600:60",
+      "--rate-limit-policy=rlp_burstlimit:5000:60",
+      "--rate-limit-default-policy=rlp_burstlimit",
+    ]);
+    expect(o.rateLimitPolicies?.defaultPolicy.policyId).toBe("rlp_burstlimit");
+    expect(Object.keys(o.rateLimitPolicies?.byPolicyId ?? {}).sort()).toEqual([
+      "rlp_burstlimit",
+      "rlp_standard",
+    ]);
+  });
+
+  it("refuses a default with no policy declared", () => {
+    // The declaration needs a policy for the routes that name none — which today is every route —
+    // so there is nothing for the named default to be.
+    expect(() =>
+      parseServeArgs([...PG, "--rate-limit-default-policy", "rlp_standard"]),
+    ).toThrow(/--rate-limit-default-policy requires at least one/);
+  });
+
+  it("refuses an unnamed default once more than one policy is declared", () => {
+    expect(() =>
+      parseServeArgs([
+        ...PG,
+        "--rate-limit-policy",
+        "rlp_standard:600:60",
+        "--rate-limit-policy",
+        "rlp_burstlimit:5000:60",
+      ]),
+    ).toThrow(/--rate-limit-default-policy is required when more than one/);
+  });
+
+  it("refuses a default naming a policy nobody declared, and names the ones that were", () => {
+    // Falling back would apply terms the operator did not write down and then record the fallback's
+    // id in the decision row — the defect this flag family exists to end.
+    let message = "";
+    try {
+      parseServeArgs([
+        ...PG,
+        "--rate-limit-policy",
+        "rlp_standard:600:60",
+        "--rate-limit-default-policy",
+        "rlp_notdeclared",
+      ]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("rlp_notdeclared is not among the declared policies");
+    expect(message).toContain("rlp_standard");
+  });
+
+  it("refuses the memory store, which has no meta.rate_limit_decisions to name the policy in", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--rate-limit-policy", "rlp_standard:600:60"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.rate_limit_decisions");
+  });
+
+  it("refuses a malformed spec by name rather than coercing it", () => {
+    // `Number()` accepts "0x10", "1e3" and " 10 ", so a limit silently read as 16 from "0x10" is a
+    // ceiling the operator never configured.
+    for (const bad of ["rlp_standard:600", "rlp_standard:0x10:60", "rlp_standard:600:0"]) {
+      expect(() => parseServeArgs([...PG, "--rate-limit-policy", bad])).toThrow(
+        /invalid --rate-limit-policy/,
+      );
+    }
+    expect(() => parseServeArgs([...PG, "--rate-limit-policy", "standard:600:60"])).toThrow(
+      /policy_id_malformed/,
+    );
+  });
+
+  it("refuses two declarations of one policy id", () => {
+    expect(() =>
+      parseServeArgs([
+        ...PG,
+        "--rate-limit-policy",
+        "rlp_standard:600:60",
+        "--rate-limit-policy",
+        "rlp_standard:900:60",
+        "--rate-limit-default-policy",
+        "rlp_standard",
+      ]),
+    ).toThrow(/invalid rate-limit declaration.*duplicate_policy_id/);
+  });
+
+  it("documents both flags in the help text", () => {
+    expect(helpText).toContain("--rate-limit-policy");
+    expect(helpText).toContain("--rate-limit-default-policy");
+    // And offers a starting point, since the whole point is that nothing defaults the ceiling.
+    expect(helpText).toContain("rlp_conservativedefault:600:60");
+  });
+});
+
+describe("--platform-user-routes", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off and ungranted unless asked for", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.platformUserRoutes).toBe(false);
+    expect(o.platformUserRoles).toEqual([]);
+  });
+
+  it("mounts the registry, fail-closed on the grant", () => {
+    const o = parseServeArgs([...PG, "--platform-user-routes"]);
+    expect(o.platformUserRoutes).toBe(true);
+    expect(o.platformUserRoles).toEqual([]);
+  });
+
+  it("collects repeatable roles in both spellings", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--platform-user-routes",
+      "--platform-user-role",
+      "platform_admin",
+      "--platform-user-role=identity_admin",
+    ]);
+    expect(o.platformUserRoles).toEqual(["platform_admin", "identity_admin"]);
+  });
+
+  it("refuses a grant with no surface, rather than implying the routes", () => {
+    // The opposite of `--deletion-request-role` and its siblings, which turn their routes on. A
+    // registry grant is a licence to mint principals, so inferring the surface from it would mount
+    // the one surface an operator should have to ask for by name.
+    expect(() => parseServeArgs([...PG, "--platform-user-role", "ops"])).toThrow(
+      /--platform-user-role requires --platform-user-routes/,
+    );
+  });
+
+  it("refuses the memory store, which has neither registry table", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--platform-user-routes"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.users");
+    expect(message).toContain("meta.user_tenant_membership");
+  });
+
+  it("documents both flags in the help text", () => {
+    expect(helpText).toContain("--platform-user-routes");
+    expect(helpText).toContain("--platform-user-role");
+    expect(helpText).toContain("/v1/platform/users");
+    // And says it is a different grant from the tenant administrator's, which is the mistake an
+    // operator reading only the flag names would make.
+    expect(helpText).toContain("Separate from --platform-admin-role, which administers tenants");
+  });
+});
+
+describe("--preference-routes", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("is off and ungranted unless asked for", () => {
+    const o = parseServeArgs([...PG]);
+    expect(o.preferenceRoutes).toBe(false);
+    expect(o.preferenceRoles).toEqual([]);
+    expect(o.preferenceAdminRoles).toEqual([]);
+  });
+
+  it("mounts the routes with both grants, in both spellings", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--preference-routes",
+      "--preference-role",
+      "erp_user",
+      "--preference-role=cashier",
+      "--preference-admin-role=tenant_admin",
+    ]);
+    expect(o.preferenceRoutes).toBe(true);
+    expect(o.preferenceRoles).toEqual(["erp_user", "cashier"]);
+    expect(o.preferenceAdminRoles).toEqual(["tenant_admin"]);
+  });
+
+  it("refuses either grant with no surface mounted", () => {
+    expect(() => parseServeArgs([...PG, "--preference-role", "erp_user"])).toThrow(
+      /--preference-role requires --preference-routes/,
+    );
+    expect(() => parseServeArgs([...PG, "--preference-admin-role", "tenant_admin"])).toThrow(
+      /--preference-admin-role requires --preference-routes/,
+    );
+  });
+
+  it("takes the admin grant without the base grant, which leaves the own-preference path closed", () => {
+    // Unlike `--read-state-backfill-role`, the admin grant is not asserted to be a subset: a
+    // deployment may well want a support role that can set somebody else's preferences and has no
+    // preferences of its own to read.
+    const o = parseServeArgs([...PG, "--preference-routes", "--preference-admin-role", "support"]);
+    expect(o.preferenceRoles).toEqual([]);
+    expect(o.preferenceAdminRoles).toEqual(["support"]);
+  });
+
+  it("refuses the memory store, which has no meta.notification_preferences", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--preference-routes"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.notification_preferences");
+  });
+
+  it("documents all three flags in the help text", () => {
+    expect(helpText).toContain("--preference-routes");
+    expect(helpText).toContain("--preference-role");
+    expect(helpText).toContain("--preference-admin-role");
+    // The reason the surface matters: without it the defaults are permanent.
+    expect(helpText).toContain("built-in defaults for ever");
+    expect(helpText).toContain("A body naming another user is refused, not ignored");
+  });
+});
