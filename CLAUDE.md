@@ -1886,6 +1886,27 @@ many the glob finds, because a family that stopped using the convention would ot
 scan read this module's doc comment — which contains the literal `new PostgresTargetingRuleStore(` —
 as a construction site, and the store read as reachable. The shipped rule strips them and its comment
 says it anticipated exactly that.
+**The driver-family census accounts for a module three ways** — a tracked class, a module
+declaration, or a non-test file naming one of its **exported functions** — and the third arm's names
+come from `export function` only, because exported *types* and *constants* collide across the family
+(`DriftIssue` appears in three of the six replayers) so crediting a module because one of those
+appeared anywhere would credit all six and the fence would never fire. A shared function name credits
+every module exporting it, which can only make a module read *reachable*, never unreachable — the
+same conservative direction as the class scan's by-name attribution. A driver exported as
+`export const run = () => …` is invisible to it: that leaves its module unaccounted, which is the
+safe direction, and trips the family's own invariant that every member exports at least one function.
+The two-sided floor was restated rather than extended, because the third arm moved the ceiling's
+meaning: the floor (≥ 6 family modules) still guards a convention that stopped being used or a glob
+that stopped matching, while the ceiling (≤ 3 classless) now guards the **class parse** — if
+`exportedClasses` stopped matching, all six would read classless at once and three other assertions
+would still pass. The arm's liveness is proved by a control pair rather than a count, so it does not
+depend on which replayers happen to be wired.
+**The rule caught this increment's own wiring**, which is the clearest evidence it works:
+`operate-server replay` constructs four replayers and calls the fifth, and five declarations came
+back `overtaken`, each naming `node.ts` and each fixed by deleting one line. The fifth exposed the
+census gap above — a classless module that went from declared-unreachable to genuinely wired was
+accounted for by neither arm — so the third arm exists because the first declaration to *resolve*
+found it.
 **The transitive version was built as a measurement and refused as a fence, and the measurement is
 what refuses it**: entrypoints taken from every `package.json` `"bin"` — never from a filename that
 looks like a CLI, since `src/cli.ts` is the argv *parser* and does not import the command bodies,

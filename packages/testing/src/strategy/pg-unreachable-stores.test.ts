@@ -16,6 +16,7 @@ import {
   DECISION_BEARING_REASONS,
   DRIVER_MODULE_FAMILIES,
   exportedClasses,
+  exportedFunctions,
   exportedNames,
   findConstructions,
   findIdentifierUses,
@@ -87,8 +88,10 @@ function moduleFacts(over: Partial<ModuleFacts> = {}): ModuleFacts {
     present: true,
     exportedClasses: [],
     exportedNames: ["replayWidgets", "formatWidgetReport"],
-    entrypointUsedBy: [],
-    entrypointUsedByTests: ["packages/widgets-pg/src/replayer.test.ts"],
+    exportedFunctions: ["replayWidgets", "formatWidgetReport"],
+    usedBy: [],
+    usedByTests: ["packages/widgets-pg/src/replayer.test.ts"],
+    usedNames: [],
     ...over,
   });
 }
@@ -443,7 +446,9 @@ describe("auditUnreachableStores", () => {
     expect(member.map((f) => f.kind)).toEqual(["overtaken"]);
 
     const module = audit({
-      modules: [moduleFacts({ entrypointUsedBy: ["apps/a/src/verify.ts"] })],
+      modules: [
+        moduleFacts({ usedBy: ["apps/a/src/verify.ts"], usedNames: ["replayWidgets"] }),
+      ],
       declarations: [moduleDeclaration()],
     });
     expect(module.map((f) => f.kind)).toEqual(["overtaken"]);
@@ -472,12 +477,18 @@ describe("auditUnreachableStores", () => {
     expect(grew[0]?.detail).toContain("delete the module declaration");
   });
 
-  it("reports a driver-family module that neither exports a class nor is declared — signal 5's fence", () => {
+  it("reports a driver-family module that is accounted for no way at all — signal 5's fence", () => {
     const found = audit({ driverFamilyModules: [moduleFacts()] });
     expect(found.map((f) => f.kind)).toEqual(["driver_module_unaccounted"]);
     expect(found[0]?.detail).toContain("looks for a 'new' site");
-    // Accounted for either way: a class in it is the symbol rule's, a declaration is this rule's.
+    // It names what nothing referenced, which is what an author needs to act on.
+    expect(found[0]?.detail).toContain("replayWidgets");
+  });
+
+  it("accounts for a driver-family module three ways, and the third is the one that was missing", () => {
+    // One: a class in it is the symbol rule's to answer for.
     expect(audit({ driverFamilyModules: [moduleFacts({ exportedClasses: ["X"] })] })).toEqual([]);
+    // Two: a declaration is this rule's.
     expect(
       audit({
         modules: [moduleFacts()],
@@ -485,6 +496,35 @@ describe("auditUnreachableStores", () => {
         declarations: [moduleDeclaration()],
       }),
     ).toEqual([]);
+    // Three: something outside it names an invocable export, so it is reachable on its own terms.
+    // Without this arm, a module that went from declared-unreachable to genuinely wired landed in a
+    // finding telling its author to wire what they had just wired — which is what ADR-0337 hit.
+    expect(
+      audit({
+        driverFamilyModules: [
+          moduleFacts({ usedBy: ["apps/operate-server/src/node.ts"], usedNames: ["replayWidgets"] }),
+        ],
+      }),
+    ).toEqual([]);
+    // A *test* naming it is not an account, for `isTestSite`'s reason everywhere else in this file.
+    expect(
+      audit({
+        driverFamilyModules: [
+          moduleFacts({ usedByTests: ["packages/widgets-pg/src/replayer.test.ts"] }),
+        ],
+      }).map((f) => f.kind),
+    ).toEqual(["driver_module_unaccounted"]);
+  });
+
+  it("says so differently when there is nothing to ask about at all", () => {
+    // A family module whose driver is a const or an arrow seeds no name, so the question cannot be
+    // asked. It stays unaccounted — the safe direction — and the detail says why, rather than
+    // claiming nothing references a list that is empty.
+    const found = audit({
+      driverFamilyModules: [moduleFacts({ exportedFunctions: [], exportedNames: ["REPLAY_KINDS"] })],
+    });
+    expect(found.map((f) => f.kind)).toEqual(["driver_module_unaccounted"]);
+    expect(found[0]?.detail).toContain("exports no class and no function");
   });
 
   it("reports a declaration naming a class nothing exports, and says if another member has it", () => {
@@ -719,6 +759,32 @@ describe("reading the source", () => {
       // keeps a seam implementation out of the diagnostic bucket.
       { name: "Impl", extendsName: null },
     ]);
+  });
+
+  it("finds only the invocable exports, which is what a classless driver module is asked about", () => {
+    // Narrower than `exportedNames` deliberately: three replayers export `DriftIssue` and two
+    // export an `EnforcementSummary`, so crediting a module because one of *those* names appears
+    // somewhere would make the third accounted-for arm vacuous. A driver is invoked.
+    const code = codeOnly(
+      [
+        "export const KINDS = [] as const;",
+        "export interface DriftIssue { a: 1 }",
+        "export type Kind = string;",
+        "export async function replayIncidents() {}",
+        "export function formatIncidentReplayReport() {}",
+        "export function* walk() {}",
+        "function hidden() {}",
+        "export const run = () => {};",
+      ].join("\n"),
+    );
+    expect([...exportedFunctions(code)]).toEqual([
+      "replayIncidents",
+      "formatIncidentReplayReport",
+      "walk",
+    ]);
+    // The limit, stated rather than hidden: a const-arrow driver is not seen, which leaves its
+    // module unaccounted (the safe direction) and fails the family's own invariant assertion.
+    expect(exportedFunctions(code)).not.toContain("run");
   });
 
   it("finds every exported name, so a declared module entrypoint can be checked against reality", () => {
@@ -1000,25 +1066,68 @@ describe("the real workspace", () => {
     for (const name of substitutes) expect(scan.reachableSubstitutes, name).toContain(name);
   });
 
-  it("the driver family is real, every member is accounted for, and the glob still matches", () => {
-    // Two-sided, which matters more here than anywhere else in this file: a file-level predicate that
-    // stopped matching reports nothing and passes silently, the opposite failure from the
-    // over-reporting the reachable floor guards. So the floor is on how many family members the glob
-    // finds, and the ceiling on how many of them export no class.
+  it("the driver family is real, the glob still matches, and the class parse has not collapsed", () => {
+    // **Two-sided, and the two sides guard different things since the third accounted-for arm
+    // landed.** The floor is on how many members the glob finds: a file-level predicate that stopped
+    // matching reports nothing and passes silently, which is the opposite failure from the
+    // over-reporting the reachable-symbol floor guards. The ceiling on *classless* members no longer
+    // says anything about accounting — a classless module can be accounted for by being referenced —
+    // so what it guards now is the **class parse**: if `exportedClasses` stopped matching, all six
+    // would read classless at once and three of this file's other assertions would still pass.
     expect([...DRIVER_MODULE_FAMILIES]).toEqual(["replayer.ts"]);
     expect(scan.driverFamilyModules.length).toBeGreaterThanOrEqual(6);
     const classless = scan.driverFamilyModules.filter((m) => m.exportedClasses.length === 0);
     expect(classless.length).toBeLessThanOrEqual(3);
-    // The fifth blind spot's named live member, pinned by both halves of what makes it invisible.
+    // Every member must have something the third arm can ask about, so the "nothing to ask" branch
+    // stays a tripwire rather than a silent pass-through: a const-arrow driver joining the family
+    // fails here, naming the module, instead of being reported as unreferenced.
+    for (const module of scan.driverFamilyModules) {
+      expect(module.present, `${module.pkg}/${module.module}`).toBe(true);
+      expect(module.exportedFunctions.length, `${module.pkg}/${module.module}`).toBeGreaterThan(0);
+    }
+    // The fifth blind spot's named live member, pinned by both halves of what makes it invisible to
+    // a `new X(` scan: no class, and a driver that is a function.
     const incident = scan.driverFamilyModules.find(
       (m) => m.pkg === "packages/incident-response-runtime-pg",
     );
     expect(incident?.module).toBe("src/replayer.ts");
     expect(incident?.exportedClasses).toEqual([]);
-    expect(incident?.exportedNames).toContain("replayIncidents");
-    for (const module of scan.driverFamilyModules) {
-      expect(module.present, `${module.pkg}/${module.module}`).toBe(true);
-    }
+    expect(incident?.exportedFunctions).toContain("replayIncidents");
+  });
+
+  it("would catch a classless driver module that nothing runs, and clears one that something does", () => {
+    // The control pair that replaces a count, so the arm's liveness does not depend on which
+    // replayers happen to be wired this week. Built from the **real** scan: take the one classless
+    // family module the workspace has and flip the only fact that accounts for it.
+    const incident = scan.driverFamilyModules.find((m) => m.exportedClasses.length === 0);
+    expect(incident).toBeDefined();
+    const others = scan.driverFamilyModules.filter(
+      (m) => !(m.pkg === incident?.pkg && m.module === incident?.module),
+    );
+    const withFamily = (
+      family: readonly ModuleFacts[],
+    ): readonly string[] =>
+      auditUnreachableStores({
+        symbols: scan.symbols,
+        members: scan.memberFacts,
+        modules: scan.modules,
+        declarations: UNREACHABLE_STORES,
+        catalogTables,
+        storelessTables,
+        reachableSubstitutes: scan.reachableSubstitutes,
+        driverFamilyModules: family,
+      }).map((f) => `${f.kind}:${f.subject}`);
+
+    const unrun = ModuleFactsSchema.parse({ ...(incident ?? moduleFacts()), usedBy: [], usedNames: [] });
+    expect(withFamily([...others, unrun])).toEqual([
+      `driver_module_unaccounted:${unrun.pkg}::${unrun.module}`,
+    ]);
+    const run = ModuleFactsSchema.parse({
+      ...(incident ?? moduleFacts()),
+      usedBy: ["apps/operate-server/src/node.ts"],
+      usedNames: [incident?.exportedFunctions[0] ?? "replayIncidents"],
+    });
+    expect(withFamily([...others, run])).toEqual([]);
   });
 
   it("would catch the defect it was written for, in both directions", () => {

@@ -84,10 +84,20 @@ import { REPO_ROOT, workspaceRoots } from "./workspace-sql-scan.js";
  *    (`unknown_module`, `unknown_entrypoint`, `module_now_has_class`, `overtaken`), so the live
  *    member is named on disk rather than in prose; and
  *  - a **driver-family census** over `DRIVER_MODULE_FAMILIES`, which asserts that every
- *    `src/replayer.ts` in the workspace is accounted for by *one of the two* rules — it either
- *    exports a class the symbol scan tracks, or it carries a module declaration. One glob, with a
- *    floor on how many members it must find, so a family that stopped using the convention fails
- *    rather than passing on zero.
+ *    `src/replayer.ts` in the workspace is accounted for one of **three** ways: it exports a class
+ *    the symbol scan tracks, it carries a module declaration, or a non-test file outside it names
+ *    one of its invocable exports. One glob, with a floor on how many members it must find, so a
+ *    family that stopped using the convention fails rather than passing on zero.
+ *
+ * **The third arm was missing and the first real wiring found it.** ADR-0337 wired
+ * `operate-server replay`, which calls `replayIncidents`; the module declaration reported
+ * `overtaken` by name, which is the blind-spot fence working — and then deleting the declaration
+ * left the census reporting `driver_module_unaccounted` for a module that was now **genuinely
+ * reachable**, telling its author to wire what they had just wired. The machinery was nearly there:
+ * the names a module is asked about were seeded from *declared* entrypoints only, so an undeclared
+ * driver module had nothing to look up. They are seeded from every watched module's exported
+ * `function`s now, which is why the arm costs no extra pass — the class scan already reads every
+ * non-test file.
  *
  * ## What this rule cannot see
  *
@@ -436,9 +446,16 @@ export const ModuleFactsSchema = z.object({
   exportedClasses: z.array(z.string().regex(CLASS_SYMBOL)),
   /** Exported names of every kind, used to check that a declared entrypoint really is exported. */
   exportedNames: z.array(z.string().min(1)),
-  /** Non-test files outside this module, and outside its member's barrel, naming the entrypoint. */
-  entrypointUsedBy: z.array(z.string().min(1)),
-  entrypointUsedByTests: z.array(z.string().min(1)),
+  /**
+   * The invocable exports: what "does anything run this module" is asked about. Empty means the
+   * question could not be asked, which keeps the module unaccounted rather than passing it.
+   */
+  exportedFunctions: z.array(z.string().min(1)),
+  /** Non-test files, other than this module and its member's barrel, naming one of those. */
+  usedBy: z.array(z.string().min(1)),
+  usedByTests: z.array(z.string().min(1)),
+  /** Which invocable exports were named, so a finding can say what reached it. */
+  usedNames: z.array(z.string().min(1)),
 });
 export type ModuleFacts = z.infer<typeof ModuleFactsSchema>;
 
@@ -734,11 +751,11 @@ export function auditUnreachableStores(
           detail: `${subject} exports the class(es) ${facts.exportedClasses.join(", ")} now, so the symbol rule covers this module — delete the module declaration and declare the class if it has no caller`,
         });
       }
-      if (facts.entrypointUsedBy.length > 0) {
+      if (facts.usedBy.length > 0) {
         findings.push({
           kind: "overtaken",
           subject,
-          detail: `${subject} is declared unreachable (${declaration.reason}) and ${facts.entrypointUsedBy.join(", ")} name(s) ${declaration.entrypoint ?? ""} now — the decision is overtaken; remove the declaration`,
+          detail: `${subject} is declared unreachable (${declaration.reason}) and ${facts.usedBy.join(", ")} name(s) ${facts.usedNames.join(", ")} now — the decision is overtaken; remove the declaration`,
         });
       }
       continue;
@@ -821,14 +838,23 @@ export function auditUnreachableStores(
     });
   }
 
+  // Three ways a driver-family module is accounted for, and the third one is why this loop is not
+  // simply the symbol rule's complement. A module **exporting a class** is the symbol scan's to
+  // answer for; one **carrying a declaration** is this rule's; and one whose invocable exports are
+  // **named by a non-test file** is reachable on its own terms — the arm that was missing when the
+  // first function-shaped driver was wired, so a module that went from declared-unreachable to
+  // genuinely wired landed in a finding telling its author to wire it.
   for (const facts of driverFamilyModules) {
-    if (facts.exportedClasses.length > 0) continue;
+    if (facts.exportedClasses.length > 0 || facts.usedBy.length > 0) continue;
     const subject = `${facts.pkg}::${facts.module}`;
     if (seen.has(subject)) continue;
     findings.push({
       kind: "driver_module_unaccounted",
       subject,
-      detail: `${subject} is in a declared driver family, exports no class, and carries no module declaration — so neither this rule's symbol scan (which looks for a 'new' site) nor pg-storeless-tables.ts can say whether anything runs it. Wire it, or add an UNREACHABLE_STORES line with scope 'module'.`,
+      detail:
+        facts.exportedFunctions.length === 0
+          ? `${subject} is in a declared driver family, exports no class and no function, so there is nothing for this rule to ask about — its driver is a const or an arrow, which this scan cannot see. Declare it with scope 'module', or give it a named export.`
+          : `${subject} is in a declared driver family, exports no class, carries no module declaration, and nothing outside it names ${facts.exportedFunctions.join(", ")} — so neither this rule's symbol scan (which looks for a 'new' site) nor pg-storeless-tables.ts can say whether anything runs it. Wire it, or add an UNREACHABLE_STORES line with scope 'module'.`,
     });
   }
 
@@ -1090,6 +1116,30 @@ export function exportedClasses(code: string): readonly ExportedClass[] {
   });
 }
 
+/**
+ * Every exported `function`, which is what the census asks about for a classless driver module.
+ *
+ * Narrower than `exportedNames` on purpose, and the narrowing is the whole reason the third
+ * accounted-for arm is usable. A module's exported *types* and *constants* collide freely — three
+ * replayers each export `DriftIssue`, two export `EnforcementSummary` — so crediting a module
+ * because one of those names appears somewhere in the workspace would make the arm vacuous: every
+ * family module would read as referenced and the fence would never fire. A driver is **invoked**, so
+ * the invocable exports are the honest question, and those names are specific
+ * (`replayIncidents`, `timerProjectionSignature`, `verifyPipelineExecutionShape`).
+ *
+ * What it does not see: a driver exported as `export const run = () => …`. That is not a silent hole
+ * — a family module with no exported function has nothing seeded, so it stays **unaccounted** and
+ * fails loudly rather than passing — and the invariant test asserts every family member has one, so
+ * a const-arrow driver landing in the family fails there with its reason named.
+ */
+export function exportedFunctions(code: string): readonly string[] {
+  return [
+    ...code.matchAll(
+      /export\s+(?:declare\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)/g,
+    ),
+  ].map((m) => m[1] ?? "");
+}
+
 /** Every exported name of any kind, used to check a declared module entrypoint really exists. */
 export function exportedNames(code: string): readonly string[] {
   const out = new Set<string>();
@@ -1206,8 +1256,9 @@ export function isTestSite(file: string): boolean {
 const SKIP_DIRS = new Set(["node_modules", "dist", ".next", "coverage", ".turbo", ".git"]);
 
 /**
- * Module basenames that are drivers by convention, whose members must be accounted for by one of
- * the two rules — the fence for a driver that is a set of functions.
+ * Module basenames that are drivers by convention, whose members must each be accounted for — by a
+ * tracked class, by a declaration, or by something outside naming an invocable export. The fence for
+ * a driver that is a set of functions.
  *
  * **One entry, deliberately, and the limit is the point.** The general predicate ("an exported
  * symbol nothing outside its module uses") measures at 82 unactionable findings with a
@@ -1216,6 +1267,16 @@ const SKIP_DIRS = new Set(["node_modules", "dist", ".next", "coverage", ".turbo"
  * one does not, which is how the fifth blind spot was found. A driver family that is not in this set
  * is **not fenced**, and adding one is a visible line in a diff — `typecheck-config.ts`' shape for
  * its two exemptions.
+ *
+ * **What the two-sided guard on it means, restated for the third arm.** The floor is on how many
+ * members the glob finds (≥ 6): a convention that stopped being used, or a glob that stopped
+ * matching, reports nothing and would otherwise pass silently — the opposite failure from the
+ * over-reporting the reachable-symbol floor guards. The ceiling on *classless* members no longer
+ * says anything about accounting, since a classless module can now be accounted for by being
+ * referenced; it guards the **class parse**, because if `exportedClasses` stopped matching, all six
+ * would read classless at once. And the arm's own liveness is proved by a control pair built from
+ * the real scan rather than by a count, so it does not depend on which replayers happen to be wired
+ * this week.
  */
 export const DRIVER_MODULE_FAMILIES: readonly string[] = Object.freeze(["replayer.ts"]);
 
@@ -1317,12 +1378,20 @@ export function scanWorkspaceStores(
     }
   }
 
+  const declaredModuleKeys = new Set(declaredModules.map((d) => `${d.pkg}::${d.module ?? ""}`));
+
   // Every class in every member, keyed by (member, symbol). Keying by symbol alone would lose a copy
   // silently, and eight members each declare `FixedClock` — the shape of defect these rules exist to
   // end, one level down.
+  //
+  // The same pass records the text of every module the module-level questions are asked about — the
+  // declared ones and every driver-family member — because it already reads every non-test file, so
+  // the exports those questions need cost no second read.
   const declarations = new Map<string, { member: string; file: string; extendsName: string | null }>();
   const copiesOf = new Map<string, string[]>();
   const memberFileLists = new Map<string, string[]>();
+  const moduleCode = new Map<string, string>();
+  const familyModuleKeys = new Set<string>();
   for (const member of members) {
     const absolute: string[] = [];
     filesUnder(join(REPO_ROOT, member.dir), absolute);
@@ -1330,7 +1399,8 @@ export function scanWorkspaceStores(
     for (const file of absolute) {
       const relative = file.slice(REPO_ROOT.length + 1);
       if (isTestSite(relative)) continue;
-      for (const found of exportedClasses(codeOnly(readFileSync(file, "utf8")))) {
+      const code = codeOnly(readFileSync(file, "utf8"));
+      for (const found of exportedClasses(code)) {
         declarations.set(`${member.dir}:${found.name}`, {
           member: member.dir,
           file: relative,
@@ -1340,30 +1410,48 @@ export function scanWorkspaceStores(
         if (!copies.includes(member.dir)) copies.push(member.dir);
         copiesOf.set(found.name, copies);
       }
+      const inMember = relative.slice(member.dir.length + 1);
+      const key = `${member.dir}::${inMember}`;
+      const base = inMember.slice(inMember.lastIndexOf("/") + 1);
+      if (DRIVER_MODULE_FAMILIES.includes(base)) familyModuleKeys.add(key);
+      if (familyModuleKeys.has(key) || declaredModuleKeys.has(key)) moduleCode.set(key, code);
     }
   }
 
   const tracked = new Set<string>([...copiesOf.keys(), ...substituteNames]);
-  const entrypoints = new Set<string>(
-    declaredModules.flatMap((d) => (d.entrypoint === undefined ? [] : [d.entrypoint])),
-  );
-  // A module defines its own entrypoint, so its own text names it: without this the question
-  // "does anything call it" answers yes for every function-shaped driver, which is the whole class.
-  const entrypointOwner = new Map<string, string>(
-    declaredModules.flatMap((d) =>
-      d.entrypoint === undefined ? [] : [[d.entrypoint, `${d.pkg}::${d.module ?? ""}`] as const],
-    ),
-  );
-  const declaredModuleKeys = new Set(declaredModules.map((d) => `${d.pkg}::${d.module ?? ""}`));
-  const familyModuleKeys = new Set<string>();
+
+  // The names the module-level reachability question is asked about, and who owns each.
+  //
+  // Seeded from every watched module's **invocable** exports (plus a declared entrypoint, in case
+  // the declaration names something this parse cannot see), so an undeclared driver module can be
+  // answered for at all — which is what the first wiring of a function-shaped driver exposed.
+  //
+  // A name may have **several** owners: three replayers export `DriftIssue`, and although types are
+  // not seeded, two do export `verifyDrillExecutionShape`-shaped siblings. A shared name credits
+  // every owner, which is conservative in the same direction as the class scan's by-name
+  // attribution — it can only make a module read *reachable*, never unreachable — and the negative
+  // control is what proves the arm still fires.
+  const ownersOf = new Map<string, string[]>();
+  const addOwner = (name: string, key: string): void => {
+    const owners = ownersOf.get(name) ?? [];
+    if (!owners.includes(key)) owners.push(key);
+    ownersOf.set(name, owners);
+  };
+  for (const [key, code] of moduleCode) {
+    for (const name of exportedFunctions(code)) addOwner(name, key);
+  }
+  for (const declaration of declaredModules) {
+    if (declaration.entrypoint === undefined) continue;
+    addOwner(declaration.entrypoint, `${declaration.pkg}::${declaration.module ?? ""}`);
+  }
+  const entrypoints = new Set(ownersOf.keys());
 
   const sites = new Map<string, { prod: string[]; tests: string[] }>();
   const imports = new Map<string, { prod: string[]; tests: string[] }>();
-  const uses = new Map<string, { prod: string[]; tests: string[] }>();
+  const uses = new Map<string, { prod: string[]; tests: string[]; names: string[] }>();
   const dynamic: DynamicConstruction[] = [];
   const memberByName = new Map(members.map((m) => [m.name, m.dir]));
   const filesByMember = new Map<string, number>();
-  const moduleTexts = new Map<string, string>();
 
   let files = 0;
   for (const member of members) {
@@ -1379,19 +1467,6 @@ export function scanWorkspaceStores(
       files += 1;
       const test = isTestSite(relative);
 
-      if (!test) {
-        const base = inMember.slice(inMember.lastIndexOf("/") + 1);
-        if (DRIVER_MODULE_FAMILIES.includes(base)) {
-          familyModuleKeys.add(`${member.dir}::${inMember}`);
-        }
-        if (declaredModuleKeys.has(`${member.dir}::${inMember}`)) {
-          moduleTexts.set(`${member.dir}::${inMember}`, code);
-        }
-        if (familyModuleKeys.has(`${member.dir}::${inMember}`)) {
-          moduleTexts.set(`${member.dir}::${inMember}`, code);
-        }
-      }
-
       const found = findConstructions(code, tracked);
       for (const symbol of found.constructs) {
         const entry = sites.get(symbol) ?? { prod: [], tests: [] };
@@ -1403,15 +1478,23 @@ export function scanWorkspaceStores(
       }
 
       // A barrel re-export is not a caller, so a member's own `index.ts` is excluded from the
-      // entrypoint question — otherwise `export * from "./replayer.js"` would answer it.
+      // module question — otherwise `export * from "./replayer.js"` would answer it. And a module
+      // defines its own exports, so its own text names them: without that skip the question "does
+      // anything call this" answers yes for every function-shaped driver, which is the whole class.
       const isOwnBarrel = inMember === "src/index.ts" || inMember === "index.ts";
       const fileKey = `${member.dir}::${inMember}`;
       if (!isOwnBarrel) {
         for (const name of findIdentifierUses(code, entrypoints)) {
-          if (entrypointOwner.get(name) === fileKey) continue;
-          const entry = uses.get(name) ?? { prod: [], tests: [] };
-          (test ? entry.tests : entry.prod).push(relative);
-          uses.set(name, entry);
+          for (const owner of ownersOf.get(name) ?? []) {
+            if (owner === fileKey) continue;
+            const entry = uses.get(owner) ?? { prod: [], tests: [], names: [] };
+            (test ? entry.tests : entry.prod).push(relative);
+            // Only a non-test use is recorded as a name, so `usedNames` means exactly what the
+            // `overtaken` message claims — the invocable exports a non-test file named — rather than
+            // listing something only the module's own test ever called.
+            if (!test && !entry.names.includes(name)) entry.names.push(name);
+            uses.set(owner, entry);
+          }
         }
       }
 
@@ -1487,29 +1570,25 @@ export function scanWorkspaceStores(
     );
   }
 
-  const moduleFactsFor = (key: string, declaredEntrypoint: string | null): ModuleFacts => {
+  const moduleFactsFor = (key: string): ModuleFacts => {
     const split = key.indexOf("::");
-    const pkg = key.slice(0, split);
-    const module = key.slice(split + 2);
-    const code = moduleTexts.get(key);
-    const use = declaredEntrypoint === null ? undefined : uses.get(declaredEntrypoint);
+    const code = moduleCode.get(key);
+    const use = uses.get(key);
     return ModuleFactsSchema.parse({
-      pkg,
-      module,
+      pkg: key.slice(0, split),
+      module: key.slice(split + 2),
       present: code !== undefined,
       exportedClasses: code === undefined ? [] : exportedClasses(code).map((c) => c.name),
       exportedNames: code === undefined ? [] : exportedNames(code),
-      entrypointUsedBy: (use?.prod ?? []).slice().sort(),
-      entrypointUsedByTests: (use?.tests ?? []).slice().sort(),
+      exportedFunctions: code === undefined ? [] : exportedFunctions(code),
+      usedBy: (use?.prod ?? []).slice().sort(),
+      usedByTests: (use?.tests ?? []).slice().sort(),
+      usedNames: (use?.names ?? []).slice().sort(),
     });
   };
 
-  const modules = declaredModules.map((d) =>
-    moduleFactsFor(`${d.pkg}::${d.module ?? ""}`, d.entrypoint ?? null),
-  );
-  const driverFamilyModules = [...familyModuleKeys]
-    .sort()
-    .map((key) => moduleFactsFor(key, null));
+  const modules = declaredModules.map((d) => moduleFactsFor(`${d.pkg}::${d.module ?? ""}`));
+  const driverFamilyModules = [...familyModuleKeys].sort().map((key) => moduleFactsFor(key));
 
   const reachableSubstitutes = substituteNames.filter(
     (name) => (sites.get(name)?.prod.length ?? 0) > 0,
@@ -1552,49 +1631,6 @@ export function scanWorkspaceStores(
  * surface.
  */
 export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.freeze([
-  /* ------------------------------------------------------------- apps (0) */
-  // `apps/operate-server`'s `UnroutableChannelSender` was the first `apps/*` member of this class,
-  // found the day the predicate widened to include apps at all, and it was deleted rather than
-  // declared: `drainOnce` already asks the registry whether a channel has a sender, so the class was
-  // a second answer to a question something else answered. The empty section is kept as the record
-  // that `apps/*` is in scope — ADR-0336 declared it out — so a future member lands here rather than
-  // in a rule that does not look.
-
-  /* ------------------------------------------------- access-reviews-runtime (0) */
-  // `CampaignScheduler` was declared here as `substitute_in_use` and is gone: the app declares its
-  // own `AccessReviewCampaignScheduler` in `access-reviews-lifecycle.ts` and constructs it, so there
-  // were two interval drivers over one runtime and the package's was the dead one. Deleted rather
-  // than declared, which is the outcome this rule is for — and the second one in a day, after
-  // `apps/operate-server`'s `UnroutableChannelSender`. A callerless class is a question, not a
-  // verdict: often the answer is that it should not exist.
-
-  /* ---------------------------------------------- access-reviews-runtime-pg (1) */
-  {
-    scope: "symbol",
-    pkg: "packages/access-reviews-runtime-pg",
-    symbol: "AccessReviewReplayer",
-    reason: "prerequisite_of_unbuilt_surface",
-    blockedBy:
-      "a verification surface to invoke a replayer from: there is no `replay` or `verify` subcommand on either binary and no scheduler calls one, so all six of this workspace's drift replayers are in the same position. The narrowest honest shape is a `crossengin-pg verify` subcommand taking a scope and printing the report each replayer already formats; a route would need `--audit-read-routes`' apparatus, since a drift report names other tenants' rows. Ordering, not shape.",
-    tables: [],
-    consequence:
-      "A campaign, item or decision row edited into a state the contract forbids but a CHECK constraint permits is never detected — the re-parse-on-read that `verifyCampaignRowShape` performs is the only detector for it, and nothing performs it.",
-    note: "CLAUDE.md advertises this package as `persists campaigns/items/decisions, wraps the runtime, and ships a replayer`. The replayer ships and is constructed only by `replayer.test.ts`.",
-  },
-
-  /* --------------------------------------------------------- api-gateway-pg (2) */
-  {
-    scope: "symbol",
-    pkg: "packages/api-gateway-pg",
-    symbol: "GatewayReplayer",
-    reason: "prerequisite_of_unbuilt_surface",
-    blockedBy:
-      "the same verification surface the other five replayers want, and here the ordering argument is ADR-0336's own open end: `--gateway-execution-capture` gave this reader rows to read in the same increment that declared it had no caller, which is ADR-0335's shape in a new place — a store with a writer and a reader with nothing calling it. The rows are the product (a queryable forensic record of request handling) rather than inert, which is the difference argued; it is not decisive.",
-    tables: [],
-    consequence:
-      "`meta.gateway_pipeline_executions` accumulates sampled executions that nothing ever reads, so `pass_with_4xx_or_5xx`, `deny_without_4xx_or_5xx`, the out-of-order stage check and the orphaned rate-limit decision check are all unreachable — and ADR-0335 made `meta.rate_limit_decisions` writable, so the orphan check now has one half of its join and not the other.",
-    note: "Named as an open end in ADR-0336 and reported by no rule at the time, because the symbol predicate was `Postgres*`. It is the clearest single justification for widening it.",
-  },
   {
     scope: "symbol",
     pkg: "packages/api-gateway-pg",
@@ -1617,20 +1653,6 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     consequence:
       "Nothing is lost by this class having no caller. What its absence of a *production* counterpart costs is separate and real: `auditKeyManagement`'s findings have no durable sink in any deployment, because no `CryptoAuditSink` implementation outside this one exists anywhere in the workspace.",
     note: "The in-memory implementation of the `CryptoAuditSink` seam, constructed by three of its own tests and offered to a caller that injects it. Declared rather than excused by the `test_surface` bucket because no *other* member's tests construct it, so this rule cannot tell it from a dead driver without the declaration — which is the honest state: it is an offline implementation of a seam with no live implementation beside it.",
-  },
-
-  /* ------------------------------------------------------------ dr-runtime-pg (1) */
-  {
-    scope: "symbol",
-    pkg: "packages/dr-runtime-pg",
-    symbol: "DrReplayer",
-    reason: "prerequisite_of_unbuilt_surface",
-    blockedBy:
-      "the verification surface the other five replayers want. This one is the sharpest argument for building it: ADR-0333 found that the failover and drill stores dropped every state transition, scored a deployment breaching both its RPO and RTO as `ready: true`, and gave this replayer the `projection_disagrees_with_record` issue kind that makes the divergence visible — so the detector for ADR-0333's defect was fixed in the increment that found it and has still never run. Ordering, not shape.",
-    tables: [],
-    consequence:
-      "A failover or drill row whose `record` JSONB disagrees with its projected columns is never reported, which is exactly the state ADR-0333's `DO NOTHING` upserts left behind in any deployment that ran them.",
-    note: "Bug-fixed by ADR-0333 (`projection_disagrees_with_record` added) while nothing constructed it; constructed only by `replayer.test.ts`.",
   },
 
   /* ------------------------------------------------------ feature-flags-pg (2) */
@@ -1656,21 +1678,6 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     consequence:
       "A flag's targeting rules can be read back and written by nothing, so `chooseTargetingRule` evaluates an empty rule set in every deployment and the ten targeting rule kinds with their FNV-1a sticky bucketing are unreachable from a database.",
     note: "**The store this rule exists for.** ADR-0335 shipped no authoring route deliberately and the reasoning is sound — a rule changes what the deployment serves, so it is at least config-grade and would need `--notification-template-routes`' four-eyes apparatus (ADR-0313) — but the table left `pg-storeless-tables.ts`' census when this store landed, so the fence read greener for a place that went from watched to unwatched. The decision survives the rule naming it; that is the point.",
-  },
-
-  /* ------------------------------------------ incident-response-runtime-pg (4) */
-  {
-    scope: "module",
-    pkg: "packages/incident-response-runtime-pg",
-    module: "src/replayer.ts",
-    entrypoint: "replayIncidents",
-    reason: "prerequisite_of_unbuilt_surface",
-    blockedBy:
-      "the verification surface the five class-shaped replayers want. It is declared separately because of *how* it was missed rather than why it is unwired: this module exports `replayIncidents` and `formatIncidentReplayReport` and **no class at all**, so a rule whose unit is `new X(` has no site to look for and is structurally blind to it. Ordering, not shape — the subcommand that invokes the other five invokes this one.",
-    tables: ["meta.incidents"],
-    consequence:
-      "An incident row edited into a state `IncidentRecordSchema` forbids but the table's CHECK constraints permit is never detected. CLAUDE.md names this module's re-parse as `the only way to catch` that (ADR-0289), so the sole detector for a tamper class has never run.",
-    note: "**The fifth blind spot's named live member.** The only non-test reference to `formatIncidentReplayReport` anywhere is `dist/replayer.d.ts`, which is build output rather than a caller. `module` scope exists for this declaration and is checked four ways — the file must be on disk, it must export the named entrypoint, it must still export no class, and nothing outside it may name the entrypoint — so if a class is added here the declaration fails with `module_now_has_class` and the symbol rule takes over.",
   },
   {
     scope: "symbol",
@@ -1747,20 +1754,6 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     consequence:
       "Declared synthetic checks are never executed, so a surface that is down for every real user while serving no requests — the one failure an availability SLO over observed traffic cannot see — raises nothing.",
     note: "The other half of `observability-runtime`'s unreached surface. The availability and latency engines in the same package are both reachable through `observability-runtime-pg`'s persisting engines, which is the contrast that makes these two declarations sharp rather than a blanket statement about the package.",
-  },
-
-  /* ------------------------------------------------------ observability-runtime-pg (1) */
-  {
-    scope: "symbol",
-    pkg: "packages/observability-runtime-pg",
-    symbol: "SloEnforcementReplayer",
-    reason: "prerequisite_of_unbuilt_surface",
-    blockedBy:
-      "the verification surface the other five replayers want. Ordering, not shape.",
-    tables: [],
-    consequence:
-      "The three SLO drift conditions — an `ongoing` action with no open incident, two open incidents for one surface, and a `paged` action whose policy had no channels — are never checked, so ADR-0294's duplicate-declaration guard and ADR-0325's undelivered-page accounting have no auditor.",
-    note: "`records.ts` and both persisting engines in this package are reachable from `node.ts`; the replayer beside them is constructed only by `replayer.test.ts`.",
   },
 
   /* --------------------------------------------------------- operate-runtime (1) */
