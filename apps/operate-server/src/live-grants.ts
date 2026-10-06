@@ -125,7 +125,9 @@ export function apiKeyPrincipalProvider(apiKeys: readonly ApiKeySpec[]): AuthPri
       userId: subjectToUuid(spec.key) as Principal["userId"],
       primaryRole: spec.role,
       secondaryRoles: [],
-      abacAttributes: {},
+      // `null`: this enumerates api-key specs offline for access-review item generation, with no
+      // connection and no membership read, so no attribute was resolved for any of them.
+      abacAttributes: null,
       mfaProofAgeSeconds: null,
     });
     byTenant.set(spec.tenantId, list);

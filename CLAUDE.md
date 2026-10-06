@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 335 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 336 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~16,575 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~16,770 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -237,6 +237,35 @@ type errors.
   argument: the source does exist (ADR-0339 said it did not), but before this change `{}` erred
   toward granting and disclosing and after it the same `{}` errs toward denial — so an evaluator
   wired first is wrong-and-safe, while attributes wired first would restore the hole.
+
+  ADR-0341 closes that Q1 and **corrects that last clause of its own predecessor**: with obligations
+  refused at boot, attributes wired alone restore no hole — nothing could read them either way — so
+  the cost of that order is *inertness*, not exposure, and the real reason to do both halves at once
+  is that **either alone is inert**. The class is **a record written and never read**:
+  `meta.user_tenant_membership.abac_attributes` has had a writer *and* a reader since ADR-0335 and
+  nothing that makes a decision, so the ABAC domain had its subject recorded and never consulted.
+  The bound that shapes the whole increment is in the seam: `AbacEvaluationInput` carries
+  `{policyKey, principal, entity, operation, field?}` and **no record**, so "owns this row" and
+  `user.department == record.department` — one of the two spellings this package's own tests used —
+  are inexpressible by **any** evaluator here, OPA included. What is expressible is a predicate over
+  the principal's own attributes, and that is what shipped.
+  Four decisions carry it. `Principal.abacAttributes` is `Record | null` and still **required**,
+  because an evaluator handed `{}` cannot tell *has none* from *nobody looked* — ADR-0331's
+  distinction inside an authorization input, failing in the allowing direction — and `dischargeAbac`
+  refuses `null` **before calling the evaluator**, so a deployment's own evaluator cannot get it
+  wrong. Attributes resolve **once in the auth stage** on `ResolvedPrincipal`, which one decoration
+  covers for both credential families because an api-key validates in `authenticate` and then
+  resolves in a *separate* `resolve_principal` stage through the same resolver a JWT uses. The
+  directory **writes no SQL** — `PostgresUserStore.membershipFor` already carries the
+  `withTenantContext` and strict `scopeFilter` that table's single `ALL`-scope policy requires — and
+  looks nothing up for a credential that names no person (`PRINCIPAL_KIND_NAMES_A_PERSON`, a total
+  map with only `user` true), because ADR-0331's bare api-key is a `service_account` on one shared
+  placeholder id. And `--abac-policy` is the consumer, whose declaration is *also* what switches the
+  producer on: the lookup exists exactly when something reads it. The boot check changed shape with
+  it — `evaluatorDeclared: boolean` became `answerableKeys: ReadonlySet<string>` with a second
+  refusal `policy_undeclared`, because "an evaluator exists" was never the question; a
+  declared-but-incomplete policy set answers `undischargeable` for exactly the keys it lacks, which
+  is the same silence the boot refusal exists to end.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -749,6 +778,15 @@ packages exist at only one layer, noted below where that is true.
   principal it has no business seeing. `surveyAbacObligations` covers all four grant positions — the
   five operation names, `transitions`, and `fields[x].read`/`.update` — which is what the boot
   refusal is built from.
+  **`Principal.abacAttributes` is `Record | null` since ADR-0341**, where `null` means *not
+  resolved* and `{}` asserts the principal has none — two facts an evaluator cannot tell apart, and
+  the conflation resolves in the allowing direction. Still **required**, not optional: an optional
+  field can be forgotten with the type valid (ADR-0330's rule), and here every construction site has
+  to say which it holds. `dischargeAbac` refuses `undischargeable` on `null` **before** calling the
+  evaluator and **after** the no-obligation check, so an absent obligation still answers `null` —
+  there was nothing to check, so a missing input cannot matter — and a deployment-supplied evaluator
+  cannot answer from attributes nobody gathered even if it forgets to look. `abacAttributesResolved`
+  is the one spelling of that comparison.
 - **`sso`** — federated identity contracts: SAML 2.0 + OIDC provider configs, SCIM 2.0
   provisioning, claim mappings with transforms and JIT user policies, session lifecycle,
   login audit.
@@ -1867,9 +1905,29 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   that field unwritable and would otherwise trip `--classified-write-mask`'s
   `would_make_entity_uncreatable`, naming the classification declaration as the remedy for
   something no declaration can fix. First refusal wins, so it has to be the one whose remedy is
-  true. `BuildOperateHttpServerOptions.abacEvaluator` is the only way to supply one — no CLI flag
-  does, because an ABAC policy engine is not something this binary contains — so it is an option
-  rather than a hardcoded absence, which makes the refusal's premise a fact about the caller.
+  true.
+  **`--abac-policy <key>=<attribute>:<op>[:<value>]` is the policy layer** (ADR-0341, ops `eq` /
+  `ne` / `in` / `present`), colon-delimited after the key because that is `--rate-limit-policy`'s
+  convention here, and a repeated key is **refused** rather than last-wins since which of two
+  policies decides an authorization must not depend on argv order. Declaring one is *also* what
+  builds the attribute directory — the producer is wired exactly when a consumer exists, so a
+  deployment with no policy pays no per-request lookup — and the flag is **refused under
+  `--store memory`**, where there is no membership table and every obligation would answer
+  `undischargeable`, the total denial that reads as the policy working. Three evaluation rules are
+  decisions: an **absent** attribute denies for every operator **including `ne`** (so `ne` is not
+  the negation of `eq` — nothing is known, and a grant condition over nothing must not be
+  satisfied); a **structured** value denies for all but `present`, since guessing a scalar rendering
+  would make the answer depend on an unstated convention; and a key no policy declares is
+  **`undischargeable`, not `denied`**, because that is a configuration gap rather than a statement
+  about the principal. Attribute lookup is `hasOwnProperty`-guarded, which is not pedantry: a policy
+  naming `constructor` or `toString` would otherwise find the attribute *present* on every
+  principal, a fail-open reachable from the declaration alone.
+  `BuildOperateHttpServerOptions.abac` groups the evaluator, the **keys it can answer** and the
+  attribute directory as **one** object, because the three must agree and two of the pairings are
+  silently wrong if they can be formed apart: an evaluator without its key set leaves the per-tenant
+  check unable to ask whether the manifest's obligations are answerable, and an evaluator without a
+  directory refuses every obligation. `answerableKeys` is required beside the evaluator; the
+  directory is the one genuinely optional member.
   **At-rest PHI is decided at boot** (ADR-0338): `resolveStore` surveys the manifest's
   `phi`/`regulated` fields (through `resolvedFields`, so a classified *trait* field cannot be missed),
   calls `decidePhiStorage`, and either refuses or builds one `buildColumnKeySource` shared by the boot
@@ -2446,22 +2504,10 @@ opened them.
   ADR-0338 had just made ciphertext**. Fixed fail-closed through one `dischargeAbac`, one
   `OperateRuntimeOptions.abacEvaluator` threaded from `compile.ts` (the only module holding all five
   readers), and a boot refusal in `buildOperateHttpServer` with no escape hatch.
-  What remains, in order: **(1)** **the attributes are not wired.** `meta.user_tenant_membership`
-  has carried `abac_attributes JSONB NOT NULL DEFAULT '{}'` since Phase 1 and has had a writer *and*
-  a reader since ADR-0335 (`--platform-user-routes`), so ADR-0339's "fixing it needs an attribute
-  source" was wrong; what is missing is the wire, and **five** non-test sites hardcode
-  `Principal.abacAttributes` to `{}` (`api-gateway-runtime/redaction.ts:80`,
-  `operate-runtime/handlers.ts:93`, `association.ts:214`, `operate-server/sensitive-field-policy.ts:186`,
-  `live-grants.ts:128`). Deliberately left, and the **ordering is the argument**: before ADR-0340
-  that `{}` erred toward granting and disclosing, after it the same `{}` errs toward denial and
-  redaction, so an evaluator wired before the attributes is wrong-and-safe while attributes wired
-  before an evaluator would restore the hole. It wants a per-request `(userId, tenantId)` lookup
-  with `--tenant-status-gate`'s TTL idiom (positive TTL, shorter absence TTL, first lookup
-  propagates, a refresh serving stale to a bound). **(2)** **which mechanism** — a policy engine
-  (OPA/Cedar) behind `AbacEvaluator`, or a narrow built-in attribute-comparison vocabulary
-  declarable in the manifest. The seam makes it a configuration choice and nothing picks yet; note
-  that `"data.access.allow_update"`, one of the two spellings this package's own tests used, is
-  literally an OPA data path. **(3)** **seven spellings of one concept** across six packages, with
+  What remains, in order: **(1)** ~~the attributes are not wired~~ and **(2)** ~~which mechanism~~
+  are both **closed by ADR-0341** — the directory is live and `--abac-policy` is the narrow option
+  taken. See the next entry; that ADR also corrects this one's claim that attributes-first "would
+  restore the hole" (it would merely have been inert). **(3)** **seven spellings of one concept** across six packages, with
   three value types for the attributes: `auth.RoleDefinition.abacAttributes`
   (`Record<string,string>`, no producer and no reader), `auth.RbacGrant.abac` (the key),
   `reporting.BaseReport.abac` — a **second** ABAC field on a report that already carries one through
@@ -2478,6 +2524,34 @@ opened them.
   `AbacEnforcement`, so an obligated field surveys as writable-by-nobody — correct, and unreachable
   because the obligation refusal fires first, but the survey's output would mislead if that ordering
   ever changed.
+- **The attribute source is wired, and what is left of it** (ADR-0341 closed ADR-0340's Q1 and Q2).
+  `meta.user_tenant_membership.abac_attributes` has had a writer *and* a reader since ADR-0335 and
+  nothing that made a decision, so the ABAC domain had its subject recorded and never consulted; the
+  five hardcoded `Principal.abacAttributes: {}` sites are gone and the type (`Record | null`,
+  required) no longer lets a sixth appear. Attributes resolve once in the auth stage, the directory
+  reads through `PostgresUserStore.membershipFor` (no new SQL, `active` memberships only, cached on
+  the tenant gate's three TTL figures with `DEFAULT_MAX_STALE_MS` now shared), a credential naming
+  no person gets no lookup, and `--abac-policy` is both the consumer and the switch that builds the
+  producer.
+  What remains: **(1)** **the record gap, which is the live one.** `AbacEvaluationInput` carries no
+  record, so "owns this row" and `user.department == record.department` are inexpressible by **any**
+  evaluator here — OPA included — and the narrow vocabulary that shipped covers only the
+  principal-attribute half. Closing it is a contract decision with a real asymmetry in it: `read`
+  and `update` hold a stored record, `create` holds only the client's patch and `list` holds a set,
+  so either the input gains an optional record that is absent for exactly the operations a policy
+  most wants it for, or ABAC splits into record-free and record-bearing kinds. **(2)** a directory
+  failure lands as an unclassified **500** through the listener's top-level catch, where ADR-0334
+  deliberately chose **503** for the same could-not-establish condition on the tenant-status gate —
+  right in direction, coarser in kind, and the typed error would have to reach a generic catch.
+  **(3)** `auth.RoleDefinition.abacAttributes` is now the sharpest of the unreconciled spellings
+  rather than merely dead: with a membership source live, a **role-level default** is the obvious
+  fallback and nothing merges one. **(4)** attribute *writes* are reachable only through
+  `--platform-user-routes`, whose grant is a platform operator, so a tenant administering its own
+  members' attributes has no surface. **(5)** the TTL is how long an attribute change takes to bite,
+  and a `service_account` can hold no attributes at all by rule. **(6)**
+  `search.PermissionTagInput.abacAttributes` is still the only other *consumer* in the workspace,
+  with its own value type and no runtime — `deriveSessionTags` would now have a real source to
+  flatten.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3399,7 +3473,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 335 records; 256 Accepted, 79 Proposed (the
+title or status change cannot drift. 336 records; 257 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

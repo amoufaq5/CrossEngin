@@ -183,7 +183,10 @@ function principalFor(role: RoleName): Principal {
     userId: null,
     primaryRole: role,
     secondaryRoles: [],
-    abacAttributes: {},
+    // `null`, not `{}`: this is a boot survey over roles with no request and no membership behind
+    // it, so nothing was resolved. `{}` would claim the surveyed role has no attributes, which
+    // would let an obligated field read as answerable from a question nobody asked.
+    abacAttributes: null,
     mfaProofAgeSeconds: null,
   };
 }

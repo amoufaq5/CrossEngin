@@ -58,6 +58,14 @@ function isAbacOutcome(value: unknown): value is AbacOutcome {
 }
 
 /**
+ * Whether an attribute directory was consulted for this principal. One spelling of the comparison,
+ * so a caller can ask the question `dischargeAbac` asks without restating which value means which.
+ */
+export function abacAttributesResolved(principal: Principal): boolean {
+  return principal.abacAttributes !== null;
+}
+
+/**
  * The one place in this package that ever calls an evaluator, with five callers — `rbacCheck` and
  * the four field-level functions — so the fail-closed rules below cannot diverge between them.
  */
@@ -70,6 +78,11 @@ export function dischargeAbac(
   // and "a policy answered yes" are different facts, and a caller reporting the second when the
   // first is true would claim an evaluation that never happened.
   if (policyKey === undefined) return null;
+
+  // Attributes were never gathered, so no policy over them can be answered — and an evaluator handed
+  // `{}` would read it as "this principal has no attributes" and could answer `denied` or even
+  // `satisfied` from an input nobody collected.
+  if (context.principal.abacAttributes === null) return { policyKey, outcome: "undischargeable" };
 
   // `undischargeable` and not `denied`: `denied` is a claim about this principal's attributes,
   // while this says no evaluator could answer at all. Different facts, different remedies.

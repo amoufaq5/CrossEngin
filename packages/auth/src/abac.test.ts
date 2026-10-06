@@ -3,6 +3,7 @@ import type { TenantId, UserId } from "@crossengin/types";
 import {
   ABAC_OUTCOME_ALLOWS,
   UNDISCHARGEABLE_ABAC_EVALUATOR,
+  abacAttributesResolved,
   describeOperation,
   dischargeAbac,
   formatAbacObligation,
@@ -37,6 +38,29 @@ const CONTEXT: Omit<AbacEvaluationInput, "policyKey"> = {
   entity: "prescription",
   operation: "update",
 };
+
+/** The same principal with no directory consulted, which is not the same as holding no attributes. */
+const UNRESOLVED_PRINCIPAL: Principal = { ...PRINCIPAL, abacAttributes: null };
+
+const UNRESOLVED_CONTEXT: Omit<AbacEvaluationInput, "policyKey"> = {
+  ...CONTEXT,
+  principal: UNRESOLVED_PRINCIPAL,
+};
+
+/** Records every call so a test can assert the evaluator was never reached, not merely ignored. */
+function spyEvaluator(answer: AbacOutcome): {
+  readonly evaluator: AbacEvaluator;
+  readonly calls: AbacEvaluationInput[];
+} {
+  const calls: AbacEvaluationInput[] = [];
+  return {
+    evaluator: (input) => {
+      calls.push(input);
+      return answer;
+    },
+    calls,
+  };
+}
 
 describe("ABAC_OUTCOMES", () => {
   it("names exactly three outcomes", () => {
@@ -140,6 +164,103 @@ describe("dischargeAbac — no evaluator", () => {
     expect(dischargeAbac("data.access.allow_update", CONTEXT, undefined)?.policyKey).toBe(
       "data.access.allow_update",
     );
+  });
+});
+
+describe("dischargeAbac — unresolved attributes", () => {
+  it("answers undischargeable for an obligation when no directory was consulted", () => {
+    expect(dischargeAbac("p.key", UNRESOLVED_CONTEXT, undefined)).toEqual({
+      policyKey: "p.key",
+      outcome: "undischargeable",
+    });
+  });
+
+  it("never calls the evaluator, even when one is supplied", () => {
+    // The point of the rule: an evaluator handed `{}` cannot tell "no attributes" from "nobody
+    // looked", so it must not be asked at all rather than asked with a fabricated input.
+    const spy = spyEvaluator("satisfied");
+    const d = dischargeAbac("p.key", UNRESOLVED_CONTEXT, spy.evaluator);
+    expect(spy.calls).toEqual([]);
+    expect(d).toEqual({ policyKey: "p.key", outcome: "undischargeable" });
+  });
+
+  it("refuses even an evaluator that would have denied, so the outcome names the real reason", () => {
+    const spy = spyEvaluator("denied");
+    expect(dischargeAbac("p.key", UNRESOLVED_CONTEXT, spy.evaluator)?.outcome).toBe(
+      "undischargeable",
+    );
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("does not allow", () => {
+    const d = dischargeAbac("p.key", UNRESOLVED_CONTEXT, () => "satisfied");
+    expect(d).not.toBeNull();
+    expect(ABAC_OUTCOME_ALLOWS[(d as { outcome: AbacOutcome }).outcome]).toBe(false);
+  });
+
+  it("echoes the policy key, so the refusal still names what could not be answered", () => {
+    expect(dischargeAbac("rx.update", UNRESOLVED_CONTEXT, () => "satisfied")?.policyKey).toBe(
+      "rx.update",
+    );
+  });
+
+  it("is ordered after the no-obligation check: no obligation still returns null", () => {
+    // Nothing was going to be checked, so the missing input does not matter — and reporting an
+    // `undischargeable` here would invent an obligation the grant never carried.
+    const spy = spyEvaluator("satisfied");
+    expect(dischargeAbac(undefined, UNRESOLVED_CONTEXT, spy.evaluator)).toBeNull();
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("is indistinguishable in outcome from having no evaluator, and that is deliberate", () => {
+    // Both say nothing could answer. The remedies differ (wire a directory / wire an evaluator) and
+    // neither is a claim about this principal's attributes.
+    expect(dischargeAbac("p.key", UNRESOLVED_CONTEXT, () => "satisfied")).toEqual(
+      dischargeAbac("p.key", CONTEXT, undefined),
+    );
+  });
+});
+
+describe("dischargeAbac — resolved-but-empty attributes", () => {
+  it("is a usable input: a satisfied evaluator still satisfies", () => {
+    // `{}` asserts this principal holds no attributes, which is a fact a policy can answer from.
+    // Only `null` refuses, so the new rule cannot swallow the empty case.
+    const empty: Principal = { ...PRINCIPAL, abacAttributes: {} };
+    const spy = spyEvaluator("satisfied");
+    const d = dischargeAbac("p.key", { ...CONTEXT, principal: empty }, spy.evaluator);
+    expect(d).toEqual({ policyKey: "p.key", outcome: "satisfied" });
+    expect(spy.calls).toHaveLength(1);
+  });
+
+  it("reaches the evaluator with the empty record intact", () => {
+    const empty: Principal = { ...PRINCIPAL, abacAttributes: {} };
+    const spy = spyEvaluator("denied");
+    dischargeAbac("p.key", { ...CONTEXT, principal: empty }, spy.evaluator);
+    expect(spy.calls[0]?.principal.abacAttributes).toEqual({});
+  });
+});
+
+describe("abacAttributesResolved", () => {
+  it("is false when no directory was consulted", () => {
+    expect(abacAttributesResolved(UNRESOLVED_PRINCIPAL)).toBe(false);
+  });
+
+  it("is true for an empty record, which asserts there are none", () => {
+    expect(abacAttributesResolved({ ...PRINCIPAL, abacAttributes: {} })).toBe(true);
+  });
+
+  it("is true for a populated record", () => {
+    expect(abacAttributesResolved(PRINCIPAL)).toBe(true);
+    expect(
+      abacAttributesResolved({ ...PRINCIPAL, abacAttributes: { clearance: 3, ward: "icu" } }),
+    ).toBe(true);
+  });
+
+  it("agrees with the rule dischargeAbac applies", () => {
+    for (const p of [UNRESOLVED_PRINCIPAL, PRINCIPAL, { ...PRINCIPAL, abacAttributes: {} }]) {
+      const d = dischargeAbac("p.key", { ...CONTEXT, principal: p }, () => "satisfied");
+      expect(d?.outcome === "satisfied").toBe(abacAttributesResolved(p));
+    }
   });
 });
 

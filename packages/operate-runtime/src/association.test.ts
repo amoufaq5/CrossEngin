@@ -147,6 +147,11 @@ function principal(role: string | null): ResolvedPrincipal | null {
     principalKind: "user",
     authScheme: "api_key_header",
     grantedScopes: [role],
+    // Resolved-but-empty, which is the shape a deployment with an attribute directory produces for
+    // a member carrying none. Since ADR-0341 an *absent* record refuses an obligation before any
+    // evaluator runs, so a fixture without this would make every policy test below pass for the
+    // wrong reason; the absent case is pinned on its own below.
+    abacAttributes: {},
     mfaProofAgeSeconds: null,
     resolvedAt: "2026-06-03T12:00:00.000Z",
   } as ResolvedPrincipal;
@@ -491,6 +496,24 @@ function call(handler: Handler, role: string, params: Record<string, string>): P
   );
 }
 
+/** The same call with the attribute lookup never having happened. */
+function callUnresolved(
+  handler: Handler,
+  role: string,
+  params: Record<string, string>,
+): Promise<HandlerOutput> {
+  const resolved = principal(role);
+  return Promise.resolve(
+    handler({
+      request: {} as never,
+      route: {} as never,
+      principal: resolved === null ? null : { ...resolved, abacAttributes: undefined },
+      params,
+      parsedBody: null,
+    }),
+  );
+}
+
 function abacBody(out: HandlerOutput): Record<string, unknown> {
   if (out.kind !== "json") throw new Error("expected json output");
   return out.body as Record<string, unknown>;
@@ -546,6 +569,22 @@ describe("association handlers — abac obligation", () => {
       // Nothing behind the check ran.
       expect(store.lastListLinks).toBeNull();
       expect(store.lastCountLinks).toBeNull();
+      expect(store.linked).toEqual([]);
+    });
+
+    it(`${family.name}: refuses on satisfied when attributes were never resolved`, async () => {
+      // ADR-0341. `association.ts` keeps its own copy of `authPrincipal`, so this pins that the two
+      // copies cannot diverge on the rule: unresolved attributes refuse before the evaluator runs.
+      const store = new FakeStore();
+      const seen: AbacEvaluationInput[] = [];
+      const out = await callUnresolved(
+        family.build(abacCtx(store, answering("satisfied", seen))),
+        family.name === "write" ? "editor" : "viewer",
+        family.params,
+      );
+      expect(out.status).toBe(403);
+      expect(abacBody(out)["abacOutcome"]).toBe("undischargeable");
+      expect(seen).toEqual([]);
       expect(store.linked).toEqual([]);
     });
 

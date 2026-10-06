@@ -10,6 +10,7 @@ import {
   formatAbacObligationCheck,
   type AbacObligationCheck,
 } from "./abac-obligations.js";
+import { ABAC_POLICY_FLAG } from "./abac-policy.js";
 import { BUILTIN_PACK_NAMES, loadBuiltinPack } from "./manifest-source.js";
 
 function manifest(parts: Partial<Manifest> = {}): Manifest {
@@ -29,6 +30,16 @@ function withOneObligation(): Manifest {
   });
 }
 
+/** Two obligations with distinct keys, so a partial evaluator can cover one and not the other. */
+function withTwoObligations(): Manifest {
+  return manifest({
+    permissions: {
+      Patient: { read: { roles: ["clinician"], abac: "same_facility" } },
+      Citizen: { update: { roles: ["gov_admin"], abac: "own_jurisdiction" } },
+    },
+  });
+}
+
 /** `n` distinct synthetic obligations, so a truncated render is checkable per member. */
 function synthetic(n: number): readonly AbacObligation[] {
   return Array.from({ length: n }, (_, i) => ({
@@ -43,18 +54,20 @@ function check(parts: Partial<AbacObligationCheck> = {}): AbacObligationCheck {
   return {
     obligations: [],
     evaluatorDeclared: false,
+    unanswerable: [],
     refusal: null,
     ...parts,
   };
 }
 
 describe("ABAC_OBLIGATION_REFUSALS", () => {
-  it("names the one refusal", () => {
-    expect(ABAC_OBLIGATION_REFUSALS).toEqual(["obligation_unevaluable"]);
+  it("names both refusals", () => {
+    expect(ABAC_OBLIGATION_REFUSALS).toEqual(["obligation_unevaluable", "policy_undeclared"]);
   });
 
   it("has no escape-hatch member, because serving an unevaluated obligation is not a state to opt into", () => {
-    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(1);
+    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(2);
+    expect(ABAC_OBLIGATION_REFUSALS.some((r) => /allow|skip|ignore|unchecked/.test(r))).toBe(false);
   });
 });
 
@@ -68,7 +81,7 @@ describe("checkAbacObligations", () => {
   it("refuses when obligations are declared and no evaluator is", () => {
     const result = checkAbacObligations({
       manifest: withOneObligation(),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations).toHaveLength(1);
     expect(result.evaluatorDeclared).toBe(false);
@@ -78,7 +91,7 @@ describe("checkAbacObligations", () => {
   it("does not refuse when obligations are declared and an evaluator is", () => {
     const result = checkAbacObligations({
       manifest: withOneObligation(),
-      evaluatorDeclared: true,
+      answerableKeys: new Set(["same_facility"]),
     });
     expect(result.obligations).toHaveLength(1);
     expect(result.evaluatorDeclared).toBe(true);
@@ -88,7 +101,7 @@ describe("checkAbacObligations", () => {
   it("does not refuse when no obligation is declared and no evaluator is", () => {
     const result = checkAbacObligations({
       manifest: manifest({ permissions: { Patient: { read: { roles: ["clinician"] } } } }),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
@@ -97,7 +110,7 @@ describe("checkAbacObligations", () => {
   it("does not refuse when no obligation is declared and an evaluator is", () => {
     const result = checkAbacObligations({
       manifest: manifest({ permissions: {} }),
-      evaluatorDeclared: true,
+      answerableKeys: new Set(["same_facility"]),
     });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
@@ -106,7 +119,7 @@ describe("checkAbacObligations", () => {
   it("treats an absent `permissions` key as no obligations rather than throwing", () => {
     const m = manifest();
     expect(m.permissions).toBeUndefined();
-    const result = checkAbacObligations({ manifest: m, evaluatorDeclared: false });
+    const result = checkAbacObligations({ manifest: m, answerableKeys: new Set() });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
   });
@@ -116,7 +129,7 @@ describe("checkAbacObligations", () => {
       manifest: manifest({
         permissions: { Invoice: { update: { roles: ["ap_clerk"], abac: "own_entity" } } },
       }),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations).toEqual([
       { entity: "Invoice", operation: "update", field: null, policyKey: "own_entity" },
@@ -130,7 +143,7 @@ describe("checkAbacObligations", () => {
           SalesOrder: { transitions: { fulfil: { roles: ["picker"], abac: "same_store" } } },
         },
       }),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations).toHaveLength(1);
     const [only] = result.obligations;
@@ -147,7 +160,7 @@ describe("checkAbacObligations", () => {
           Patient: { fields: { mrn: { read: { roles: ["clinician"], abac: "treating" } } } },
         },
       }),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations).toEqual([
       { entity: "Patient", operation: "read", field: "mrn", policyKey: "treating" },
@@ -163,7 +176,7 @@ describe("checkAbacObligations", () => {
           },
         },
       }),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations).toEqual([
       {
@@ -186,7 +199,7 @@ describe("checkAbacObligations", () => {
           },
         },
       }),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations).toEqual([]);
   });
@@ -208,9 +221,126 @@ describe("checkAbacObligations", () => {
           },
         },
       }),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations.map((o) => o.policyKey).sort()).toEqual(["a", "b", "c", "d", "e"]);
+  });
+});
+
+describe("checkAbacObligations against an incomplete evaluator", () => {
+  it("refuses `policy_undeclared` and names only the obligation whose key is missing", () => {
+    const result = checkAbacObligations({
+      manifest: withTwoObligations(),
+      answerableKeys: new Set(["same_facility"]),
+    });
+    expect(result.evaluatorDeclared).toBe(true);
+    expect(result.refusal).toBe("policy_undeclared");
+    expect(result.obligations).toHaveLength(2);
+    expect(result.unanswerable.map((o) => o.policyKey)).toEqual(["own_jurisdiction"]);
+  });
+
+  it("does not refuse when every declared key is covered", () => {
+    const result = checkAbacObligations({
+      manifest: withTwoObligations(),
+      answerableKeys: new Set(["same_facility", "own_jurisdiction"]),
+    });
+    expect(result.refusal).toBeNull();
+    expect(result.unanswerable).toEqual([]);
+  });
+
+  it("ignores a declared key no obligation names, because a policy may precede its grant", () => {
+    const result = checkAbacObligations({
+      manifest: withOneObligation(),
+      answerableKeys: new Set(["same_facility", "unused"]),
+    });
+    expect(result.refusal).toBeNull();
+    expect(result.unanswerable).toEqual([]);
+  });
+
+  /**
+   * The precedence. An empty set is the no-evaluator case, which `obligation_unevaluable` states
+   * once with the remedy that supersedes every per-key one — so it must not be reported as a
+   * per-key gap, and `unanswerable` must stay empty rather than naming all of them beside it.
+   */
+  it("reports `obligation_unevaluable` rather than `policy_undeclared` on an empty set", () => {
+    const result = checkAbacObligations({
+      manifest: withTwoObligations(),
+      answerableKeys: new Set(),
+    });
+    expect(result.evaluatorDeclared).toBe(false);
+    expect(result.refusal).toBe("obligation_unevaluable");
+    expect(result.unanswerable).toEqual([]);
+  });
+
+  it("matches a policy key exactly, so a near-miss is unanswerable rather than covered", () => {
+    const result = checkAbacObligations({
+      manifest: withOneObligation(),
+      answerableKeys: new Set(["Same_Facility"]),
+    });
+    expect(result.refusal).toBe("policy_undeclared");
+    expect(result.unanswerable).toHaveLength(1);
+  });
+
+  it("neither refuses nor reports an unanswerable key when no obligation is declared", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({ permissions: { Patient: { read: { roles: ["clinician"] } } } }),
+      answerableKeys: new Set(["same_facility"]),
+    });
+    expect(result.refusal).toBeNull();
+    expect(result.unanswerable).toEqual([]);
+  });
+});
+
+describe("the policy_undeclared refusal text", () => {
+  function undeclared(): AbacObligationCheck {
+    return checkAbacObligations({
+      manifest: withTwoObligations(),
+      answerableKeys: new Set(["same_facility"]),
+    });
+  }
+
+  it("names the unanswerable key and the grant carrying it, and not the covered one", () => {
+    const err = new AbacObligationsUnevaluable(undeclared());
+    expect(err.refusal).toBe("policy_undeclared");
+    expect(err.message).toContain("'own_jurisdiction'");
+    expect(err.message).toContain(
+      formatAbacObligation(undeclared().unanswerable[0] as AbacObligation),
+    );
+    expect(err.message).not.toContain("same_facility");
+  });
+
+  it("counts the unanswerable grants, not every declared obligation", () => {
+    const err = new AbacObligationsUnevaluable(undeclared());
+    expect(err.message).toContain("1 abac-qualified grant(s)");
+  });
+
+  it("names both remedies, and the flag for the one a flag can do", () => {
+    const err = new AbacObligationsUnevaluable(undeclared());
+    expect(err.message).toContain(ABAC_POLICY_FLAG);
+    expect(err.message).toContain("remove the `abac` key");
+    expect(err.message).toContain("the role grant beside it is enforced");
+  });
+
+  it("carries the unanswerable subset structurally, so a boot catch need not parse the message", () => {
+    const c = undeclared();
+    const err = new AbacObligationsUnevaluable(c);
+    expect(err.unanswerable).toEqual(c.unanswerable);
+    expect(err.obligations).toEqual(c.obligations);
+  });
+
+  it("is the same text the boot line carries, so the two cannot disagree", () => {
+    const c = undeclared();
+    expect(formatAbacObligationCheck(c)).toContain(new AbacObligationsUnevaluable(c).message);
+  });
+
+  it("is a different text from the no-evaluator refusal", () => {
+    const none = checkAbacObligations({
+      manifest: withTwoObligations(),
+      answerableKeys: new Set(),
+    });
+    expect(new AbacObligationsUnevaluable(none).message).not.toBe(
+      new AbacObligationsUnevaluable(undeclared()).message,
+    );
   });
 });
 
@@ -241,7 +371,6 @@ describe("formatAbacObligationCheck", () => {
   it("carries the refusal's own message, so the boot line and the thrown error cannot disagree", () => {
     const c = check({
       obligations: synthetic(3),
-      evaluatorDeclared: false,
       refusal: "obligation_unevaluable",
     });
     expect(formatAbacObligationCheck(c)).toContain(new AbacObligationsUnevaluable(c).message);
@@ -335,8 +464,10 @@ describe("the builtin pack census", () => {
     const counts: Record<string, number> = {};
     for (const name of BUILTIN_PACK_NAMES) {
       const resolved = await loadBuiltinPack(name);
-      counts[name] = checkAbacObligations({ manifest: resolved, evaluatorDeclared: false })
-        .obligations.length;
+      counts[name] = checkAbacObligations({
+        manifest: resolved,
+        answerableKeys: new Set(),
+      }).obligations.length;
     }
     expect(Object.keys(counts)).toHaveLength(7);
     expect(counts).toEqual({
@@ -365,7 +496,7 @@ describe("the builtin pack census", () => {
   it("finds an abac grant through the same code path, so a zero census cannot be a wrong path", () => {
     const result = checkAbacObligations({
       manifest: withOneObligation(),
-      evaluatorDeclared: false,
+      answerableKeys: new Set(),
     });
     expect(result.obligations).toEqual([
       { entity: "Patient", operation: "read", field: null, policyKey: "same_facility" },
@@ -387,7 +518,7 @@ describe("the builtin pack census", () => {
         },
       },
     };
-    const result = checkAbacObligations({ manifest: qualified, evaluatorDeclared: false });
+    const result = checkAbacObligations({ manifest: qualified, answerableKeys: new Set() });
     expect(result.obligations).toHaveLength(1);
     expect(result.refusal).toBe("obligation_unevaluable");
   });

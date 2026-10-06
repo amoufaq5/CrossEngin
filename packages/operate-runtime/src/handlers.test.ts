@@ -41,6 +41,11 @@ function principal(role: string | null): ResolvedPrincipal | null {
     principalKind: "user",
     authScheme: "api_key_header",
     grantedScopes: [role],
+    // Resolved-but-empty, which is the shape a deployment with an attribute directory produces for
+    // a member carrying none. Since ADR-0341 an *absent* record refuses an obligation before any
+    // evaluator runs, so a fixture without this would make every policy test below pass for the
+    // wrong reason; the absent case is pinned on its own below.
+    abacAttributes: {},
     mfaProofAgeSeconds: null,
     resolvedAt: "2026-06-03T12:00:00.000Z",
   };
@@ -686,7 +691,13 @@ function evaluator(outcome: AbacOutcome, seen?: AbacEvaluationInput[]): AbacEval
 async function hit(
   ctx: HandlerContext,
   opId: string,
-  opts: { role: string; params?: Record<string, string>; body?: Record<string, unknown> },
+  opts: {
+    role: string;
+    params?: Record<string, string>;
+    body?: Record<string, unknown>;
+    /** Rewrites the resolved principal — used to drop the attributes the fixture resolves. */
+    principal?: (p: ResolvedPrincipal | null) => ResolvedPrincipal | null;
+  },
 ): Promise<HandlerOutput> {
   const spec = CLINIC_SPECS.find((s) => s.operationId === opId);
   if (spec === undefined) throw new Error(`no route for ${opId}`);
@@ -703,7 +714,7 @@ async function hit(
       clientIp: "203.0.113.1",
     }),
     route: routeFromSpec(spec),
-    principal: principal(opts.role),
+    principal: (opts.principal ?? ((p) => p))(principal(opts.role)),
     params: opts.params ?? {},
     parsedBody: opts.body ?? null,
   });
@@ -740,6 +751,34 @@ describe("operate handlers — abac obligation on an entity grant", () => {
     // The store was really called, not merely the status allowed.
     const stored = await store.get(TENANT, "Vault", id);
     expect(stored?.["label"]).toBe("B");
+  });
+
+  it("refuses an obligated grant when attributes were never resolved, even on satisfied", async () => {
+    // ADR-0341: `dischargeAbac` refuses `null` attributes before the evaluator runs, so a
+    // deployment that declared a policy but no attribute directory denies rather than answering
+    // from an input nobody gathered. The spy proving zero calls is the point — a `satisfied`
+    // evaluator is present and is never asked.
+    const store = new InMemoryEntityStore();
+    const created = bodyOf(await hit(clinicCtx(store), "vault.create", { role: "clerk", body: { label: "A" } }));
+    const id = created["id"] as string;
+    let calls = 0;
+    const spy = (): "satisfied" => {
+      calls += 1;
+      return "satisfied";
+    };
+    const unresolved = (p: ResolvedPrincipal | null): ResolvedPrincipal | null =>
+      p === null ? null : { ...p, abacAttributes: undefined };
+    const out = await hit(clinicCtx(store, spy), "vault.update", {
+      role: "clinician",
+      params: { id },
+      body: { label: "B" },
+      principal: unresolved,
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["abacOutcome"]).toBe("undischargeable");
+    expect(calls).toBe(0);
+    // And the write did not land.
+    expect((await store.get(TENANT, "Vault", id))?.["label"]).toBe("A");
   });
 
   it("403s denied, distinguishably from undischargeable, when the attributes do not match", async () => {

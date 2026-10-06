@@ -368,3 +368,106 @@ describe("rbacCheck — abac obligations", () => {
     expect(r.abac).toBeUndefined();
   });
 });
+
+describe("rbacCheck — unresolved abac attributes", () => {
+  function unresolved(role: string): Principal {
+    return { ...principal(role), abacAttributes: null };
+  }
+
+  function spy(outcome: AbacOutcome): {
+    readonly fn: AbacEvaluator;
+    readonly calls: AbacEvaluationInput[];
+  } {
+    const calls: AbacEvaluationInput[] = [];
+    return {
+      fn: (input) => {
+        calls.push(input);
+        return outcome;
+      },
+      calls,
+    };
+  }
+
+  it("denies an obligated grant even when an evaluator is supplied", () => {
+    const s = spy("satisfied");
+    const r = rbacCheck({
+      principal: unresolved("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: s.fn,
+    });
+    expect(r.allowed).toBe(false);
+    expect(s.calls).toEqual([]);
+  });
+
+  it("names undischargeable in the reason and on the discharge", () => {
+    const r = rbacCheck({
+      principal: unresolved("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: () => "satisfied",
+    });
+    expect(r.abac).toEqual({
+      policyKey: "data.access.allow_update",
+      outcome: "undischargeable",
+    });
+    expect(r.reason).toContain("undischargeable");
+    expect(r.reason).toContain("data.access.allow_update");
+  });
+
+  it("denies an obligated transition too", () => {
+    const r = rbacCheck({
+      principal: unresolved("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: { kind: "transition", name: "verify" },
+      abacEvaluator: () => "satisfied",
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.abac?.outcome).toBe("undischargeable");
+  });
+
+  it("leaves an unobligated grant exactly as it was", () => {
+    // The regression that matters most: the new rule is about obligations, so a grant that carries
+    // none must not start refusing because a directory happens not to be wired.
+    const r = rbacCheck({
+      principal: unresolved("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "read",
+      abacEvaluator: () => "satisfied",
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it("leaves an unobligated grant as it was with no evaluator either", () => {
+    const r = rbacCheck({
+      principal: unresolved("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "create",
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it("still refuses on roles first, so the reason is the role failure and not the attributes", () => {
+    const r = rbacCheck({
+      principal: unresolved("staff"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: () => "satisfied",
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.abac).toBeUndefined();
+    expect(r.reason).toContain("effective roles");
+  });
+});

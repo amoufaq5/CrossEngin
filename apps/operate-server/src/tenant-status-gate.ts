@@ -68,7 +68,12 @@ export interface CachedTenantStatusDirectoryOptions {
 
 const DEFAULT_TTL_MS = 30_000;
 const DEFAULT_ABSENCE_TTL_MS = 5_000;
-const DEFAULT_MAX_STALE_MS = 300_000;
+/**
+ * How long a value past its TTL may be served when the refresh fails. Exported because the ABAC
+ * attribute directory bounds the same thing for the same reason — "we knew a minute ago" is
+ * evidence and cannot mean forever — and two copies of one figure drift.
+ */
+export const DEFAULT_MAX_STALE_MS = 300_000;
 
 interface CacheEntry {
   readonly status: TenantLifecycleState | null;

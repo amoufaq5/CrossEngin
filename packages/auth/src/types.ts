@@ -73,7 +73,13 @@ export interface Principal {
   readonly userId: UserId | null;
   readonly primaryRole: RoleName;
   readonly secondaryRoles: readonly RoleName[];
-  readonly abacAttributes: Readonly<Record<string, unknown>>;
+  /**
+   * `null` means **not resolved** — no attribute directory was consulted — and is not the same fact
+   * as `{}`, which asserts this principal has no attributes. `dischargeAbac` refuses an obligation
+   * on `null` without calling the evaluator, because an evaluator cannot tell the two apart and the
+   * mistake is in the allowing direction.
+   */
+  readonly abacAttributes: Readonly<Record<string, unknown>> | null;
   readonly mfaProofAgeSeconds: number | null;
 }
 

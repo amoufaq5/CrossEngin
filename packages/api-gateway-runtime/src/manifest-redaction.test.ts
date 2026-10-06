@@ -64,6 +64,18 @@ const OPS: Readonly<Record<string, readonly string[]>> = {
 };
 const operationsForEntity = (name: string): readonly string[] => OPS[name] ?? [];
 
+/**
+ * A principal whose attribute lookup actually happened. Since ADR-0341 an obligation is refused
+ * before any evaluator is consulted when `abacAttributes` is absent, so a test that means to
+ * exercise a policy has to resolve them — an absent record is "nobody looked", not "has none".
+ */
+function resolvedPrincipal(
+  role: string,
+  abacAttributes: Readonly<Record<string, unknown>> = {},
+): ResolvedPrincipal {
+  return { ...principal(role), abacAttributes };
+}
+
 function principal(role: string): ResolvedPrincipal {
   return {
     principalId: "00000000-0000-4000-8000-000000000001",
@@ -237,11 +249,25 @@ describe("redactionRegistryFromManifest", () => {
       for (const outcome of ["denied", "undischargeable"] as const) {
         const spec = specOf(OBLIGATED, () => outcome);
         if (spec === null) throw new Error("expected spec");
-        expect(computeRedactedFields(spec, principal("clinician"))).toContain("mrn");
+        expect(computeRedactedFields(spec, resolvedPrincipal("clinician"))).toContain("mrn");
       }
       const ok = specOf(OBLIGATED, () => "satisfied");
       if (ok === null) throw new Error("expected spec");
-      expect(computeRedactedFields(ok, principal("clinician"))).not.toContain("mrn");
+      expect(computeRedactedFields(ok, resolvedPrincipal("clinician"))).not.toContain("mrn");
+    });
+
+    it("redacts an obligated field even on `satisfied` when attributes were never resolved", () => {
+      // ADR-0341: the registry passes the resolved principal's attributes through, and an absent
+      // record refuses the obligation before the evaluator runs — so a deployment with a policy but
+      // no attribute directory redacts rather than answering from an input nobody gathered.
+      const seen: string[] = [];
+      const spec = specOf(OBLIGATED, () => {
+        seen.push("called");
+        return "satisfied";
+      });
+      if (spec === null) throw new Error("expected spec");
+      expect(computeRedactedFields(spec, principal("clinician"))).toContain("mrn");
+      expect(seen).toEqual([]);
     });
 
     it("asks the evaluator about the right entity, operation and field", () => {
@@ -251,7 +277,7 @@ describe("redactionRegistryFromManifest", () => {
         return "satisfied";
       });
       if (spec === null) throw new Error("expected spec");
-      computeRedactedFields(spec, principal("clinician"));
+      computeRedactedFields(spec, resolvedPrincipal("clinician", { department: "clinical" }));
       expect(seen).toEqual(["p.owns_encounter|Patient|read|mrn"]);
     });
 

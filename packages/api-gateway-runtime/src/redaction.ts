@@ -8,7 +8,7 @@ import {
   type RoleName,
   type SensitiveFieldPolicy,
 } from "@crossengin/auth";
-import type { ResolvedPrincipal } from "@crossengin/api-gateway";
+import { principalAbacAttributes, type ResolvedPrincipal } from "@crossengin/api-gateway";
 
 export interface PrincipalRoles {
   readonly primaryRole: RoleName;
@@ -72,12 +72,9 @@ export function computeRedactedFields(
     userId: (principal?.principalId ?? null) as Principal["userId"],
     primaryRole: mapped[0] ?? UNPRIVILEGED_ROLE,
     secondaryRoles: mapped.slice(1),
-    // An attribute source does exist (`meta.user_tenant_membership.abac_attributes`), and this
-    // `{}` is not it. It is left because no evaluator can be constructed in the deployed binary,
-    // so a manifest declaring an obligation is refused at boot and nothing reads these. After this
-    // change the same `{}` errs toward redaction where before it erred toward disclosure; wiring it
-    // belongs with the evaluator that consumes it.
-    abacAttributes: {},
+    // Resolved in the auth stage. `null` means no directory was consulted, which keeps an obligated
+    // field redacted rather than letting a policy be answered from attributes nobody gathered.
+    abacAttributes: principalAbacAttributes(principal),
     mfaProofAgeSeconds: principal?.mfaProofAgeSeconds ?? null,
   };
   return computeClassifiedFieldRedaction(

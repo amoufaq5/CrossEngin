@@ -78,6 +78,8 @@ export * from "./read-state-routes.js";
 export * from "./column-encryption.js";
 export * from "./sensitive-field-policy.js";
 export * from "./abac-obligations.js";
+export * from "./abac-policy.js";
+export * from "./abac-attributes.js";
 export * from "./gateway-idempotency.js";
 export * from "./gateway-execution-capture.js";
 export * from "./replay.js";

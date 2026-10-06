@@ -8,6 +8,7 @@ import {
   type RoleName,
 } from "@crossengin/auth";
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
+import { principalAbacAttributes } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
@@ -207,11 +208,9 @@ function authPrincipal(resolved: ResolvedPrincipal | null, principalRoles: Assoc
     userId: (resolved?.principalId ?? null) as Principal["userId"],
     primaryRole,
     secondaryRoles: secondaryRoles ?? [],
-    // A source exists (`meta.user_tenant_membership.abac_attributes`, written by
-    // `--platform-user-routes`) and is deliberately not read here: with no evaluator in this binary
-    // an obligation is refused anyway, so `{}` feeds nothing — and it now errs toward denial where
-    // before it granted. Wiring it belongs with the evaluator that consumes it.
-    abacAttributes: {},
+    // Resolved in the auth stage — see `handlers.ts`' `authPrincipal` for why `null` and `{}` are
+    // different answers here.
+    abacAttributes: principalAbacAttributes(resolved),
     mfaProofAgeSeconds: resolved?.mfaProofAgeSeconds ?? null,
   };
 }

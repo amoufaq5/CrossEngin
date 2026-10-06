@@ -696,3 +696,134 @@ describe("the classified read/write pair cannot diverge on an obligation (ADR-03
     }
   });
 });
+
+describe("the four field functions — unresolved abac attributes", () => {
+  function unresolved(role: string): Principal {
+    return { ...principal(role), abacAttributes: null };
+  }
+
+  const FIELD = { name: "mrn", classification: "phi" as const };
+
+  it("computeFieldRedaction redacts an obligated field even with an evaluator", () => {
+    const spy = recordingEvaluator("satisfied");
+    const r = computeFieldRedaction(unresolved("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: spy.fn,
+    });
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("validateWriteMask rejects an obligated field even with an evaluator", () => {
+    const spy = recordingEvaluator("satisfied");
+    const r = validateWriteMask(unresolved("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: spy.fn,
+    });
+    expect(r).toEqual({
+      ok: false,
+      rejectedField: "mrn",
+      abac: { policyKey: "field.mrn.update", outcome: "undischargeable" },
+    });
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("computeClassifiedFieldRedaction redacts an obligated field even with an evaluator", () => {
+    const spy = recordingEvaluator("satisfied");
+    const r = computeClassifiedFieldRedaction(
+      unresolved("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [FIELD],
+      { privilegedRoles: ["clinician"] },
+      { entity: "Patient", evaluator: spy.fn },
+    );
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("validateClassifiedWriteMask rejects an obligated field even with an evaluator", () => {
+    const spy = recordingEvaluator("satisfied");
+    const r = validateClassifiedWriteMask(
+      unresolved("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [FIELD],
+      { privilegedRoles: ["clinician"] },
+      { entity: "Patient", evaluator: spy.fn },
+    );
+    expect(r).toEqual({
+      ok: false,
+      rejectedField: "mrn",
+      abac: { policyKey: "field.mrn.update", outcome: "undischargeable" },
+    });
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("keeps the read/write pair in agreement, which is the property the four share", () => {
+    const enforcement = { entity: "Patient", evaluator: () => "satisfied" as const };
+    const read = computeClassifiedFieldRedaction(
+      unresolved("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [FIELD],
+      {},
+      enforcement,
+    );
+    const write = validateClassifiedWriteMask(
+      unresolved("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [FIELD],
+      {},
+      enforcement,
+    );
+    expect(read.readable).toEqual([]);
+    expect(write.ok).toBe(false);
+  });
+
+  it("leaves an unobligated field grant untouched on all four", () => {
+    // The regression that matters most: these fixtures carry no `abac`, so an unwired directory must
+    // change nothing about them — the rule is about obligations and not about every field grant.
+    const p = unresolved("pharmacist");
+    expect(computeFieldRedaction(p, PERMS, ROLES, ["narcotic_schedule"]).readable).toEqual([
+      "narcotic_schedule",
+    ]);
+    expect(validateWriteMask(p, PERMS, ROLES, ["narcotic_schedule"])).toEqual({ ok: true });
+    expect(
+      computeClassifiedFieldRedaction(p, PERMS, ROLES, [{ name: "narcotic_schedule" }]).readable,
+    ).toEqual(["narcotic_schedule"]);
+    expect(
+      validateClassifiedWriteMask(p, PERMS, ROLES, [{ name: "narcotic_schedule" }]),
+    ).toEqual({ ok: true });
+  });
+
+  it("leaves the classification default untouched, since no evaluator is involved in it", () => {
+    // A privileged class grant is answered from roles alone, so an unresolved directory neither
+    // rescues nor refuses it.
+    const granted = computeClassifiedFieldRedaction(
+      unresolved("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [FIELD],
+      { privilegedRoles: ["clinician"] },
+    );
+    const withheld = computeClassifiedFieldRedaction(
+      unresolved("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      [FIELD],
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(granted.readable).toEqual(["mrn"]);
+    expect(withheld.redacted).toEqual(["mrn"]);
+  });
+
+  it("still refuses on roles first, so no discharge is attached to a roles-only rejection", () => {
+    const r = validateWriteMask(unresolved("technician"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => "satisfied",
+    });
+    expect(r).toEqual({ ok: false, rejectedField: "mrn" });
+  });
+});

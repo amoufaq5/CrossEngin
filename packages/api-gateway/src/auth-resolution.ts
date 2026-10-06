@@ -223,6 +223,18 @@ export interface ResolvedPrincipal {
   readonly grantedScopes: readonly string[];
   readonly mfaProofAgeSeconds: number | null;
   readonly resolvedAt: string;
+  /**
+   * The principal's ABAC attributes, resolved once in the auth stage by whatever directory the
+   * deployment configured. **Absent means not resolved** and is not the same fact as `{}`, which
+   * asserts this principal has none — `Principal.abacAttributes` carries that distinction as
+   * `null` vs `{}`, and `dischargeAbac` refuses an obligation on the first without consulting a
+   * policy.
+   *
+   * Resolved here rather than per handler because this is the one record a request already carries
+   * for its identity, so the five places that build an `auth.Principal` read one answer instead of
+   * each asking its own.
+   */
+  readonly abacAttributes?: Readonly<Record<string, unknown>>;
 }
 
 export const ResolvedPrincipalSchema = z.object({
@@ -238,7 +250,22 @@ export const ResolvedPrincipalSchema = z.object({
   grantedScopes: z.array(z.string().max(200)),
   mfaProofAgeSeconds: z.number().int().min(0).nullable(),
   resolvedAt: z.string().datetime({ offset: true }),
+  // Optional, so every existing resolver and stored row still parses, and so an absent field keeps
+  // meaning "not resolved" rather than being defaulted to an empty record nobody gathered.
+  abacAttributes: z.record(z.string(), z.unknown()).optional(),
 });
+
+/**
+ * The resolved principal's attributes as an authorization input, mapping **absent to `null`** —
+ * the one spelling of that step, because the tempting wrong form (`?? {}`) turns "no directory was
+ * consulted" into an assertion that this principal has no attributes, and `auth.dischargeAbac`
+ * refuses an obligation on the first while answering a policy from the second.
+ */
+export function principalAbacAttributes(
+  principal: ResolvedPrincipal | null,
+): Readonly<Record<string, unknown>> | null {
+  return principal?.abacAttributes ?? null;
+}
 
 export const isStrongAuthScheme = (scheme: AuthScheme): boolean =>
   STRONG_AUTH_SCHEMES.has(scheme);

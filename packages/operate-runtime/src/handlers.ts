@@ -9,6 +9,7 @@ import {
   type SensitiveFieldPolicy,
 } from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
+import { principalAbacAttributes } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
 import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, parseFields, parseListQuery, type ListConfig } from "./list-query.js";
@@ -86,11 +87,10 @@ function authPrincipal(
     userId: (resolved?.principalId ?? null) as Principal["userId"],
     primaryRole,
     secondaryRoles: secondaryRoles ?? [],
-    // A source exists (`meta.user_tenant_membership.abac_attributes`, written by
-    // `--platform-user-routes`) and is deliberately not read here: with no evaluator in this binary
-    // an obligation is refused anyway, so `{}` feeds nothing — and it now errs toward denial where
-    // before it granted. Wiring it belongs with the evaluator that consumes it.
-    abacAttributes: {},
+    // Resolved in the auth stage, not here: `null` when the deployment configured no attribute
+    // directory, or when this credential names no person. `{}` would assert the principal has no
+    // attributes, which is a different fact and the one that lets a policy be answered.
+    abacAttributes: principalAbacAttributes(resolved),
     mfaProofAgeSeconds: resolved?.mfaProofAgeSeconds ?? null,
   };
 }

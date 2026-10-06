@@ -22,6 +22,7 @@ import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawH
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
 import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
 import { AbacObligationsUnevaluable, checkAbacObligations } from "./abac-obligations.js";
+import { withAbacAttributes, type AbacAttributeDirectory } from "./abac-attributes.js";
 
 let requestCounter = 0;
 function defaultRequestId(): string {
@@ -259,13 +260,24 @@ export interface BuildOperateHttpServerOptions {
    */
   readonly idempotencyStore?: IdempotencyStore;
   /**
-   * Discharges a `RbacGrant.abac` policy key. No CLI flag supplies one — an ABAC policy engine is
-   * not something this binary contains — so for a deployment started from `crossengin-operate`
-   * this is always absent and a manifest declaring an obligation is refused below. It is an option
-   * rather than a hardcoded absence so an embedder can supply one, and so the refusal's premise is
-   * a fact about the caller rather than a constant.
+   * The deployment's ABAC policy layer, or absent for none — in which case a manifest declaring an
+   * obligation is refused below (ADR-0340).
+   *
+   * One object rather than three options, because the three must agree and two of the pairings are
+   * silently wrong if they can be formed separately. An `evaluator` without its `answerableKeys`
+   * leaves this function unable to check that the manifest's obligations are ones the layer can
+   * answer, which is the per-key gap ADR-0341 made the boot refusal ask about; and an evaluator
+   * without an `attributeDirectory` refuses every obligation, since `dischargeAbac` treats an
+   * unresolved attribute set as unanswerable. So `answerableKeys` is required beside the evaluator
+   * and the directory is the one genuinely optional member — a policy over no attributes at all
+   * (`present` on nothing) is expressible, if useless.
    */
-  readonly abacEvaluator?: AbacEvaluator;
+  readonly abac?: {
+    readonly evaluator: AbacEvaluator;
+    /** The policy keys `evaluator` can answer. Checked against the manifest's obligations. */
+    readonly answerableKeys: ReadonlySet<string>;
+    readonly attributeDirectory?: AbacAttributeDirectory;
+  };
 }
 
 export interface BuiltOperateHttpServer {
@@ -287,15 +299,22 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   // authorization rule it cannot enforce, because serving the rule unenforced is the defect.
   const obligations = checkAbacObligations({
     manifest: options.manifest,
-    evaluatorDeclared: options.abacEvaluator !== undefined,
+    answerableKeys: options.abac?.answerableKeys ?? new Set(),
   });
   if (obligations.refusal !== null) throw new AbacObligationsUnevaluable(obligations);
 
   const wiring = buildPrincipalWiring(options.apiKeys, options.now !== undefined ? { now: options.now } : {});
+  // Decorated here rather than inside `buildPrincipalWiring`: the directory needs a connection and
+  // this is the seam that already takes deployment-supplied collaborators, so the api-key and JWT
+  // paths both get attributes from one wrap instead of two.
+  const principalResolver =
+    options.abac?.attributeDirectory !== undefined
+      ? withAbacAttributes(wiring.principalResolver, options.abac.attributeDirectory)
+      : wiring.principalResolver;
   const gateway = buildOperateGateway(options.manifest, {
     store: options.store,
     principalRoles: wiring.principalRoles,
-    principalResolver: wiring.principalResolver,
+    principalResolver,
     opaqueTokenLookup: wiring.opaqueTokenLookup,
     ...(options.jwt !== undefined
       ? {
@@ -318,7 +337,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.idempotencyStore !== undefined ? { idempotencyStore: options.idempotencyStore } : {}),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.writeMaskMode !== undefined ? { writeMaskMode: options.writeMaskMode } : {}),
-    ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
+    ...(options.abac !== undefined ? { abacEvaluator: options.abac.evaluator } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   // After every registration and before the first request. The gate goes on the registry rather than

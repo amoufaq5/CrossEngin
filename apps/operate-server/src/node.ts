@@ -114,6 +114,16 @@ import {
   formatAbacObligationCheck,
 } from "./abac-obligations.js";
 import {
+  ABAC_POLICY_FLAG,
+  buildAbacEvaluator,
+  formatAbacPolicies,
+  parseAbacPolicies,
+} from "./abac-policy.js";
+import {
+  CachedAbacAttributeDirectory,
+  abacAttributeDirectoryFromStore,
+} from "./abac-attributes.js";
+import {
   IDEMPOTENCY_FK_HINT,
   IDEMPOTENCY_GUARANTEE,
   IdempotencyPruneScheduler,
@@ -641,7 +651,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // fix. First refusal wins, so it has to be the one whose remedy is true.
   // `buildOperateHttpServer` re-asks: this covers the boot manifest, that one covers an activated
   // per-tenant manifest and an embedder, and both read the one rule in `abac-obligations.ts`.
-  const abacObligations = checkAbacObligations({ manifest, evaluatorDeclared: false });
+  // The deployment's ABAC policy layer. `--abac-policy` is what makes the attribute directory worth
+  // running at all, so the two are one decision rather than two flags: the producer is wired exactly
+  // when a consumer exists, and a deployment with no policy pays no membership lookup.
+  const abacPolicies = parseAbacPolicies(options.abacPolicies);
+  if (abacPolicies.size > 0 && conn === undefined) {
+    // Refused rather than mounted with no directory. With no `meta.user_tenant_membership` to read,
+    // every principal's attributes are unresolved and every obligation answers `undischargeable` —
+    // a total denial that looks exactly like the policy working, which is the silence ADR-0340's
+    // boot refusal exists to end.
+    throw new Error(
+      `${ABAC_POLICY_FLAG} requires a Postgres store (--store pg or pg-columns):` +
+        " attributes come from meta.user_tenant_membership and there is none under --store memory",
+    );
+  }
+  const abacEvaluator = abacPolicies.size > 0 ? buildAbacEvaluator(abacPolicies) : undefined;
+  if (abacPolicies.size > 0) console.info(`[abac] ${formatAbacPolicies(abacPolicies)}`);
+
+  const abacObligations = checkAbacObligations({ manifest, answerableKeys: new Set(abacPolicies.keys()) });
   console.info(`[abac] ${formatAbacObligationCheck(abacObligations)}`);
   if (abacObligations.refusal !== null) throw new AbacObligationsUnevaluable(abacObligations);
 
@@ -700,6 +727,27 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
+  // Resolved once per request in the auth stage and cached, so the five places that build an
+  // `auth.Principal` read one answer instead of each asking its own. Built only alongside an
+  // evaluator (see the policy block above), and reading through `PostgresUserStore.membershipFor`,
+  // which already carries the `withTenantContext` and strict `scopeFilter` this read needs — a
+  // second spelling of that query is what this repo refuses.
+  const abacAttributeDirectory =
+    abacEvaluator !== undefined && conn !== undefined
+      ? new CachedAbacAttributeDirectory(
+          abacAttributeDirectoryFromStore(new PostgresUserStore(conn, schemaOpt)),
+        )
+      : undefined;
+  // Grouped so the evaluator, the keys it answers and the directory feeding it cannot be supplied
+  // apart — see `BuildOperateHttpServerOptions.abac`.
+  const abac =
+    abacEvaluator === undefined
+      ? undefined
+      : {
+          evaluator: abacEvaluator,
+          answerableKeys: new Set(abacPolicies.keys()),
+          ...(abacAttributeDirectory !== undefined ? { attributeDirectory: abacAttributeDirectory } : {}),
+        };
   // Offline subscription entitlement: verify an Ed25519 license token against the
   // licensor's public key at boot (no cloud billing call). A lapsed/expired license
   // means the gate denies (past_due keeps read access).
@@ -2721,6 +2769,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     settingsStore,
     policyForEntity: sensitivePolicyForEntity,
     writeMaskMode,
+    ...(abac !== undefined ? { abac } : {}),
     ...(regionGuard !== undefined ? { regionGuard } : {}),
     ...(extraRoutes !== undefined ? { extraRoutes } : {}),
     ...(entitlementResolver !== undefined ? { entitlementResolver } : {}),
@@ -3369,6 +3418,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           // `unservable_field_type` in `applyTenantManifestSchema`.
           policyForEntity: sensitivePolicyForEntity,
           writeMaskMode,
+          // One policy layer for every gateway: a policy key is a deployment declaration and an
+          // attribute is a fact about a membership in the tenant being served, so neither varies
+          // with whose manifest is compiled. The per-tenant manifest's own obligations are checked
+          // against `answerableKeys` by `buildOperateHttpServer`.
+          ...(abac !== undefined ? { abac } : {}),
           apiKeys,
           allocator,
           settingsStore,

@@ -8,12 +8,12 @@
  * granted **unconditionally** — the inverse of this repo's fail-closed invariant, and in the
  * one place a manifest author wrote down a condition.
  *
- * `@crossengin/auth` fails closed now: with no `AbacEvaluator` supplied the obligation
- * resolves `undischargeable` and the grant is denied. That closes the hole and converts it
- * into a **silent total denial**, which is ADR-0339's own finding — total redaction looks
- * exactly like classification working, so a deployment serving a manifest whose declared
- * obligations it denies at every request reads as healthy until somebody asks why a role
- * with a grant cannot use it.
+ * `@crossengin/auth` fails closed now: with no `AbacEvaluator` supplied — or with one that does
+ * not hold this grant's policy key — the obligation resolves `undischargeable` and the grant is
+ * denied. That closes the hole and converts it into a **silent total denial**, which is
+ * ADR-0339's own finding — total redaction looks exactly like classification working, so a
+ * deployment serving a manifest whose declared obligations it denies at every request reads as
+ * healthy until somebody asks why a role with a grant cannot use it.
  *
  * So the deployment refuses at boot, naming what it cannot evaluate. That is ADR-0334's
  * conversion for an unservable `duration` field (refused at plan time by name rather than
@@ -34,13 +34,15 @@ import {
   type AbacObligation,
 } from "@crossengin/auth";
 
+import { ABAC_POLICY_FLAG } from "./abac-policy.js";
+
 /**
- * There is deliberately no escape-hatch flag. ADR-0338 shipped `--allow-plaintext-phi`
- * because plaintext PHI is a degraded-but-coherent state an operator may knowingly accept;
- * an unevaluated obligation is not degraded, it is the opposite of what the manifest
- * declares, so a flag here would be an option to serve the hole on purpose.
+ * There is deliberately no escape-hatch flag for either refusal. ADR-0338 shipped
+ * `--allow-plaintext-phi` because plaintext PHI is a degraded-but-coherent state an operator
+ * may knowingly accept; an unevaluated obligation is not degraded, it is the opposite of what
+ * the manifest declares, so a flag here would be an option to serve the hole on purpose.
  */
-export const ABAC_OBLIGATION_REFUSALS = ["obligation_unevaluable"] as const;
+export const ABAC_OBLIGATION_REFUSALS = ["obligation_unevaluable", "policy_undeclared"] as const;
 export type AbacObligationRefusal = (typeof ABAC_OBLIGATION_REFUSALS)[number];
 
 /** Entity+field pairs printed before the line truncates. */
@@ -49,16 +51,28 @@ export const OBLIGATION_DETAIL_LIMIT = 8;
 export interface AbacObligationCheckInput {
   readonly manifest: Manifest;
   /**
-   * Whether this deployment can discharge an obligation. A parameter rather than a
-   * hardcoded `false` so the satisfied direction is testable and the rule stays total; the
-   * caller passes `false`, because no `AbacEvaluator` can be constructed in this binary.
+   * The policy keys the deployment's evaluator can answer. Empty = no evaluator declared.
+   *
+   * The set rather than a `boolean`, because "an evaluator exists" was never the right
+   * question. A declared-but-incomplete evaluator answers `undischargeable` at request time
+   * for exactly the keys it does not hold, which is the same silent total denial — per grant
+   * instead of per deployment — that this boot refusal exists to prevent. "Can it answer
+   * *this* grant" is the question, and only the key set can be asked it.
    */
-  readonly evaluatorDeclared: boolean;
+  readonly answerableKeys: ReadonlySet<string>;
 }
 
 export interface AbacObligationCheck {
   readonly obligations: readonly AbacObligation[];
   readonly evaluatorDeclared: boolean;
+  /**
+   * The obligations an evaluator **is** declared for and cannot answer. Empty when no
+   * evaluator is declared: with none, there is no per-key gap to report — every obligation is
+   * unanswerable for one reason, which `obligation_unevaluable` states once. Reporting both
+   * would name a remedy (declare these keys) beside one that supersedes it (declare a policy
+   * layer at all).
+   */
+  readonly unanswerable: readonly AbacObligation[];
   readonly refusal: AbacObligationRefusal | null;
 }
 
@@ -71,9 +85,18 @@ export interface AbacObligationCheck {
  */
 export function checkAbacObligations(input: AbacObligationCheckInput): AbacObligationCheck {
   const obligations = surveyAbacObligations(input.manifest.permissions ?? {});
-  const refusal =
-    obligations.length > 0 && !input.evaluatorDeclared ? "obligation_unevaluable" : null;
-  return { obligations, evaluatorDeclared: input.evaluatorDeclared, refusal };
+  const evaluatorDeclared = input.answerableKeys.size > 0;
+  const unanswerable = evaluatorDeclared
+    ? obligations.filter((o) => !input.answerableKeys.has(o.policyKey))
+    : [];
+
+  let refusal: AbacObligationRefusal | null = null;
+  if (obligations.length > 0) {
+    if (!evaluatorDeclared) refusal = "obligation_unevaluable";
+    else if (unanswerable.length > 0) refusal = "policy_undeclared";
+  }
+
+  return { obligations, evaluatorDeclared, unanswerable, refusal };
 }
 
 /**
@@ -88,9 +111,9 @@ function renderObligations(obligations: readonly AbacObligation[]): string {
 }
 
 /**
- * The refusal text, built once so the boot line and the thrown error cannot disagree. Both
- * remedies are named, and the second is worded as a capability rather than a flag because
- * there is no flag — supplying an evaluator is a change to what this deployment can do.
+ * The no-evaluator text. Both remedies are named, and the second is worded as a capability
+ * rather than a flag because there is no flag — supplying an evaluator is a change to what this
+ * deployment can do.
  */
 function unevaluableMessage(obligations: readonly AbacObligation[]): string {
   return (
@@ -103,6 +126,33 @@ function unevaluableMessage(obligations: readonly AbacObligation[]): string {
 }
 
 /**
+ * The other refusal's text. This one **does** name a flag where `unevaluableMessage` refuses to,
+ * and the asymmetry is the point: declaring a policy for a key is something the CLI can do, while
+ * supplying an evaluator is a capability no flag confers. A message naming a remedy that does not
+ * exist is worse than one naming none.
+ */
+function undeclaredMessage(unanswerable: readonly AbacObligation[]): string {
+  const keys = [...new Set(unanswerable.map((o) => o.policyKey))].sort();
+  return (
+    `${unanswerable.length.toString()} abac-qualified grant(s) name a policy key this ` +
+    `deployment's ABAC evaluator cannot answer, so each would be denied at every request ` +
+    `rather than evaluated: ${renderObligations(unanswerable)}. Declare a policy for ` +
+    `${keys.map((k) => `'${k}'`).join(", ")} with ${ABAC_POLICY_FLAG}, or remove the \`abac\` ` +
+    `key from the grant — the role grant beside it is enforced and stays.`
+  );
+}
+
+/**
+ * The refusal detail, selected by refusal and shared by the boot line and the thrown error so the
+ * two cannot disagree.
+ */
+function refusalMessage(check: AbacObligationCheck): string {
+  return check.refusal === "policy_undeclared"
+    ? undeclaredMessage(check.unanswerable)
+    : unevaluableMessage(check.obligations);
+}
+
+/**
  * One boot line. The no-obligations case says so **affirmatively**: "we surveyed and found
  * none" cannot be claimed from the absence of a log line, which is this repo's recurring
  * rule, and it is the line that makes the refusal's vacuity visible on every boot.
@@ -112,7 +162,7 @@ export function formatAbacObligationCheck(check: AbacObligationCheck): string {
     return "abac obligations: none declared, so no grant depends on an ABAC evaluator";
   }
   if (check.refusal !== null) {
-    return `abac obligations: ${unevaluableMessage(check.obligations)}`;
+    return `abac obligations: ${refusalMessage(check)}`;
   }
   return (
     `abac obligations: ${check.obligations.length.toString()} declared and an evaluator is ` +
@@ -121,19 +171,25 @@ export function formatAbacObligationCheck(check: AbacObligationCheck): string {
 }
 
 /**
- * Thrown at boot for the one refusal. Carries the obligations so a caller can report them
- * structurally rather than re-deriving them from the message.
+ * Thrown at boot for either refusal. Carries the obligations and the unanswerable subset so a
+ * caller can report them structurally rather than re-deriving them from the message.
+ *
+ * One error for both rather than a second class: `policy_undeclared` is the same fact narrowed to
+ * a subset of the grants — an obligation this deployment cannot evaluate — so `refusal` is what
+ * distinguishes them and a caller catching one catches both.
  */
 export class AbacObligationsUnevaluable extends Error {
   readonly refusal: AbacObligationRefusal;
   readonly obligations: readonly AbacObligation[];
+  readonly unanswerable: readonly AbacObligation[];
 
   constructor(check: AbacObligationCheck) {
-    super(unevaluableMessage(check.obligations));
+    super(refusalMessage(check));
     this.name = "AbacObligationsUnevaluable";
-    // `ABAC_OBLIGATION_REFUSALS` has one member, so this error names it even when
-    // constructed from a check whose `refusal` the caller did not consult.
+    // A check whose `refusal` the caller did not consult still names one, and it is the stricter
+    // of the two: `obligation_unevaluable` claims nothing about which keys are declared.
     this.refusal = check.refusal ?? "obligation_unevaluable";
     this.obligations = check.obligations;
+    this.unanswerable = check.unanswerable;
   }
 }
