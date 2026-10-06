@@ -267,6 +267,17 @@ export interface PostgresFeatureFlagStoreOptions {
 /**
  * Persists `FlagDefinition` records in `meta.feature_flags`.
  *
+ * **Nothing constructs this store.** It is declared in `subsystem-survey.ts` as
+ * `no_consumer_exists`, and the reason is one level up from this file: no component in the workspace
+ * evaluates a feature flag, so a persisted flag has no reader. ADR-0300 built the store and never
+ * claimed to wire it — read that ADR's Decision rather than a summary of it — but its argument for
+ * doing so, "the store is what makes the next drift fail loudly", was later disproved by ADR-0332
+ * rather than borne out: `FEATURE_FLAG_COLUMN_NAMES` named `default_value` where the catalog said
+ * `default_value_json`, this store could not round-trip a single flag against any real database, and
+ * every offline test passed, because a fake connection asserts SQL shape and cannot know a column
+ * does not exist. What makes drift fail loudly is the assertion against `META_TABLES`. Everything
+ * below is correct and unexercised outside this package's tests; do not read it as in service.
+ *
  * **Tenant scoping is conditional**, as in `PostgresKillSwitchStore`, and for the same reason read
  * off the contract: `FlagDefinition.tenantId` is `.nullable()`, so a flag is either one tenant's or
  * the platform's — a `checkout.new_pricing` flag belongs to a tenant, a `gateway.strict_jwt_aud`

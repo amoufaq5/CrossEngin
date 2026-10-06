@@ -4,3 +4,4 @@ export * from "./rollouts.js";
 export * from "./kill-switches.js";
 export * from "./evaluations.js";
 export * from "./history.js";
+export * from "./producers.js";

@@ -284,8 +284,18 @@ export interface PostgresTargetingRuleStoreOptions {
 
 /**
  * Persists `TargetingRule` records in `meta.feature_flag_targeting_rules` — the writer that table
- * never had, and the reason a flag read back from the database could not be evaluated against its
- * own targeting at all.
+ * never had, and what makes a flag read back from the database *resolvable* against its own
+ * targeting.
+ *
+ * **Nothing constructs this store**, and the word above is `resolvable` rather than `evaluable`
+ * deliberately: resolving a flag's rules and evaluating the flag are different steps, and only the
+ * first exists. `subsystem-survey.ts` declares this as `awaiting_authoring_grant` — the nearer
+ * blocker being that a targeting rule changes what the deployment serves, so an authoring route is
+ * config-grade and wants `--notification-template-routes`' author/approver split (ADR-0313) — but
+ * the evaluator is missing too, and that is the larger half. One consequence is worth stating
+ * because it is easy to read the other way: the three `TARGETING_RULE_SET_DEFECTS` below are
+ * unreachable in practice today, since `meta.feature_flags` has no writer either, so there is no
+ * stored list for a stored rule to disagree with.
  *
  * ## The store is insert-only, and that is the catalog's shape rather than a simplification
  *

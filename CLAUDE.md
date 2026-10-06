@@ -877,9 +877,24 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   across the allocation *and* the insert, so two declarations in flight cannot be handed one sequence
   (ADR-0293), and `PostgresIncidentDeclarer` is the store-backed declarer the SLO engines use.
   `findOpenFor` answers hydration's question from `auto_declared_for` (ADR-0294). Also the three stores
-  that were dead since Phase 1 — `PostgresRunbookExecutionStore`, `PostgresPostmortemStore`,
+  that are **still** dead — `PostgresRunbookExecutionStore`, `PostgresPostmortemStore`,
   `PostgresCustomerCommsStore` (ADR-0296) — each with its own revision guard, since a postmortem edited
-  by two people over days was last-writer-wins. `appendPagedNote` (ADR-0327) is the paged timeline
+  by two people over days was last-writer-wins. ADR-0296 resolved the *tables* (they had no
+  business-key column, so a record could be written and never looked up) and said in its own last
+  follow-up that nothing exposes these records over HTTP; the *records* have never been written, and
+  ADR-0336 declares why, per store, rather than wiring them. **There is no incident lifecycle surface
+  in the deployed binary at all** — no `/incidents` route anywhere, and `PersistentIncidentEngine` is
+  constructed only by `PostgresIncidentDeclarer`, which calls `declare` / `findOpenFor` / `load` /
+  `cancelIfUntriaged` and never `assignRole`, `changeSeverity`, `note`, `transition` or
+  `attachPostmortem`. Two consequences are live rather than theoretical: **`human_owned` is
+  unreachable in every deployment**, since `cancelIfUntriaged` declines only when the status is not
+  `declared` and reaching `triaged` requires on-call roles no route assigns, so ADR-0326's
+  "an alert wrongly closed is silence" arm never fires; and **sev1 and sev2 incidents cannot be closed
+  at all**, because `IncidentRecordSchema` refuses `closed` without a `postmortemId` for every
+  severity with `postmortemRequired` — which is every grade the three escalators declare at — while
+  the refinement above it refuses any status past `declared` for those grades without
+  `publiclyVisible: true`, i.e. a status page this platform does not have. `declare → cancel` is the
+  whole reachable lifecycle. `appendPagedNote` (ADR-0327) is the paged timeline
   note's writer and **never throws** — the page has already gone out and the incident is already
   durable, so raising would turn a successful escalation into an error — retrying a lost revision race
   three times before reporting `revision_conflict`. `findById` throws on an unparseable row rather than
@@ -925,6 +940,22 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`feature-flags`** — 7 flag kinds, 10 targeting rule kinds with FNV-1a sticky percentage
   bucketing, a 9-stage rollout ramp state machine, 8-trigger kill switches with strict
   separation of duties, 17 evaluation reasons, and a 23-kind append-only change audit.
+  **Nothing in the workspace evaluates a flag** (ADR-0336), and that is the disease behind both of
+  this domain's callerless stores. Every ingredient is modelled and none composed — `isFlagActive`,
+  `isFlagInEnvironment`, `parseDefaultValue`, `parseKilledValue`, `findActiveKillSwitch`,
+  `chooseTargetingRule`, `computeStableBucket`, `FlagEvaluationSchema` — and no function anywhere
+  takes a flag plus a context and returns a value. Proved mechanically rather than read: each of the
+  17 `EVALUATION_REASONS` appears only in `evaluations.ts`, its own test, and the CHECK on
+  `meta.feature_flag_evaluations.reason`, so `FLAG_EVALUATION_REASON_PRODUCERS` is a **total map**
+  answering `"none"` seventeen times, with `stored_flags` / `declared_flags` reserved in the union so
+  the product choice is expressible — `JOB_KIND_PRODUCERS`' shape, and `flagEvaluationIsImplemented()`
+  is the one call that answers it. There is no *source* either: a flag has no manifest field, no CLI
+  flag, no env var and no route, so a flag here is **neither a database record nor a deployment
+  declaration but a modelled domain with no mechanism**. The sharpest part is on the store that *is*
+  reachable: `KillSwitchLookup` has exactly one method, `findForIncident` — *which incident did this
+  switch open* — and never *is this flag killed*, so the SLO loop's third enforcement action writes a
+  row naming a `flag_id` whose flag row cannot exist and nothing ever asks. ADR-0333's class on a
+  constructed store, which a callerless-store census clears on its first question.
 - **`feature-flags-pg`** — Postgres stores for `KillSwitch` records, which the SLO loop writes
   when it rolls a flag back and reads back when a restart adopts the incident (ADR-0296), and for
   `FeatureFlag` itself — the table was declared in Phase 1, never written, and had drifted 18 columns
@@ -939,8 +970,10 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   cannot know a column does not exist. The same class as ADR-0331's signal store, and the reason the
   assertion is against `META_TABLES` rather than a second copy of the names.
   `targeting-rule-store.ts` (ADR-0335) is the writer `meta.feature_flag_targeting_rules` never had, so
-  a flag read back from the database no longer round-trips `ftr_…` ids pointing at nothing and can be
-  evaluated against its own targeting. `flag_id` is TEXT referencing `meta.feature_flags(flag_id)`
+  a flag read back from the database no longer round-trips `ftr_…` ids pointing at nothing and is
+  **resolvable** against its own targeting — resolvable and not *evaluable*, because resolving a
+  flag's rules and evaluating the flag are different steps and ADR-0336 found only the first exists.
+  `flag_id` is TEXT referencing `meta.feature_flags(flag_id)`
   (`CASCADE`), not the UUID surrogate, because the contract's own id is what a rule names.
   **Nothing constructs it** — not a route, not a scheduler, not `node.ts`; only its own test. The
   reasoning for shipping no route is sound (a rule changes what the deployment serves, so it is at
@@ -951,6 +984,15 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   it, while no caller exists. See *What's actually left* — the storeless rule's inverse is unfenced.
 - **`deploy`** — apps × 4 environments × 4 strategies, artifact kinds, migration records,
   release channels, on-prem/BYOC packaging (Helm/Terraform).
+  It also ships **a second, complete feature-flag subsystem** (ADR-0336) and has **zero importers**,
+  which is the `api-gateway-pg` condition before ADR-0335. `src/feature-flags.ts` holds the
+  workspace's only `evaluateFlag()`, with its own 4-member `FLAG_KINDS` against
+  `@crossengin/feature-flags`' 7 (a strict subset), its own `TargetingRuleSchema`, and a `hash*31`
+  bucket rather than FNV-1a — **six colliding exported names** across the two packages
+  (`FLAG_KINDS`, `FlagKind`, `FlagVariant`, `FlagVariantSchema`, `TargetingRule`,
+  `TargetingRuleSchema`). So the workspace has two incompatible flag vocabularies under one set of
+  names, and the one with a working evaluator is the one nothing imports. Which of the two is the
+  real model is a product decision, not a wiring step.
 - **`edge`** — region routing strategies, per-route latency budgets and percentiles,
   autoscaling policies with signals and decisions, edge cache strategies, throttling
   verdicts, region affinity.
@@ -2101,7 +2143,13 @@ opened them.
   plan hands over the exact SQL for both; automating either means deciding what happens to existing
   rows, which is the one thing a migrator should not decide.
 - **The kill switch's `flag_id` foreign key is addable but not added** (ADR-0300). `meta.feature_flags`
-  now has the `flag_id TEXT` unique column ADR-0296 said was needed, and a store that writes it. The
+  now has the `flag_id TEXT` unique column ADR-0296 said was needed, and a store that *can* write it,
+  which nothing constructs (ADR-0336). ADR-0300's stated reason for building the store —
+  "the store is what makes the next drift fail loudly" — was **disproved by ADR-0332**: the store
+  named `default_value` where the catalog said `default_value_json`, so it could not round-trip a
+  single flag against any real database while every offline test passed. The assertion against
+  `META_TABLES` is what makes drift fail loudly; the decision to build the store survives, its
+  justification does not. The
   reference still stays off for a different reason: ADR-0291 will not add a foreign key it cannot prove
   every row satisfies, and the table is empty in every deployment — so declaring it would be correct on
   a fresh install and reported as drift on every existing one, forever. It becomes available once a

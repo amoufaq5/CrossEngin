@@ -216,6 +216,27 @@ const REVISION_GUARD_PARAM = COMMS_COLUMN_NAMES.length + 1;
  * succeed and the bounce update would erase the retraction — a notice the world had been told was
  * withdrawn, silently standing again. Every write states the revision it read, and a zero-row update
  * raises `CommsRevisionConflictError`.
+ *
+ * **Nothing constructs this store, and the obstacle is the contract's own shape.**
+ * `IncidentCommunicationSchema` models only a communication that has **already been published** —
+ * `publishedAt`, `publishedBy`, `deliveryChannels` and `recipientCount` are all required and there
+ * is no draft status — while `requiresLegalReview` is forced true for `breach_notification`,
+ * `regulators` and `law_enforcement`, and then demands `legalReviewedBy` and `legalReviewedAt` on
+ * the same record. So there is no state in which the platform holds a drafted notice awaiting
+ * review, and a single-POST route would take the legal-review attestation **from the request
+ * body** — manufacturing the proof of review that the field exists to carry. That is the thing
+ * `--notification-template-routes` built an author grant, an approver grant and a
+ * `created_by <> $actor` predicate to prevent (ADR-0313), and this contract cannot carry that
+ * apparatus because it has no two-step state to hang it on.
+ *
+ * Two further mismatches, both evidence the record predates the delivery stack rather than
+ * describing it: `deliveryChannels` admits `rss` and `status_page`, neither of which is a
+ * `NOTIFICATION_CHANNEL` and neither of which anything here can deliver (and it spells push
+ * `push`, against the stack's `push_mobile`); and `regulators` / `law_enforcement` are not
+ * resolvable audiences, since `PostgresRecipientResolver` resolves tenant users. Also worth
+ * knowing before anyone writes that route: the schema refuses `publishedAt` later than
+ * `breachNotificationDeadlineAt`, so a **late** GDPR 72h notification is unrepresentable — the one
+ * fact a regulator would ask for is the one record this table cannot hold.
  */
 export class PostgresCustomerCommsStore {
   private readonly conn: PgConnection;

@@ -191,12 +191,23 @@ const REVISION_GUARD_PARAM = RUNBOOK_EXECUTION_COLUMN_NAMES.length + 1;
  * Platform-wide, like the `meta.incidents` row it hangs off: an execution belongs to an incident,
  * which may name many tenants or none, so there is no `withTenantContext` wrapper and no RLS.
  *
- * **Optimistic concurrency, failing closed.** A scheduler drives an execution while an operator
- * watches it, so two writers can hold one row: one aborting a `running` execution, one marking it
- * succeeded from the same read. Without a guard both would succeed and the second would overwrite
- * the first with nothing raised anywhere. Every write states the revision it read, and a zero-row
- * update raises `RunbookExecutionRevisionConflictError` rather than silently discarding the other
- * writer's transition.
+ * **Optimistic concurrency, failing closed.** Two writers can hold one row — one aborting a
+ * `running` execution, one marking it succeeded from the same read. Without a guard both would
+ * succeed and the second would overwrite the first with nothing raised anywhere. Every write states
+ * the revision it read, and a zero-row update raises `RunbookExecutionRevisionConflictError` rather
+ * than silently discarding the other writer's transition.
+ *
+ * **Nothing constructs this store, and that is the decision rather than an omission.** ADR-0296
+ * reconciled the table — it had no business-key column, so a record could be written and never
+ * looked up — and said in its own last line that nothing exposes these records over HTTP. The
+ * reason it stays that way is one level below wiring: **there is no runbook.** The workspace has no
+ * `Runbook` definition contract and no `meta.runbooks` table; `incident-response` declares
+ * `RunbookExecution` and `RunbookStepRecord` and nothing a step could be read from. So `runbookId`
+ * and `runbookVersion` are free TEXT naming a document that lives outside this system, no module
+ * anywhere executes a step, and a route over this store would accept an operator's transcription of
+ * outcomes the platform did not produce — a row that reads as a record and is a typed-in claim. The
+ * writer this table wants is a runbook executor, and the thing that has to exist before the
+ * executor is a runbook.
  */
 export class PostgresRunbookExecutionStore {
   private readonly conn: PgConnection;
