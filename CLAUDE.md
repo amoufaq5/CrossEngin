@@ -941,10 +941,14 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `targeting-rule-store.ts` (ADR-0335) is the writer `meta.feature_flag_targeting_rules` never had, so
   a flag read back from the database no longer round-trips `ftr_…` ids pointing at nothing and can be
   evaluated against its own targeting. `flag_id` is TEXT referencing `meta.feature_flags(flag_id)`
-  (`CASCADE`), not the UUID surrogate, because the contract's own id is what a rule names. There is no
-  HTTP surface for authoring one and deliberately so: a rule changes what the deployment serves, so it
-  is at least `config`-grade and would need `--notification-template-routes`' four-eyes apparatus
-  (ADR-0313).
+  (`CASCADE`), not the UUID surrogate, because the contract's own id is what a rule names.
+  **Nothing constructs it** — not a route, not a scheduler, not `node.ts`; only its own test. The
+  reasoning for shipping no route is sound (a rule changes what the deployment serves, so it is at
+  least `config`-grade and would need `--notification-template-routes`' four-eyes apparatus,
+  ADR-0313) but the consequence is that this store is the ADR-0333 class in a new place, and the
+  increment that added it **moved** the defect rather than closing it: before, the table had no store
+  and `pg-storeless-tables.ts` named it; now the table has a store and the census no longer reports
+  it, while no caller exists. See *What's actually left* — the storeless rule's inverse is unfenced.
 - **`deploy`** — apps × 4 environments × 4 strategies, artifact kinds, migration records,
   release channels, on-prem/BYOC packaging (Helm/Terraform).
 - **`edge`** — region routing strategies, per-route latency budgets and percentiles,
@@ -1833,6 +1837,27 @@ opened them.
   somebody else's mistake), so which of the two actions should name the reject is a vocabulary
   decision rather than a defect, and changing `ACTION_TARGET_STATE` forces a workspace rebuild before
   any consumer's tests mean anything (ADR-0329).
+- **The storeless-table rule's inverse is unfenced: a store that nothing constructs** (ADR-0335).
+  `pg-storeless-tables.ts` asks *which catalogued table has no store*. Nothing asks *which store has
+  no caller* — and the two are not the same question, which this increment demonstrated by **moving**
+  a defect rather than closing it. `meta.feature_flag_targeting_rules` was on the writerless census;
+  it now has `PostgresTargetingRuleStore`, so the census no longer reports it, and that store is
+  constructed **only in its own test file**. The table went from a place a rule watches to a place
+  nothing watches, and the fence read greener for it.
+  Found by hand, which is the point: this is ADR-0333's class — built, tested, never connected — and
+  three consecutive increments have now found a member of it by accident. The honest fix sits one
+  level up, as it did there: a workspace rule over the **dependency graph** rather than over SQL,
+  asserting that every exported `Postgres*Store` is referenced outside its own package's tests, with
+  the deliberate exceptions declared as lines the way `pg-storeless-tables.ts` declares its reasons.
+  What makes it more than a tidy-up: `api-gateway-pg` had **zero importers** for four stores and a
+  replayer, and no rule in the repo would have said so — ADR-0335 found that by grepping, and
+  `targeting-rule-store.ts` proves the grep is not repeatable discipline. The two candidate signals
+  are a package with no importer and a symbol constructed only under `*.test.ts`; the first is cheap
+  and `pnpm`'s own graph answers it, the second needs the same fs scan `workspace-sql-scan.ts`
+  already does.
+  Not closed in this increment because it is a fifth strategy rule and wants its own increment, and
+  because the *decision* for this particular store — no authoring route without four-eyes — is right
+  and would survive the rule naming it.
 - **77 of 145 catalogued tables have no writer, and every one is declared with a reason**
   (ADR-0334, ADR-0335). `packages/testing/src/strategy/pg-storeless-tables.ts` classifies them —
   `static_catalog` (2), `out_of_band` (1), `dynamic_writer` (1), `superseded` (8), `unwritten_table`
