@@ -1,0 +1,394 @@
+import { formatAbacObligation, type AbacObligation } from "@crossengin/auth";
+import type { Manifest } from "@crossengin/kernel";
+import { describe, expect, it } from "vitest";
+
+import {
+  ABAC_OBLIGATION_REFUSALS,
+  AbacObligationsUnevaluable,
+  OBLIGATION_DETAIL_LIMIT,
+  checkAbacObligations,
+  formatAbacObligationCheck,
+  type AbacObligationCheck,
+} from "./abac-obligations.js";
+import { BUILTIN_PACK_NAMES, loadBuiltinPack } from "./manifest-source.js";
+
+function manifest(parts: Partial<Manifest> = {}): Manifest {
+  return {
+    manifestVersion: "1.0",
+    meta: { name: "Fixture", slug: "fixture/pack", version: "1.0.0" },
+    ...parts,
+  };
+}
+
+/** A resolved manifest declaring exactly one `abac`-qualified grant. */
+function withOneObligation(): Manifest {
+  return manifest({
+    permissions: {
+      Patient: { read: { roles: ["clinician"], abac: "same_facility" } },
+    },
+  });
+}
+
+/** `n` distinct synthetic obligations, so a truncated render is checkable per member. */
+function synthetic(n: number): readonly AbacObligation[] {
+  return Array.from({ length: n }, (_, i) => ({
+    entity: `E${(i + 1).toString()}`,
+    operation: "read" as const,
+    field: null,
+    policyKey: `p${(i + 1).toString()}`,
+  }));
+}
+
+function check(parts: Partial<AbacObligationCheck> = {}): AbacObligationCheck {
+  return {
+    obligations: [],
+    evaluatorDeclared: false,
+    refusal: null,
+    ...parts,
+  };
+}
+
+describe("ABAC_OBLIGATION_REFUSALS", () => {
+  it("names the one refusal", () => {
+    expect(ABAC_OBLIGATION_REFUSALS).toEqual(["obligation_unevaluable"]);
+  });
+
+  it("has no escape-hatch member, because serving an unevaluated obligation is not a state to opt into", () => {
+    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(1);
+  });
+});
+
+describe("OBLIGATION_DETAIL_LIMIT", () => {
+  it("is 8", () => {
+    expect(OBLIGATION_DETAIL_LIMIT).toBe(8);
+  });
+});
+
+describe("checkAbacObligations", () => {
+  it("refuses when obligations are declared and no evaluator is", () => {
+    const result = checkAbacObligations({
+      manifest: withOneObligation(),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.evaluatorDeclared).toBe(false);
+    expect(result.refusal).toBe("obligation_unevaluable");
+  });
+
+  it("does not refuse when obligations are declared and an evaluator is", () => {
+    const result = checkAbacObligations({
+      manifest: withOneObligation(),
+      evaluatorDeclared: true,
+    });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.evaluatorDeclared).toBe(true);
+    expect(result.refusal).toBeNull();
+  });
+
+  it("does not refuse when no obligation is declared and no evaluator is", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({ permissions: { Patient: { read: { roles: ["clinician"] } } } }),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations).toEqual([]);
+    expect(result.refusal).toBeNull();
+  });
+
+  it("does not refuse when no obligation is declared and an evaluator is", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({ permissions: {} }),
+      evaluatorDeclared: true,
+    });
+    expect(result.obligations).toEqual([]);
+    expect(result.refusal).toBeNull();
+  });
+
+  it("treats an absent `permissions` key as no obligations rather than throwing", () => {
+    const m = manifest();
+    expect(m.permissions).toBeUndefined();
+    const result = checkAbacObligations({ manifest: m, evaluatorDeclared: false });
+    expect(result.obligations).toEqual([]);
+    expect(result.refusal).toBeNull();
+  });
+
+  it("finds an obligation on a plain operation grant", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({
+        permissions: { Invoice: { update: { roles: ["ap_clerk"], abac: "own_entity" } } },
+      }),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations).toEqual([
+      { entity: "Invoice", operation: "update", field: null, policyKey: "own_entity" },
+    ]);
+  });
+
+  it("finds an obligation on a transition grant", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({
+        permissions: {
+          SalesOrder: { transitions: { fulfil: { roles: ["picker"], abac: "same_store" } } },
+        },
+      }),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations).toHaveLength(1);
+    const [only] = result.obligations;
+    expect(only?.entity).toBe("SalesOrder");
+    expect(only?.operation).toEqual({ kind: "transition", name: "fulfil" });
+    expect(only?.field).toBeNull();
+    expect(only?.policyKey).toBe("same_store");
+  });
+
+  it("finds an obligation on a field read grant", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({
+        permissions: {
+          Patient: { fields: { mrn: { read: { roles: ["clinician"], abac: "treating" } } } },
+        },
+      }),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations).toEqual([
+      { entity: "Patient", operation: "read", field: "mrn", policyKey: "treating" },
+    ]);
+  });
+
+  it("finds an obligation on a field update grant", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({
+        permissions: {
+          Citizen: {
+            fields: { national_id: { update: { roles: ["gov_admin"], abac: "own_jurisdiction" } } },
+          },
+        },
+      }),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations).toEqual([
+      {
+        entity: "Citizen",
+        operation: "update",
+        field: "national_id",
+        policyKey: "own_jurisdiction",
+      },
+    ]);
+  });
+
+  it("ignores a grant carrying roles and no `abac` key", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({
+        permissions: {
+          Patient: {
+            read: { roles: ["clinician"] },
+            transitions: { close: { roles: ["clinician"] } },
+            fields: { mrn: { read: { roles: ["clinician"] }, update: { roles: ["clinician"] } } },
+          },
+        },
+      }),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations).toEqual([]);
+  });
+
+  it("finds every obligation when one entity qualifies several grants", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({
+        permissions: {
+          Patient: {
+            read: { roles: ["clinician"], abac: "a" },
+            update: { roles: ["clinician"], abac: "b" },
+            transitions: { close: { roles: ["clinician"], abac: "c" } },
+            fields: {
+              mrn: {
+                read: { roles: ["clinician"], abac: "d" },
+                update: { roles: ["clinician"], abac: "e" },
+              },
+            },
+          },
+        },
+      }),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations.map((o) => o.policyKey).sort()).toEqual(["a", "b", "c", "d", "e"]);
+  });
+});
+
+describe("formatAbacObligationCheck", () => {
+  it("says none were declared affirmatively, so a clean survey is not inferred from silence", () => {
+    expect(formatAbacObligationCheck(check())).toBe(
+      "abac obligations: none declared, so no grant depends on an ABAC evaluator",
+    );
+  });
+
+  it("says the same affirmative line whether or not an evaluator is declared", () => {
+    expect(formatAbacObligationCheck(check({ evaluatorDeclared: true }))).toBe(
+      formatAbacObligationCheck(check({ evaluatorDeclared: false })),
+    );
+  });
+
+  it("names the count, the evaluator and the obligations when they are evaluable", () => {
+    const obligations = synthetic(2);
+    const line = formatAbacObligationCheck(
+      check({ obligations, evaluatorDeclared: true, refusal: null }),
+    );
+    expect(line).toContain("2 declared");
+    expect(line).toContain("an evaluator is declared");
+    expect(line).toContain(formatAbacObligation(obligations[0] as AbacObligation));
+    expect(line).toContain(formatAbacObligation(obligations[1] as AbacObligation));
+  });
+
+  it("carries the refusal's own message, so the boot line and the thrown error cannot disagree", () => {
+    const c = check({
+      obligations: synthetic(3),
+      evaluatorDeclared: false,
+      refusal: "obligation_unevaluable",
+    });
+    expect(formatAbacObligationCheck(c)).toContain(new AbacObligationsUnevaluable(c).message);
+  });
+
+  it("does not truncate at exactly OBLIGATION_DETAIL_LIMIT", () => {
+    const obligations = synthetic(OBLIGATION_DETAIL_LIMIT);
+    const line = formatAbacObligationCheck(check({ obligations, evaluatorDeclared: true }));
+    expect(line).not.toContain("more)");
+    for (const o of obligations) {
+      expect(line).toContain(formatAbacObligation(o));
+    }
+  });
+
+  it("truncates one past the limit and names how many it withheld", () => {
+    const obligations = synthetic(OBLIGATION_DETAIL_LIMIT + 1);
+    const line = formatAbacObligationCheck(check({ obligations, evaluatorDeclared: true }));
+    expect(line).toContain("(+1 more)");
+    expect(line).toContain(`${(OBLIGATION_DETAIL_LIMIT + 1).toString()} declared`);
+    expect(line).not.toContain(
+      formatAbacObligation(obligations[OBLIGATION_DETAIL_LIMIT] as AbacObligation),
+    );
+  });
+
+  it("reports the full count even when the list is cut", () => {
+    const line = formatAbacObligationCheck(
+      check({ obligations: synthetic(30), evaluatorDeclared: true }),
+    );
+    expect(line).toContain("30 declared");
+    expect(line).toContain(`(+${(30 - OBLIGATION_DETAIL_LIMIT).toString()} more)`);
+  });
+});
+
+describe("AbacObligationsUnevaluable", () => {
+  it("names the count", () => {
+    const err = new AbacObligationsUnevaluable(
+      check({ obligations: synthetic(4), refusal: "obligation_unevaluable" }),
+    );
+    expect(err.message).toContain("4 abac-qualified grant(s)");
+  });
+
+  it("names the first OBLIGATION_DETAIL_LIMIT obligations and withholds the rest", () => {
+    const obligations = synthetic(OBLIGATION_DETAIL_LIMIT + 2);
+    const err = new AbacObligationsUnevaluable(
+      check({ obligations, refusal: "obligation_unevaluable" }),
+    );
+    for (const o of obligations.slice(0, OBLIGATION_DETAIL_LIMIT)) {
+      expect(err.message).toContain(formatAbacObligation(o));
+    }
+    expect(err.message).toContain("(+2 more)");
+  });
+
+  it("names both remedies and invents no flag for the second", () => {
+    const err = new AbacObligationsUnevaluable(
+      check({ obligations: synthetic(1), refusal: "obligation_unevaluable" }),
+    );
+    expect(err.message).toContain("Remove the `abac` key");
+    expect(err.message).toContain("the role grant beside it is enforced");
+    expect(err.message).toContain("ABAC evaluator");
+    expect(err.message).not.toMatch(/--[a-z]/);
+  });
+
+  it("carries the obligations array and the refusal", () => {
+    const obligations = synthetic(2);
+    const err = new AbacObligationsUnevaluable(
+      check({ obligations, refusal: "obligation_unevaluable" }),
+    );
+    expect(err.obligations).toEqual(obligations);
+    expect(err.refusal).toBe("obligation_unevaluable");
+  });
+
+  it("is an Error with its own name, so a boot catch can report it structurally", () => {
+    const err = new AbacObligationsUnevaluable(check({ obligations: synthetic(1) }));
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("AbacObligationsUnevaluable");
+    expect(err.refusal).toBe("obligation_unevaluable");
+  });
+});
+
+describe("the builtin pack census", () => {
+  /**
+   * The point of this lane. A non-zero count is **not automatically a bug**: it means the
+   * deployment now needs an ABAC evaluator, and this test is the forcing function for that
+   * conversation — whoever adds the grant meets the refusal here, with its reason, instead of
+   * a silent total denial in production.
+   *
+   * Zero today is also what makes the boot refusal vacuous, so this change breaks no
+   * deployment that worked.
+   */
+  it("declares zero abac obligations across all seven resolved builtin packs today", async () => {
+    const counts: Record<string, number> = {};
+    for (const name of BUILTIN_PACK_NAMES) {
+      const resolved = await loadBuiltinPack(name);
+      counts[name] = checkAbacObligations({ manifest: resolved, evaluatorDeclared: false })
+        .obligations.length;
+    }
+    expect(Object.keys(counts)).toHaveLength(7);
+    expect(counts).toEqual({
+      "erp-core": 0,
+      "erp-retail": 0,
+      "erp-healthcare": 0,
+      "erp-grocery": 0,
+      "erp-government": 0,
+      "erp-education": 0,
+      "erp-construction": 0,
+    });
+  });
+
+  it("surveys a non-empty permission map on every pack, so the zero is a measurement and not an empty walk", async () => {
+    for (const name of BUILTIN_PACK_NAMES) {
+      const resolved = await loadBuiltinPack(name);
+      expect(Object.keys(resolved.permissions ?? {}).length).toBeGreaterThan(0);
+    }
+  });
+
+  /**
+   * The vacuity control, the way `packages/testing/src/strategy/*` rules carry one: the
+   * census above would read zero just as happily if the survey were walking nothing. This
+   * puts an `abac` grant through the same function and demands it comes back.
+   */
+  it("finds an abac grant through the same code path, so a zero census cannot be a wrong path", () => {
+    const result = checkAbacObligations({
+      manifest: withOneObligation(),
+      evaluatorDeclared: false,
+    });
+    expect(result.obligations).toEqual([
+      { entity: "Patient", operation: "read", field: null, policyKey: "same_facility" },
+    ]);
+    expect(result.refusal).toBe("obligation_unevaluable");
+  });
+
+  it("refuses a resolved pack the moment one abac grant is added to it", async () => {
+    const core = await loadBuiltinPack("erp-core");
+    const entity = Object.keys(core.permissions ?? {})[0];
+    expect(entity).toBeDefined();
+    const qualified: Manifest = {
+      ...core,
+      permissions: {
+        ...(core.permissions ?? {}),
+        [entity as string]: {
+          ...(core.permissions ?? {})[entity as string],
+          read: { roles: ["platform-admin"], abac: "same_region" },
+        },
+      },
+    };
+    const result = checkAbacObligations({ manifest: qualified, evaluatorDeclared: false });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.refusal).toBe("obligation_unevaluable");
+  });
+});

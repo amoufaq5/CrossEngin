@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 334 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 335 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~16,410 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~16,575 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -203,6 +203,40 @@ type errors.
   names them, and that list is the migration guide. The recurring rule held a fifth time: the honest
   fix sits one level up from the pain. The pain was a callerless function; the fix was the
   declaration surface that function needed and never had.
+
+  ADR-0340 takes ADR-0339's own Q3 and corrects two of the three things that ADR said about it. The
+  class is **an obligation handed back and dropped**: `rbacCheck` returned `requiresAbac` for a
+  grant carrying `abac` and **nothing read it**, so an ABAC-qualified grant granted
+  unconditionally — the inverse of this repo's own *fail closed* invariant, inside the authorization
+  decision. What ADR-0339 missed is that the hole is in **five** functions, and the four in
+  `fields.ts` are the worse place: each reads `rule.roles` and never `rule.abac`, and two of them
+  are the pair ADR-0339 reached for as its fix, so an **explicitly declared** per-field grant — the
+  7 it made authoritative with no flag — was enforced as to roles and silently unconditional as to
+  attributes. Measured by building the committed tree in a worktree: one grant on `Patient` yielded
+  `{"allowed":true,"requiresAbac":…}`, `{"readable":["mrn"],"redacted":[]}` and `{"ok":true}` — all
+  three unsafe, and the middle one **disclosed the PHI field ADR-0338 had just made ciphertext** to
+  a grantee whose grant says a policy must admit them first. `abac: ""` also parsed, and
+  `"" !== undefined`, so an empty key was a live obligation naming nothing. It is not gated on a
+  pack author: `ManifestSchema.permissions` is `@crossengin/auth`'s own `EntityPermissionsSchema`
+  unwrapped, so **the Architect can author one** and a reviewer approves a declaration the runtime
+  discards.
+  The decision converges rather than invents — `workflow-engine`'s `ABAC_CHECK_GUARD` already read
+  the reference as a `policyKey` and already **threw** on it — so `abac` is documented as an opaque
+  key bounded the same way, `""` is refused, and `dischargeAbac` is the one function that calls an
+  evaluator: no obligation → `null` (*nothing to check*, deliberately not a `satisfied` discharge,
+  because reporting the second for the first claims an evaluation that never ran), no evaluator →
+  `undischargeable` (a statement that nothing could answer, not a claim about this principal's
+  attributes), a throw or an out-of-enum return → `undischargeable`. One
+  `OperateRuntimeOptions.abacEvaluator` threaded from `compile.ts`, the only module holding all five
+  readers, because two evaluators would let the read and write halves disagree about one grant.
+  And a manifest declaring an obligation the deployment cannot discharge is **refused at boot by
+  name**, with no escape hatch — ADR-0338's `--allow-plaintext-phi` exists because plaintext PHI is
+  degraded-but-coherent, while an unevaluated obligation is the opposite of what the manifest
+  declares, and the measured count across the seven packs is **zero**, so refusing breaks nothing
+  that worked. The attributes are deliberately **not** wired, and the ordering is the whole
+  argument: the source does exist (ADR-0339 said it did not), but before this change `{}` erred
+  toward granting and disclosing and after it the same `{}` errs toward denial — so an evaluator
+  wired first is wrong-and-safe, while attributes wired first would restore the hole.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -692,6 +726,29 @@ packages exist at only one layer, noted below where that is true.
   `operate-runtime`'s create and update handlers now, with the **same policy object** the redaction
   registry gets. `computeFieldRedaction` and `validateWriteMask` — the classification-unaware
   originals — are still callerless and superseded by the classified pair.
+  **`abac.ts` is the ABAC obligation** (ADR-0340). `RbacGrant.abac` is an opaque **policy key**,
+  bounded `min(1).max(200)` like `workflow-engine`'s `ABAC_CHECK_GUARD.policyKey` — the one spelling
+  in the repo that was already right, and whose `defaultGuardEvaluator` already *threw* — never an
+  expression, which is how two of this package's own tests had been reading it.
+  `dischargeAbac(policyKey, context, evaluator)` is the only function anywhere that calls an
+  `AbacEvaluator`, and its four answers are the decision: no obligation → `null` (*nothing was
+  checked*, which is not the same fact as *a policy said yes*); no evaluator → `undischargeable`,
+  never `denied`, because the second is a claim about this principal's attributes and the first says
+  nothing could answer; an evaluator that **throws**, or returns a value outside `ABAC_OUTCOMES`, →
+  `undischargeable`, since an exception inside an authorization check must not become an allow nor
+  a 500 a client retries. `ABAC_OUTCOME_ALLOWS` is a total map so a fourth outcome is a compile
+  error. All five readers fail closed — `rbacCheck` plus the four field functions, which take one
+  trailing `AbacEnforcement {entity, evaluator?}` whose `entity` is *required*, so a caller cannot
+  ask for enforcement without naming the entity the policy is about, and **omitting the parameter
+  refuses rather than skips** (pinned by a `toEqual` against the no-evaluator result, so a forgotten
+  argument cannot become a silent grant). `AuthorizationDecision.requiresAbac` is **deleted** rather
+  than fixed in place — a field whose whole history is being dropped must not survive under its old
+  name — and `abac?: AbacDischarge` rides on **both** arms so a satisfied check is reportable.
+  `rbacCheck` consults the evaluator **only after** the role check passes: there is nothing to learn
+  from an evaluation when a 403 was already owed, and asking hands the deployment's policy layer a
+  principal it has no business seeing. `surveyAbacObligations` covers all four grant positions — the
+  five operation names, `transitions`, and `fields[x].read`/`.update` — which is what the boot
+  refusal is built from.
 - **`sso`** — federated identity contracts: SAML 2.0 + OIDC provider configs, SCIM 2.0
   provisioning, claim mappings with transforms and JIT user policies, session lifecycle,
   login audit.
@@ -1796,6 +1853,23 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   would produce a false boot refusal — and measures `uncreatable` with the mask **on** whatever the
   flag says, because a refusal computed under the regime the operator is leaving could never gate
   the change.
+  **A manifest declaring an ABAC obligation this deployment cannot discharge is refused at boot**
+  (ADR-0340, `abac-obligations.ts`), and there is deliberately **no flag past it**: ADR-0338 shipped
+  `--allow-plaintext-phi` because plaintext PHI is a degraded-but-coherent state an operator may
+  knowingly accept, while serving a grant with its qualifier removed is the opposite of what the
+  manifest declares. The refusal names the count and the first eight obligations and both remedies,
+  and the boot line is *affirmative* when there are none — "we checked and found nothing" cannot be
+  claimed from the absence of a log line. It lives in **`buildOperateHttpServer`**, which is also
+  what compiles an activated **per-tenant** manifest, so a tenant's own manifest is covered by the
+  same rule — the placement that gives a per-tenant gateway the tenant-status gate (ADR-0334), and
+  the reason there is no second check to forget. `node.ts` asks again *before* its sensitive-field
+  survey, purely for ordering: an obligation on a required classified field's `update` grant makes
+  that field unwritable and would otherwise trip `--classified-write-mask`'s
+  `would_make_entity_uncreatable`, naming the classification declaration as the remedy for
+  something no declaration can fix. First refusal wins, so it has to be the one whose remedy is
+  true. `BuildOperateHttpServerOptions.abacEvaluator` is the only way to supply one — no CLI flag
+  does, because an ABAC policy engine is not something this binary contains — so it is an option
+  rather than a hardcoded absence, which makes the refusal's premise a fact about the caller.
   **At-rest PHI is decided at boot** (ADR-0338): `resolveStore` surveys the manifest's
   `phi`/`regulated` fields (through `resolvedFields`, so a classified *trait* field cannot be missed),
   calls `decidePhiStorage`, and either refuses or builds one `buildColumnKeySource` shared by the boot
@@ -2354,14 +2428,56 @@ opened them.
   subset and the boot survey names them. **(2)** `computeFieldRedaction` and `validateWriteMask`,
   the classification-unaware originals, still have no callers and are probably deletable —
   a mechanical increment, and `pg-unreachable-stores.ts` does not fence *functions* (ADR-0337
-  measured why). **(3)** **an ABAC-qualified grant grants unconditionally**: `rbacCheck` returns
-  `allowed: true` with `requiresAbac` attached and **nothing reads it**, so the qualifier is an
-  obligation handed back and dropped. Latent — no pack declares one — and fixing it needs an
-  attribute *source*, since both principal bridges hardcode `abacAttributes: {}`. **(4)** the mask
+  measured why). **(3)** ~~an ABAC-qualified grant grants unconditionally~~ — **closed by
+  ADR-0340**, which also corrected two of the three things this entry said: the hole was in **five**
+  functions and not one, and the attribute *source* does exist. See the next entry. **(4)** the mask
   answers "may this principal write this field", never "this value", which is the write guards'
   question. **(5)** the survey is boot-time, so a *per-tenant* manifest activated later is not
   surveyed; that check belongs beside ADR-0334's `unservable_field_type` in
-  `applyTenantManifestSchema`.
+  `applyTenantManifestSchema` — though the ABAC obligation check *is* covered per tenant, because
+  ADR-0340 put it in `buildOperateHttpServer`.
+- **The ABAC obligation is enforced now, and what is left of it** (ADR-0340 closed ADR-0339's Q3).
+  An ABAC-qualified grant granted unconditionally in **five** functions — `rbacCheck` plus all four
+  in `fields.ts`, each reading `rule.roles` and never `rule.abac` — and two of those four are the
+  pair ADR-0339 reached for, so the **7 explicitly declared** per-field grants it made authoritative
+  were enforced as to roles and silently unconditional as to attributes. Measured by building the
+  committed tree in a worktree: `{"allowed":true,"requiresAbac":…}`,
+  `{"readable":["mrn"],"redacted":[]}` and `{"ok":true}` — the middle one **disclosing the PHI field
+  ADR-0338 had just made ciphertext**. Fixed fail-closed through one `dischargeAbac`, one
+  `OperateRuntimeOptions.abacEvaluator` threaded from `compile.ts` (the only module holding all five
+  readers), and a boot refusal in `buildOperateHttpServer` with no escape hatch.
+  What remains, in order: **(1)** **the attributes are not wired.** `meta.user_tenant_membership`
+  has carried `abac_attributes JSONB NOT NULL DEFAULT '{}'` since Phase 1 and has had a writer *and*
+  a reader since ADR-0335 (`--platform-user-routes`), so ADR-0339's "fixing it needs an attribute
+  source" was wrong; what is missing is the wire, and **five** non-test sites hardcode
+  `Principal.abacAttributes` to `{}` (`api-gateway-runtime/redaction.ts:80`,
+  `operate-runtime/handlers.ts:93`, `association.ts:214`, `operate-server/sensitive-field-policy.ts:186`,
+  `live-grants.ts:128`). Deliberately left, and the **ordering is the argument**: before ADR-0340
+  that `{}` erred toward granting and disclosing, after it the same `{}` errs toward denial and
+  redaction, so an evaluator wired before the attributes is wrong-and-safe while attributes wired
+  before an evaluator would restore the hole. It wants a per-request `(userId, tenantId)` lookup
+  with `--tenant-status-gate`'s TTL idiom (positive TTL, shorter absence TTL, first lookup
+  propagates, a refresh serving stale to a bound). **(2)** **which mechanism** — a policy engine
+  (OPA/Cedar) behind `AbacEvaluator`, or a narrow built-in attribute-comparison vocabulary
+  declarable in the manifest. The seam makes it a configuration choice and nothing picks yet; note
+  that `"data.access.allow_update"`, one of the two spellings this package's own tests used, is
+  literally an OPA data path. **(3)** **seven spellings of one concept** across six packages, with
+  three value types for the attributes: `auth.RoleDefinition.abacAttributes`
+  (`Record<string,string>`, no producer and no reader), `auth.RbacGrant.abac` (the key),
+  `reporting.BaseReport.abac` — a **second** ABAC field on a report that already carries one through
+  `permissions: RbacGrantSchema` — `search.PermissionTagInput.abacAttributes`, the only *consumer*
+  of attributes anywhere (it flattens them to permission tags) and with its own value type,
+  `views.PermissionRef.abac`, `views.PermissionVerdict.requiresAbac` which after ADR-0340 has **no
+  possible producer**, and `workflow-engine.ABAC_CHECK_GUARD.policyKey`, the one that was already
+  right. **(4)** `defaultGuardEvaluator` still throws on `abac_check` *and* on `expression`; with an
+  `AbacEvaluator` now defined, the guard's `policyKey` could route to the same seam. **(5)** a tenant
+  whose activated manifest is refused falls back to the deployment's gateway rather than being told
+  — `TenantGatewayCache.serverFor` catches a build failure, logs through `reportInvalid` and returns
+  `null`, which pre-dates this change (any build failure does it) but an authorization refusal is a
+  worse thing to degrade silently. **(6)** `surveySensitiveFields` calls the field functions with no
+  `AbacEnforcement`, so an obligated field surveys as writable-by-nobody — correct, and unreachable
+  because the obligation refusal fires first, but the survey's output would mislead if that ordering
+  ever changed.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3283,7 +3399,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 334 records; 255 Accepted, 79 Proposed (the
+title or status change cannot drift. 335 records; 256 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

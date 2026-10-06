@@ -1,5 +1,6 @@
 import {
   rbacCheck,
+  type AbacEvaluator,
   type ClassifiedField,
   type PermissionMap,
   type Principal,
@@ -63,6 +64,14 @@ export interface HandlerContext {
   readonly classifiedFields?: ReadonlyMap<string, readonly ClassifiedField[]>;
   /** Which half of the field-level write rule is in force. Defaults to `explicit_only`. */
   readonly writeMaskMode?: WriteMaskMode;
+  /**
+   * Discharges the `abac` policy key a manifest grant may carry, for the entity check *and* the
+   * write mask — one seam for both, like `policyForEntity`, so the two halves of one grant cannot
+   * be answered by two evaluators. Absent is the fail-closed reading rather than "no obligation":
+   * `rbacCheck` and `validateClassifiedWriteMask` resolve an obligation they cannot discharge
+   * `undischargeable` and refuse, which is what makes an abac-qualified grant conditional at all.
+   */
+  readonly abacEvaluator?: AbacEvaluator;
   readonly clock?: { now(): Date };
 }
 
@@ -77,6 +86,10 @@ function authPrincipal(
     userId: (resolved?.principalId ?? null) as Principal["userId"],
     primaryRole,
     secondaryRoles: secondaryRoles ?? [],
+    // A source exists (`meta.user_tenant_membership.abac_attributes`, written by
+    // `--platform-user-routes`) and is deliberately not read here: with no evaluator in this binary
+    // an obligation is refused anyway, so `{}` feeds nothing — and it now errs toward denial where
+    // before it granted. Wiring it belongs with the evaluator that consumes it.
     abacAttributes: {},
     mfaProofAgeSeconds: resolved?.mfaProofAgeSeconds ?? null,
   };
@@ -108,9 +121,20 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
       roles: ctx.roles,
       entity: spec.entity,
       operation: spec.authOperation,
+      ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
     });
     if (!decision.allowed) {
-      return json(403, { error: "forbidden", detail: decision.reason });
+      // The obligation is surfaced because the two refusals need different actions: `denied` is
+      // "your attributes do not match" and `undischargeable` is "this deployment cannot evaluate
+      // this policy". Two flat fields rather than a nested object, so this and the write mask's
+      // 403 are one shape. The policy key is an opaque name the deployment chose, never a value.
+      return json(403, {
+        error: "forbidden",
+        detail: decision.reason,
+        ...(decision.abac !== undefined
+          ? { abacPolicyKey: decision.abac.policyKey, abacOutcome: decision.abac.outcome }
+          : {}),
+      });
     }
 
     const id = params["id"] ?? "";
@@ -385,6 +409,7 @@ function maskRefusal(
   const policy = ctx.policyForEntity?.(entity);
   const refusal = maskWrite({
     mode: ctx.writeMaskMode ?? "explicit_only",
+    entity,
     principal,
     // Unreachable: `rbacCheck` already 403'd an entity with no declared permissions. `{}` is also
     // the fail-closed reading — no explicit grant satisfies anyone, and under `classified` a
@@ -394,6 +419,7 @@ function maskRefusal(
     classifiedFields: ctx.classifiedFields?.get(entity) ?? [],
     writtenKeys,
     ...(policy !== undefined ? { policy } : {}),
+    ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
   });
   if (refusal === null) return null;
   return json(403, {
@@ -401,6 +427,9 @@ function maskRefusal(
     detail: `field '${refusal.field}' on '${entity}' is not writable by this principal`,
     field: refusal.field,
     rule: refusal.rule,
+    ...(refusal.abacPolicyKey !== undefined
+      ? { abacPolicyKey: refusal.abacPolicyKey, abacOutcome: refusal.abacOutcome }
+      : {}),
   });
 }
 

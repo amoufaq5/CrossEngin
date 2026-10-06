@@ -1,5 +1,5 @@
 import type { Entity } from "@crossengin/types/meta-schema";
-import type { EntityPermissions, RoleDefinition } from "@crossengin/auth";
+import type { AbacEvaluator, EntityPermissions, RoleDefinition } from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import { describe, expect, it } from "vitest";
 import { computeRedactedFields } from "./redaction.js";
@@ -200,5 +200,70 @@ describe("redactionRegistryFromManifest", () => {
       "given_name",
       "mrn",
     ]);
+  });
+
+  describe("abac obligations (ADR-0340)", () => {
+    // An explicit field `read` grant naming the caller's role, qualified by a policy key. The role
+    // check passes, so the obligation is the only thing that can decide.
+    const OBLIGATED: RedactionManifestInput = {
+      ...MANIFEST,
+      permissions: {
+        Patient: {
+          read: { roles: ["clinician"] },
+          fields: { mrn: { read: { roles: ["clinician"], abac: "p.owns_encounter" } } },
+        },
+      },
+    };
+    const specOf = (input: RedactionManifestInput, evaluator?: AbacEvaluator) =>
+      redactionRegistryFromManifest(input, {
+        rolesForPrincipal,
+        operationsForEntity,
+        ...(evaluator !== undefined ? { abacEvaluator: evaluator } : {}),
+      }).specFor("patient.read");
+
+    it("carries the entity unconditionally, with only the evaluator optional", () => {
+      expect(specOf(MANIFEST)?.abac).toEqual({ entity: "Patient" });
+      const evaluator: AbacEvaluator = () => "satisfied";
+      expect(specOf(MANIFEST, evaluator)?.abac).toEqual({ entity: "Patient", evaluator });
+    });
+
+    it("redacts an obligated field when no evaluator can discharge it", () => {
+      const spec = specOf(OBLIGATED);
+      if (spec === null) throw new Error("expected spec");
+      expect(computeRedactedFields(spec, principal("clinician"))).toContain("mrn");
+    });
+
+    it("returns an obligated field only on `satisfied`", () => {
+      for (const outcome of ["denied", "undischargeable"] as const) {
+        const spec = specOf(OBLIGATED, () => outcome);
+        if (spec === null) throw new Error("expected spec");
+        expect(computeRedactedFields(spec, principal("clinician"))).toContain("mrn");
+      }
+      const ok = specOf(OBLIGATED, () => "satisfied");
+      if (ok === null) throw new Error("expected spec");
+      expect(computeRedactedFields(ok, principal("clinician"))).not.toContain("mrn");
+    });
+
+    it("asks the evaluator about the right entity, operation and field", () => {
+      const seen: string[] = [];
+      const spec = specOf(OBLIGATED, (input) => {
+        seen.push(`${input.policyKey}|${input.entity}|${String(input.operation)}|${input.field ?? "-"}`);
+        return "satisfied";
+      });
+      if (spec === null) throw new Error("expected spec");
+      computeRedactedFields(spec, principal("clinician"));
+      expect(seen).toEqual(["p.owns_encounter|Patient|read|mrn"]);
+    });
+
+    it("does not consult the evaluator for an unobligated grant", () => {
+      let calls = 0;
+      const spec = specOf(MANIFEST, () => {
+        calls += 1;
+        return "denied";
+      });
+      if (spec === null) throw new Error("expected spec");
+      computeRedactedFields(spec, principal("clinician"));
+      expect(calls).toBe(0);
+    });
   });
 });

@@ -1,4 +1,12 @@
-import { rbacCheck, type PermissionMap, type Principal, type RoleDefinition, type RoleName } from "@crossengin/auth";
+import {
+  rbacCheck,
+  type AbacEvaluator,
+  type AuthorizationDecision,
+  type PermissionMap,
+  type Principal,
+  type RoleDefinition,
+  type RoleName,
+} from "@crossengin/auth";
 import type { PathSegment, ResolvedPrincipal, RouteDefinition } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
@@ -162,10 +170,33 @@ export interface AssociationHandlerContext {
   readonly permissions: PermissionMap;
   readonly roles: ReadonlyMap<RoleName, RoleDefinition>;
   readonly principalRoles: (principal: ResolvedPrincipal | null) => PrincipalRoles;
+  /**
+   * Discharges the `abac` policy key a manifest grant may carry. Absent is the fail-closed reading
+   * rather than "no obligation": `rbacCheck` resolves one it cannot discharge `undischargeable`
+   * and refuses. The same seam `HandlerContext` carries, so an association route and the entity
+   * route behind it answer one grant the same way.
+   */
+  readonly abacEvaluator?: AbacEvaluator;
 }
 
 function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
+}
+
+/**
+ * The one 403 all three association families return. Shared rather than copied because the
+ * obligation has to appear on every one of them — three routes that answer the same grant and
+ * report it three ways would be a list to keep in step, which is this repo's recurring defect.
+ * `denied` and `undischargeable` are different actions for an operator, so the outcome is named.
+ */
+function forbidden(decision: AuthorizationDecision): HandlerOutput {
+  return json(403, {
+    error: "forbidden",
+    detail: decision.reason,
+    ...(decision.abac !== undefined
+      ? { abacPolicyKey: decision.abac.policyKey, abacOutcome: decision.abac.outcome }
+      : {}),
+  });
 }
 
 function authPrincipal(resolved: ResolvedPrincipal | null, principalRoles: AssociationHandlerContext["principalRoles"]): Principal {
@@ -176,6 +207,10 @@ function authPrincipal(resolved: ResolvedPrincipal | null, principalRoles: Assoc
     userId: (resolved?.principalId ?? null) as Principal["userId"],
     primaryRole,
     secondaryRoles: secondaryRoles ?? [],
+    // A source exists (`meta.user_tenant_membership.abac_attributes`, written by
+    // `--platform-user-routes`) and is deliberately not read here: with no evaluator in this binary
+    // an obligation is refused anyway, so `{}` feeds nothing — and it now errs toward denial where
+    // before it granted. Wiring it belongs with the evaluator that consumes it.
     abacAttributes: {},
     mfaProofAgeSeconds: resolved?.mfaProofAgeSeconds ?? null,
   };
@@ -199,8 +234,9 @@ export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: Ass
       roles: ctx.roles,
       entity: spec.relatedEntity,
       operation: "list",
+      ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
     });
-    if (!decision.allowed) return json(403, { error: "forbidden", detail: decision.reason });
+    if (!decision.allowed) return forbidden(decision);
 
     if (!isAssociationReader(ctx.store)) {
       return json(501, { error: "associations_unsupported", detail: "the entity store does not support associations" });
@@ -314,8 +350,9 @@ export function buildAssociationCountHandler(spec: AssociationCountRouteSpec, ct
       roles: ctx.roles,
       entity: spec.relatedEntity,
       operation: "list",
+      ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
     });
-    if (!decision.allowed) return json(403, { error: "forbidden", detail: decision.reason });
+    if (!decision.allowed) return forbidden(decision);
 
     if (!isAssociationCounter(ctx.store)) {
       return json(501, { error: "associations_unsupported", detail: "the entity store does not support associations" });
@@ -447,8 +484,9 @@ export function buildAssociationWriteHandler(spec: AssociationWriteRouteSpec, ct
       roles: ctx.roles,
       entity: spec.ownerEntity,
       operation: "update",
+      ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
     });
-    if (!decision.allowed) return json(403, { error: "forbidden", detail: decision.reason });
+    if (!decision.allowed) return forbidden(decision);
 
     if (!isAssociationWriter(ctx.store)) {
       return json(501, { error: "associations_unsupported", detail: "the entity store does not support associations" });

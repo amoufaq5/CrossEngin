@@ -1,5 +1,8 @@
 import {
   validateClassifiedWriteMask,
+  type AbacEvaluationInput,
+  type AbacEvaluator,
+  type AbacOutcome,
   type ClassifiedField,
   type EntityPermissions,
   type Principal,
@@ -18,6 +21,9 @@ import {
 } from "./write-mask.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
+
+// Only ever handed to `AbacEnforcement.entity`, which is what an evaluator is asked about.
+const ENTITY = "Patient";
 
 const ROLES: ReadonlyMap<RoleName, RoleDefinition> = new Map<RoleName, RoleDefinition>([
   ["clerk", { name: "clerk" }],
@@ -65,6 +71,7 @@ function mask(
 ) {
   return maskWrite({
     mode,
+    entity: ENTITY,
     principal: principal(role),
     entityPerms: PERMS,
     roles: ROLES,
@@ -240,6 +247,7 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
     // `mrn` carries an explicit grant, so use a phi field governed only by the default.
     const refusal = maskWrite({
       mode: "classified",
+      entity: ENTITY,
       principal: principal("compliance"),
       entityPerms: { fields: {} },
       roles: ROLES,
@@ -256,6 +264,7 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
     expect(
       maskWrite({
         mode: "classified",
+        entity: ENTITY,
         principal: principal("compliance"),
         entityPerms: { fields: {} },
         roles: ROLES,
@@ -282,6 +291,7 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
     expect(
       maskWrite({
         mode: "classified",
+        entity: ENTITY,
         principal: principal("clerk"),
         entityPerms: { fields: {} },
         roles: ROLES,
@@ -295,6 +305,7 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
     expect(
       maskWrite({
         mode: "classified",
+        entity: ENTITY,
         principal: principal("clerk"),
         entityPerms: { fields: {} },
         roles: ROLES,
@@ -306,5 +317,116 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
 
   it("still ignores an ordinary field", () => {
     expect(mask("classified", "clerk", ["status"])).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ABAC obligations on a per-field update grant.
+//
+// `rbacCheck` returned the obligation and nothing read it, so an abac-qualified grant granted
+// unconditionally — the inverse of this repo's "fail closed" invariant. The obligation rides on the
+// *explicit* grant, which ADR-0339 made authoritative and enforced always, so it is refused in BOTH
+// modes: gating it on `classified` would leave that grant enforced as to roles and silently
+// unconditional as to attributes.
+// ---------------------------------------------------------------------------
+
+const ABAC_KEY = "patient.in_care_team";
+
+// `mrn` is phi *and* carries the obligation, so one field exercises both modes: under
+// `explicit_only` its classification is stripped and the grant (with its obligation) still applies.
+const ABAC_PERMS: EntityPermissions = {
+  create: { roles: ["clerk", "clinician", "chief"] },
+  update: { roles: ["clerk", "clinician", "chief"] },
+  fields: {
+    mrn: { read: { roles: ["clinician"] }, update: { roles: ["clinician"], abac: ABAC_KEY } },
+    nickname: { update: { roles: ["clinician"] } },
+  },
+};
+
+function answering(outcome: AbacOutcome, seen?: AbacEvaluationInput[]): AbacEvaluator {
+  return (input) => {
+    seen?.push(input);
+    return outcome;
+  };
+}
+
+function abacMask(
+  mode: WriteMaskMode,
+  role: RoleName,
+  writtenKeys: readonly string[],
+  abacEvaluator?: AbacEvaluator,
+) {
+  return maskWrite({
+    mode,
+    entity: ENTITY,
+    principal: principal(role),
+    entityPerms: ABAC_PERMS,
+    roles: ROLES,
+    classifiedFields: CLASSIFIED,
+    writtenKeys,
+    ...(abacEvaluator !== undefined ? { abacEvaluator } : {}),
+  });
+}
+
+describe("maskWrite — an abac obligation is refused in both modes", () => {
+  for (const mode of WRITE_MASK_MODES) {
+    it(`${mode}: no evaluator refuses the granted role as undischargeable`, () => {
+      expect(abacMask(mode, "clinician", ["mrn"])).toEqual({
+        field: "mrn",
+        rule: "abac_obligation",
+        abacPolicyKey: ABAC_KEY,
+        abacOutcome: "undischargeable",
+        classification: "phi",
+      });
+    });
+
+    it(`${mode}: a satisfied evaluator lets the write through`, () => {
+      expect(abacMask(mode, "clinician", ["mrn"], answering("satisfied"))).toBeNull();
+    });
+
+    it(`${mode}: a denied evaluator refuses, distinguishably from undischargeable`, () => {
+      const refusal = abacMask(mode, "clinician", ["mrn"], answering("denied"));
+      expect(refusal?.rule).toBe("abac_obligation");
+      expect(refusal?.abacOutcome).toBe("denied");
+      expect(refusal?.abacPolicyKey).toBe(ABAC_KEY);
+    });
+  }
+
+  it("reports the obligation as itself and never as the role rule that already passed", () => {
+    // `clinician` *is* named by the grant, so `explicit_update_grant` would send an operator to
+    // widen a grant that already reaches them and leave the real cause unnamed.
+    expect(abacMask("explicit_only", "clinician", ["mrn"])?.rule).toBe("abac_obligation");
+  });
+
+  it("a role the grant does not name is refused by the role rule, with no obligation reported", () => {
+    // The three refusals are distinct: the role check answers first, so a `clerk` never reaches
+    // the obligation and the body carries neither abac field.
+    const refusal = abacMask("explicit_only", "clerk", ["mrn"], answering("satisfied"));
+    expect(refusal).toEqual({ field: "mrn", rule: "explicit_update_grant", classification: "phi" });
+    expect(refusal).not.toHaveProperty("abacPolicyKey");
+    expect(refusal).not.toHaveProperty("abacOutcome");
+  });
+
+  it("names the policy key, the entity, the update operation and the field to the evaluator", () => {
+    // `AbacEnforcement.entity` is the only route the entity name has into the evaluation input —
+    // the four field-level functions take `EntityPermissions`, which does not carry it.
+    const seen: AbacEvaluationInput[] = [];
+    abacMask("explicit_only", "clinician", ["mrn"], answering("satisfied", seen));
+    expect(seen.map((i) => [i.policyKey, i.entity, i.operation, i.field])).toEqual([
+      [ABAC_KEY, ENTITY, "update", "mrn"],
+    ]);
+  });
+
+  it("leaves a grant with no obligation alone even when an evaluator is configured", () => {
+    // `nickname`'s grant carries no `abac`, so there is nothing to discharge: a `denied` evaluator
+    // must not refuse it, or configuring one would narrow every unqualified grant in the manifest.
+    expect(abacMask("explicit_only", "clinician", ["nickname"], answering("denied"))).toBeNull();
+    expect(abacMask("explicit_only", "clerk", ["nickname"], answering("satisfied"))?.rule).toBe(
+      "explicit_update_grant",
+    );
+  });
+
+  it("leaves an ordinary field alone, which never reaches a grant at all", () => {
+    expect(abacMask("explicit_only", "clinician", ["status"], answering("denied"))).toBeNull();
   });
 });

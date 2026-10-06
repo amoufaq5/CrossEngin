@@ -1,5 +1,5 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
-import type { SensitiveFieldPolicy } from "@crossengin/auth";
+import type { AbacEvaluator, SensitiveFieldPolicy } from "@crossengin/auth";
 import type { IdempotencyStore, RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
@@ -21,6 +21,7 @@ import {
 import { parseMethod, rawToIncoming, splitTarget, type RawHttpRequest, type RawHttpResponse } from "./http.js";
 import { buildPrincipalWiring, type ApiKeySpec, type JwtVerifyConfig } from "./principals.js";
 import { applyTenantStatusGate, type TenantStatusGateOptions } from "./tenant-status-gate.js";
+import { AbacObligationsUnevaluable, checkAbacObligations } from "./abac-obligations.js";
 
 let requestCounter = 0;
 function defaultRequestId(): string {
@@ -257,6 +258,14 @@ export interface BuildOperateHttpServerOptions {
    * tombstone.
    */
   readonly idempotencyStore?: IdempotencyStore;
+  /**
+   * Discharges a `RbacGrant.abac` policy key. No CLI flag supplies one — an ABAC policy engine is
+   * not something this binary contains — so for a deployment started from `crossengin-operate`
+   * this is always absent and a manifest declaring an obligation is refused below. It is an option
+   * rather than a hardcoded absence so an embedder can supply one, and so the refusal's premise is
+   * a fact about the caller rather than a constant.
+   */
+  readonly abacEvaluator?: AbacEvaluator;
 }
 
 export interface BuiltOperateHttpServer {
@@ -270,6 +279,18 @@ export interface BuiltOperateHttpServer {
  * the manifest) wired to the auth resolver derived from the API keys.
  */
 export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): BuiltOperateHttpServer {
+  // Before anything is compiled, and here rather than in `node.ts`, because this function is also
+  // what compiles a *per-tenant* activated manifest — the same placement that gives a per-tenant
+  // gateway the tenant-status gate (ADR-0334). A tenant whose own manifest declares an obligation
+  // this deployment cannot discharge gets no gateway, which is the fail-closed answer: ADR-0314's
+  // degradation to the JSONB fallback is right for a schema it cannot apply and wrong for an
+  // authorization rule it cannot enforce, because serving the rule unenforced is the defect.
+  const obligations = checkAbacObligations({
+    manifest: options.manifest,
+    evaluatorDeclared: options.abacEvaluator !== undefined,
+  });
+  if (obligations.refusal !== null) throw new AbacObligationsUnevaluable(obligations);
+
   const wiring = buildPrincipalWiring(options.apiKeys, options.now !== undefined ? { now: options.now } : {});
   const gateway = buildOperateGateway(options.manifest, {
     store: options.store,
@@ -297,6 +318,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.idempotencyStore !== undefined ? { idempotencyStore: options.idempotencyStore } : {}),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.writeMaskMode !== undefined ? { writeMaskMode: options.writeMaskMode } : {}),
+    ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   // After every registration and before the first request. The gate goes on the registry rather than

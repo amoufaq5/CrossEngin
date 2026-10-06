@@ -1,4 +1,9 @@
-import type { RoleDefinition, RoleName, SensitiveFieldPolicy } from "@crossengin/auth";
+import type {
+  AbacEvaluator,
+  RoleDefinition,
+  RoleName,
+  SensitiveFieldPolicy,
+} from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { PathSegment, RouteDefinition } from "@crossengin/api-gateway";
 import type { Manifest } from "@crossengin/kernel/manifest";
@@ -99,6 +104,20 @@ export interface OperateRuntimeOptions {
    * uncreatable. See `write-mask.ts`.
    */
   readonly writeMaskMode?: WriteMaskMode;
+  /**
+   * Discharges an ABAC obligation — a `RbacGrant.abac` policy key — on an entity grant, a
+   * transition grant or a per-field `read`/`update` grant. One evaluator for the whole manifest
+   * and threaded from here rather than per reader, because this is the only place that holds all
+   * five of them: the two handler families' `rbacCheck` calls, the write mask, and the response
+   * redaction registry. Two evaluators would let the read side and the write side disagree about
+   * one grant, which is the divergence ADR-0329 put `privilegedForClass` behind one definition to
+   * prevent and ADR-0339 found had happened anyway.
+   *
+   * Absent, an obligation resolves `undischargeable` and the grant is refused. That is the
+   * fail-closed answer and not an opt-out: `apps/operate-server` refuses at boot rather than
+   * serving a manifest whose declared obligations it would silently deny on every request.
+   */
+  readonly abacEvaluator?: AbacEvaluator;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /** Backs the admin settings endpoints + runtime numbering overrides. */
@@ -633,6 +652,7 @@ export function compileOperateServer(
     ...(options.allocator !== undefined ? { allocator: options.allocator } : {}),
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
+    ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   };
 
@@ -809,6 +829,7 @@ export function compileOperateServer(
     rolesForPrincipal: options.principalRoles,
     operationsForEntity: (name) => operationIdsByEntity.get(name) ?? fallbackOperationIds(name),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
+    ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
   });
 
   return {

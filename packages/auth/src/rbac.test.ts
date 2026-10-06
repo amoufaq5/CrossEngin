@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { TenantId, UserId } from "@crossengin/types";
+import type { AbacEvaluationInput, AbacEvaluator } from "./abac.js";
 import { rbacCheck } from "./rbac.js";
-import type { PermissionMap, Principal, RoleDefinition } from "./types.js";
+import type { AbacOutcome, PermissionMap, Principal, RoleDefinition } from "./types.js";
 
 const ROLES: ReadonlyMap<string, RoleDefinition> = new Map([
   ["staff", { name: "staff" }],
@@ -80,7 +81,7 @@ describe("rbacCheck — entity-level operations", () => {
     expect(r.allowed).toBe(false);
   });
 
-  it("returns requiresAbac when the grant carries an abac path", () => {
+  it("denies an abac-qualified grant when no evaluator can discharge it", () => {
     const r = rbacCheck({
       principal: principal("pharmacist"),
       permissions: PERMS,
@@ -88,11 +89,29 @@ describe("rbacCheck — entity-level operations", () => {
       entity: "prescription",
       operation: "update",
     });
-    expect(r.allowed).toBe(true);
-    expect(r.requiresAbac).toBe("data.access.allow_update");
+    // The role check passes; the obligation does not. Granting here was the defect: an obligation
+    // handed back to a caller that never read it granted unconditionally.
+    expect(r.allowed).toBe(false);
+    expect(r.abac).toEqual({
+      policyKey: "data.access.allow_update",
+      outcome: "undischargeable",
+    });
   });
 
-  it("does not set requiresAbac when the grant has no abac path", () => {
+  it("allows an abac-qualified grant when the evaluator answers satisfied", () => {
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: () => "satisfied",
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.abac).toEqual({ policyKey: "data.access.allow_update", outcome: "satisfied" });
+  });
+
+  it("does not set abac when the grant carries no policy key", () => {
     const r = rbacCheck({
       principal: principal("pharmacist"),
       permissions: PERMS,
@@ -101,7 +120,8 @@ describe("rbacCheck — entity-level operations", () => {
       operation: "create",
     });
     expect(r.allowed).toBe(true);
-    expect(r.requiresAbac).toBeUndefined();
+    // `undefined` rather than a `satisfied` discharge: no obligation existed, so none was evaluated.
+    expect(r.abac).toBeUndefined();
   });
 
   it("denies an operation that's not declared on the entity", () => {
@@ -129,7 +149,23 @@ describe("rbacCheck — entity-level operations", () => {
 });
 
 describe("rbacCheck — transitions", () => {
-  it("allows pharmacist to verify (with abac requirement)", () => {
+  it("allows pharmacist to verify once the abac obligation is satisfied", () => {
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: { kind: "transition", name: "verify" },
+      abacEvaluator: () => "satisfied",
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.abac).toEqual({
+      policyKey: "data.access.signature_required_and_valid",
+      outcome: "satisfied",
+    });
+  });
+
+  it("denies the same transition with no evaluator, so a signature check is not assumed", () => {
     const r = rbacCheck({
       principal: principal("pharmacist"),
       permissions: PERMS,
@@ -137,8 +173,8 @@ describe("rbacCheck — transitions", () => {
       entity: "prescription",
       operation: { kind: "transition", name: "verify" },
     });
-    expect(r.allowed).toBe(true);
-    expect(r.requiresAbac).toBe("data.access.signature_required_and_valid");
+    expect(r.allowed).toBe(false);
+    expect(r.abac?.outcome).toBe("undischargeable");
   });
 
   it("allows manager to cancel via inheritance", () => {
@@ -172,5 +208,163 @@ describe("rbacCheck — transitions", () => {
       operation: { kind: "transition", name: "verify" },
     });
     expect(r.allowed).toBe(false);
+  });
+});
+
+describe("rbacCheck — abac obligations", () => {
+  function spyEvaluator(outcome: AbacOutcome): {
+    readonly fn: AbacEvaluator;
+    readonly calls: AbacEvaluationInput[];
+  } {
+    const calls: AbacEvaluationInput[] = [];
+    return {
+      fn: (input) => {
+        calls.push(input);
+        return outcome;
+      },
+      calls,
+    };
+  }
+
+  it("does not consult the evaluator when the role check already failed", () => {
+    const spy = spyEvaluator("satisfied");
+    const r = rbacCheck({
+      principal: principal("staff"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: spy.fn,
+    });
+    expect(r.allowed).toBe(false);
+    // There is nothing to learn from an evaluation that a 403 was already owed, and asking would
+    // hand the deployment's policy layer a principal it has no business seeing.
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("does not consult the evaluator for an entity with no permissions declared", () => {
+    const spy = spyEvaluator("satisfied");
+    rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "unknown",
+      operation: "update",
+      abacEvaluator: spy.fn,
+    });
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("does not consult the evaluator for a grant carrying no policy key", () => {
+    const spy = spyEvaluator("satisfied");
+    rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "create",
+      abacEvaluator: spy.fn,
+    });
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("passes the policy key, principal, entity and operation to the evaluator", () => {
+    const spy = spyEvaluator("satisfied");
+    const p = principal("pharmacist");
+    rbacCheck({
+      principal: p,
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: spy.fn,
+    });
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0]).toEqual({
+      policyKey: "data.access.allow_update",
+      principal: p,
+      entity: "prescription",
+      operation: "update",
+    });
+  });
+
+  it("names the transition in the evaluation input", () => {
+    const spy = spyEvaluator("satisfied");
+    rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: { kind: "transition", name: "verify" },
+      abacEvaluator: spy.fn,
+    });
+    expect(spy.calls[0]?.operation).toEqual({ kind: "transition", name: "verify" });
+  });
+
+  it("denies on 'denied' and attaches the discharge", () => {
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: () => "denied",
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.abac).toEqual({ policyKey: "data.access.allow_update", outcome: "denied" });
+  });
+
+  it("gives 'denied' and 'undischargeable' different reason text", () => {
+    const denied = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: () => "denied",
+    });
+    const undischargeable = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+    });
+    // A refusal about this principal's attributes and a refusal because nothing could answer have
+    // different remedies, so they must not read alike.
+    expect(denied.reason).toMatch(/denied\)$/);
+    expect(undischargeable.reason).toMatch(/undischargeable\)$/);
+    expect(denied.reason).not.toBe(undischargeable.reason);
+    expect(denied.reason).toContain("data.access.allow_update");
+  });
+
+  it("denies when the evaluator throws", () => {
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: () => {
+        throw new Error("policy service unreachable");
+      },
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.abac?.outcome).toBe("undischargeable");
+  });
+
+  it("leaves an unqualified grant untouched when an evaluator is supplied", () => {
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "read",
+      abacEvaluator: () => "denied",
+    });
+    // No obligation on the grant, so the evaluator has no say: a deployment wiring an evaluator
+    // must not start refusing grants nobody qualified.
+    expect(r.allowed).toBe(true);
+    expect(r.abac).toBeUndefined();
   });
 });

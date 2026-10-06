@@ -2,21 +2,55 @@ import {
   isSensitiveDataClass,
   type DataClassification,
 } from "@crossengin/types/meta-schema";
+import { ABAC_OUTCOME_ALLOWS, dischargeAbac } from "./abac.js";
+import type { AbacEnforcement } from "./abac.js";
 import { resolveEffectiveRoles } from "./roles.js";
 import type {
+  AbacDischarge,
   EntityPermissions,
   FieldRedactionResult,
+  OperationName,
   Principal,
   RoleDefinition,
   RoleName,
   WriteMaskResult,
 } from "./types.js";
 
+/**
+ * The one spelling of a field-level grant's obligation, shared by all four functions here.
+ *
+ * An **omitted** `abac` parameter is a caller that has no evaluator — not a way to skip the
+ * obligation — so it answers `undischargeable`, identically to a named entity with no evaluator.
+ * Reading it the other way would reproduce the defect this closes, one parameter over. It
+ * short-circuits before `dischargeAbac` because `AbacEvaluationInput.entity` is required and this
+ * caller has no entity to name; no evaluator is consulted on that path either way.
+ */
+function dischargeFieldObligation(
+  policyKey: string | undefined,
+  principal: Principal,
+  operation: OperationName,
+  field: string,
+  abac: AbacEnforcement | undefined,
+): AbacDischarge | null {
+  if (policyKey === undefined) return null;
+  if (abac === undefined) return { policyKey, outcome: "undischargeable" };
+  return dischargeAbac(
+    policyKey,
+    { principal, entity: abac.entity, operation, field },
+    abac.evaluator,
+  );
+}
+
+function obligationAdmits(discharge: AbacDischarge | null): boolean {
+  return discharge === null || ABAC_OUTCOME_ALLOWS[discharge.outcome];
+}
+
 export function computeFieldRedaction(
   principal: Principal,
   entityPerms: EntityPermissions,
   roles: ReadonlyMap<RoleName, RoleDefinition>,
   fieldNames: readonly string[],
+  abac?: AbacEnforcement,
 ): FieldRedactionResult {
   const effective = resolveEffectiveRoles(principal, roles);
   const fields = entityPerms.fields;
@@ -29,11 +63,15 @@ export function computeFieldRedaction(
       readable.push(name);
       continue;
     }
-    if (rule.roles.some((r) => effective.has(r))) {
-      readable.push(name);
-    } else {
+    if (!rule.roles.some((r) => effective.has(r))) {
       redacted.push(name);
+      continue;
     }
+    // Only after the roles check passes: there is nothing to learn from an evaluation that a
+    // redaction was already owed.
+    const discharge = dischargeFieldObligation(rule.abac, principal, "read", name, abac);
+    if (obligationAdmits(discharge)) readable.push(name);
+    else redacted.push(name);
   }
 
   return { readable, redacted };
@@ -44,6 +82,7 @@ export function validateWriteMask(
   entityPerms: EntityPermissions,
   roles: ReadonlyMap<RoleName, RoleDefinition>,
   patchFields: readonly string[],
+  abac?: AbacEnforcement,
 ): WriteMaskResult {
   const effective = resolveEffectiveRoles(principal, roles);
   const fields = entityPerms.fields;
@@ -53,6 +92,10 @@ export function validateWriteMask(
     if (rule === undefined) continue;
     if (!rule.roles.some((r) => effective.has(r))) {
       return { ok: false, rejectedField: name };
+    }
+    const discharge = dischargeFieldObligation(rule.abac, principal, "update", name, abac);
+    if (discharge !== null && !ABAC_OUTCOME_ALLOWS[discharge.outcome]) {
+      return { ok: false, rejectedField: name, abac: discharge };
     }
   }
 
@@ -124,6 +167,7 @@ export function computeClassifiedFieldRedaction(
   roles: ReadonlyMap<RoleName, RoleDefinition>,
   fields: readonly ClassifiedField[],
   policy: SensitiveFieldPolicy = {},
+  abac?: AbacEnforcement,
 ): FieldRedactionResult {
   const effective = resolveEffectiveRoles(principal, roles);
   const fieldPerms = entityPerms.fields;
@@ -133,7 +177,10 @@ export function computeClassifiedFieldRedaction(
   for (const field of fields) {
     const rule = fieldPerms?.[field.name]?.read;
     if (rule !== undefined) {
-      if (rule.roles.some((r) => effective.has(r))) readable.push(field.name);
+      const admitted =
+        rule.roles.some((r) => effective.has(r)) &&
+        obligationAdmits(dischargeFieldObligation(rule.abac, principal, "read", field.name, abac));
+      if (admitted) readable.push(field.name);
       else redacted.push(field.name);
       continue;
     }
@@ -161,6 +208,7 @@ export function validateClassifiedWriteMask(
   roles: ReadonlyMap<RoleName, RoleDefinition>,
   patchFields: readonly ClassifiedField[],
   policy: SensitiveFieldPolicy = {},
+  abac?: AbacEnforcement,
 ): WriteMaskResult {
   const effective = resolveEffectiveRoles(principal, roles);
   const fieldPerms = entityPerms.fields;
@@ -170,6 +218,16 @@ export function validateClassifiedWriteMask(
     if (rule !== undefined) {
       if (!rule.roles.some((r) => effective.has(r))) {
         return { ok: false, rejectedField: field.name };
+      }
+      const discharge = dischargeFieldObligation(
+        rule.abac,
+        principal,
+        "update",
+        field.name,
+        abac,
+      );
+      if (discharge !== null && !obligationAdmits(discharge)) {
+        return { ok: false, rejectedField: field.name, abac: discharge };
       }
       continue;
     }

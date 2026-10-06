@@ -1,10 +1,10 @@
 # ADR index
 
-334 records. Generated from the ADR files themselves — regenerate rather than
+335 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 255  **Proposed:** 79
+- **Accepted:** 256  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -346,3 +346,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0337](0337-the-detector-nobody-ran.md) | The detector nobody ran, and the key nobody could set | — | Accepted | 2026-10-06 |
 | [0338](0338-the-key-nobody-set.md) | the key nobody set, and the write that handed it back | — | Accepted | 2026-10-06 |
 | [0339](0339-the-mask-nobody-applied.md) | the mask nobody applied, and the grant nobody could make | — | Accepted | 2026-10-06 |
+| [0340](0340-the-obligation-nobody-discharged.md) | The obligation nobody discharged | — | Accepted | 2026-10-06 |

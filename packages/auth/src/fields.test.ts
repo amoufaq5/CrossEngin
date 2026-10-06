@@ -7,7 +7,8 @@ import {
   validateWriteMask,
   type ClassifiedField,
 } from "./fields.js";
-import type { EntityPermissions, Principal, RoleDefinition } from "./types.js";
+import { ABAC_OUTCOME_ALLOWS, type AbacEvaluationInput, type AbacEvaluator } from "./abac.js";
+import type { AbacOutcome, EntityPermissions, Principal, RoleDefinition } from "./types.js";
 
 const ROLES: ReadonlyMap<string, RoleDefinition> = new Map([
   ["pharmacist", { name: "pharmacist" }],
@@ -379,5 +380,319 @@ describe("validateClassifiedWriteMask — per-class grants (ADR-0329)", () => {
     // One function behind both, so a role cannot end up able to change a value it may not see.
     expect(read.redacted).toEqual(["mrn"]);
     expect(write.ok).toBe(false);
+  });
+});
+
+/**
+ * Field-level ABAC obligations.
+ *
+ * Each of the four functions read `rule.roles` and ignored `rule.abac`, so an ABAC-qualified field
+ * `read` grant disclosed the field and an ABAC-qualified field `update` grant permitted the write —
+ * the repo's "fail closed" invariant inverted, since a check that cannot be completed must deny.
+ */
+const ABAC_PERMS: EntityPermissions = {
+  fields: {
+    mrn: {
+      read: { roles: ["pharmacist", "manager"], abac: "field.mrn.read" },
+      update: { roles: ["pharmacist", "manager"], abac: "field.mrn.update" },
+    },
+    plain: {
+      read: { roles: ["pharmacist", "manager"] },
+      update: { roles: ["pharmacist", "manager"] },
+    },
+  },
+};
+
+function recordingEvaluator(outcome: AbacOutcome): {
+  readonly fn: AbacEvaluator;
+  readonly calls: AbacEvaluationInput[];
+} {
+  const calls: AbacEvaluationInput[] = [];
+  return {
+    fn: (input) => {
+      calls.push(input);
+      return outcome;
+    },
+    calls,
+  };
+}
+
+describe("computeFieldRedaction — abac obligations", () => {
+  it("redacts an abac-qualified field when the parameter is omitted", () => {
+    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
+    // Omitting the parameter is a caller with no evaluator, not a way to skip the obligation.
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.readable).toEqual([]);
+  });
+
+  it("redacts it identically when an entity is named with no evaluator", () => {
+    const omitted = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
+    const named = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+    });
+    expect(named).toEqual(omitted);
+    expect(named.redacted).toEqual(["mrn"]);
+  });
+
+  it("reads the field when the evaluator answers satisfied", () => {
+    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => "satisfied",
+    });
+    expect(r.readable).toEqual(["mrn"]);
+  });
+
+  it("redacts the field when the evaluator answers denied", () => {
+    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => "denied",
+    });
+    expect(r.redacted).toEqual(["mrn"]);
+  });
+
+  it("redacts the field when the evaluator throws", () => {
+    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => {
+        throw new Error("down");
+      },
+    });
+    expect(r.redacted).toEqual(["mrn"]);
+  });
+
+  it("leaves an unqualified field grant untouched", () => {
+    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["plain"], {
+      entity: "Prescription",
+      evaluator: () => "denied",
+    });
+    expect(r.readable).toEqual(["plain"]);
+  });
+
+  it("names the entity, the read operation and the field in the evaluation input", () => {
+    const spy = recordingEvaluator("satisfied");
+    computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: spy.fn,
+    });
+    expect(spy.calls).toEqual([
+      {
+        policyKey: "field.mrn.read",
+        principal: principal("pharmacist"),
+        entity: "Prescription",
+        operation: "read",
+        field: "mrn",
+      },
+    ]);
+  });
+
+  it("does not consult the evaluator when the roles check already failed", () => {
+    const spy = recordingEvaluator("satisfied");
+    const r = computeFieldRedaction(principal("technician"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: spy.fn,
+    });
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(spy.calls).toEqual([]);
+  });
+});
+
+describe("validateWriteMask — abac obligations", () => {
+  it("rejects an abac-qualified field when the parameter is omitted", () => {
+    const r = validateWriteMask(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
+    expect(r.ok).toBe(false);
+    expect(r.rejectedField).toBe("mrn");
+    expect(r.abac).toEqual({ policyKey: "field.mrn.update", outcome: "undischargeable" });
+  });
+
+  it("accepts the write when the evaluator answers satisfied", () => {
+    const r = validateWriteMask(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => "satisfied",
+    });
+    expect(r).toEqual({ ok: true });
+  });
+
+  it("attaches the discharge beside the rejected field on a denial", () => {
+    const r = validateWriteMask(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => "denied",
+    });
+    expect(r).toEqual({
+      ok: false,
+      rejectedField: "mrn",
+      abac: { policyKey: "field.mrn.update", outcome: "denied" },
+    });
+  });
+
+  it("sets no abac on a roles-only rejection", () => {
+    const r = validateWriteMask(principal("technician"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => "satisfied",
+    });
+    expect(r).toEqual({ ok: false, rejectedField: "mrn" });
+  });
+
+  it("names the update operation in the evaluation input", () => {
+    const spy = recordingEvaluator("satisfied");
+    validateWriteMask(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: spy.fn,
+    });
+    expect(spy.calls[0]?.operation).toBe("update");
+    expect(spy.calls[0]?.field).toBe("mrn");
+  });
+});
+
+const CLASSIFIED_ABAC_PERMS: EntityPermissions = {
+  fields: {
+    mrn: {
+      read: { roles: ["clinician"], abac: "field.mrn.read" },
+      update: { roles: ["clinician"], abac: "field.mrn.update" },
+    },
+  },
+};
+
+describe("computeClassifiedFieldRedaction — abac obligations", () => {
+  it("redacts an abac-qualified field with no evaluator", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      {},
+    );
+    expect(r.redacted).toEqual(["mrn"]);
+  });
+
+  it("reads it when the evaluator answers satisfied", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      {},
+      { entity: "Patient", evaluator: () => "satisfied" },
+    );
+    expect(r.readable).toEqual(["mrn"]);
+  });
+
+  it("does not reach the classification default when an explicit rule's obligation refuses", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      { privilegedRoles: ["clinician"] },
+      { entity: "Patient", evaluator: () => "denied" },
+    );
+    // An explicit per-field rule is the answer for that field; a privileged class grant must not
+    // rescue a field whose own obligation was refused.
+    expect(r.redacted).toEqual(["mrn"]);
+  });
+
+  it("does not consult the evaluator for a field with no explicit rule", () => {
+    const spy = recordingEvaluator("satisfied");
+    computeClassifiedFieldRedaction(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"] },
+      { entity: "Patient", evaluator: spy.fn },
+    );
+    expect(spy.calls).toEqual([]);
+  });
+});
+
+describe("validateClassifiedWriteMask — abac obligations", () => {
+  it("rejects an abac-qualified field with no evaluator", () => {
+    const r = validateClassifiedWriteMask(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      {},
+    );
+    expect(r.ok).toBe(false);
+    expect(r.abac?.outcome).toBe("undischargeable");
+  });
+
+  it("accepts it when the evaluator answers satisfied", () => {
+    const r = validateClassifiedWriteMask(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      {},
+      { entity: "Patient", evaluator: () => "satisfied" },
+    );
+    expect(r).toEqual({ ok: true });
+  });
+
+  it("rejects it when the evaluator answers denied, naming the policy", () => {
+    const r = validateClassifiedWriteMask(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      { privilegedRoles: ["clinician"] },
+      { entity: "Patient", evaluator: () => "denied" },
+    );
+    expect(r).toEqual({
+      ok: false,
+      rejectedField: "mrn",
+      abac: { policyKey: "field.mrn.update", outcome: "denied" },
+    });
+  });
+});
+
+describe("the classified read/write pair cannot diverge on an obligation (ADR-0329's property)", () => {
+  const FIELD = { name: "mrn", classification: "phi" as const };
+
+  it("refuses both read and write for one grant carrying abac and no evaluator", () => {
+    const read = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [FIELD],
+      { privilegedRoles: ["clinician"] },
+    );
+    const write = validateClassifiedWriteMask(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [FIELD],
+      { privilegedRoles: ["clinician"] },
+    );
+    // The field is neither readable nor writable: an obligation nobody can discharge must not leave
+    // the write half open, which is the asymmetry that made `privilegedForClass`' own property
+    // unenforceable.
+    expect(read.redacted).toEqual(["mrn"]);
+    expect(read.readable).toEqual([]);
+    expect(write.ok).toBe(false);
+  });
+
+  it("agrees on every outcome of the enum", () => {
+    for (const outcome of (["satisfied", "denied", "undischargeable"] as const)) {
+      const enforcement = { entity: "Patient", evaluator: () => outcome };
+      const read = computeClassifiedFieldRedaction(
+        principal("clinician"),
+        CLASSIFIED_ABAC_PERMS,
+        CLINICAL_ROLES,
+        [FIELD],
+        {},
+        enforcement,
+      );
+      const write = validateClassifiedWriteMask(
+        principal("clinician"),
+        CLASSIFIED_ABAC_PERMS,
+        CLINICAL_ROLES,
+        [FIELD],
+        {},
+        enforcement,
+      );
+      expect(read.readable.includes("mrn")).toBe(ABAC_OUTCOME_ALLOWS[outcome]);
+      expect(write.ok).toBe(ABAC_OUTCOME_ALLOWS[outcome]);
+    }
   });
 });

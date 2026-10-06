@@ -109,6 +109,11 @@ import {
   type SensitiveFieldDeclaration,
 } from "./sensitive-field-policy.js";
 import {
+  AbacObligationsUnevaluable,
+  checkAbacObligations,
+  formatAbacObligationCheck,
+} from "./abac-obligations.js";
+import {
   IDEMPOTENCY_FK_HINT,
   IDEMPOTENCY_GUARANTEE,
   IdempotencyPruneScheduler,
@@ -629,6 +634,17 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // object reaches the response-redaction registry and the write mask, because `privilegedForClass`
   // has a single definition precisely so a role cannot end up able to write a class it may not read
   // (ADR-0329) — and two policy sources would have made that property unenforceable.
+  // Said at boot either way, and checked *before* the sensitive-field survey below. `rbacCheck`
+  // refuses an obligated grant, so an obligation on a required field's `update` grant makes that
+  // field unwritable and would trip `checkClassifiedWriteMask`'s `would_make_entity_uncreatable`
+  // refusal — naming the classification declaration as the remedy for something no declaration can
+  // fix. First refusal wins, so it has to be the one whose remedy is true.
+  // `buildOperateHttpServer` re-asks: this covers the boot manifest, that one covers an activated
+  // per-tenant manifest and an embedder, and both read the one rule in `abac-obligations.ts`.
+  const abacObligations = checkAbacObligations({ manifest, evaluatorDeclared: false });
+  console.info(`[abac] ${formatAbacObligationCheck(abacObligations)}`);
+  if (abacObligations.refusal !== null) throw new AbacObligationsUnevaluable(abacObligations);
+
   const sensitiveFieldDeclaration = {
     privilegedRoles: options.sensitiveFieldRoles,
     privilegedRolesByClass: options.sensitiveFieldClasses as SensitiveFieldDeclaration["privilegedRolesByClass"],

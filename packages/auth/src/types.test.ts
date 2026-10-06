@@ -67,13 +67,21 @@ describe("RbacGrantSchema", () => {
     ).not.toThrow();
   });
 
-  it("accepts a role + abac grant", () => {
+  it("accepts a role + abac policy key", () => {
+    // The key is opaque and nothing here parses it, so this expression-shaped string is accepted as
+    // a *key* rather than as an expression. It read as an expression before the meaning was
+    // declared; `abac.test.ts` pins both readings parsing for the same reason.
     expect(() =>
       RbacGrantSchema.parse({
         roles: ["doctor"],
-        abac: "user.department == record.department",
+        abac: "patient.same_department",
       }),
     ).not.toThrow();
+  });
+
+  it("rejects an empty abac policy key", () => {
+    // `"" !== undefined`, so an empty key was a live obligation naming nothing.
+    expect(() => RbacGrantSchema.parse({ roles: ["doctor"], abac: "" })).toThrow();
   });
 
   it("rejects missing roles", () => {

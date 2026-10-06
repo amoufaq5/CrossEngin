@@ -1,5 +1,6 @@
 import {
   computeClassifiedFieldRedaction,
+  type AbacEnforcement,
   type ClassifiedField,
   type EntityPermissions,
   type Principal,
@@ -20,6 +21,14 @@ export interface ResponseRedactionSpec {
   readonly rolesForPrincipal: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   readonly entityPermissions?: EntityPermissions;
   readonly policy?: SensitiveFieldPolicy;
+  /**
+   * The entity the spec is about, plus the evaluator that discharges an ABAC
+   * obligation on one of its field grants. Absent — or present with no
+   * evaluator — leaves an obligated field redacted, which is the same answer:
+   * omitting this is a caller with no evaluator, never a caller opting out of
+   * the obligation.
+   */
+  readonly abac?: AbacEnforcement;
 }
 
 export interface RedactionRegistry {
@@ -63,6 +72,11 @@ export function computeRedactedFields(
     userId: (principal?.principalId ?? null) as Principal["userId"],
     primaryRole: mapped[0] ?? UNPRIVILEGED_ROLE,
     secondaryRoles: mapped.slice(1),
+    // An attribute source does exist (`meta.user_tenant_membership.abac_attributes`), and this
+    // `{}` is not it. It is left because no evaluator can be constructed in the deployed binary,
+    // so a manifest declaring an obligation is refused at boot and nothing reads these. After this
+    // change the same `{}` errs toward redaction where before it erred toward disclosure; wiring it
+    // belongs with the evaluator that consumes it.
     abacAttributes: {},
     mfaProofAgeSeconds: principal?.mfaProofAgeSeconds ?? null,
   };
@@ -72,6 +86,7 @@ export function computeRedactedFields(
     safeRoles,
     spec.classifiedFields,
     spec.policy,
+    spec.abac,
   ).redacted;
 }
 

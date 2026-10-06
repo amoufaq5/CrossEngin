@@ -1,5 +1,6 @@
 import { entityClassifiedFields, type Entity } from "@crossengin/types/meta-schema";
 import type {
+  AbacEvaluator,
   ClassifiedField,
   EntityPermissions,
   RoleDefinition,
@@ -28,6 +29,15 @@ export interface RedactionManifestInput {
 export interface RedactionSpecOptions {
   readonly rolesForPrincipal: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   readonly policyForEntity?: (entityName: string) => SensitiveFieldPolicy | undefined;
+  /**
+   * Discharges an ABAC obligation on a field `read` grant. One evaluator for
+   * the whole manifest, not one per entity: the obligation's evaluation input
+   * already carries the entity, and a per-entity resolver would let the read
+   * side and the write side be given different evaluators for one grant — the
+   * divergence ADR-0329 put `privilegedForClass` behind one definition to
+   * prevent, and ADR-0339 found had happened anyway.
+   */
+  readonly abacEvaluator?: AbacEvaluator;
 }
 
 export interface ManifestRedactionOptions extends RedactionSpecOptions {
@@ -89,6 +99,12 @@ export function redactionSpecForEntity(
     rolesForPrincipal: options.rolesForPrincipal,
     ...(entityPermissions !== undefined ? { entityPermissions } : {}),
     ...(policy !== undefined ? { policy } : {}),
+    // Always set, even with no evaluator: the entity is always known here, and a spec that carries
+    // it is checkable. Only the evaluator is conditional.
+    abac: {
+      entity: entity.name,
+      ...(options.abacEvaluator !== undefined ? { evaluator: options.abacEvaluator } : {}),
+    },
   };
 }
 

@@ -1,6 +1,14 @@
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
-import type { HandlerOutput } from "@crossengin/api-gateway-runtime";
-import type { PermissionMap, RoleDefinition, RoleName } from "@crossengin/auth";
+import type { Handler, HandlerOutput } from "@crossengin/api-gateway-runtime";
+import type {
+  AbacEvaluationInput,
+  AbacEvaluator,
+  AbacOutcome,
+  Operation,
+  PermissionMap,
+  RoleDefinition,
+  RoleName,
+} from "@crossengin/auth";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { describe, expect, it } from "vitest";
 
@@ -439,5 +447,160 @@ describe("buildAssociationCountHandler", () => {
     expect(out.status).toBe(200);
     expect(out.kind === "json" ? (out.body as { count: number }).count : -1).toBe(3);
     expect(store.lastCountLinks).toEqual({ left: "Tag", right: "Product", opts: { leftId: "tag-1" } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ABAC obligations on the three association families.
+//
+// All three call `rbacCheck` and all three dropped the obligation it returned, so an
+// abac-qualified grant granted unconditionally on every one of them. The evaluator is the same
+// `AssociationHandlerContext` seam an entity route reads, so a route and the association routes
+// hanging off it answer one grant the same way.
+// ---------------------------------------------------------------------------
+
+const ABAC_KEY = "tag.owned_by_caller";
+
+// `Product.list` and `Tag.update` carry the obligation; `Product.read` carries none, which is what
+// proves an unqualified grant is unaffected by a configured evaluator.
+const abacPermissions: PermissionMap = {
+  Product: { list: { roles: ["viewer"], abac: ABAC_KEY }, read: { roles: ["viewer"] } },
+  Tag: { update: { roles: ["editor"], abac: ABAC_KEY } },
+} as unknown as PermissionMap;
+
+function abacCtx(store: EntityStore, abacEvaluator?: AbacEvaluator): AssociationHandlerContext {
+  return {
+    store,
+    permissions: abacPermissions,
+    roles,
+    principalRoles,
+    ...(abacEvaluator !== undefined ? { abacEvaluator } : {}),
+  };
+}
+
+function answering(outcome: AbacOutcome, seen?: AbacEvaluationInput[]): AbacEvaluator {
+  return (input) => {
+    seen?.push(input);
+    return outcome;
+  };
+}
+
+function call(handler: Handler, role: string, params: Record<string, string>): Promise<HandlerOutput> {
+  return Promise.resolve(
+    handler({ request: {} as never, route: {} as never, principal: principal(role), params, parsedBody: null }),
+  );
+}
+
+function abacBody(out: HandlerOutput): Record<string, unknown> {
+  if (out.kind !== "json") throw new Error("expected json output");
+  return out.body as Record<string, unknown>;
+}
+
+describe("association handlers — abac obligation", () => {
+  interface Family {
+    readonly name: string;
+    readonly build: (ctx: AssociationHandlerContext) => Handler;
+    readonly params: Record<string, string>;
+    /** Which entity + operation this family's grant is declared on. */
+    readonly entity: string;
+    readonly operation: Operation;
+    readonly ok: number;
+  }
+
+  const families: readonly Family[] = [
+    {
+      name: "list",
+      build: (ctx: AssociationHandlerContext): Handler => buildAssociationListHandler(spec, ctx),
+      params: { id: "tag-1" },
+      // The list family authorizes `list` on the *related* entity.
+      entity: "Product",
+      operation: "list",
+      ok: 200,
+    },
+    {
+      name: "count",
+      build: (ctx: AssociationHandlerContext): Handler => buildAssociationCountHandler(countSpecFixture, ctx),
+      params: { id: "tag-1" },
+      entity: "Product",
+      operation: "list",
+      ok: 200,
+    },
+    {
+      name: "write",
+      build: (ctx: AssociationHandlerContext): Handler => buildAssociationWriteHandler(linkSpec, ctx),
+      params: { id: "tag-1", relatedId: "prod-a" },
+      // The write family authorizes `update` on the *owner* entity.
+      entity: "Tag",
+      operation: "update",
+      ok: 204,
+    },
+  ];
+
+  for (const family of families) {
+    it(`${family.name}: 403s undischargeable with no evaluator configured`, async () => {
+      const store = new FakeStore();
+      const out = await call(family.build(abacCtx(store)), family.name === "write" ? "editor" : "viewer", family.params);
+      expect(out.status).toBe(403);
+      expect(abacBody(out)["abacPolicyKey"]).toBe(ABAC_KEY);
+      expect(abacBody(out)["abacOutcome"]).toBe("undischargeable");
+      // Nothing behind the check ran.
+      expect(store.lastListLinks).toBeNull();
+      expect(store.lastCountLinks).toBeNull();
+      expect(store.linked).toEqual([]);
+    });
+
+    it(`${family.name}: a satisfied evaluator reaches the store`, async () => {
+      const store = new FakeStore();
+      const out = await call(
+        family.build(abacCtx(store, answering("satisfied"))),
+        family.name === "write" ? "editor" : "viewer",
+        family.params,
+      );
+      expect(out.status).toBe(family.ok);
+    });
+
+    it(`${family.name}: a denied evaluator 403s, distinguishably`, async () => {
+      const out = await call(
+        family.build(abacCtx(new FakeStore(), answering("denied"))),
+        family.name === "write" ? "editor" : "viewer",
+        family.params,
+      );
+      expect(out.status).toBe(403);
+      expect(abacBody(out)["abacOutcome"]).toBe("denied");
+    });
+
+    it(`${family.name}: asks the evaluator about the entity this family authorizes`, async () => {
+      const seen: AbacEvaluationInput[] = [];
+      await call(
+        family.build(abacCtx(new FakeStore(), answering("satisfied", seen))),
+        family.name === "write" ? "editor" : "viewer",
+        family.params,
+      );
+      expect(seen.map((i) => [i.policyKey, i.entity, i.operation])).toEqual([
+        [ABAC_KEY, family.entity, family.operation],
+      ]);
+    });
+  }
+
+  it("an ordinary role refusal carries neither new field", async () => {
+    // `cashier` holds no grant on Product at all, so the body stays exactly `{error, detail}`.
+    const handler = buildAssociationListHandler(spec, abacCtx(new FakeStore()));
+    const out = await call(handler, "cashier", { id: "tag-1" });
+    expect(out.status).toBe(403);
+    expect(Object.keys(abacBody(out)).sort()).toEqual(["detail", "error"]);
+  });
+
+  it("a grant with no abac is unaffected by a denied evaluator", async () => {
+    // The original `permissions` fixture declares `Product.list` with no obligation.
+    const store = new FakeStore();
+    const ctx: AssociationHandlerContext = {
+      store,
+      permissions,
+      roles,
+      principalRoles,
+      abacEvaluator: answering("denied"),
+    };
+    const out = await call(buildAssociationListHandler(spec, ctx), "viewer", { id: "tag-1" });
+    expect(out.status).toBe(200);
   });
 });

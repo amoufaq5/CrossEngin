@@ -1,13 +1,24 @@
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import { buildIncomingRequest, type HandlerOutput } from "@crossengin/api-gateway-runtime";
+import type {
+  AbacEvaluationInput,
+  AbacEvaluator,
+  AbacOutcome,
+  PermissionMap,
+  RoleDefinition,
+  RoleName,
+} from "@crossengin/auth";
 import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
-import { routeFromSpec } from "./operations.js";
+import { buildSpecHandler, type HandlerContext } from "./handlers.js";
+import { manifestRouteSpecs, routeFromSpec } from "./operations.js";
 import { InMemoryEntityStore } from "./store.js";
+import { buildValidationPlans } from "./validation.js";
+import { buildClassifiedFieldIndex } from "./write-mask.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
@@ -581,5 +592,293 @@ describe("operate handlers — write mask (classified, opt-in)", () => {
     // `Episode.phase` is pii with a literal default and an update grant naming clinician.
     expect(out.status).toBe(201);
     expect(bodyOf(out)["phase"]).toBe("open");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ABAC obligations (ADR-0339's open end #3).
+//
+// `rbacCheck` attached the obligation to an *allowed* decision and no caller read it, so an
+// abac-qualified grant granted unconditionally — the inverse of the "fail closed" invariant. The
+// evaluator is a single `HandlerContext` seam feeding both the entity check and the write mask, and
+// the 403 names the obligation so an operator can tell "your attributes do not match" (`denied`)
+// from "this deployment cannot evaluate this policy" (`undischargeable`).
+//
+// These build handlers directly from `buildSpecHandler` rather than through
+// `compileOperateServer`, so what is under test is the `HandlerContext` seam itself and not
+// `compile.ts`'s threading of it.
+// ---------------------------------------------------------------------------
+
+const ABAC_KEY = "patient.in_care_team";
+
+const CLINIC = {
+  meta: { name: "clinic", version: "1.0.0" },
+  entities: [
+    {
+      name: "Patient",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        // required, unclassified, no grant: always writable, so its absence is the 422 the
+        // ordering test needs.
+        { name: "family_name", type: { kind: "text", maxLength: 100 }, required: true },
+        // phi with a grant naming clinician *and* an obligation: the field-level case.
+        { name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" },
+      ],
+    },
+    {
+      // Entity-level: the `update` grant itself carries the obligation.
+      name: "Vault",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        { name: "label", type: { kind: "text", maxLength: 40 } },
+      ],
+    },
+  ],
+  roles: { clerk: { name: "clerk" }, clinician: { name: "clinician" } },
+  permissions: {
+    Patient: {
+      list: { roles: ["clerk", "clinician"] },
+      read: { roles: ["clerk", "clinician"] },
+      create: { roles: ["clerk", "clinician"] },
+      update: { roles: ["clerk", "clinician"] },
+      delete: { roles: ["clinician"] },
+      fields: { mrn: { read: { roles: ["clinician"] }, update: { roles: ["clinician"], abac: ABAC_KEY } } },
+    },
+    Vault: {
+      list: { roles: ["clerk", "clinician"] },
+      read: { roles: ["clerk", "clinician"] },
+      create: { roles: ["clerk", "clinician"] },
+      update: { roles: ["clinician"], abac: ABAC_KEY },
+      delete: { roles: ["clinician"] },
+    },
+  },
+} as unknown as Manifest;
+
+const CLINIC_SPECS = manifestRouteSpecs(CLINIC);
+
+const CLINIC_ROLES = new Map<RoleName, RoleDefinition>([
+  ["clerk", { name: "clerk" }],
+  ["clinician", { name: "clinician" }],
+]);
+
+function clinicCtx(
+  store: InMemoryEntityStore,
+  abacEvaluator?: AbacEvaluator,
+): HandlerContext {
+  return {
+    store,
+    permissions: (CLINIC.permissions ?? {}) as PermissionMap,
+    roles: CLINIC_ROLES,
+    principalRoles,
+    validationPlans: buildValidationPlans(CLINIC),
+    classifiedFields: buildClassifiedFieldIndex(CLINIC),
+    ...(abacEvaluator !== undefined ? { abacEvaluator } : {}),
+  };
+}
+
+function evaluator(outcome: AbacOutcome, seen?: AbacEvaluationInput[]): AbacEvaluator {
+  return (input) => {
+    seen?.push(input);
+    return outcome;
+  };
+}
+
+async function hit(
+  ctx: HandlerContext,
+  opId: string,
+  opts: { role: string; params?: Record<string, string>; body?: Record<string, unknown> },
+): Promise<HandlerOutput> {
+  const spec = CLINIC_SPECS.find((s) => s.operationId === opId);
+  if (spec === undefined) throw new Error(`no route for ${opId}`);
+  return buildSpecHandler(spec, ctx)({
+    request: buildIncomingRequest({
+      id: "req_ab0000000001",
+      receivedAt: "2026-06-03T12:00:00.000Z",
+      method: spec.method,
+      path: "/v1/x",
+      headers: {},
+      host: "api.example.com",
+      scheme: "https",
+      bodyBytes: null,
+      clientIp: "203.0.113.1",
+    }),
+    route: routeFromSpec(spec),
+    principal: principal(opts.role),
+    params: opts.params ?? {},
+    parsedBody: opts.body ?? null,
+  });
+}
+
+describe("operate handlers — abac obligation on an entity grant", () => {
+  it("403s undischargeable when the grant carries abac and no evaluator is configured", async () => {
+    const store = new InMemoryEntityStore();
+    const created = bodyOf(await hit(clinicCtx(store), "vault.create", { role: "clerk", body: { label: "A" } }));
+    const out = await hit(clinicCtx(store), "vault.update", {
+      role: "clinician",
+      params: { id: created["id"] as string },
+      body: { label: "B" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["error"]).toBe("forbidden");
+    expect(bodyOf(out)["abacPolicyKey"]).toBe(ABAC_KEY);
+    expect(bodyOf(out)["abacOutcome"]).toBe("undischargeable");
+    // The write never happened: the record still holds its original label.
+    const still = bodyOf(await hit(clinicCtx(store), "vault.read", { role: "clerk", params: { id: created["id"] as string } }));
+    expect(still["label"]).toBe("A");
+  });
+
+  it("proceeds to the store when the evaluator answers satisfied", async () => {
+    const store = new InMemoryEntityStore();
+    const created = bodyOf(await hit(clinicCtx(store), "vault.create", { role: "clerk", body: { label: "A" } }));
+    const id = created["id"] as string;
+    const out = await hit(clinicCtx(store, evaluator("satisfied")), "vault.update", {
+      role: "clinician",
+      params: { id },
+      body: { label: "B" },
+    });
+    expect(out.status).toBe(200);
+    // The store was really called, not merely the status allowed.
+    const stored = await store.get(TENANT, "Vault", id);
+    expect(stored?.["label"]).toBe("B");
+  });
+
+  it("403s denied, distinguishably from undischargeable, when the attributes do not match", async () => {
+    const store = new InMemoryEntityStore();
+    const created = bodyOf(await hit(clinicCtx(store), "vault.create", { role: "clerk", body: { label: "A" } }));
+    const out = await hit(clinicCtx(store, evaluator("denied")), "vault.update", {
+      role: "clinician",
+      params: { id: created["id"] as string },
+      body: { label: "B" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["abacOutcome"]).toBe("denied");
+    expect(bodyOf(out)["abacPolicyKey"]).toBe(ABAC_KEY);
+  });
+
+  it("hands the evaluator the policy key, entity and operation", async () => {
+    const seen: AbacEvaluationInput[] = [];
+    const store = new InMemoryEntityStore();
+    const created = bodyOf(await hit(clinicCtx(store), "vault.create", { role: "clerk", body: { label: "A" } }));
+    await hit(clinicCtx(store, evaluator("satisfied", seen)), "vault.update", {
+      role: "clinician",
+      params: { id: created["id"] as string },
+      body: { label: "B" },
+    });
+    expect(seen.map((i) => [i.policyKey, i.entity, i.operation])).toEqual([[ABAC_KEY, "Vault", "update"]]);
+  });
+
+  it("an ordinary role refusal carries neither new field, so an existing client sees no change", async () => {
+    // `Patient.delete` is clinician-only and its grant carries no `abac`. An existing client
+    // parsing this body must see exactly `{error, detail}` as before.
+    const out = await hit(clinicCtx(new InMemoryEntityStore()), "patient.delete", {
+      role: "clerk",
+      params: { id: "pat-1" },
+    });
+    expect(out.status).toBe(403);
+    expect(Object.keys(bodyOf(out)).sort()).toEqual(["detail", "error"]);
+  });
+
+  it("a grant with no abac is unaffected by a denied evaluator", async () => {
+    // Configuring an evaluator must not narrow every unqualified grant in the manifest.
+    const out = await hit(clinicCtx(new InMemoryEntityStore(), evaluator("denied")), "vault.create", {
+      role: "clerk",
+      body: { label: "A" },
+    });
+    expect(out.status).toBe(201);
+  });
+});
+
+describe("operate handlers — abac obligation on a field grant (the write mask)", () => {
+  it("403s undischargeable on create for the granted role with no evaluator", async () => {
+    const store = new InMemoryEntityStore();
+    const out = await hit(clinicCtx(store), "patient.create", {
+      role: "clinician",
+      body: { family_name: "Hopper", mrn: "MRN-1" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["field"]).toBe("mrn");
+    expect(bodyOf(out)["rule"]).toBe("abac_obligation");
+    expect(bodyOf(out)["abacPolicyKey"]).toBe(ABAC_KEY);
+    expect(bodyOf(out)["abacOutcome"]).toBe("undischargeable");
+    expect((await store.list(TENANT, "Patient")).length).toBe(0);
+  });
+
+  it("writes through when the evaluator answers satisfied", async () => {
+    const store = new InMemoryEntityStore();
+    const out = await hit(clinicCtx(store, evaluator("satisfied")), "patient.create", {
+      role: "clinician",
+      body: { family_name: "Hopper", mrn: "MRN-1" },
+    });
+    expect(out.status).toBe(201);
+    const stored = await store.list(TENANT, "Patient");
+    expect(stored.length).toBe(1);
+    expect(stored[0]?.["mrn"]).toBe("MRN-1");
+  });
+
+  it("403s denied on update, leaving the stored value untouched", async () => {
+    const store = new InMemoryEntityStore();
+    const created = bodyOf(
+      await hit(clinicCtx(store, evaluator("satisfied")), "patient.create", {
+        role: "clinician",
+        body: { family_name: "Hopper", mrn: "MRN-1" },
+      }),
+    );
+    const id = created["id"] as string;
+    const out = await hit(clinicCtx(store, evaluator("denied")), "patient.update", {
+      role: "clinician",
+      params: { id },
+      body: { mrn: "MRN-REPLACED" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["abacOutcome"]).toBe("denied");
+    expect((await store.get(TENANT, "Patient", id))?.["mrn"]).toBe("MRN-1");
+  });
+
+  it("names the field, the rule and the policy key, and never a value", async () => {
+    const out = await hit(clinicCtx(new InMemoryEntityStore()), "patient.update", {
+      role: "clinician",
+      params: { id: "pat-1" },
+      body: { mrn: "MRN-SECRET-VALUE" },
+    });
+    const serialized = JSON.stringify(bodyOf(out));
+    expect(serialized).toContain(ABAC_KEY);
+    expect(serialized).not.toContain("MRN-SECRET-VALUE");
+  });
+
+  it("the 403 precedes the 422 with a third refusal in the ordering", async () => {
+    // `family_name` is required and absent, so validation would 422 and enumerate it. An
+    // undischargeable obligation on `mrn` answers first: a 422 would hand a caller who may not
+    // write the field a map of what to send next.
+    const store = new InMemoryEntityStore();
+    const refused = await hit(clinicCtx(store), "patient.create", { role: "clinician", body: { mrn: "MRN-X" } });
+    expect(refused.status).toBe(403);
+    expect(bodyOf(refused)["rule"]).toBe("abac_obligation");
+    expect(bodyOf(refused)).not.toHaveProperty("fields");
+    // Discharge the obligation and the same body gets the 422 the validator owes it.
+    const validated = await hit(clinicCtx(store, evaluator("satisfied")), "patient.create", {
+      role: "clinician",
+      body: { mrn: "MRN-X" },
+    });
+    expect(validated.status).toBe(422);
+    expect((bodyOf(validated)["fields"] as Array<{ field: string }>).map((f) => f.field)).toEqual(["family_name"]);
+  });
+
+  it("a role the field grant does not name is still refused by the role rule", async () => {
+    // The three refusals stay distinct end to end: a `clerk` never reaches the obligation.
+    const out = await hit(clinicCtx(new InMemoryEntityStore(), evaluator("satisfied")), "patient.create", {
+      role: "clerk",
+      body: { family_name: "Lovelace", mrn: "MRN-1" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["rule"]).toBe("explicit_update_grant");
+    expect(bodyOf(out)).not.toHaveProperty("abacPolicyKey");
+  });
+
+  it("a body naming no obligated field is unaffected", async () => {
+    const out = await hit(clinicCtx(new InMemoryEntityStore(), evaluator("denied")), "patient.create", {
+      role: "clerk",
+      body: { family_name: "Lovelace" },
+    });
+    expect(out.status).toBe(201);
   });
 });

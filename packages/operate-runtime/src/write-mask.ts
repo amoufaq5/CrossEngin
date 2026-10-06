@@ -1,5 +1,7 @@
 import {
   validateClassifiedWriteMask,
+  type AbacEvaluator,
+  type AbacOutcome,
   type ClassifiedField,
   type EntityPermissions,
   type Principal,
@@ -43,8 +45,19 @@ export type WriteMaskMode = (typeof WRITE_MASK_MODES)[number];
 export interface WriteMaskRefusal {
   readonly field: string;
   readonly classification?: DataClassification;
-  /** Which rule refused: a declared grant, or the classification default. */
-  readonly rule: "explicit_update_grant" | "classification_default";
+  /**
+   * Which rule refused. A third member rather than a flag on the other two, because an operator
+   * acts on each differently: `explicit_update_grant` means the manifest named roles and this is
+   * not one of them (fix the grant or the caller's role), `classification_default` means no grant
+   * exists and the class is privileged (declare a grant or a privileged role), and
+   * `abac_obligation` means the role *was* granted and a declared attribute policy was not
+   * discharged — which on an `undischargeable` outcome is a deployment gap and not a permission.
+   */
+  readonly rule: "explicit_update_grant" | "classification_default" | "abac_obligation";
+  /** The grant's opaque policy key, set iff `rule === "abac_obligation"`. */
+  readonly abacPolicyKey?: string;
+  /** `denied` (the attributes did not match) vs `undischargeable` (no evaluator could answer). */
+  readonly abacOutcome?: AbacOutcome;
 }
 
 /**
@@ -58,6 +71,13 @@ const UNNAMED_REJECTED_FIELD = "(unnamed)";
 
 export interface WriteMaskInput {
   readonly mode: WriteMaskMode;
+  /**
+   * The entity this mask is for. Required rather than optional, and it exists only because
+   * `AbacEnforcement.entity` is: an evaluator is consulted only when the entity is named, so an
+   * optional field would make a caller that forgot it refuse every obligated field in a correctly
+   * configured deployment. The compiler asks instead.
+   */
+  readonly entity: string;
   readonly principal: Principal;
   readonly entityPerms: EntityPermissions;
   readonly roles: ReadonlyMap<RoleName, RoleDefinition>;
@@ -65,6 +85,13 @@ export interface WriteMaskInput {
   /** The keys the **caller** wrote — never a server-filled default. */
   readonly writtenKeys: readonly string[];
   readonly policy?: SensitiveFieldPolicy;
+  /**
+   * Discharges an `abac` policy key carried by a per-field `update` grant. Absent means no
+   * evaluator is configured, which `validateClassifiedWriteMask` resolves `undischargeable` —
+   * a refusal, because an obligation nothing can answer is the "fail closed" case and granting
+   * on it is the defect this seam exists to close.
+   */
+  readonly abacEvaluator?: AbacEvaluator;
 }
 
 /**
@@ -94,6 +121,14 @@ export interface WriteMaskInput {
  *   `FixedAsset`, `Patient`, `Student` and `Permit` uncreatable by every role in
  *   every deployment. A mask that simply switched on is not shippable; a mode
  *   that says which half is in force is.
+ *
+ * An **ABAC obligation is refused in both modes**, and that is not a third mode.
+ * An obligation rides on the per-field `update` grant, so the field reaching the
+ * explicit rule is exactly the field that can carry one — and ADR-0339 made the
+ * explicit grant authoritative and enforced always, with no flag. Gating the
+ * obligation on `classified` would make that grant enforced as to *roles* and
+ * silently unconditional as to *attributes*, which is the shape of the defect
+ * this whole seam exists to close.
  */
 export function maskWrite(input: WriteMaskInput): WriteMaskRefusal | null {
   const classificationOf = new Map<string, DataClassification | undefined>(
@@ -130,17 +165,37 @@ export function maskWrite(input: WriteMaskInput): WriteMaskRefusal | null {
     input.roles,
     candidates,
     input.policy ?? {},
+    // Passed even with no evaluator. Omitting it answers `undischargeable` just the same, so
+    // either way fails closed, but naming the entity is what lets the refusal say which policy on
+    // which record was not discharged.
+    {
+      entity: input.entity,
+      ...(input.abacEvaluator !== undefined ? { evaluator: input.abacEvaluator } : {}),
+    },
   );
   if (result.ok) return null;
 
   const field = result.rejectedField ?? UNNAMED_REJECTED_FIELD;
+  const classification = classificationOf.get(field);
+  // An undischarged obligation is reported as itself and never re-derived from the grant: the role
+  // *passed* the role check, so reporting `explicit_update_grant` would send an operator to widen a
+  // grant that already names them and leave the real cause — an evaluator this deployment does not
+  // have — unnamed.
+  if (result.abac !== undefined) {
+    return {
+      field,
+      rule: "abac_obligation",
+      abacPolicyKey: result.abac.policyKey,
+      abacOutcome: result.abac.outcome,
+      ...(classification !== undefined ? { classification } : {}),
+    };
+  }
   // Which rule refused is re-derived from the same two inputs the rule itself read, in the same
   // order of precedence: an explicit grant wins, so a field that has one was refused by it.
   const rule =
     fieldPerms?.[field]?.update !== undefined
       ? ("explicit_update_grant" as const)
       : ("classification_default" as const);
-  const classification = classificationOf.get(field);
   return {
     field,
     rule,
