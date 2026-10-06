@@ -24,7 +24,7 @@ import { InAppSender, SenderRegistry, type ChannelSender } from "./delivery-send
  *
  * Absent configuration is not an error. A deployment that wants only in-app notices is the default,
  * and `in_app` is always registered — so the registry never comes back empty and a delivery for an
- * unconfigured channel is refused by `UnroutableChannelSender` with `no_sender_configured`, which
+ * unconfigured channel is refused by `unroutedResult` with `no_sender_configured`, which
  * the drain already treats as retryable so that configuring the channel and re-draining delivers.
  */
 export interface SenderWiringReport {
