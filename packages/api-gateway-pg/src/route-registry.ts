@@ -102,6 +102,43 @@ export interface PostgresRouteRegistryOptions {
   readonly now?: () => number;
 }
 
+/**
+ * **This class has no caller in the workspace, and that is a decision rather than a gap.** It is
+ * written down here because the storeless-table rule asks which catalogued table has no store, and
+ * nothing yet asks which store has no caller — so without this paragraph the next census reads a
+ * silence and cannot tell a refusal from an omission.
+ *
+ * `PostgresRouteRegistry` implements `RouteRegistry` over `meta.gateway_routes`, which is a
+ * *published* route surface: rows are authored, a gateway loads them, and the served API is
+ * whatever the table says. This platform does not serve that way. `compileOperateServer` derives
+ * routes **and their handlers in one pass** from the resolved manifest, keyed on `operationId`, so
+ * the two halves of a route are produced together and cannot disagree. Substituting this registry
+ * breaks that in both directions, and neither failure is loud:
+ *
+ * - a row the manifest did not produce has **no handler**, so it matches, authenticates, consumes
+ *   its rate-limit budget and then resolves to `no_handler` — a 404 for a route the table says
+ *   exists;
+ * - a manifest route **absent** from the table stops matching at all, so activating a manifest
+ *   would silently un-serve part of it until somebody remembered to publish the rows.
+ *
+ * Two mechanical facts confirm it is not a drop-in even setting that aside. `lookup` is
+ * synchronous and answers `null` on a cold cache, so the first requests after a boot or a TTL lapse
+ * are unroutable unless an `ensureLoaded()` is awaited somewhere off the request path — a
+ * requirement the interface cannot express. And `node.ts` reads `gateway.routes.list()` for
+ * `surveyRoutePolicies`; `list()` is deliberately **not** on `RouteRegistry` (see the note on
+ * `InMemoryRouteRegistry.list`) precisely because enumerating a TTL-cached table is a query with a
+ * different cost and a different answer, so this class does not and should not have it.
+ *
+ * What is *not* the reason: the table is platform-wide with no `tenant_id` and no RLS, so none of
+ * the owner-bypass or missing-context defects that made `PostgresIdempotencyStore` unusable apply
+ * here. The SQL is fine. It answers a question this architecture does not ask.
+ *
+ * The one piece with standalone value is `upsert`, which could *publish* the compiled surface for
+ * observability — `rate_limit_policy_id` is the only persisted statement of which policy governs a
+ * route, and `surveyRoutePolicies` computes that in memory and prints it. Deliberately not taken
+ * here: writing rows nothing reads would make `meta.gateway_routes` look like the authority on the
+ * served surface when the manifest is, which is a worse state than an empty table.
+ */
 export class PostgresRouteRegistry implements RouteRegistry {
   private readonly conn: PgConnection;
   private readonly cacheTtlMs: number;

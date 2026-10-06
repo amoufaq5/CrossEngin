@@ -1557,3 +1557,106 @@ describe("--preference-routes", () => {
     expect(helpText).toContain("A body naming another user is refused, not ignored");
   });
 });
+
+describe("--idempotency-store", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("defaults to the in-memory guard, which is what every deployment has had", () => {
+    expect(parseServeArgs([...PG]).pgIdempotencyStore).toBe(false);
+  });
+
+  it("takes pg and memory, in both spellings", () => {
+    expect(parseServeArgs([...PG, "--idempotency-store", "pg"]).pgIdempotencyStore).toBe(true);
+    expect(parseServeArgs([...PG, "--idempotency-store=pg"]).pgIdempotencyStore).toBe(true);
+    expect(parseServeArgs([...PG, "--idempotency-store", "memory"]).pgIdempotencyStore).toBe(false);
+  });
+
+  it("refuses an unknown kind by name rather than falling back to memory", () => {
+    // Falling back would mount the per-process guard on a deployment that asked for durability and
+    // report success, which is the class this flag exists to close.
+    expect(() => parseServeArgs([...PG, "--idempotency-store", "postgres"])).toThrow(
+      /must be 'memory' or 'pg'/,
+    );
+  });
+
+  it("refuses the memory store, which has no meta.gateway_idempotency_records", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--idempotency-store", "pg"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.gateway_idempotency_records");
+  });
+
+  it("permits memory with the memory store, since that is the existing behaviour spelled out", () => {
+    expect(
+      parseServeArgs(["--pack", "erp-core", "--idempotency-store", "memory"]).pgIdempotencyStore,
+    ).toBe(false);
+  });
+});
+
+describe("--gateway-execution-capture", () => {
+  const PG = ["--pack", "erp-core", "--store", "pg"];
+
+  it("captures nothing by default, as today", () => {
+    expect(parseServeArgs([...PG]).gatewayExecutionCapture).toBeNull();
+  });
+
+  it("takes a rate in both spellings and carries no default", () => {
+    expect(
+      parseServeArgs([...PG, "--gateway-execution-capture", "0.01"]).gatewayExecutionCapture,
+    ).toEqual({ sampleRate: 0.01 });
+    expect(
+      parseServeArgs([...PG, "--gateway-execution-capture=1"]).gatewayExecutionCapture?.sampleRate,
+    ).toBe(1);
+  });
+
+  it("refuses a rate of 0 and names the remedy", () => {
+    // 0 is spelled by omitting the flag. A sink that is mounted and writes nothing reads as
+    // configured and records nothing, which is the class this increment closes, not a setting.
+    let message = "";
+    try {
+      parseServeArgs([...PG, "--gateway-execution-capture", "0"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("must be in (0, 1]");
+    expect(message).toContain("omit the flag");
+  });
+
+  it("refuses a rate above 1 and a non-number, rather than coercing", () => {
+    // `Number("")` is 0 and `Number("1e3")` is 1000: a rate read as a thousand would be clamped by
+    // nothing and a rate read as 0 would mount a sink that writes nothing.
+    for (const bad of ["1.5", "2", "abc", ""]) {
+      expect(() => parseServeArgs([...PG, "--gateway-execution-capture", bad])).toThrow();
+    }
+  });
+
+  it("narrows to operations, and refuses a narrowing with no capture mounted", () => {
+    const o = parseServeArgs([
+      ...PG,
+      "--gateway-execution-capture",
+      "0.1",
+      "--gateway-execution-capture-operation",
+      "invoice.create",
+      "--gateway-execution-capture-operation=invoice.post",
+    ]);
+    expect(o.gatewayExecutionCapture?.operations).toEqual(["invoice.create", "invoice.post"]);
+    expect(() =>
+      parseServeArgs([...PG, "--gateway-execution-capture-operation", "invoice.create"]),
+    ).toThrow(/requires --gateway-execution-capture/);
+  });
+
+  it("refuses the memory store, which has no meta.gateway_pipeline_executions", () => {
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--gateway-execution-capture", "0.1"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("requires a Postgres store");
+    expect(message).toContain("meta.gateway_pipeline_executions");
+  });
+});

@@ -4,6 +4,8 @@ import { hostname } from "node:os";
 
 import type { PipelineExecution } from "@crossengin/api-gateway";
 import {
+  PostgresIdempotencyStore,
+  PostgresPipelineExecutionStore,
   PostgresRateLimitChecker,
   probeDecisionSchema,
   surveyRoutePolicies,
@@ -60,6 +62,17 @@ import {
   type MultiTenantSweepReport,
 } from "./link-sweep.js";
 import { PruneScheduler } from "./prune-scheduler.js";
+import {
+  CAPTURE_FK_HINT,
+  GatewayExecutionCaptureObserver,
+  describeCaptureCost,
+} from "./gateway-execution-capture.js";
+import {
+  IDEMPOTENCY_FK_HINT,
+  IDEMPOTENCY_GUARANTEE,
+  IdempotencyPruneScheduler,
+  ReportingIdempotencyStore,
+} from "./gateway-idempotency.js";
 import { DeliveryScheduler } from "./delivery-scheduler.js";
 import { PostgresDeliveryStore } from "./delivery-store.js";
 import { PostgresRecipientResolver } from "./recipient-resolver.js";
@@ -2443,11 +2456,73 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       schema: decisionSchema,
     });
   }
+  // The gateway's replay guard. Absent ⇒ `buildOperateGateway` installs `InMemoryIdempotencyStore`,
+  // which is a `Map` in one process: `PostgresIdempotencyStore` existed with tests and nothing
+  // constructed it, so every deployment's idempotency has been per-replica and per-restart —
+  // including on `--tenant-deletion-routes`, the one route here that requires a key. Said out loud
+  // either way, because the guarantee it buys is bounded (ADR-0322's rule): there is no reserve
+  // step between the stage-10 read and the post-handler write, so two *concurrent* retries of one
+  // key can still both execute, and only the sequential case is closed.
+  let idempotencyStore: ReportingIdempotencyStore | undefined;
+  let idempotencyPrune: IdempotencyPruneScheduler | null = null;
+  if (options.pgIdempotencyStore && conn !== undefined) {
+    const pgIdempotency = new PostgresIdempotencyStore(conn);
+    idempotencyStore = new ReportingIdempotencyStore(pgIdempotency, {
+      // Reported, never thrown. `persistIdempotency` runs *after* the handler's own transaction
+      // committed, so raising would turn a successful mutation into a 500 — and a client retrying
+      // that 500 re-executes, with no record to stop it, so the throw would cause the exact harm
+      // the record prevents. ADR-0333's rule, and the hole is logged rather than absorbed.
+      onPersistError: (err, where) =>
+        console.error(
+          `[idempotency] tenant ${where.tenantId} key ${where.key}: record not stored; a retry of` +
+            ` this mutation will re-execute: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+    });
+    console.info(`[idempotency] meta.gateway_idempotency_records: ${IDEMPOTENCY_GUARANTEE}`);
+    console.info(`[idempotency] ${IDEMPOTENCY_FK_HINT}`);
+    // Not a second flag: a durable store that needs another opt-in to stop growing is a feature
+    // with a trap in it, so mounting the store mounts the reaper.
+    idempotencyPrune = new IdempotencyPruneScheduler({
+      store: pgIdempotency,
+      tenants: new PostgresTenantSource(conn),
+      onError: (err) =>
+        console.error(
+          `[idempotency] prune failed: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+    });
+  } else if (options.pgIdempotencyStore) {
+    console.warn(
+      "[idempotency] --idempotency-store pg needs a Postgres connection; the in-memory guard is" +
+        " per process and a retry on another replica will re-execute",
+    );
+  }
+  // Sampled `PipelineExecution` capture — the writer `meta.gateway_pipeline_executions` never had,
+  // and the only thing that gives `GatewayReplayer` a row to read.
+  let executionCapture: GatewayExecutionCaptureObserver | null = null;
+  if (options.gatewayExecutionCapture !== null && conn !== undefined) {
+    executionCapture = new GatewayExecutionCaptureObserver({
+      store: new PostgresPipelineExecutionStore(conn),
+      config: options.gatewayExecutionCapture,
+      onError: (err) =>
+        console.error(
+          `[gateway-capture] execution not stored: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+    });
+    // The figure at boot whether or not anything goes wrong: a cost accepted silently is a cost
+    // nobody chose.
+    console.info(`[gateway-capture] ${describeCaptureCost(options.gatewayExecutionCapture)}`);
+    console.info(`[gateway-capture] ${CAPTURE_FK_HINT}`);
+  } else if (options.gatewayExecutionCapture !== null) {
+    console.warn(
+      "[gateway-capture] --gateway-execution-capture needs a Postgres connection; skipping",
+    );
+  }
   // Compose the per-request observers (SLO + metering + audit chain) into one execution sink.
   const executionSinks: ((execution: PipelineExecution) => void)[] = [];
   if (sloEnforcement !== null) executionSinks.push(sloEnforcement.observer.asExecutionSink());
   if (metering !== null) executionSinks.push(metering.observer.asExecutionSink());
   if (auditChain !== null) executionSinks.push(auditChain.observer.asExecutionSink());
+  if (executionCapture !== null) executionSinks.push(executionCapture.asExecutionSink());
   const onExecution =
     executionSinks.length > 0
       ? (execution: PipelineExecution): void => {
@@ -2478,6 +2553,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     ...(onExecution !== undefined ? { onExecution } : {}),
     ...(tenantStatusGate !== undefined ? { tenantStatusGate } : {}),
     ...(rateLimitChecker !== undefined ? { rateLimitChecker } : {}),
+    ...(idempotencyStore !== undefined ? { idempotencyStore } : {}),
   });
   if (rateLimitChecker !== undefined && options.rateLimitPolicies !== null) {
     const policySurvey = surveyRoutePolicies(options.rateLimitPolicies, gateway.routes.list());
@@ -3225,6 +3301,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   jobScheduler?.start();
   workflowWorkers?.start();
   pruneScheduler?.start();
+  idempotencyPrune?.start();
   deletionScheduler?.start();
   deliveryScheduler?.start();
   sloEnforcement?.scheduler.start();
@@ -3256,6 +3333,23 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         manifestPoller?.stop();
         jobScheduler?.stop();
         pruneScheduler?.stop();
+        idempotencyPrune?.stop();
+        // The aggregate, once, at the one moment it is actionable. Every swallowed `put` is already
+        // logged individually, but a count is what says whether the guard was working at all —
+        // `failed > 0` means that many mutations have no dedup record and a retry of each would
+        // re-execute, which is precisely the thing the flag was turned on to prevent.
+        if (idempotencyStore !== undefined) {
+          const report = idempotencyStore.report();
+          if (report.failed > 0) {
+            console.error(
+              `[idempotency] ${String(report.persisted)} record(s) stored, ` +
+                `${String(report.failed)} NOT stored — a retry of each would re-execute; ` +
+                `first failure: ${report.firstFailure ?? "unknown"}`,
+            );
+          } else {
+            console.info(`[idempotency] ${String(report.persisted)} record(s) stored, 0 failed`);
+          }
+        }
         deletionScheduler?.stop();
         deliveryScheduler?.stop();
         sloEnforcement?.scheduler.stop();
@@ -3285,6 +3379,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         void Promise.all([
           auditChain?.observer.drain() ?? Promise.resolve(),
           workersDrained,
+          // The capture's in-flight writes, in the same parallel set rather than after it. Purely
+          // observational, so abandoning them would lose a fraction of a fraction — but it is
+          // bounded by `maxInFlight` and costs nothing to wait for, and a shutdown that dropped
+          // rows it had already decided to sample would make the sample a lie about itself.
+          executionCapture?.drain() ?? Promise.resolve(),
         ]).finally(() => {
           server.close((err) => (err ? reject(err) : resolve()));
         });

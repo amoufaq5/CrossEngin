@@ -1,5 +1,5 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
-import type { RateLimitChecker } from "@crossengin/api-gateway-runtime";
+import type { IdempotencyStore, RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
 import { decideRegionRouting, type TenantResidencyDirectory } from "@crossengin/residency-runtime";
@@ -229,6 +229,14 @@ export interface BuildOperateHttpServerOptions {
    * `meta.rate_limit_decisions` had a store and no caller, so no deployment has ever written a row.
    */
   readonly rateLimitChecker?: RateLimitChecker;
+  /**
+   * The gateway's replay guard. Absent ⇒ `buildOperateGateway` installs `InMemoryIdempotencyStore`,
+   * which is today's behaviour and is **per process**: a retried `POST` landing on another replica,
+   * or on this one after a restart, is not deduplicated — including on the tenant-deletion route,
+   * the one route here that requires an idempotency key precisely because a retry mints a second
+   * tombstone.
+   */
+  readonly idempotencyStore?: IdempotencyStore;
 }
 
 export interface BuiltOperateHttpServer {
@@ -266,6 +274,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.jobInvokeActionRoles !== undefined ? { jobInvokeActionRoles: options.jobInvokeActionRoles } : {}),
     ...(options.extraRoutes !== undefined ? { extraRoutes: options.extraRoutes } : {}),
     ...(options.rateLimitChecker !== undefined ? { rateLimitChecker: options.rateLimitChecker } : {}),
+    ...(options.idempotencyStore !== undefined ? { idempotencyStore: options.idempotencyStore } : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   // After every registration and before the first request. The gate goes on the registry rather than

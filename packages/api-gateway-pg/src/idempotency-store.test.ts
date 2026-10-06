@@ -6,15 +6,63 @@ import { PostgresIdempotencyStore } from "./idempotency-store.js";
 
 const TENANT = "00000000-0000-4000-8000-000000000001";
 
+/**
+ * A fake that **refuses a statement it could not really serve** (ADR-0334's rule).
+ *
+ * Every statement on this table runs under one `ALL`-scope isolation policy and no platform arm, so
+ * on a non-owner connection a statement issued with no `app.current_tenant_id` is not merely
+ * narrowed — the write is refused `42501` and the read answers zero rows, which is the silent half.
+ * A pure recorder cannot see either, and a recorder is what this file used to be: all nine tests
+ * passed against a store whose `get` could never find a row and whose `put` could never land one.
+ *
+ * So the fake tracks the transaction-local setting and throws on anything issued outside it. It
+ * also models the transaction itself: `scopedRead`/`scopedWrite` run their statement inside one,
+ * and a `transaction` returning `undefined` drops the statement under test entirely.
+ */
+type Statement = { sql: string; params: readonly unknown[] | undefined };
+type Handler = (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>;
+
 function mockConnection(
-  handler: (sql: string, params: readonly unknown[] | undefined) => PgQueryResult<Record<string, unknown>>,
+  handler: Handler,
+  opts: { readonly capture?: Statement[]; readonly ctx?: { tenant: string | null } } = {},
 ): PgConnection {
+  const ctx = opts.ctx ?? { tenant: null };
+  const query = vi.fn(async (sql: string, params?: readonly unknown[]) => {
+    opts.capture?.push({ sql, params });
+    if (sql.includes("set_config")) {
+      ctx.tenant = String(params?.[0] ?? "");
+      return { rows: [], rowCount: 1 } as PgQueryResult<Record<string, unknown>>;
+    }
+    if (ctx.tenant === null) {
+      throw new Error(
+        `unscoped statement: no app.current_tenant_id was set in this transaction — a non-owner ` +
+          `connection refuses this write (42501) and reads nothing: ${sql.slice(0, 48)}`,
+      );
+    }
+    return handler(sql, params);
+  }) as PgConnection["query"];
   return {
-    query: vi.fn(async (sql: string, params?: readonly unknown[]) => handler(sql, params)) as PgConnection["query"],
-    transaction: vi.fn() as PgConnection["transaction"],
+    query,
+    transaction: vi.fn(async <T>(fn: (tx: PgConnection) => Promise<T>) =>
+      // A fresh context per transaction, because `set_config(…, true)` is transaction-local: a
+      // setting established by an earlier call must not satisfy a later one.
+      fn(
+        mockConnection(handler, {
+          ...(opts.capture !== undefined ? { capture: opts.capture } : {}),
+          ctx: { tenant: null },
+        }),
+      ),
+    ) as PgConnection["transaction"],
     withAdvisoryLock: vi.fn() as PgConnection["withAdvisoryLock"],
     close: vi.fn() as PgConnection["close"],
   };
+}
+
+/** The statement under test, found by what it *is* rather than by its position after the setting. */
+function issued(captured: readonly Statement[]): Statement {
+  const found = captured.find((c) => !c.sql.includes("set_config"));
+  if (found === undefined) throw new Error("no statement other than the session setting was issued");
+  return found;
 }
 
 function fixtureRecord(overrides: Partial<IdempotencyRecord> = {}): IdempotencyRecord {
@@ -38,6 +86,40 @@ function fixtureRecord(overrides: Partial<IdempotencyRecord> = {}): IdempotencyR
     ...overrides,
   };
 }
+
+/**
+ * The negative control for the fake itself. Without this, a fake that quietly answered an unscoped
+ * statement would make every test below pass against the store as it was shipped — which is
+ * precisely what happened for four phases.
+ */
+describe("the fake refuses what a non-owner database refuses", () => {
+  it("throws on a statement issued with no tenant context", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }));
+    await expect(conn.query("SELECT 1 FROM meta.gateway_idempotency_records")).rejects.toThrow(
+      /unscoped statement/,
+    );
+  });
+
+  it("admits the same statement once the context is set in that transaction", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }));
+    const out = await conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.current_tenant_id', $1, true)", [TENANT]);
+      return tx.query("SELECT 1 FROM meta.gateway_idempotency_records");
+    });
+    expect(out.rowCount).toBe(1);
+  });
+
+  it("does not carry a context across transactions, since set_config(…, true) does not", async () => {
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }));
+    await conn.transaction(async (tx) => {
+      await tx.query("SELECT set_config('app.current_tenant_id', $1, true)", [TENANT]);
+      return null;
+    });
+    await expect(
+      conn.transaction(async (tx) => tx.query("SELECT 1 FROM meta.gateway_idempotency_records")),
+    ).rejects.toThrow(/unscoped statement/);
+  });
+});
 
 describe("PostgresIdempotencyStore.get", () => {
   it("returns null when no row matches", async () => {
@@ -146,31 +228,67 @@ describe("PostgresIdempotencyStore.get", () => {
   });
 
   it("queries with tenant + key bind parameters in order", async () => {
-    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    const conn = mockConnection((sql, params) => {
-      captured.push({ sql, params });
-      return { rows: [], rowCount: 0 };
-    });
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), { capture: captured });
     const store = new PostgresIdempotencyStore(conn);
     await store.get({ tenantId: TENANT, key: "key-x" });
-    expect(captured[0]?.params).toEqual([TENANT, "key-x"]);
+    expect(issued(captured).params).toEqual([TENANT, "key-x"]);
+  });
+
+  it("keeps the explicit tenant predicate beside RLS, for the owner who bypasses it", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), { capture: captured });
+    await new PostgresIdempotencyStore(conn).get({ tenantId: TENANT, key: "key-x" });
+    expect(issued(captured).sql).toContain("tenant_id = $1");
+  });
+
+  it("sets the tenant context inside the transaction before reading", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), { capture: captured });
+    await new PostgresIdempotencyStore(conn).get({ tenantId: TENANT, key: "key-x" });
+    expect(captured[0]?.sql).toContain("set_config('app.current_tenant_id'");
+    expect(captured[0]?.params).toEqual([TENANT]);
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a tenant id that is not a UUID rather than issuing the read", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), { capture: captured });
+    await expect(
+      new PostgresIdempotencyStore(conn).get({ tenantId: "not-a-uuid", key: "key-x" }),
+    ).rejects.toThrow();
+    expect(captured).toHaveLength(0);
   });
 });
 
 describe("PostgresIdempotencyStore.put", () => {
   it("issues an INSERT ... ON CONFLICT DO UPDATE", async () => {
-    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    const conn = mockConnection((sql, params) => {
-      captured.push({ sql, params });
-      return { rows: [], rowCount: 1 };
-    });
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), { capture: captured });
     const store = new PostgresIdempotencyStore(conn);
     await store.put({ tenantId: TENANT, record: fixtureRecord() });
-    expect(captured[0]?.sql).toContain("INSERT INTO");
-    expect(captured[0]?.sql).toContain("ON CONFLICT (tenant_id, operation_id, idempotency_key)");
-    expect(captured[0]?.params?.[0]).toBe("idem_abcdefghijklmn");
-    expect(captured[0]?.params?.[1]).toBe(TENANT);
-    expect(captured[0]?.params?.[4]).toBe("key-1");
+    const stmt = issued(captured);
+    expect(stmt.sql).toContain("INSERT INTO");
+    expect(stmt.sql).toContain("ON CONFLICT (tenant_id, operation_id, idempotency_key)");
+    expect(stmt.params?.[0]).toBe("idem_abcdefghijklmn");
+    expect(stmt.params?.[1]).toBe(TENANT);
+    expect(stmt.params?.[4]).toBe("key-1");
+  });
+
+  it("sets the tenant context in the same transaction as the insert", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), { capture: captured });
+    await new PostgresIdempotencyStore(conn).put({ tenantId: TENANT, record: fixtureRecord() });
+    expect(captured[0]?.sql).toContain("set_config('app.current_tenant_id'");
+    expect(captured[0]?.params).toEqual([TENANT]);
+    expect(conn.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("never claims a platform write grant: this table has no platform-scope row", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 1 }), { capture: captured });
+    await new PostgresIdempotencyStore(conn).put({ tenantId: TENANT, record: fixtureRecord() });
+    expect(captured.some((c) => c.sql.includes("platform_record_write"))).toBe(false);
   });
 });
 
@@ -213,16 +331,35 @@ describe("PostgresIdempotencyStore.update", () => {
 
 describe("PostgresIdempotencyStore.deleteExpired", () => {
   it("issues a DELETE with the cutoff timestamp", async () => {
-    const captured: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
-    const conn = mockConnection((sql, params) => {
-      captured.push({ sql, params });
-      return { rows: [], rowCount: 7 };
-    });
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 7 }), { capture: captured });
     const store = new PostgresIdempotencyStore(conn);
-    const deleted = await store.deleteExpired(new Date("2026-05-16T12:00:00.000Z"));
+    const deleted = await store.deleteExpired(new Date("2026-05-16T12:00:00.000Z"), TENANT);
     expect(deleted).toBe(7);
-    expect(captured[0]?.sql).toContain("DELETE FROM");
-    expect(captured[0]?.params?.[0]).toBe("2026-05-16T12:00:00.000Z");
+    const stmt = issued(captured);
+    expect(stmt.sql).toContain("DELETE FROM");
+    expect(stmt.params).toEqual([TENANT, "2026-05-16T12:00:00.000Z"]);
+  });
+
+  /**
+   * The predicate, not merely the context. As the owner RLS confines nothing, so a `DELETE` with no
+   * `tenant_id` clause reaps **every** tenant's lapsed records — a cross-tenant write from a caller
+   * that named one scope.
+   */
+  it("names its scope in the statement as well as in the session", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), { capture: captured });
+    await new PostgresIdempotencyStore(conn).deleteExpired(new Date(), TENANT);
+    expect(issued(captured).sql).toContain("tenant_id = $1");
+  });
+
+  it("refuses a scope that is not a UUID rather than deleting unconfined", async () => {
+    const captured: Statement[] = [];
+    const conn = mockConnection(() => ({ rows: [], rowCount: 0 }), { capture: captured });
+    await expect(
+      new PostgresIdempotencyStore(conn).deleteExpired(new Date(), "all"),
+    ).rejects.toThrow();
+    expect(captured).toHaveLength(0);
   });
 });
 

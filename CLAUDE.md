@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 330 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 331 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~15,810 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~15,970 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -88,6 +88,34 @@ type errors.
   non-owner — the whole asynchronous Article 17 flow could not write a single row — and one was
   visible only by applying the catalog to a real cluster, where a `uuid <> text` four-eyes CHECK took
   the entire bootstrap down at statement #0 of 960 while every offline test passed.
+  ADR-0336 is the sixth sweep, and its class is **a store nobody constructed** — the question
+  ADR-0335 named in its own open ends after *moving* a defect rather than closing it.
+  `pg-storeless-tables.ts` asks which catalogued table has no writer; nothing asked **which writer
+  has no caller**, and the two differ exactly where it matters, because that rule decides a table is
+  written by reading a store's SQL as text — so a store with no caller makes its table read as
+  written while no deployment has ever put a row in it. Eight exported `Postgres*` classes were
+  constructed only in their own tests, confirmed three ways (a grep, an independent oracle, and a
+  new workspace rule written blind), and **none of the eight tables appeared on the writerless
+  census.** What the eight do *not* share is the finding: three were a missing **wire**, five a
+  missing **subsystem one level up**, where a route would be a surface reporting success and
+  recording a typed-in claim — so the deliverable is partly routes and partly declarations carrying
+  their reasons. The sharpest member is the one that was asked to be wired:
+  `PostgresIdempotencyStore` had **no path to be passed at all**, so every deployment's replay guard
+  has been a `Map` in one process, and wiring it unfixed would have been **worse than that** — as a
+  non-owner its read answered 0 rows for a row that exists (every request reading `first_seen`) and
+  its write was refused `42501` *after* the handler committed, escaping as a 500 that a client
+  retries into the second execution the record exists to prevent. Both reproduced by hand on a live
+  cluster, beside the pair that settles it: with the flag, a retry after a process restart reads
+  `replay_hit_match`; without it, `first_seen`. Two subsystems turned out to be the disease behind
+  five of the stores — **nothing in the workspace evaluates a feature flag** (17 evaluation reasons,
+  zero producers, no manifest field, no CLI flag, no route: a modelled domain with no mechanism, and
+  a second complete flag subsystem in `packages/deploy`, which has zero importers and holds the only
+  `evaluateFlag()`), and **there is no incident lifecycle surface at all**, which makes `human_owned`
+  unreachable in every deployment and sev1/sev2 incidents impossible to close. The recurring rule
+  held for the fourth time: **the honest fix sits one level up from where the pain was felt** — here
+  a fifth strategy rule over the dependency graph, and a measurement that *refused* its own
+  transitive version, because module reachability is not symbol reachability and `export *` makes it
+  answer "reached" for precisely the stores the rule exists to report.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -314,6 +342,45 @@ packages exist at only one layer, noted below where that is true.
   operator runs once, which a boot line can carry and a per-request error cannot. The checker mounts
   **either way, loudly** (ADR-0322's rule) — the limit is enforced whether or not the decision row can
   be written, and refusing would cost the enforcement to protect its own projection.
+  **ADR-0335 wired one of the four; ADR-0336 wired two more and declared the fourth.**
+  `--idempotency-store pg` makes `PostgresIdempotencyStore` the gateway's replay guard, which had
+  **no path to be passed at all** — `compile.ts` reads `options.idempotencyStore ?? new
+  InMemoryIdempotencyStore()` and `server.ts` lacked the option — so every deployment's guard has
+  been a `Map` in one process, including on `--tenant-deletion-routes`, the one route that *requires*
+  a key. It carried two ADR-0335-class defects and **wiring it unfixed would have been worse than the
+  in-memory store**: all three statements were bare `conn.query` calls on a table with one
+  `ALL`-scope policy and no platform arm, so as a non-owner `get` answered **0 rows for a row that
+  exists** (every request reading `first_seen`, a guard that always says "never seen") and `put` was
+  refused `42501` — which, running *after* the handler committed with no try/catch in the 17 stages,
+  escapes as a **500 for a mutation that succeeded**, and a client retrying that 500 gets the second
+  execution. Both reproduced by hand on a live cluster. `deleteExpired` gained a required scope, for
+  `rls_would_confine_this_session`'s reason. The two halves get **opposite** failure policies and
+  that split is the decision: `get` **propagates** (it runs before the handler, nothing has happened,
+  and not knowing whether this is a replay must not admit it — `cancellation_unknown`'s shape) while
+  `put` is **reported and swallowed**, because throwing there causes the double execution it would
+  prevent (ADR-0333). The guarantee is bounded and *stated* (`IDEMPOTENCY_GUARANTEE`): there is no
+  reserve step, so two *concurrent* retries of one key both execute and only the **sequential** case
+  is closed — which is what clients actually produce. The reaper is mounted by the store and
+  deliberately **not** by a second flag, since a durable store needing another opt-in to stop growing
+  is a feature with a trap in it.
+  `--gateway-execution-capture <rate>` persists a sampled `PipelineExecution` — the writer
+  `meta.gateway_pipeline_executions` never had, and the only thing that gives `GatewayReplayer` a row
+  to read. The rate has **no `z.default()`** and `0` is **refused by name** (omitting the flag is how
+  "off" is spelled), because the derived figure is **≈2,100 B per request** = 6.6 TB/yr at 100 req/s
+  and **66 TB/yr at 1,000 req/s**, the same order as the 124 TB/yr that refused
+  `meta.feature_flag_evaluations` a writer. A **uniform sample, not an outcome filter**:
+  `pass_with_4xx_or_5xx` is a drift code about a row whose outcome *disagrees* with its status, so
+  filtering on the claimed outcome discards exactly the rows where the claim is false.
+  `sampleValue` is imported from `audit-chain.ts` so the two samples **nest** and a captured
+  execution always has a chain entry beside it; past `maxInFlight` an execution is **shed and
+  counted** rather than queued, since an execution row is independent under `ON CONFLICT DO NOTHING`
+  and an unbounded promise chain turns a slow disk into an OOM.
+  **`PostgresRouteRegistry` is declared a different serving model, not a queue position**:
+  `compileOperateServer` derives routes *and their handlers* in one pass from the manifest, so a
+  stored row the manifest did not produce has no handler and resolves `no_handler` after consuming
+  its rate-limit budget, while a manifest route absent from the table stops matching — activating a
+  manifest would quietly un-serve part of it. `lookup` is also synchronous and cold-returns `null`,
+  a requirement `RouteRegistry` cannot express.
 - **`rate-limiting`** — contracts only: 6 algorithms × 10 scope kinds, policies with 5
   overage handlings, 10 quota targets × 7 periods × 6 classes, IETF rate-limit headers,
   exception kinds with duration caps, throttle event audit.
@@ -1684,7 +1751,7 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **four** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **five** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -1695,7 +1762,41 @@ them **in both directions** (`protected_table_cascades` / `_not_in_catalog` / `_
 `expected_protection_absent`), with a negative control that re-adds `audit_log`'s reference and
 demands exactly one finding naming it. Both directions is the part that carries the weight: ADR-0334
 established that *location* was never what made ADR-0288's `needsAuditEmitter` wrong, the absence of a
-both-ways comparison was. All four read the real workspace from disk rather than
+both-ways comparison was.
+The fifth is `pg-unreachable-stores.ts` (ADR-0336), **the storeless rule's inverse**: that rule asks
+which catalogued table has no store, and this one asks **which store has no caller**. The two are
+different questions, which ADR-0335 demonstrated by *moving* a defect rather than closing it —
+`meta.feature_flag_targeting_rules` left the writerless census the moment a store was written for it,
+and that store is constructed only in its own test. Measured: **55 exported `Postgres*` classes, 49
+reachable, 6 declared**, over 1,740 files and 18 pg packages. Five reasons, each with a required
+field prose cannot substitute for — `no_caller_by_design` (needs a `decidedIn` ADR asserted to exist
+on disk, because it is the one reason that must never be assumed), `substitute_in_use` (needs a
+`substitutedBy` asserted itself constructed outside tests), `unpersisted_record`,
+`prerequisite_of_unbuilt_surface` and `contract_cannot_carry_the_surface`. The last two split on
+**ordering versus shape** on ADR-0330's reasoning: a store blocked by ordering will be wired and its
+note says what must land beside it, while one blocked by its contract's shape needs a schema change
+first, and calling both "unwired" sends the next person to write the route that cannot be written
+honestly. `tables` is required and **may be empty**, since `[]` is a signed assertion that the store
+writes no catalogued table while an absent field would mean nobody looked (ADR-0331's distinction).
+Twelve finding kinds compared in both directions, and `table_declared_storeless` is the **cross-rule
+join** — the sharpest statement of why two rules are needed, because `pg-storeless-tables.ts` decides
+a table is written by reading a store's SQL as text, so **a store with no caller makes its table read
+as written while no deployment has ever put a row in it**. No count equality anywhere: the
+declarations are the only place a name is written down and the floors are one-sided, with the floor
+on the **reachable** side (`reachable >= 40`) because a site matcher that stopped matching would
+report all 55 unreachable, and over-reporting is the direction that fails CI on correct code.
+It caught a live wiring commit mid-increment (`[overtaken] api-gateway-pg:PostgresIdempotencyStore`),
+where the fix is deleting the declaration rather than weakening the check.
+**The transitive version was built as a measurement and refused as a fence, and the measurement is
+what refuses it**: entrypoints taken from every `package.json` `"bin"` — never from a filename that
+looks like a CLI, since `src/cli.ts` is the argv *parser* and does not import the command bodies,
+which over-reported by five of thirteen — resolve with zero unresolvable imports and reach 760 of
+1,026 non-test files, and then three of the six declared stores come back **reached**, because an
+`index.ts` carrying `export *` is imported by package root. **Module reachability is not symbol
+reachability**, and here it answers "reached" for precisely the stores the rule exists to report;
+answering it honestly needs symbol-level use analysis through `export *`, a type-aware pass rather
+than a text scan. The flat signal is sound *because* it is conservative — it can only under-report,
+so what it declares is a lower bound. All five read the real workspace from disk rather than
 importing it, which is what keeps them unconditional: importing `@crossengin/kernel` would make the
 dependency graph cyclic, and reading `kernel/dist` would make the answer depend on whether someone ran
 `pnpm -r build`. A rule that is green only after a build is not a rule.
@@ -1706,7 +1807,17 @@ not, because the statement extractor silently skips a `SELECT` with a join, an a
 target. That check changed the census's answer three times and is the one that makes it trustworthy.
 
 Full workspace build + typecheck + test is several minutes; run it backgrounded
-into a log rather than blocking on it. There is **no top-level lint script** —
+into a log rather than blocking on it — but **run only one at a time** (ADR-0336). Packages resolve
+each other through `dist/`, so a second `pnpm -r` started before the first finished has one run's
+`tsc` writing a file while the other's vitest reads it, and the assertions that come back are about a
+module half-built from two trees. That produced **three phantom failures** once — a `kernel-pg`
+policy assertion reading `'INSERT'` for an `'ALL'` policy and two `operate-server` CLI tests
+expecting a refusal that did not throw — none of which reproduced when those packages were run
+alone, before *or* after the change. So: reproduce a sweep failure in isolation before believing it,
+and check `pgrep -af "pnpm -r"` is empty before starting one. This is ADR-0307's lesson in a third
+form — running vitest is not running the type checker, running vitest is not running the build, and
+running two sweeps is not running one.
+There is **no top-level lint script** —
 ESLint has not been migrated to v9 flat config. Ignore lint unless asked.
 
 **Run `pnpm -r build` before trusting a consumer's tests after a contract change.**
@@ -1764,7 +1875,11 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   scope and a scoped read could only answer "absent". A **writerless** table is also a
   failure now unless declared with a reason
   (`pg-storeless-tables.ts`), because a table with no store cannot have a wrong store
-  and so never appeared in either SQL rule.
+  and so never appeared in either SQL rule. And a **callerless store** is a failure unless declared
+  too (`pg-unreachable-stores.ts`, ADR-0336), which is the same blindness read the other way: a
+  store with no caller passes every SQL rule — its statements are well-formed, its columns exist,
+  its `INSERT` is complete — and makes its table read as *written*, so the two rules disagree and
+  `table_declared_storeless` is what says so.
   **ADR-0335 found two more members and they are the sharpest yet**: a write that sets no tenant
   context. `PostgresLifecycleEventStore` and `PostgresDeletionRequestStore` both issued correct SQL
   that no non-owner database would ever accept — on both tables the isolation policy is the only arm
@@ -1879,27 +1994,71 @@ opened them.
   somebody else's mistake), so which of the two actions should name the reject is a vocabulary
   decision rather than a defect, and changing `ACTION_TARGET_STATE` forces a workspace rebuild before
   any consumer's tests mean anything (ADR-0329).
-- **The storeless-table rule's inverse is unfenced: a store that nothing constructs** (ADR-0335).
-  `pg-storeless-tables.ts` asks *which catalogued table has no store*. Nothing asks *which store has
-  no caller* — and the two are not the same question, which this increment demonstrated by **moving**
-  a defect rather than closing it. `meta.feature_flag_targeting_rules` was on the writerless census;
-  it now has `PostgresTargetingRuleStore`, so the census no longer reports it, and that store is
-  constructed **only in its own test file**. The table went from a place a rule watches to a place
-  nothing watches, and the fence read greener for it.
-  Found by hand, which is the point: this is ADR-0333's class — built, tested, never connected — and
-  three consecutive increments have now found a member of it by accident. The honest fix sits one
-  level up, as it did there: a workspace rule over the **dependency graph** rather than over SQL,
-  asserting that every exported `Postgres*Store` is referenced outside its own package's tests, with
-  the deliberate exceptions declared as lines the way `pg-storeless-tables.ts` declares its reasons.
-  What makes it more than a tidy-up: `api-gateway-pg` had **zero importers** for four stores and a
-  replayer, and no rule in the repo would have said so — ADR-0335 found that by grepping, and
-  `targeting-rule-store.ts` proves the grep is not repeatable discipline. The two candidate signals
-  are a package with no importer and a symbol constructed only under `*.test.ts`; the first is cheap
-  and `pnpm`'s own graph answers it, the second needs the same fs scan `workspace-sql-scan.ts`
-  already does.
-  Not closed in this increment because it is a fifth strategy rule and wants its own increment, and
-  because the *decision* for this particular store — no authoring route without four-eyes — is right
-  and would survive the rule naming it.
+- **The storeless rule's inverse is fenced now, and six stores stay unreachable with a reason each**
+  (ADR-0335 named the gap, ADR-0336 closed it). `pg-unreachable-stores.ts` asks *which store has no
+  caller*, which `pg-storeless-tables.ts` cannot — it decides a table is written by reading a store's
+  SQL as text, so **a store with no caller makes its table read as written while no deployment has
+  ever put a row in it**, and `table_declared_storeless` is the cross-rule join that catches the two
+  disagreeing. Of the eight found, two were wired (`PostgresIdempotencyStore`,
+  `PostgresPipelineExecutionStore`) and six are declared.
+  What the rule **structurally cannot see**, which is the live part of this entry:
+  **a store constructed behind a factory whose factory has nothing calling it.** Flat reachability
+  stops at the first non-test `new`, and **ten stores sit in exactly that position today** — the four
+  access-review stores via `persisting-runtime.ts`, the four Architect stores via `transcript.ts`,
+  `PostgresEventLog` via `replayer.ts`/`persistent-engine.ts`, `PostgresSloLatencyEvaluationStore` via
+  `latency-persisting-engine.ts`. All ten are *correctly* called reachable, but if one of those
+  factories lost its last caller the rule would keep calling its stores reachable, and ADR-0333's
+  `workflow-workers.ts` is the historical member of that class. Also invisible: a symbol not named
+  `Postgres*` — `ColumnMappedEntityStore`, `TenantColumnStoreRegistry`, `ProjectingEventLog`,
+  `MigrationApplier`, `DeletionRunner`, `DeletionReconciler` and the five `Persistent*Engine`s are all
+  impure persistence classes outside its sight, so the prefix is a convention the rule trusts the way
+  `pg-storeless-tables.ts` trusts `META_TABLES`; `apps/*`' own stores (`PostgresRecipientResolver`,
+  `PostgresReadStateStore`) are out of scope **by declaration**, and an app-internal store the app
+  never constructs is the same defect; a dynamic `new (map[kind])()` is counted and reported (0 today,
+  with a tripwire that none mentions `Postgres`) but could only ever be named unattributable; a
+  construction in a fake not matching `*.test.ts` / `test-*.ts` reads as a real caller, and
+  `access-reviews-runtime/src/fixtures.ts` is exactly such a module; a package imported for one
+  type-only symbol counts as reachable, since `importedSpecifiers` does not distinguish
+  `import type`; and, as with every rule here, **whether a declared reason is true** is unverifiable
+  by machine.
+  And `packages/feature-flags-pg/src/subsystem-survey.ts`' `CALLERLESS_FLAG_STORES` is a **second list
+  naming the same things that no rule reads** — written to be the rule's input and not consumed,
+  because `packages/testing` has no workspace dependencies so reading it means importing `dist` (green
+  only after a build) or text-parsing another package's source. Two lists without a both-ways
+  comparison is ADR-0288's shape; comparing them from disk in both directions, the way
+  `pg-record-retention.ts` does, is the follow-up.
+- **There is no incident lifecycle surface, and two of its consequences are live** (ADR-0336). No
+  `/incidents` route exists anywhere in `apps/`, and `PersistentIncidentEngine` is constructed only by
+  `PostgresIncidentDeclarer`, which calls `declare` / `findOpenFor` / `load` / `cancelIfUntriaged` and
+  never `assignRole`, `changeSeverity`, `note`, `transition` or `attachPostmortem`. So
+  **`human_owned` is unreachable in every deployment** — `cancelIfUntriaged` declines only when the
+  status is not `declared`, reaching `triaged` requires on-call roles no route assigns, and
+  ADR-0326's "an alert wrongly closed is silence" arm therefore never fires — and **sev1 and sev2
+  incidents cannot be closed at all**, since `IncidentRecordSchema` refuses `closed` without a
+  `postmortemId` for every severity with `postmortemRequired`, which is every grade the three
+  escalators declare at, while the refinement above it refuses any status past `declared` for those
+  grades without `publiclyVisible: true` — a status page this platform does not have.
+  `declared → cancelled` is the whole reachable lifecycle. `lifecycle-prerequisites.test.ts` pins both
+  couplings from the contracts, so a close route added later fails there naming the reason rather than
+  at the first sev1. Three further facts sit under it: **there is no runbook** (no
+  `Runbook`/`RunbookDefinition` contract anywhere, no `meta.runbooks` table, so `runbookId` is free
+  TEXT naming an external document and nothing executes a step); `PostgresCustomerCommsStore`'s table
+  is platform-wide with **no tenant-scoped read path** while `affected_tenants` is one of its
+  audiences, so a tenant cannot be shown the row; and the schema refuses `publishedAt` later than
+  `breachNotificationDeadlineAt`, so **a late GDPR 72-hour breach notification is unrepresentable** and
+  `isBreachNotificationTimely` can never answer `false` for a record that parsed — the one fact a
+  regulator asks for is the one this table cannot hold. All of it reported and untouched: contracts
+  edits with cross-package consumers, and changing one forces a workspace rebuild before any
+  consumer's tests mean anything (ADR-0329).
+- **`GatewayReplayer` has no caller, which is the wired writer's own open end** (ADR-0336). Zero
+  importers outside its test — no route, no CLI subcommand, no scheduler — so
+  `--gateway-execution-capture` puts ADR-0335's shape in a new place: a store with a writer and a
+  reader with nothing calling it, exactly what `targeting-rule-store.ts` did. The difference argued is
+  real but not decisive — the rows themselves are the product, a queryable forensic record of request
+  handling, where a targeting rule is inert until something evaluates it — and a read route would need
+  the `--audit-read-routes` apparatus (a role, a recorded read, a tenant refusal). ADR-0335 also made
+  `meta.rate_limit_decisions` writable, so the orphan check now has one half of its join and not the
+  other: every decision row exists and nothing names it.
 - **77 of 145 catalogued tables have no writer, and every one is declared with a reason**
   (ADR-0334, ADR-0335). `packages/testing/src/strategy/pg-storeless-tables.ts` classifies them —
   `static_catalog` (2), `out_of_band` (1), `dynamic_writer` (1), `superseded` (8), `unwritten_table`
@@ -2674,7 +2833,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 330 records; 251 Accepted, 79 Proposed (the
+title or status change cannot drift. 331 records; 252 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

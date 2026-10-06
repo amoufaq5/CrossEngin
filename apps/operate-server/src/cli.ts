@@ -20,6 +20,10 @@ import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
 import { DEFAULT_UNREAD_SCAN_LIMIT, MAX_UNREAD_SCAN_LIMIT } from "./read-state-routes.js";
 import { parseRequestBodyLimit, parseRouteBodyLimits } from "./request-body-limit.js";
+import {
+  GatewayExecutionCaptureConfigSchema,
+  type GatewayExecutionCaptureConfig,
+} from "./gateway-execution-capture.js";
 
 export type StoreKind = "memory" | "pg" | "pg-columns";
 
@@ -146,6 +150,31 @@ export interface ServeOptions {
    * 10,000/60s to 600/60s on upgrade would refuse traffic that works today.
    */
   readonly rateLimitPolicies: RateLimitPolicyDeclaration | null;
+  /**
+   * `true` ⇒ the gateway's replay guard is `meta.gateway_idempotency_records`. Absent ⇒
+   * `InMemoryIdempotencyStore`, which is today's behaviour and is **per process**: a retried `POST`
+   * landing on another replica, or on this one after a restart, is not deduplicated — including on
+   * `--tenant-deletion-routes`, the one route here that *requires* a key, because a retry mints a
+   * second tombstone id and then answers `409 scope_empty` for a request that had succeeded.
+   *
+   * The guarantee it buys is bounded and stated rather than implied (`IDEMPOTENCY_GUARANTEE`):
+   * there is no reserve step between the read at stage 10 and the write after the handler commits,
+   * so two *concurrent* retries of one key can still both execute. What Postgres buys is the
+   * **sequential** case — a timeout, then a retry seconds later, anywhere in the fleet — which is
+   * what clients actually produce.
+   */
+  readonly pgIdempotencyStore: boolean;
+  /**
+   * Persist this fraction of `PipelineExecution` rows — the writer
+   * `meta.gateway_pipeline_executions` never had, and the only thing that gives `GatewayReplayer`
+   * a row to read. `null` ⇒ nothing persisted, as today.
+   *
+   * The rate is **required** when the flag is given and has no `z.default()`: ≈2.1 KB a row
+   * including indexes is ≈6.6 TB/year at 100 req/s and ≈66 TB/year at 1,000 req/s unsampled — the
+   * same order as the figure that refused `meta.feature_flag_evaluations` a writer altogether — and
+   * a write volume must not be chosen by silence (ADR-0328's rule).
+   */
+  readonly gatewayExecutionCapture: GatewayExecutionCaptureConfig | null;
   readonly platformUserRoutes: boolean;
   /**
    * Roles permitted to administer that registry. Fail-closed: empty ⇒ the routes refuse everything.
@@ -404,6 +433,9 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let workflowDeferActivities = false;
   const rateLimitPolicySpecs: string[] = [];
   let rateLimitDefaultPolicyId: string | null = null;
+  let idempotencyStoreKind: string | null = null;
+  let gatewayCaptureRate: string | null = null;
+  const gatewayCaptureOperations: string[] = [];
   let platformUserRoutes = false;
   const platformUserRoles: string[] = [];
   let preferenceRoutes = false;
@@ -656,6 +688,21 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       arg.startsWith("--rate-limit-default-policy=")
     ) {
       rateLimitDefaultPolicyId = takeValue(arg, next, "--rate-limit-default-policy");
+      i += consumed();
+    } else if (arg === "--idempotency-store" || arg.startsWith("--idempotency-store=")) {
+      idempotencyStoreKind = takeValue(arg, next, "--idempotency-store");
+      i += consumed();
+    } else if (
+      arg === "--gateway-execution-capture" ||
+      arg.startsWith("--gateway-execution-capture=")
+    ) {
+      gatewayCaptureRate = takeValue(arg, next, "--gateway-execution-capture");
+      i += consumed();
+    } else if (
+      arg === "--gateway-execution-capture-operation" ||
+      arg.startsWith("--gateway-execution-capture-operation=")
+    ) {
+      gatewayCaptureOperations.push(takeValue(arg, next, "--gateway-execution-capture-operation"));
       i += consumed();
     } else if (arg === "--platform-user-routes") {
       platformUserRoutes = true;
@@ -1335,6 +1382,56 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       );
     }
   }
+  let pgIdempotencyStore = false;
+  if (idempotencyStoreKind !== null) {
+    if (idempotencyStoreKind !== "memory" && idempotencyStoreKind !== "pg") {
+      throw new CliUsageError(
+        `--idempotency-store must be 'memory' or 'pg', got ${JSON.stringify(idempotencyStoreKind)}`,
+      );
+    }
+    pgIdempotencyStore = idempotencyStoreKind === "pg";
+    // There is no `meta.gateway_idempotency_records` under `--store memory`, so the flag would buy
+    // a second in-memory Map — `--workflow-cancel-role`'s shape (ADR-0331).
+    if (pgIdempotencyStore && store === "memory") {
+      throw new CliUsageError(
+        "--idempotency-store pg requires a Postgres store (--store pg or pg-columns): there is no" +
+          " meta.gateway_idempotency_records under --store memory",
+      );
+    }
+  }
+  let gatewayExecutionCapture: GatewayExecutionCaptureConfig | null = null;
+  if (gatewayCaptureRate !== null) {
+    const rate = Number(gatewayCaptureRate);
+    if (!Number.isFinite(rate)) {
+      throw new CliUsageError(
+        `invalid --gateway-execution-capture: ${gatewayCaptureRate} is not a number`,
+      );
+    }
+    // 0 is refused rather than honoured: "capture nothing" is spelled by omitting the flag, and a
+    // sink that is mounted and writes nothing is the surface-reports-success-and-records-nothing
+    // class this increment exists to close, not a setting.
+    if (rate <= 0 || rate > 1) {
+      throw new CliUsageError(
+        `--gateway-execution-capture must be in (0, 1], got ${gatewayCaptureRate}` +
+          (rate === 0 ? " — omit the flag to capture nothing" : ""),
+      );
+    }
+    if (store === "memory") {
+      throw new CliUsageError(
+        "--gateway-execution-capture requires a Postgres store (--store pg or pg-columns): there" +
+          " is no meta.gateway_pipeline_executions under --store memory",
+      );
+    }
+    gatewayExecutionCapture = GatewayExecutionCaptureConfigSchema.parse({
+      sampleRate: rate,
+      ...(gatewayCaptureOperations.length > 0 ? { operations: gatewayCaptureOperations } : {}),
+    });
+  } else if (gatewayCaptureOperations.length > 0) {
+    // A narrowing with no surface mounted reads as configured and does nothing.
+    throw new CliUsageError(
+      "--gateway-execution-capture-operation requires --gateway-execution-capture <rate>",
+    );
+  }
   // A grant with no surface mounted reads as configured and does nothing — the same shape as
   // `--workflow-defer-activities` without `--workflow-workers` (ADR-0333).
   if (platformUserRoles.length > 0 && !platformUserRoutes) {
@@ -1474,6 +1571,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     workflowWorkerConfig,
     workflowDeferActivities,
     rateLimitPolicies,
+    pgIdempotencyStore,
+    gatewayExecutionCapture,
     platformUserRoutes,
     platformUserRoles,
     preferenceRoutes,
@@ -1884,6 +1983,23 @@ Options:
                        Needs --store pg|pg-columns
   --rate-limit-default-policy <rlp_id>  Which declared policy governs a route that names none
                        (required when more than one is declared; unambiguous with exactly one)
+  --idempotency-store memory|pg  Where the gateway's replay guard lives. Default memory, which is
+                       PER PROCESS: a retried POST landing on another replica, or on this one after
+                       a restart, is not deduplicated -- including on --tenant-deletion-routes, the
+                       one route that requires a key because a retry mints a second tombstone.
+                       pg deduplicates a sequential retry fleet-wide; two CONCURRENT retries of one
+                       key can still both execute (there is no reserve step). Needs --store pg or
+                       pg-columns
+  --gateway-execution-capture <rate>  Persist this fraction of PipelineExecution rows, which is what
+                       gives GatewayReplayer anything to read. No default: ~2100 B/row incl. indexes
+                       is ~6.6 TB/yr at 100 req/s and ~66 TB/yr at 1,000 req/s unsampled, so the
+                       rate is required rather than assumed. 0 is refused -- omit the flag instead.
+                       A uniform sample, not an outcome filter: pass_with_4xx_or_5xx is a drift code
+                       about a row whose outcome disagrees with its status, so filtering on that
+                       outcome discards exactly the rows where the claim is false. Needs --store pg
+                       or pg-columns
+  --gateway-execution-capture-operation <operationId>  Narrow the capture to these operations
+                       (repeatable). Requires --gateway-execution-capture
   --platform-user-routes  Mount the platform user registry under /v1/platform/users — provision a
                        principal, grant it a membership in a tenant, retire it. NOTHING wrote
                        meta.users before this, while 50 catalogued columns reference it NOT NULL
