@@ -258,3 +258,66 @@ describe("PostgresTimerStore.upsert — a recurring timer's next occurrence", ()
     expect(insert.sql).not.toMatch(/claimed_by = NULL/);
   });
 });
+
+describe("PostgresTimerStore — who is entitled to release a claim", () => {
+  it("releases the claim on a fire by default, which is what the engine's append path means", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(capture);
+    const resolver = new WorkflowInstanceIdResolver(conn);
+    resolver.register("wfi_inst0001", INSTANCE_UUID);
+    await new PostgresTimerStore({ conn, instanceResolver: resolver }).upsert(fixtureTimer());
+    expect(capture[0]?.sql).toContain("claimed_by = CASE");
+    expect(capture[0]?.sql).toContain("EXCLUDED.fire_count > meta.workflow_timers.fire_count");
+  });
+
+  it("leaves the claim untouched under preserve_claim", async () => {
+    // The premise of the claim-clearing arm is "advancing fire_count means this write is the result
+    // of that claim". True of `ProjectingEventLog`; false of a repair, where advancing `fire_count`
+    // past a *stale* row is the drift case itself — so the repair would clear the lease of the
+    // worker firing that very timer, and with `claim_expires_at` NULL a second worker fires the
+    // same occurrence.
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(capture);
+    const resolver = new WorkflowInstanceIdResolver(conn);
+    resolver.register("wfi_inst0001", INSTANCE_UUID);
+    await new PostgresTimerStore({ conn, instanceResolver: resolver }).upsert(fixtureTimer(), {
+      claimPolicy: "preserve_claim",
+    });
+    expect(capture[0]?.sql).not.toContain("claimed_by");
+    expect(capture[0]?.sql).not.toContain("claim_expires_at");
+  });
+
+  it("writes the same columns with the same bindings under either policy", async () => {
+    // The two statements differ only in the pair of assignments in question, which is the property
+    // that keeps `pg-column-coverage.ts`'s reading of either one true of the other.
+    const released: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const preserved: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    for (const [capture, claimPolicy] of [
+      [released, "release_on_fire"],
+      [preserved, "preserve_claim"],
+    ] as const) {
+      const conn = mockConnection(capture);
+      const resolver = new WorkflowInstanceIdResolver(conn);
+      resolver.register("wfi_inst0001", INSTANCE_UUID);
+      await new PostgresTimerStore({ conn, instanceResolver: resolver }).upsert(fixtureTimer(), {
+        claimPolicy,
+      });
+    }
+    expect(insertColumnList(preserved[0]!.sql)).toEqual(insertColumnList(released[0]!.sql));
+    expect(preserved[0]?.params).toEqual(released[0]?.params);
+    expect(missingRequiredColumns(META_WORKFLOW_TIMERS, preserved[0]!.sql)).toEqual([]);
+  });
+
+  it("passes the policy through upsertMany", async () => {
+    const capture: Array<{ sql: string; params: readonly unknown[] | undefined }> = [];
+    const conn = mockConnection(capture);
+    const resolver = new WorkflowInstanceIdResolver(conn);
+    resolver.register("wfi_inst0001", INSTANCE_UUID);
+    await new PostgresTimerStore({ conn, instanceResolver: resolver }).upsertMany(
+      [fixtureTimer(), fixtureTimer({ id: "wft_tim00002" })],
+      { claimPolicy: "preserve_claim" },
+    );
+    expect(capture).toHaveLength(2);
+    for (const entry of capture) expect(entry.sql).not.toContain("claimed_by");
+  });
+});

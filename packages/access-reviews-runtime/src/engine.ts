@@ -152,112 +152,21 @@ export class AccessReviewRuntime {
   }
 }
 
-export type IntervalHandle = unknown;
-
-export interface IntervalScheduler {
-  setInterval(handler: () => void, ms: number): IntervalHandle;
-  clearInterval(handle: IntervalHandle): void;
-}
-
-const DEFAULT_SCHEDULER: IntervalScheduler = {
-  setInterval(handler, ms) {
-    const h = setInterval(handler, ms);
-    (h as { unref?: () => void }).unref?.();
-    return h;
-  },
-  clearInterval(handle) {
-    clearInterval(handle as ReturnType<typeof setInterval>);
-  },
-};
-
-export interface AccessReviewSource {
-  activeCampaigns():
-    | readonly AccessReviewCampaign[]
-    | Promise<readonly AccessReviewCampaign[]>;
-  itemsForCampaign(
-    campaign: AccessReviewCampaign,
-  ): readonly AccessReviewItem[] | Promise<readonly AccessReviewItem[]>;
-}
-
-export interface TickReport {
-  readonly at: string;
-  readonly startedCampaigns: readonly AccessReviewCampaign[];
-  readonly overdueItems: readonly AccessReviewItem[];
-  readonly autoRevocations: readonly AccessReviewDecision[];
-}
-
-export interface CampaignSchedulerOptions {
-  readonly runtime: AccessReviewRuntime;
-  readonly source: AccessReviewSource;
-  readonly intervalMs: number;
-  readonly scheduler?: IntervalScheduler;
-  readonly onTick?: (report: TickReport) => void;
-  readonly onError?: (err: unknown) => void;
-}
-
-export class CampaignScheduler {
-  private handle: IntervalHandle | null = null;
-
-  constructor(private readonly opts: CampaignSchedulerOptions) {}
-
-  start(): void {
-    if (this.handle !== null) return;
-    void this.tickOnce();
-    this.handle = this.scheduler().setInterval(
-      () => void this.tickOnce(),
-      this.opts.intervalMs,
-    );
-  }
-
-  stop(): void {
-    if (this.handle === null) return;
-    this.scheduler().clearInterval(this.handle);
-    this.handle = null;
-  }
-
-  async tickOnce(): Promise<TickReport | null> {
-    try {
-      const report = await this.runTick();
-      this.opts.onTick?.(report);
-      return report;
-    } catch (err) {
-      this.opts.onError?.(err);
-      return null;
-    }
-  }
-
-  private async runTick(): Promise<TickReport> {
-    const { runtime, source } = this.opts;
-    const now = runtime.clock.now();
-    const campaigns = await source.activeCampaigns();
-    const started = runtime.dueCampaigns(campaigns, now).map((c) =>
-      runtime.startCampaign(c, now),
-    );
-    const startedIds = new Set(started.map((c) => c.id));
-    const inProgress: AccessReviewCampaign[] = [
-      ...campaigns.filter(
-        (c) => c.status === "in_progress" && !startedIds.has(c.id),
-      ),
-      ...started,
-    ];
-
-    const overdueItems: AccessReviewItem[] = [];
-    const autoRevocations: AccessReviewDecision[] = [];
-    for (const campaign of inProgress) {
-      const items = await source.itemsForCampaign(campaign);
-      overdueItems.push(...runtime.overdueItems(items, now));
-      autoRevocations.push(...runtime.planAutoRevocations(items, campaign, now));
-    }
-
-    return {
-      at: now.toISOString(),
-      startedCampaigns: started,
-      overdueItems,
-      autoRevocations,
-    };
-  }
-
-  private scheduler(): IntervalScheduler {
-    return this.opts.scheduler ?? DEFAULT_SCHEDULER;
-  }
-}
+/*
+ * `CampaignScheduler` lived here and is gone, as a duplicate rather than as a gap.
+ *
+ * `apps/operate-server/src/access-reviews-lifecycle.ts` holds `AccessReviewCampaignScheduler`,
+ * which is wired under `--access-reviews-config` and is the scheduler this subsystem actually runs.
+ * The two were not two implementations of one thing: this one's `AccessReviewSource` had
+ * `activeCampaigns()` and `itemsForCampaign()` and **no write method of any kind**, so every tick
+ * called `startCampaign` and `planAutoRevocations`, handed the results to an `onTick` sink, and
+ * discarded them. Nothing was persisted, so the next tick re-read the same `scheduled` campaign
+ * from the source and started it again — forever — minting fresh `ard_` decision ids each pass for
+ * revocations that never landed. It could not be fixed by wiring it; its contract had no seam to
+ * write through. The app's version drives `PersistentAccessReviewRuntime`, which persists the
+ * start, the generated items and each decision, closes a completed campaign and seals its evidence
+ * pack.
+ *
+ * `AccessReviewRuntime` below is the shared part and is reached through
+ * `buildPersistentAccessReviewRuntime`, so nothing here was orphaned by the removal.
+ */

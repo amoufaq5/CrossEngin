@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SloEnforcementActionRecord } from "./records.js";
 import {
-  DRIFT_ISSUE_KINDS,
+  SLO_DRIFT_ISSUE_KINDS,
   SloEnforcementReplayer,
   summarizeEnforcement,
   verifyEnforcementActionShape,
@@ -138,7 +138,7 @@ describe("verifyEnforcementActionShape", () => {
   });
 
   it("names the drift kind in the exported catalog", () => {
-    expect([...DRIFT_ISSUE_KINDS]).toContain("recovered_close_out_failed");
+    expect([...SLO_DRIFT_ISSUE_KINDS]).toContain("recovered_close_out_failed");
   });
 });
 
@@ -202,6 +202,108 @@ describe("verifyEnforcementHistory", () => {
       action({ actionId: "sloa_b0000010", incidentId: "INC-2026-0005", decision: "breach_opened", occurredAt: iso(2_000), paged: true, pageChannelCount: 1 }),
     ]);
     expect(issues).toHaveLength(0);
+  });
+});
+
+/**
+ * The window that `listRecent`'s `LIMIT` cuts, and which half of the check survives it.
+ *
+ * An episode that began before the page starts mid-flight in the page, so every `breach_ongoing`
+ * and `recovered` in it has "no prior open" — a statement about the page and not about the table,
+ * fired on the healthiest thing a deployment can have: a long breach the loop re-asserts each tick.
+ */
+describe("verifyEnforcementHistory over a window", () => {
+  const MID_EPISODE = [
+    action({ actionId: "sloa_e0000001", incidentId: "INC-2026-0010", decision: "breach_ongoing", occurredAt: iso(0) }),
+    action({ actionId: "sloa_e0000002", incidentId: "INC-2026-0010", decision: "breach_ongoing", occurredAt: iso(1_000) }),
+    action({ actionId: "sloa_e0000003", incidentId: "INC-2026-0010", decision: "recovered", occurredAt: iso(2_000) }),
+  ];
+
+  it("reports a missing open when the set is the whole history", () => {
+    const kinds = verifyEnforcementHistory(MID_EPISODE, { historyIsComplete: true }).map((i) => i.kind);
+    expect(kinds).toContain("ongoing_without_open");
+    expect(kinds).toContain("recovered_without_open");
+  });
+
+  it("reports nothing when the same set is declared a window", () => {
+    expect(verifyEnforcementHistory(MID_EPISODE, { historyIsComplete: false })).toEqual([]);
+  });
+
+  it("defaults to complete, which is what a direct caller handing a full history means", () => {
+    expect(verifyEnforcementHistory(MID_EPISODE).map((i) => i.kind)).toContain(
+      "ongoing_without_open",
+    );
+  });
+
+  it("still reports a duplicate open inside a window, because presence is conclusive", () => {
+    // ADR-0322's asymmetry: seeing both opens is the whole evidence, so no `LIMIT` can explain it
+    // away — while an absence is only ever an inference.
+    const issues = verifyEnforcementHistory(
+      [
+        action({ actionId: "sloa_e0000004", incidentId: "INC-2026-0011", decision: "breach_opened", occurredAt: iso(0), paged: true, pageChannelCount: 1 }),
+        action({ actionId: "sloa_e0000005", incidentId: "INC-2026-0011", decision: "breach_opened", occurredAt: iso(1_000), paged: true, pageChannelCount: 1 }),
+      ],
+      { historyIsComplete: false },
+    );
+    expect(issues.map((i) => i.kind)).toEqual(["duplicate_open"]);
+  });
+
+  it("still reports every per-row finding inside a window", () => {
+    // The intra-row checks never depended on the set, so a window must not weaken them.
+    const issues = verifyEnforcementHistory(
+      [
+        action({ actionId: "sloa_e0000006", incidentId: "INC-2026-0012", decision: "recovered", occurredAt: iso(0), closeOut: "failed" }),
+      ],
+      { historyIsComplete: false },
+    );
+    expect(issues.map((i) => i.kind)).toEqual(["recovered_close_out_failed"]);
+  });
+
+  it("still reports a missing open that the window cannot excuse", () => {
+    // `recovered` *after* its own `recovered` in the same page: the open is accounted for inside the
+    // window, so the second absence is real and survives the gate... which it does not, by design.
+    // Recorded as the cost: inside a window the two kinds are off, not merely relaxed.
+    const issues = verifyEnforcementHistory(
+      [
+        action({ actionId: "sloa_e0000007", incidentId: "INC-2026-0013", decision: "breach_opened", occurredAt: iso(0), paged: true, pageChannelCount: 1 }),
+        action({ actionId: "sloa_e0000008", incidentId: "INC-2026-0013", decision: "recovered", occurredAt: iso(1_000) }),
+        action({ actionId: "sloa_e0000009", incidentId: "INC-2026-0013", decision: "recovered", occurredAt: iso(2_000) }),
+      ],
+      { historyIsComplete: false },
+    );
+    expect(issues).toEqual([]);
+    expect(
+      verifyEnforcementHistory(
+        [
+          action({ actionId: "sloa_e0000007", incidentId: "INC-2026-0013", decision: "breach_opened", occurredAt: iso(0), paged: true, pageChannelCount: 1 }),
+          action({ actionId: "sloa_e0000008", incidentId: "INC-2026-0013", decision: "recovered", occurredAt: iso(1_000) }),
+          action({ actionId: "sloa_e0000009", incidentId: "INC-2026-0013", decision: "recovered", occurredAt: iso(2_000) }),
+        ],
+        { historyIsComplete: true },
+      ).map((i) => i.kind),
+    ).toEqual(["recovered_without_open"]);
+  });
+});
+
+describe("SloEnforcementReplayer declares which of its reads is a window", () => {
+  const MID_EPISODE = [
+    action({ actionId: "sloa_f0000001", incidentId: "INC-2026-0014", decision: "breach_ongoing", occurredAt: iso(0) }),
+  ];
+
+  function store(): PostgresSloEnforcementActionStore {
+    return {
+      listForIncident: async () => MID_EPISODE,
+      listRecent: async () => MID_EPISODE,
+    } as unknown as PostgresSloEnforcementActionStore;
+  }
+
+  it("verifyRecent does not report an open that fell off its own page", async () => {
+    expect(await new SloEnforcementReplayer(store()).verifyRecent()).toEqual([]);
+  });
+
+  it("verifyIncident does, because listForIncident is unbounded within its scope", async () => {
+    const issues = await new SloEnforcementReplayer(store()).verifyIncident("INC-2026-0014");
+    expect(issues.map((i) => i.kind)).toEqual(["ongoing_without_open"]);
   });
 });
 

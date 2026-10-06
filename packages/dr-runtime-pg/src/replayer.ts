@@ -1,3 +1,5 @@
+import { isoInstant } from "@crossengin/kernel-pg";
+
 import type {
   DrDrillExecutionRecord,
   DrFailoverExecutionRecord,
@@ -92,6 +94,38 @@ interface DivergentField {
   readonly column: string;
   readonly projected: unknown;
   readonly inRecord: unknown;
+  /**
+   * `instant` where the two halves are **the same moment stored twice in different media**, and so
+   * cannot be compared as text — see `divergesAt`.
+   */
+  readonly compare?: "instant";
+}
+
+/**
+ * Whether one pair disagrees, which for a timestamp is not a question about text.
+ *
+ * A projected timestamp column is `TIMESTAMPTZ`, and node-postgres hands it back as a `Date` that
+ * the stores turn into `toISOString()` — fixed width, always `Z`, always three fraction digits. The
+ * `record` half is the **same timestamp inside JSONB**, where the writer's own bytes survive
+ * untouched. `FailoverRecord.triggeredAt` and `DrillRecord.scheduledFor` are
+ * `z.string().datetime({ offset: true })`, so `2026-03-01T09:00:00Z` and `2026-03-01T12:00:00+03:00`
+ * are both legal and both name the moment the column round-trips as `2026-03-01T09:00:00.000Z` — and
+ * `FailoverExecutorInput.triggeredAt` / `DrillExecutorInput.scheduledFor` are caller-supplied, so
+ * neither form is hypothetical; a drill is *booked* for a date rather than clocked at one.
+ *
+ * Compared as text, every such row reported `projection_disagrees_with_record` on a row where
+ * nothing had diverged. This is ADR-0330's defect in a second place and it was invisible for the
+ * same reason: the fake hands back strings, and this package's fixtures spell every timestamp in the
+ * one form — `toISOString()`'s — where the two media happen to agree.
+ *
+ * `isoInstant` is the normaliser `kernel-pg` already defines for exactly this, so both halves are
+ * reduced to one spelling before `!==`, and a genuine divergence still reports the raw pair.
+ */
+function divergesAt(pair: DivergentField): boolean {
+  if (pair.compare === "instant") {
+    return isoInstant(pair.projected) !== isoInstant(pair.inRecord);
+  }
+  return pair.projected !== pair.inRecord;
 }
 
 /**
@@ -111,8 +145,18 @@ function divergentFailoverFields(
     { column: "status", projected: record.status, inRecord: record.record.status },
     { column: "from_region", projected: record.fromRegion, inRecord: record.record.fromRegion },
     { column: "to_region", projected: record.toRegion, inRecord: record.record.toRegion },
-    { column: "triggered_at", projected: record.triggeredAt, inRecord: record.record.triggeredAt },
-    { column: "completed_at", projected: record.completedAt, inRecord: record.record.completedAt },
+    {
+      column: "triggered_at",
+      projected: record.triggeredAt,
+      inRecord: record.record.triggeredAt,
+      compare: "instant",
+    },
+    {
+      column: "completed_at",
+      projected: record.completedAt,
+      inRecord: record.record.completedAt,
+      compare: "instant",
+    },
     {
       column: "actual_rpo_seconds",
       projected: record.actualRpoSeconds,
@@ -129,7 +173,7 @@ function divergentFailoverFields(
       inRecord: record.record.incidentTicketId ?? null,
     },
   ];
-  return pairs.filter((p) => p.projected !== p.inRecord);
+  return pairs.filter(divergesAt);
 }
 
 function divergentDrillFields(
@@ -144,10 +188,16 @@ function divergentDrillFields(
       column: "scheduled_for",
       projected: record.scheduledFor,
       inRecord: record.record.scheduledFor,
+      compare: "instant",
     },
-    { column: "executed_at", projected: record.executedAt, inRecord: record.record.executedAt },
+    {
+      column: "executed_at",
+      projected: record.executedAt,
+      inRecord: record.record.executedAt,
+      compare: "instant",
+    },
   ];
-  return pairs.filter((p) => p.projected !== p.inRecord);
+  return pairs.filter(divergesAt);
 }
 
 export function verifyDrillExecutionShape(

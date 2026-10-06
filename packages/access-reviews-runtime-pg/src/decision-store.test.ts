@@ -88,6 +88,10 @@ describe("PostgresAccessReviewDecisionStore.record", () => {
     await store.listByCampaign(UUIDS.tenant, "arc_00000001");
     const select = conn.find("FROM meta.access_review_decisions d");
     expect(select?.sql).toContain("WHERE c.campaign_id = $1");
-    expect(select?.params).toEqual(["arc_00000001"]);
+    // All three joined tables, which is what a non-owner is shown.
+    expect(select?.sql).toContain("d.tenant_id = $2");
+    expect(select?.sql).toContain("i.tenant_id = $2");
+    expect(select?.sql).toContain("c.tenant_id = $2");
+    expect(select?.params).toEqual(["arc_00000001", UUIDS.tenant]);
   });
 });

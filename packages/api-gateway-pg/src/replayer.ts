@@ -25,29 +25,91 @@ const TERMINATING_OUTCOMES: ReadonlySet<StageOutcome> = new Set([
   "error",
 ]);
 
-export type DriftCode =
-  | "stages_out_of_order"
-  | "stage_repeated"
-  | "final_stage_mismatch"
-  | "final_outcome_mismatch"
-  | "pass_with_4xx_or_5xx"
-  | "deny_without_4xx_or_5xx"
-  | "duration_inconsistent"
-  | "rate_limit_decision_not_found"
-  | "empty_stages"
-  | "terminating_not_last";
+/**
+ * Every code this module can report, as a value rather than a type alone, so a test and a caller
+ * can both iterate it. `DR_DRIFT_ISSUE_KINDS` and the SLO replayer's `DRIFT_ISSUE_KINDS` were
+ * already consts; this was the odd one out, and a findings vocabulary that is not a value cannot be
+ * asserted against anything.
+ *
+ * `unknown_stage` and `stages_unreadable` are new and they close the same hole from two sides. The
+ * order walk did `if (stageIdx === -1) continue`, so a `stages` entry naming something that is not
+ * a `PipelineStage` was **skipped in silence**: it could not be out of order, could not be a repeat,
+ * and did not stop the row being reported clean — in the one module whose job is to say whether the
+ * stored record of a request is coherent. And `parseStages` returned `[]` for a `stages` value it
+ * could not read, which the walk then reported as `empty_stages` — a different and much milder
+ * claim than "this row's stage log is unreadable". ADR-0333's rule, that an unparsed statement is
+ * reported and never skipped, read on the other side of the same boundary.
+ */
+export const GATEWAY_DRIFT_CODES = [
+  "stages_out_of_order",
+  "stage_repeated",
+  "final_stage_mismatch",
+  "final_outcome_mismatch",
+  "pass_with_4xx_or_5xx",
+  "deny_without_4xx_or_5xx",
+  "duration_inconsistent",
+  "rate_limit_decision_not_found",
+  "empty_stages",
+  "stages_unreadable",
+  "unknown_stage",
+  "terminating_not_last",
+] as const;
+export type GatewayDriftCode = (typeof GATEWAY_DRIFT_CODES)[number];
 
-export interface DriftIssue {
-  readonly code: DriftCode;
+export interface GatewayDriftIssue {
+  readonly code: GatewayDriftCode;
   readonly detail: string;
 }
 
 export interface ExecutionVerifyReport {
   readonly requestId: string;
+  /**
+   * The scope the row itself declares, which is a recorded fact and not what the caller asked for.
+   *
+   * It is here because a cross-scope sweep is a **loop over tenants** (see
+   * `UNSCOPED_READ_IS_OWNER_ONLY`), and findings from two tenants landing in one report with no way
+   * to tell them apart make the sweep unusable. `null` is the platform scope; `null` also when
+   * there is no row, where the honest answer is that no scope was established.
+   */
+  readonly tenantId: string | null;
   readonly hasExecution: boolean;
   readonly drifted: boolean;
-  readonly issues: readonly DriftIssue[];
+  readonly issues: readonly GatewayDriftIssue[];
 }
+
+/**
+ * `ReadScope`'s third member — `undefined`, "every scope" — is **owner-only by construction**, and
+ * that is a fact about RLS rather than about this query.
+ *
+ * `scopedRead(conn, undefined, …)` deliberately sets no tenant context, and `optionalScopeFilter`
+ * deliberately adds no predicate, so the statement is correct and unrestricted. What restricts it is
+ * the table: `meta.gateway_pipeline_executions` carries an isolation policy plus a `SELECT`-scoped
+ * platform arm on `tenant_id IS NULL`, so a session with no tenant context sees **only the platform
+ * scope**. Measured on a live cluster with 6 tenant executions beside 1 platform one, same code:
+ *
+ *   listRecentExecutions({tenantId: "…"})   non-owner 6   owner 6
+ *   listRecentExecutions({tenantId: null})  non-owner 1   owner 1
+ *   listRecentExecutions({})                non-owner 1   owner 7
+ *
+ * So in any deployment that does not connect as the table's owner, "every scope" silently means
+ * "the platform scope", and a sweep built on it reports the other six rows clean **by never having
+ * looked at them**. That is ADR-0329's `rls_would_confine_this_session` shape, where a statement
+ * matched 0 rows, reported 0, and the confirming count also saw 0 because both read through the
+ * same policy.
+ *
+ * It is kept rather than removed, because as the owner it is a genuinely useful diagnostic and
+ * `getExecution`'s point lookup by request id honestly does not know the scope in advance. What
+ * changes is that `bulkVerify` can no longer *default* into it: the scope is a required field there
+ * with no default, so reading every scope is a deliberate act that was written down. ADR-0328's
+ * rule — a default is applied to silence, and silence must not decide this.
+ *
+ * A complete cross-scope sweep is a loop over `meta.tenants` calling `bulkVerify({scope: tenantId})`
+ * per tenant plus one `{scope: null}` pass, which is the pattern `drainAllTenants` and the
+ * checkpoint scheduler already use for exactly this reason.
+ */
+export const UNSCOPED_READ_IS_OWNER_ONLY =
+  "scope: undefined reads every scope only as the table's owner; a non-owner session with no " +
+  "tenant context is shown the platform scope alone. Sweep per tenant instead.";
 
 interface ExecutionRow {
   readonly request_id: string;
@@ -76,17 +138,26 @@ interface ExecutionRow {
   readonly bytes_out: number | string;
 }
 
-function parseStages(value: unknown): readonly StageResult[] {
+/**
+ * A `stages` JSONB value as an array, or `null` when it cannot be read as one.
+ *
+ * `null` rather than `[]` is the whole change: an unreadable `stages` column used to come back as an
+ * empty array, which `verifyPipelineExecutionShape` then reported as `empty_stages` — "this request
+ * recorded no stages", a claim about the gateway. The truth is "this row's stage log is unreadable",
+ * a claim about the row, and conflating the two sends an operator to the wrong place. node-postgres
+ * parses `JSONB` for us, so the string arm is for a driver or column type that hands back text.
+ */
+function parseStages(value: unknown): readonly StageResult[] | null {
   if (Array.isArray(value)) return value as StageResult[];
   if (typeof value === "string") {
     try {
       const parsed = JSON.parse(value) as unknown;
-      if (Array.isArray(parsed)) return parsed as StageResult[];
+      return Array.isArray(parsed) ? (parsed as StageResult[]) : null;
     } catch {
-      return [];
+      return null;
     }
   }
-  return [];
+  return null;
 }
 
 function toNumber(value: number | string): number {
@@ -94,12 +165,32 @@ function toNumber(value: number | string): number {
   return Number.parseInt(value, 10);
 }
 
+export interface VerifyShapeOptions {
+  readonly durationToleranceMs?: number;
+  /**
+   * Set by `verifyExecution` when the stored `stages` column could not be read as an array at all.
+   *
+   * It has to come in from outside, because by the time a `PipelineExecution` exists its `stages` is
+   * typed `StageResult[]` and an unreadable column has already been flattened to `[]` — which is
+   * exactly how "unreadable" used to be reported as `empty_stages`.
+   */
+  readonly stagesUnreadable?: boolean;
+}
+
 export function verifyPipelineExecutionShape(
   execution: PipelineExecution,
-  opts: { readonly durationToleranceMs?: number } = {},
-): readonly DriftIssue[] {
-  const issues: DriftIssue[] = [];
+  opts: VerifyShapeOptions = {},
+): readonly GatewayDriftIssue[] {
+  const issues: GatewayDriftIssue[] = [];
   const stages = execution.stages;
+
+  if (opts.stagesUnreadable === true) {
+    issues.push({
+      code: "stages_unreadable",
+      detail: "the stored stages column is not a JSON array, so the stage log cannot be checked",
+    });
+    return issues;
+  }
 
   if (stages.length === 0) {
     issues.push({
@@ -115,7 +206,16 @@ export function verifyPipelineExecutionShape(
   for (let i = 0; i < stages.length; i++) {
     const stage = stages[i]!;
     const stageIdx = PIPELINE_STAGES.indexOf(stage.stage);
-    if (stageIdx === -1) continue;
+    if (stageIdx === -1) {
+      // Reported, never skipped. A `continue` here meant an entry naming something that is not a
+      // `PipelineStage` could be neither out of order nor a repeat, and left the row reported clean
+      // — so a `stages` array of invented names produced no findings at all.
+      issues.push({
+        code: "unknown_stage",
+        detail: `stage entry at position ${i.toString()} names '${String(stage.stage)}', which is not a pipeline stage`,
+      });
+      continue;
+    }
     if (stageIdx <= lastIdx) {
       issues.push({
         code: "stages_out_of_order",
@@ -218,6 +318,17 @@ export class GatewayReplayer {
     requestId: string,
     scope: ReadScope = undefined,
   ): Promise<PipelineExecution | null> {
+    return (await this.loadExecution(requestId, scope))?.execution ?? null;
+  }
+
+  /**
+   * `getExecution` plus the one fact a `PipelineExecution` cannot carry: whether its `stages` column
+   * was readable. The public shape stays as it was; `verifyExecution` needs the extra bit.
+   */
+  private async loadExecution(
+    requestId: string,
+    scope: ReadScope = undefined,
+  ): Promise<{ readonly execution: PipelineExecution; readonly stagesUnreadable: boolean } | null> {
     const filter = optionalScopeFilter(scope, 2);
     const result = await scopedRead(this.conn, scope, (tx) =>
       tx.query<ExecutionRow>(
@@ -234,7 +345,8 @@ export class GatewayReplayer {
     );
     const row = result.rows[0];
     if (row === undefined) return null;
-    return {
+    const stages = parseStages(row.stages);
+    const execution: PipelineExecution = {
       requestId: row.request_id,
       tenantId: row.tenant_id,
       startedAt: requireIsoInstant(row.started_at, "started_at"),
@@ -243,7 +355,7 @@ export class GatewayReplayer {
       finalStage: row.final_stage as PipelineExecution["finalStage"],
       finalOutcome: row.final_outcome as PipelineExecution["finalOutcome"],
       finalResponseStatus: row.final_response_status,
-      stages: [...parseStages(row.stages)],
+      stages: [...(stages ?? [])],
       authOutcome: row.auth_outcome as PipelineExecution["authOutcome"],
       routeMatchOutcome:
         row.route_match_outcome === null
@@ -261,17 +373,21 @@ export class GatewayReplayer {
       bytesIn: toNumber(row.bytes_in),
       bytesOut: toNumber(row.bytes_out),
     };
+    return { execution, stagesUnreadable: stages === null };
   }
 
   async verifyExecution(
     requestId: string,
     scope: ReadScope = undefined,
   ): Promise<ExecutionVerifyReport> {
-    const execution = await this.getExecution(requestId, scope);
-    if (execution === null) {
-      return { requestId, hasExecution: false, drifted: false, issues: [] };
+    const loaded = await this.loadExecution(requestId, scope);
+    if (loaded === null) {
+      // `tenantId: null` here is "no scope was established", not "the platform scope" — the row
+      // that would have named one is absent, and `hasExecution` is what says which.
+      return { requestId, tenantId: null, hasExecution: false, drifted: false, issues: [] };
     }
-    const issues = [...verifyPipelineExecutionShape(execution)];
+    const { execution, stagesUnreadable } = loaded;
+    const issues = [...verifyPipelineExecutionShape(execution, { stagesUnreadable })];
     if (execution.rateLimitDecisionId !== null) {
       // The decision's scope comes from the execution that names it, not from the caller: a
       // gateway writes both rows in one request, so the execution's own `tenant_id` is a recorded
@@ -290,6 +406,7 @@ export class GatewayReplayer {
     }
     return {
       requestId,
+      tenantId: execution.tenantId,
       hasExecution: true,
       drifted: issues.length > 0,
       issues,
@@ -338,12 +455,26 @@ export class GatewayReplayer {
     return result.rows.map((r) => r.request_id);
   }
 
+  /**
+   * Every execution in **one** scope, which the caller has to name.
+   *
+   * `scope` is a required field with no default, and that is the fix rather than a style
+   * preference: it used to be `tenantId?: ReadScope`, so omitting it fell into "every scope", which
+   * `UNSCOPED_READ_IS_OWNER_ONLY` records is owner-only — a non-owner sweep read the platform scope
+   * and reported every tenant row clean by never looking. A default is applied to silence
+   * (ADR-0328), and whether a sweep covered one tenant or the whole deployment is not something
+   * silence may decide. Passing `undefined` explicitly is still allowed and still means every scope
+   * the role can see; it is now a written-down act.
+   *
+   * Each report names the scope of the row it is about, so the per-tenant passes of a
+   * `meta.tenants` loop compose into one list without losing which tenant a finding belongs to.
+   */
   async bulkVerify(opts: {
+    readonly scope: ReadScope;
     readonly since?: Date;
-    readonly tenantId?: ReadScope;
     readonly batchSize?: number;
     readonly maxExecutions?: number;
-  } = {}): Promise<readonly ExecutionVerifyReport[]> {
+  }): Promise<readonly ExecutionVerifyReport[]> {
     const batchSize = opts.batchSize ?? 100;
     const max = opts.maxExecutions ?? Number.POSITIVE_INFINITY;
     const reports: ExecutionVerifyReport[] = [];
@@ -353,14 +484,14 @@ export class GatewayReplayer {
       const limit = Math.min(batchSize, remaining);
       const ids = await this.listRecentExecutions({
         ...(opts.since !== undefined ? { since: opts.since } : {}),
-        ...(opts.tenantId !== undefined ? { tenantId: opts.tenantId } : {}),
+        ...(opts.scope !== undefined ? { tenantId: opts.scope } : {}),
         limit,
         offset,
       });
       if (ids.length === 0) break;
       for (const id of ids) {
         if (reports.length >= max) break;
-        reports.push(await this.verifyExecution(id, opts.tenantId));
+        reports.push(await this.verifyExecution(id, opts.scope));
       }
       if (ids.length < limit) break;
       offset += ids.length;

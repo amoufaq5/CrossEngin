@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 331 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 332 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -116,6 +116,41 @@ type errors.
   a fifth strategy rule over the dependency graph, and a measurement that *refused* its own
   transitive version, because module reachability is not symbol reachability and `export *` makes it
   answer "reached" for precisely the stores the rule exists to report.
+
+  ADR-0337 is the seventh sweep, and it widened ADR-0336's predicate past the `Postgres*` naming
+  limit that ADR had declared as a blind spot. **Four of the five blind spots had live members**, and
+  what came out is one class with two faces — both *a capability built, catalogued, documented and
+  reachable by no deployment*, and in both the sharpest member is one where the **absence is
+  reported as success**.
+  *Face one: six drift replayers with zero callers.* `WorkflowReplayer`, `DrReplayer`,
+  `SloEnforcementReplayer`, `AccessReviewReplayer`, `GatewayReplayer` and
+  `incident-response-runtime-pg`'s function-shaped one — each advertised in this file as shipped,
+  none ever constructed outside its own tests. **Two were bug-fixed in consecutive increments while
+  nothing called them** (ADR-0330 stopped the workflow one reporting drift on every healthy instance;
+  ADR-0333 gave the DR one an issue kind it could not emit), so a detector's false positives *and*
+  its false negatives were corrected and no deployment ran it. The sixth exports no class, and
+  `new X(` is the whole matching strategy — so the one driver the fence cannot see is, by this file's
+  own account, the sole detector for a tamper class. Thirteen defects came out of them, every one
+  invisible to its own tests, including **ADR-0330's exact defect in the same function one field
+  across** (`variables` is `JSONB`, which comes back *parsed*, compared with `!==`).
+  *Face two, and the more serious: at-rest PHI encryption is reachable by no deployment, and its
+  absence is certified.* On `--store pg-columns` every PHI write is a **500** — `patient.mrn` is
+  genuinely `bytea` and nothing in the workspace sets `app.column_encryption_key`, which four ADRs
+  specify and ADR-0091 names outright. On `--store pg` the same write **succeeds and stores
+  plaintext** (`document->>'mrn'` reads back `MRN-1`), a limitation documented nowhere. And the
+  encryption-at-rest control was **vacuously satisfied** on exactly that deployment, because
+  `satisfied = issues.length === 0` and a JSONB schema declares zero at-rest columns — so a HIPAA
+  report asserted encryption over plaintext PHI with a reassuring summary. That is ADR-0335's
+  `certifiable` defect **inverted**, and the inversion is the dangerous direction: a falsely-false
+  control costs a certification, a falsely-true one *is* the compliance failure. The control is fixed;
+  the key management is a design decision ADR-0070 left open and is now the top open item.
+  The increment's cleanest results are two **deletions** — `CampaignScheduler` and
+  `UnroutableChannelSender`, both second spellings of live code — because **a callerless class is a
+  question, not a verdict**; and two refusals argued from measurement rather than taste: the
+  compiler-API answer to the factory blind spot (26 s, 1.2 GB, and cross-package symbols resolving
+  into `dist`, so it is green only after a build and against a stale one green on the last build) and
+  the general function-shaped fence (82 of 812 modules, mostly contracts packages, and it misses three
+  of the six replayers it exists to find).
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -1641,6 +1676,41 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   transaction**, because `RETURNING` answers with the *new* row and `PENDING_DELETION_SOURCES` has
   three members, so the predicate's candidate list does not say which one matched (and there is no
   `RETURNING OLD` before PG 18 against a floor of 14).
+  **`operate-server replay` is the first caller the six drift replayers ever had** (ADR-0337), and
+  it is read-only. `REPLAY_SCOPE_SUPPORT` is a **total map** over the six subsystems because they do
+  not share one scoping story, and the three arms are read off the catalog rather than chosen:
+  `access_reviews` and `workflow` are **tenant-only** (their tables carry the isolation policy as
+  their *only* arm, so a non-owner with no tenant context matches **zero** rows); `dr`, `slo` and
+  `gateway` are tenant-or-platform (isolation plus a platform `SELECT` arm — measured on seven real
+  captured executions: 6 for a tenant, 1 for the platform, and **1 as a non-owner but 7 as the
+  owner** with no scope at all, so "every scope" is an owner-only diagnostic and never a sweep); and
+  `incidents` takes **no** scope, since `meta.incidents` has no `tenant_id` and no RLS, so a scope
+  flag is *refused* rather than ignored. A scopeless invocation is refused outright, and that is
+  ADR-0322's rule applied where it bites hardest: the degraded answer prints `0 findings` having read
+  nothing, which is **indistinguishable from a clean sweep**, so warning cannot be loud enough.
+  Refusal is **per subsystem**, so `--platform` reads the three that can serve it and names the three
+  that cannot. A report is `ok` only when every section was *readable* and found nothing — a refused
+  section with zero findings exits **1**, because `0 findings` from something unread would otherwise
+  launder it into a passing maintenance job. Each section carries `coverage` (how the scope was
+  reached — clean from a tenant loop and clean from one unscoped read are different claims) and
+  `complete` (whether a `LIMIT` cut the set), and both are needed because a complete-scope pass can
+  still be window-truncated. The five findings vocabularies stay **five**, as a discriminated union:
+  the meanings do not align, the finding identity differs with no common key, and three packages were
+  already colliding on `interface DriftIssue` meaning three different things.
+  **The repairing half is deliberately unreachable.** `resyncInstance`'s *derivation* is conclusive —
+  an append-only log is the authority and a projection behind it is simply wrong, which is ADR-0322's
+  appliable side — but the implementation is not safe to apply: it is not one transaction (1 + 3N
+  statements through four stores, so a conflict mid-loop leaves exactly the half-resynced instance
+  its own comment claims to prevent — ADR-0319 unapplied), and it writes `workflow_timers.status`
+  and `workflow_activities.status`, the columns `claimDueTimers`/`claimDueActivities` select on, with
+  an unconditional `ON CONFLICT … DO UPDATE` — so since ADR-0333 mounted the fleet it is a second
+  writer editing a running queue. Detection is wireable, repair is not, and the surface says so.
+  **It found real drift on its first run**: six `rate_limit_decision_not_found` over six captured
+  executions, attributable — the in-memory checker persists **no** decision row while every execution
+  still stamps an `rld_…` id, so declaring `--rate-limit-policy` takes it to 3 and 3 with zero
+  findings. That is the **inverse** of ADR-0336's open end ("every decision row exists and nothing
+  names it"), so both halves of that join are now known, and a boot warning says it before the sweep
+  does.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
@@ -1787,6 +1857,35 @@ on the **reachable** side (`reachable >= 40`) because a site matcher that stoppe
 report all 55 unreachable, and over-reporting is the direction that fails CI on correct code.
 It caught a live wiring commit mid-increment (`[overtaken] api-gateway-pg:PostgresIdempotencyStore`),
 where the fix is deleting the declaration rather than weakening the check.
+**ADR-0337 widened it, because four of the five blind spots had live members.** The candidate set is
+now **every exported class in every member including `apps/*`** — 324 candidates, 285 reachable, 3
+exempt as `diagnostic_type`, 17 as `test_surface` (never granted to a `*-pg` member, since
+persistence is not a test double), **19 declared** over 21 declarations. Members are candidates too,
+with three mechanical exemptions read from `package.json` and the class scan rather than from names
+(`entrypoint`, `not_importable`, `contracts_only`). `CALLERLESS_FLAG_STORES` is no longer a second
+list nobody reads: `auditCallerlessFlagLists` reads it from disk as text and compares **three** facts
+in both directions — that list against the live scan and against `UNREACHABLE_STORES` — because
+comparing the two lists alone would pass while both were stale together.
+**Two refusals are argued from measurement rather than taste, and both are in the module so nobody
+attempts them a third time.** The *compiler-API* answer to the factory blind spot: 1,026 roots pull
+in 2,173 program files at 26 s and 1.2 GB inside a 3-second suite; one program cannot hold 90
+packages (112 unresolved specifiers, since members do not share a tsconfig); and decisively there is
+no `paths` mapping, so **cross-package symbols resolve into `dist/*.d.ts`** — measured on all 69
+`new Postgres*` sites in `node.ts` — making the symbol at the use and the symbol at the declaration
+two different symbols, joinable only by the filename heuristic the compiler was meant to replace or
+by a second copy of the workspace's module resolution whose stale-by-one-package failure is silent
+total over-reporting. It would also be green only after `pnpm -r build` and, against a stale `dist`,
+green on the previous build. And the *general function-shaped fence* — "an exported symbol nothing
+outside its module uses" — reports 82 of 812 modules, almost all contracts modules doing their job,
+and because the reference test is a word match it **misses three of the six replayers it exists to
+find** (all three export `DriftIssue`). So the unit stays "an exported class, constructed somewhere",
+plus a `module`-scope declaration checked four ways and a narrow driver-family census over
+`replayer.ts` with floors on **both** sides — a ceiling on how many are classless and a floor on how
+many the glob finds, because a family that stopped using the convention would otherwise pass on zero.
+**A scan over source must strip comments and strings before it believes a match**: my own widened
+scan read this module's doc comment — which contains the literal `new PostgresTargetingRuleStore(` —
+as a construction site, and the store read as reachable. The shipped rule strips them and its comment
+says it anticipated exactly that.
 **The transitive version was built as a measurement and refused as a fence, and the measurement is
 what refuses it**: entrypoints taken from every `package.json` `"bin"` — never from a filename that
 looks like a CLI, since `src/cli.ts` is the argv *parser* and does not import the command bodies,
@@ -1952,6 +2051,70 @@ opened them.
 
 **Load-bearing**
 
+- **At-rest PHI encryption is reachable by no deployment, and this is the top open item**
+  (ADR-0337, specified across ADR-0070 / ADR-0071 / ADR-0074 / ADR-0091). Three parts, each verified
+  live through the real server on PG 16:
+  **(1)** on `--store pg-columns` every `phi`/`regulated` write is a **500**
+  (`unrecognized configuration parameter "app.column_encryption_key"`). The column really is
+  encrypted — `patient.mrn` is created `bytea` — and `DEFAULT_ENCRYPTION_KEY_REF` is
+  `current_setting('app.column_encryption_key')`, but **nothing in the workspace sets that GUC**: it
+  appears only as a default key-ref in `column-store.ts` and `crossengin-pg.ts` and in four ADRs,
+  with no setter in any compose file, any `withTenantContext`, or `node.ts`. ADR-0091 names the
+  requirement in so many words and nothing ever built it. **The healthcare pack cannot store one
+  `Patient` on the typed store.**
+  **(2)** on `--store pg` (the default) the same write returns **201 and stores plaintext** —
+  `document->>'mrn'` reads back `MRN-1`. ADR-0091 does not mention JSONB at all and this file
+  attributes "pgcrypto-encrypted PHI columns" to `ColumnMappedEntityStore` only, so the limitation is
+  real and documented nowhere.
+  **(3)** the encryption-at-rest control *was* vacuously satisfied on exactly that deployment, which
+  is **fixed**: `satisfied = issues.length === 0` over a schema with zero at-rest columns answered
+  `satisfied: true` with the summary "0 at-rest column(s) … are ciphertext; pgcrypto installed", so a
+  HIPAA / SOC 2 report asserted encryption over plaintext PHI. It reports `scope_absent` and
+  `satisfied: false` now, because an absence of evidence is not evidence. **That was ADR-0335's
+  `certifiable` defect inverted, and the inversion is the dangerous direction**: a falsely-false
+  control costs a certification, a falsely-true one *is* the compliance failure.
+  Parts 1 and 2 are **not** fixed, deliberately: the fix is a key-management decision — per-tenant
+  DEK, envelope scheme, where the key enters the process — which ADR-0070 itself names as "the
+  envelope refinement" and leaves open, and inventing one at the end of an increment is how a
+  deployment ends up with a key nobody chose. The open sub-question: whether `--store pg` should
+  *refuse* a manifest declaring `phi`/`regulated` fields rather than accept one and store plaintext.
+- **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
+  condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
+  This file says the package "ships as a registered gateway handler" — it ships the handler and
+  **nothing registers it**, so no inbound webhook can deliver a signal to a workflow in any
+  deployment, and its two driver classes (`WorkflowSignalBridge`, `StaticSecretResolver`) are
+  callerless with it. A wiring increment of its own: it needs the HMAC secret resolver decided, since
+  `StaticSecretResolver` is the offline one. `RegionRouter` in `residency-runtime` is the same shape
+  one notch smaller — a residency profile is stored and never enforced.
+- **Four stores in `workflow-runtime-pg` set no tenant context** (ADR-0337), so as a non-owner
+  `ProjectingEventLog.append` raises `42501` on the first child write and the instance upsert writes
+  **nothing, silently** (an `UPDATE` matching zero rows). That makes the workflow engine itself
+  owner-dependent, and it is live because `--workflow-workers` mounts the fleet. Deliberately not
+  fixed in ADR-0337: `claimDueTimers` documents the worker connection as platform-scoped and
+  RLS-bypassing so one fleet serves every tenant, which makes scoping these stores a **subsystem**
+  decision with the engine on the other end — it changes `append` semantics for `--workflow-workers`
+  and `--workflow-cancel-role` — rather than a replayer fix. The scope is available from each row
+  (`ProjectedInstance.tenantId` and siblings, ADR-0335's property). `WorkflowReplayer` refuses
+  `rls_would_confine_this_session` up front instead, before reading the log, because a confined
+  session reads zero events and would otherwise answer "nothing to repair" for every instance.
+- **The repairing replayer is not transactional and not guarded against the fleet** (ADR-0337), which
+  is why `operate-server replay` offers detection only. Its derivation is conclusive; applying it is
+  not safe until `resyncInstance` runs in one `conn.transaction` and its child upserts carry a claim
+  guard (`claimed_by IS NULL OR claim_expires_at < now()` in the `DO UPDATE … WHERE`, which is
+  checkable, unlike "the operator stopped the fleet"). One sub-case *was* unauthorised and is fixed:
+  the timer store cleared a live claim whenever `fire_count` advanced, on a premise true of the engine
+  and false of a repair, so resyncing the very timer the detector found would have let a second worker
+  fire the same occurrence.
+- **Three of the six replayers do not re-parse through zod** (ADR-0337) — `access-reviews` (three of
+  four mappers hand-assemble with row-level type assertions), `gateway` (`PipelineExecutionSchema`
+  exists and is unused; using it would make `unknown_stage` unnecessary), and partially `workflow`.
+  So they re-implement a hand-picked subset of their own contract instead of asking it, and a
+  status↔field pairing the schema enforces and the replayer does not is invisible. Only the incident
+  replayer treats a parse failure as a **finding** rather than an exception, which is its real
+  contribution — and the claim that it is "the only way" to catch such a row is **partly overstated**:
+  the re-parse is shared by six read paths and runs on every SLO and integrity tick, but there it
+  *throws*, surfacing as a failed escalation pass with no id and no field named. What only the
+  replayer adds is the non-throwing sweep over every row and three findings no read path can produce.
 - **Nine actor columns became TEXT, and that is standing manual SQL on every existing deployment**
   (ADR-0335). `planSchemaReconciliation` will not drop a foreign key without `--allow-loosening`, and
   a type change on a populated table is its deliberate refusal. The scale, measured against the
@@ -2833,7 +2996,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 331 records; 252 Accepted, 79 Proposed (the
+title or status change cannot drift. 332 records; 253 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

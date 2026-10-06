@@ -1,7 +1,7 @@
 import type { SloEnforcementActionRecord } from "./records.js";
 import { PostgresSloEnforcementActionStore } from "./enforcement-action-store.js";
 
-export const DRIFT_ISSUE_KINDS = [
+export const SLO_DRIFT_ISSUE_KINDS = [
   "breach_opened_missing_severity",
   "paged_without_channels",
   "channels_without_paged",
@@ -11,10 +11,10 @@ export const DRIFT_ISSUE_KINDS = [
   "recovered_without_open",
   "duplicate_open",
 ] as const;
-export type DriftIssueKind = (typeof DRIFT_ISSUE_KINDS)[number];
+export type SloDriftIssueKind = (typeof SLO_DRIFT_ISSUE_KINDS)[number];
 
-export interface DriftIssue {
-  readonly kind: DriftIssueKind;
+export interface SloDriftIssue {
+  readonly kind: SloDriftIssueKind;
   readonly actionId: string;
   readonly incidentId: string;
   readonly detail: string;
@@ -22,9 +22,9 @@ export interface DriftIssue {
 
 export function verifyEnforcementActionShape(
   action: SloEnforcementActionRecord,
-): readonly DriftIssue[] {
-  const issues: DriftIssue[] = [];
-  const at = (kind: DriftIssueKind, detail: string): void => {
+): readonly SloDriftIssue[] {
+  const issues: SloDriftIssue[] = [];
+  const at = (kind: SloDriftIssueKind, detail: string): void => {
     issues.push({ kind, actionId: action.actionId, incidentId: action.incidentId, detail });
   };
 
@@ -52,18 +52,45 @@ export function verifyEnforcementActionShape(
   return issues;
 }
 
+export interface EnforcementHistoryOptions {
+  /**
+   * Whether `actions` is the **whole** history of every incident it mentions, or a window over it.
+   *
+   * This is the difference between a finding and an artefact of a `LIMIT`, and the two
+   * `*_without_open` kinds are the only ones that turn on it. `listRecent(limit)` returns the newest
+   * N actions, so any episode that began before the page starts mid-flight: its `breach_opened` is
+   * older than the window, and every `breach_ongoing` and `recovered` inside the window then has
+   * "no prior open". That is *true of the page* and says nothing about the table — and it fires on
+   * precisely the healthiest thing a deployment can have, a long-running incident the loop is
+   * re-asserting every tick. Unqualified, `verifyRecent` on a deployment with one open breach
+   * reports a finding per tick, for ever.
+   *
+   * `duplicate_open` is deliberately **not** gated: two `breach_opened` rows for one incident id are
+   * conclusive in any subset of the table, because seeing both is the whole evidence. An absence is
+   * only an inference — ADR-0322's rule, that presence is conclusive at any age while "not there"
+   * and "not there yet" look identical — so one half of this check survives a window and the other
+   * does not.
+   *
+   * Defaults to `true`, the meaning this function has always had for a caller handing it a complete
+   * set; `verifyRecent` is the one path that must say otherwise and does.
+   */
+  readonly historyIsComplete?: boolean;
+}
+
 export function verifyEnforcementHistory(
   actions: readonly SloEnforcementActionRecord[],
-): readonly DriftIssue[] {
+  opts: EnforcementHistoryOptions = {},
+): readonly SloDriftIssue[] {
+  const historyIsComplete = opts.historyIsComplete ?? true;
   const ordered = [...actions].sort((a, b) =>
     a.occurredAt < b.occurredAt ? -1 : a.occurredAt > b.occurredAt ? 1 : 0,
   );
-  const issues: DriftIssue[] = [];
+  const issues: SloDriftIssue[] = [];
   const openedIncidents = new Set<string>();
 
   for (const action of ordered) {
     issues.push(...verifyEnforcementActionShape(action));
-    const issue = (kind: DriftIssueKind, detail: string): void => {
+    const issue = (kind: SloDriftIssueKind, detail: string): void => {
       issues.push({ kind, actionId: action.actionId, incidentId: action.incidentId, detail });
     };
 
@@ -73,11 +100,11 @@ export function verifyEnforcementHistory(
       }
       openedIncidents.add(action.incidentId);
     } else if (action.decision === "breach_ongoing") {
-      if (!openedIncidents.has(action.incidentId)) {
+      if (historyIsComplete && !openedIncidents.has(action.incidentId)) {
         issue("ongoing_without_open", `ongoing for ${action.incidentId} with no prior open`);
       }
     } else {
-      if (!openedIncidents.has(action.incidentId)) {
+      if (historyIsComplete && !openedIncidents.has(action.incidentId)) {
         issue("recovered_without_open", `recovered for ${action.incidentId} with no prior open`);
       }
       openedIncidents.delete(action.incidentId);
@@ -86,7 +113,7 @@ export function verifyEnforcementHistory(
   return issues;
 }
 
-export interface EnforcementSummary {
+export interface SloEnforcementSummary {
   readonly total: number;
   readonly opened: number;
   readonly ongoing: number;
@@ -97,7 +124,7 @@ export interface EnforcementSummary {
 
 export function summarizeEnforcement(
   actions: readonly SloEnforcementActionRecord[],
-): EnforcementSummary {
+): SloEnforcementSummary {
   let opened = 0;
   let ongoing = 0;
   let recovered = 0;
@@ -135,26 +162,35 @@ export class SloEnforcementReplayer {
    * under the `LIMIT`). The scope belongs on the question, not on how the connection happens to be
    * authenticated.
    */
+  /**
+   * `listForIncident` is unbounded within its scope, so this *is* the whole history of the one
+   * incident asked about — the only read here that can honestly claim an absence means something.
+   */
   async verifyIncident(
     incidentId: string,
     tenantId: string | null = null,
-  ): Promise<readonly DriftIssue[]> {
+  ): Promise<readonly SloDriftIssue[]> {
     const actions = await this.store.listForIncident(incidentId, tenantId);
-    return verifyEnforcementHistory(actions);
+    return verifyEnforcementHistory(actions, { historyIsComplete: true });
   }
 
+  /**
+   * A window, and it says so — see `EnforcementHistoryOptions.historyIsComplete`. An episode whose
+   * `breach_opened` is older than the page is not drift, and `verifyIncident` is the way to ask
+   * conclusively about one of the incidents this reports.
+   */
   async verifyRecent(
     limit = 100,
     tenantId: string | null = null,
-  ): Promise<readonly DriftIssue[]> {
+  ): Promise<readonly SloDriftIssue[]> {
     const actions = await this.store.listRecent(limit, tenantId);
-    return verifyEnforcementHistory(actions);
+    return verifyEnforcementHistory(actions, { historyIsComplete: false });
   }
 
   async summarizeRecent(
     limit = 100,
     tenantId: string | null = null,
-  ): Promise<EnforcementSummary> {
+  ): Promise<SloEnforcementSummary> {
     const actions = await this.store.listRecent(limit, tenantId);
     return summarizeEnforcement(actions);
   }

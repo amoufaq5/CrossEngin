@@ -98,6 +98,9 @@ describe("PostgresAccessReviewItemStore.upsert", () => {
     const select = conn.find("FROM meta.access_review_items i");
     expect(select?.sql).toContain("JOIN meta.access_review_campaigns c");
     expect(select?.sql).toContain("WHERE c.campaign_id = $1");
-    expect(select?.params).toEqual(["arc_00000001"]);
+    // Both sides of the join, which is what a non-owner is shown.
+    expect(select?.sql).toContain("i.tenant_id = $2");
+    expect(select?.sql).toContain("c.tenant_id = $2");
+    expect(select?.params).toEqual(["arc_00000001", UUIDS.tenant]);
   });
 });

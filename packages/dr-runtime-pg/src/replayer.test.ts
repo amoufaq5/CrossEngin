@@ -186,6 +186,118 @@ describe("projection_disagrees_with_record", () => {
     expect(issues.filter((i) => i.kind === "projection_disagrees_with_record")).toHaveLength(2);
   });
 
+  /**
+   * The timestamp halves are one moment in two media, and comparing them as text reported drift on
+   * every healthy row whose writer did not spell it `toISOString()`'s way.
+   *
+   * These five fixtures are the forms `z.string().datetime({ offset: true })` accepts and
+   * `FailoverExecutorInput.triggeredAt` / `DrillExecutorInput.scheduledFor` therefore let a caller
+   * supply. Each names exactly the instant the `TIMESTAMPTZ` column round-trips as, so the only
+   * difference is spelling — and each one false-positived before `divergesAt`.
+   */
+  describe("a timestamp is compared as an instant, not as text", () => {
+    const COLUMN_FORM = "2026-06-02T12:00:00.000Z";
+    const SAME_INSTANT = [
+      ["no fractional seconds", "2026-06-02T12:00:00Z"],
+      ["a positive offset", "2026-06-02T15:00:00+03:00"],
+      ["a negative offset", "2026-06-02T07:00:00-05:00"],
+      ["a zero offset spelled out", "2026-06-02T12:00:00+00:00"],
+      ["microsecond precision", "2026-06-02T12:00:00.000000Z"],
+    ] as const;
+
+    for (const [label, spelling] of SAME_INSTANT) {
+      it(`accepts a failover whose record writes triggeredAt with ${label}`, () => {
+        const issues = verifyFailoverExecutionShape(
+          failoverExec({
+            triggeredAt: COLUMN_FORM,
+            record: embeddedFailover({ triggeredAt: spelling }),
+          }),
+        );
+        expect(issues.filter((i) => i.kind === "projection_disagrees_with_record")).toEqual([]);
+      });
+
+      it(`accepts a drill whose record writes scheduledFor with ${label}`, () => {
+        const issues = verifyDrillExecutionShape(
+          drillExec({
+            scheduledFor: COLUMN_FORM,
+            record: embeddedDrill({ scheduledFor: spelling }),
+          }),
+        );
+        expect(issues.filter((i) => i.kind === "projection_disagrees_with_record")).toEqual([]);
+      });
+    }
+
+    it("still catches a completedAt that is a genuinely different moment", () => {
+      const issues = verifyFailoverExecutionShape(
+        failoverExec({
+          status: "succeeded",
+          completedAt: LATER,
+          actualRpoSeconds: 30,
+          actualRtoSeconds: 300,
+          record: embeddedFailover({
+            status: "succeeded",
+            // One hour out: the same spelling family as the column, a different instant.
+            completedAt: "2026-06-02T13:30:00.000Z",
+            actualRpoSeconds: 30,
+            actualRtoSeconds: 300,
+          }),
+        }),
+      );
+      const divergent = issues.filter((i) => i.kind === "projection_disagrees_with_record");
+      expect(divergent).toHaveLength(1);
+      expect(divergent[0]?.detail).toContain("'completed_at'");
+    });
+
+    it("still catches a null column against a record that carries a moment", () => {
+      const issues = verifyFailoverExecutionShape(
+        failoverExec({
+          status: "succeeded",
+          completedAt: null,
+          actualRpoSeconds: 30,
+          actualRtoSeconds: 300,
+          record: embeddedFailover({
+            status: "succeeded",
+            completedAt: "2026-06-02T12:30:00+00:00",
+            actualRpoSeconds: 30,
+            actualRtoSeconds: 300,
+          }),
+        }),
+      );
+      expect(
+        issues.some(
+          (i) => i.kind === "projection_disagrees_with_record" && i.detail.includes("'completed_at'"),
+        ),
+      ).toBe(true);
+    });
+
+    it("reports the raw pair rather than the normalised one, so the row is recognisable", () => {
+      const issues = verifyDrillExecutionShape(
+        drillExec({
+          scheduledFor: COLUMN_FORM,
+          record: embeddedDrill({ scheduledFor: "2026-05-02T12:00:00+00:00" }),
+        }),
+      );
+      const divergent = issues.find((i) => i.kind === "projection_disagrees_with_record");
+      expect(divergent?.detail).toContain("2026-05-02T12:00:00+00:00");
+    });
+
+    it("leaves a non-timestamp column compared exactly", () => {
+      // Only the four timestamp pairs are normalised. Every other column is an enum or an
+      // identifier, where two values are two values and normalising would be the opposite mistake.
+      const issues = verifyFailoverExecutionShape(
+        failoverExec({
+          trigger: "planned_drill",
+          record: embeddedFailover({ trigger: "maintenance_window" }),
+        }),
+      );
+      expect(
+        issues.some(
+          (i) => i.kind === "projection_disagrees_with_record" && i.detail.includes("'trigger'"),
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("could not have caught the dropped transition it was added alongside", () => {
     // A row left behind by `DO NOTHING` is a perfectly consistent *plan* row: both halves come from
     // the plan write and agree with each other. The replayer was not silently right about that bug;

@@ -44,7 +44,7 @@ import {
   surveyTenantSchemaWithCollateral,
 } from "@crossengin/operate-runtime-pg";
 
-import type { PruneOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
+import type { PruneOptions, ReplayOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
 import type { RawHttpRequest, RawHttpResponse } from "./http.js";
 import {
   DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -61,6 +61,30 @@ import {
   sweepDanglingLinksForTenants,
   type MultiTenantSweepReport,
 } from "./link-sweep.js";
+import { DrReplayer, PostgresDrDrillStore, PostgresDrFailoverStore } from "@crossengin/dr-runtime-pg";
+import {
+  PostgresSloEnforcementActionStore,
+  SloEnforcementReplayer,
+} from "@crossengin/observability-runtime-pg";
+import {
+  AccessReviewReplayer,
+  PostgresAccessReviewCampaignStore,
+  PostgresAccessReviewDecisionStore,
+  PostgresAccessReviewItemStore,
+} from "@crossengin/access-reviews-runtime-pg";
+import { GatewayReplayer } from "@crossengin/api-gateway-pg";
+import { replayIncidents } from "@crossengin/incident-response-runtime-pg";
+import {
+  REPLAY_SUBSYSTEMS,
+  runReplaySections,
+  subsystemsServedBy,
+  summarizeReplay,
+  type ReplayCoverage,
+  type ReplayReport,
+  type ReplaySection,
+  type ReplaySubsystem,
+  type ReplaySubsystemRunner,
+} from "./replay.js";
 import { PruneScheduler } from "./prune-scheduler.js";
 import {
   CAPTURE_FK_HINT,
@@ -2512,6 +2536,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // nobody chose.
     console.info(`[gateway-capture] ${describeCaptureCost(options.gatewayExecutionCapture)}`);
     console.info(`[gateway-capture] ${CAPTURE_FK_HINT}`);
+    // Said because the replay surface finds it on every row otherwise, and an operator should
+    // know before the sweep tells them. Measured live: with the in-memory checker, 0 decisions are
+    // written while every captured execution still stamps an `rld_…` id, so `GatewayReplayer`
+    // reports `rate_limit_decision_not_found` for **every** request (6 of 6). Declaring a policy
+    // makes both halves line up (3 decisions, 3 executions, 0 findings). The id is not wrong — the
+    // decision really was taken — it is simply not persisted, so the reference dangles by
+    // configuration rather than by defect.
+    if (options.rateLimitPolicies === null) {
+      console.warn(
+        "[gateway-capture] no --rate-limit-policy declared: the in-memory checker persists no" +
+          " decision row, so every captured execution will carry a rate_limit_decision_id that" +
+          " resolves to nothing and `operate-server replay --subsystem gateway` will report" +
+          " rate_limit_decision_not_found on every row",
+      );
+    }
   } else if (options.gatewayExecutionCapture !== null) {
     console.warn(
       "[gateway-capture] --gateway-execution-capture needs a Postgres connection; skipping",
@@ -3428,6 +3467,189 @@ export async function runPruneLinks(options: PruneOptions): Promise<MultiTenantS
  * integrity + per-entry signatures against the crypto-pg key registry. Closes the connection before
  * returning the report.
  */
+/**
+ * `operate-server replay` — the first caller any of the six drift replayers has ever had.
+ *
+ * Read-only by construction: every runner below calls a `verify*` / `replay*` method and none
+ * calls a write. The repairing half of the workflow replayer (`resyncInstance` / `bulkResync`) is
+ * deliberately **not** reachable from here. Its derivation is authorised — an append-only log is
+ * the authority and a projection behind it is simply wrong — but the implementation is not safe to
+ * apply yet: the repair is not one transaction (so a failure mid-loop leaves the half-resynced
+ * instance its own comment says it exists to prevent), and it writes `workflow_timers.status` and
+ * `workflow_activities.status`, which are the very columns `claimDueTimers` and
+ * `claimDueActivities` select on — so a resync is a second writer editing a running fleet's queue
+ * with no guard clause. `--workflow-workers` mounts that fleet, so this is live rather than
+ * hypothetical. Detection is wireable today; repair is not, and the honest surface says so by
+ * offering only the former.
+ */
+export async function runReplay(options: ReplayOptions): Promise<ReplayReport> {
+  const conn = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const selected: readonly ReplaySubsystem[] =
+      options.subsystems.length > 0 ? options.subsystems : REPLAY_SUBSYSTEMS;
+    const runners = buildReplayRunners(options.schema);
+    const sections: ReplaySection[] = [];
+
+    if (options.allTenants) {
+      // A loop over `meta.tenants`, which for two of the six subsystems is the only complete mode:
+      // their tables carry the isolation policy as their only arm, so an unscoped read matches
+      // zero rows as a non-owner. `prune-links`' precedent, and the same reason.
+      const tenants = await new PostgresTenantSource(conn).activeTenantIds();
+      for (const tenantId of tenants) {
+        const coverage: ReplayCoverage = { kind: "tenant", tenantId };
+        const servable = selected.filter((sub) => subsystemsServedBy(coverage).includes(sub));
+        sections.push(
+          ...(await runReplaySections(conn, coverage, servable, runners, options.limit)),
+        );
+      }
+      // Then the platform scope and the unscoped subsystems, so `--all-tenants` means every scope
+      // rather than every tenant: a platform-scope row belongs to no tenant and would otherwise be
+      // the one thing a full sweep never examined.
+      for (const coverage of [{ kind: "platform" } as const, { kind: "unscoped" } as const]) {
+        const servable = selected.filter((sub) => subsystemsServedBy(coverage).includes(sub));
+        if (servable.length > 0) {
+          sections.push(
+            ...(await runReplaySections(conn, coverage, servable, runners, options.limit)),
+          );
+        }
+      }
+      // Anything the whole sweep could never reach is still reported, rather than quietly absent.
+      const reached = new Set(sections.map((sec) => sec.subsystem));
+      for (const sub of selected) {
+        if (!reached.has(sub)) {
+          sections.push({
+            subsystem: sub,
+            coverage: { kind: "unscoped" },
+            complete: false,
+            scanned: 0,
+            refusal: "no scope in this sweep can serve this subsystem",
+            findings: [],
+          });
+        }
+      }
+      return summarizeReplay(sections);
+    }
+
+    const coverage: ReplayCoverage =
+      options.tenantId !== null
+        ? { kind: "tenant", tenantId: options.tenantId }
+        : options.platform
+          ? { kind: "platform" }
+          : { kind: "unscoped" };
+    return summarizeReplay(
+      await runReplaySections(conn, coverage, selected, runners, options.limit),
+    );
+  } finally {
+    await conn.close();
+  }
+}
+
+/**
+ * One runner per subsystem, each rendering its own findings vocabulary to strings at this
+ * boundary.
+ *
+ * Rendered here and not merged upstream: the five vocabularies mean genuinely different things — a
+ * stored outcome contradicting its own stage log, an append-only timeline out of order, a
+ * close-out the store refused, a row that no longer satisfies its contract — and collapsing them
+ * into one enum would either lose those distinctions or grow to forty-odd members. So each
+ * package keeps its own enum and only the *presentation* is uniform.
+ *
+ * `workflow` is absent, deliberately. `WorkflowReplayer` needs a definition map, which means
+ * `PostgresWorkflowDefinitionStore` + `loadEngineDefinitions`, and under RLS as a non-owner with no
+ * tenant context that map loads **empty** — whereupon the replayer refuses every instance by name
+ * (`definition_unresolved`) rather than reporting drift, which is correct but means the section
+ * would consist entirely of refusals. It also requires an RLS-bypassing session by its own
+ * account. Reporting `no runner wired` with that reason is more honest than a section of refusals
+ * that reads like a failure of the instances rather than of the session.
+ */
+function buildReplayRunners(
+  schema: string | null,
+): Readonly<Partial<Record<ReplaySubsystem, ReplaySubsystemRunner>>> {
+  const schemaOpt = schema !== null ? { schema } : {};
+  void schemaOpt;
+  return {
+    dr: {
+      run: async (conn, coverage, limit) => {
+        const replayer = new DrReplayer(
+          new PostgresDrFailoverStore(conn),
+          new PostgresDrDrillStore(conn),
+        );
+        const scope = coverage.kind === "tenant" ? coverage.tenantId : null;
+        const issues = await replayer.bulkVerify(scope, limit);
+        const summary = await replayer.summarize(scope, limit);
+        return {
+          complete: summary.failovers + summary.drills < limit * 2,
+          scanned: summary.failovers + summary.drills,
+          refusal: null,
+          findings: issues.map((i) => `${i.kind} [${i.executionId}]: ${i.detail}`),
+        };
+      },
+    },
+    slo: {
+      run: async (conn, coverage, limit) => {
+        const replayer = new SloEnforcementReplayer(new PostgresSloEnforcementActionStore(conn));
+        const scope = coverage.kind === "tenant" ? coverage.tenantId : null;
+        const issues = await replayer.verifyRecent(limit, scope);
+        const summary = await replayer.summarizeRecent(limit, scope);
+        return {
+          complete: summary.total < limit,
+          scanned: summary.total,
+          refusal: null,
+          findings: issues.map((i) => `${i.kind} [${i.actionId}]: ${i.detail}`),
+        };
+      },
+    },
+    access_reviews: {
+      run: async (conn, coverage) => {
+        // Guarded by `scopeRefusal` before this runs, but asserted rather than assumed: the
+        // tenant id is the only thing that makes this read return a row at all.
+        if (coverage.kind !== "tenant") throw new Error("access_reviews requires a tenant scope");
+        const replayer = new AccessReviewReplayer({
+          campaignStore: new PostgresAccessReviewCampaignStore(conn),
+          itemStore: new PostgresAccessReviewItemStore(conn),
+          decisionStore: new PostgresAccessReviewDecisionStore(conn),
+        });
+        const replays = await replayer.replayTenant(coverage.tenantId);
+        return {
+          complete: true,
+          scanned: replays.length,
+          refusal: null,
+          findings: replays.flatMap((r) =>
+            r.issues.map((i) => `${i.kind} [${r.campaignId}]: ${i.detail}`),
+          ),
+        };
+      },
+    },
+    gateway: {
+      run: async (conn, coverage, limit) => {
+        const replayer = new GatewayReplayer({ conn });
+        const scope = coverage.kind === "tenant" ? coverage.tenantId : null;
+        const reports = await replayer.bulkVerify({ scope, maxExecutions: limit });
+        const drifted = reports.filter((r) => r.drifted);
+        return {
+          complete: reports.length < limit,
+          scanned: reports.length,
+          refusal: null,
+          findings: drifted.flatMap((r) =>
+            r.issues.map((i) => `${i.code} [${r.requestId}]: ${i.detail}`),
+          ),
+        };
+      },
+    },
+    incidents: {
+      run: async (conn, _coverage, limit) => {
+        const report = await replayIncidents(conn, { limit });
+        return {
+          complete: report.windowComplete,
+          scanned: report.scanned,
+          refusal: null,
+          findings: report.drift.map((d) => `${d.kind} [${d.incidentId}]: ${d.detail}`),
+        };
+      },
+    },
+  };
+}
+
 export async function runVerifyChain(options: VerifyChainOptions): Promise<ChainVerificationReport> {
   const conn = createNodePgConnection(parsePgEnvConfig());
   try {

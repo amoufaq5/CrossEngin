@@ -48,6 +48,33 @@ export interface TimerProjection {
   readonly nextFireAt: string | null;
 }
 
+/**
+ * Whether this write is entitled to release the row's claim.
+ *
+ * `upsert`'s claim-clearing arm rests on one premise, stated in its own doc comment: *advancing
+ * `fire_count` is the one condition that means "this write is the result of that claim"*. That is
+ * true of `ProjectingEventLog`, which writes because an event just landed, and **false of a
+ * repair**: a replayer writes because the row disagrees with the log, and the row disagreeing is the
+ * drift case — so a resync of exactly the timer a detector was built to find would advance
+ * `fire_count` past a stale row, read the premise as satisfied, and clear the lease of the worker
+ * that is at that moment firing it. With `claim_expires_at` NULL the timer is immediately claimable
+ * again, and a second worker fires the same occurrence.
+ *
+ * So the premise is a property of the *caller*, and the caller states it. `"release_on_fire"` is the
+ * default because that is what the engine needs and what every existing writer means.
+ */
+export const TIMER_CLAIM_POLICIES = [
+  /** The write is the result of a claim: advancing `fire_count` hands the row back. */
+  "release_on_fire",
+  /** The write is a repair, which no claim produced, so the claim is left exactly as it is. */
+  "preserve_claim",
+] as const;
+export type TimerClaimPolicy = (typeof TIMER_CLAIM_POLICIES)[number];
+
+export interface TimerUpsertOptions {
+  readonly claimPolicy?: TimerClaimPolicy;
+}
+
 export class PostgresTimerStore {
   private readonly conn: PgConnection;
   private readonly instanceResolver: WorkflowInstanceIdResolver;
@@ -76,10 +103,28 @@ export class PostgresTimerStore {
    * landed on the instance. Advancing `fire_count` is the one condition that means "this write is
    * the result of that claim".
    */
-  async upsert(projection: TimerProjection): Promise<void> {
+  async upsert(projection: TimerProjection, options: TimerUpsertOptions = {}): Promise<void> {
     const instanceUuid = await this.instanceResolver.requireResolve(projection.instanceId);
-    await this.conn.query(
-      `INSERT INTO ${SCHEMA}.${TABLE} (
+    // Two whole statements rather than one with an interpolated `SET` tail: both column lists stay
+    // literal, which is what `pg-column-coverage.ts` reads as text, and the only difference between
+    // them is the pair of assignments that is actually in question.
+    const sql =
+      (options.claimPolicy ?? "release_on_fire") === "preserve_claim"
+        ? `INSERT INTO ${SCHEMA}.${TABLE} (
+         timer_id, instance_id, tenant_id, timer_name, kind, status, scheduled_at,
+         fire_at, timezone, cron_expression, relative_seconds, transition_to_trigger,
+         fired_at, cancelled_at, fire_count, next_fire_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       ON CONFLICT (timer_id) DO UPDATE
+         SET status = EXCLUDED.status,
+             scheduled_at = EXCLUDED.scheduled_at,
+             fire_at = EXCLUDED.fire_at,
+             fired_at = EXCLUDED.fired_at,
+             cancelled_at = EXCLUDED.cancelled_at,
+             fire_count = EXCLUDED.fire_count,
+             next_fire_at = EXCLUDED.next_fire_at`
+        : `INSERT INTO ${SCHEMA}.${TABLE} (
          timer_id, instance_id, tenant_id, timer_name, kind, status, scheduled_at,
          fire_at, timezone, cron_expression, relative_seconds, transition_to_trigger,
          fired_at, cancelled_at, fire_count, next_fire_at
@@ -98,7 +143,9 @@ export class PostgresTimerStore {
                ELSE ${SCHEMA}.${TABLE}.claimed_by END,
              claim_expires_at = CASE
                WHEN EXCLUDED.fire_count > ${SCHEMA}.${TABLE}.fire_count THEN NULL
-               ELSE ${SCHEMA}.${TABLE}.claim_expires_at END`,
+               ELSE ${SCHEMA}.${TABLE}.claim_expires_at END`;
+    await this.conn.query(
+      sql,
       [
         projection.id,
         instanceUuid,
@@ -120,9 +167,12 @@ export class PostgresTimerStore {
     );
   }
 
-  async upsertMany(projections: readonly TimerProjection[]): Promise<void> {
+  async upsertMany(
+    projections: readonly TimerProjection[],
+    options: TimerUpsertOptions = {},
+  ): Promise<void> {
     for (const p of projections) {
-      await this.upsert(p);
+      await this.upsert(p, options);
     }
   }
 }

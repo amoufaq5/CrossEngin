@@ -3,7 +3,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
 
 import { CampaignUuidResolver, ItemUuidResolver } from "./id-mapping.js";
 import { rowToDecision, type DecisionRow } from "./records.js";
-import { withTenantContext } from "./tenant-context.js";
+import { tenantScopePredicate, withTenantContext } from "./tenant-context.js";
 
 const SCHEMA = "meta";
 const TABLE = "access_review_decisions";
@@ -95,14 +95,26 @@ export class PostgresAccessReviewDecisionStore {
     });
   }
 
+  /**
+   * All three joined tables carry the predicate — the decision, its item and their campaign — which
+   * is what a non-owner is shown, since RLS applies each table's own isolation policy to each table
+   * in the join. Without it this read was global as the owner: `campaign_id` is table-wide unique,
+   * so `listByCampaign(tenantA, …)` returned tenant B's decisions and the replayer reported them
+   * under tenant A.
+   */
   async listByCampaign(
     tenantId: string,
     campaignId: string,
   ): Promise<readonly AccessReviewDecision[]> {
     return withTenantContext(this.conn, tenantId, async (tx) => {
       const result = await tx.query<DecisionRow>(
-        `${SELECT_JOINED} WHERE c.campaign_id = $1 ORDER BY d.decided_at ASC, d.decision_id ASC`,
-        [campaignId],
+        `${SELECT_JOINED}
+          WHERE c.campaign_id = $1
+            AND ${tenantScopePredicate("d", 2)}
+            AND ${tenantScopePredicate("i", 2)}
+            AND ${tenantScopePredicate("c", 2)}
+          ORDER BY d.decided_at ASC, d.decision_id ASC`,
+        [campaignId, tenantId],
       );
       return result.rows.map(rowToDecision);
     });

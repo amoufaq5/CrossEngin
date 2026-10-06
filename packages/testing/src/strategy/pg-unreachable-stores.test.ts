@@ -6,32 +6,44 @@ import { describe, expect, it } from "vitest";
 import { parseCatalogSource } from "./pg-column-coverage.js";
 import { STORELESS_TABLES } from "./pg-storeless-tables.js";
 import {
+  auditCallerlessFlagLists,
   auditUnreachableStores,
   BLOCKER_BEARING_REASONS,
-  classifyPgPackage,
-  classifyStore,
+  classifyMember,
+  classifySymbol,
   codeOnly,
   countUnreachableByReason,
   DECISION_BEARING_REASONS,
-  exportedStoreSymbols,
+  DRIVER_MODULE_FAMILIES,
+  exportedClasses,
+  exportedNames,
   findConstructions,
+  findIdentifierUses,
+  FLAG_LIST_FINDING_KINDS,
+  FLAG_MEMBER,
+  FLAG_SURVEY_PATH,
   formatUnreachableFindings,
   importedSpecifiers,
+  isErrorBase,
   isTestSite,
-  PACKAGE_REACHABILITIES,
-  PgPackageFactsSchema,
+  MEMBER_REACHABILITIES,
+  MemberFactsSchema,
+  ModuleFactsSchema,
+  readCallerlessFlagStores,
   scanWorkspaceStores,
-  STORE_REACHABILITIES,
-  StoreFactsSchema,
-  subjectOf,
   SUBSTITUTE_BEARING_REASONS,
+  SYMBOL_REACHABILITIES,
+  SymbolFactsSchema,
+  subjectOf,
+  TEST_CONSTRUCTED_REASONS,
   UNREACHABLE_FINDING_KINDS,
   UNREACHABLE_REASONS,
   UNREACHABLE_SCOPES,
   UNREACHABLE_STORES,
   UnreachableDeclarationSchema,
-  type PgPackageFacts,
-  type StoreFacts,
+  type MemberFacts,
+  type ModuleFacts,
+  type SymbolFacts,
   type UnreachableDeclaration,
   type UnreachableFinding,
 } from "./pg-unreachable-stores.js";
@@ -39,21 +51,28 @@ import { readCatalogSource, REPO_ROOT } from "./workspace-sql-scan.js";
 
 /* ------------------------------------------------------------------ fixtures */
 
-function storeFacts(over: Partial<StoreFacts> = {}): StoreFacts {
-  return StoreFactsSchema.parse({
+function symbolFacts(over: Partial<SymbolFacts> = {}): SymbolFacts {
+  return SymbolFactsSchema.parse({
     symbol: "PostgresWidgetStore",
-    pkg: "widgets-pg",
+    pkg: "packages/widgets-pg",
     declaredIn: "packages/widgets-pg/src/widget-store.ts",
+    extendsName: null,
+    alsoDeclaredBy: [],
     constructedBy: [],
     constructedByTests: ["packages/widgets-pg/src/widget-store.test.ts"],
+    foreignTestMembers: [],
     ...over,
   });
 }
 
-function pkgFacts(over: Partial<PgPackageFacts> = {}): PgPackageFacts {
-  return PgPackageFactsSchema.parse({
-    pkg: "widgets-pg",
+function memberFacts(over: Partial<MemberFacts> = {}): MemberFacts {
+  return MemberFactsSchema.parse({
+    pkg: "packages/widgets-pg",
     name: "@crossengin/widgets-pg",
+    isEntrypoint: false,
+    isImportable: true,
+    files: 12,
+    driverClasses: ["PostgresWidgetStore"],
     dependents: ["apps/operate-server"],
     importedBy: ["apps/operate-server/src/node.ts"],
     importedByTests: [],
@@ -61,10 +80,23 @@ function pkgFacts(over: Partial<PgPackageFacts> = {}): PgPackageFacts {
   });
 }
 
+function moduleFacts(over: Partial<ModuleFacts> = {}): ModuleFacts {
+  return ModuleFactsSchema.parse({
+    pkg: "packages/widgets-pg",
+    module: "src/replayer.ts",
+    present: true,
+    exportedClasses: [],
+    exportedNames: ["replayWidgets", "formatWidgetReport"],
+    entrypointUsedBy: [],
+    entrypointUsedByTests: ["packages/widgets-pg/src/replayer.test.ts"],
+    ...over,
+  });
+}
+
 function declaration(over: Partial<UnreachableDeclaration> = {}): UnreachableDeclaration {
   return UnreachableDeclarationSchema.parse({
-    scope: "store",
-    pkg: "widgets-pg",
+    scope: "symbol",
+    pkg: "packages/widgets-pg",
     symbol: "PostgresWidgetStore",
     reason: "unpersisted_record",
     tables: [],
@@ -74,65 +106,123 @@ function declaration(over: Partial<UnreachableDeclaration> = {}): UnreachableDec
   });
 }
 
+function moduleDeclaration(over: Partial<UnreachableDeclaration> = {}): UnreachableDeclaration {
+  return UnreachableDeclarationSchema.parse({
+    scope: "module",
+    pkg: "packages/widgets-pg",
+    module: "src/replayer.ts",
+    entrypoint: "replayWidgets",
+    reason: "unpersisted_record",
+    tables: [],
+    consequence: "the widget drift report is never produced by anything that runs",
+    note: "a function-shaped driver, for the purposes of this test",
+    ...over,
+  });
+}
+
 const audit = (
   input: Partial<Parameters<typeof auditUnreachableStores>[0]> = {},
 ): readonly UnreachableFinding[] =>
   auditUnreachableStores({
-    stores: [],
-    packages: [pkgFacts()],
+    symbols: [],
+    members: [memberFacts()],
+    modules: [],
     declarations: [],
     catalogTables: [],
     storelessTables: [],
     reachableSubstitutes: [],
+    driverFamilyModules: [],
     ...input,
   });
 
 /* ------------------------------------------------------------------ the shape */
 
 describe("the declared shape", () => {
-  it("names five reasons, two scopes, three store buckets, four package buckets and twelve finding kinds", () => {
+  it("names six reasons, three scopes, five symbol buckets, seven member buckets and seventeen finding kinds", () => {
     expect([...UNREACHABLE_REASONS]).toEqual([
       "no_caller_by_design",
       "substitute_in_use",
+      "offline_implementation",
       "unpersisted_record",
       "prerequisite_of_unbuilt_surface",
       "contract_cannot_carry_the_surface",
     ]);
-    expect([...UNREACHABLE_SCOPES]).toEqual(["store", "package"]);
-    expect([...STORE_REACHABILITIES]).toEqual(["reachable", "test_only", "unconstructed"]);
-    expect([...PACKAGE_REACHABILITIES]).toEqual([
+    expect([...UNREACHABLE_SCOPES]).toEqual(["symbol", "module", "member"]);
+    expect([...SYMBOL_REACHABILITIES]).toEqual([
       "reachable",
+      "diagnostic_type",
+      "test_surface",
+      "test_only",
+      "unconstructed",
+    ]);
+    expect([...MEMBER_REACHABILITIES]).toEqual([
+      "reachable",
+      "entrypoint",
+      "not_importable",
+      "contracts_only",
       "unimported",
       "test_only_importer",
       "declared_unused",
     ]);
-    expect(UNREACHABLE_FINDING_KINDS.length).toBe(12);
+    expect(UNREACHABLE_FINDING_KINDS.length).toBe(17);
+    expect(FLAG_LIST_FINDING_KINDS.length).toBe(4);
   });
 
-  it("partitions the reasons that bear a field, leaving exactly the one that bears none", () => {
+  it("partitions the reasons that bear a field, leaving exactly the two that bear none", () => {
     // ADR-0330's shape, as `pg-storeless-tables.ts` uses it: the bearing sets are asserted disjoint
-    // and the remainder is named, so a sixth reason added to neither fails here rather than quietly
-    // carrying any field it likes.
-    const bearing = [...DECISION_BEARING_REASONS, ...SUBSTITUTE_BEARING_REASONS, ...BLOCKER_BEARING_REASONS];
+    // and the remainder is named, so a seventh reason added to none of them fails here rather than
+    // quietly carrying any field it likes.
+    const bearing = [
+      ...DECISION_BEARING_REASONS,
+      ...SUBSTITUTE_BEARING_REASONS,
+      ...BLOCKER_BEARING_REASONS,
+      ...TEST_CONSTRUCTED_REASONS,
+    ];
     expect(new Set(bearing).size).toBe(bearing.length);
     const remainder = UNREACHABLE_REASONS.filter((r) => !bearing.includes(r));
     expect([...remainder]).toEqual(["unpersisted_record"]);
   });
 
-  it("requires a symbol and a table list of a store declaration, and forbids both of a package one", () => {
+  it("requires a class and a table list of a symbol declaration, and forbids both of a member one", () => {
+    expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), scope: "member" })).toThrow();
     expect(() =>
-      UnreachableDeclarationSchema.parse({ ...declaration(), scope: "package" }),
-    ).toThrow();
-    expect(() =>
-      declaration({ scope: "package", symbol: undefined, tables: undefined }),
+      declaration({ scope: "member", symbol: undefined, tables: undefined }),
     ).not.toThrow();
     expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), symbol: undefined })).toThrow();
     expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), tables: undefined })).toThrow();
   });
 
-  it("accepts an empty table list as a signed assertion that this store writes none", () => {
+  it("requires a file and an entrypoint of a module declaration, and forbids both elsewhere", () => {
+    expect(() => moduleDeclaration()).not.toThrow();
+    expect(() =>
+      UnreachableDeclarationSchema.parse({ ...moduleDeclaration(), entrypoint: undefined }),
+    ).toThrow();
+    expect(() =>
+      UnreachableDeclarationSchema.parse({ ...moduleDeclaration(), module: undefined }),
+    ).toThrow();
+    // A module declaration names no class, and a symbol declaration names no file.
+    expect(() =>
+      UnreachableDeclarationSchema.parse({ ...moduleDeclaration(), symbol: "PostgresWidgetStore" }),
+    ).toThrow();
+    expect(() =>
+      UnreachableDeclarationSchema.parse({ ...declaration(), module: "src/replayer.ts" }),
+    ).toThrow();
+    // And a module declaration carries tables, for the same reason a symbol one does.
+    expect(() =>
+      UnreachableDeclarationSchema.parse({ ...moduleDeclaration(), tables: undefined }),
+    ).toThrow();
+    // A traversal or an absolute path is not a path inside a member.
+    expect(() =>
+      UnreachableDeclarationSchema.parse({ ...moduleDeclaration(), module: "../x/y.ts" }),
+    ).toThrow();
+    expect(() =>
+      UnreachableDeclarationSchema.parse({ ...moduleDeclaration(), module: "/etc/passwd.ts" }),
+    ).toThrow();
+  });
+
+  it("accepts an empty table list as a signed assertion that this component writes none", () => {
     // ADR-0331's distinction, which is the whole reason the field is required rather than optional:
-    // `[]` says "this store writes no catalogued table" and an absent field says "nobody looked".
+    // `[]` says "this writes no catalogued table" and an absent field says "nobody looked".
     expect(declaration({ tables: [] }).tables).toEqual([]);
     expect(() => declaration({ tables: ["meta.widgets"] })).not.toThrow();
     expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), tables: ["widgets"] })).toThrow();
@@ -155,9 +245,7 @@ describe("the declared shape", () => {
     expect(() =>
       UnreachableDeclarationSchema.parse({ ...declaration(), reason: "no_caller_by_design" }),
     ).toThrow();
-    expect(() =>
-      declaration({ reason: "no_caller_by_design", decidedIn: "ADR-0335" }),
-    ).not.toThrow();
+    expect(() => declaration({ reason: "no_caller_by_design", decidedIn: "ADR-0335" })).not.toThrow();
     expect(() =>
       UnreachableDeclarationSchema.parse({
         ...declaration(),
@@ -183,130 +271,250 @@ describe("the declared shape", () => {
     ).toThrow();
   });
 
-  it("refuses a package name that is not a pg package, a bad symbol and an empty note", () => {
-    expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), pkg: "widgets" })).toThrow();
-    expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), symbol: "WidgetStore" })).toThrow();
+  it("refuses a member that is not a workspace directory, a bad class name and an empty note", () => {
+    expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), pkg: "widgets-pg" })).toThrow();
+    expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), pkg: "lib/widgets" })).toThrow();
+    // An app is a legal member now — ADR-0336 declared `apps/*` out of scope and it had a live member.
+    expect(() => declaration({ pkg: "apps/operate-server" })).not.toThrow();
+    expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), symbol: "widgetStore" })).toThrow();
     expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), note: "too short" })).toThrow();
     expect(() => UnreachableDeclarationSchema.parse({ ...declaration(), consequence: "short" })).toThrow();
   });
 
-  it("names a subject the same way from both scopes", () => {
-    expect(subjectOf(declaration())).toBe("widgets-pg:PostgresWidgetStore");
-    expect(subjectOf(declaration({ scope: "package", symbol: undefined, tables: undefined }))).toBe(
-      "widgets-pg",
+  it("names a subject the same way from all three scopes, and cannot confuse two of them", () => {
+    expect(subjectOf(declaration())).toBe("packages/widgets-pg:PostgresWidgetStore");
+    expect(subjectOf(declaration({ scope: "member", symbol: undefined, tables: undefined }))).toBe(
+      "packages/widgets-pg",
     );
+    expect(subjectOf(moduleDeclaration())).toBe("packages/widgets-pg::src/replayer.ts");
   });
 });
 
 /* --------------------------------------------------------------- reachability */
 
 describe("reachability", () => {
-  it("calls a store reachable on any non-test construction site, wherever it is", () => {
-    expect(classifyStore(storeFacts({ constructedBy: ["apps/operate-server/src/node.ts"] }))).toBe(
+  it("calls a class reachable on any non-test construction site, wherever it is", () => {
+    expect(classifySymbol(symbolFacts({ constructedBy: ["apps/operate-server/src/node.ts"] }))).toBe(
       "reachable",
     );
     // Even a site inside its own package counts: the transitive question is a different one, and a
-    // naive answer to it reports ten false positives (see the module's closing note).
+    // naive answer to it reports ten false positives (see the module's header).
     expect(
-      classifyStore(storeFacts({ constructedBy: ["packages/widgets-pg/src/persisting-engine.ts"] })),
+      classifySymbol(symbolFacts({ constructedBy: ["packages/widgets-pg/src/persisting-engine.ts"] })),
     ).toBe("reachable");
   });
 
   it("separates test-only from constructed-nowhere", () => {
-    expect(classifyStore(storeFacts())).toBe("test_only");
-    expect(classifyStore(storeFacts({ constructedByTests: [] }))).toBe("unconstructed");
+    expect(classifySymbol(symbolFacts())).toBe("test_only");
+    expect(classifySymbol(symbolFacts({ constructedByTests: [] }))).toBe("unconstructed");
   });
 
-  it("classifies a package by how it is unreachable, not merely that it is", () => {
-    expect(classifyPgPackage(pkgFacts())).toBe("reachable");
-    expect(classifyPgPackage(pkgFacts({ importedBy: [], dependents: [] }))).toBe("unimported");
-    expect(classifyPgPackage(pkgFacts({ importedBy: [] }))).toBe("declared_unused");
+  it("exempts a class whose own extends clause names an error type", () => {
+    // Mechanical rather than a list of names: an error is constructed by whoever throws it, which is
+    // any consumer, so a `new`-site census says nothing about it. Read from the clause, not from the
+    // class's own name, which is what makes it a rule and not a naming convention.
+    expect(isErrorBase("Error")).toBe(true);
+    expect(isErrorBase("JobError")).toBe(true);
+    expect(isErrorBase("ns.PgError")).toBe(true);
+    expect(isErrorBase("Map")).toBe(false);
+    expect(isErrorBase(null)).toBe(false);
+    expect(classifySymbol(symbolFacts({ symbol: "Refusal", extendsName: "Error" }))).toBe(
+      "diagnostic_type",
+    );
+    // And the fact beats the exemption: an error type something constructs is simply reachable.
     expect(
-      classifyPgPackage(pkgFacts({ importedBy: [], importedByTests: ["packages/x/src/a.test.ts"] })),
+      classifySymbol(
+        symbolFacts({ extendsName: "Error", constructedBy: ["packages/x/src/throw.ts"] }),
+      ),
+    ).toBe("reachable");
+  });
+
+  it("exempts a class other members' tests construct, but never one in a -pg member", () => {
+    // `FixedClock`, `InMemoryKeyStore` and `MockLlmProvider` are public test surface doing their job.
+    expect(
+      classifySymbol(
+        symbolFacts({
+          symbol: "FixedClock",
+          pkg: "packages/dr-runtime",
+          foreignTestMembers: ["packages/dr-runtime-pg"],
+        }),
+      ),
+    ).toBe("test_surface");
+    // The hole this bucket would open, closed where it would matter: a Postgres package's classes
+    // are persistence, not doubles, so a store another package's test happens to build is still a
+    // finding.
+    expect(classifySymbol(symbolFacts({ foreignTestMembers: ["apps/operate-server"] }))).toBe(
+      "test_only",
+    );
+  });
+
+  it("classifies a member by how it is unreachable, not merely that it is", () => {
+    expect(classifyMember(memberFacts())).toBe("reachable");
+    expect(classifyMember(memberFacts({ importedBy: [], dependents: [] }))).toBe("unimported");
+    expect(classifyMember(memberFacts({ importedBy: [] }))).toBe("declared_unused");
+    expect(
+      classifyMember(memberFacts({ importedBy: [], importedByTests: ["packages/x/src/a.test.ts"] })),
     ).toBe("test_only_importer");
+  });
+
+  it("exempts a member that is run rather than imported, one nothing could import, and a declarative one", () => {
+    // All three read from `package.json` and from the class scan, never from a member's name.
+    expect(
+      classifyMember(memberFacts({ importedBy: [], dependents: [], isEntrypoint: true })),
+    ).toBe("entrypoint");
+    expect(
+      classifyMember(memberFacts({ importedBy: [], dependents: [], isImportable: false })),
+    ).toBe("not_importable");
+    // The thirteen contracts packages, derived so they cost no declaration lines — and this is also
+    // the bucket that excuses `packages/deploy`, which exports no class and holds the workspace's
+    // only `evaluateFlag()`. See the module header's fifth blind spot.
+    expect(
+      classifyMember(memberFacts({ importedBy: [], dependents: [], driverClasses: [] })),
+    ).toBe("contracts_only");
   });
 });
 
 /* -------------------------------------------------------------------- the rule */
 
 describe("auditUnreachableStores", () => {
-  it("passes a reachable store and a reachable package with no declarations", () => {
-    expect(audit({ stores: [storeFacts({ constructedBy: ["apps/a/src/node.ts"] })] })).toEqual([]);
+  it("passes a reachable class and a reachable member with no declarations", () => {
+    expect(audit({ symbols: [symbolFacts({ constructedBy: ["apps/a/src/node.ts"] })] })).toEqual([]);
   });
 
-  it("passes an unreachable store that is declared", () => {
-    expect(audit({ stores: [storeFacts()], declarations: [declaration()] })).toEqual([]);
+  it("passes an unreachable class that is declared", () => {
+    expect(audit({ symbols: [symbolFacts()], declarations: [declaration()] })).toEqual([]);
   });
 
-  it("reports a test-only store nothing declares — the fence", () => {
-    const found = audit({ stores: [storeFacts()] });
-    expect(found.map((f) => f.kind)).toEqual(["store_test_only"]);
+  it("reports a test-only class nothing declares — the fence", () => {
+    const found = audit({ symbols: [symbolFacts()] });
+    expect(found.map((f) => f.kind)).toEqual(["symbol_test_only"]);
     expect(found[0]?.detail).toContain("built, tested and never connected");
     // The sentence that says why this rule is not a duplicate of pg-storeless-tables.ts.
     expect(found[0]?.detail).toContain("reads as written");
   });
 
-  it("reports a store nothing constructs at all, separately", () => {
-    const found = audit({ stores: [storeFacts({ constructedByTests: [] })] });
-    expect(found.map((f) => f.kind)).toEqual(["store_unconstructed"]);
+  it("reports a class nothing constructs at all, separately", () => {
+    const found = audit({ symbols: [symbolFacts({ constructedByTests: [] })] });
+    expect(found.map((f) => f.kind)).toEqual(["symbol_unconstructed"]);
   });
 
-  it("reports an unimported package, and names ADR-0335's shape", () => {
-    const found = audit({ packages: [pkgFacts({ importedBy: [], dependents: [] })] });
-    expect(found.map((f) => f.kind)).toEqual(["package_unimported"]);
+  it("reports neither a diagnostic type nor public test surface", () => {
+    expect(audit({ symbols: [symbolFacts({ extendsName: "Error" })] })).toEqual([]);
+    expect(
+      audit({
+        symbols: [
+          symbolFacts({ pkg: "packages/dr-runtime", foreignTestMembers: ["packages/dr-runtime-pg"] }),
+        ],
+        members: [memberFacts({ pkg: "packages/dr-runtime", name: "@crossengin/dr-runtime" })],
+      }),
+    ).toEqual([]);
+  });
+
+  it("reports an unimported member with its driver classes named, and ADR-0335's shape", () => {
+    const found = audit({ members: [memberFacts({ importedBy: [], dependents: [] })] });
+    expect(found.map((f) => f.kind)).toEqual(["member_unimported"]);
     expect(found[0]?.detail).toContain("api-gateway-pg");
+    // The driver classes are in the detail because they are the reason it is not `contracts_only`.
+    expect(found[0]?.detail).toContain("PostgresWidgetStore");
   });
 
   it("reports a dependency declared and never imported, and one imported only by tests", () => {
-    expect(audit({ packages: [pkgFacts({ importedBy: [] })] }).map((f) => f.kind)).toEqual([
-      "package_declared_unused",
+    expect(audit({ members: [memberFacts({ importedBy: [] })] }).map((f) => f.kind)).toEqual([
+      "member_declared_unused",
     ]);
     expect(
       audit({
-        packages: [pkgFacts({ importedBy: [], importedByTests: ["packages/x/src/a.test.ts"] })],
+        members: [memberFacts({ importedBy: [], importedByTests: ["packages/x/src/a.test.ts"] })],
       }).map((f) => f.kind),
-    ).toEqual(["package_test_only_importer"]);
+    ).toEqual(["member_test_only_importer"]);
   });
 
-  it("reports a declaration a caller has overtaken, in both scopes", () => {
-    const store = audit({
-      stores: [storeFacts({ constructedBy: ["apps/a/src/node.ts"] })],
+  it("reports a declaration a caller has overtaken, in all three scopes", () => {
+    const symbol = audit({
+      symbols: [symbolFacts({ constructedBy: ["apps/a/src/node.ts"] })],
       declarations: [declaration()],
     });
-    expect(store.map((f) => f.kind)).toEqual(["overtaken"]);
-    expect(store[0]?.detail).toContain("remove the declaration");
+    expect(symbol.map((f) => f.kind)).toEqual(["overtaken"]);
+    expect(symbol[0]?.detail).toContain("remove the declaration");
 
-    const pkg = audit({
-      declarations: [declaration({ scope: "package", symbol: undefined, tables: undefined })],
+    const member = audit({
+      declarations: [declaration({ scope: "member", symbol: undefined, tables: undefined })],
     });
-    expect(pkg.map((f) => f.kind)).toEqual(["overtaken"]);
+    expect(member.map((f) => f.kind)).toEqual(["overtaken"]);
+
+    const module = audit({
+      modules: [moduleFacts({ entrypointUsedBy: ["apps/a/src/verify.ts"] })],
+      declarations: [moduleDeclaration()],
+    });
+    expect(module.map((f) => f.kind)).toEqual(["overtaken"]);
+    expect(module[0]?.detail).toContain("replayWidgets");
   });
 
-  it("reports a declaration naming a symbol nothing exports, and says if another package has it", () => {
-    const gone = audit({ stores: [], declarations: [declaration()] });
+  it("reports a module declaration whose file is gone, whose entrypoint is gone, or which grew a class", () => {
+    expect(
+      audit({ modules: [moduleFacts({ present: false })], declarations: [moduleDeclaration()] }).map(
+        (f) => f.kind,
+      ),
+    ).toEqual(["unknown_module"]);
+    expect(
+      audit({
+        modules: [moduleFacts({ exportedNames: ["formatWidgetReport"] })],
+        declarations: [moduleDeclaration()],
+      }).map((f) => f.kind),
+    ).toEqual(["unknown_entrypoint"]);
+    // The handover between the two units: a module that gains a class is the symbol rule's problem,
+    // so the module declaration has to go rather than sit beside it and excuse the class too.
+    const grew = audit({
+      modules: [moduleFacts({ exportedClasses: ["WidgetReplayer"] })],
+      declarations: [moduleDeclaration()],
+    });
+    expect(grew.map((f) => f.kind)).toEqual(["module_now_has_class"]);
+    expect(grew[0]?.detail).toContain("delete the module declaration");
+  });
+
+  it("reports a driver-family module that neither exports a class nor is declared — signal 5's fence", () => {
+    const found = audit({ driverFamilyModules: [moduleFacts()] });
+    expect(found.map((f) => f.kind)).toEqual(["driver_module_unaccounted"]);
+    expect(found[0]?.detail).toContain("looks for a 'new' site");
+    // Accounted for either way: a class in it is the symbol rule's, a declaration is this rule's.
+    expect(audit({ driverFamilyModules: [moduleFacts({ exportedClasses: ["X"] })] })).toEqual([]);
+    expect(
+      audit({
+        modules: [moduleFacts()],
+        driverFamilyModules: [moduleFacts()],
+        declarations: [moduleDeclaration()],
+      }),
+    ).toEqual([]);
+  });
+
+  it("reports a declaration naming a class nothing exports, and says if another member has it", () => {
+    const gone = audit({ symbols: [], declarations: [declaration()] });
     expect(gone.map((f) => f.kind)).toEqual(["unknown_symbol"]);
     expect(gone[0]?.detail).toContain("renamed or removed");
 
     const moved = audit({
-      stores: [storeFacts({ pkg: "gadgets-pg" })],
-      packages: [pkgFacts(), pkgFacts({ pkg: "gadgets-pg", name: "@crossengin/gadgets-pg" })],
+      symbols: [symbolFacts({ pkg: "packages/gadgets-pg" })],
+      members: [
+        memberFacts(),
+        memberFacts({ pkg: "packages/gadgets-pg", name: "@crossengin/gadgets-pg" }),
+      ],
       declarations: [declaration()],
     });
-    // Both findings land, and that is right: one broken declaration, and a store in another package
+    // Both findings land, and that is right: one broken declaration, and a class in another member
     // that nothing has decided about. `pg-storeless-tables.ts` makes the same pairing for a
     // `writerless_successor`.
-    expect(moved.map((f) => f.kind)).toEqual(["unknown_symbol", "store_test_only"]);
-    expect(moved[0]?.detail).toContain("exported by gadgets-pg instead");
+    expect(moved.map((f) => f.kind)).toEqual(["unknown_symbol", "symbol_test_only"]);
+    expect(moved[0]?.detail).toContain("exported by packages/gadgets-pg instead");
   });
 
-  it("reports a declaration naming a package that is not a pg package here", () => {
-    const found = audit({ packages: [], declarations: [declaration()] });
+  it("reports a declaration naming a member this workspace does not have", () => {
+    const found = audit({ members: [], declarations: [declaration()] });
     expect(found.map((f) => f.kind)).toEqual(["unknown_package"]);
   });
 
   it("reports the same subject declared twice", () => {
     const found = audit({
-      stores: [storeFacts()],
+      symbols: [symbolFacts()],
       declarations: [declaration(), declaration({ reason: "unpersisted_record" })],
     });
     expect(found.map((f) => f.kind)).toEqual(["duplicate"]);
@@ -316,21 +524,33 @@ describe("auditUnreachableStores", () => {
     // `writerless_successor`'s shape: a reason that asserts something positive about another symbol
     // is the reason that rots when that symbol is abandoned too.
     const d = declaration({ reason: "substitute_in_use", substitutedBy: "InMemoryWidgetStore" });
-    const found = audit({ stores: [storeFacts()], declarations: [d] });
+    const found = audit({ symbols: [symbolFacts()], declarations: [d] });
     expect(found.map((f) => f.kind)).toEqual(["unsupported_substitute"]);
     expect(found[0]?.detail).toContain("something else does this job is false");
     expect(
       audit({
-        stores: [storeFacts()],
+        symbols: [symbolFacts()],
         declarations: [d],
         reachableSubstitutes: ["InMemoryWidgetStore"],
       }),
     ).toEqual([]);
   });
 
+  it("reports an offline implementation no test constructs either — the inverted check", () => {
+    // Every other reason is checked against a caller; this one is checked for one. A seam
+    // implementation nothing builds at all is dead rather than offline, so the reason is wrong.
+    const d = declaration({ reason: "offline_implementation" });
+    expect(
+      audit({ symbols: [symbolFacts({ constructedByTests: [] })], declarations: [d] }).map(
+        (f) => f.kind,
+      ),
+    ).toEqual(["offline_implementation_unconstructed"]);
+    expect(audit({ symbols: [symbolFacts()], declarations: [d] })).toEqual([]);
+  });
+
   it("reports a declared table the catalog does not have", () => {
     const found = audit({
-      stores: [storeFacts()],
+      symbols: [symbolFacts()],
       declarations: [declaration({ tables: ["meta.widgets"] })],
     });
     expect(found.map((f) => f.kind)).toEqual(["unknown_table"]);
@@ -338,7 +558,7 @@ describe("auditUnreachableStores", () => {
 
   it("reports a table the storeless rule also calls writerless — the two rules disagreeing", () => {
     const found = audit({
-      stores: [storeFacts()],
+      symbols: [symbolFacts()],
       declarations: [declaration({ tables: ["meta.widgets"] })],
       catalogTables: ["meta.widgets"],
       storelessTables: ["meta.widgets"],
@@ -349,32 +569,48 @@ describe("auditUnreachableStores", () => {
 
   it("every finding kind is reachable", () => {
     const reached = new Set<string>([
-      ...audit({ stores: [storeFacts()] }).map((f) => f.kind),
-      ...audit({ stores: [storeFacts({ constructedByTests: [] })] }).map((f) => f.kind),
-      ...audit({ packages: [pkgFacts({ importedBy: [], dependents: [] })] }).map((f) => f.kind),
+      ...audit({ symbols: [symbolFacts()] }).map((f) => f.kind),
+      ...audit({ symbols: [symbolFacts({ constructedByTests: [] })] }).map((f) => f.kind),
+      ...audit({ members: [memberFacts({ importedBy: [], dependents: [] })] }).map((f) => f.kind),
+      ...audit({ members: [memberFacts({ importedBy: [], importedByTests: ["x.test.ts"] })] }).map(
+        (f) => f.kind,
+      ),
+      ...audit({ members: [memberFacts({ importedBy: [] })] }).map((f) => f.kind),
+      ...audit({ driverFamilyModules: [moduleFacts()] }).map((f) => f.kind),
       ...audit({
-        packages: [pkgFacts({ importedBy: [], importedByTests: ["x.test.ts"] })],
-      }).map((f) => f.kind),
-      ...audit({ packages: [pkgFacts({ importedBy: [] })] }).map((f) => f.kind),
-      ...audit({
-        stores: [storeFacts({ constructedBy: ["a.ts"] })],
+        symbols: [symbolFacts({ constructedBy: ["a.ts"] })],
         declarations: [declaration()],
       }).map((f) => f.kind),
       ...audit({ declarations: [declaration()] }).map((f) => f.kind),
-      ...audit({ packages: [], declarations: [declaration()] }).map((f) => f.kind),
-      ...audit({ stores: [storeFacts()], declarations: [declaration(), declaration()] }).map(
+      ...audit({ members: [], declarations: [declaration()] }).map((f) => f.kind),
+      ...audit({ modules: [moduleFacts({ present: false })], declarations: [moduleDeclaration()] }).map(
         (f) => f.kind,
       ),
       ...audit({
-        stores: [storeFacts()],
+        modules: [moduleFacts({ exportedNames: [] })],
+        declarations: [moduleDeclaration()],
+      }).map((f) => f.kind),
+      ...audit({
+        modules: [moduleFacts({ exportedClasses: ["X"] })],
+        declarations: [moduleDeclaration()],
+      }).map((f) => f.kind),
+      ...audit({ symbols: [symbolFacts()], declarations: [declaration(), declaration()] }).map(
+        (f) => f.kind,
+      ),
+      ...audit({
+        symbols: [symbolFacts()],
         declarations: [declaration({ reason: "substitute_in_use", substitutedBy: "InMemoryX" })],
       }).map((f) => f.kind),
       ...audit({
-        stores: [storeFacts()],
+        symbols: [symbolFacts({ constructedByTests: [] })],
+        declarations: [declaration({ reason: "offline_implementation" })],
+      }).map((f) => f.kind),
+      ...audit({
+        symbols: [symbolFacts()],
         declarations: [declaration({ tables: ["meta.widgets"] })],
       }).map((f) => f.kind),
       ...audit({
-        stores: [storeFacts()],
+        symbols: [symbolFacts()],
         declarations: [declaration({ tables: ["meta.widgets"] })],
         catalogTables: ["meta.widgets"],
         storelessTables: ["meta.widgets"],
@@ -392,8 +628,8 @@ describe("auditUnreachableStores", () => {
 
   it("formats findings one per line with the kind in front", () => {
     expect(formatUnreachableFindings([])).toBe("");
-    expect(formatUnreachableFindings(audit({ stores: [storeFacts()] }))).toContain(
-      "[store_test_only]",
+    expect(formatUnreachableFindings(audit({ symbols: [symbolFacts()] }))).toContain(
+      "[symbol_test_only]",
     );
   });
 });
@@ -411,8 +647,9 @@ describe("reading the source", () => {
   });
 
   it("does not count a construction written inside a string", () => {
-    // This file's own notes quote these symbol names; without blanking, the declaration list would
-    // argue itself reachable.
+    // Not hypothetical: an ad-hoc scan of this very module read its own doc comment, which contains
+    // the literal text `new PostgresTargetingRuleStore(`, as a construction site — and the store read
+    // as reachable. Both passes are load-bearing.
     const code = codeOnly('const note = "nothing calls new PostgresWidgetStore(conn) anywhere";');
     expect(findConstructions(code, new Set(["PostgresWidgetStore"])).constructs).toEqual([]);
   });
@@ -461,14 +698,66 @@ describe("reading the source", () => {
     expect(scan.dynamic[0]?.line).toBe(1);
   });
 
-  it("finds an exported store class, abstract or not, and nothing else", () => {
+  it("finds an exported class with its extends clause, abstract or not, and nothing else", () => {
     expect(
-      exportedStoreSymbols(
+      exportedClasses(
         codeOnly(
-          "export class PostgresA {}\nexport abstract class PostgresB {}\nexport class Other {}\nclass PostgresC {}",
+          [
+            "export class PostgresA {}",
+            "export abstract class PostgresB extends Base {}",
+            "export class Boom extends Error {}",
+            "export class Impl implements Seam {}",
+            "class PostgresC {}",
+          ].join("\n"),
         ),
       ),
-    ).toEqual(["PostgresA", "PostgresB"]);
+    ).toEqual([
+      { name: "PostgresA", extendsName: null },
+      { name: "PostgresB", extendsName: "Base" },
+      { name: "Boom", extendsName: "Error" },
+      // `implements` is not `extends`, and reading the clause rather than the whole head is what
+      // keeps a seam implementation out of the diagnostic bucket.
+      { name: "Impl", extendsName: null },
+    ]);
+  });
+
+  it("finds every exported name, so a declared module entrypoint can be checked against reality", () => {
+    const names = exportedNames(
+      codeOnly(
+        [
+          "export const KINDS = [] as const;",
+          "export type Kind = string;",
+          "export interface Report { a: 1 }",
+          "export async function replayIncidents() {}",
+          "export function formatIncidentReplayReport() {}",
+          "function hidden() {}",
+          "export { hidden as shown };",
+        ].join("\n"),
+      ),
+    );
+    expect([...names].sort()).toEqual([
+      "KINDS",
+      "Kind",
+      "Report",
+      "formatIncidentReplayReport",
+      "replayIncidents",
+      "shown",
+    ]);
+  });
+
+  it("finds a bare identifier use, which is how a function-shaped entrypoint is asked about", () => {
+    expect(
+      findIdentifierUses(codeOnly("const r = await replayIncidents(conn);"), new Set(["replayIncidents"])),
+    ).toEqual(["replayIncidents"]);
+    // Word-bounded, so a longer name is not a use of a shorter one.
+    expect(
+      findIdentifierUses(codeOnly("replayIncidentsLater();"), new Set(["replayIncidents"])),
+    ).toEqual([]);
+    // And a mention in prose or in a string is not a use, for the same reason a `new` is not.
+    expect(
+      findIdentifierUses(codeOnly('// replayIncidents is unused\nconst s = "replayIncidents";'), new Set(["replayIncidents"])),
+    ).toEqual([]);
+    expect(findIdentifierUses("anything", new Set())).toEqual([]);
   });
 
   it("reads a specifier from each of the four forms that reach a package", () => {
@@ -510,95 +799,168 @@ describe("the real workspace", () => {
   const scan = scanWorkspaceStores();
   const catalogTables = parseCatalogSource(readCatalogSource()).map((t) => `${t.schema}.${t.name}`);
   const storelessTables = STORELESS_TABLES.map((d) => d.table);
-  const reachable = scan.stores.filter((s) => classifyStore(s) === "reachable");
-  const unreachable = scan.stores.filter((s) => classifyStore(s) !== "reachable");
+  const bucketed = (bucket: string): readonly SymbolFacts[] =>
+    scan.symbols.filter((s) => classifySymbol(s) === bucket);
+  const reachable = bucketed("reachable");
+  const unreachable = scan.symbols.filter((s) => {
+    const b = classifySymbol(s);
+    return b === "test_only" || b === "unconstructed";
+  });
 
   const liveAudit = (
     declarations: readonly UnreachableDeclaration[],
-    stores: readonly StoreFacts[] = scan.stores,
+    symbols: readonly SymbolFacts[] = scan.symbols,
   ): ReturnType<typeof auditUnreachableStores> =>
     auditUnreachableStores({
-      stores,
-      packages: scan.packages,
+      symbols,
+      members: scan.memberFacts,
+      modules: scan.modules,
       declarations,
       catalogTables,
       storelessTables,
       reachableSubstitutes: scan.reachableSubstitutes,
+      driverFamilyModules: scan.driverFamilyModules,
     });
 
-  it("walked the workspace and resolved every package it should have", () => {
-    // **The vacuity guard this rule needs most.** Signal 2 finds nothing today — ADR-0335 closed its
-    // only member — so "finds ≥ 1" would be a false floor and a rule asserting nothing is the exact
-    // failure this family exists to prevent. The assertion is therefore that the scan *examined and
-    // resolved* everything: every root glob understood, a floor of files, a floor of pg packages,
-    // and every one of them landing in a known bucket.
+  it("walked the workspace and resolved every member it should have", () => {
+    // **The vacuity guard this rule needs most.** Several of its signals have no live member, so
+    // "finds ≥ 1" would be a false floor and a rule asserting nothing is the exact failure this
+    // family exists to prevent. The assertion is therefore that the scan *examined and resolved*
+    // everything: every root glob understood, a floor of files, a floor of members, and every one
+    // landing in a known bucket.
     expect(scan.unhandledGlobs).toEqual([]);
-    expect(scan.files).toBeGreaterThanOrEqual(1500);
-    expect(scan.packages.length).toBeGreaterThanOrEqual(18);
-    // `packages/*-pg` also matches `packages/*-runtime-pg`, so the set is derived from one readdir
-    // and keyed by directory. A doubled denominator would make every count below look better.
-    expect(new Set(scan.packages.map((p) => p.pkg)).size).toBe(scan.packages.length);
-    expect(scan.collidingSymbols).toEqual([]);
-    for (const pkg of scan.packages) {
-      expect(PACKAGE_REACHABILITIES).toContain(classifyPgPackage(pkg));
-      // A renamed package would make its import edges unfindable and read as unimported.
-      expect(pkg.name, pkg.pkg).toBe(`@crossengin/${pkg.pkg}`);
+    expect(scan.files).toBeGreaterThanOrEqual(1700);
+    expect(scan.members.length).toBeGreaterThanOrEqual(88);
+    expect(new Set(scan.memberFacts.map((m) => m.pkg)).size).toBe(scan.memberFacts.length);
+    for (const member of scan.memberFacts) {
+      expect(MEMBER_REACHABILITIES).toContain(classifyMember(member));
+      expect(member.name, member.pkg).toBe(`@crossengin/${member.pkg.split("/")[1] ?? ""}`);
     }
-    for (const store of scan.stores) expect(STORE_REACHABILITIES).toContain(classifyStore(store));
-    // Both `-pg` and `-runtime-pg` are present, so the suffix predicate is not quietly matching one.
-    expect(scan.packages.map((p) => p.pkg)).toContain("kernel-pg");
-    expect(scan.packages.map((p) => p.pkg)).toContain("workflow-runtime-pg");
+    for (const facts of scan.symbols) expect(SYMBOL_REACHABILITIES).toContain(classifySymbol(facts));
+    // Both `-pg` and `-runtime-pg` are present, and so are apps and non-pg packages, so none of the
+    // three widenings is quietly matching nothing.
+    const dirs = scan.memberFacts.map((m) => m.pkg);
+    expect(dirs).toContain("packages/kernel-pg");
+    expect(dirs).toContain("packages/workflow-runtime-pg");
+    expect(dirs).toContain("packages/observability-runtime");
+    expect(dirs).toContain("apps/operate-server");
   });
 
-  it("found most stores reachable, which is the direction that would be catastrophic to get wrong", () => {
-    // A site matcher that stopped matching would report all 55 stores unreachable — over-reporting
-    // is the direction that fails CI on correct code, so the floor is on the *reachable* count. The
-    // ceiling on the other side is deliberately loose: wiring a store lowers it, and a legitimately
-    // declared ninth must not break it, so it guards only against a collapse.
-    expect(scan.stores.length).toBeGreaterThanOrEqual(50);
-    expect(reachable.length).toBeGreaterThanOrEqual(40);
-    expect(unreachable.length).toBeLessThanOrEqual(12);
+  it("reads apps/operate-web, which has no src/ and was the stated reason apps were out of scope", () => {
+    // ADR-0336 declared `apps/*` out of scope and named this specific hole: a walk hardcoding
+    // `<member>/src` misses a Next app entirely. The floor is on this one member because a walk that
+    // silently stopped reaching it would take all 43 of its files with it and still pass every
+    // other assertion here.
+    expect(scan.filesByMember.get("apps/operate-web") ?? 0).toBeGreaterThanOrEqual(30);
+    expect(existsSync(join(REPO_ROOT, "apps/operate-web", "src"))).toBe(false);
+    // And it is exempt by a fact rather than by its name: it publishes no `main` and no `.` export.
+    const web = scan.memberFacts.find((m) => m.pkg === "apps/operate-web");
+    expect(web?.isImportable).toBe(false);
+    expect(web === undefined ? "missing" : classifyMember(web)).toBe("not_importable");
+  });
+
+  it("found most classes reachable, which is the direction that would be catastrophic to get wrong", () => {
+    // A site matcher that stopped matching would report every class unreachable — over-reporting is
+    // the direction that fails CI on correct code, so the floor is on the *reachable* count, and the
+    // widened predicate makes that worse rather than better: there are five times as many candidates
+    // now. The ceiling on the other side is deliberately loose: wiring lowers it, and a legitimately
+    // declared new member must not break it, so it guards only against a collapse.
+    expect(scan.symbols.length).toBeGreaterThanOrEqual(280);
+    expect(reachable.length).toBeGreaterThanOrEqual(240);
+    expect(unreachable.length).toBeLessThanOrEqual(40);
     // ADR-0335's wiring, pinned: `PostgresRateLimitChecker` was one of api-gateway-pg's four
     // callerless stores until that increment constructed it in `node.ts`. If it ever goes back to
     // test-only, this rule should be the thing that says so.
-    const checker = scan.stores.find((s) => s.symbol === "PostgresRateLimitChecker");
+    const checker = scan.symbols.find((s) => s.symbol === "PostgresRateLimitChecker");
     expect(checker).toBeDefined();
-    expect(checker === undefined ? "missing" : classifyStore(checker)).toBe("reachable");
+    expect(checker === undefined ? "missing" : classifySymbol(checker)).toBe("reachable");
   });
 
-  it("attributes every construction it can see, and nothing hides behind a dynamic one", () => {
-    // Zero today. Asserted as a tripwire rather than an equality: the day a store is constructed
-    // through `new (map[kind])()` this scan cannot attribute it, and the honest failure is here
-    // rather than in a silent "reachable".
+  it("both mechanical exemptions have live members and neither is over-reaching", () => {
+    // An exemption over a convention nobody uses would be a dead branch; one that swallowed the
+    // fence's own population would be a muted rule. Both sides asserted.
+    const diagnostics = bucketed("diagnostic_type");
+    expect(diagnostics.length).toBeGreaterThanOrEqual(2);
+    expect(diagnostics.length).toBeLessThanOrEqual(30);
+    for (const facts of diagnostics) expect(isErrorBase(facts.extendsName), facts.symbol).toBe(true);
+
+    const surface = bucketed("test_surface");
+    expect(surface.length).toBeGreaterThanOrEqual(4);
+    expect(surface.length).toBeLessThanOrEqual(40);
+    for (const facts of surface) {
+      expect(facts.foreignTestMembers.length, facts.symbol).toBeGreaterThan(0);
+      // The hole closed where it would matter: persistence is never public test surface.
+      expect(facts.pkg.endsWith("-pg"), facts.symbol).toBe(false);
+    }
+  });
+
+  it("the contracts_only exemption has live members and never swallows a -pg member", () => {
+    const contracts = scan.memberFacts.filter((m) => classifyMember(m) === "contracts_only");
+    // Two-sided: these thirteen cost no declaration lines, and if the driver-class scan broke every
+    // member would land here and the rule would pass having examined nothing.
+    expect(contracts.length).toBeGreaterThanOrEqual(8);
+    expect(contracts.length).toBeLessThanOrEqual(30);
+    for (const member of contracts) {
+      expect(member.driverClasses, member.pkg).toEqual([]);
+      expect(member.pkg.endsWith("-pg"), member.pkg).toBe(false);
+    }
+    // The named live member of this exemption's own blind spot, pinned so it cannot be forgotten:
+    // `packages/deploy` holds the workspace's only `evaluateFlag()` and exports no class.
+    const deploy = scan.memberFacts.find((m) => m.pkg === "packages/deploy");
+    expect(deploy?.driverClasses).toEqual([]);
+    expect(deploy === undefined ? "missing" : classifyMember(deploy)).toBe("contracts_only");
+  });
+
+  it("attributes every construction it can see, reports colliding names, and hides nothing dynamic", () => {
+    // Zero dynamic constructions today. Asserted as a tripwire rather than an equality: the day a
+    // store is constructed through `new (map[kind])()` this scan cannot attribute it, and the honest
+    // failure is here rather than in a silent "reachable".
     expect(scan.dynamic.filter((d) => d.snippet.includes("Postgres"))).toEqual([]);
     expect(scan.dynamic.length).toBeLessThanOrEqual(20);
+    // Collisions are real now that the predicate is every class: eight members each declare
+    // `FixedClock`. They are reported rather than asserted empty, and the direction is conservative —
+    // a shared site makes every copy read reachable, so the rule can only under-report.
+    expect(scan.collidingSymbols.length).toBeLessThanOrEqual(12);
+    const colliding = new Set(scan.collidingSymbols.map((s) => s.slice(0, s.indexOf(":"))));
+    expect(colliding.has("FixedClock")).toBe(true);
+    for (const facts of scan.symbols) {
+      expect(facts.alsoDeclaredBy.includes(facts.pkg), facts.symbol).toBe(false);
+      if (facts.alsoDeclaredBy.length > 0) expect(colliding.has(facts.symbol)).toBe(true);
+    }
   });
 
-  it("no exported Postgres store is unreachable without a declaration saying why", () => {
-    // The assertion this file exists for. A store built, tested and never connected is a failure at
-    // the moment it lands, rather than a defect somebody finds by grepping three increments later.
+  it("no exported class is unreachable without a declaration saying why", () => {
+    // The assertion this file exists for. A component built, tested and never connected is a failure
+    // at the moment it lands, rather than a defect somebody finds by grepping three increments later.
     expect(formatUnreachableFindings(liveAudit(UNREACHABLE_STORES))).toBe("");
   });
 
-  it("declares exactly the unreachable stores, and every declaration parses", () => {
+  it("declares exactly the unreachable classes, and every declaration parses", () => {
     const declared = new Set(UNREACHABLE_STORES.map((d) => subjectOf(d)));
     expect(declared.size).toBe(UNREACHABLE_STORES.length);
     for (const d of UNREACHABLE_STORES) {
       expect(() => UnreachableDeclarationSchema.parse(d)).not.toThrow();
     }
     // Both directions, as plain set equality over subjects. The count is deliberately *not* asserted
-    // — three of these are being wired as this lands, and a number here would make a correct wiring
-    // commit fail for the wrong reason. The list is the only place a name is written down.
-    expect([...declared].sort()).toEqual(
+    // — several of these are being wired as this lands, and a number here would make a correct
+    // wiring commit fail for the wrong reason. The list is the only place a name is written down.
+    const symbolSubjects = UNREACHABLE_STORES.filter((d) => d.scope === "symbol").map((d) =>
+      subjectOf(d),
+    );
+    expect(symbolSubjects.slice().sort()).toEqual(
       unreachable.map((s) => `${s.pkg}:${s.symbol}`).sort(),
     );
   });
 
-  it("every declaration names a package, a symbol and a file that exist", () => {
+  it("every declaration names a member, a class or a file, and a path that exists", () => {
     for (const d of UNREACHABLE_STORES) {
-      expect(existsSync(join(REPO_ROOT, "packages", d.pkg)), d.pkg).toBe(true);
+      expect(existsSync(join(REPO_ROOT, d.pkg)), d.pkg).toBe(true);
+      if (d.module !== undefined) {
+        expect(existsSync(join(REPO_ROOT, d.pkg, d.module)), `${d.pkg}/${d.module}`).toBe(true);
+        continue;
+      }
       if (d.symbol === undefined) continue;
-      const facts = scan.stores.find((s) => s.symbol === d.symbol && s.pkg === d.pkg);
+      const facts = scan.symbols.find((s) => s.symbol === d.symbol && s.pkg === d.pkg);
       expect(facts, subjectOf(d)).toBeDefined();
       expect(existsSync(join(REPO_ROOT, facts?.declaredIn ?? "")), facts?.declaredIn).toBe(true);
     }
@@ -613,10 +975,7 @@ describe("the real workspace", () => {
     expect(cited.length).toBeGreaterThanOrEqual(1);
     for (const id of cited) {
       const number = id.slice("ADR-".length);
-      expect(
-        adrs.some((f) => f.startsWith(`${number}-`)),
-        `${id} has no file in docs/adr`,
-      ).toBe(true);
+      expect(adrs.some((f) => f.startsWith(`${number}-`)), `${id} has no file in docs/adr`).toBe(true);
     }
   });
 
@@ -626,7 +985,7 @@ describe("the real workspace", () => {
     // **written** while no deployment has ever put a row in it. A table in both lists would mean
     // the two disagree, and the audit reports it.
     const tables = UNREACHABLE_STORES.flatMap((d) => d.tables ?? []);
-    expect(tables.length).toBeGreaterThanOrEqual(UNREACHABLE_STORES.filter((d) => d.scope === "store").length);
+    expect(tables.length).toBeGreaterThanOrEqual(5);
     for (const table of tables) {
       expect(catalogTables, table).toContain(table);
       expect(storelessTables, table).not.toContain(table);
@@ -637,75 +996,193 @@ describe("the real workspace", () => {
     const substitutes = UNREACHABLE_STORES.flatMap((d) =>
       d.substitutedBy === undefined ? [] : [d.substitutedBy],
     );
+    expect(substitutes.length).toBeGreaterThanOrEqual(1);
     for (const name of substitutes) expect(scan.reachableSubstitutes, name).toContain(name);
+  });
+
+  it("the driver family is real, every member is accounted for, and the glob still matches", () => {
+    // Two-sided, which matters more here than anywhere else in this file: a file-level predicate that
+    // stopped matching reports nothing and passes silently, the opposite failure from the
+    // over-reporting the reachable floor guards. So the floor is on how many family members the glob
+    // finds, and the ceiling on how many of them export no class.
+    expect([...DRIVER_MODULE_FAMILIES]).toEqual(["replayer.ts"]);
+    expect(scan.driverFamilyModules.length).toBeGreaterThanOrEqual(6);
+    const classless = scan.driverFamilyModules.filter((m) => m.exportedClasses.length === 0);
+    expect(classless.length).toBeLessThanOrEqual(3);
+    // The fifth blind spot's named live member, pinned by both halves of what makes it invisible.
+    const incident = scan.driverFamilyModules.find(
+      (m) => m.pkg === "packages/incident-response-runtime-pg",
+    );
+    expect(incident?.module).toBe("src/replayer.ts");
+    expect(incident?.exportedClasses).toEqual([]);
+    expect(incident?.exportedNames).toContain("replayIncidents");
+    for (const module of scan.driverFamilyModules) {
+      expect(module.present, `${module.pkg}/${module.module}`).toBe(true);
+    }
   });
 
   it("would catch the defect it was written for, in both directions", () => {
     // The fence finding nothing is indistinguishable from the fence being broken, so the controls are
     // built from the *real* scan rather than from a name that a concurrent wiring commit could move.
     //
-    // One: a reachable store whose non-test sites are taken away must be reported.
+    // One: a reachable class whose non-test sites are taken away must be reported.
     const victim = reachable[0];
     expect(victim).toBeDefined();
-    const stripped = StoreFactsSchema.parse({
-      ...(victim ?? storeFacts()),
+    const stripped = SymbolFactsSchema.parse({
+      ...(victim ?? symbolFacts()),
       constructedBy: [],
       constructedByTests: ["packages/x/src/x.test.ts"],
+      // Both exemptions neutralised, so the control exercises the fence rather than a bucket.
+      extendsName: null,
+      foreignTestMembers: [],
     });
-    const others = scan.stores.filter((s) => s.symbol !== stripped.symbol);
+    const others = scan.symbols.filter(
+      (s) => !(s.symbol === stripped.symbol && s.pkg === stripped.pkg),
+    );
     expect(
       liveAudit(UNREACHABLE_STORES, [...others, stripped]).map((f) => `${f.kind}:${f.subject}`),
-    ).toEqual([`store_test_only:${stripped.pkg}:${stripped.symbol}`]);
+    ).toEqual([`symbol_test_only:${stripped.pkg}:${stripped.symbol}`]);
 
-    // Two: a store with a live caller cannot be parked as unreachable.
+    // Two: a class with a live caller cannot be parked as unreachable.
     const parked = UnreachableDeclarationSchema.parse({
-      scope: "store",
-      pkg: victim?.pkg ?? "widgets-pg",
+      scope: "symbol",
+      pkg: victim?.pkg ?? "packages/widgets-pg",
       symbol: victim?.symbol ?? "PostgresWidgetStore",
       reason: "unpersisted_record",
       tables: [],
       consequence: "a false claim, written to prove the rule reads the workspace",
       note: "a false claim, written to prove the rule reads the workspace",
     });
-    expect(
-      liveAudit([...UNREACHABLE_STORES, parked]).map((f) => `${f.kind}:${f.subject}`),
-    ).toEqual([`overtaken:${parked.pkg}:${parked.symbol}`]);
+    expect(liveAudit([...UNREACHABLE_STORES, parked]).map((f) => `${f.kind}:${f.subject}`)).toEqual([
+      `overtaken:${parked.pkg}:${parked.symbol}`,
+    ]);
   });
 
-  it("would catch a package nobody imports, which is the signal with no live member", () => {
-    // Signal 2's only member was closed last increment, so the only way to show the rule works is to
-    // take a real package's import edges away. `api-gateway-pg` is the right victim: this is
-    // literally its state before ADR-0335.
-    const gateway = scan.packages.find((p) => p.pkg === "api-gateway-pg");
+  it("would catch a member nobody imports, which is the signal with one live member", () => {
+    // `api-gateway-pg` is the right victim: this is literally its state before ADR-0335, and it
+    // exports driver classes, so it cannot fall into the `contracts_only` exemption.
+    const gateway = scan.memberFacts.find((m) => m.pkg === "packages/api-gateway-pg");
     expect(gateway).toBeDefined();
-    const orphaned = PgPackageFactsSchema.parse({
-      ...(gateway ?? pkgFacts()),
+    expect(gateway?.driverClasses.length ?? 0).toBeGreaterThan(0);
+    const orphaned = MemberFactsSchema.parse({
+      ...(gateway ?? memberFacts()),
       dependents: [],
       importedBy: [],
       importedByTests: [],
     });
     const findings = auditUnreachableStores({
-      stores: [],
-      packages: [orphaned],
+      symbols: [],
+      members: [orphaned],
+      modules: [],
       declarations: [],
       catalogTables,
       storelessTables,
       reachableSubstitutes: scan.reachableSubstitutes,
+      driverFamilyModules: [],
     });
     expect(findings.map((f) => `${f.kind}:${f.subject}`)).toEqual([
-      "package_unimported:api-gateway-pg",
+      "member_unimported:packages/api-gateway-pg",
     ]);
   });
 
   it("the test-module convention it relies on is real and in use", () => {
     // `isTestSite`'s `test-*.ts` half is insurance against a hole nothing currently falls into, and
-    // insurance over a convention that does not exist would be a dead branch. Thirteen such modules
-    // exist, so the branch is live.
-    const testModules = scan.stores.length > 0 ? readdirSync(join(REPO_ROOT, "packages")) : [];
-    const withFakes = testModules.filter((pkg) =>
+    // insurance over a convention that does not exist would be a dead branch.
+    const withFakes = readdirSync(join(REPO_ROOT, "packages")).filter((pkg) =>
       existsSync(join(REPO_ROOT, "packages", pkg, "src", "test-fakes.ts")),
     );
     expect(withFakes.length).toBeGreaterThanOrEqual(8);
     for (const pkg of withFakes) expect(isTestSite(`packages/${pkg}/src/test-fakes.ts`)).toBe(true);
+  });
+});
+
+/* ------------------------------------------------- the second list, both ways */
+
+describe("the callerless flag-store list", () => {
+  const scan = scanWorkspaceStores();
+  const flagSymbols = scan.symbols.filter((s) => s.pkg === FLAG_MEMBER);
+  const listed = readCallerlessFlagStores();
+
+  it("reads that list out of its own declaration and nothing beside it", () => {
+    // Bounded to the `Object.freeze([...])` after the name, for `readProtectedTables`' reason:
+    // `EXPORTED_STORE_SYMBOLS` sits a few lines below and names all three of the package's stores
+    // *including the reachable one*, so a loose scan would pick up `PostgresKillSwitchStore` from the
+    // wrong declaration and invert the comparison.
+    expect(listed.length).toBeGreaterThanOrEqual(2);
+    expect(listed).not.toContain("PostgresKillSwitchStore");
+    expect(existsSync(join(REPO_ROOT, FLAG_SURVEY_PATH))).toBe(true);
+    // A parse whose failure mode is "found nothing" would make this comparison vacuous in exactly
+    // the case it exists for, so it refuses instead.
+    expect(() => readCallerlessFlagStores(join(REPO_ROOT, "docs"))).toThrow();
+  });
+
+  it("agrees with this scan and with UNREACHABLE_STORES, in both directions", () => {
+    // Three facts compared, not two: comparing the two lists alone would pass while both were stale
+    // together. ADR-0336 shipped them with no comparison at all, which is ADR-0288's shape.
+    expect(flagSymbols.length).toBeGreaterThanOrEqual(3);
+    expect(
+      auditCallerlessFlagLists({
+        listed,
+        symbols: flagSymbols,
+        declarations: UNREACHABLE_STORES,
+      }),
+    ).toEqual([]);
+  });
+
+  it("would catch each way the two lists can drift apart", () => {
+    const base = { symbols: flagSymbols, declarations: UNREACHABLE_STORES };
+    // That list names something this scan calls reachable.
+    expect(
+      auditCallerlessFlagLists({ ...base, listed: [...listed, "PostgresKillSwitchStore"] }).map(
+        (f) => f.kind,
+      ),
+    ).toEqual(["flag_list_overtaken"]);
+    // That list names something nothing exports.
+    expect(
+      auditCallerlessFlagLists({ ...base, listed: [...listed, "PostgresGhostStore"] }).map(
+        (f) => f.kind,
+      ),
+    ).toEqual(["flag_list_unknown_symbol"]);
+    // That list has a gap this scan can see — and the same omission is also a disagreement with
+    // UNREACHABLE_STORES, so both findings land and they are different facts.
+    const dropped = auditCallerlessFlagLists({ ...base, listed: listed.slice(1) });
+    expect(dropped.map((f) => f.kind).sort()).toEqual(["flag_list_incomplete", "flag_lists_disagree"]);
+    expect(dropped.every((f) => f.symbol === listed[0])).toBe(true);
+    // And the reverse direction: declared here, absent there.
+    const extra = UnreachableDeclarationSchema.parse({
+      scope: "symbol",
+      pkg: FLAG_MEMBER,
+      symbol: "PostgresKillSwitchStore",
+      reason: "unpersisted_record",
+      tables: [],
+      consequence: "a false claim, written to prove the cross-check reads both lists",
+      note: "a false claim, written to prove the cross-check reads both lists",
+    });
+    expect(
+      auditCallerlessFlagLists({ ...base, listed, declarations: [...UNREACHABLE_STORES, extra] }).map(
+        (f) => `${f.kind}:${f.symbol}`,
+      ),
+    ).toEqual(["flag_lists_disagree:PostgresKillSwitchStore"]);
+  });
+
+  it("every flag-list finding kind is reachable", () => {
+    const reached = new Set<string>([
+      ...auditCallerlessFlagLists({
+        listed: [...listed, "PostgresKillSwitchStore"],
+        symbols: flagSymbols,
+        declarations: UNREACHABLE_STORES,
+      }).map((f) => f.kind),
+      ...auditCallerlessFlagLists({
+        listed: [...listed, "PostgresGhostStore"],
+        symbols: flagSymbols,
+        declarations: UNREACHABLE_STORES,
+      }).map((f) => f.kind),
+      ...auditCallerlessFlagLists({
+        listed: listed.slice(1),
+        symbols: flagSymbols,
+        declarations: UNREACHABLE_STORES,
+      }).map((f) => f.kind),
+    ]);
+    expect([...reached].sort()).toEqual([...FLAG_LIST_FINDING_KINDS].sort());
   });
 });

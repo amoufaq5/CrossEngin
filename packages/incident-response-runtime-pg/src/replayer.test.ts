@@ -47,10 +47,55 @@ describe("INCIDENT_DRIFT_KINDS", () => {
       "unparseable_record",
       "id_sequence_mismatch",
       "timeline_out_of_order",
-      "terminal_without_timestamp",
       "sla_breached_while_open",
       "duplicate_open_for_signal",
     ]);
+  });
+
+  it("does not declare a kind the re-parse makes unreachable", () => {
+    // `terminal_without_timestamp` fired on exactly what `IncidentRecordSchema` refuses, and
+    // `rowToIncident` applies that schema first and unconditionally, so the row left the loop as
+    // `unparseable_record` before the check was reached. A declared-but-unreportable kind is a
+    // false negative wearing a vocabulary entry.
+    expect([...INCIDENT_DRIFT_KINDS]).not.toContain("terminal_without_timestamp");
+  });
+
+  it("has no duplicate member", () => {
+    expect(new Set(INCIDENT_DRIFT_KINDS).size).toBe(INCIDENT_DRIFT_KINDS.length);
+  });
+});
+
+/**
+ * The claim removing the kind rests on: the schema, not the replayer, is what catches a terminal
+ * status with no stamp — and it catches it *upstream* of where the replayer looked.
+ */
+describe("a terminal status with no stamp is caught by the re-parse", () => {
+  it("reports a closed row with no closedAt as unparseable, naming the field", async () => {
+    const row = incidentRow(declaredIncident());
+    row["status"] = "closed";
+    row["closed_at"] = null;
+    const report = await replayIncidents(rowsConn([row]), { nowIso: LATER });
+    expect(report.drift.map((d) => d.kind)).toEqual(["unparseable_record"]);
+    expect(report.drift[0]?.detail).toContain("closedAt: closed status requires closedAt");
+  });
+
+  it("reports a cancelled row with no cancelledAt the same way", async () => {
+    const row = incidentRow(declaredIncident());
+    row["status"] = "cancelled";
+    row["cancelled_at"] = null;
+    const report = await replayIncidents(rowsConn([row]), { nowIso: LATER });
+    expect(report.drift.map((d) => d.kind)).toEqual(["unparseable_record"]);
+    expect(report.drift[0]?.detail).toContain("cancelledAt: cancelled status requires cancelledAt");
+  });
+
+  it("keeps the row out of the open count and out of a signal collision", async () => {
+    // A row that failed to re-parse is already reported once; nothing downstream may guess at it.
+    const row = incidentRow(declaredIncident());
+    row["status"] = "closed";
+    row["closed_at"] = null;
+    const report = await replayIncidents(rowsConn([row]), { nowIso: LATER });
+    expect(report.open).toBe(0);
+    expect(report.scanned).toBe(1);
   });
 });
 
@@ -389,6 +434,49 @@ describe("replayIncidents — one open incident per signal", () => {
     expect(formatIncidentReplayReport(report)).toContain(
       "[duplicate_open_for_signal] INC-2026-0008",
     );
+  });
+});
+
+/**
+ * "No incident has drifted" and "none of the newest 500 has drifted" are different claims, and a
+ * clean report used to be indistinguishable between them.
+ */
+describe("the pass says whether it saw the whole table", () => {
+  it("is complete when the page came back short", async () => {
+    const report = await replayIncidents(rowsConn([incidentRow(closed())]), {
+      limit: 10,
+      nowIso: MUCH_LATER,
+    });
+    expect(report.windowComplete).toBe(true);
+  });
+
+  it("is complete for an empty table", async () => {
+    expect((await replayIncidents(rowsConn([]), { nowIso: LATER })).windowComplete).toBe(true);
+  });
+
+  it("is truncated when the page came back full", async () => {
+    // A full page is the only evidence there may be more; it cannot be told from an exact fit, and
+    // over-reporting truncation is the safe direction for a coverage claim.
+    const report = await replayIncidents(rowsConn([incidentRow(closed())]), {
+      limit: 1,
+      nowIso: MUCH_LATER,
+    });
+    expect(report.windowComplete).toBe(false);
+  });
+
+  it("says so in the formatted line, so a clean report cannot be misread", async () => {
+    const report = await replayIncidents(rowsConn([incidentRow(closed())]), {
+      limit: 1,
+      nowIso: MUCH_LATER,
+    });
+    expect(formatIncidentReplayReport(report)).toContain("window truncated");
+  });
+
+  it("stays silent about the window when the pass was complete", async () => {
+    const report = await replayIncidents(rowsConn([incidentRow(closed())]), {
+      nowIso: MUCH_LATER,
+    });
+    expect(formatIncidentReplayReport(report)).not.toContain("truncated");
   });
 });
 

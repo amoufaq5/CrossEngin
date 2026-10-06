@@ -372,3 +372,24 @@ describe("cancellationProjectionFromRow", () => {
     ).toEqual(["wfa_z", "wfa_a"]);
   });
 });
+
+describe("PostgresInstanceStore.upsertProjection — whether a row was there", () => {
+  function storeOver(rowCount: number): PostgresInstanceStore {
+    const conn = mockConnection(() => ({ rows: [], rowCount }));
+    const instanceResolver = new WorkflowInstanceIdResolver(conn);
+    const definitionResolver = new WorkflowDefinitionIdResolver(conn);
+    return new PostgresInstanceStore({ conn, instanceResolver, definitionResolver });
+  }
+
+  it("answers true when the UPDATE matched the instance's row", async () => {
+    expect(await storeOver(1).upsertProjection(fixtureProjection())).toBe(true);
+  });
+
+  it("answers false when it matched nothing, rather than reading as success", async () => {
+    // It is an UPDATE, so an absent instance row means it wrote nothing — and `UPDATE … WHERE
+    // instance_id = $n` matching zero rows is indistinguishable from matching one unless the count
+    // is read. ADR-0333's `INSERT 0 0` in a second place: the replayer used to report
+    // `upserts.instance: true` here, i.e. claim the one repair it had not made.
+    expect(await storeOver(0).upsertProjection(fixtureProjection())).toBe(false);
+  });
+});

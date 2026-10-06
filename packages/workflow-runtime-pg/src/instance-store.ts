@@ -159,9 +159,21 @@ export class PostgresInstanceStore {
     return row.id;
   }
 
-  async upsertProjection(projection: ProjectedInstance): Promise<void> {
+  /**
+   * Writes the projection over the instance's existing row, and **answers whether a row was there**.
+   *
+   * It is an `UPDATE`, not an upsert: the row is created once by `create()` from the
+   * `instance_started` append, and re-deriving one here would have to invent the create-time columns
+   * (`definition_id`, `started_at`, `timeout_at`) that the projection does not carry. So an absent
+   * row is `false` rather than an exception — but it has to be *said*, because `UPDATE … WHERE
+   * instance_id = $n` matching nothing is byte-identical to matching one row from the caller's side,
+   * which is ADR-0333's `INSERT 0 0` in a second place. Two callers want opposite things with the
+   * answer: the projecting log is downstream of an append that has already committed and may only
+   * report it, while the replayer is a repair and must not claim one it did not make.
+   */
+  async upsertProjection(projection: ProjectedInstance): Promise<boolean> {
     const p = projection;
-    await this.conn.query(
+    const result = await this.conn.query(
       `UPDATE ${SCHEMA}.${TABLE}
           SET status = $1,
               current_state = $2,
@@ -219,5 +231,6 @@ export class PostgresInstanceStore {
         p.instanceId,
       ],
     );
+    return result.rowCount > 0;
   }
 }

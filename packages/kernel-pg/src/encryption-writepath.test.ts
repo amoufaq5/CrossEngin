@@ -5,6 +5,7 @@ import {
   KeyRotationMigrator,
   emitEncryptingViewTriggersSql,
   formatKeyRotationPlan,
+  formatKeyRotationSurvey,
   planColumnKeyRotation,
   reencryptColumnSql,
 } from "./encryption-writepath.js";
@@ -48,7 +49,7 @@ describe("planColumnKeyRotation + formatKeyRotationPlan", () => {
   });
 
   it("renders a no-op message when there is nothing to rotate", () => {
-    expect(formatKeyRotationPlan([])).toContain("nothing to rotate");
+    expect(formatKeyRotationPlan([])).toContain("No ciphertext (BYTEA) columns");
   });
 
   it("lists each column header + its statement", () => {
@@ -127,12 +128,43 @@ describe("emitEncryptingViewTriggersSql", () => {
   });
 });
 
-function mockConn(rows: EncryptedColumnRow[], observed: string[]): PgConnection {
+interface VisibilityRow {
+  readonly role: string;
+  readonly bypasses_rls: boolean;
+  readonly is_owner: boolean;
+  readonly rls_enabled: boolean;
+}
+
+/**
+ * The owner-bypass default is deliberate and is the opposite of the fake this replaced.
+ *
+ * That one was a pure recorder answering `{rows: [], rowCount: 0}` to every statement, which is the
+ * ADR-0334 class exactly: it answered the catalog probe as "table does not exist" and answered the
+ * `UPDATE` as "0 rows rewritten", and the test asserted on neither. `owner: false` is what a real
+ * non-owner deployment looks like, and the refusal test uses it.
+ */
+function mockConn(
+  rows: EncryptedColumnRow[],
+  observed: string[],
+  opts: { readonly owner?: boolean; readonly tableExists?: boolean; readonly updatedRows?: number } = {},
+): PgConnection {
+  const owner = opts.owner ?? true;
+  const tableExists = opts.tableExists ?? true;
+  const visibility: VisibilityRow[] = tableExists
+    ? [{ role: "app_rw", bypasses_rls: false, is_owner: owner, rls_enabled: true }]
+    : [];
   const conn: PgConnection = {
     query: vi.fn(async (sql: string) => {
       observed.push(sql);
+      if (sql.includes("relrowsecurity")) {
+        return { rows: visibility, rowCount: visibility.length } as unknown as PgQueryResult<EncryptedColumnRow>;
+      }
       if (sql.includes("col_description")) {
         return { rows, rowCount: rows.length } satisfies PgQueryResult<EncryptedColumnRow>;
+      }
+      if (sql.startsWith("UPDATE")) {
+        const n = opts.updatedRows ?? 7;
+        return { rows: [], rowCount: n } satisfies PgQueryResult<EncryptedColumnRow>;
       }
       return { rows: [], rowCount: 0 } satisfies PgQueryResult<EncryptedColumnRow>;
     }) as PgConnection["query"],
@@ -175,11 +207,88 @@ describe("KeyRotationMigrator", () => {
     expect(observed.some((s) => s.startsWith("UPDATE") && s.includes("pgp_sym_encrypt(pgp_sym_decrypt"))).toBe(true);
   });
 
+  it("reports the rows each column actually rewrote, not the statements issued", async () => {
+    const observed: string[] = [];
+    const migrator = new KeyRotationMigrator(
+      mockConn([ciphertextRow], observed, { updatedRows: 12 }),
+    );
+    const outcomes = await migrator.rotateSchema("t_clinic", OLD_KEY, NEW_KEY);
+    expect(outcomes[0]?.rowsReencrypted).toBe(12);
+  });
+
+  it("refuses when row-level security would confine this session", async () => {
+    const observed: string[] = [];
+    const migrator = new KeyRotationMigrator(mockConn([ciphertextRow], observed, { owner: false }));
+    await expect(migrator.rotateSchema("t_clinic", OLD_KEY, NEW_KEY)).rejects.toThrow(
+      /rls_would_confine_this_session/,
+    );
+    // The refusal lands before any rewrite: a rotation that half-ran under RLS is worse than one
+    // that did not start, because the outcome list would name columns it only partly rewrote.
+    expect(observed.some((s) => s.startsWith("UPDATE"))).toBe(false);
+  });
+
+  it("reports a hinted column that is still plaintext at rest without blocking the rotation", async () => {
+    const observed: string[] = [];
+    const migrator = new KeyRotationMigrator(mockConn([ciphertextRow, plaintextRow], observed));
+    const survey = await migrator.surveySchema("t_clinic", OLD_KEY, NEW_KEY);
+    expect(survey.plans).toHaveLength(1);
+    expect(survey.plaintextAtRest.map((c) => c.column)).toEqual(["body"]);
+    expect(survey.refusals).toEqual([]);
+    // Reported, not refused: that column was protected by neither key, so it is a finding about
+    // the encryption migration rather than a reason this rotation is wrong.
+    const outcomes = await migrator.rotateSchema("t_clinic", OLD_KEY, NEW_KEY);
+    expect(outcomes.map((o) => o.column)).toEqual(["mrn"]);
+  });
+
+  it("refuses rotating a key to itself", async () => {
+    const observed: string[] = [];
+    const migrator = new KeyRotationMigrator(mockConn([ciphertextRow], observed));
+    const survey = await migrator.surveySchema("t_clinic", NEW_KEY, NEW_KEY);
+    expect(survey.refusals.map((r) => r.reason)).toContain("keys_are_the_same");
+  });
+
+  it("refuses when an introspected table does not exist", async () => {
+    const observed: string[] = [];
+    const migrator = new KeyRotationMigrator(
+      mockConn([ciphertextRow], observed, { tableExists: false }),
+    );
+    const survey = await migrator.surveySchema("t_clinic", OLD_KEY, NEW_KEY);
+    expect(survey.refusals.map((r) => r.reason)).toContain("table_missing");
+  });
+
+  it("claims its key GUCs transaction-locally inside the rotation", async () => {
+    const observed: string[] = [];
+    const migrator = new KeyRotationMigrator(mockConn([ciphertextRow], observed), {
+      sessionSettings: new Map([["app.column_encryption_key_old", "old-secret"]]),
+    });
+    await migrator.rotateSchema("t_clinic", OLD_KEY, NEW_KEY);
+    const settings = observed.filter((s) => s.includes("set_config"));
+    expect(settings).toHaveLength(1);
+    // `true` is the is_local argument: a session-wide SET would leave the key readable to the next
+    // caller of a pooled connection.
+    expect(settings[0]).toContain("set_config($1, $2, true)");
+  });
+
   it("is a no-op when there are no ciphertext columns", async () => {
     const observed: string[] = [];
-    const migrator = new KeyRotationMigrator(mockConn([plaintextRow], observed));
+    const migrator = new KeyRotationMigrator(mockConn([], observed));
     const plans = await migrator.rotateSchema("t_clinic", OLD_KEY, NEW_KEY);
     expect(plans).toEqual([]);
     expect(observed.some((s) => s.startsWith("UPDATE"))).toBe(false);
+  });
+
+  it("formats the survey with the skipped and refused parts the plan cannot carry", async () => {
+    const observed: string[] = [];
+    const migrator = new KeyRotationMigrator(mockConn([ciphertextRow, plaintextRow], observed));
+    const text = formatKeyRotationSurvey(
+      await migrator.surveySchema("t_clinic", OLD_KEY, NEW_KEY),
+    );
+    expect(text).toContain("SKIPPED note.body");
+    expect(text).toContain("hinted encrypt=at_rest but stored as text");
+  });
+
+  it("no longer claims an absence it did not check", () => {
+    expect(formatKeyRotationPlan([])).not.toContain("No encrypted-at-rest columns found");
+    expect(formatKeyRotationPlan([])).toContain("No ciphertext (BYTEA) columns");
   });
 });

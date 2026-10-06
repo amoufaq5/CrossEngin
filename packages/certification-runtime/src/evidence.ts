@@ -63,20 +63,49 @@ const SEALED_EVIDENCE_STATUSES: ReadonlySet<string> = new Set([
 
 export const DEFAULT_MIN_COMPLETION_RATE = 0.95;
 
+/**
+ * The finding a schema with no at-rest columns carries.
+ *
+ * Named rather than inlined so a reader of a stored report can tell this apart from a real
+ * plaintext finding, and so a test can assert on it without matching prose.
+ */
+export const ENCRYPTION_SCOPE_ABSENT_FINDING =
+  "scope_absent: no column is declared encrypt-at-rest in this schema, so nothing was verified — on a JSONB-store deployment every phi/regulated field lives in one JSONB document column and is stored in plaintext";
+
 export function evidenceFromEncryptionCoverage(
   controlId: string,
   report: EncryptionCoverageLike,
   observedAt: string,
 ): ControlEvidence {
   const findings = report.issues.map((i) => `${i.kind}: ${i.detail}`);
+  // `issues.length === 0` means "no plaintext column was found", which is a different statement
+  // from "no column was found", and on the deployment that matters they are not the same fact.
+  // A JSONB-store deployment keeps every field — `phi` and `regulated` included — inside one
+  // `document` JSONB column, so it declares **zero** at-rest columns and therefore zero issues,
+  // and this control used to answer `satisfied: true` with the summary "0 at-rest column(s) …
+  // are ciphertext; pgcrypto installed". Verified live: the same `POST /v1/patients` that 500s on
+  // the column store returns 201 on the JSONB store and `document->>'mrn'` reads back `MRN-1` in
+  // plaintext. So the control affirmed encryption at rest over unencrypted PHI, in the report a
+  // HIPAA auditor reads.
+  //
+  // That is ADR-0335's `certifiable` defect inverted, and the inversion is the dangerous
+  // direction: there an unwired adapter answered `null`, the engine read it as *no evidence*, and
+  // a control was falsely false — a cost. Here a control is falsely **true**, which is not a cost
+  // but the compliance failure itself. So zero scope is `scope_absent`, never satisfaction:
+  // an absence of evidence is not evidence, which is this repo's fail-closed rule (an
+  // unresolvable identity yields an empty result set, never an unfiltered one).
+  const scopeAbsent = report.total === 0;
+  if (scopeAbsent) findings.unshift(ENCRYPTION_SCOPE_ABSENT_FINDING);
   const satisfied = findings.length === 0;
   return ControlEvidenceSchema.parse({
     controlId,
     sourceKind: "encryption_coverage",
     satisfied,
-    summary: satisfied
-      ? `${report.total.toString()} at-rest column(s) in ${report.schema} are ciphertext; pgcrypto installed`
-      : `${report.plaintext.toString()} of ${report.total.toString()} at-rest column(s) in ${report.schema} are plaintext or pgcrypto is missing`,
+    summary: scopeAbsent
+      ? `no at-rest column(s) declared in ${report.schema}: this control is unevidenced, not satisfied`
+      : satisfied
+        ? `${report.total.toString()} at-rest column(s) in ${report.schema} are ciphertext; pgcrypto installed`
+        : `${report.plaintext.toString()} of ${report.total.toString()} at-rest column(s) in ${report.schema} are plaintext or pgcrypto is missing`,
     findings,
     observedAt,
     detailRef: report.schema,

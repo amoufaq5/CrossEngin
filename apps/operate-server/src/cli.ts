@@ -20,6 +20,7 @@ import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
 import { DEFAULT_UNREAD_SCAN_LIMIT, MAX_UNREAD_SCAN_LIMIT } from "./read-state-routes.js";
 import { parseRequestBodyLimit, parseRouteBodyLimits } from "./request-body-limit.js";
+import { REPLAY_SUBSYSTEMS, type ReplaySubsystem } from "./replay.js";
 import {
   GatewayExecutionCaptureConfigSchema,
   type GatewayExecutionCaptureConfig,
@@ -2228,4 +2229,153 @@ Options:
 Auth: --api-key for dev opaque tokens; --jwks-* + --jwt-* to verify Bearer JWTs
 (EdDSA) against an IdP's public keys — the verified claims (sub/scope/tenant_id)
 become the principal. Postgres (--store pg): standard PG* env vars.
+`;
+
+/**
+ * Options for the `replay` maintenance subcommand — re-derive each subsystem's projections from
+ * their own logs and report where the two disagree. **Read-only**; uses standard PG* env vars.
+ *
+ * Six packages shipped a drift replayer and nothing constructed any of them, so this is the first
+ * caller any of them has had. Two were bug-fixed in consecutive increments while nothing ran them.
+ *
+ * The scope flags mirror `prune-links` (`--tenant` / `--all-tenants`) rather than `verify-chain`
+ * (`--tenant` / `--platform`) and add `--platform` as a third arm, because the subsystems do not
+ * share one scoping story: two of the six read isolation-only tables where a non-owner with no
+ * tenant context matches **zero** rows, so for those a tenant loop is the only complete mode. See
+ * `REPLAY_SCOPE_SUPPORT` in `replay.ts` for the measurement.
+ */
+export interface ReplayOptions {
+  readonly tenantId: string | null;
+  /** Loop every active tenant from `meta.tenants` (mutually exclusive with --tenant/--platform). */
+  readonly allTenants: boolean;
+  /** Read the platform (null-tenant) scope (mutually exclusive with --tenant/--all-tenants). */
+  readonly platform: boolean;
+  /** Subsystems to replay; empty means every subsystem the chosen scope can serve. */
+  readonly subsystems: readonly ReplaySubsystem[];
+  readonly limit: number;
+  readonly schema: string | null;
+  readonly format: "human" | "json";
+  readonly help: boolean;
+}
+
+/**
+ * Parses the argv *after* the `replay` token.
+ *
+ * At most one scope flag, and **no default scope**: which rows a maintenance sweep examined is not
+ * something silence may answer (ADR-0328's rule), and the unscoped read is an owner-only
+ * diagnostic that returns 1 of 7 rows as a non-owner — so defaulting to it would make the most
+ * misleading output the easiest one to produce.
+ */
+export function parseReplayArgs(argv: readonly string[]): ReplayOptions {
+  let tenantId: string | null = null;
+  let allTenants = false;
+  let platform = false;
+  const subsystems: ReplaySubsystem[] = [];
+  let limit = 100;
+  let schema: string | null = null;
+  let format: "human" | "json" = "human";
+  let help = false;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const next = argv[i + 1];
+    const consumed = (): number => (isInline(arg) ? 0 : 1);
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+    } else if (arg === "--tenant" || arg.startsWith("--tenant=")) {
+      tenantId = takeValue(arg, next, "--tenant");
+      i += consumed();
+    } else if (arg === "--all-tenants") {
+      allTenants = true;
+    } else if (arg === "--platform") {
+      platform = true;
+    } else if (arg === "--subsystem" || arg.startsWith("--subsystem=")) {
+      const raw = takeValue(arg, next, "--subsystem");
+      // Refused by name rather than ignored: a misspelled subsystem that silently selected nothing
+      // would report "every selected subsystem found no drift" having run none of them.
+      if (!(REPLAY_SUBSYSTEMS as readonly string[]).includes(raw)) {
+        throw new CliUsageError(
+          `unknown --subsystem: ${raw} (${REPLAY_SUBSYSTEMS.join(", ")})`,
+        );
+      }
+      subsystems.push(raw as ReplaySubsystem);
+      i += consumed();
+    } else if (arg === "--limit" || arg.startsWith("--limit=")) {
+      const raw = takeValue(arg, next, "--limit");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1) throw new CliUsageError(`invalid --limit: ${raw} (>= 1)`);
+      limit = n;
+      i += consumed();
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
+      i += consumed();
+    } else if (arg === "--format" || arg.startsWith("--format=")) {
+      const raw = takeValue(arg, next, "--format");
+      if (raw !== "human" && raw !== "json") {
+        throw new CliUsageError(`invalid --format: ${raw} (human|json)`);
+      }
+      format = raw;
+      i += consumed();
+    } else {
+      throw new CliUsageError(`unknown argument: ${arg}`);
+    }
+  }
+
+  if (!help) {
+    const chosen = [tenantId !== null, allTenants, platform].filter(Boolean).length;
+    if (chosen === 0) {
+      throw new CliUsageError(
+        "replay requires exactly one of --tenant <uuid>, --all-tenants or --platform:" +
+          " two of the six subsystems read isolation-only tables where an unscoped read matches" +
+          " zero rows as a non-owner, so a scopeless sweep would print no findings having read nothing",
+      );
+    }
+    if (chosen > 1) {
+      throw new CliUsageError(
+        "replay takes at most one of --tenant, --all-tenants and --platform",
+      );
+    }
+    if (tenantId !== null && !TENANT_ID_RE.test(tenantId)) {
+      throw new CliUsageError(`invalid --tenant: ${tenantId}`);
+    }
+  }
+
+  return { tenantId, allTenants, platform, subsystems, limit, schema, format, help };
+}
+
+export const replayHelpText = `operate-server replay — re-derive each subsystem's projections from its own log and report drift
+
+Usage:
+  operate-server replay --tenant <uuid> [--subsystem <name>]... [options]
+  operate-server replay --all-tenants [--subsystem <name>]... [options]
+  operate-server replay --platform [--subsystem <name>]... [options]
+
+Read-only: nothing is written, and the repairing half of the workflow replayer is deliberately
+not reachable from here (its repair is not transactional and writes a live worker queue).
+
+Scope (exactly one, no default):
+  --tenant <uuid>      One tenant's projections
+  --all-tenants        Every active tenant from meta.tenants, one pass each, plus the platform
+  --platform           The platform (null-tenant) scope only
+
+Subsystems (repeatable; default is every subsystem the chosen scope can serve):
+  dr, slo, access_reviews, gateway, incidents, workflow
+
+  Not every subsystem can serve every scope, and this is read off the catalog rather than chosen:
+    access_reviews, workflow   tenant only -- their tables carry the isolation policy as their
+                               ONLY arm, so an unscoped read matches zero rows as a non-owner
+    dr, slo, gateway           tenant or platform -- isolation plus a platform SELECT arm
+    incidents                  no scope -- meta.incidents has no tenant_id and no RLS, so a
+                               scope flag is refused rather than ignored
+  A subsystem the chosen scope cannot serve is reported NOT READ with the reason, not skipped.
+
+Options:
+  --limit <n>          Rows per subsystem (default 100). A truncated pass is marked TRUNCATED,
+                       because "0 findings" over a cut window is not "nothing has drifted"
+  --schema <name>      Meta-schema name (default meta)
+  --format human|json  Output format (default human)
+
+Exit: 0 when every selected subsystem was readable and found nothing; 1 when anything drifted
+OR a subsystem could not be read -- an unread subsystem must not exit 0; 2 on a usage error.
 `;
