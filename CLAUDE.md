@@ -1793,8 +1793,15 @@ opened them.
 
 - **Nine actor columns became TEXT, and that is standing manual SQL on every existing deployment**
   (ADR-0335). `planSchemaReconciliation` will not drop a foreign key without `--allow-loosening`, and
-  a type change on a populated table is its deliberate refusal — so an operator runs two `ALTER`s per
-  column plus fifteen FK drops for the `PLATFORM_RECORD_TABLES`. The tables are empty in every
+  a type change on a populated table is its deliberate refusal. The scale, measured against the
+  previous catalog rather than counted by hand: **29 foreign keys** the database still enforces and
+  the catalog no longer declares — **14** into `meta.users` (17 `USER_FK` references removed, of which
+  3 come back as `USER_OWNED_FK`, an `ON DELETE` change that reconciles as a *replace* rather than a
+  drop) and **15** into `meta.tenants`. All 29 report as undeclared on **every** drift check until an
+  operator clears them once. `--allow-loosening` should **not** go into the compose `migrate`
+  command: it converts every *future* undeclared-FK refusal into a silent drop, which is the one
+  guardrail between a catalog typo and a dropped constraint, so this is a one-time manual invocation.
+  The tables are empty in every
   deployment today, because nothing could write them, which is the cheapest moment this change will
   ever have. `meta.rate_limit_decisions` additionally needs a `DROP COLUMN quota_definition_id`, which
   `allowLoosening` reaches by design **never** (it covers foreign keys only, since that is the one
@@ -1806,9 +1813,18 @@ opened them.
 - **The console's transition routes now require a `reason`** (ADR-0335), which is caller-visible: the
   three routes previously parsed no body at all and now 400 without one. `LifecycleEvent.reason` is
   `z.string().min(1)` and a transition whose reason is `"(none given)"` is the field ADR-0317 refused
-  a default for. No in-repo caller exists — `operate-web` does not call them — but an external one
-  breaks. Required unconditionally rather than only when a trail store is wired, because an API shape
-  that depends on deployment config is worse than a required field.
+  a default for. Required unconditionally rather than only when a trail store is wired, because an
+  API shape that depends on deployment config is worse than a required field.
+  **There *was* an in-repo caller and the increment shipped it broken for an hour.**
+  `operate-web`'s `setTenantStatus` sent a literal `body: "{}"`, so every Suspend / Archive /
+  Reactivate click in the platform console was a guaranteed 400 — fixed in the same commit with a
+  required input (trimmed, `maxLength={500}` matching the server's cap, buttons disabled until typed,
+  cleared on success, no default string). The lesson is narrower and worse than the break: **neither
+  `npx tsc --noEmit` nor `npx next build` can see it**, because `operate-web` types its request bodies
+  as `string` — so the boundary is drawn at the *serialized body*, and what is past it is unverified
+  by construction. That is ADR-0333's fake-connection finding one layer out, on the other side of the
+  process, and nothing in the repo fences it: a server-side body schema and its browser caller are
+  two files with no shared type. Changing a request schema means grepping `apps/operate-web` by hand.
 - **`ACTION_TARGET_STATE.cancel_deletion` is `"archived"` and the reject route returns a tenant to
   `active`** (ADR-0335), so the action that *means* "the deletion was cancelled" cannot express what
   the route does, and `cancel_deletion` has **no producer** — `lifecycleTrailGaps()` returns exactly

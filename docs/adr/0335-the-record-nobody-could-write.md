@@ -260,14 +260,26 @@ place.
   destroyed all four before. A notification audience resolves. `certifiable` can be true. The entire
   asynchronous Article 17 flow works as a non-owner for the first time. A sparse cron is 314× faster
   and a schedule that can never fire is refused by name.
-- **Negative.** The nine `meta.users` references that became TEXT are **standing manual SQL** on every
-  existing deployment: `planSchemaReconciliation` will not drop a foreign key without
-  `--allow-loosening`, and a type change on a populated table is its deliberate refusal. The tables
+- **Negative.** The references that became TEXT are **standing manual SQL** on every existing
+  deployment, and the scale is bigger than the nine columns suggests: **29 foreign keys** the database
+  still enforces and the catalog no longer declares — **14** into `meta.users` (17 removed, 3 returning
+  as `USER_OWNED_FK`, which is an `ON DELETE` change and reconciles as a replace) and **15** into
+  `meta.tenants`. `planSchemaReconciliation` will not drop a foreign key without `--allow-loosening`,
+  and a type change on a populated table is its deliberate refusal, so all 29 report as undeclared on
+  every drift check until an operator clears them once. That invocation is deliberately **not** baked
+  into the compose `migrate` step: the flag converts every future undeclared-FK refusal into a silent
+  drop, which is the one guardrail between a catalog typo and a dropped constraint. The tables
   are empty in every deployment today (nothing could write them), which is the cheapest moment this
   change will ever have — but `meta.rate_limit_decisions` also needs a `DROP COLUMN`, which
   `allowLoosening` reaches by design never, so that one is manual forever. The console's transition
-  routes now **require** a `reason` in the request body, which is caller-visible; no in-repo caller
-  exists. And a `pending_deletion` tenant can still write for up to `--tenant-status-ttl-ms`.
+  routes now **require** a `reason` in the request body, which is caller-visible — and there *was* an
+  in-repo caller: `operate-web`'s `setTenantStatus` sent a literal `body: "{}"`, so every Suspend /
+  Archive / Reactivate click in the platform console was a guaranteed 400. Fixed in this commit with a
+  required input rather than a constant, since a boilerplate reason is the thing the server-side change
+  exists to prevent. **Neither `tsc --noEmit` nor `next build` could see it** — `operate-web` types its
+  request bodies as `string`, so a server body schema and its browser caller are two files with no
+  shared type, and changing one means grepping the other by hand. And a `pending_deletion` tenant can
+  still write for up to `--tenant-status-ttl-ms`.
 - **Neutral.** `LIVE_USER_FK_WRITERS` shrank from nine to five and is derived now, so it moves on its
   own as stores land. `STORELESS_TABLES` went from 83 to **77**.
 - **Reversibility.** The catalog changes are reversible per column but would re-break what they fixed.
