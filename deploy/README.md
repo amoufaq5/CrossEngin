@@ -174,13 +174,83 @@ What the flag buys is the limit being *yours* and every decision being on the re
 ## Day-2 operations
 
 - **Update to a new version:** `git pull && docker compose up -d --build`
-  (the `migrate` job re-applies any new schema before the API restarts).
+  (the `migrate` job re-applies any new schema before the API restarts). After the upgrade
+  that landed the user registry, read
+  [Clearing the foreign-key drift](#clearing-the-foreign-key-drift-after-an-upgrade) once —
+  until you do, `migrate` reports the same 29 findings on every `up`.
 - **Backups:** the data lives in the `db-data` volume. Dump regularly, e.g.
   `docker compose exec db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > backup.sql`.
 - **Logs:** `docker compose logs -f api` / `web` / `caddy`.
 - **Stop / start:** `docker compose down` (keeps volumes) / `docker compose up -d`.
 - **Scale the API:** the API is stateless — run several `api` replicas behind Caddy
   and they share Postgres safely (idempotency, advisory locks, RLS all hold).
+
+### Clearing the foreign-key drift after an upgrade
+
+A **fresh** database is unaffected by this section: it gets the patched shape straight out of
+the bootstrap SQL and reports nothing. An **existing** one will report the same drift on every
+`up`, forever, until an operator clears it once.
+
+What the drift is: the catalog stopped declaring **29 foreign keys** that your database is
+still enforcing — **14** into `meta.users` and **15** into `meta.tenants`. Both removals are
+deliberate, and each closed a live defect:
+
+- A column recording *who performed an act* is a record of the past, and a `RESTRICT`
+  reference on it made the actor undeletable as a consequence of having acted. Those nine
+  actor columns are plain `TEXT` now, which is why the stores above can record whichever
+  principal acted without a registry row existing first. Three references were *kept* and
+  strengthened to `CASCADE` instead — a user's own per-viewer state, which must go when the
+  user does.
+- A table whose purpose is to outlive the tenant it describes cannot be a `CASCADE` child of
+  that tenant's row. Fifteen of the sixteen tables the GDPR Article 17 erasure protects by
+  name were exactly that, so retiring the `meta.tenants` row destroyed the platform's record
+  of the deletion one statement after the erasure had carefully preserved it.
+
+`migrate` reports all 29 and does not act, because the reconciliation planner will not drop a
+foreign key unless it is told to. Each appears as an `unreconciled` finding with reason
+`foreign_key_removed` and the SQL beside it. To see the list without touching anything:
+
+```sh
+docker compose run --rm migrate \
+  node apps/architect-cli/dist/bin/crossengin.js apply --plan
+```
+
+To clear it, run the applier **once** with `--allow-loosening`:
+
+```sh
+docker compose run --rm migrate \
+  node apps/architect-cli/dist/bin/crossengin.js apply --confirm --allow-loosening
+```
+
+It says so on stderr before anything runs: this is the one invocation that removes a
+constraint the database is currently enforcing.
+
+**Do not add `--allow-loosening` to the `migrate` command in `docker-compose.yml`.** It is a
+one-time invocation on purpose. Left in place it converts every *future* undeclared-foreign-key
+refusal into a silent drop, and that refusal is the only guardrail between a typo in the
+catalog and a dropped constraint on a live database.
+
+The nine actor columns also change type (`UUID` → `TEXT`). The planner changes a column's type
+only on an **empty** table, under a guard that re-checks emptiness in its own transaction;
+these tables are empty in every deployment today precisely because nothing could write them,
+which is the cheapest moment this change will ever have. If one of yours is not empty, the plan
+reports the `ALTER` rather than running it — the exact statements are in ADR-0335's
+implementation notes (`docs/adr/0335-the-record-nobody-could-write.md`).
+
+**One statement stays manual, forever.** `meta.rate_limit_decisions` also lost a *column* —
+`quota_definition_id`, whose `rlq_` ids have no declaration site anywhere, so re-typing it to
+`TEXT` would have been the same hole in a different type. `--allow-loosening` reaches foreign
+keys only, by design: dropping a foreign key is the single loosening that cannot fail against
+existing rows, which is what keeps every step in a plan expected to succeed. So `column_removed`
+is never planned, with or without the flag, and the catalog will report that column as drift
+until you run this once as the table owner:
+
+```sql
+ALTER TABLE meta.rate_limit_decisions DROP COLUMN IF EXISTS quota_definition_id;
+```
+
+`DROP COLUMN` takes `idx_rate_limit_decisions_quota_definition` with it, so the accompanying
+`index_removed` finding needs no statement of its own.
 
 ## Sending email and SMS
 
