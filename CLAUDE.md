@@ -1858,9 +1858,12 @@ report all 55 unreachable, and over-reporting is the direction that fails CI on 
 It caught a live wiring commit mid-increment (`[overtaken] api-gateway-pg:PostgresIdempotencyStore`),
 where the fix is deleting the declaration rather than weakening the check.
 **ADR-0337 widened it, because four of the five blind spots had live members.** The candidate set is
-now **every exported class in every member including `apps/*`** — 324 candidates, 285 reachable, 3
-exempt as `diagnostic_type`, 17 as `test_surface` (never granted to a `*-pg` member, since
-persistence is not a test double), **19 declared** over 21 declarations. Members are candidates too,
+now **every exported class in every member including `apps/*`** — 324 candidates, **289 reachable**,
+3 exempt as `diagnostic_type`, 17 as `test_surface` (never granted to a `*-pg` member, since
+persistence is not a test double), **15 callerless classes declared** plus one callerless *member*,
+so 16 declarations. (ADR-0337's own text records 285 / 19 / 21: that was measured before the same
+increment's wiring made five of them `overtaken`, and the fix for an overtaken declaration is
+deleting the line. Measure the census, do not read the figure.) Members are candidates too,
 with three mechanical exemptions read from `package.json` and the class scan rather than from names
 (`entrypoint`, `not_importable`, `contracts_only`). `CALLERLESS_FLAG_STORES` is no longer a second
 list nobody reads: `auditCallerlessFlagLists` reads it from disk as text and compares **three** facts
@@ -2178,13 +2181,16 @@ opened them.
   somebody else's mistake), so which of the two actions should name the reject is a vocabulary
   decision rather than a defect, and changing `ACTION_TARGET_STATE` forces a workspace rebuild before
   any consumer's tests mean anything (ADR-0329).
-- **The storeless rule's inverse is fenced now, and six stores stay unreachable with a reason each**
-  (ADR-0335 named the gap, ADR-0336 closed it). `pg-unreachable-stores.ts` asks *which store has no
+- **The storeless rule's inverse is fenced now, and 15 classes plus one member stay unreachable with
+  a reason each** (ADR-0335 named the gap, ADR-0336 closed it, ADR-0337 widened it).
+  `pg-unreachable-stores.ts` asks *which store has no
   caller*, which `pg-storeless-tables.ts` cannot — it decides a table is written by reading a store's
   SQL as text, so **a store with no caller makes its table read as written while no deployment has
   ever put a row in it**, and `table_declared_storeless` is the cross-rule join that catches the two
-  disagreeing. Of the eight found, two were wired (`PostgresIdempotencyStore`,
-  `PostgresPipelineExecutionStore`) and six are declared.
+  disagreeing. Of ADR-0336's eight, two were wired (`PostgresIdempotencyStore`,
+  `PostgresPipelineExecutionStore`) and six declared; ADR-0337's widening added members and `apps/*`
+  to the predicate, and the same increment's `operate-server replay` resolved five declarations —
+  deleted, not weakened. Count the declarations in the module; this sentence will go stale again.
   What the rule **structurally cannot see**, which is the live part of this entry:
   **a store constructed behind a factory whose factory has nothing calling it.** Flat reachability
   stops at the first non-test `new`, and **ten stores sit in exactly that position today** — the four
@@ -2234,15 +2240,15 @@ opened them.
   regulator asks for is the one this table cannot hold. All of it reported and untouched: contracts
   edits with cross-package consumers, and changing one forces a workspace rebuild before any
   consumer's tests mean anything (ADR-0329).
-- **`GatewayReplayer` has no caller, which is the wired writer's own open end** (ADR-0336). Zero
-  importers outside its test — no route, no CLI subcommand, no scheduler — so
-  `--gateway-execution-capture` puts ADR-0335's shape in a new place: a store with a writer and a
-  reader with nothing calling it, exactly what `targeting-rule-store.ts` did. The difference argued is
-  real but not decisive — the rows themselves are the product, a queryable forensic record of request
-  handling, where a targeting rule is inert until something evaluates it — and a read route would need
-  the `--audit-read-routes` apparatus (a role, a recorded read, a tenant refusal). ADR-0335 also made
-  `meta.rate_limit_decisions` writable, so the orphan check now has one half of its join and not the
-  other: every decision row exists and nothing names it.
+- ~~**`GatewayReplayer` has no caller**~~ — **closed by ADR-0337**, which is why this entry is kept
+  rather than deleted: it was ADR-0336's open end and `operate-server replay` is the caller, so
+  `--gateway-execution-capture` no longer writes rows only a test reads. The `rate_limit_decisions`
+  orphan check ADR-0336 described as half-joined is the half that resolved: it fired six
+  `rate_limit_decision_not_found` on the first live run, attributable to the in-memory checker
+  persisting no decision row while every execution still stamps an `rld_…` id, so **both** halves of
+  that join are now known and a boot warning says it before the sweep does. A *read* route over the
+  captured executions is still unbuilt and would still need the `--audit-read-routes` apparatus (a
+  role, a recorded read, a tenant refusal); detection by CLI is what shipped.
 - **77 of 145 catalogued tables have no writer, and every one is declared with a reason**
   (ADR-0334, ADR-0335). `packages/testing/src/strategy/pg-storeless-tables.ts` classifies them —
   `static_catalog` (2), `out_of_band` (1), `dynamic_writer` (1), `superseded` (8), `unwritten_table`
