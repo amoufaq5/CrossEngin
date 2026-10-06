@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 332 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 333 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~16,130 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~16,290 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -152,6 +152,38 @@ type errors.
   the general function-shaped fence (82 of 812 modules, mostly contracts packages, and it misses three
   of the six replayers it exists to find).
 
+  ADR-0338 is the first increment in this run that is **not** a sweep: it takes the single defect
+  ADR-0337 ranked top and closes it, and the class is **a specification with no setter**. At-rest PHI
+  encryption was reachable by no deployment — four ADRs specify
+  `current_setting('app.column_encryption_key')`, ADR-0091 names the requirement in so many words,
+  and **nothing in the workspace set the GUC**, so every `phi`/`regulated` write was a 500 on the
+  typed store and plaintext on the default one. The decision it had been waiting on is a
+  key-management choice, and the answer is the one the repo had already made once for the
+  structurally identical problem (ADR-0302's per-tenant key from one deployment secret): **derive per
+  tenant with HKDF, store nothing.** That bought the whole increment in one piece — no new table, no
+  CHECK migration on a `meta.crypto_keys` that is structurally a public-key directory, no cipher added
+  to a package with three pins asserting it has none — at one stated cost, **no crypto-shredding**,
+  which is the only argument for a stored DEK and is now the top follow-up.
+  Three things fell out that were sharper than the defect. **ADR-0070's own stated direction would
+  have destroyed PHI**: it proposed mirroring the tenant-RLS GUC idiom, and
+  `pgp_sym_encrypt(x, current_setting('app.k', true))` returns **NULL silently**, so a missing key
+  writes NULL over every value and reports success — live on three of the five real classified fields.
+  The `''` reset value that *breaks* the RLS cast is what *saves* this path, by accident.
+  **The per-tenant fallback was a silent downgrade from ciphertext to plaintext**: a tenant whose DDL
+  application is refused is served from the JSONB store, which has no encryption, so ADR-0314's "their
+  data is in a different place than they think" was understating it — and the guard had to cover
+  `withTransaction`, which hands out the *underlying* store, or every handler that writes in a
+  transaction would route around it.
+  And the worst of the three, found while verifying the fix: **the write handed the plaintext straight
+  back.** Redaction was registered against `[list, read]` while the routes emit
+  `list, create, read, update, delete` plus one per workflow transition, so a `PATCH {"sex":"female"}`
+  returned `mrn`, `given_name`, `family_name` and `date_of_birth` — fields the same credential cannot
+  read through `GET`. Encrypting a column at rest while any write discloses it is ADR-0337's
+  falsely-true-control direction in a new place. That list was ADR-0288's `needsAuditEmitter` shape
+  for the **fourth** time, and a static helper could never have been right: a transition's operationId
+  comes from the manifest's workflow, which a `(name: string) => string[]` cannot know. It is derived
+  from the routes actually derived now.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -244,6 +276,21 @@ packages exist at only one layer, noted below where that is true.
   hash bookkeeping, preconditions, and the pgcrypto at-rest encryption stack (coverage report,
   encrypt-on-write column migration, encrypting-view triggers, key rotation planner). Ships the
   `crossengin-pg` CLI.
+  **`DEFAULT_COLUMN_KEY_REF` is the one spelling of the key reference** (ADR-0338), beside
+  `COLUMN_ENCRYPTION_KEY_GUC`; there were three independent copies and none was exported.
+  `columnKeyRefFor` validates the GUC name, which is where that validation belongs because
+  `pgpSymEncryptExpr`/`DecryptExpr` interpolate their `keyRef` **raw** — zero escaping, by design —
+  and `isRaisingKeyRef` answers whether a reference can be shown to raise, false for the
+  two-argument `current_setting` form *and* for a bind placeholder. `EncryptionMigrator` gained the
+  `sessionSettings` option its sibling `KeyRotationMigrator` already had, applied **inside** each
+  per-column transaction because `set_config(…, true)` is transaction-local: without it
+  `crossengin-pg encrypt --apply` could never have worked under the default key ref, which is the
+  same defect as the serving store's in the sibling class. `--apply` now **refuses** before opening a
+  connection — `key_value_absent` when `COLUMN_ENCRYPTION_KEY` is unset, `key_ref_can_yield_null` for
+  a caller-supplied two-argument ref — and exits 2 having run nothing, because a halt partway through
+  a column conversion leaves a mixed schema. The key value is read from the environment, never argv
+  (ADR-0301). `--plan` warns instead of refusing: a plan is SQL an operator pastes, and printing it
+  is how they discover what to arrange.
   **Migration is reconciliation, not replay** (ADR-0290): `introspectSchema` reads `pg_catalog`,
   `diffSchema` compares it to `META_TABLES`, and `planSchemaReconciliation` turns the difference
   into statements. `apply` runs the plan, so an empty database gets the full bootstrap (the plan
@@ -339,6 +386,29 @@ packages exist at only one layer, noted below where that is true.
   refusal memoised for 60s so an operator's fix is picked up without a restart); `storeFor` is
   deliberately synchronous and does not provision; `TenantColumnStoreRouter` routes **per call** to the
   tenant's store or the JSONB fallback.
+  **And encrypts a classified column with that tenant's own key** (ADR-0338). `encryptionKey:
+  ColumnEncryptionKeySource` is a resolver from tenant id to key *value*, and it is the **value**
+  rather than a per-tenant `keyRef` because the expression must stay one string — the trigger path
+  bakes it into a plpgsql function body. One private `scoped(tenantId, fn)` backs all **11** former
+  `withTenantContext` call sites and sets `app.column_encryption_key` through
+  `withTenantContext`'s new settings map, with the key **bound as `$2`**, so it reaches no SQL text;
+  a store with no encrypted column passes no settings and issues no extra statement, so a deployment
+  with no PHI pays nothing. Constructing a store over a plan with an encrypted column and no key
+  **throws `ColumnEncryptionUnavailable` naming the entities and fields** — ADR-0334's conversion of a
+  page-1 500 into a boot refusal — with an exemption for a caller who passed a non-default
+  `encryptionKeyRef`, since that caller has arranged the key by a route the store cannot see.
+  `PlaintextFallbackRefused` closes what was a **silent downgrade from ciphertext to plaintext**: the
+  router's fallback is the JSONB store, which has no encryption, so a tenant whose DDL application was
+  *refused* had their PHI written in the clear while the log reported a refusal. `encryptedEntities`
+  makes those entities refuse — **reads too**, because a read from the plaintext fallback cannot return
+  PHI that was written encrypted, so serving it is a wrong answer and not a degraded one
+  (ADR-0336's `IdempotencyStore.get` rule). The guard had to cover `withTransaction`, which hands its
+  callback the *underlying* store, or every handler that writes inside a transaction — the ordinary
+  write path — would route around it; the wrapper is hand-written rather than a `Proxy` so a seventh
+  `EntityStore` method fails to typecheck instead of passing through unguarded. The set comes from the
+  **tenant's own** manifest via `encryptedEntityNames`, never the deployment's: under per-tenant
+  manifests a deployment-wide set taken from the boot pack would be correct only for tenants serving
+  that pack and would leave exactly the tenant-declared classified field unguarded.
   **And erases it** (ADR-0316), because ADR-0314's schema was never removed and `tenant-lifecycle` then
   signed a GDPR Article 17 tombstone over data that survived. `surveyTenantSchema` measures with
   `count(*)`, not `reltuples`, since a cryptographic proof commits to the figure; `probeCascadeCollateral`
@@ -362,6 +432,34 @@ packages exist at only one layer, noted below where that is true.
   parsing, handler dispatch, handler 4xx/5xx → deny/error mapping, classification-driven
   response redaction (including a registry derived straight from a manifest), security
   headers, and a schema-valid `PipelineExecution` per request.
+  **Redaction covers writes since ADR-0338, and until then it did not.** The stage itself was always
+  fine — it is operation-keyed off `route.operationId` and redacts any JSON response with a spec —
+  but the registry was populated from `[list, read]` while the routes emit
+  `list, create, read, update, delete` **plus one per workflow transition**, so a
+  `PATCH {"sex":"female"}` returned `mrn`, `given_name`, `family_name` and `date_of_birth`: fields the
+  same credential cannot read through `GET`. Any principal with update permission read any record's
+  classified fields with a no-op write, verified live. That hand-maintained list was ADR-0288's
+  `needsAuditEmitter` shape for the **fourth** time, and a static `(name: string) => string[]` helper
+  could never have been right, because a transition's operationId comes from the manifest's workflow
+  and the helper is not given one — the registry's spec set is derived from the routes actually
+  derived now, via `entityOperationIndex` over `compileOperateServer`'s own `routeSpecs` plus the
+  three association spec families. **Measured on resolved retail+core: 24 operations covered before,
+  90 after** — 66 operations across 12 classified entities were serving classified fields in the
+  clear, including all four `salesOrder` transitions. Its reach is wider than the encryption work
+  that found it: redaction keys on *any* classification, so `erp-core`'s 21
+  `pii`/`commercial_sensitive` fields are in scope too, none of them encrypted at rest.
+  **The association list route was a second live member**: `GET /v1/<owner>/{id}/<related>` was in
+  no entity's mapping, while `buildAssociationListHandler`'s own doc comment claims *"the gateway
+  redacts per-caller at the edge, exactly like the list endpoint"*. No pack declares a
+  `many_to_many`, so no pack exercised it. Attribution for those routes is by **whose records come
+  back** — list and count to `relatedEntity`, link/unlink to `ownerEntity`.
+  Both hand-maintained lists are **deleted** rather than corrected and `operationsForEntity` is now
+  **required**: `defaultOperationsForEntity` was `[read, list, get]` with **no write ids at all**, so
+  a caller omitting the override lost write redaction for every entity, and a default that cannot
+  possibly be correct fails silently in the unsafe direction. `CompiledOperateServer` exposes
+  `redactionOperationIds` so the mapping is checkable in **both** directions — `MapRedactionRegistry`
+  answers only `specFor(id)`, and that missing direction is what let a `.get` no route emits sit in
+  the list unnoticed.
 - **`api-gateway-pg`** — Postgres implementations of the runtime's four store interfaces
   (idempotency, route registry with TTL cache, sliding-window rate-limit checker,
   pipeline-execution store) plus a replayer that flags out-of-order stages, pass-with-4xx,
@@ -577,8 +675,25 @@ packages exist at only one layer, noted below where that is true.
 - **`crypto`** — real cryptography over `node:crypto`: SHA-256/BLAKE2b-512 hashing and hash
   chains, HMAC-SHA256 webhook signing with replay windows, Ed25519 sign/verify/keypair,
   opaque tenant-scoped `KeyHandle`s behind a `KeyStore`, and auto-audit of key management.
+  **Still no symmetric cipher** — and `key-derivation.ts` (ADR-0338) is deliberately a **KDF, not a
+  cipher**, so the three pins asserting the absence stay exactly as they are (`KEY_ALGORITHMS` has no
+  cipher member, `KEY_PURPOSES` no encryption purpose, `CRYPTO_OPERATIONS` no encrypt/decrypt, with a
+  test asserting `isCryptoOperation("encrypt") === false`). `deriveTenantColumnKey` is HKDF-SHA256
+  with the **tenant id as salt** and the generation in the `info` string — that way round because
+  HKDF's salt is the per-instance separator and info is the context label, and swapping them would
+  make two tenants' keys differ only in info. A derived column key is **not** a `KeyHandle`: no
+  registry row, no public material, no lifecycle, nothing stored. `parseColumnEncryptionSecret`
+  refuses rather than stretching (`too_short` under 32 bytes, `too_uniform` under 16 distinct byte
+  values — the shape a deployment produces when it is satisfying a length check rather than supplying
+  entropy), the derivation re-runs the same check so a caller holding bytes cannot bypass it, and the
+  derivation is pinned by a **known-answer vector** computed two ways, because a silent change to it
+  would make every existing ciphertext undecryptable. `columnKeyFingerprint` exists so a key can be
+  *identified* in a log line without being disclosed.
 - **`crypto-pg`** — a Postgres key registry for those handles (tenant-scoped rows, rotate /
-  revoke / list). Thin: registry, records, tenant context.
+  revoke / list). Thin: registry, records, tenant context. Note what it is **not**: `meta.crypto_keys`
+  has no private-material column and its `algorithm` CHECK names only `hmac-sha256`/`ed25519`, so it
+  is structurally a *public*-key directory and a wrapped data key cannot live there without migrating
+  two CHECKs and a regex — which is half the reason ADR-0338 derives rather than stores.
 - **`compliance`** — contracts only: the compliance-pack shape (metadata, parameters,
   contributions) and the resolver that merges pack clauses into a manifest.
 - **`residency`** — 8 regions × 5 broad regions, cloud providers, residency profiles with
@@ -1638,6 +1753,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `--max-request-body-route <prefix>=<size>` gives ADR-0312's platform-wide cap a per-route form,
   matched by path **prefix** rather than by the gateway's route template — the limit has to be chosen
   before the body is read, and route matching happens after it.
+  **At-rest PHI is decided at boot** (ADR-0338): `resolveStore` surveys the manifest's
+  `phi`/`regulated` fields (through `resolvedFields`, so a classified *trait* field cannot be missed),
+  calls `decidePhiStorage`, and either refuses or builds one `buildColumnKeySource` shared by the boot
+  store and the per-tenant registry so a tenant's key is derived once. The secret is
+  `COLUMN_ENCRYPTION_SECRET` from the environment and **there is no flag for it** — ADR-0301 — while
+  `--allow-plaintext-phi` is the one flag, refused by name on `--store pg-columns` where plaintext is
+  not an outcome a `BYTEA` column can produce. **The key source is built before the decision is
+  logged**, which is load-bearing rather than tidy: `secretPresent` is "the variable is non-empty" and
+  cannot see a secret that is present and too weak to use, so logging first would put
+  `phi storage: encrypted` on the record and throw a `ColumnSecretRefused` immediately after — this
+  increment's own defect, one layer in, caught in review. A secret that is set and **unused** warns
+  rather than refusing, since the variable may be set for a sibling service. The router is built
+  **per tenant gateway** so `encryptedEntities` comes from that tenant's own manifest.
   **The fax run counter is opt-in** (`--bounce-fax-observations`, `--bounce-fax-suppress-after`,
   `--bounce-fax-window-hours`, ADR-0332): a threshold below `MIN_FAX_SUPPRESSION_THRESHOLD` is
   **refused rather than clamped**, because a threshold of 1 is the inference ADR-0302 forbids and
@@ -2067,6 +2195,21 @@ Two constraints worth knowing before suggesting a host:
 - **Managed Postgres usually forbids C extensions**, so `pg_uuidv7` is
   unavailable; `deploy/supabase/00-uuidv7.sql` defines a pure-SQL
   `uuid_generate_v7()` and the migration applier accepts either.
+- **`pgcrypto` is created at init now, and guarded where `pg_uuidv7` is not** (ADR-0338).
+  `deploy/postgres/init/00-extension.sql` created only `pg_uuidv7`, so the self-hosted stack had no
+  pgcrypto at all and nothing in `deploy/` ever ran `crossengin-pg encrypt --provision`. The
+  asymmetry is the decision: the entrypoint runs these files with `ON_ERROR_STOP=1`, so a failing
+  `CREATE EXTENSION` **aborts initialisation and the container never comes up**. `pg_uuidv7` should
+  do that — the applier hard-requires it and every `meta.*` id default resolves through it — while
+  pgcrypto is needed only by a manifest declaring a `phi`/`regulated` field (none in `erp-core`, the
+  compose default) and the serving store already provisions it when a plan needs one. So pgcrypto
+  goes in a `DO` block whose handler downgrades a failure to a `WARNING`, and a missing one degrades
+  to a boot refusal naming the entity and field rather than a database that will not start. Both arms
+  verified on PG 16: `EXECUTE` inside a `DO` block does create the extension, and an unavailable one
+  is caught with `psql` still exiting 0.
+  `COLUMN_ENCRYPTION_SECRET` is in the compose `environment:` block and **never** in `command:`,
+  because argv is readable via `ps`; the compose file also says what switching `OPERATE_PACK` to
+  `erp-healthcare` or `erp-government` requires, since that is where an operator meets the refusal.
 
 ## What's actually left
 
@@ -2075,33 +2218,72 @@ opened them.
 
 **Load-bearing**
 
-- **At-rest PHI encryption is reachable by no deployment, and this is the top open item**
-  (ADR-0337, specified across ADR-0070 / ADR-0071 / ADR-0074 / ADR-0091). Three parts, each verified
-  live through the real server on PG 16:
-  **(1)** on `--store pg-columns` every `phi`/`regulated` write is a **500**
-  (`unrecognized configuration parameter "app.column_encryption_key"`). The column really is
-  encrypted — `patient.mrn` is created `bytea` — and `DEFAULT_ENCRYPTION_KEY_REF` is
-  `current_setting('app.column_encryption_key')`, but **nothing in the workspace sets that GUC**: it
-  appears only as a default key-ref in `column-store.ts` and `crossengin-pg.ts` and in four ADRs,
-  with no setter in any compose file, any `withTenantContext`, or `node.ts`. ADR-0091 names the
-  requirement in so many words and nothing ever built it. **The healthcare pack cannot store one
-  `Patient` on the typed store.**
-  **(2)** on `--store pg` (the default) the same write returns **201 and stores plaintext** —
-  `document->>'mrn'` reads back `MRN-1`. ADR-0091 does not mention JSONB at all and this file
-  attributes "pgcrypto-encrypted PHI columns" to `ColumnMappedEntityStore` only, so the limitation is
-  real and documented nowhere.
-  **(3)** the encryption-at-rest control *was* vacuously satisfied on exactly that deployment, which
-  is **fixed**: `satisfied = issues.length === 0` over a schema with zero at-rest columns answered
-  `satisfied: true` with the summary "0 at-rest column(s) … are ciphertext; pgcrypto installed", so a
-  HIPAA / SOC 2 report asserted encryption over plaintext PHI. It reports `scope_absent` and
-  `satisfied: false` now, because an absence of evidence is not evidence. **That was ADR-0335's
-  `certifiable` defect inverted, and the inversion is the dangerous direction**: a falsely-false
-  control costs a certification, a falsely-true one *is* the compliance failure.
-  Parts 1 and 2 are **not** fixed, deliberately: the fix is a key-management decision — per-tenant
-  DEK, envelope scheme, where the key enters the process — which ADR-0070 itself names as "the
-  envelope refinement" and leaves open, and inventing one at the end of an increment is how a
-  deployment ends up with a key nobody chose. The open sub-question: whether `--store pg` should
-  *refuse* a manifest declaring `phi`/`regulated` fields rather than accept one and store plaintext.
+- **At-rest PHI encryption works, per tenant, and what is left of it** (ADR-0338 closed ADR-0337's
+  top open item; specified across ADR-0070 / ADR-0071 / ADR-0074 / ADR-0091). The key is **derived,
+  not stored**: `HKDF-SHA256(ikm = COLUMN_ENCRYPTION_SECRET, salt = tenantId, info =
+  "crossengin.column-encryption.v1:gen<N>")`, set as `app.column_encryption_key` transaction-locally
+  and **as a bound parameter**, so it reaches no SQL text, no `log_statement` output and no query
+  plan. Convergence rather than invention: ADR-0302 had already decided this exact shape for the
+  structurally identical problem (a per-tenant key derived from `NOTIFICATION_BOUNCE_SECRET`), and
+  following it meant no new table, no CHECK migration on `meta.crypto_keys` — which is structurally a
+  *public*-key directory, with no private-material column and an `algorithm` CHECK naming only the two
+  signing algorithms — and no cipher added to `packages/crypto`, whose three pins
+  (`KEY_ALGORITHMS`, `KEY_PURPOSES`, `CRYPTO_OPERATIONS`, the last with a test asserting
+  `isCryptoOperation("encrypt") === false`) say it has none. Verified live as a non-owner on PG 16:
+  the `POST /v1/patients` that was a 500 returns 201, `mrn` is `bytea` whose bytes begin `c30d04`
+  with the plaintext absent, tenant A's derived key decrypts it and tenant B's is refused
+  `Wrong key or corrupt data`, and `crossengin-pg encrypt --verify` reports
+  `ciphertext: 4   plaintext: 0`.
+  **The GUC is forced, not chosen**: `emitEncryptingViewTriggersSql` bakes the key ref into a plpgsql
+  *function body*, so a bind parameter is structurally impossible on the trigger path — which means
+  ADR-0091's stated reason for preferring a reference (a bind param "puts key material in the
+  application process and the wire") is weaker than it reads, since `set_config($1,$2,true)` does
+  both, while the conclusion survives for the trigger reason.
+  **And the house GUC idiom would have destroyed PHI, which is what ADR-0070 Q2 proposed.** Measured:
+  `current_setting('app.k', true)` is NULL when unset and `pgp_sym_encrypt(x, NULL)` returns **NULL
+  silently**, so mirroring the tenant-RLS predicate writes NULL over every PHI value and reports
+  success — live on **three of the five** real classified fields, the nullable ones. The one-argument
+  form raises instead, and is itself nondeterministic by connection history (`''` after use-and-reset,
+  where *pgcrypto* becomes the thing that raises), so `isRaisingKeyRef` + a named refusal for an empty
+  resolved key close both arms. It is five fields across **two** packs, not one: ADR-0337's write-up
+  named only healthcare, and `erp-government`'s `Citizen.national_id` is `regulated`.
+  **A classified field is encrypted or the deployment refuses to serve it** — `decidePhiStorage` is a
+  total map over five verdicts with `mayServe` read off `PHI_VERDICT_MAY_SERVE`, so `--store pg` and
+  `--store memory` refuse a classified manifest at boot unless `--allow-plaintext-phi` says otherwise,
+  and `--store pg-columns` with no secret refuses at boot rather than 500ing on page 1 (ADR-0334's
+  `duration` conversion). Refusing by default **inverts** ADR-0334's reasoning for `--tenant-status-gate`
+  being opt-in — there, on-by-default would refuse requests of a deployment that works today; here
+  nothing served PHI correctly today, so the refusal breaks nothing that worked. The shipped compose is
+  `erp-core`, which declares no `phi`/`regulated` field (it has 10 `pii` and 11 `commercial_sensitive` ones, which are classified but not encrypt-at-rest).
+  What remains, in order: **(1)** the **DEK envelope** and with it crypto-shredding — the one thing
+  deriving does not buy, since a derived key cannot be destroyed, so Article 17 gains nothing here and
+  destroying a wrapped DEK would make a tenant's PHI unrecoverable *including from backups*, a claim
+  ADR-0316's `DROP SCHEMA` cannot make. It needs AES-256-GCM in `packages/crypto`, a KEK source, an
+  unwrap cache and a decision about an unreadable DEK row; the derivation is already
+  generation-tagged, so it is generation 2 rather than a rewrite. **(2)** rotation has **no executor**
+  — `KeyRotationMigrator` is still callerless, which is exactly why the `generation` parameter is
+  exposed by no flag or env var: a deployment that bumped it would make every existing ciphertext
+  undecryptable with no way back. **(3)** `unique: true` is unenforced on the column store
+  (**zero** UNIQUE constraints across all 54 tables — it is simply not plumbed into the entity DDL, so
+  this changed nothing) and *unenforceable* on an encrypted column, since `pgp_sym_encrypt` is
+  non-deterministic: two rows with the same plaintext under a UNIQUE `bytea` both insert, verified.
+  `Citizen.national_id` is both `unique` and `regulated`, so whoever plumbs `unique` must **refuse**
+  the encrypted case rather than emit a constraint that silently never fires — ADR-0070's Q4 noticed
+  encrypted columns cannot be *searched* and nobody noticed they cannot be *unique*. **(4)**
+  `packages/security`'s `AT_REST_ALGORITHMS` offers AES and ChaCha AEADs and the mechanism is OpenPGP
+  CFB+MDC, which is none of them, and nothing reads the enum. **(5)** no per-tenant BYOK, which
+  `KEY_MANAGEMENT_KINDS`' `customer-managed-byok` models; `ColumnEncryptionKeySource` is the seam.
+  **(6)** an encrypted field is dropped from `?sort` and filters **silently**, which ADR-0091 decided
+  and matters more now that the ciphertext is real.
+- **`validateClassifiedWriteMask` is called by nothing on the request path** (ADR-0338 Q7), which is
+  the write-mask mirror of the response defect that increment fixed. ADR-0329 built it on the rule
+  *a role cannot write a class it may not read*, and deliberately put **one function behind both
+  halves** so the two could not diverge — and only the read half is wired. It has **zero non-test
+  consumers** in `operate-runtime` or `api-gateway-runtime`, so a principal with `update` on the
+  entity and no field-level `update` grant can **write** a `phi` field it cannot read back. ADR-0336's
+  callerless shape: a rule built, tested and connected to nothing, and the one case where the
+  callerless thing is a *function* rather than a class, which is the blind spot ADR-0337 measured and
+  refused to fence. Its own increment, because wiring it refuses writes that currently succeed.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3023,7 +3205,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 332 records; 253 Accepted, 79 Proposed (the
+title or status change cannot drift. 333 records; 254 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

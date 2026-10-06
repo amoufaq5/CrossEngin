@@ -77,10 +77,21 @@ services:
       TWILIO_STATUS_CALLBACK_URL: ${TWILIO_STATUS_CALLBACK_URL:-}
       TWILIO_BASE_URL: ${TWILIO_BASE_URL:-}
       NOTIFICATION_BOUNCE_SECRET: ${NOTIFICATION_BOUNCE_SECRET:-}
+      # The master secret at-rest column encryption derives each tenant's key from (HKDF-SHA256,
+      # salted with the tenant id). Needed only by a pack declaring phi/regulated fields, and only
+      # on --store pg-columns; see the OPERATE_PACK note below. In the environment and never in
+      # `command:` below, because argv is readable via ps.
+      COLUMN_ENCRYPTION_SECRET: ${COLUMN_ENCRYPTION_SECRET:-}
     # Args in list form so the api-key (token:role:tenant) is never shell-split.
     command:
       - node
       - apps/operate-server/dist/bin/operate-server.js
+      # erp-core declares no phi/regulated field, so this default serves on the JSONB store below.
+      # erp-healthcare (4 such fields) and erp-government (Citizen.national_id) do, and the JSONB
+      # store cannot encrypt a column -- it would hold them as plaintext -- so setting OPERATE_PACK
+      # to either one is REFUSED at boot. To serve one, switch `--store` to `pg-columns` and set
+      # COLUMN_ENCRYPTION_SECRET above. `--allow-plaintext-phi` overrides the refusal and is what
+      # its name says: the fields are stored in the clear.
       - --pack
       - ${OPERATE_PACK:-erp-core}
       - --store

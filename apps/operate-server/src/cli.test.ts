@@ -1224,6 +1224,36 @@ describe("--workflow-workers", () => {
     expect(message).toContain("--workflow-workers");
   });
 
+  it("defaults --allow-plaintext-phi off, so a classified field is refused rather than stored bare", () => {
+    expect(parseServeArgs([...PG]).allowPlaintextPhi).toBe(false);
+    expect(parseServeArgs([...PG, "--allow-plaintext-phi"]).allowPlaintextPhi).toBe(true);
+  });
+
+  it("refuses --allow-plaintext-phi on pg-columns, where plaintext is not an outcome", () => {
+    // Not ignored, on this file's standing rule: a phi column is BYTEA on the typed store, so the
+    // write is encrypted or refused for a missing secret — never the plaintext the flag claims to
+    // authorise. Accepting it would let an operator believe they had opted into something.
+    let message = "";
+    try {
+      parseServeArgs(["--pack", "erp-core", "--store", "pg-columns", "--allow-plaintext-phi"]);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("--allow-plaintext-phi is not applicable to --store pg-columns");
+    expect(message).toContain("BYTEA");
+    expect(message).toContain("COLUMN_ENCRYPTION_SECRET");
+  });
+
+  it("never reads the column-encryption secret from argv", () => {
+    // ADR-0301's rule: argv is readable via `ps`, so a credential may only arrive by environment.
+    // The secret feeds HKDF for PHI, which makes it the last thing that should ever be a flag.
+    expect(helpText).toContain("COLUMN_ENCRYPTION_SECRET");
+    expect(helpText).not.toContain("--column-encryption-secret");
+    // And the flag that *is* a flag is documented, since one reachable only by reading cli.ts is
+    // the same defect as an undocumented refusal.
+    expect(helpText).toContain("--allow-plaintext-phi");
+  });
+
   it("refuses deferral without the workers, which is the load-bearing one", () => {
     // `deferActivities` is a biconditional and its own contract says so. Deferring with no worker
     // claiming leaves every scheduled activity at rest, so the instance stalls at its first

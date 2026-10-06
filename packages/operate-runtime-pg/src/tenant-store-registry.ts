@@ -12,7 +12,7 @@ import {
   type TransactionalEntityStore,
 } from "@crossengin/operate-runtime";
 
-import { ColumnMappedEntityStore } from "./column-store.js";
+import { ColumnMappedEntityStore, type ColumnEncryptionKeySource } from "./column-store.js";
 import { tenantSchemaName, DEFAULT_TENANT_SCHEMA_PREFIX } from "./tenant-schema.js";
 import { applyTenantManifestSchema, type TenantSchemaApplication } from "./tenant-schema-apply.js";
 
@@ -38,6 +38,16 @@ export interface TenantColumnStoreRegistryOptions {
   readonly prefix?: string;
   /** SQL expression yielding the pgcrypto key, passed to each tenant's store. */
   readonly encryptionKeyRef?: string;
+  /**
+   * Resolves one tenant's pgcrypto key value, passed to that tenant's store.
+   *
+   * Mirrors `resolveSchema`: a function the registry calls, not a value it holds,
+   * so a per-tenant key may be fetched. Without it, a tenant whose manifest
+   * declares a `phi`/`regulated` field cannot be served at all — the store
+   * refuses at construction with `ColumnEncryptionUnavailable` rather than
+   * provisioning a `BYTEA` column and 500ing on the first write.
+   */
+  readonly encryptionKey?: ColumnEncryptionKeySource;
   /** Called once per *fresh* application (not on a memoised hit), for logging. */
   readonly onApplication?: (application: TenantSchemaApplication) => void;
   /**
@@ -87,6 +97,7 @@ export class TenantColumnStoreRegistry {
   private readonly conn: PgConnection;
   private readonly prefix: string;
   private readonly encryptionKeyRef: string | undefined;
+  private readonly encryptionKey: ColumnEncryptionKeySource | undefined;
   private readonly onApplication: ((application: TenantSchemaApplication) => void) | null;
   private readonly refusalRetryMs: number;
   private readonly now: () => number;
@@ -99,6 +110,7 @@ export class TenantColumnStoreRegistry {
     this.conn = conn;
     this.prefix = opts.prefix ?? DEFAULT_TENANT_SCHEMA_PREFIX;
     this.encryptionKeyRef = opts.encryptionKeyRef;
+    this.encryptionKey = opts.encryptionKey;
     this.onApplication = opts.onApplication ?? null;
     this.refusalRetryMs = opts.refusalRetryMs ?? DEFAULT_REFUSAL_RETRY_MS;
     this.now = opts.now ?? Date.now;
@@ -152,8 +164,20 @@ export class TenantColumnStoreRegistry {
       ? new ColumnMappedEntityStore(this.conn, manifest, {
           schema: application.schema,
           ...(this.encryptionKeyRef !== undefined ? { encryptionKeyRef: this.encryptionKeyRef } : {}),
+          ...(this.encryptionKey !== undefined ? { encryptionKey: this.encryptionKey } : {}),
         })
       : null;
+    // An *applied* entry never expires (`validUntil` is Infinity), so nothing re-reads a key
+    // source on a cache hit. That bounds what this registry does about rotation, and the bound is
+    // worth stating rather than discovering: `encryptionKey` is a function the store calls **per
+    // op**, so a resolver that changes the key it answers with — a rotated per-tenant DEK — is
+    // picked up by the next operation without any cache work. What is pinned at construction is the
+    // *resolver* and the key **generation** it closes over; a deployment that swaps the resolver
+    // itself, or whose resolver memoises internally, needs `forget(tenantId)` for the next `ensure`
+    // to build a store around the new one. There is deliberately no rotation machinery here —
+    // re-encrypting existing ciphertext under a new key is `kernel-pg`'s `KeyRotationMigrator`, and
+    // a registry that silently started serving a new key over old ciphertext would read
+    // "Wrong key or corrupt data" as an ordinary read failure.
     this.entries.set(tenantId, {
       manifestHash: hash,
       application,
@@ -213,6 +237,42 @@ export class TenantColumnStoreRegistry {
  * exactly the behaviour that existed before any of this: served, from the
  * manifest-agnostic JSONB store, rather than 500ing on an unplanned entity.
  */
+/**
+ * An entity whose manifest declares an at-rest-encrypted field was about to be
+ * served from the plaintext fallback store, and was refused instead.
+ *
+ * The fallback exists because ADR-0314 chose to serve a tenant whose column
+ * schema was refused from the manifest-agnostic JSONB store rather than 500 on
+ * every request — "their data is in a different place than they think". For an
+ * `phi`/`regulated` entity that trade does not hold: `PostgresEntityStore` has no
+ * encryption of any kind, so the write **succeeds** and stores plaintext (verified
+ * live: `document->>'mrn'` reads back the value), while the deployment logs a
+ * refusal and reports 201 to the caller. A silent downgrade from ciphertext to
+ * plaintext is the compliance failure itself, not a degraded mode of it.
+ *
+ * Reads are refused for a second, independent reason: data written encrypted into
+ * the tenant's own schema is not in the fallback's table at all, so a read there
+ * answers *absent* for a record that exists. That is ADR-0336's
+ * `IdempotencyStore.get` rule — not knowing must not be reported as knowing.
+ */
+export class PlaintextFallbackRefused extends Error {
+  readonly tenantId: string;
+  readonly entity: string;
+
+  constructor(tenantId: string, entity: string) {
+    super(
+      `refusing to serve '${entity}' for tenant ${tenantId} from the plaintext fallback store: ` +
+        `that entity has at least one at-rest-encrypted field and this tenant's column schema ` +
+        `was not applied, so a write would store plaintext and a read would answer absent for ` +
+        `data that exists. Resolve the tenant's schema application (see the recorded refusal's ` +
+        `reported SQL) and retry.`,
+    );
+    this.name = "PlaintextFallbackRefused";
+    this.tenantId = tenantId;
+    this.entity = entity;
+  }
+}
+
 export interface TenantColumnStoreRouterOptions {
   readonly registry: TenantColumnStoreRegistry;
   /**
@@ -221,15 +281,27 @@ export interface TenantColumnStoreRouterOptions {
    * than a silent miss.
    */
   readonly fallback?: EntityStore;
+  /**
+   * Entity names carrying at least one encrypt-at-rest column. The fallback store
+   * is plaintext, so routing one of these to it would silently downgrade PHI.
+   *
+   * Supplied rather than derived: the router holds no manifest and routes per
+   * call, and one encryption check is not a reason to make it manifest-aware.
+   * `encryptedEntityNames(manifest)` in `column-store.ts` is the reduction.
+   * Omitted (or empty) the router behaves exactly as it always has.
+   */
+  readonly encryptedEntities?: ReadonlySet<string>;
 }
 
 export class TenantColumnStoreRouter implements TransactionalEntityStore {
   private readonly registry: TenantColumnStoreRegistry;
   private readonly fallback: EntityStore | null;
+  private readonly encryptedEntities: ReadonlySet<string>;
 
   constructor(opts: TenantColumnStoreRouterOptions) {
     this.registry = opts.registry;
     this.fallback = opts.fallback ?? null;
+    this.encryptedEntities = opts.encryptedEntities ?? new Set<string>();
   }
 
   /** Which store serves this tenant: their own column store, or the fallback. */
@@ -244,25 +316,38 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     return this.fallback;
   }
 
+  /**
+   * `storeFor`, refusing when the resolved store is the plaintext fallback and the
+   * entity carries an encrypted column. Every entity-bearing op goes through this
+   * rather than `storeFor`, so a method added later that forgets it is the only
+   * way back to the silent downgrade — which is why the two are named apart.
+   */
+  private storeForEntity(tenantId: string, entity: string): EntityStore {
+    const store = this.storeFor(tenantId);
+    if (store !== this.fallback) return store;
+    if (this.encryptedEntities.has(entity)) throw new PlaintextFallbackRefused(tenantId, entity);
+    return store;
+  }
+
   /** Whether this tenant is being served from their own typed tables. */
   isTenantScoped(tenantId: string): boolean {
     return this.registry.storeFor(tenantId) !== null;
   }
 
   async list(tenantId: string, entity: string): Promise<readonly EntityRecord[]> {
-    return this.storeFor(tenantId).list(tenantId, entity);
+    return this.storeForEntity(tenantId, entity).list(tenantId, entity);
   }
 
   async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
-    return this.storeFor(tenantId).listPage(tenantId, entity, query);
+    return this.storeForEntity(tenantId, entity).listPage(tenantId, entity, query);
   }
 
   async get(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
-    return this.storeFor(tenantId).get(tenantId, entity, id);
+    return this.storeForEntity(tenantId, entity).get(tenantId, entity, id);
   }
 
   async create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
-    return this.storeFor(tenantId).create(tenantId, entity, record);
+    return this.storeForEntity(tenantId, entity).create(tenantId, entity, record);
   }
 
   async update(
@@ -271,11 +356,11 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     id: string,
     patch: EntityRecord,
   ): Promise<EntityRecord | null> {
-    return this.storeFor(tenantId).update(tenantId, entity, id, patch);
+    return this.storeForEntity(tenantId, entity).update(tenantId, entity, id, patch);
   }
 
   async remove(tenantId: string, entity: string, id: string): Promise<boolean> {
-    return this.storeFor(tenantId).remove(tenantId, entity, id);
+    return this.storeForEntity(tenantId, entity).remove(tenantId, entity, id);
   }
 
   /**
@@ -286,7 +371,17 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
    */
   async withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
     const store = this.storeFor(tenantId);
-    return isTransactional(store) ? store.withTransaction(tenantId, fn) : fn(store);
+    // The callback is handed the *underlying* store, so its ops do not pass back through this
+    // router — a guard only on the six methods above would be bypassed by every handler that runs
+    // its guard → write → effect unit in a transaction, which is the ordinary write path. So the
+    // store the callback sees is wrapped when it is the fallback, and the refusal is the same one.
+    const guard = (inner: EntityStore): EntityStore =>
+      store === this.fallback && this.encryptedEntities.size > 0
+        ? guardPlaintextEntities(inner, tenantId, this.encryptedEntities)
+        : inner;
+    return isTransactional(store)
+      ? store.withTransaction(tenantId, (tx) => fn(guard(tx)))
+      : fn(guard(store));
   }
 
   // ----- many_to_many associations ------------------------------------------
@@ -294,6 +389,11 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
   // Structural, like the interfaces in `operate-runtime/association.ts`: the
   // router declares them so a tenant's own join tables are reachable, and reports
   // a store that cannot serve one instead of answering wrongly.
+  //
+  // These deliberately keep `storeFor` rather than `storeForEntity`: a join table
+  // holds the two ids and `created_at` and no classified field at all, so routing
+  // one to the plaintext fallback cannot downgrade anything. The entity *rows* the
+  // link points at are reached through the six methods above, which do refuse.
 
   async link(
     tenantId: string,
@@ -367,4 +467,49 @@ export class TenantColumnStoreRouter implements TransactionalEntityStore {
     }
     return store.countLinks(tenantId, leftEntity, rightEntity, opts);
   }
+}
+
+/**
+ * Wraps a plaintext store so every entity-bearing op over an encrypted entity
+ * refuses, used for the store a `withTransaction` callback is handed.
+ *
+ * A wrapper rather than a `Proxy`: the six methods are the whole `EntityStore`
+ * surface, so listing them is a compile-time obligation — a seventh method added
+ * to the interface fails to typecheck here instead of passing through unguarded,
+ * which is what a `Proxy` would do.
+ */
+function guardPlaintextEntities(
+  inner: EntityStore,
+  tenantId: string,
+  encrypted: ReadonlySet<string>,
+): EntityStore {
+  const check = (entity: string): void => {
+    if (encrypted.has(entity)) throw new PlaintextFallbackRefused(tenantId, entity);
+  };
+  return {
+    list: (t, entity) => {
+      check(entity);
+      return inner.list(t, entity);
+    },
+    listPage: (t, entity, query) => {
+      check(entity);
+      return inner.listPage(t, entity, query);
+    },
+    get: (t, entity, id) => {
+      check(entity);
+      return inner.get(t, entity, id);
+    },
+    create: (t, entity, record) => {
+      check(entity);
+      return inner.create(t, entity, record);
+    },
+    update: (t, entity, id, patch) => {
+      check(entity);
+      return inner.update(t, entity, id, patch);
+    },
+    remove: (t, entity, id) => {
+      check(entity);
+      return inner.remove(t, entity, id);
+    },
+  };
 }

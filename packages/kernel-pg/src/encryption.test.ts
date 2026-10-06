@@ -1,16 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PgConnection } from "./connection.js";
 import {
+  COLUMN_ENCRYPTION_KEY_ENV,
+  COLUMN_ENCRYPTION_KEY_GUC,
+  COLUMN_KEY_REFUSAL_REASONS,
+  DEFAULT_COLUMN_KEY_REF,
   EncryptionApplier,
   ENCRYPTED_COLUMN_QUERY,
+  columnKeyRefFor,
   ensurePgcryptoExtension,
   formatEncryptionCoverage,
   introspectEncryptedColumns,
+  isRaisingKeyRef,
   parseColumnDirectives,
   pgcryptoInstalled,
   pgpSymDecryptExpr,
   pgpSymEncryptExpr,
   pgpSymEncryptLiteral,
+  resolveColumnEncryptionKey,
   summarizeEncryptionCoverage,
   type EncryptedColumn,
   type EncryptedColumnRow,
@@ -103,6 +110,117 @@ describe("pgcrypto provisioning", () => {
     });
     await ensurePgcryptoExtension(conn);
     expect(observed).toContain("CREATE EXTENSION IF NOT EXISTS pgcrypto");
+  });
+});
+
+describe("column key ref vocabulary", () => {
+  it("pins the GUC name the whole stack agrees on", () => {
+    expect(COLUMN_ENCRYPTION_KEY_GUC).toBe("app.column_encryption_key");
+    expect(COLUMN_ENCRYPTION_KEY_ENV).toBe("COLUMN_ENCRYPTION_KEY");
+  });
+
+  it("derives the default ref from the GUC rather than restating it", () => {
+    expect(DEFAULT_COLUMN_KEY_REF).toBe(`current_setting('app.column_encryption_key')`);
+    expect(DEFAULT_COLUMN_KEY_REF).toBe(columnKeyRefFor(COLUMN_ENCRYPTION_KEY_GUC));
+  });
+
+  it("builds a ref for any valid GUC name", () => {
+    expect(columnKeyRefFor("app.other_key")).toBe(`current_setting('app.other_key')`);
+    expect(columnKeyRefFor("_x._y0")).toBe(`current_setting('_x._y0')`);
+  });
+
+  it("emits only the one-argument (raising) form", () => {
+    // The two-argument form is what the house GUC idiom uses for tenant isolation and is exactly
+    // wrong here; see `isRaisingKeyRef`'s measurements.
+    expect(columnKeyRefFor("app.k")).not.toContain(",");
+  });
+
+  it("throws on anything that is not a GUC name — the value is interpolated raw", () => {
+    expect(() => columnKeyRefFor("'; DROP TABLE patient; --")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("barename")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("App.Key")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("app.key.extra")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("app. key")).toThrow(/not a GUC name/);
+    expect(() => columnKeyRefFor("9app.key")).toThrow(/not a GUC name/);
+  });
+});
+
+describe("isRaisingKeyRef", () => {
+  it("is true for the single-argument current_setting form", () => {
+    expect(isRaisingKeyRef(DEFAULT_COLUMN_KEY_REF)).toBe(true);
+    expect(isRaisingKeyRef(`current_setting( 'app.k' )`)).toBe(true);
+    expect(isRaisingKeyRef(`  current_setting('app.k')  `)).toBe(true);
+  });
+
+  it("is false for the two-argument form", () => {
+    // Measured on PG 16: current_setting('app.foo', true) unset returns NULL (and '' once used and
+    // reset on that connection), and pgp_sym_encrypt(x, NULL) returns NULL *silently* — so the
+    // two-argument form turns a missing key into a PHI column storing NULL, reported as success.
+    // The one-argument form raises `unrecognized configuration parameter` instead, and
+    // pgp_sym_encrypt(x, '') raises `Illegal argument to function`.
+    expect(isRaisingKeyRef(`current_setting('app.column_encryption_key', true)`)).toBe(false);
+    expect(isRaisingKeyRef(`current_setting('app.k',true)`)).toBe(false);
+    expect(isRaisingKeyRef(`current_setting('app.k', false)`)).toBe(false);
+    expect(isRaisingKeyRef(`NULLIF(current_setting('app.k', true), '')`)).toBe(false);
+  });
+
+  it("is false for anything else, including a bind parameter", () => {
+    // Not a judgement that `$1` is malformed — it answers "cannot be shown to raise", and `$1`
+    // bound to null is the silent-NULL path one layer out.
+    expect(isRaisingKeyRef("$1")).toBe(false);
+    expect(isRaisingKeyRef("'literal-key'")).toBe(false);
+    expect(isRaisingKeyRef("")).toBe(false);
+  });
+});
+
+describe("resolveColumnEncryptionKey", () => {
+  it("claims the GUC from the environment with the default ref", () => {
+    const resolved = resolveColumnEncryptionKey(DEFAULT_COLUMN_KEY_REF, {
+      COLUMN_ENCRYPTION_KEY: "s3cret",
+    });
+    expect(resolved.refusal).toBeNull();
+    expect([...resolved.sessionSettings]).toEqual([["app.column_encryption_key", "s3cret"]]);
+  });
+
+  it("refuses the default ref when the environment variable is absent", () => {
+    const resolved = resolveColumnEncryptionKey(DEFAULT_COLUMN_KEY_REF, {});
+    expect(resolved.refusal?.reason).toBe("key_value_absent");
+    expect(resolved.refusal?.message).toContain("COLUMN_ENCRYPTION_KEY is not set");
+    expect(resolved.refusal?.message).toContain("unrecognized configuration parameter");
+    expect(resolved.sessionSettings.size).toBe(0);
+  });
+
+  it("refuses an empty variable too — pgp_sym_encrypt(x, '') raises", () => {
+    const resolved = resolveColumnEncryptionKey(DEFAULT_COLUMN_KEY_REF, {
+      COLUMN_ENCRYPTION_KEY: "",
+    });
+    expect(resolved.refusal?.reason).toBe("key_value_absent");
+  });
+
+  it("requires nothing when the deployment names its own raising ref", () => {
+    const resolved = resolveColumnEncryptionKey(`current_setting('app.other_key')`, {});
+    expect(resolved.refusal).toBeNull();
+    expect(resolved.sessionSettings.size).toBe(0);
+  });
+
+  it("refuses a caller-supplied ref that can yield NULL", () => {
+    const resolved = resolveColumnEncryptionKey(`current_setting('app.other_key', true)`, {
+      COLUMN_ENCRYPTION_KEY: "s3cret",
+    });
+    expect(resolved.refusal?.reason).toBe("key_ref_can_yield_null");
+    expect(resolved.refusal?.message).toContain("store NULL");
+  });
+
+  it("never puts the key value in the refusal message", () => {
+    const resolved = resolveColumnEncryptionKey(`current_setting('app.k', true)`, {
+      COLUMN_ENCRYPTION_KEY: "s3cret",
+    });
+    expect(resolved.refusal?.message).not.toContain("s3cret");
+  });
+
+  it("has a refusal reason enum with no duplicates", () => {
+    expect(new Set(COLUMN_KEY_REFUSAL_REASONS).size).toBe(COLUMN_KEY_REFUSAL_REASONS.length);
   });
 });
 

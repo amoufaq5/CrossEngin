@@ -125,11 +125,42 @@ export function formatEncryptionPlan(plans: readonly ColumnMigrationPlan[]): str
   return lines.join("\n");
 }
 
+export interface EncryptionMigratorOptions {
+  /**
+   * `set_config(name, value, true)` pairs claimed inside each per-column transaction, before that
+   * column's plan statements.
+   *
+   * The symmetric counterpart of `KeyRotationMigratorOptions.sessionSettings`, and it exists for the
+   * same reason: `keyRef` is a SQL *expression*, the convention the whole stack follows is
+   * `current_setting('app.column_encryption_key')`, and nothing in the workspace sets that GUC — so
+   * `migrateSchema`, which opens its own transaction, had no way to set the key it reads and
+   * `crossengin-pg encrypt --apply` raised on its first statement in every deployment. The only
+   * caller that could ever have worked was one inlining the key material into the SQL text, where
+   * it lands in `pg_stat_statements` and in the server log on error.
+   *
+   * **Inside** each transaction, not before: `set_config(…, is_local => true)` is
+   * transaction-local, so a setting claimed outside is discarded with the implicit
+   * single-statement transaction before the statement it was set for — the same property
+   * `tenant-lifecycle-pg`'s `tenant-context.ts` is pinned on. Transaction-local rather than a
+   * session-wide `SET` because a session-wide one leaves the key readable to the next caller of a
+   * pooled connection.
+   */
+  readonly sessionSettings?: ReadonlyMap<string, string>;
+}
+
 export class EncryptionMigrator {
   private readonly conn: PgConnection;
+  private readonly sessionSettings: ReadonlyMap<string, string>;
 
-  constructor(conn: PgConnection) {
+  /**
+   * `options` stays optional: three call sites use the one-argument form (`crossengin-pg.ts` twice
+   * and `apps/operate-server`'s certification evidence adapter), and a required second argument
+   * would be a breaking change to a constructor whose default behaviour is correct for a
+   * deployment that sets the GUC itself.
+   */
+  constructor(conn: PgConnection, options: EncryptionMigratorOptions = {}) {
     this.conn = conn;
+    this.sessionSettings = options.sessionSettings ?? new Map();
   }
 
   /** Plans encrypt-in-place migrations for every plaintext (non-bytea) hinted column. */
@@ -145,6 +176,10 @@ export class EncryptionMigrator {
     const plans = await this.planSchema(schema, keyRef);
     for (const plan of plans) {
       await this.conn.transaction(async (tx) => {
+        for (const [name, value] of this.sessionSettings) {
+          // Name and value both bound, never interpolated: the value is the key.
+          await tx.query(`SELECT set_config($1, $2, true)`, [name, value]);
+        }
         for (const statement of plan.statements) {
           await tx.query(statement);
         }

@@ -11,6 +11,7 @@ import {
   type DataClassification,
 } from "@crossengin/types/meta-schema";
 
+import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
 import {
   DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
@@ -33,6 +34,21 @@ export interface ServeOptions {
   readonly pack: string | null;
   readonly manifestPath: string | null;
   readonly store: StoreKind;
+  /**
+   * Serve a manifest declaring `phi`/`regulated` fields from a store that cannot encrypt them.
+   *
+   * Off by default, and that default is a *refusal* rather than this repo's usual opt-in posture:
+   * ADR-0334 left `--tenant-status-gate` opt-in because on-by-default would refuse requests of a
+   * deployment that works today, and here the reasoning inverts — no deployment serves PHI
+   * correctly today, so refusing breaks nothing that worked. `--store pg` and `--store memory`
+   * hold a classified field as plaintext (verified live: `document->>'mrn'` reads back the value),
+   * and a classification that silently means nothing is worse than one that refuses.
+   *
+   * It does not rescue `--store pg-columns` without a key: there the column is `BYTEA`, so the
+   * write cannot succeed at all and "allow plaintext" would name an outcome that store cannot
+   * produce.
+   */
+  readonly allowPlaintextPhi: boolean;
   readonly schema: string | null;
   readonly apiKeys: readonly string[];
   readonly jwksKeys: readonly string[];
@@ -397,6 +413,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let pack: string | null = null;
   let manifestPath: string | null = null;
   let store: StoreKind = "memory";
+  let allowPlaintextPhi = false;
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
   const apiKeys: string[] = [];
@@ -674,6 +691,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     } else if (arg === "--workflow-cancel-role" || arg.startsWith("--workflow-cancel-role=")) {
       workflowCancelRoles.push(takeValue(arg, next, "--workflow-cancel-role"));
       i += consumed();
+    } else if (arg === "--allow-plaintext-phi") {
+      allowPlaintextPhi = true;
     } else if (arg === "--workflow-workers") {
       workflowWorkers = true;
     } else if (arg === "--workflow-worker-config" || arg.startsWith("--workflow-worker-config=")) {
@@ -1322,6 +1341,19 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   // and never runs, so an instance stalls at its first activity with no error anywhere — strictly
   // worse than both alternatives. Mounting the workers is the only thing that makes deferral mean
   // anything, so it is required rather than assumed.
+  // Refused rather than ignored, on this file's standing rule: a flag whose name asserts something
+  // the deployment cannot do is worse than no flag. On `pg-columns` an encrypt-at-rest column is
+  // genuinely `BYTEA`, so a plaintext write cannot succeed — the outcome is ciphertext or a boot
+  // refusal for a missing key, never the plaintext this flag claims to authorise. Silently
+  // accepting it would let an operator believe they had opted into something, which is the shape
+  // `--gateway-execution-capture 0` and `--workflow-defer-activities` are both refused for.
+  if (allowPlaintextPhi && store === "pg-columns") {
+    throw new CliUsageError(
+      "--allow-plaintext-phi is not applicable to --store pg-columns: a phi/regulated column is" +
+        " BYTEA there, so the write is encrypted or refused for a missing" +
+        ` ${COLUMN_ENCRYPTION_SECRET_VAR}, never stored as plaintext. Drop the flag.`,
+    );
+  }
   if (workflowDeferActivities && !workflowWorkers) {
     throw new CliUsageError(
       "--workflow-defer-activities requires --workflow-workers: deferring leaves every scheduled" +
@@ -1568,6 +1600,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     enableJobInvoke,
     jobInvokeRoles,
     workflowCancelRoles,
+    allowPlaintextPhi,
     workflowWorkers,
     workflowWorkerConfig,
     workflowDeferActivities,
@@ -1888,6 +1921,14 @@ Options:
   --port <n>           Port to listen on (default 8787)
   --store <kind>       Entity store: memory | pg (JSONB) | pg-columns (typed
                        per-entity tables) (default memory)
+  --allow-plaintext-phi
+                       Serve a manifest with phi/regulated fields from a store
+                       that cannot encrypt them (pg | memory). Off by default:
+                       those stores hold a classified field as plaintext, so a
+                       manifest declaring one is refused at boot unless this
+                       says otherwise. Not applicable to pg-columns, which
+                       encrypts (set COLUMN_ENCRYPTION_SECRET in the
+                       environment -- never argv, which ps can read).
   --schema <name>      Postgres schema for the entity store (default meta;
                        public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)

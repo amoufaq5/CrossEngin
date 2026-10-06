@@ -75,6 +75,7 @@ export * from "./notification-template-routes.js";
 export * from "./notification-template-store.js";
 export * from "./read-state-store.js";
 export * from "./read-state-routes.js";
+export * from "./column-encryption.js";
 export * from "./gateway-idempotency.js";
 export * from "./gateway-execution-capture.js";
 export * from "./replay.js";

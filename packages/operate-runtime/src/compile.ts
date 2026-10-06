@@ -72,7 +72,7 @@ import { buildWhtReconciliationHandler } from "./wht-reconciliation-handler.js";
 import { buildJobInvokeHandler, type JobInvoker } from "./job-invoke-handler.js";
 import { withEntitlement, withRecordLimit, type EntitlementResolver } from "./entitlement.js";
 import type { SettingsStore, TenantSettings } from "./settings.js";
-import { entityReadOperationIds } from "./slugs.js";
+import { operationId, type CrudOperation } from "./slugs.js";
 import type { EntityStore } from "./store.js";
 import { temporalFieldIndexFromManifest, withDatetimeWireType } from "./datetime-store.js";
 import { decimalFieldIndexFromManifest, withDecimalWireType } from "./decimal-store.js";
@@ -496,11 +496,62 @@ function buildSettingsDefaultPlans(manifest: Manifest): Map<string, SettingsDefa
   return plans;
 }
 
+/**
+ * Entity → every operationId whose response can carry that entity's records,
+ * read off the derived routes rather than computed from a list of action names.
+ * That is the only form that can be right: a lifecycle transition's operationId
+ * comes from the *manifest's workflow*, so a `(name: string) => string[]`
+ * cannot name it, and the read-only convention this replaced
+ * (`[<camel>.list, <camel>.read]`) left `create`, `update`, `delete` and every
+ * transition out of the redaction registry — so a credential with update
+ * permission read any record's `phi` fields by issuing a no-op PATCH.
+ *
+ * **Every** operation serving the entity goes in, with no exclusions. Redaction
+ * is a no-op on a body that has no such key, so a 204 delete and an
+ * association `{count}` cost nothing, while deciding per action whether its
+ * response carries a record is the judgement call that produced the defect.
+ */
+function entityOperationIndex(
+  specs: readonly { readonly entity: string; readonly operationId: string }[],
+): ReadonlyMap<string, readonly string[]> {
+  const index = new Map<string, string[]>();
+  for (const spec of specs) {
+    const ids = index.get(spec.entity);
+    if (ids === undefined) index.set(spec.entity, [spec.operationId]);
+    else if (!ids.includes(spec.operationId)) ids.push(spec.operationId);
+  }
+  return index;
+}
+
+/**
+ * Fail closed when the index names no operation for an entity the manifest
+ * declares: register the spec against the statically derivable CRUD ids, which
+ * is less than the real set (it cannot know transitions) and far more than the
+ * nothing an empty list would register. Unreachable today — `manifestRouteSpecs`
+ * and `redactionRegistryFromManifest` both walk `manifest.entities`, so every
+ * entity has at least its five CRUD specs — and here because "the index has no
+ * entry" must never be the one path that serves classified fields in the clear.
+ */
+function fallbackOperationIds(entityName: string): readonly string[] {
+  const actions: readonly CrudOperation[] = ["list", "create", "read", "update", "delete"];
+  return actions.map((action) => operationId(entityName, action));
+}
+
 export interface CompiledOperateServer {
   readonly routes: InMemoryRouteRegistry;
   readonly handlers: HandlerRegistry;
   readonly redactionRegistry: MapRedactionRegistry;
   readonly routeSpecs: readonly RouteSpec[];
+  /**
+   * The entity → operationIds mapping the redaction registry was keyed off.
+   * Exposed because `MapRedactionRegistry` answers only `specFor(id)`, so
+   * without it the mapping can be checked in one direction — "is this id
+   * covered" — and never the other, "is every id covered one the route
+   * derivation actually emits". The absence of that second direction is what
+   * let a phantom `<entity>.get` and a lower-cased id sit in the old mapping
+   * unnoticed, matching nothing.
+   */
+  readonly redactionOperationIds: ReadonlyMap<string, readonly string[]>;
 }
 
 /**
@@ -583,17 +634,20 @@ export function compileOperateServer(
   }
 
   // Association read routes: GET /v1/<owner>/{id}/<related> lists the m2m-linked related records.
-  for (const spec of manifestAssociationRoutes(manifest)) {
+  const associationListSpecs = manifestAssociationRoutes(manifest);
+  for (const spec of associationListSpecs) {
     routes.register(associationRouteFromSpec(spec));
     handlers.register(spec.operationId, gate(buildAssociationListHandler(spec, ctx), "read"));
   }
   // Association write routes: PUT/DELETE /v1/<owner>/{id}/<related>/{relatedId} link/unlink.
-  for (const spec of manifestAssociationWriteRoutes(manifest)) {
+  const associationWriteSpecs = manifestAssociationWriteRoutes(manifest);
+  for (const spec of associationWriteSpecs) {
     routes.register(associationWriteRouteFromSpec(spec));
     handlers.register(spec.operationId, gate(buildAssociationWriteHandler(spec, ctx), "write"));
   }
   // Association count routes: GET /v1/<owner>/{id}/<related>/count counts the m2m-linked related records.
-  for (const spec of manifestAssociationCountRoutes(manifest)) {
+  const associationCountSpecs = manifestAssociationCountRoutes(manifest);
+  for (const spec of associationCountSpecs) {
     routes.register(associationCountRouteFromSpec(spec));
     handlers.register(spec.operationId, gate(buildAssociationCountHandler(spec, ctx), "read"));
   }
@@ -718,13 +772,29 @@ export function compileOperateServer(
     );
   }
 
+  // Every operationId whose response can carry an entity's records, taken from the routes this
+  // compile actually derived — the entity routes above (CRUD *and* one per lifecycle transition,
+  // whose ids come out of the manifest's workflows) plus the association routes, where the
+  // records served belong to the *related* entity and the link/unlink pair belongs to the owner.
+  const operationIdsByEntity = entityOperationIndex([
+    ...routeSpecs,
+    ...associationListSpecs.map((s) => ({ entity: s.relatedEntity, operationId: s.operationId })),
+    ...associationCountSpecs.map((s) => ({ entity: s.relatedEntity, operationId: s.operationId })),
+    ...associationWriteSpecs.map((s) => ({ entity: s.ownerEntity, operationId: s.operationId })),
+  ]);
   const redactionRegistry = redactionRegistryFromManifest(manifest, {
     rolesForPrincipal: options.principalRoles,
-    operationsForEntity: (name) => [...entityReadOperationIds(name)],
+    operationsForEntity: (name) => operationIdsByEntity.get(name) ?? fallbackOperationIds(name),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
   });
 
-  return { routes, handlers, redactionRegistry, routeSpecs };
+  return {
+    routes,
+    handlers,
+    redactionRegistry,
+    routeSpecs,
+    redactionOperationIds: operationIdsByEntity,
+  };
 }
 
 export interface OperateGatewayOptions extends OperateRuntimeOptions {

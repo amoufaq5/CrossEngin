@@ -38,10 +38,12 @@ import {
   PostgresSubscriptionStore,
   TenantColumnStoreRegistry,
   TenantColumnStoreRouter,
+  encryptedEntityNames,
   eraseTenantSchema,
   eraseTenantSchemaWithin,
   ingestStripeWebhook,
   surveyTenantSchemaWithCollateral,
+  type ColumnEncryptionKeySource,
 } from "@crossengin/operate-runtime-pg";
 
 import type { PruneOptions, ReplayOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
@@ -91,6 +93,13 @@ import {
   GatewayExecutionCaptureObserver,
   describeCaptureCost,
 } from "./gateway-execution-capture.js";
+import {
+  COLUMN_ENCRYPTION_SECRET_VAR,
+  buildColumnKeySource,
+  decidePhiStorage,
+  formatPhiStorageDecision,
+  surveyPhiFields,
+} from "./column-encryption.js";
 import {
   IDEMPOTENCY_FK_HINT,
   IDEMPOTENCY_GUARANTEE,
@@ -512,9 +521,59 @@ interface ResolvedStores {
   readonly settingsStore: SettingsStore;
   /** The Postgres connection (present only for pg stores), reused for billing wiring. */
   readonly conn?: PgConnection;
+  /**
+   * Resolves one tenant's at-rest column key. Present only when this deployment actually
+   * encrypts — so a per-tenant store built later gets the same resolver, and its derivation
+   * cache, rather than a second one.
+   */
+  readonly columnKey?: ColumnEncryptionKeySource;
 }
 
 async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<ResolvedStores> {
+  // Decided before a connection is opened, because every outcome here is about whether this
+  // deployment may serve this manifest at all. A classification that silently means nothing is
+  // the defect being closed: `--store pg` and `--store memory` hold a phi/regulated field as
+  // plaintext (verified live — `document->>'mrn'` reads the value straight back), and
+  // `--store pg-columns` cannot write one at all without a key.
+  const rawSecret = process.env[COLUMN_ENCRYPTION_SECRET_VAR] ?? "";
+  const phiDecision = decidePhiStorage({
+    store: options.store,
+    phiFields: surveyPhiFields(manifest),
+    secretPresent: rawSecret.trim().length > 0,
+    allowPlaintextPhi: options.allowPlaintextPhi,
+  });
+  if (!phiDecision.mayServe) throw new Error(formatPhiStorageDecision(phiDecision));
+  // Built *before* the decision is logged, and the order is load-bearing. `secretPresent` is
+  // "the variable is non-empty", which cannot see a secret that is present and too weak to use
+  // — under 32 bytes, or fewer than 16 distinct byte values. Such a secret decides `encrypted`
+  // and is then refused by the parser, so logging first would put "this deployment encrypts
+  // PHI" on the record and throw immediately after: the very shape of defect this increment
+  // closes, one layer in. Built once and shared, so the per-tenant derivation is cached across
+  // every store that needs it rather than once per store.
+  const columnKey =
+    phiDecision.verdict === "encrypted" ? buildColumnKeySource(rawSecret) : undefined;
+  if (phiDecision.fields.length > 0) {
+    // Said at boot either way, including when it is fine: "this deployment encrypts PHI" and
+    // "this deployment stores PHI in the clear because it was told to" are the two facts an
+    // operator needs on the record, and the second is reachable only through a flag whose name
+    // is the admission.
+    const line = formatPhiStorageDecision(phiDecision);
+    if (phiDecision.verdict === "plaintext_accepted") console.warn(`[phi] ${line}`);
+    else console.info(`[phi] ${line}`);
+  }
+  // A secret that is set and not used is a deployment believing it has encryption it has not
+  // got. It is not a refusal — the variable may be set globally for a sibling service, and
+  // refusing would break a deployment that works — but going quiet is how the original defect
+  // lasted four phases.
+  if (rawSecret.trim().length > 0 && columnKey === undefined) {
+    console.warn(
+      `[phi] ${COLUMN_ENCRYPTION_SECRET_VAR} is set and unused: ` +
+        (phiDecision.fields.length === 0
+          ? "this manifest declares no phi/regulated field."
+          : `verdict ${phiDecision.verdict} — only --store pg-columns encrypts a column.`),
+    );
+  }
+
   if (options.store === "memory") {
     return {
       store: new InMemoryEntityStore(),
@@ -527,9 +586,12 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   const allocator = new PostgresSequenceAllocator(conn, schema);
   const settingsStore = new PostgresSettingsStore(conn, schema);
   if (options.store === "pg-columns") {
-    const store = new ColumnMappedEntityStore(conn, manifest, options.schema !== null ? { schema: options.schema } : {});
+    const store = new ColumnMappedEntityStore(conn, manifest, {
+      ...(options.schema !== null ? { schema: options.schema } : {}),
+      ...(columnKey !== undefined ? { encryptionKey: columnKey } : {}),
+    });
     await store.ensureSchema();
-    return { store, allocator, settingsStore, conn };
+    return { store, allocator, settingsStore, conn, columnKey };
   }
   const store = new PostgresEntityStore(conn, options.schema !== null ? { schema: options.schema } : {});
   return { store, allocator, settingsStore, conn };
@@ -551,7 +613,10 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.manifestPath !== null
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
-  const { store, allocator, settingsStore, conn } = await resolveStore(options, manifest);
+  const { store, allocator, settingsStore, conn, columnKey } = await resolveStore(
+    options,
+    manifest,
+  );
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
@@ -3152,6 +3217,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         : store;
     if (store instanceof ColumnMappedEntityStore && conn !== undefined) {
       tenantStoreRegistry = new TenantColumnStoreRegistry(conn, {
+        // The same resolver the boot store got, so a tenant's key is derived from the one
+        // deployment secret and cached once. Absent when this deployment encrypts nothing, in
+        // which case a tenant activating a manifest with a classified field is refused by the
+        // store's own constructor — named, rather than 500ing on their first PHI write.
+        ...(columnKey !== undefined ? { encryptionKey: columnKey } : {}),
         onApplication: (application) => {
           if (application.applied) {
             console.info(
@@ -3171,10 +3241,28 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         },
       });
     }
-    const tenantStore: EntityStore =
+    // One router *per tenant*, not one for the deployment, and that is the whole reason this is a
+    // function rather than a value. Without `encryptedEntities` the fallback is a silent downgrade
+    // from ciphertext to plaintext: a tenant whose DDL application is *refused* is served from the
+    // JSONB store, which has no encryption, so their PHI would land in the clear while the log
+    // reported a refusal and the caller got a 201. Declaring the set makes those entities refuse
+    // instead — the fail-closed invariant, at the same cost ADR-0314 already accepts for a refused
+    // application, minus the silence.
+    //
+    // And the set has to come from the *tenant's own* manifest. Under per-tenant manifests a
+    // tenant authors independently, so A's classified fields are not B's and neither is the boot
+    // pack's; a deployment-wide set taken from the boot manifest would have been correct only for
+    // tenants serving that pack, and would have left exactly the tenant-declared PHI field
+    // unguarded. The registry stays shared — it owns provisioning and the memoised per-tenant
+    // store — while the router is a thin dispatcher, so one per gateway costs nothing.
+    const tenantStoreFor = (tenantManifest: Manifest): EntityStore =>
       tenantStoreRegistry === null
         ? jsonbStore
-        : new TenantColumnStoreRouter({ registry: tenantStoreRegistry, fallback: jsonbStore });
+        : new TenantColumnStoreRouter({
+            registry: tenantStoreRegistry,
+            fallback: jsonbStore,
+            encryptedEntities: encryptedEntityNames(tenantManifest),
+          });
     gatewayCache = new TenantGatewayCache({
       source: manifestStore,
       // Tenant gateways mirror the default server's cross-cutting wiring — extra routes (AI
@@ -3191,7 +3279,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         if (tenantStoreRegistry !== null) await tenantStoreRegistry.ensure(tenantId, tenantManifest);
         return buildOperateHttpServer({
           manifest: tenantManifest,
-          store: tenantStore,
+          store: tenantStoreFor(tenantManifest),
           apiKeys,
           allocator,
           settingsStore,

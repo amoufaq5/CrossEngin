@@ -16,8 +16,11 @@ import { diffSchema, expressionRequestsFor, formatSchemaDiff } from "../src/diff
 import { renderExpressions } from "../src/expression-render.js";
 import { formatReconciliationPlan, planLiveReconciliation } from "../src/reconcile.js";
 import {
+  COLUMN_ENCRYPTION_KEY_ENV,
+  DEFAULT_COLUMN_KEY_REF,
   EncryptionApplier,
   formatEncryptionCoverage,
+  resolveColumnEncryptionKey,
 } from "../src/encryption.js";
 import {
   EncryptionMigrator,
@@ -27,7 +30,6 @@ import { introspectSchema } from "../src/introspection.js";
 import { createNodePgConnection } from "../src/node-pg.js";
 
 const CLI_VERSION = "0.0.0";
-const DEFAULT_KEY_REF = "current_setting('app.column_encryption_key')";
 
 type Command = "apply" | "drift" | "inspect" | "encrypt" | "version" | "help";
 
@@ -83,12 +85,19 @@ function printHelp(): void {
       "  --json               With drift/inspect, emit JSON instead of human form",
       "  --schema=<name>      With encrypt, the schema to operate on (default: meta)",
       "  --key-ref=<sql>      With encrypt --plan/--apply, the SQL key reference",
-      "                       (default: current_setting('app.column_encryption_key'))",
+      `                       (default: ${DEFAULT_COLUMN_KEY_REF})`,
+      "                       Must be the one-argument current_setting form: the two-argument",
+      "                       form yields NULL when unset and pgp_sym_encrypt(x, NULL) is NULL,",
+      "                       which would store NULL over every PHI value and report success.",
       "  --provision          With encrypt --apply, CREATE EXTENSION pgcrypto first",
       "  --verify|--plan|--apply  encrypt action (default: --plan)",
       "",
       "Environment:",
       "  PGHOST, PGPORT, PGUSER, PGPASSWORD, PGDATABASE, PGSSLMODE, PGAPPNAME",
+      `  ${COLUMN_ENCRYPTION_KEY_ENV}  The at-rest column key *value*. Required by`,
+      "                            encrypt --apply with the default --key-ref; claimed",
+      "                            per transaction as set_config(…, true) with the value",
+      "                            bound, never in argv (argv is readable via ps).",
       "",
     ].join("\n"),
   );
@@ -213,7 +222,25 @@ async function runEncrypt(
   argv: readonly string[],
 ): Promise<number> {
   const schema = flagValue(argv, "schema") ?? META_SCHEMA_NAME;
-  const keyRef = flagValue(argv, "key-ref") ?? DEFAULT_KEY_REF;
+  const keyRef = flagValue(argv, "key-ref") ?? DEFAULT_COLUMN_KEY_REF;
+  const key = resolveColumnEncryptionKey(keyRef, process.env);
+
+  // Before the connection is opened, let alone the first statement. The migration runs one
+  // transaction per column, so raising on statement 1 of N leaves the schema half converted with
+  // nothing recording which half; and `--verify` / `--plan` neither set the key nor need it, so the
+  // refusal is scoped to `--apply`.
+  if (flags.has("--apply") && key.refusal !== null) {
+    process.stderr.write(
+      `Refusing to run the encryption migration: ${key.refusal.reason}\n${key.refusal.message}\n`,
+    );
+    return 2;
+  }
+  if (!flags.has("--apply") && !flags.has("--verify") && key.refusal !== null) {
+    // A plan is SQL an operator pastes, so the defect travels with it. Said, not refused: printing
+    // the plan is how an operator discovers what the migration would do before arranging a key.
+    process.stderr.write(`Warning: ${key.refusal.reason}: ${key.refusal.message}\n`);
+  }
+
   const config = parsePgEnvConfig();
   const conn = createNodePgConnection(config);
   try {
@@ -227,7 +254,7 @@ async function runEncrypt(
       return report.issues.length > 0 && !flags.has("--exit-zero-on-drift") ? 1 : 0;
     }
 
-    const migrator = new EncryptionMigrator(conn);
+    const migrator = new EncryptionMigrator(conn, { sessionSettings: key.sessionSettings });
     if (flags.has("--apply")) {
       if (looksLikeProductionDatabase(config.database) && !flags.has("--confirm")) {
         process.stderr.write(

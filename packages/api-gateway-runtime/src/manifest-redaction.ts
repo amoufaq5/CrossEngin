@@ -24,15 +24,44 @@ export interface RedactionManifestInput {
   readonly roles?: Readonly<Record<string, RoleDefinition>>;
 }
 
-export interface ManifestRedactionOptions {
+/** What composing one entity's spec needs — no operation mapping is involved. */
+export interface RedactionSpecOptions {
   readonly rolesForPrincipal: (principal: ResolvedPrincipal | null) => PrincipalRoles;
-  readonly operationsForEntity?: (entityName: string) => readonly string[];
   readonly policyForEntity?: (entityName: string) => SensitiveFieldPolicy | undefined;
 }
 
-function defaultOperationsForEntity(entityName: string): readonly string[] {
-  const lower = entityName.toLowerCase();
-  return [`${lower}.read`, `${lower}.list`, `${lower}.get`];
+export interface ManifestRedactionOptions extends RedactionSpecOptions {
+  /**
+   * Every operationId whose response can carry this entity's records — not the
+   * read ones, all of them. Required, and deliberately with no default: the
+   * operationIds of an entity's lifecycle transitions come out of the
+   * *manifest's workflows*, so a `(entityName: string) => string[]` computed
+   * from the name alone structurally cannot name them. Any default here is
+   * therefore a mapping that is wrong for exactly the write operations whose
+   * responses carry the record, and wrong *silently* — the registry looks
+   * populated and the gateway redacts nothing on create, update, delete or any
+   * transition. The one that used to live here was wrong twice over on top of
+   * that (`<entity>.get` matched no derived operation, and it lower-cased where
+   * the real id camel-cases, so a multi-word entity matched nothing at all),
+   * because nothing ever compared it against the ids route derivation emits.
+   * So the caller that derives the routes supplies the index; fail closed means
+   * demanding the answer rather than guessing half of it.
+   */
+  readonly operationsForEntity: (entityName: string) => readonly string[];
+}
+
+/**
+ * An entity declares a classified field and the caller's index names no
+ * operation for it — so the spec has nowhere to be registered and every
+ * response carrying that entity's records would go out unredacted. A refusal,
+ * because the alternative is a server that serves PHI in the clear and reports
+ * success; the message names the entity so the wiring bug is fixable.
+ */
+export class RedactionCoverageError extends Error {
+  constructor(readonly entity: string) {
+    super(`${entity}: declares classified fields but no operationId serves it, so no redaction spec could be registered`);
+    this.name = "RedactionCoverageError";
+  }
 }
 
 function rolesMapOf(
@@ -44,7 +73,7 @@ function rolesMapOf(
 export function redactionSpecForEntity(
   entity: Entity,
   roles: ReadonlyMap<RoleName, RoleDefinition>,
-  options: ManifestRedactionOptions,
+  options: RedactionSpecOptions,
   entityPermissions?: EntityPermissions,
 ): ResponseRedactionSpec | null {
   const classified = entityClassifiedFields(entity);
@@ -66,9 +95,10 @@ export function redactionSpecForEntity(
 /**
  * Builds a `RedactionRegistry` from a manifest: every entity that declares a
  * classified field contributes a `ResponseRedactionSpec`, registered against
- * the operationIds that serve that entity's reads (default convention
- * `<entity>.read|list|get`, overridable via `operationsForEntity`). Entities
- * with no classified fields are skipped.
+ * every operationId `operationsForEntity` names for it — which the caller
+ * derives from the routes it actually registered, since nothing here can know
+ * them. Entities with no classified fields are skipped; an entity that has them
+ * and no operation is a `RedactionCoverageError` rather than a silent omission.
  */
 export function redactionRegistryFromManifest(
   manifest: RedactionManifestInput,
@@ -76,7 +106,6 @@ export function redactionRegistryFromManifest(
 ): MapRedactionRegistry {
   const registry = new MapRedactionRegistry();
   const roles = rolesMapOf(manifest.roles);
-  const operationsForEntity = options.operationsForEntity ?? defaultOperationsForEntity;
 
   for (const entity of manifest.entities ?? []) {
     const spec = redactionSpecForEntity(
@@ -86,7 +115,9 @@ export function redactionRegistryFromManifest(
       manifest.permissions?.[entity.name],
     );
     if (spec === null) continue;
-    for (const operationId of operationsForEntity(entity.name)) {
+    const operationIds = options.operationsForEntity(entity.name);
+    if (operationIds.length === 0) throw new RedactionCoverageError(entity.name);
+    for (const operationId of operationIds) {
       registry.register(operationId, spec);
     }
   }

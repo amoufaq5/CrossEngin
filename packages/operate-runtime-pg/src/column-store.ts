@@ -71,10 +71,58 @@ export async function ensureColumnStoreExtensions(
  */
 export const DEFAULT_ENCRYPTION_KEY_REF = "current_setting('app.column_encryption_key')";
 
+/**
+ * The transaction-local GUC `DEFAULT_ENCRYPTION_KEY_REF` reads the pgcrypto key
+ * out of. Named here rather than spelled a second time inside the ref, so the
+ * setter and the reader cannot drift — ADR-0332's `FEATURE_FLAG_COLUMN_NAMES`
+ * defect is exactly two spellings of one name.
+ */
+export const COLUMN_ENCRYPTION_KEY_SETTING = "app.column_encryption_key";
+
+/**
+ * Resolves the pgcrypto key *value* for one tenant. The key travels as a bound
+ * transaction-local GUC, never in SQL text.
+ *
+ * A function rather than a string because the key is a per-tenant fact a
+ * deployment may have to fetch (a KMS unwrap, a per-tenant DEK row), and because
+ * a captured string would pin whatever was true at construction — see the note
+ * on `TenantColumnStoreRegistry`'s cache.
+ */
+export type ColumnEncryptionKeySource = (tenantId: string) => string | Promise<string>;
+
+/**
+ * No route can supply the pgcrypto key this store's encrypted columns need, so
+ * nothing it serves for those entities could be written or read.
+ *
+ * Raised at **construction**, which is the whole point: before this, a manifest
+ * declaring a `phi`/`regulated` field provisioned its `BYTEA` column, served
+ * every other field, and answered **500** on the first PHI write
+ * (`unrecognized configuration parameter "app.column_encryption_key"`), because
+ * `DEFAULT_ENCRYPTION_KEY_REF` reads a GUC nothing in the workspace ever set.
+ * ADR-0334 made the same conversion for an unservable `duration` column: a
+ * failure that is certain at plan time belongs at plan time, where it names the
+ * entity and the field instead of arriving as one route's 500.
+ */
+export class ColumnEncryptionUnavailable extends Error {
+  /** `Entity.field (classification)` for each column that cannot be served. */
+  readonly columns: readonly string[];
+
+  constructor(message: string, columns: readonly string[]) {
+    super(message);
+    this.name = "ColumnEncryptionUnavailable";
+    this.columns = columns;
+  }
+}
+
 export interface ColumnMappedEntityStoreOptions {
   readonly schema?: string;
   /** SQL expression yielding the pgcrypto key (a reference, never the raw key). */
   readonly encryptionKeyRef?: string;
+  /**
+   * Resolves the pgcrypto key *value* for one tenant. The key travels as a bound
+   * transaction-local GUC, never in SQL text.
+   */
+  readonly encryptionKey?: ColumnEncryptionKeySource;
 }
 
 /**
@@ -94,6 +142,9 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   private readonly plans: ReadonlyMap<string, EntityTablePlan>;
   private readonly indexes: Map<string, ReadonlyMap<string, ColumnMapping>> = new Map();
   private readonly keyRef: string;
+  private readonly encryptionKey: ColumnEncryptionKeySource | null;
+  /** Whether any planned column is stored as ciphertext — `plansRequirePgcrypto`, asked once. */
+  private readonly encryptsAtRest: boolean;
   private readonly deletePolicies: ReadonlyMap<string, OnDelete>;
   private readonly joinPlans: readonly JoinTablePlan[];
   private readonly joinIndex: ReadonlyMap<string, JoinTablePlan>;
@@ -112,6 +163,65 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     const keyRef = opts.encryptionKeyRef ?? DEFAULT_ENCRYPTION_KEY_REF;
     if (keyRef.trim().length === 0) throw new Error("encryptionKeyRef must be a non-empty SQL reference");
     this.keyRef = keyRef;
+    this.encryptionKey = opts.encryptionKey ?? null;
+    this.encryptsAtRest = plansRequirePgcrypto(this.plans);
+    // A caller that supplied its own *reference* is arranging the key by a route this store cannot
+    // see — a session-level GUC set by a pooler, a `pgp_sym_encrypt` wrapper function, a literal in
+    // a test — so it is taking responsibility and is not refused. The exemption is exactly that
+    // narrow: `encryptionKeyRef` left at `DEFAULT_ENCRYPTION_KEY_REF` names a GUC whose only setter
+    // is `scoped` below, so with no `encryptionKey` to set it there is nobody who could.
+    const refIsOurs = keyRef === DEFAULT_ENCRYPTION_KEY_REF;
+    if (this.encryptsAtRest && this.encryptionKey === null && refIsOurs) {
+      const columns = encryptedColumnLabels(this.plans);
+      throw new ColumnEncryptionUnavailable(
+        `cannot serve ${columns.length.toString()} at-rest-encrypted column(s) — ` +
+          `${columns.join(", ")} — because no column-encryption key is available: ` +
+          `${DEFAULT_ENCRYPTION_KEY_REF} reads a transaction-local setting and nothing sets it. ` +
+          `Supply 'encryptionKey' (a per-tenant key resolver, bound into the transaction) or an ` +
+          `explicit 'encryptionKeyRef' naming a reference this deployment arranges itself.`,
+        columns,
+      );
+    }
+  }
+
+  /**
+   * Opens the tenant-scoped transaction every op runs in, carrying the pgcrypto
+   * key when this store has a column that needs one.
+   *
+   * One method rather than eleven `withTenantContext` call sites, because the key
+   * and the tenant context have to be established by the *same* transaction —
+   * both are `is_local = true`, so a key set anywhere else is already discarded
+   * by the time the statement that reads it runs. (That is not theoretical: a
+   * bare `conn.query` setter is ADR-0335's `tenant-context.ts` defect, where
+   * `set_config(…, true)` was discarded with the implicit single-statement
+   * transaction before the statement it was set for.)
+   *
+   * A store with no encrypted column passes **no** settings and so issues no
+   * extra statement — the overwhelming majority of manifests, which must not pay
+   * a round trip for a column they do not have.
+   */
+  private async scoped<T>(tenantId: string, fn: (tx: PgConnection) => Promise<T>): Promise<T> {
+    if (!this.encryptsAtRest || this.encryptionKey === null) {
+      return withTenantContext(this.conn, tenantId, fn);
+    }
+    const key = await this.encryptionKey(tenantId);
+    // Measured on PG 16, and the reason this is a refusal rather than a pass-through:
+    // `pgp_sym_encrypt(x, '')` **raises** `Illegal argument to function`, so an empty key would
+    // surface as an opaque write failure from inside pgcrypto. Named here, it says whose resolver
+    // answered nothing.
+    if (key.length === 0) {
+      throw new ColumnEncryptionUnavailable(
+        `the column-encryption key resolver returned an empty key for tenant ${tenantId}; ` +
+          `pgcrypto refuses an empty key, so no at-rest-encrypted column can be read or written`,
+        encryptedColumnLabels(this.plans),
+      );
+    }
+    return withTenantContext(
+      this.conn,
+      tenantId,
+      fn,
+      new Map([[COLUMN_ENCRYPTION_KEY_SETTING, key]]),
+    );
   }
 
   private planFor(entity: string): EntityTablePlan {
@@ -216,7 +326,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   async listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage> {
-    return withTenantContext(this.conn, tenantId, (tx) => this.listPageOn(tx, tenantId, entity, query));
+    return this.scoped(tenantId, (tx) => this.listPageOn(tx, tenantId, entity, query));
   }
 
   private async getOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
@@ -234,7 +344,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   async get(tenantId: string, entity: string, id: string): Promise<EntityRecord | null> {
-    return withTenantContext(this.conn, tenantId, (tx) => this.getOn(tx, tenantId, entity, id));
+    return this.scoped(tenantId, (tx) => this.getOn(tx, tenantId, entity, id));
   }
 
   private async createOn(
@@ -268,7 +378,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   async create(tenantId: string, entity: string, record: EntityRecord): Promise<EntityRecord> {
-    return withTenantContext(this.conn, tenantId, (tx) => this.createOn(tx, tenantId, entity, record));
+    return this.scoped(tenantId, (tx) => this.createOn(tx, tenantId, entity, record));
   }
 
   private async updateOn(
@@ -312,7 +422,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     id: string,
     patch: EntityRecord,
   ): Promise<EntityRecord | null> {
-    return withTenantContext(this.conn, tenantId, (tx) => this.updateOn(tx, tenantId, entity, id, patch));
+    return this.scoped(tenantId, (tx) => this.updateOn(tx, tenantId, entity, id, patch));
   }
 
   private async removeOn(tx: PgConnection, tenantId: string, entity: string, id: string): Promise<boolean> {
@@ -326,7 +436,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   }
 
   async remove(tenantId: string, entity: string, id: string): Promise<boolean> {
-    return withTenantContext(this.conn, tenantId, (tx) => this.removeOn(tx, tenantId, entity, id));
+    return this.scoped(tenantId, (tx) => this.removeOn(tx, tenantId, entity, id));
   }
 
   /**
@@ -335,7 +445,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
    * or rolls back atomically). A cross-tenant call inside is rejected.
    */
   withTransaction<T>(tenantId: string, fn: (tx: EntityStore) => Promise<T>): Promise<T> {
-    return withTenantContext(this.conn, tenantId, (tx) => {
+    return this.scoped(tenantId, (tx) => {
       const assertTenant = (t: string): void => {
         if (t !== tenantId) throw new Error("cross-tenant access inside a transaction is not allowed");
       };
@@ -393,7 +503,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   ): Promise<void> {
     const plan = this.joinPlanFor(leftEntity, rightEntity);
     const qualified = qualifyTable(plan.schema, plan.table);
-    await withTenantContext(this.conn, tenantId, async (tx) => {
+    await this.scoped(tenantId, async (tx) => {
       await tx.query(
         `INSERT INTO ${qualified} (${quoteIdent("tenant_id")}, ${quoteIdent(plan.leftColumn)}, ${quoteIdent(plan.rightColumn)})
          VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
@@ -412,7 +522,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   ): Promise<boolean> {
     const plan = this.joinPlanFor(leftEntity, rightEntity);
     const qualified = qualifyTable(plan.schema, plan.table);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
+    return this.scoped(tenantId, async (tx) => {
       const res = await tx.query(
         `DELETE FROM ${qualified}
           WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent(plan.leftColumn)} = $2 AND ${quoteIdent(plan.rightColumn)} = $3`,
@@ -432,7 +542,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   ): Promise<boolean> {
     const plan = this.joinPlanFor(leftEntity, rightEntity);
     const qualified = qualifyTable(plan.schema, plan.table);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
+    return this.scoped(tenantId, async (tx) => {
       const res = await tx.query(
         `SELECT 1 FROM ${qualified}
           WHERE ${quoteIdent("tenant_id")} = $1 AND ${quoteIdent(plan.leftColumn)} = $2 AND ${quoteIdent(plan.rightColumn)} = $3
@@ -456,7 +566,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   ): Promise<ReadonlyArray<{ leftId: string; rightId: string }>> {
     const plan = this.joinPlanFor(leftEntity, rightEntity);
     const qualified = qualifyTable(plan.schema, plan.table);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
+    return this.scoped(tenantId, async (tx) => {
       const params: unknown[] = [tenantId];
       const where = [`${quoteIdent("tenant_id")} = $1`];
       if (opts.leftId !== undefined) {
@@ -491,7 +601,7 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
   ): Promise<number> {
     const plan = this.joinPlanFor(leftEntity, rightEntity);
     const qualified = qualifyTable(plan.schema, plan.table);
-    return withTenantContext(this.conn, tenantId, async (tx) => {
+    return this.scoped(tenantId, async (tx) => {
       const params: unknown[] = [tenantId];
       const where = [`${quoteIdent("tenant_id")} = $1`];
       if (opts.leftId !== undefined) {
@@ -570,6 +680,46 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     params.push(bound);
     return `$${params.length.toString()}`;
   }
+}
+
+/**
+ * `Entity.field (classification)` for every planned column stored as ciphertext,
+ * in plan order — the evidence a `ColumnEncryptionUnavailable` carries.
+ *
+ * Both halves are read off the `ColumnMapping` rather than re-derived from the
+ * manifest: `encryptAtRest` is what actually decided the column is `BYTEA`, and
+ * `classification` is why, so an operator reading a boot refusal gets the two
+ * facts that tell them whether to supply a key or reclassify the field.
+ */
+function encryptedColumnLabels(plans: ReadonlyMap<string, EntityTablePlan>): readonly string[] {
+  const out: string[] = [];
+  for (const [entity, plan] of plans) {
+    for (const column of plan.columns) {
+      if (!column.encryptAtRest) continue;
+      out.push(`${entity}.${column.field} (${column.classification ?? "unclassified"})`);
+    }
+  }
+  return out;
+}
+
+/**
+ * The entity names carrying at least one encrypt-at-rest column, for a manifest.
+ *
+ * Exists so a caller wiring `TenantColumnStoreRouter` can hand it
+ * `encryptedEntities` without writing the reduction, and without the router
+ * learning what a manifest is — it routes per call and holds no manifest, and
+ * one encryption check is not a reason to give it one.
+ */
+export function encryptedEntityNames(
+  manifest: Manifest,
+  opts: { readonly schema?: string } = {},
+): ReadonlySet<string> {
+  const plans = columnPlansForManifest(manifest, { schema: opts.schema ?? "public" });
+  const names = new Set<string>();
+  for (const [entity, plan] of plans) {
+    if (plan.columns.some((c) => c.encryptAtRest)) names.add(entity);
+  }
+  return names;
 }
 
 /**

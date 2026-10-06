@@ -109,6 +109,169 @@ function quoteLiteral(value: string): string {
 }
 
 /**
+ * The GUC every builder in this stack reads the at-rest column key out of.
+ *
+ * It was spelled independently in three places — `crossengin-pg.ts`'s private `DEFAULT_KEY_REF`,
+ * `operate-runtime-pg`'s `DEFAULT_ENCRYPTION_KEY_REF` and `encryption-writepath.test.ts` — and
+ * exported from none of them, so the one string the whole subsystem agrees on was agreed by
+ * coincidence. This is that string, and `DEFAULT_COLUMN_KEY_REF` is the one expression derived
+ * from it.
+ */
+export const COLUMN_ENCRYPTION_KEY_GUC = "app.column_encryption_key";
+
+/**
+ * The environment variable holding the key **value**.
+ *
+ * Environment and never argv: argv is readable by any process that can run `ps`, which is ADR-0301's
+ * established rule in this repo for exactly this class of secret. The value reaches Postgres as a
+ * *bound parameter* of `set_config($1, $2, true)`, so it is in no SQL text, no
+ * `pg_stat_statements` entry and no server log line.
+ */
+export const COLUMN_ENCRYPTION_KEY_ENV = "COLUMN_ENCRYPTION_KEY";
+
+/**
+ * A GUC name: two dot-separated lowercase identifiers (`app.column_encryption_key`).
+ *
+ * Validated here because `keyRef` is interpolated into SQL text **unescaped** by every builder in
+ * this stack (`pgpSymEncryptExpr`, `emitEncryptColumnSql`, `emitDecryptingViewSql`,
+ * `emitEncryptingViewTriggersSql`), and deliberately so — the whole point of a key *reference* is
+ * that it is an expression rather than a value. `columnKeyRefFor` is therefore the single place a
+ * name becomes that expression, and the single place it can be checked.
+ */
+const COLUMN_KEY_GUC_RE = /^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$/;
+
+export function columnKeyRefFor(guc: string): string {
+  if (!COLUMN_KEY_GUC_RE.test(guc)) {
+    throw new Error(
+      `columnKeyRefFor: ${JSON.stringify(guc)} is not a GUC name; expected two dot-separated ` +
+        "lowercase identifiers (e.g. app.column_encryption_key). The name is interpolated into " +
+        "SQL text unescaped, so it is validated here and nowhere else.",
+    );
+  }
+  // One argument, never two. See `isRaisingKeyRef`.
+  return `current_setting('${guc}')`;
+}
+
+/**
+ * The *raising* form, and the only one this stack emits.
+ *
+ * Measured on PG 16:
+ *
+ * - `current_setting('app.foo')` with the GUC unset **raises** `unrecognized configuration
+ *   parameter`.
+ * - `current_setting('app.foo', true)` with it unset returns **NULL** — and `''` once the setting
+ *   has been used and reset on that connection, i.e. on every pooled connection in production.
+ * - `pgp_sym_encrypt(x, NULL)` returns **NULL, silently**.
+ * - `pgp_sym_encrypt(x, '')` **raises** `Illegal argument to function`.
+ *
+ * So the house idiom for a GUC in this repo — the two-argument form, as
+ * `NULLIF(current_setting('app.current_tenant_id', true), '')` uses for tenant isolation — is
+ * exactly wrong here: composed with `pgp_sym_encrypt` it turns a *missing key* into a PHI column
+ * storing NULL, reported as a successful write. A loud failure on every row is the only acceptable
+ * behaviour, so the second argument is forbidden and `isRaisingKeyRef` is what says whether a
+ * caller-supplied ref has it.
+ */
+export const DEFAULT_COLUMN_KEY_REF = columnKeyRefFor(COLUMN_ENCRYPTION_KEY_GUC);
+
+const RAISING_KEY_REF_RE = /^\s*current_setting\(\s*'[^']*'\s*\)\s*$/i;
+
+/**
+ * Whether `ref` is guaranteed to **raise** rather than yield NULL when the key is absent.
+ *
+ * True only for the single-argument `current_setting('…')` form. False for the two-argument form,
+ * and false for a bind parameter or any other expression — not because those are malformed, but
+ * because this function answers one question and the honest answer for them is "cannot be shown to
+ * raise": `$1` bound to null is the silent-NULL path again, one layer out.
+ */
+export function isRaisingKeyRef(ref: string): boolean {
+  return RAISING_KEY_REF_RE.test(ref);
+}
+
+export const COLUMN_KEY_REFUSAL_REASONS = ["key_value_absent", "key_ref_can_yield_null"] as const;
+export type ColumnKeyRefusalReason = (typeof COLUMN_KEY_REFUSAL_REASONS)[number];
+
+export interface ColumnKeyRefusal {
+  readonly reason: ColumnKeyRefusalReason;
+  readonly message: string;
+}
+
+export interface ColumnKeyResolution {
+  readonly keyRef: string;
+  /**
+   * Transaction-local `set_config` pairs to claim before the migration's statements —
+   * `EncryptionMigratorOptions.sessionSettings`' shape. Empty when the key ref is not the default
+   * one, because then the deployment arranged the key some other way and this CLI has no idea
+   * which setting, if any, to claim.
+   */
+  readonly sessionSettings: ReadonlyMap<string, string>;
+  /** Non-null when a migration must refuse **before** its first statement runs. */
+  readonly refusal: ColumnKeyRefusal | null;
+}
+
+/**
+ * Resolves the key a column-encryption migration will run under, from the key ref and the process
+ * environment, without touching the database.
+ *
+ * Up front rather than at the first statement, because the alternative is Postgres's
+ * `unrecognized configuration parameter "app.column_encryption_key"` on statement 1 of N with some
+ * columns already converted: the migration is per column in its own transaction, so a failure
+ * halfway leaves a schema half encrypted and nothing recording which half. A refusal naming the
+ * missing variable costs nothing and happens before any DDL.
+ *
+ * An **empty** value refuses for the same reason a missing one does, and the reason is measured
+ * rather than stylistic: `pgp_sym_encrypt(x, '')` raises `Illegal argument to function`, so an
+ * empty variable is a failure at statement 1 either way.
+ */
+export function resolveColumnEncryptionKey(
+  keyRef: string,
+  env: Readonly<Record<string, string | undefined>>,
+): ColumnKeyResolution {
+  if (keyRef !== DEFAULT_COLUMN_KEY_REF) {
+    if (!isRaisingKeyRef(keyRef)) {
+      return {
+        keyRef,
+        sessionSettings: new Map(),
+        refusal: {
+          reason: "key_ref_can_yield_null",
+          message:
+            `--key-ref=${keyRef} is not the raising form. current_setting('…', true) returns NULL ` +
+            "when the setting is unset (and '' once it has been used and reset on a pooled " +
+            "connection), and pgp_sym_encrypt(x, NULL) returns NULL silently — so a missing key " +
+            "would store NULL over every PHI value and report success. Use " +
+            `current_setting('<guc>') with one argument.`,
+        },
+      };
+    }
+    // A raising ref the deployment named itself: it is arranging the key some other way (a
+    // connection-level `options` parameter, a server-side `ALTER ROLE ... SET`), so the key value
+    // is deliberately not this process's business and the variable is not required.
+    return { keyRef, sessionSettings: new Map(), refusal: null };
+  }
+
+  const value = env[COLUMN_ENCRYPTION_KEY_ENV];
+  if (value === undefined || value.length === 0) {
+    return {
+      keyRef,
+      sessionSettings: new Map(),
+      refusal: {
+        reason: "key_value_absent",
+        message:
+          `${COLUMN_ENCRYPTION_KEY_ENV} is not set, so ${keyRef} would raise ` +
+          `'unrecognized configuration parameter "${COLUMN_ENCRYPTION_KEY_GUC}"' on the first ` +
+          `statement. Set ${COLUMN_ENCRYPTION_KEY_ENV}=<key> in the environment (not on the ` +
+          "command line — argv is readable via ps), or pass --key-ref=<sql> if this deployment " +
+          `sets ${COLUMN_ENCRYPTION_KEY_GUC} another way.`,
+      },
+    };
+  }
+  return {
+    keyRef,
+    sessionSettings: new Map([[COLUMN_ENCRYPTION_KEY_GUC, value]]),
+    refusal: null,
+  };
+}
+
+/**
  * Builds the pgcrypto symmetric-encryption expression for a value. `keyRef`
  * is a SQL expression yielding the key (e.g. a bind param or
  * `current_setting('app.column_encryption_key')`), never the raw key text.
