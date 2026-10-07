@@ -1,5 +1,5 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
-import type { AbacEvaluator, SensitiveFieldPolicy } from "@crossengin/auth";
+import type { AbacBatchEvaluator, AbacEvaluator, SensitiveFieldPolicy } from "@crossengin/auth";
 import type { IdempotencyStore, RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
@@ -275,6 +275,12 @@ export interface BuildOperateHttpServerOptions {
    * `recordBearingKeys` joined them for the same reason: without it this function cannot tell a
    * policy that compares against the record from one that does not, so a manifest putting a record
    * policy on a `create` would compile and deny that grant at every request.
+   *
+   * `evaluateBatch` is the **second** genuinely optional member, beside the directory, and for the
+   * opposite reason to the two required ones: absent, every obligation is still enforced through
+   * one call per question, which is what every deployment did before it existed. It can only make
+   * the asking cheaper, never the answer different — so there is nothing for its absence to break
+   * and nothing to refuse at boot.
    */
   readonly abac?: {
     readonly evaluator: AbacEvaluator;
@@ -282,6 +288,8 @@ export interface BuildOperateHttpServerOptions {
     readonly answerableKeys: ReadonlySet<string>;
     /** Of those, the keys whose comparison references a field of the record. */
     readonly recordBearingKeys: ReadonlySet<string>;
+    /** Answers a whole set of questions at once, for the per-record redaction pass (ADR-0344). */
+    readonly evaluateBatch?: AbacBatchEvaluator;
     readonly attributeDirectory?: AbacAttributeDirectory;
   };
 }
@@ -345,6 +353,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.writeMaskMode !== undefined ? { writeMaskMode: options.writeMaskMode } : {}),
     ...(options.abac !== undefined ? { abacEvaluator: options.abac.evaluator } : {}),
+    ...(options.abac?.evaluateBatch !== undefined
+      ? { abacBatchEvaluator: options.abac.evaluateBatch }
+      : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });
   // After every registration and before the first request. The gate goes on the registry rather than

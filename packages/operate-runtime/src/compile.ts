@@ -1,4 +1,5 @@
 import type {
+  AbacBatchEvaluator,
   AbacEvaluator,
   RoleDefinition,
   RoleName,
@@ -120,6 +121,22 @@ export interface OperateRuntimeOptions {
    * serving a manifest whose declared obligations it would silently deny on every request.
    */
   readonly abacEvaluator?: AbacEvaluator;
+  /**
+   * The optional **sibling** of `abacEvaluator` — never a replacement — for the one reader with a
+   * fan-out. Since ADR-0343 response redaction computes a field set per record, so a page of N
+   * records with F obligated fields asks N×F questions; this lets the deployment be asked once.
+   *
+   * It is forwarded to the redaction registry alone, and the other four readers this options
+   * object feeds deliberately get nothing: `rbacCheck` asks exactly one question per call, and the
+   * write mask stops at the first refusing field, so batching it would evaluate fields past the
+   * rejection — more work, and it would hand the deployment's policy layer questions whose answers
+   * were never needed, which is ADR-0340's reason `rbacCheck` consults the evaluator only after
+   * the role check passes.
+   *
+   * Absent is not an opt-out and needs no refusal: the obligation is still enforced, through N
+   * single calls, which is exactly what every deployment did before this existed.
+   */
+  readonly abacBatchEvaluator?: AbacBatchEvaluator;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /** Backs the admin settings endpoints + runtime numbering overrides. */
@@ -894,6 +911,9 @@ export function compileOperateServer(
     operationsForEntity: (name) => operationIdsByEntity.get(name) ?? fallbackOperationIds(name),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
+    ...(options.abacBatchEvaluator !== undefined
+      ? { abacBatchEvaluator: options.abacBatchEvaluator }
+      : {}),
   });
 
   return {

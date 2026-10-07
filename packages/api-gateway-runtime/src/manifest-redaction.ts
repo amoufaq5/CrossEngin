@@ -1,5 +1,6 @@
 import { entityClassifiedFields, type Entity } from "@crossengin/types/meta-schema";
 import type {
+  AbacBatchEvaluator,
   AbacEvaluator,
   ClassifiedField,
   EntityPermissions,
@@ -39,6 +40,18 @@ export interface RedactionSpecOptions {
    * prevent, and ADR-0339 found had happened anyway.
    */
   readonly abacEvaluator?: AbacEvaluator;
+  /**
+   * The **optional sibling** of `abacEvaluator`, never a replacement: a deployment that supplies
+   * only the single evaluator gets exactly today's behaviour at exactly today's cost, and one
+   * supplied here without `abacEvaluator` refuses every obligation rather than being promoted into
+   * its place.
+   *
+   * It exists because response redaction is the one evaluator reader in the repo with a fan-out —
+   * a page of N records times F obligated fields, all of them one principal's answer about one
+   * entity — so a deployment whose policy layer is a network call pays N × F round trips for one
+   * response. Every other seam asks about a single act, which is why none of them carries one.
+   */
+  readonly abacBatchEvaluator?: AbacBatchEvaluator;
 }
 
 /**
@@ -125,10 +138,13 @@ export function redactionSpecForEntity(
     ...(entityPermissions !== undefined ? { entityPermissions } : {}),
     ...(policy !== undefined ? { policy } : {}),
     // Always set, even with no evaluator: the entity is always known here, and a spec that carries
-    // it is checkable. Only the evaluator is conditional.
+    // it is checkable. Only the evaluators are conditional.
     abac: {
       entity: entity.name,
       ...(options.abacEvaluator !== undefined ? { evaluator: options.abacEvaluator } : {}),
+      ...(options.abacBatchEvaluator !== undefined
+        ? { evaluateBatch: options.abacBatchEvaluator }
+        : {}),
     },
   };
 }

@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 338 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 339 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~17,065 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~17,151 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -308,6 +308,44 @@ type errors.
   and both are now shape, with the distinction stated: **a field policy filters columns within a
   row, which a response can express per record; an entity-list policy would filter rows**, leaving
   the page's cursor describing a set the caller was not shown.
+
+  ADR-0344 closes ADR-0343's own Q1, and the class is **a seam that could only be asked one
+  question at a time**. `AbacEvaluator` is synchronous, so nothing can coalesce after the fact — a
+  batch has to be *collected* before any answer is needed, which makes "add a batch arm" a question
+  about each reader's control flow rather than about the type. Asking it reader by reader found
+  **three of that open end's own claims wrong**. It does not touch all five readers but **one**,
+  and the four that do not, do not for three different reasons: `rbacCheck` asks one question,
+  `computeFieldRedaction` is callerless, and the two write masks **must not** batch,
+  because they stop at the first refusing field so a pool would evaluate past the rejection — more
+  work, and it hands the policy layer questions whose answers were never needed, which is ADR-0340's
+  reason `rbacCheck` evaluates only after the role check. The shape is not
+  `(inputs) => AbacOutcome[]` either: a bare positional array makes a permuted answer set a **silent
+  mis-authorization**, roughly half of which allows, and no check over the *outcomes* can see it
+  since every one is a legal answer to some question in the set — so an answer echoes its own index,
+  pure redundancy for a correct implementation and that is its whole job. And the fan-out is
+  **records × fields**, not records, so the pool spans both axes and the plural entry point is in
+  the contracts package rather than only in the gateway.
+  The refusal granularity is the decision and it splits on whether the **correspondence** survives:
+  a throw, a non-array, a wrong length or a wrong index fails the **whole** batch, because no answer
+  can then be shown to belong to its question and the prefix of a short array is not evidence that
+  it answers the first ones; an `outcome` outside the enum fails **that one**, where the position is
+  intact. A throw is in the first column for its own reason — catching per element would be
+  *strictly laxer*, leaving the other N−1 answers standing as authoritative when what the throw says
+  is that the implementation is in an unknown state. `evaluateBatch` is a **sibling, never a
+  replacement**: supplied without a single evaluator it refuses everything, since the three
+  reachable readers that ask one question would already be answering `undischargeable` and the one
+  that could use the batch must not enforce a policy the rest of the deployment cannot. Deliberately
+  **no total map** over the five readers — `ABAC_OUTCOME_ALLOWS` is a map because a new *enum member*
+  must be a compile error, while these are hand-written functions, so a map could not make a sixth
+  reader a compile error and would be a constant nobody reads. `--abac-policy` supplies the
+  degenerate batch **on purpose**, so the validated branch is the branch this repo runs rather than
+  one reached only from its own tests (ADR-0336's class, which the increment would otherwise
+  reproduce). The gateway enumerates the records by **running its own redactor** with a collecting
+  field-set resolver, so enumeration and rebuild are one traversal definition — and the property is
+  a **superset**, not an equality, which is the safe direction, because `page`'s rebuild skips a
+  wrapper key the record-free set names. Measured on the same tree, both arms: a 500-row page with
+  three obligated fields goes from **1,503 evaluator calls to 2**, and live the crossings are
+  2 per response with **zero** on the single arm.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -604,6 +642,25 @@ packages exist at only one layer, noted below where that is true.
   size. This is what ended ADR-0338's shared-spec property — the shape is a property of the
   *operation*, so a spec keyed by operation carries it, and the sharing that remains
   (`classifiedFields`, `entityPermissions`, `roles`) is pinned structurally instead.
+  **And the per-record pass is one evaluator call since ADR-0344.** `recordsIn(shape, body)`
+  enumerates the record positions by **running `redactRecords` itself** with a collecting
+  `RedactedFieldsFor` that returns the empty set and throwing the rebuilt body away — so enumeration
+  and rebuild are *one traversal definition* and cannot disagree about which objects are records,
+  where two independent walks would be ADR-0288's shape again. The property is a **superset, not an
+  equality**, and that asymmetry is the safe direction: `page`'s rebuild skips any wrapper key the
+  record-free set names, so an entity with a classified field literally called `data` would stop the
+  real rebuild descending while the empty-set enumeration still finds the rows — every position the
+  rebuild can reach was enumerated, never the reverse, and an over-enumeration costs one evaluation
+  for a record nobody asks about. `computeResponseRedactionForRecords` then answers all of them in
+  one call, keyed back to the body **by object identity** with a fail-closed fallback to the
+  record-free set (unreachable while the two share a definition, and `JSON.parse` never aliases, so
+  a repeated record cannot arrive on the live path at all). It also built the `auth.Principal` and
+  **copied `spec.roles` into a fresh `Map` once per record** before this; all of it is once per
+  response now. `RedactionSpecOptions.abacBatchEvaluator` is the optional sibling that rides onto
+  `spec.abac.evaluateBatch`. The two passes mean **two** seam crossings per response, not one,
+  because the pool is per *call*: the record-free pass batches its own F cells and the per-record
+  pass the remaining N×F — collapsing them would need the first pass to know what the second will
+  ask, which is the thing it exists to discover.
 - **`api-gateway-pg`** — Postgres implementations of the runtime's four store interfaces
   (idempotency, route registry with TTL cache, sliding-window rate-limit checker,
   pipeline-execution store) plus a replayer that flags out-of-order stages, pass-with-4xx,
@@ -829,8 +886,24 @@ packages exist at only one layer, noted below where that is true.
   a 500 a client retries. `ABAC_OUTCOME_ALLOWS` is a total map so a new outcome is a compile
   error — which ADR-0342 then relied on, because `deferred` had to be *written down* to be read at
   all, where an `if`-shaped condition would have had to have it added to the denying branch.
+  **`dischargeAbacBatch(requests, evaluator, batch?)` is the plural form** (ADR-0344), one discharge
+  per request and positionally aligned, with the same refusals in the same order plus two of its
+  own. `AbacBatchEvaluator` answers `AbacBatchAnswer {index, outcome}` and the index must be exactly
+  its own position: for a correct implementation that is pure redundancy, and that is its job, since
+  a batch returning the right number of valid outcomes in the **wrong order** is a silent
+  mis-authorization no check over the outcomes can see. Refusal granularity splits on whether the
+  **correspondence** survives — a throw, a non-array, a wrong length or a wrong index refuses the
+  **whole** batch (nothing can then be shown to belong to its question, and the prefix of a short
+  array is not evidence that it answers the first ones), while an out-of-enum `outcome` refuses
+  **that one**. `evaluateBatch` is a **sibling, never a replacement**: supplied without `evaluator`
+  it refuses everything, because three of the five readers can only ask one question and the fourth
+  is callerless. An empty request list returns `[]` calling **neither** function — not to keep the
+  length check honest (`0 !== 0` passes) but so a vacuous alignment cannot stand in for a check, and
+  so a policy service is not woken for nothing. ADR-0341's `abacAttributes === null` refusal settles
+  **before** the array is built, so a batch evaluator receives only answerable questions and its
+  length is the number of those.
   All five readers fail closed — `rbacCheck` plus the four field functions, which take one
-  trailing `AbacEnforcement {entity, evaluator?, record?}` whose `entity` is *required*, so a caller cannot
+  trailing `AbacEnforcement {entity, evaluator?, evaluateBatch?, record?}` whose `entity` is *required*, so a caller cannot
   ask for enforcement without naming the entity the policy is about, and **omitting the parameter
   refuses rather than skips** (pinned by a `toEqual` against the no-evaluator result, so a forgotten
   argument cannot become a silent grant). `AuthorizationDecision.requiresAbac` is **deleted** rather
@@ -886,6 +959,20 @@ packages exist at only one layer, noted below where that is true.
   **subsequence** of `redacted`, not merely a subset: both are pushed in field-list order in one
   loop pass, so a caller can zip either against its own field list, and a property test asserts
   **exactly one** of `ABAC_OUTCOMES` contributes, derived from the enum rather than restated.
+  **`computeClassifiedFieldRedactionForRecords` is the plural read path** (ADR-0344), one result per
+  record and positionally aligned, with **one** `dischargeAbacBatch` call pooling every
+  (record, field) obligation — so a page costs one evaluator call rather than N×F. The three
+  properties above survive the refactor because the function is now **plan → discharge → assemble**:
+  a planner per record appends to one shared request array and returns a `PlannedField {name,
+  verdict}` list in field order, and the assembler walks that one list, so order and the subsequence
+  are still provable from a single ordered loop and no parallel array is indexed. Its enforcement
+  parameter is `Omit<AbacEnforcement, "record">` **deliberately** — the records travel in the array,
+  so supplying one twice is structurally impossible rather than resolved by a silent precedence
+  rule. `computeClassifiedFieldRedaction` keeps its exact signature over the same pair and is *not*
+  a wrapper that indexes `[0]`, which would need a non-null assertion or an unreachable arm.
+  `fieldEvaluationContext` is the one spelling of the evaluation input, shared by the planner and
+  the three one-question-at-a-time readers, so the batching and non-batching paths cannot build
+  different questions about one grant.
 - **`sso`** — federated identity contracts: SAML 2.0 + OIDC provider configs, SCIM 2.0
   provisioning, claim mappings with transforms and JIT user policies, session lifecycle,
   login audit.
@@ -2045,7 +2132,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   answerable, one without `recordBearingKeys` cannot tell a record policy from an attribute policy
   and so would boot a manifest that puts a record policy on a `create`, and one without a
   directory refuses every obligation. `answerableKeys` and `recordBearingKeys` are required beside
-  the evaluator; the directory is the one genuinely optional member.
+  the evaluator; the directory and `evaluateBatch` are the **two** genuinely optional members, and
+  the second is optional for the opposite reason to the required ones — its absence cannot make an
+  answer different, only the asking dearer (ADR-0344). `buildAbacBatchEvaluator(evaluator)` takes
+  the evaluator **instance**, not the policy map, so the batch provably is that evaluator mapped and
+  the two cannot answer one question differently; `node.ts` wires it unconditionally alongside the
+  evaluator. For a map lookup it buys nothing and is supplied anyway, so the branch a deployment
+  with a real batch takes — the validated one, with the length and index checks — is the branch this
+  repo runs on every per-record redaction. It is deliberately **not** exported from
+  `@crossengin/auth`: a generic `batchFromEvaluator` there would let any deployment satisfy the arm
+  without batching anything while a reviewer reads the wiring as batched.
   **At-rest PHI is decided at boot** (ADR-0338): `resolveStore` surveys the manifest's
   `phi`/`regulated` fields (through `resolvedFields`, so a classified *trait* field cannot be missed),
   calls `decidePhiStorage`, and either refuses or builds one `buildColumnKeySource` shared by the boot
@@ -2738,11 +2834,11 @@ opened them.
   that *can* supply one that it should, so the fast path is one evaluation and today's bytes and only
   a deferral pays per record. No second list naming which fields are record-bearing — ADR-0288's
   shape, which this repo has found wrong four times.
-  What remains: **(1)** `AbacEvaluator` has **no batch seam**, so a deployment-supplied evaluator
-  that makes a network call pays one per record per page. Bounded by `MAX_PAGE_SIZE`, and for
-  `--abac-policy` each call is a map lookup and a string compare; a
-  `(inputs: readonly AbacEvaluationInput[]) => readonly AbacOutcome[]` arm would fix it and touches
-  all five readers. **(2)** **entity `list` still cannot**, and the honest shape for it is **row
+  What remains: **(1)** ~~`AbacEvaluator` has no batch seam~~ — **closed by ADR-0344**, which also
+  corrected three of the things this entry said: **one** reader takes the arm and not five, the shape
+  is not `(inputs) => readonly AbacOutcome[]` (an answer echoes its index, because a permutation is
+  otherwise undetectable), and the fan-out is records × fields rather than records. See the next
+  entry. **(2)** **entity `list` still cannot**, and the honest shape for it is **row
   filtering**, which changes what `page.nextCursor` and any count mean — a different feature, not a
   wider redaction. **(3)** a record with a **nested** object gets the record's own set applied to
   the nested value by `redactJsonValue`'s walk: correct for the flat JSONB documents entity records
@@ -2755,6 +2851,27 @@ opened them.
   "record" is a *historical snapshot* in `before`/`after`, so "only on a patient in your department"
   would be answered against the department the row held when it was written. Whether that is the
   question a trail reader is asking is undecided.
+- **The evaluator can be asked a whole set at once, and what is left of it** (ADR-0344 closed
+  ADR-0343's Q1). `evaluateBatch` is an optional sibling of `evaluator` — never a replacement, and a
+  batch supplied without one refuses everything — answering `AbacBatchAnswer {index, outcome}` whose
+  index must be its own position. Measured on the same tree with both arms live: a 500-row page with
+  three obligated fields goes from **1,503 evaluator calls to 2**, with identical answers; live, one
+  list request makes **2** seam crossings and **zero** on the single arm, and boot makes none.
+  Two of the five readers batch; the write masks must not, because first-refusal-wins means a pool
+  would ask about fields whose answers are never needed.
+  What remains: **(1)** a permuted *outcome* list with ascending indices is still accepted — the
+  echo catches a reordered answer **list**, not one that mislabels each element, and there is no
+  cheap check for the second. **(2)** `rbacCheck` is still one question per call, so a request
+  holding an entity grant **and** a field mask asks separately; grouping those is a different seam,
+  because the two decisions happen at different points in the handler. **(3)** the degenerate batch
+  in `abac-policy.ts` exists to exercise a branch, so if a real batch producer ever lands it should
+  **replace** rather than join it — two producers for one policy layer is the divergence
+  `privilegedForClass` is behind one definition to prevent. **(4)** the pool is per *call*, so the
+  minimum is 2 crossings per response and not 1; collapsing them would need the record-free pass to
+  know what the per-record pass will ask, which is the thing it exists to discover. **(5)** an
+  aliased record contributes duplicate cells to the batch, unreachable from the pipeline since
+  `JSON.parse` never aliases, and not worth de-duplicating for a case only a direct
+  `redactRecords` call can produce.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3676,7 +3793,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 338 records; 259 Accepted, 79 Proposed (the
+title or status change cannot drift. 339 records; 260 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

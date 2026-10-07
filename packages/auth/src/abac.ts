@@ -46,6 +46,66 @@ export interface AbacEvaluationInput {
 export type AbacEvaluator = (input: AbacEvaluationInput) => AbacOutcome;
 
 /**
+ * One answer out of a batch, carrying the position of the question it answers.
+ *
+ * **For a correct implementation the index is pure redundancy, and that is its whole job.** The
+ * correspondence between a question and its answer is otherwise unverifiable: a batch that returns
+ * the right number of valid outcomes in the wrong order is a silent mis-authorization, and roughly
+ * half of a permutation *allows* — no amount of checking the outcomes themselves can see it, because
+ * every one of them is a legal answer to some question in the set. The realistic bug is not a
+ * deliberate reordering but answers assembled out of a map keyed by policy key and returned in its
+ * iteration order, which collapses duplicate keys and drops the question order entirely; echoing the
+ * index turns exactly that into one named refusal of the whole batch.
+ *
+ * The indices must be **exactly ascending** — `answers[i].index === i` — rather than any permutation
+ * the reader re-sorts. Re-sorting would repair an authorization answer whose order the implementation
+ * did not intend, silently making a broken evaluator look correct; refusing says so.
+ *
+ * The residual, stated honestly: an implementation that permutes the *outcomes* while leaving the
+ * indices ascending is still accepted, and nothing here can detect it. The echo catches the mistake
+ * that reorders a whole list, not one that mislabels each element.
+ */
+export interface AbacBatchAnswer {
+  readonly index: number;
+  readonly outcome: AbacOutcome;
+}
+
+/**
+ * The batch arm beside {@link AbacEvaluator}: one call for a set of questions whose answers are all
+ * needed before any of them is acted on.
+ *
+ * **Which of the five readers batch, and the reasons differ:**
+ * - `rbacCheck` — one obligation per call. There is nothing to group it with, so `RbacCheckInput`
+ *   gains no batch field.
+ * - `computeFieldRedaction` — callerless and superseded by the classified pair, so an arm here would
+ *   equip dead code and leave the two read paths with different costs.
+ * - `computeClassifiedFieldRedaction` / `…ForRecords` — **batches.** Every obligated field is
+ *   decided, so the whole question set is known before any answer is needed, and a page of records
+ *   multiplies it by the record count.
+ * - `validateWriteMask` / `validateClassifiedWriteMask` — **must not.** First refusal wins, so a
+ *   batch would evaluate fields past the rejection: more work, and it hands the deployment's policy
+ *   layer questions whose answers were never needed. That is ADR-0340's reason `rbacCheck` consults
+ *   the evaluator only after the role check passes, one position over.
+ *
+ * This is **prose and deliberately not a total map.** `ABAC_OUTCOME_ALLOWS` is a map because a new
+ * enum *member* must be a compile error; these five are hand-written functions, and a map over them
+ * could not make a sixth reader a compile error — it would be a constant nobody reads.
+ */
+export type AbacBatchEvaluator = (
+  inputs: readonly AbacEvaluationInput[],
+) => readonly AbacBatchAnswer[];
+
+/**
+ * One question in a batch. The policy key is **required**, unlike `dischargeAbac`'s parameter:
+ * "there is no obligation" is expressed by not making a request at all, so there is no `null` arm in
+ * the result either.
+ */
+export interface AbacBatchRequest {
+  readonly policyKey: string;
+  readonly context: Omit<AbacEvaluationInput, "policyKey">;
+}
+
+/**
  * What a field-level caller supplies to have obligations enforced.
  *
  * `entity` is **required** inside the object: a caller cannot ask for enforcement without naming
@@ -57,6 +117,12 @@ export type AbacEvaluator = (input: AbacEvaluationInput) => AbacOutcome;
 export interface AbacEnforcement {
   readonly entity: string;
   readonly evaluator?: AbacEvaluator;
+  /**
+   * The optional batch arm, **a sibling of `evaluator` and never a replacement**: supplying this
+   * without that one is a half-wired seam, and `dischargeAbacBatch` refuses rather than using it.
+   * See that function's rule 2 for why.
+   */
+  readonly evaluateBatch?: AbacBatchEvaluator;
   /**
    * What the four field-level functions pass through to `AbacEvaluationInput.record`.
    *
@@ -149,6 +215,113 @@ export function dischargeAbac(
   }
 
   return { policyKey, outcome };
+}
+
+/**
+ * Read a batch evaluator's answers, or refuse the whole batch.
+ *
+ * `null` means **refuse every question in the batch**, and the line between that and a single
+ * `undischargeable` is whether positional correspondence survives: a length fault or a wrong index
+ * means no answer can be shown to belong to its question, so trusting the ones that happen to line
+ * up would be guessing which. An unreadable *outcome* on a correctly indexed answer is the opposite
+ * case — the correspondence is intact and exactly one answer is unreadable, which is the granularity
+ * the single path already has.
+ */
+function readBatchAnswers(
+  batch: AbacBatchEvaluator,
+  inputs: readonly AbacEvaluationInput[],
+): readonly AbacOutcome[] | null {
+  let answers: unknown;
+  try {
+    answers = batch(inputs);
+  } catch {
+    // Same rule as the single path: an exception inside an authorization check must not become an
+    // allow, and must not propagate as a 500 a client retries into the same refusal.
+    return null;
+  }
+
+  if (!Array.isArray(answers)) return null;
+  const list: readonly unknown[] = answers;
+  if (list.length !== inputs.length) return null;
+
+  const outcomes: AbacOutcome[] = [];
+  for (const [position, answer] of list.entries()) {
+    if (typeof answer !== "object" || answer === null) return null;
+    const fields = answer as Readonly<Record<string, unknown>>;
+    if (typeof fields.index !== "number" || fields.index !== position) return null;
+    outcomes.push(isAbacOutcome(fields.outcome) ? fields.outcome : "undischargeable");
+  }
+
+  return outcomes;
+}
+
+/**
+ * Discharge several obligations at once, one discharge per request and **positionally aligned** to
+ * `requests`.
+ *
+ * The order of the rules below is the whole contract:
+ *
+ * 1. **No requests → `[]`, and neither function is called.** A deployment's policy service must not
+ *    be woken for nothing, and it is what keeps the length check in `readBatchAnswers`
+ *    non-vacuous — two empty arrays line up trivially.
+ * 2. **No `evaluator` → every discharge `undischargeable`, and `batch` is not called either.**
+ *    `evaluateBatch` is a sibling of `evaluator`, never a replacement: three of the five readers that
+ *    call an evaluator (`rbacCheck` and the two write masks) can only ever ask one question, so a
+ *    seam carrying only a batch is half-wired — every entity-level obligation in that deployment
+ *    would already be answering `undischargeable` — and the one reader that *could* use the batch
+ *    refuses rather than enforcing a policy the rest of the deployment cannot.
+ * 3. **A request whose principal's attributes were never resolved is `undischargeable` and is
+ *    excluded from the set handed to the evaluator**, exactly as `dischargeAbac` refuses it before
+ *    calling one (ADR-0341). So the array a batch evaluator receives holds only questions it could
+ *    answer, and its length is the number of those — not of the requests.
+ * 4. Every request excluded → return without calling anything.
+ * 5. With `batch`, one call; without it, `dischargeAbac` per askable request, which is exactly
+ *    today's behaviour and today's cost.
+ *
+ * Every discharge starts `undischargeable` and is only ever overwritten by an answer, so each of the
+ * refusals above is the absence of a write rather than a branch that has to remember to deny.
+ */
+export function dischargeAbacBatch(
+  requests: readonly AbacBatchRequest[],
+  evaluator: AbacEvaluator | undefined,
+  batch?: AbacBatchEvaluator,
+): readonly AbacDischarge[] {
+  const discharges: AbacDischarge[] = requests.map((request) => ({
+    policyKey: request.policyKey,
+    outcome: "undischargeable",
+  }));
+  if (discharges.length === 0) return discharges;
+  if (evaluator === undefined) return discharges;
+
+  const askable: { readonly position: number; readonly request: AbacBatchRequest }[] = [];
+  for (const [position, request] of requests.entries()) {
+    if (request.context.principal.abacAttributes === null) continue;
+    askable.push({ position, request });
+  }
+  if (askable.length === 0) return discharges;
+
+  if (batch === undefined) {
+    for (const { position, request } of askable) {
+      const discharge = dischargeAbac(request.policyKey, request.context, evaluator);
+      if (discharge !== null) discharges[position] = discharge;
+    }
+    return discharges;
+  }
+
+  const inputs = askable.map(({ request }) => ({
+    ...request.context,
+    policyKey: request.policyKey,
+  }));
+  const outcomes = readBatchAnswers(batch, inputs);
+  if (outcomes === null) return discharges;
+
+  for (const [slot, { position, request }] of askable.entries()) {
+    const outcome = outcomes[slot];
+    if (outcome === undefined) continue;
+    discharges[position] = { policyKey: request.policyKey, outcome };
+  }
+
+  return discharges;
 }
 
 export interface AbacObligation {

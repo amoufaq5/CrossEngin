@@ -1,5 +1,6 @@
 import {
   computeClassifiedFieldRedaction,
+  computeClassifiedFieldRedactionForRecords,
   type AbacEnforcement,
   type ClassifiedField,
   type EntityPermissions,
@@ -98,20 +99,27 @@ export interface ResponseRedaction {
   readonly deferred: readonly string[];
 }
 
+interface RedactionInputs {
+  readonly authPrincipal: Principal;
+  readonly safeRoles: ReadonlyMap<RoleName, RoleDefinition>;
+  readonly enforcement: AbacEnforcement | undefined;
+}
+
 /**
- * Fail-closed: a role the spec's `roles` map doesn't know (anonymous,
- * a stale token role, a typo) is mapped to an unprivileged sentinel rather
- * than throwing, so an unrecognized principal sees the most-redacted view.
+ * Everything both forms need before a single field is decided, built once.
  *
- * `record` absent is a caller that **had none** — spread conditionally into the `AbacEnforcement`,
- * never passed as `{}`, which would assert an empty record and let a policy be answered against
- * fields nobody loaded (ADR-0331's distinction, one level in).
+ * Fail-closed: a role the spec's `roles` map doesn't know (anonymous, a stale token role, a typo)
+ * is mapped to an unprivileged sentinel rather than throwing, so an unrecognized principal sees the
+ * most-redacted view.
+ *
+ * One builder for the singular and plural forms, so the two cannot come to answer for different
+ * principals or different role closures over one spec — the shape ADR-0329 put `privilegedForClass`
+ * behind one definition for and ADR-0339 found had diverged anyway.
  */
-export function computeResponseRedaction(
+function redactionInputs(
   spec: ResponseRedactionSpec,
   principal: ResolvedPrincipal | null,
-  record?: Readonly<Record<string, unknown>>,
-): ResponseRedaction {
+): RedactionInputs {
   const { primaryRole, secondaryRoles } = spec.rolesForPrincipal(principal);
   const requested = [primaryRole, ...(secondaryRoles ?? [])];
   const safeRoles = new Map(spec.roles);
@@ -130,19 +138,77 @@ export function computeResponseRedaction(
     abacAttributes: principalAbacAttributes(principal),
     mfaProofAgeSeconds: principal?.mfaProofAgeSeconds ?? null,
   };
-  const enforcement: AbacEnforcement | undefined =
-    spec.abac === undefined
-      ? undefined
-      : { ...spec.abac, ...(record !== undefined ? { record } : {}) };
+  return {
+    authPrincipal,
+    safeRoles,
+    enforcement: spec.abac === undefined ? undefined : { ...spec.abac },
+  };
+}
+
+function withoutRecord(enforcement: AbacEnforcement): Omit<AbacEnforcement, "record"> {
+  const { record: _record, ...rest } = enforcement;
+  return rest;
+}
+
+/**
+ * `record` absent is a caller that **had none** — spread conditionally into the `AbacEnforcement`,
+ * never passed as `{}`, which would assert an empty record and let a policy be answered against
+ * fields nobody loaded (ADR-0331's distinction, one level in).
+ */
+export function computeResponseRedaction(
+  spec: ResponseRedactionSpec,
+  principal: ResolvedPrincipal | null,
+  record?: Readonly<Record<string, unknown>>,
+): ResponseRedaction {
+  const { authPrincipal, safeRoles, enforcement } = redactionInputs(spec, principal);
   const result = computeClassifiedFieldRedaction(
     authPrincipal,
     spec.entityPermissions ?? {},
     safeRoles,
     spec.classifiedFields,
     spec.policy,
-    enforcement,
+    enforcement === undefined
+      ? undefined
+      : { ...enforcement, ...(record !== undefined ? { record } : {}) },
   );
   return { redacted: result.redacted, deferred: result.deferred };
+}
+
+/**
+ * The per-record pass as **one** evaluation, positionally aligned with `records`.
+ *
+ * What this replaces is N calls to {@link computeResponseRedaction}, which is what the two-pass did
+ * when it landed: a page of N records asked the deployment's evaluator N × F times, one obligated
+ * field at a time, so an evaluator that crosses a process boundary paid a round trip per cell. One
+ * `computeClassifiedFieldRedactionForRecords` call pools every (record, field) request into a single
+ * `dischargeAbacBatch`, which a deployment answers in one go if it supplied a batch evaluator and
+ * one at a time if it did not — identical cost in that second case, which is every deployment today.
+ *
+ * It also removes a cost that was already there and had nothing to do with the evaluator: the
+ * principal, the role closure and the `AbacEnforcement` were rebuilt per record, and `spec.roles`
+ * was **copied into a fresh `Map`** per record purely to hold the unprivileged sentinel. All three
+ * are built once here.
+ *
+ * The enforcement passed down carries **no** `record` — the records travel in the array, and the
+ * plural auth function takes `Omit<AbacEnforcement, "record">` precisely so one call cannot supply
+ * the record twice and leave which of the two wins to a spread order.
+ */
+export function computeResponseRedactionForRecords(
+  spec: ResponseRedactionSpec,
+  principal: ResolvedPrincipal | null,
+  records: readonly (Readonly<Record<string, unknown>> | null)[],
+): readonly ResponseRedaction[] {
+  const { authPrincipal, safeRoles, enforcement } = redactionInputs(spec, principal);
+  const results = computeClassifiedFieldRedactionForRecords(
+    authPrincipal,
+    spec.entityPermissions ?? {},
+    safeRoles,
+    spec.classifiedFields,
+    spec.policy,
+    enforcement === undefined ? undefined : withoutRecord(enforcement),
+    records,
+  );
+  return results.map((result) => ({ redacted: result.redacted, deferred: result.deferred }));
 }
 
 /**
@@ -253,6 +319,41 @@ export function redactRecords(
   redactedFor: RedactedFieldsFor,
 ): unknown {
   return SHAPE_REDACTORS[shape](body, redactedFor);
+}
+
+const NO_FIELDS: ReadonlySet<string> = new Set();
+
+/**
+ * Every object position {@link redactRecords} will ask about for this shape, in traversal order —
+ * the records, so a caller can compute their field sets in one batch before the rebuild needs them.
+ *
+ * Implemented by **running `redactRecords` itself** with a collecting `RedactedFieldsFor` and
+ * throwing the rebuilt body away. That is the whole point rather than an economy: the enumeration
+ * and the rebuild are then *the same traversal definition*, so they cannot disagree about which
+ * objects are records. Two independent walks over one shape is the shape this repo keeps finding
+ * wrong — a second list with no forcing function, which ADR-0288's `needsAuditEmitter` was and was
+ * wrong three times; here there is one definition used twice.
+ *
+ * Cheap enough not to need a second implementation: `redactJsonValue` returns its argument
+ * unchanged for an empty set, so the collecting pass allocates only the per-shape wrapper (`page`'s
+ * output object and its mapped `data` array) and copies nothing below it.
+ *
+ * The empty set is also what makes the enumeration a **superset** of the rebuild's record positions
+ * rather than merely equal to it, which is the direction that matters: `page` skips a wrapper key
+ * the record-free set names, so a field literally called `data` would stop the real rebuild
+ * descending into the array at all. Enumerating with no field set descends unconditionally, so
+ * every position the rebuild can reach was enumerated — never the other way round.
+ */
+export function recordsIn(
+  shape: ResponseRecordShape,
+  body: unknown,
+): readonly Readonly<Record<string, unknown>>[] {
+  const found: Readonly<Record<string, unknown>>[] = [];
+  redactRecords(shape, body, (record) => {
+    if (record !== null) found.push(record);
+    return NO_FIELDS;
+  });
+  return found;
 }
 
 /** The shapes `redactRecords` can apply — the map's own keys, so the two cannot disagree. */

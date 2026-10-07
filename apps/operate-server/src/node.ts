@@ -115,6 +115,7 @@ import {
 } from "./abac-obligations.js";
 import {
   ABAC_POLICY_FLAG,
+  buildAbacBatchEvaluator,
   buildAbacEvaluator,
   formatAbacPolicies,
   parseAbacPolicies,
@@ -753,6 +754,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           evaluator: abacEvaluator,
           answerableKeys: new Set(abacPolicies.keys()),
           recordBearingKeys: abacRecordBearingKeys,
+          // Derived from the evaluator instance above, so the batch *is* that evaluator mapped and
+          // the two cannot answer one question differently. For a map lookup it buys nothing; it is
+          // supplied so the branch a deployment with a real batch takes is the branch this
+          // deployment runs, rather than one reached only from its own tests (ADR-0336's class).
+          evaluateBatch: buildAbacBatchEvaluator(abacEvaluator),
           ...(abacAttributeDirectory !== undefined ? { attributeDirectory: abacAttributeDirectory } : {}),
         };
   // Offline subscription entitlement: verify an Ed25519 license token against the

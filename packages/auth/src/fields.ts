@@ -2,8 +2,13 @@ import {
   isSensitiveDataClass,
   type DataClassification,
 } from "@crossengin/types/meta-schema";
-import { ABAC_OUTCOME_ALLOWS, dischargeAbac, isAbacDeferred } from "./abac.js";
-import type { AbacEnforcement } from "./abac.js";
+import {
+  ABAC_OUTCOME_ALLOWS,
+  dischargeAbac,
+  dischargeAbacBatch,
+  isAbacDeferred,
+} from "./abac.js";
+import type { AbacBatchRequest, AbacEnforcement, AbacEvaluationInput } from "./abac.js";
 import { resolveEffectiveRoles } from "./roles.js";
 import type {
   AbacDischarge,
@@ -17,7 +22,32 @@ import type {
 } from "./types.js";
 
 /**
- * The one spelling of a field-level grant's obligation, shared by all four functions here.
+ * The one spelling of a field-level evaluation input, so the per-field discharge and the batch
+ * planner cannot build different questions about the same grant. Two spellings here would let the
+ * single-record and the per-record read paths disagree about one field policy, which is the shape
+ * ADR-0339 found between the read and write halves of `privilegedForClass`.
+ */
+function fieldEvaluationContext(
+  principal: Principal,
+  operation: OperationName,
+  field: string,
+  abac: Pick<AbacEnforcement, "entity">,
+  record: Readonly<Record<string, unknown>> | undefined,
+): Omit<AbacEvaluationInput, "policyKey"> {
+  return {
+    principal,
+    entity: abac.entity,
+    operation,
+    field,
+    ...(record !== undefined ? { record } : {}),
+  };
+}
+
+/**
+ * The one spelling of a field-level grant's obligation for the three functions here that ask one
+ * question at a time. The classified read path pools its questions instead and goes through
+ * `planClassifiedRead`, which is why both build their evaluation input through the one
+ * {@link fieldEvaluationContext}.
  *
  * An **omitted** `abac` parameter is a caller that has no evaluator — not a way to skip the
  * obligation — so it answers `undischargeable`, identically to a named entity with no evaluator.
@@ -41,13 +71,7 @@ function dischargeFieldObligation(
   if (abac === undefined) return { policyKey, outcome: "undischargeable" };
   return dischargeAbac(
     policyKey,
-    {
-      principal,
-      entity: abac.entity,
-      operation,
-      field,
-      ...(abac.record !== undefined ? { record: abac.record } : {}),
-    },
+    fieldEvaluationContext(principal, operation, field, abac, abac.record),
     abac.evaluator,
   );
 }
@@ -56,6 +80,12 @@ function obligationAdmits(discharge: AbacDischarge | null): boolean {
   return discharge === null || ABAC_OUTCOME_ALLOWS[discharge.outcome];
 }
 
+/**
+ * Classification-unaware read redaction, superseded by {@link computeClassifiedFieldRedaction}.
+ *
+ * It takes no batch arm deliberately: it is callerless, so an arm here would equip dead code and
+ * leave the two read paths with different costs for the same policy.
+ */
 export function computeFieldRedaction(
   principal: Principal,
   entityPerms: EntityPermissions,
@@ -95,6 +125,14 @@ export function computeFieldRedaction(
   return { readable, redacted, deferred };
 }
 
+/**
+ * Classification-unaware write mask, superseded by {@link validateClassifiedWriteMask}.
+ *
+ * It takes no batch arm, and that is a rule rather than an omission: first refusal wins, so a batch
+ * would have to evaluate the fields *past* the rejection — more work, and it would hand the
+ * deployment's policy layer questions whose answers are never needed. Same reason `rbacCheck`
+ * consults the evaluator only after the role check passes (ADR-0340).
+ */
 export function validateWriteMask(
   principal: Principal,
   entityPerms: EntityPermissions,
@@ -174,10 +212,137 @@ function defaultRedacts(policy: SensitiveFieldPolicy, c: DataClassification): bo
 }
 
 /**
+ * What the planner decided about one field without having asked an evaluator anything.
+ *
+ * `obligated` carries the *position* of its question in the shared request array rather than the
+ * question itself, which is what lets one batch span several records: every planned field across
+ * every record points into one pool, and the assembler reads its answer back by that position.
+ */
+type FieldVerdict =
+  | { readonly kind: "readable" }
+  | { readonly kind: "redacted" }
+  | { readonly kind: "obligated"; readonly request: number };
+
+interface PlannedField {
+  readonly name: string;
+  readonly verdict: FieldVerdict;
+}
+
+/**
+ * Decide every field for one record, appending each obligation to the shared `requests` pool.
+ *
+ * The ordered single pass is what makes three properties readable rather than merely tested: the
+ * three output arrays are filled from this list in field order, and `deferred` is pushed from inside
+ * the redacted arm, so it is a **subsequence** of `redacted` and not merely a subset. A field
+ * refused on roles returns before any request is appended, so it can never reach the evaluator and
+ * can never appear in `deferred`; the classification default carries no obligation and so cannot
+ * either.
+ */
+function planClassifiedRead(
+  principal: Principal,
+  effective: ReadonlySet<RoleName>,
+  entityPerms: EntityPermissions,
+  fields: readonly ClassifiedField[],
+  policy: SensitiveFieldPolicy,
+  abac: Omit<AbacEnforcement, "record"> | undefined,
+  record: Readonly<Record<string, unknown>> | undefined,
+  requests: AbacBatchRequest[],
+): readonly PlannedField[] {
+  const fieldPerms = entityPerms.fields;
+  const planned: PlannedField[] = [];
+
+  for (const field of fields) {
+    const rule = fieldPerms?.[field.name]?.read;
+    if (rule !== undefined) {
+      // Before anything else, and before an obligation is even recorded: there is nothing to learn
+      // from an evaluation a redaction was already owed, and asking would hand the deployment's
+      // policy layer a principal it has no business seeing (ADR-0340).
+      if (!rule.roles.some((r) => effective.has(r))) {
+        planned.push({ name: field.name, verdict: { kind: "redacted" } });
+        continue;
+      }
+      if (rule.abac === undefined) {
+        planned.push({ name: field.name, verdict: { kind: "readable" } });
+        continue;
+      }
+      // An omitted `abac` parameter is a caller with no evaluator, not a way to skip the obligation
+      // — and it cannot even be asked, because `AbacEvaluationInput.entity` is required and this
+      // caller has no entity to name. Redacted and **not** deferred: a record would not help.
+      if (abac === undefined) {
+        planned.push({ name: field.name, verdict: { kind: "redacted" } });
+        continue;
+      }
+      const request = requests.length;
+      requests.push({
+        policyKey: rule.abac,
+        context: fieldEvaluationContext(principal, "read", field.name, abac, record),
+      });
+      planned.push({ name: field.name, verdict: { kind: "obligated", request } });
+      continue;
+    }
+    if (field.classification !== undefined && defaultRedacts(policy, field.classification)) {
+      // Asked per class, not once per principal: a role may be privileged for `pii` and not for
+      // `phi`, and a single `hasPrivilege` computed outside the loop could not express that.
+      //
+      // This arm never contributes to `deferred`: a classification default is answered
+      // from roles alone and carries no obligation, so no record could overturn it.
+      const verdict: FieldVerdict = privilegedForClass(policy, effective, field.classification)
+        ? { kind: "readable" }
+        : { kind: "redacted" };
+      planned.push({ name: field.name, verdict });
+      continue;
+    }
+    planned.push({ name: field.name, verdict: { kind: "readable" } });
+  }
+
+  return planned;
+}
+
+/**
+ * Fill the three arrays from one record's plan and the pooled discharges.
+ *
+ * A discharge the plan's index does not reach **redacts**, even though both come from the same
+ * array: fail closed is the direction a reader of this function should not have to reason about.
+ */
+function assembleRedaction(
+  planned: readonly PlannedField[],
+  discharges: readonly AbacDischarge[],
+): FieldRedactionResult {
+  const readable: string[] = [];
+  const redacted: string[] = [];
+  const deferred: string[] = [];
+
+  for (const { name, verdict } of planned) {
+    if (verdict.kind === "readable") {
+      readable.push(name);
+      continue;
+    }
+    if (verdict.kind === "redacted") {
+      redacted.push(name);
+      continue;
+    }
+    const discharge = discharges[verdict.request];
+    if (discharge !== undefined && ABAC_OUTCOME_ALLOWS[discharge.outcome]) {
+      readable.push(name);
+      continue;
+    }
+    redacted.push(name);
+    if (isAbacDeferred(discharge)) deferred.push(name);
+  }
+
+  return { readable, redacted, deferred };
+}
+
+/**
  * Like {@link computeFieldRedaction} but classification-aware: a sensitive
  * field (pii/phi/regulated/commercial_sensitive by default) with no explicit
  * `read` grant defaults to redacted unless the principal holds a privileged
  * role. Explicit per-field `read` rules still win.
+ *
+ * One record, so one plan and one pool — the same three steps the plural entry point takes, over the
+ * record on `abac.record`. It is deliberately **not** a wrapper that re-enters
+ * {@link computeClassifiedFieldRedactionForRecords} and indexes `[0]`: that needs either a non-null
+ * assertion or an arm for an empty array that cannot happen.
  */
 export function computeClassifiedFieldRedaction(
   principal: Principal,
@@ -188,50 +353,74 @@ export function computeClassifiedFieldRedaction(
   abac?: AbacEnforcement,
 ): FieldRedactionResult {
   const effective = resolveEffectiveRoles(principal, roles);
-  const fieldPerms = entityPerms.fields;
-  const readable: string[] = [];
-  const redacted: string[] = [];
-  const deferred: string[] = [];
+  const requests: AbacBatchRequest[] = [];
+  const planned = planClassifiedRead(
+    principal,
+    effective,
+    entityPerms,
+    fields,
+    policy,
+    abac,
+    abac?.record,
+    requests,
+  );
+  const discharges = dischargeAbacBatch(requests, abac?.evaluator, abac?.evaluateBatch);
+  return assembleRedaction(planned, discharges);
+}
 
-  for (const field of fields) {
-    const rule = fieldPerms?.[field.name]?.read;
-    if (rule !== undefined) {
-      const rolesAdmit = rule.roles.some((r) => effective.has(r));
-      // The discharge is held in a local only so the refusal can be *classified*; the ternary keeps
-      // the short-circuit the `&&` had, so the evaluator is still consulted only after the roles
-      // check passes (ADR-0340) and a role-refused field never reaches the deployment's policy
-      // layer. `null` on the roles-refused arm is not a no-obligation discharge — `rolesAdmit`
-      // gates the admit test below — it is simply the value for "no evaluation happened".
-      const discharge = rolesAdmit
-        ? dischargeFieldObligation(rule.abac, principal, "read", field.name, abac)
-        : null;
-      if (rolesAdmit && obligationAdmits(discharge)) readable.push(field.name);
-      else {
-        redacted.push(field.name);
-        if (isAbacDeferred(discharge)) deferred.push(field.name);
-      }
-      continue;
-    }
-    if (field.classification !== undefined && defaultRedacts(policy, field.classification)) {
-      // Asked per class, not once per principal: a role may be privileged for `pii` and not for
-      // `phi`, and a single `hasPrivilege` computed outside the loop could not express that.
-      //
-      // This arm never contributes to `deferred`: a classification default is answered
-      // from roles alone and carries no obligation, so no record could overturn it.
-      if (privilegedForClass(policy, effective, field.classification)) readable.push(field.name);
-      else redacted.push(field.name);
-      continue;
-    }
-    readable.push(field.name);
-  }
-
-  return { readable, redacted, deferred };
+/**
+ * {@link computeClassifiedFieldRedaction} for several records at once, one result per record and
+ * **positionally aligned** to `records`.
+ *
+ * One call to `dischargeAbacBatch` for the whole call — every (record, field) obligation pooled — so
+ * a page of N records with F obligated fields costs one evaluator call rather than N×F. Roles are
+ * resolved once for the whole call, not per record.
+ *
+ * A `null` element means **this call site had no record here**, identical in meaning to an absent
+ * `AbacEnforcement.record`: a record-bearing policy answers `deferred` for that element and
+ * `FieldRedactionResult.deferred` names the fields, exactly as on the singular path.
+ *
+ * The enforcement parameter is `Omit<AbacEnforcement, "record">` **deliberately**: it makes supplying
+ * the record twice structurally impossible. A plural caller that could also set `abac.record` would
+ * create two sources for one fact, and the only ways out are a silent precedence rule or a refusal
+ * for a mistake the type can simply prevent.
+ */
+export function computeClassifiedFieldRedactionForRecords(
+  principal: Principal,
+  entityPerms: EntityPermissions,
+  roles: ReadonlyMap<RoleName, RoleDefinition>,
+  fields: readonly ClassifiedField[],
+  policy: SensitiveFieldPolicy | undefined,
+  abac: Omit<AbacEnforcement, "record"> | undefined,
+  records: readonly (Readonly<Record<string, unknown>> | null)[],
+): readonly FieldRedactionResult[] {
+  const effective = resolveEffectiveRoles(principal, roles);
+  const requests: AbacBatchRequest[] = [];
+  const planned = records.map((record) =>
+    planClassifiedRead(
+      principal,
+      effective,
+      entityPerms,
+      fields,
+      policy ?? {},
+      abac,
+      record ?? undefined,
+      requests,
+    ),
+  );
+  // After every record is planned, so the pool is complete and the batch is asked exactly once.
+  const discharges = dischargeAbacBatch(requests, abac?.evaluator, abac?.evaluateBatch);
+  return planned.map((p) => assembleRedaction(p, discharges));
 }
 
 /**
  * Write-mask that additionally defaults sensitive fields (no explicit
  * `update` grant) to writable only by a privileged role. Explicit `update`
  * rules still win.
+ *
+ * No batch arm, for the same reason as {@link validateWriteMask} and unlike the read path it is
+ * paired with: first refusal wins, so pooling the obligations would ask about fields whose answer is
+ * never needed — the refusal is returned before the later fields are reached at all.
  */
 export function validateClassifiedWriteMask(
   principal: Principal,

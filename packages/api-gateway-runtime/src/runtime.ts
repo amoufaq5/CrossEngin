@@ -15,6 +15,8 @@ import { sha256 } from "@crossengin/crypto";
 import { type OutgoingResponse, outgoingResponseFromJson } from "./adapters.js";
 import {
   computeResponseRedaction,
+  computeResponseRedactionForRecords,
+  recordsIn,
   redactJsonValue,
   redactRecords,
   type RedactionRegistry,
@@ -932,6 +934,12 @@ export class GatewayRuntime {
    * The direction matters and is what makes every fallback safe: a per-record pass can only
    * **relax** the record-free one (a `deferred` becoming `satisfied`), never tighten it. So any
    * position where a record cannot be found gets the record-free set, which is the stricter one.
+   *
+   * The per-record pass is **one** evaluation for the whole response, not one per record: the
+   * records are enumerated from the same traversal that will rebuild the body, and their field sets
+   * are computed in a single `computeResponseRedactionForRecords` call. The fast path is untouched
+   * by that — no deferral still means one record-free evaluation and today's whole-tree walk, which
+   * is every deployment that has declared no record-bearing field policy.
    */
   private applyResponseRedaction(ctx: PipelineState): number {
     if (this.redactionRegistry === null) return 0;
@@ -954,14 +962,30 @@ export class GatewayRuntime {
       return 0;
     }
     const baseSet = new Set(base.redacted);
-    const scrubbed =
-      base.deferred.length === 0
-        ? redactJsonValue(parsed, baseSet)
-        : redactRecords(spec.recordShape, parsed, (record) =>
-            record === null
-              ? baseSet
-              : new Set(computeResponseRedaction(spec, ctx.principal, record).redacted),
-          );
+    let scrubbed: unknown;
+    if (base.deferred.length === 0) {
+      scrubbed = redactJsonValue(parsed, baseSet);
+    } else {
+      // Enumerated from the traversal that is about to rebuild the body, so the two cannot disagree
+      // about which objects are records — which is what lets the sets be keyed by object identity
+      // below rather than by a position both walks would have to agree on independently.
+      const records = recordsIn(spec.recordShape, parsed);
+      const perRecord = computeResponseRedactionForRecords(spec, ctx.principal, records);
+      const byRecord = new Map<Readonly<Record<string, unknown>>, ReadonlySet<string>>();
+      records.forEach((record, index) => {
+        const result = perRecord[index];
+        if (result !== undefined) byRecord.set(record, new Set(result.redacted));
+      });
+      scrubbed = redactRecords(spec.recordShape, parsed, (record) =>
+        // Fail-closed, both arms. `null` is a position with no record, and a lookup miss degrades to
+        // the same answer: the per-record pass can only ever *relax* the record-free set, so the
+        // fallback is the **stricter** of the two rather than a throw. The miss is unreachable while
+        // enumeration and rebuild share one definition — it is here so that a fourth response shape
+        // added later, or an enumeration that stops reaching one of the rebuild's positions, cannot
+        // fail open.
+        record === null ? baseSet : (byRecord.get(record) ?? baseSet),
+      );
+    }
     ctx.finalResponse = outgoingResponseFromJson({
       status: resp.status,
       headers: resp.headers,

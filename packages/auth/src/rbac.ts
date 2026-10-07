@@ -61,6 +61,9 @@ export function rbacCheck(input: RbacCheckInput): AuthorizationDecision {
   // principal with no role grant never reaches a policy. There is nothing to learn from an
   // evaluation that a 403 was already owed, and asking would hand the deployment's policy layer a
   // principal it has no business seeing.
+  //
+  // One question, so there is nothing for `AbacBatchEvaluator` to group: this reader decides a
+  // single grant for a single act, and `RbacCheckInput` therefore gains no batch field.
   const discharge = dischargeAbac(
     grant.abac,
     {

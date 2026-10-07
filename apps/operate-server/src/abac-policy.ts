@@ -37,7 +37,12 @@
  * exists to guard. `sensitive-field-policy.ts` and `column-encryption.ts` draw the same line.
  */
 
-import type { AbacEvaluationInput, AbacEvaluator, AbacOutcome } from "@crossengin/auth";
+import type {
+  AbacBatchEvaluator,
+  AbacEvaluationInput,
+  AbacEvaluator,
+  AbacOutcome,
+} from "@crossengin/auth";
 
 /**
  * A constant rather than a string literal per message, following `ALLOW_PLAINTEXT_PHI_FLAG`: a
@@ -401,8 +406,12 @@ const OPERATOR_PREDICATES: Readonly<Record<AbacOperator, (sides: PredicateSides)
 /**
  * The evaluator over a declaration.
  *
- * The evaluator never throws. `dischargeAbac` catches a throw and maps it to `undischargeable`, so
- * throwing would be a slower way to the same answer with the reason lost.
+ * **Nothing in here throws**, which is not the same claim as "the evaluator never throws": a
+ * hostile record whose field is a throwing getter raises inside `resolveScalar`, and a test pins
+ * that it propagates. `dischargeAbac` and `dischargeAbacBatch` catch it and map it to
+ * `undischargeable` — for the batch, to `undischargeable` for *every* question in it — so throwing
+ * deliberately would be a slower way to the same answer with the reason lost, and catching it here
+ * would be strictly laxer than letting the whole batch refuse.
  */
 export function buildAbacEvaluator(policies: ReadonlyMap<string, AbacPolicy>): AbacEvaluator {
   return (input: AbacEvaluationInput): AbacOutcome => {
@@ -450,6 +459,49 @@ export function buildAbacEvaluator(policies: ReadonlyMap<string, AbacPolicy>): A
       ? "satisfied"
       : "denied";
   };
+}
+
+/**
+ * The batch arm, over **the evaluator instance** rather than over the declaration.
+ *
+ * Taking the `AbacEvaluator` and not the policy map is the whole of why this is one line. The batch
+ * is provably the single evaluator mapped — there is one evaluation function in the process, and the
+ * two arms of the seam cannot answer differently about the same input because there is nothing for
+ * them to differ *in*. Built from the map instead, this would be a second closure over the same
+ * declaration: identical today, and free to drift the moment either arm gained state of its own
+ * (a resolution cache, a counter, a memo on the last record), at which point the read half and the
+ * write half of one grant could disagree — which is the asymmetry ADR-0339 was about, one level
+ * down.
+ *
+ * **It is deliberately degenerate, and that is the point.** For a map lookup and a string compare
+ * there is nothing to amortise: no round trip, no connection, no query to coalesce. Semantically
+ * this *is* what the absent arm does, since `dischargeAbacBatch` with no batch evaluator falls back
+ * to calling the single one per input. What it buys is not speed but **coverage**: ADR-0343 made
+ * response redaction compute a field set per record, so a page of N records with F obligated fields
+ * is N×F evaluations, and `--abac-policy` is this repo's only evaluator producer. Without this
+ * wrapper the validated branch — the one that checks the answer count and that every `index` matches
+ * its own position — is taken by no deployment anywhere and exercised only by the seam's own tests,
+ * which is exactly the modelled-capability-with-no-mechanism class `pg-unreachable-stores.ts` exists
+ * to fence (ADR-0336) and `feature-flags`' seventeen producerless evaluation reasons are the
+ * standing example of. Supplying it means the branch a deployment with a *real* batch evaluator
+ * takes is the branch this repo runs on every per-record redaction.
+ *
+ * **Which is also why it is not exported from `@crossengin/auth`.** A generic
+ * `batchFromEvaluator(e)` sitting in the contracts package beside the seam would let any deployment
+ * satisfy the batch arm without batching anything, while a reviewer reads the wiring as batched —
+ * the shape of a declaration meaning something other than what it names. The degenerate wrapper
+ * belongs in the same module as the degenerate evaluator, where the cost of its own policies is
+ * written down and a reader can see there is nothing to batch.
+ *
+ * It deliberately does **not** catch. `buildAbacEvaluator` does not either — a record whose getter
+ * throws propagates, pinned by a test — and `dischargeAbacBatch` is the one place a throw becomes
+ * `undischargeable`, for the **whole** batch. Catching per element would keep the other N−1 answers
+ * as authoritative from an evaluator that has just demonstrated it can throw, so not catching is the
+ * stricter of the two and the one the contract's whole-batch rule describes.
+ */
+export function buildAbacBatchEvaluator(evaluator: AbacEvaluator): AbacBatchEvaluator {
+  return (inputs: readonly AbacEvaluationInput[]) =>
+    inputs.map((input, index) => ({ index, outcome: evaluator(input) }));
 }
 
 /**

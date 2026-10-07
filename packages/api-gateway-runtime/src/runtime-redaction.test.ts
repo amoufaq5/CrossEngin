@@ -1,5 +1,11 @@
 import type { RouteDefinition, IncomingRequest } from "@crossengin/api-gateway";
-import type { AbacEvaluationInput, AbacEvaluator, RoleDefinition } from "@crossengin/auth";
+import type {
+  AbacBatchEvaluator,
+  AbacEvaluationInput,
+  AbacEvaluator,
+  AbacOutcome,
+  RoleDefinition,
+} from "@crossengin/auth";
 import { describe, expect, it } from "vitest";
 import { buildIncomingRequest } from "./adapters.js";
 import { HandlerRegistry } from "./dispatcher.js";
@@ -349,6 +355,21 @@ describe("GatewayRuntime — per-record redaction (ADR-0342's field_read closure
     expect(parseBody(response.bodyBytes)).toEqual({ id: "p2", department: "billing" });
   });
 
+  it("answers an aliased record consistently", async () => {
+    // The per-record sets are keyed by object identity, so one object appearing twice in `data`
+    // collapses to one map entry. Both positions must still get that record's own answer, which is
+    // the same answer — a record cannot be two things in one response.
+    const seen: AbacEvaluationInput[] = [];
+    const row = { id: "p1", department: "clinical", mrn: "MRN-001", given_name: "Ada" };
+    const { response } = await authenticatedRuntime(departmentSpec("page", seen), {
+      data: [row, row],
+    }).handleRequest(authedRequest());
+    const rows = parseBody(response.bodyBytes)["data"] as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toEqual(row);
+    expect(rows[1]).toEqual(row);
+  });
+
   it("applies the base set and asks no record question for a `none`-shaped response", async () => {
     // Fail-closed and vacuous: there is no record, so the deferral stands and the stricter
     // record-free set applies — with no extra evaluation, because there is nothing to ask about.
@@ -361,5 +382,200 @@ describe("GatewayRuntime — per-record redaction (ADR-0342's field_read closure
     expect(parseBody(response.bodyBytes)).toEqual({ count: 3 });
     const transform = execution.stages.find((s) => s.stage === "transform_response");
     expect(transform?.reason).toBe("redacted_1_fields");
+  });
+});
+
+/**
+ * Two obligated fields, not one: with F = 1 a pooled call and a per-record call produce the same
+ * figure, so the fence below could not tell them apart. Both regimes answer through one predicate,
+ * so a difference in the response bytes is a difference in the plumbing and never in two
+ * hand-written rules — which is what lets the batch be checked for being cheap *and* right at once.
+ */
+function sameDepartment(input: AbacEvaluationInput): AbacOutcome {
+  if (input.record === undefined) return "deferred";
+  return input.record["department"] === input.principal.abacAttributes?.["department"]
+    ? "satisfied"
+    : "denied";
+}
+
+interface FanOutCounts {
+  readonly single: AbacEvaluationInput[];
+  readonly batch: (readonly AbacEvaluationInput[])[];
+}
+
+function fanOutCounts(): FanOutCounts {
+  return { single: [], batch: [] };
+}
+
+function fanOutSpec(counts: FanOutCounts, withBatch: boolean): ResponseRedactionSpec {
+  const evaluator: AbacEvaluator = (input) => {
+    counts.single.push(input);
+    return sameDepartment(input);
+  };
+  const evaluateBatch: AbacBatchEvaluator = (inputs) => {
+    counts.batch.push(inputs);
+    return inputs.map((input, index) => ({ index, outcome: sameDepartment(input) }));
+  };
+  return {
+    classifiedFields: [
+      { name: "mrn", classification: "phi" },
+      { name: "given_name", classification: "pii" },
+    ],
+    roles: ROLES,
+    rolesForPrincipal: () => ({ primaryRole: "clinician" }),
+    recordShape: "page",
+    entityPermissions: {
+      fields: {
+        mrn: { read: { roles: ["clinician"], abac: "p.same_dept" } },
+        given_name: { read: { roles: ["clinician"], abac: "p.same_dept" } },
+      },
+    },
+    policy: { privilegedRoles: ["clinician"] },
+    abac: {
+      entity: "Patient",
+      evaluator,
+      ...(withBatch ? { evaluateBatch } : {}),
+    },
+  };
+}
+
+const FAN_OUT_BODY = {
+  data: [
+    { id: "p1", department: "clinical", mrn: "MRN-001", given_name: "Ada" },
+    { id: "p2", department: "billing", mrn: "MRN-002", given_name: "Linus" },
+    { id: "p3", department: "clinical", mrn: "MRN-003", given_name: "Grace" },
+  ],
+  page: { limit: 50, nextCursor: "abc" },
+};
+
+/** N = 3, F = 2. Named so the arithmetic in the assertions is readable rather than magic. */
+const N = 3;
+const F = 2;
+
+/** What the per-record pass must produce, whichever regime computed it. */
+const FAN_OUT_EXPECTED = {
+  data: [
+    { id: "p1", department: "clinical", mrn: "MRN-001", given_name: "Ada" },
+    { id: "p2", department: "billing" },
+    { id: "p3", department: "clinical", mrn: "MRN-003", given_name: "Grace" },
+  ],
+  page: { limit: 50, nextCursor: "abc" },
+};
+
+/**
+ * The fence. These are **counts**, and they are the only thing standing between the per-record pass
+ * and the N × F fan-out it had when ADR-0343 landed: a regression there is invisible in the
+ * response, which is why neither correctness nor cost can be pinned alone. Both regimes are asserted
+ * byte-for-byte identical to each other *and* to the expected result, so the batch cannot be
+ * correct-and-cheap while being wrong, and cannot be cheap by not being asked.
+ *
+ * It authenticates, for ADR-0343's own reason: an anonymous request carries
+ * `abacAttributes: null`, and `dischargeAbac` refuses `undischargeable` *before* the evaluator —
+ * so a fence over an anonymous request would count zero calls in every regime and pass vacuously.
+ */
+describe("GatewayRuntime — the per-record pass is one evaluator call", () => {
+  it("costs two batch calls for the whole response: F then N × F", async () => {
+    const counts = fanOutCounts();
+    const { response, execution } = await authenticatedRuntime(
+      fanOutSpec(counts, true),
+      FAN_OUT_BODY,
+    ).handleRequest(authedRequest());
+
+    // One per pass, and that is the whole figure for the response: the record-free pass asks about
+    // F obligated fields with no record, and the per-record pass pools every remaining cell into
+    // one call instead of the N × F it made when ADR-0343 landed. The record-free pass is pooled
+    // too, because `computeClassifiedFieldRedaction` routes through the same `dischargeAbacBatch`
+    // — which is why F and not 1: the pool is per *call*, not per field.
+    expect(counts.batch).toHaveLength(2);
+    expect(counts.batch[0]).toHaveLength(F);
+    expect(counts.batch[0]?.every((input) => input.record === undefined)).toBe(true);
+    expect(counts.batch[1]).toHaveLength(N * F);
+    // Zero: a batch evaluator is consulted *instead of* the single one, never beside it, so a
+    // non-zero count here would mean a reader had slipped back onto the per-cell path.
+    expect(counts.single).toHaveLength(0);
+    expect(parseBody(response.bodyBytes)).toEqual(FAN_OUT_EXPECTED);
+    const transform = execution.stages.find((s) => s.stage === "transform_response");
+    expect(transform?.reason).toBe(`redacted_${F.toString()}_fields`);
+  });
+
+  it("asks the batch about every record × field cell exactly once", async () => {
+    const counts = fanOutCounts();
+    await authenticatedRuntime(fanOutSpec(counts, true), FAN_OUT_BODY).handleRequest(
+      authedRequest(),
+    );
+    // A set, not a sequence: pooling order is not part of the contract (the answers come back
+    // indexed), so pinning it would fail a record-major pool against a field-major one for no
+    // reason. What matters is that every cell is in the one call and none is there twice.
+    expect(
+      [...(counts.batch[1] ?? [])]
+        .map((input) => `${String(input.record?.["id"])}|${input.field ?? "-"}`)
+        .sort(),
+    ).toEqual([
+      "p1|given_name",
+      "p1|mrn",
+      "p2|given_name",
+      "p2|mrn",
+      "p3|given_name",
+      "p3|mrn",
+    ]);
+  });
+
+  it("costs F + N × F single calls with no batch evaluator, and answers identically", async () => {
+    // Today's cost, pinned: a deployment that declared no batch must keep paying exactly what it
+    // paid, so a change that made the no-batch path cheaper *or* dearer is visible here rather than
+    // in a benchmark nobody runs.
+    const counts = fanOutCounts();
+    const { response } = await authenticatedRuntime(
+      fanOutSpec(counts, false),
+      FAN_OUT_BODY,
+    ).handleRequest(authedRequest());
+    expect(counts.batch).toHaveLength(0);
+    expect(counts.single).toHaveLength(F + N * F);
+    expect(parseBody(response.bodyBytes)).toEqual(FAN_OUT_EXPECTED);
+  });
+
+  it("returns byte-identical responses with and without the batch", async () => {
+    const batched = await authenticatedRuntime(
+      fanOutSpec(fanOutCounts(), true),
+      FAN_OUT_BODY,
+    ).handleRequest(authedRequest());
+    const unbatched = await authenticatedRuntime(
+      fanOutSpec(fanOutCounts(), false),
+      FAN_OUT_BODY,
+    ).handleRequest(authedRequest());
+    expect(new TextDecoder().decode(batched.response.bodyBytes ?? new Uint8Array())).toBe(
+      new TextDecoder().decode(unbatched.response.bodyBytes ?? new Uint8Array()),
+    );
+    expect(batched.response.headers["content-length"]).toBe(
+      unbatched.response.headers["content-length"],
+    );
+  });
+
+  it("makes no second call at all when nothing defers", async () => {
+    // The fast path, which is every deployment today: the record-free pass and today's whole-tree
+    // walk, with the records never enumerated and no per-record pass at any cost.
+    const counts = fanOutCounts();
+    const spec = fanOutSpec(counts, true);
+    const neverDefers: ResponseRedactionSpec = {
+      ...spec,
+      abac: {
+        entity: "Patient",
+        evaluator: (input) => {
+          counts.single.push(input);
+          return "satisfied";
+        },
+        evaluateBatch: (inputs) => {
+          counts.batch.push(inputs);
+          return inputs.map((_input, index) => ({ index, outcome: "satisfied" as const }));
+        },
+      },
+    };
+    const { response } = await authenticatedRuntime(neverDefers, FAN_OUT_BODY).handleRequest(
+      authedRequest(),
+    );
+    expect(counts.batch).toHaveLength(1);
+    expect(counts.batch[0]).toHaveLength(F);
+    expect(counts.single).toHaveLength(0);
+    expect(parseBody(response.bodyBytes)).toEqual(FAN_OUT_BODY);
   });
 });

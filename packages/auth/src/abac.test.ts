@@ -12,9 +12,13 @@ import {
   abacRecordAvailabilityFor,
   describeOperation,
   dischargeAbac,
+  dischargeAbacBatch,
   formatAbacObligation,
   isAbacDeferred,
   surveyAbacObligations,
+  type AbacBatchAnswer,
+  type AbacBatchEvaluator,
+  type AbacBatchRequest,
   type AbacEvaluationInput,
   type AbacEvaluator,
   type AbacGrantPosition,
@@ -1077,5 +1081,289 @@ describe("abacRecordAvailabilityFor", () => {
       "always",
       "sometimes",
     ]);
+  });
+});
+
+/**
+ * The batch arm. Its rules are all about what must *not* happen: a batch must not be woken for
+ * nothing, must not stand in for the single evaluator the other four readers need, and must not be
+ * believed when the correspondence between a question and its answer cannot be shown.
+ */
+describe("dischargeAbacBatch", () => {
+  function request(policyKey: string, principal: Principal = PRINCIPAL): AbacBatchRequest {
+    return { policyKey, context: { ...CONTEXT, principal } };
+  }
+
+  /**
+   * Records every batch call, so a test can assert it was never reached rather than ignored.
+   *
+   * The answer builder returns `unknown` and the function is cast once: the malformed returns below
+   * are the point of half these tests, and a correctly typed spy could not express them.
+   */
+  function spyBatch(answers: (inputs: readonly AbacEvaluationInput[]) => unknown): {
+    readonly batch: AbacBatchEvaluator;
+    readonly calls: AbacEvaluationInput[][];
+  } {
+    const calls: AbacEvaluationInput[][] = [];
+    const batch = (inputs: readonly AbacEvaluationInput[]): unknown => {
+      calls.push([...inputs]);
+      return answers(inputs);
+    };
+    return { batch: batch as AbacBatchEvaluator, calls };
+  }
+
+  /** The well-behaved shape: ascending indices, one answer per input. */
+  function answerAll(outcome: AbacOutcome) {
+    return (inputs: readonly AbacEvaluationInput[]): readonly AbacBatchAnswer[] =>
+      inputs.map((_input, index) => ({ index, outcome }));
+  }
+
+  it("returns an empty array for no requests, waking neither function", () => {
+    const single = spyEvaluator("satisfied");
+    const batch = spyBatch(answerAll("satisfied"));
+    expect(dischargeAbacBatch([], single.evaluator, batch.batch)).toEqual([]);
+    // A policy service must not be woken for nothing — and two empty arrays line up trivially, so
+    // the length check downstream would be vacuous on this input.
+    expect(single.calls).toHaveLength(0);
+    expect(batch.calls).toHaveLength(0);
+  });
+
+  it("refuses every request with no evaluator, and does not call the batch either", () => {
+    const batch = spyBatch(answerAll("satisfied"));
+    const out = dischargeAbacBatch([request("a"), request("b")], undefined, batch.batch);
+    // `evaluateBatch` is a sibling of `evaluator`, never a replacement: a seam carrying only a batch
+    // is half-wired, since `rbacCheck` and the two write masks can only ask one question each.
+    expect(out).toEqual([
+      { policyKey: "a", outcome: "undischargeable" },
+      { policyKey: "b", outcome: "undischargeable" },
+    ]);
+    expect(batch.calls).toHaveLength(0);
+  });
+
+  it("answers through the batch when one is supplied", () => {
+    const single = spyEvaluator("denied");
+    const batch = spyBatch(answerAll("satisfied"));
+    const out = dischargeAbacBatch([request("a"), request("b")], single.evaluator, batch.batch);
+    expect(out).toEqual([
+      { policyKey: "a", outcome: "satisfied" },
+      { policyKey: "b", outcome: "satisfied" },
+    ]);
+    expect(batch.calls).toHaveLength(1);
+    expect(single.calls).toHaveLength(0);
+  });
+
+  it("answers through the single evaluator when no batch is supplied, once per request", () => {
+    const single = spyEvaluator("satisfied");
+    const out = dischargeAbacBatch([request("a"), request("b"), request("c")], single.evaluator);
+    expect(out.map((d) => d.outcome)).toEqual(["satisfied", "satisfied", "satisfied"]);
+    // Exactly today's behaviour and today's cost for a deployment that declared no batch arm.
+    expect(single.calls).toHaveLength(3);
+    expect(single.calls.map((i) => i.policyKey)).toEqual(["a", "b", "c"]);
+  });
+
+  it("honours a deferred answer rather than reading it as a skip", () => {
+    const out = dischargeAbacBatch(
+      [request("a")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(answerAll("deferred")).batch,
+    );
+    expect(out).toEqual([{ policyKey: "a", outcome: "deferred" }]);
+    expect(ABAC_OUTCOME_ALLOWS[out[0]?.outcome ?? "satisfied"]).toBe(false);
+  });
+
+  it("refuses the whole batch when the call throws", () => {
+    const out = dischargeAbacBatch([request("a"), request("b")], UNDISCHARGEABLE_ABAC_EVALUATOR, () => {
+      throw new Error("policy service down");
+    });
+    // An exception inside an authorization check must not become an allow, and must not escape as a
+    // 500 a client retries into the same refusal.
+    expect(out.map((d) => d.outcome)).toEqual(["undischargeable", "undischargeable"]);
+  });
+
+  it("refuses the whole batch when the return is not an array", () => {
+    const out = dischargeAbacBatch(
+      [request("a")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(() => "satisfied").batch,
+    );
+    expect(out).toEqual([{ policyKey: "a", outcome: "undischargeable" }]);
+  });
+
+  it("refuses the whole batch on a short return", () => {
+    const out = dischargeAbacBatch(
+      [request("a"), request("b"), request("c")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(() => [{ index: 0, outcome: "satisfied" }]).batch,
+    );
+    // Deliberately not "honour the one that lined up": a length fault means no answer can be shown
+    // to belong to its question, so trusting the prefix would be guessing which.
+    expect(out.map((d) => d.outcome)).toEqual([
+      "undischargeable",
+      "undischargeable",
+      "undischargeable",
+    ]);
+  });
+
+  it("refuses the whole batch on a long return", () => {
+    const out = dischargeAbacBatch(
+      [request("a")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(() => [
+        { index: 0, outcome: "satisfied" },
+        { index: 1, outcome: "satisfied" },
+      ]).batch,
+    );
+    expect(out).toEqual([{ policyKey: "a", outcome: "undischargeable" }]);
+  });
+
+  it("refuses the whole batch when an index does not match its position", () => {
+    const out = dischargeAbacBatch(
+      [request("a"), request("b"), request("c")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(() => [
+        { index: 0, outcome: "satisfied" },
+        { index: 2, outcome: "denied" },
+        { index: 1, outcome: "satisfied" },
+      ]).batch,
+    );
+    // Including the one that happened to line up: a permutation is a silent mis-authorization of
+    // which roughly half allows, and the echoed index is the only thing that can see it.
+    expect(out.map((d) => d.outcome)).toEqual([
+      "undischargeable",
+      "undischargeable",
+      "undischargeable",
+    ]);
+  });
+
+  it("refuses the whole batch for an element that is not an object", () => {
+    const out = dischargeAbacBatch(
+      [request("a"), request("b")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(() => ["satisfied", { index: 1, outcome: "satisfied" }]).batch,
+    );
+    expect(out.map((d) => d.outcome)).toEqual(["undischargeable", "undischargeable"]);
+  });
+
+  it("refuses the whole batch for a null element, which typeof calls an object", () => {
+    const out = dischargeAbacBatch(
+      [request("a")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(() => [null]).batch,
+    );
+    expect(out.map((d) => d.outcome)).toEqual(["undischargeable"]);
+  });
+
+  it("refuses only the element whose outcome is outside the enum", () => {
+    const out = dischargeAbacBatch(
+      [request("a"), request("b"), request("c")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(() => [
+        { index: 0, outcome: "satisfied" },
+        { index: 1, outcome: "allow" },
+        { index: 2, outcome: "denied" },
+      ]).batch,
+    );
+    // Positional correspondence is intact here, so only that one answer is unreadable — the same
+    // granularity the single path already has.
+    expect(out).toEqual([
+      { policyKey: "a", outcome: "satisfied" },
+      { policyKey: "b", outcome: "undischargeable" },
+      { policyKey: "c", outcome: "denied" },
+    ]);
+  });
+
+  it("refuses only the element whose outcome is missing entirely", () => {
+    const out = dischargeAbacBatch(
+      [request("a"), request("b")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch(() => [{ index: 0 }, { index: 1, outcome: "satisfied" }]).batch,
+    );
+    expect(out.map((d) => d.outcome)).toEqual(["undischargeable", "satisfied"]);
+  });
+
+  it("excludes an unresolved-attribute principal from the array the batch receives", () => {
+    const batch = spyBatch(answerAll("satisfied"));
+    const out = dischargeAbacBatch(
+      [request("a"), request("b", UNRESOLVED_PRINCIPAL), request("c")],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      batch.batch,
+    );
+    // The batch is handed only questions it could answer, so its length is the number of those —
+    // and the excluded one is refused before any evaluator sees it (ADR-0341).
+    expect(batch.calls[0]).toHaveLength(2);
+    expect(batch.calls[0]?.map((i) => i.policyKey)).toEqual(["a", "c"]);
+    expect(out).toEqual([
+      { policyKey: "a", outcome: "satisfied" },
+      { policyKey: "b", outcome: "undischargeable" },
+      { policyKey: "c", outcome: "satisfied" },
+    ]);
+  });
+
+  it("excludes an unresolved-attribute principal on the single-evaluator arm too", () => {
+    const single = spyEvaluator("satisfied");
+    const out = dischargeAbacBatch(
+      [request("a", UNRESOLVED_PRINCIPAL), request("b")],
+      single.evaluator,
+    );
+    expect(single.calls.map((i) => i.policyKey)).toEqual(["b"]);
+    expect(out.map((d) => d.outcome)).toEqual(["undischargeable", "satisfied"]);
+  });
+
+  it("calls nothing when every request is excluded", () => {
+    const single = spyEvaluator("satisfied");
+    const batch = spyBatch(answerAll("satisfied"));
+    const out = dischargeAbacBatch(
+      [request("a", UNRESOLVED_PRINCIPAL), request("b", UNRESOLVED_PRINCIPAL)],
+      single.evaluator,
+      batch.batch,
+    );
+    expect(out.map((d) => d.outcome)).toEqual(["undischargeable", "undischargeable"]);
+    expect(batch.calls).toHaveLength(0);
+    expect(single.calls).toHaveLength(0);
+  });
+
+  it("aligns its result to the requests, policy key by policy key", () => {
+    const keys = ["k0", "k1", "k2", "k3"];
+    const out = dischargeAbacBatch(
+      keys.map((k) => request(k)),
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch((inputs) =>
+        inputs.map((input, index) => ({
+          index,
+          outcome: input.policyKey === "k2" ? "denied" : "satisfied",
+        })),
+      ).batch,
+    );
+    expect(out.map((d) => d.policyKey)).toEqual(keys);
+    expect(out.map((d) => d.outcome)).toEqual(["satisfied", "satisfied", "denied", "satisfied"]);
+  });
+
+  it("passes each request's context through verbatim, with the policy key attached", () => {
+    const record: Readonly<Record<string, unknown>> = { id: "p-1" };
+    const batch = spyBatch(answerAll("satisfied"));
+    dischargeAbacBatch(
+      [{ policyKey: "owns", context: { ...CONTEXT, field: "mrn", record } }],
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      batch.batch,
+    );
+    expect(batch.calls[0]?.[0]).toEqual({
+      policyKey: "owns",
+      principal: PRINCIPAL,
+      entity: "prescription",
+      operation: "update",
+      field: "mrn",
+      record,
+    });
+  });
+
+  it("answers every outcome of the enum through the batch", () => {
+    const out = dischargeAbacBatch(
+      ABAC_OUTCOMES.map((o) => request(o)),
+      UNDISCHARGEABLE_ABAC_EVALUATOR,
+      spyBatch((inputs) =>
+        inputs.map((input, index) => ({ index, outcome: input.policyKey })),
+      ).batch,
+    );
+    expect(out.map((d) => d.outcome)).toEqual([...ABAC_OUTCOMES]);
   });
 });

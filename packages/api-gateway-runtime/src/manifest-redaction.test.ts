@@ -1,5 +1,10 @@
 import type { Entity } from "@crossengin/types/meta-schema";
-import type { AbacEvaluator, EntityPermissions, RoleDefinition } from "@crossengin/auth";
+import type {
+  AbacBatchEvaluator,
+  AbacEvaluator,
+  EntityPermissions,
+  RoleDefinition,
+} from "@crossengin/auth";
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import { describe, expect, it } from "vitest";
 import { computeRedactedFields } from "./redaction.js";
@@ -327,6 +332,45 @@ describe("redactionRegistryFromManifest", () => {
       if (spec === null) throw new Error("expected spec");
       computeRedactedFields(spec, principal("clinician"));
       expect(calls).toBe(0);
+    });
+
+    describe("the batch evaluator, which is a sibling and not a replacement", () => {
+      const evaluator: AbacEvaluator = () => "satisfied";
+      const evaluateBatch: AbacBatchEvaluator = (inputs) =>
+        inputs.map((_input, index) => ({ index, outcome: "satisfied" as const }));
+
+      const specWith = (options: {
+        readonly abacEvaluator?: AbacEvaluator;
+        readonly abacBatchEvaluator?: AbacBatchEvaluator;
+      }) =>
+        redactionRegistryFromManifest(OBLIGATED, {
+          rolesForPrincipal,
+          operationsForEntity,
+          ...options,
+        }).specFor("patient.read");
+
+      it("is absent from the spec when none is supplied", () => {
+        // Not merely undefined: absent, so a deployment that declared no batch gets an enforcement
+        // object indistinguishable from the one it got before the option existed.
+        const spec = specWith({ abacEvaluator: evaluator });
+        expect(spec?.abac).toEqual({ entity: "Patient", evaluator });
+        expect(spec?.abac !== undefined && "evaluateBatch" in spec.abac).toBe(false);
+      });
+
+      it("rides onto the spec beside the single evaluator when supplied", () => {
+        expect(specWith({ abacEvaluator: evaluator, abacBatchEvaluator: evaluateBatch })?.abac)
+          .toEqual({ entity: "Patient", evaluator, evaluateBatch });
+      });
+
+      it("rides on alone, and leaves an obligated field redacted", () => {
+        // Supplied without `abacEvaluator` it is carried faithfully rather than promoted into its
+        // place, and the obligation stays undischargeable — the batch answers the fan-out of a
+        // policy layer that exists, never the absence of one.
+        const spec = specWith({ abacBatchEvaluator: evaluateBatch });
+        expect(spec?.abac).toEqual({ entity: "Patient", evaluateBatch });
+        if (spec === null) throw new Error("expected spec");
+        expect(computeRedactedFields(spec, resolvedPrincipal("clinician"))).toContain("mrn");
+      });
     });
   });
 });

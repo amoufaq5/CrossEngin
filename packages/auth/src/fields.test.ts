@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 import type { TenantId, UserId } from "@crossengin/types";
 import {
   computeClassifiedFieldRedaction,
+  computeClassifiedFieldRedactionForRecords,
   computeFieldRedaction,
   validateClassifiedWriteMask,
   validateWriteMask,
   type ClassifiedField,
 } from "./fields.js";
-import { ABAC_OUTCOME_ALLOWS, type AbacEvaluationInput, type AbacEvaluator } from "./abac.js";
+import {
+  ABAC_OUTCOME_ALLOWS,
+  type AbacBatchEvaluator,
+  type AbacEvaluationInput,
+  type AbacEvaluator,
+} from "./abac.js";
 import {
   ABAC_OUTCOMES,
   type AbacOutcome,
@@ -1381,5 +1387,387 @@ describe("FieldRedactionResult.deferred", () => {
       { entity: "Patient", evaluator: mixed },
     );
     expect(r.deferred).toEqual(["b", "a"]);
+  });
+});
+
+/**
+ * The plural read path.
+ *
+ * Since ADR-0343 the gateway computes a field set per record, so a page of N records with F
+ * obligated fields called a deployment-supplied evaluator N×F times with no way to hand it the whole
+ * set. This entry point exists to pool them — and the property that makes the refactor behind it
+ * safe is that N records answer exactly as N separate singular calls.
+ */
+describe("computeClassifiedFieldRedactionForRecords", () => {
+  const RECORDS: readonly Readonly<Record<string, unknown>>[] = [
+    { id: "p-1", department: "oncology" },
+    { id: "p-2", department: "cardiology" },
+    { id: "p-3", department: "oncology" },
+  ];
+
+  /** Two obligated read fields plus one with no obligation, so F is visibly 2 and not 3. */
+  const TWO_OBLIGATED: EntityPermissions = {
+    fields: {
+      mrn: { read: { roles: ["clinician"], abac: "owns" } },
+      dob: { read: { roles: ["clinician"], abac: "owns" } },
+      status: { read: { roles: ["clinician"] } },
+    },
+  };
+
+  const THREE_FIELDS: readonly ClassifiedField[] = [
+    { name: "mrn", classification: "phi" },
+    { name: "dob", classification: "phi" },
+    { name: "status" },
+  ];
+
+  /** Counts batch calls and the pooled question count, which is the whole claim of this arm. */
+  function spyBatch(outcome: (input: AbacEvaluationInput) => AbacOutcome): {
+    readonly batch: AbacBatchEvaluator;
+    readonly calls: AbacEvaluationInput[][];
+  } {
+    const calls: AbacEvaluationInput[][] = [];
+    return {
+      batch: (inputs) => {
+        calls.push([...inputs]);
+        return inputs.map((input, index) => ({ index, outcome: outcome(input) }));
+      },
+      calls,
+    };
+  }
+
+  /** "Only a record in your own department", the shape a record-bearing policy actually takes. */
+  const ownDepartment = (input: AbacEvaluationInput): AbacOutcome => {
+    if (input.record === undefined) return "deferred";
+    return input.record.department === "oncology" ? "satisfied" : "denied";
+  };
+
+  it("returns an empty array for no records, waking neither evaluator", () => {
+    const single = recordingEvaluator("satisfied");
+    const batch = spyBatch(() => "satisfied");
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      undefined,
+      { entity: "Patient", evaluator: single.fn, evaluateBatch: batch.batch },
+      [],
+    );
+    expect(out).toEqual([]);
+    expect(batch.calls).toHaveLength(0);
+    expect(single.calls).toHaveLength(0);
+  });
+
+  it("answers N records exactly as N separate singular calls", () => {
+    // The property that makes the plan/discharge/assemble refactor safe: whatever the plural path
+    // does to pool questions, each element must be the answer the singular function already gave.
+    const policy = { privilegedRoles: ["clinician"] };
+    const plural = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      policy,
+      { entity: "Patient", evaluator: ownDepartment },
+      RECORDS,
+    );
+    const singular = RECORDS.map((record) =>
+      computeClassifiedFieldRedaction(
+        principal("clinician"),
+        TWO_OBLIGATED,
+        CLINICAL_ROLES,
+        THREE_FIELDS,
+        policy,
+        { entity: "Patient", evaluator: ownDepartment, record },
+      ),
+    );
+    expect(plural).toEqual(singular);
+    expect(plural.map((r) => r.readable)).toEqual([
+      ["mrn", "dob", "status"],
+      ["status"],
+      ["mrn", "dob", "status"],
+    ]);
+  });
+
+  it("agrees with the singular path elementwise on the classification default too", () => {
+    const policy = { privilegedRolesByClass: { phi: [] } };
+    const plural = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      policy,
+      undefined,
+      RECORDS,
+    );
+    for (const result of plural) {
+      expect(result).toEqual(
+        computeClassifiedFieldRedaction(
+          principal("clinician"),
+          NO_FIELD_PERMS,
+          CLINICAL_ROLES,
+          CLINICAL_FIELDS,
+          policy,
+        ),
+      );
+    }
+  });
+
+  it("asks the batch exactly once for N records x F obligated fields", () => {
+    const batch = spyBatch(ownDepartment);
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      undefined,
+      { entity: "Patient", evaluator: ownDepartment, evaluateBatch: batch.batch },
+      RECORDS,
+    );
+    expect(batch.calls).toHaveLength(1);
+    // 3 records x 2 obligated fields; `status` carries no obligation and contributes nothing.
+    expect(batch.calls[0]).toHaveLength(6);
+    expect(batch.calls[0]?.map((i) => i.field)).toEqual(["mrn", "dob", "mrn", "dob", "mrn", "dob"]);
+    expect(batch.calls[0]?.map((i) => i.record?.id)).toEqual([
+      "p-1",
+      "p-1",
+      "p-2",
+      "p-2",
+      "p-3",
+      "p-3",
+    ]);
+    expect(out.map((r) => r.readable.length)).toEqual([3, 1, 3]);
+  });
+
+  it("costs one evaluator call per obligation when no batch arm is supplied", () => {
+    // The fallback is exactly today's cost, which is what makes the batch arm optional.
+    const single = recordingEvaluator("satisfied");
+    computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      undefined,
+      { entity: "Patient", evaluator: single.fn },
+      RECORDS,
+    );
+    expect(single.calls).toHaveLength(6);
+  });
+
+  it("answers satisfied for one record and deferred for another in one call", () => {
+    const batch = spyBatch(ownDepartment);
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      undefined,
+      { entity: "Patient", evaluator: ownDepartment, evaluateBatch: batch.batch },
+      // A `null` element means this call site had no record here — identical to an absent
+      // `AbacEnforcement.record`, so the policy answers `deferred` for it and says so per field.
+      [RECORDS[0] ?? null, null],
+    );
+    expect(batch.calls).toHaveLength(1);
+    expect(out[0]?.readable).toEqual(["mrn", "dob", "status"]);
+    expect(out[0]?.deferred).toEqual([]);
+    expect(out[1]?.readable).toEqual(["status"]);
+    expect(out[1]?.redacted).toEqual(["mrn", "dob"]);
+    expect(out[1]?.deferred).toEqual(["mrn", "dob"]);
+  });
+
+  it("reports readable, redacted and deferred in field-list order", () => {
+    const ordered: readonly ClassifiedField[] = [
+      { name: "status" },
+      { name: "dob", classification: "phi" },
+      { name: "mrn", classification: "phi" },
+    ];
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      ordered,
+      undefined,
+      { entity: "Patient", evaluator: () => "deferred" },
+      [null],
+    );
+    expect(out[0]?.readable).toEqual(["status"]);
+    expect(out[0]?.redacted).toEqual(["dob", "mrn"]);
+    expect(out[0]?.deferred).toEqual(["dob", "mrn"]);
+  });
+
+  it("keeps deferred a subsequence of redacted, not merely a subset", () => {
+    const perms: EntityPermissions = {
+      fields: {
+        waiting_a: { read: { roles: ["clinician"], abac: "defers" } },
+        refused: { read: { roles: ["registrar"], abac: "defers" } },
+        waiting_b: { read: { roles: ["clinician"], abac: "defers" } },
+        unanswerable: { read: { roles: ["clinician"], abac: "nope" } },
+      },
+    };
+    const evaluator: AbacEvaluator = (input) =>
+      input.policyKey === "defers" ? "deferred" : "undischargeable";
+    const names = ["waiting_a", "refused", "waiting_b", "unanswerable", "plain"];
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      perms,
+      CLINICAL_ROLES,
+      names.map((name) => ({ name })),
+      undefined,
+      { entity: "Patient", evaluator },
+      [null, null],
+    );
+    for (const result of out) {
+      expect(result.redacted).toEqual(["waiting_a", "refused", "waiting_b", "unanswerable"]);
+      expect(result.deferred).toEqual(["waiting_a", "waiting_b"]);
+      // Subsequence: the deferred names appear in `redacted` in the same relative order, which is
+      // what lets a caller zip either against its own field list.
+      expect(result.redacted.filter((n) => result.deferred.includes(n))).toEqual([
+        ...result.deferred,
+      ]);
+    }
+  });
+
+  it("never defers a field refused on roles, and never evaluates one", () => {
+    const perms: EntityPermissions = {
+      fields: {
+        forbidden: { read: { roles: ["registrar"], abac: "defers" } },
+        allowed: { read: { roles: ["clinician"], abac: "defers" } },
+      },
+    };
+    const batch = spyBatch(() => "deferred");
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      perms,
+      CLINICAL_ROLES,
+      [{ name: "forbidden" }, { name: "allowed" }],
+      undefined,
+      { entity: "Patient", evaluator: () => "deferred", evaluateBatch: batch.batch },
+      [null, null],
+    );
+    // Two records x one *role-admitted* obligated field: the roles refusal returns before an
+    // obligation is recorded, so it never reaches the deployment's policy layer (ADR-0340).
+    expect(batch.calls[0]).toHaveLength(2);
+    expect(batch.calls[0]?.map((i) => i.field)).toEqual(["allowed", "allowed"]);
+    for (const result of out) {
+      expect(result.redacted).toEqual(["forbidden", "allowed"]);
+      expect(result.deferred).toEqual(["allowed"]);
+    }
+  });
+
+  it("never defers a classification default, which carries no obligation", () => {
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"] },
+      { entity: "Patient", evaluator: () => "deferred" },
+      RECORDS,
+    );
+    for (const result of out) {
+      expect(result.redacted).toEqual(["mrn", "given_name"]);
+      expect(result.deferred).toEqual([]);
+    }
+  });
+
+  it("redacts every obligated field and defers none when no abac parameter is supplied", () => {
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      undefined,
+      undefined,
+      RECORDS,
+    );
+    for (const result of out) {
+      // No entity to name, so no evaluation input can be built: `undischargeable`, which a record
+      // could not change, so nothing is deferred.
+      expect(result.readable).toEqual(["status"]);
+      expect(result.redacted).toEqual(["mrn", "dob"]);
+      expect(result.deferred).toEqual([]);
+    }
+  });
+
+  it("refuses every obligation when the batch misaligns its answers", () => {
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      undefined,
+      {
+        entity: "Patient",
+        evaluator: () => "satisfied",
+        evaluateBatch: (inputs) =>
+          // Correct outcomes, reversed indices: exactly the mis-assembled batch the echoed index
+          // exists to catch, and the whole page is refused rather than half-trusted.
+          inputs.map((_input, index) => ({ index: inputs.length - 1 - index, outcome: "satisfied" })),
+      },
+      RECORDS,
+    );
+    for (const result of out) {
+      expect(result.readable).toEqual(["status"]);
+      expect(result.redacted).toEqual(["mrn", "dob"]);
+      expect(result.deferred).toEqual([]);
+    }
+  });
+
+  it("refuses the obligated fields of every record when a principal's attributes are unresolved", () => {
+    const batch = spyBatch(() => "satisfied");
+    const unresolved: Principal = { ...principal("clinician"), abacAttributes: null };
+    const out = computeClassifiedFieldRedactionForRecords(
+      unresolved,
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      undefined,
+      { entity: "Patient", evaluator: () => "satisfied", evaluateBatch: batch.batch },
+      RECORDS,
+    );
+    // Every question is excluded before the evaluator, so nothing is asked at all (ADR-0341).
+    expect(batch.calls).toHaveLength(0);
+    for (const result of out) {
+      expect(result.readable).toEqual(["status"]);
+      expect(result.deferred).toEqual([]);
+    }
+  });
+
+  it("resolves the roles map once for the whole call", () => {
+    // A manager inherits pharmacist; reading the inherited grant for every record proves the shared
+    // resolution is the same set a per-record one would have produced.
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("manager"),
+      PERMS,
+      ROLES,
+      [{ name: "narcotic_schedule" }, { name: "internal_notes" }],
+      undefined,
+      undefined,
+      [null, null, null],
+    );
+    expect(out).toHaveLength(3);
+    for (const result of out) {
+      expect(result.readable).toEqual(["narcotic_schedule", "internal_notes"]);
+    }
+  });
+
+  it("aligns its results to the records, element by element", () => {
+    const out = computeClassifiedFieldRedactionForRecords(
+      principal("clinician"),
+      TWO_OBLIGATED,
+      CLINICAL_ROLES,
+      THREE_FIELDS,
+      undefined,
+      {
+        entity: "Patient",
+        evaluator: (input) => (input.record?.id === "p-2" ? "satisfied" : "denied"),
+      },
+      RECORDS,
+    );
+    expect(out.map((r) => r.readable)).toEqual([
+      ["status"],
+      ["mrn", "dob", "status"],
+      ["status"],
+    ]);
   });
 });

@@ -1,4 +1,4 @@
-import type { AbacEvaluationInput, Principal } from "@crossengin/auth";
+import type { AbacEvaluationInput, AbacEvaluator, Principal } from "@crossengin/auth";
 import type { TenantId, UserId } from "@crossengin/types";
 import { describe, expect, it } from "vitest";
 
@@ -8,6 +8,7 @@ import {
   ABAC_POLICY_FLAG,
   ABAC_POLICY_REFUSALS,
   AbacPolicyRefused,
+  buildAbacBatchEvaluator,
   buildAbacEvaluator,
   formatAbacPolicies,
   parseAbacPolicies,
@@ -53,8 +54,13 @@ function evaluate(spec: string, attributes: Readonly<Record<string, unknown>> | 
 
 /**
  * The same, with a record on the input. `record` is spread conditionally rather than passed as
- * `undefined`, because `exactOptionalPropertyTypes` makes "absent" and "present and undefined"
- * different types — and absent is the fact the deferral turns on.
+ * `undefined`, matching how every producer of an `AbacEvaluationInput` writes it — so a test's
+ * input is the shape the request path really builds, and absent is the fact the deferral turns on.
+ *
+ * It is a **convention and not a compiler rule**: `exactOptionalPropertyTypes` is set nowhere in
+ * `packages/config/typescript`, so `{record: undefined}` typechecks and every reader here compares
+ * `record === undefined`, which cannot tell the two apart. An earlier version of this comment cited
+ * that flag as the reason.
  */
 function inputWithRecord(
   policyKey: string,
@@ -1282,5 +1288,187 @@ describe("formatAbacPolicies — the record operators", () => {
     expect(formatAbacPolicies(new Map())).toBe(
       "abac policies: none declared, so no obligation can be discharged",
     );
+  });
+});
+
+/**
+ * The batch arm. It is degenerate by construction — one `AbacEvaluator` mapped over the inputs — so
+ * the assertions here are not about batching but about the two properties that make supplying it
+ * honest: that it answers **exactly** what the single evaluator answers, element for element, and
+ * that it obeys the contract's index rule, since a batch whose indices did not match their own
+ * positions would make `dischargeAbacBatch` refuse the whole batch and the branch would be
+ * unreachable in a different way.
+ *
+ * Every case builds the single and the batch from the **same** evaluator instance, which the
+ * signature forces: `buildAbacBatchEvaluator` takes the evaluator and not the declaration, so there
+ * is one evaluation function and no second closure that could drift from it.
+ */
+describe("buildAbacBatchEvaluator", () => {
+  /** One declaration spanning both operator families, so every reachable outcome is declarable. */
+  const policies = parseAbacPolicies([
+    "clinical=department:eq:clinical",
+    "owns=user_id:eq_record:owner_id",
+  ]);
+
+  /**
+   * One input per outcome the single evaluator can produce, with both routes to `undischargeable`
+   * named separately — unresolved attributes and an undeclared key are different facts that happen
+   * to share an answer, and a mapping that lost one of them would still look right on the other.
+   */
+  const cases: readonly [string, AbacEvaluationInput, string][] = [
+    ["satisfied", input("clinical", { department: "clinical" }), "satisfied"],
+    ["denied", input("clinical", { department: "nursing" }), "denied"],
+    ["undischargeable (unresolved attributes)", input("clinical", null), "undischargeable"],
+    [
+      "undischargeable (undeclared key)",
+      input("undeclared", { department: "clinical" }),
+      "undischargeable",
+    ],
+    [
+      "deferred (a record-bearing policy with no record)",
+      inputWithRecord("owns", { user_id: "u1" }, undefined),
+      "deferred",
+    ],
+  ];
+
+  it("answers an empty batch with an empty list rather than throwing on it", () => {
+    const batch = buildAbacBatchEvaluator(buildAbacEvaluator(policies));
+    expect(batch([])).toEqual([]);
+  });
+
+  it("answers one entry per input, with `index` equal to its own position ascending from 0", () => {
+    const batch = buildAbacBatchEvaluator(buildAbacEvaluator(policies));
+    const inputs = cases.map(([, i]) => i);
+    const answers = batch(inputs);
+    expect(answers).toHaveLength(inputs.length);
+    expect(answers.map((a) => a.index)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("answers a single-input batch at index 0", () => {
+    const batch = buildAbacBatchEvaluator(buildAbacEvaluator(policies));
+    expect(batch([input("clinical", { department: "clinical" })])).toEqual([
+      { index: 0, outcome: "satisfied" },
+    ]);
+  });
+
+  for (const [label, one, expected] of cases) {
+    it(`agrees with the single evaluator on ${label}`, () => {
+      const single = buildAbacEvaluator(policies);
+      const batch = buildAbacBatchEvaluator(single);
+      // Pinned against the literal too, so a change that broke *both* arms identically would not
+      // pass by making them agree on the wrong answer.
+      expect(single(one)).toBe(expected);
+      expect(batch([one])).toEqual([{ index: 0, outcome: expected }]);
+    });
+  }
+
+  it("agrees elementwise across every outcome in one call", () => {
+    const single = buildAbacEvaluator(policies);
+    const batch = buildAbacBatchEvaluator(single);
+    const inputs = cases.map(([, i]) => i);
+    expect(batch(inputs)).toEqual(inputs.map((i, index) => ({ index, outcome: single(i) })));
+  });
+
+  it("lands on different outcomes within one batch, so the mapping cannot be right by accident", () => {
+    const batch = buildAbacBatchEvaluator(buildAbacEvaluator(policies));
+    const answers = batch(cases.map(([, i]) => i));
+    expect(answers.map((a) => a.outcome)).toEqual([
+      "satisfied",
+      "denied",
+      "undischargeable",
+      "undischargeable",
+      "deferred",
+    ]);
+    // Vacuity guard: a batch that answered one outcome for everything would satisfy the shape
+    // assertions above, so the set of distinct outcomes is asserted to be more than one.
+    expect(new Set(answers.map((a) => a.outcome)).size).toBeGreaterThan(1);
+  });
+
+  /**
+   * One policy key, four inputs differing only in the attribute and the record, chosen so the
+   * answers are asymmetric under reversal *and* under a rotation by one — the two ways a zip can go
+   * wrong. A transposed mapping would pair a principal with another record's owner, which is the
+   * worst available failure: it is an authorization answer about the wrong row.
+   */
+  it("preserves input order, so an answer is never attributed to another input", () => {
+    const batch = buildAbacBatchEvaluator(buildAbacEvaluator(policies));
+    const inputs: readonly AbacEvaluationInput[] = [
+      inputWithRecord("owns", { user_id: "u1" }, { owner_id: "u1" }),
+      inputWithRecord("owns", { user_id: "u1" }, { owner_id: "u2" }),
+      inputWithRecord("owns", { user_id: "u2" }, { owner_id: "u2" }),
+      inputWithRecord("owns", { user_id: "u2" }, { owner_id: "u3" }),
+    ];
+    const answers = batch(inputs);
+    expect(answers).toEqual([
+      { index: 0, outcome: "satisfied" },
+      { index: 1, outcome: "denied" },
+      { index: 2, outcome: "satisfied" },
+      { index: 3, outcome: "denied" },
+    ]);
+    // The pattern is asymmetric both ways round, so these are live rather than restatements.
+    expect([...answers].reverse().map((a) => a.outcome)).not.toEqual(answers.map((a) => a.outcome));
+  });
+
+  it("calls the single evaluator exactly once per input", () => {
+    const single = buildAbacEvaluator(policies);
+    const seen: AbacEvaluationInput[] = [];
+    const counted: AbacEvaluator = (one) => {
+      seen.push(one);
+      return single(one);
+    };
+    const batch = buildAbacBatchEvaluator(counted);
+    const inputs = cases.map(([, i]) => i);
+    batch(inputs);
+    expect(seen).toHaveLength(inputs.length);
+    // The same objects in the same order: a count alone would pass if one input were evaluated
+    // twice and another not at all.
+    expect(seen).toEqual(inputs);
+  });
+
+  it("calls nothing for an empty batch", () => {
+    let calls = 0;
+    const counting: AbacEvaluator = () => {
+      calls += 1;
+      return "denied";
+    };
+    const batch = buildAbacBatchEvaluator(counting);
+    expect(batch([])).toEqual([]);
+    expect(calls).toBe(0);
+  });
+
+  /**
+   * Mirrors the single evaluator's throwing-record-getter probe. The wrapper does not catch, so the
+   * throw leaves the batch call and `dischargeAbacBatch` refuses the **whole** batch — catching here
+   * would keep the other answers as authoritative from an evaluator that has just shown it can
+   * throw, which is the laxer of the two.
+   */
+  it("propagates a throw rather than swallowing it into a per-element answer", () => {
+    const record = {};
+    Object.defineProperty(record, "owner_id", {
+      enumerable: true,
+      get(): never {
+        throw new Error("the batch arm must not catch");
+      },
+    });
+    const batch = buildAbacBatchEvaluator(buildAbacEvaluator(policies));
+    expect(() => batch([inputWithRecord("owns", { user_id: "u1" }, record)])).toThrow(
+      /must not catch/,
+    );
+  });
+
+  it("propagates a throw from a later element rather than returning the earlier answers", () => {
+    const single = buildAbacEvaluator(policies);
+    const explosive: AbacEvaluator = (one) => {
+      if (one.policyKey === "boom") throw new Error("the batch arm must not catch");
+      return single(one);
+    };
+    const batch = buildAbacBatchEvaluator(explosive);
+    expect(() =>
+      batch([
+        input("clinical", { department: "clinical" }),
+        input("boom", { department: "clinical" }),
+        input("clinical", { department: "nursing" }),
+      ]),
+    ).toThrow(/must not catch/);
   });
 });
