@@ -1,3 +1,4 @@
+export * from "./aead.js";
 export * from "./algorithms.js";
 export * from "./audit.js";
 export * from "./hashing.js";

@@ -1,10 +1,10 @@
 # ADR index
 
-340 records. Generated from the ADR files themselves — regenerate rather than
+341 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 261  **Proposed:** 79
+- **Accepted:** 262  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -352,3 +352,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0343](0343-the-refusal-that-was-a-wiring-problem.md) | The refusal that was a wiring problem | — | Accepted | 2026-10-07 |
 | [0344](0344-the-seam-that-asked-one-question.md) | The seam that could only be asked one question | — | Accepted | 2026-10-07 |
 | [0345](0345-the-denial-that-is-not-a-refusal.md) | The denial that is not a refusal | — | Accepted | 2026-10-07 |
+| [0346](0346-the-opaque-cursor-that-was-not.md) | The opaque cursor that was not | — | Accepted | 2026-10-07 |

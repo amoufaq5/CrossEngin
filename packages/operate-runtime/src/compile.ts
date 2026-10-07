@@ -34,6 +34,7 @@ import {
   type AdminContext,
 } from "./admin-handlers.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
+import type { CursorSealer } from "./cursor-seal.js";
 import { manifestRouteSpecs, routeFromSpec, type RouteAction, type RouteSpec } from "./operations.js";
 import {
   associationCountRouteFromSpec,
@@ -139,6 +140,21 @@ export interface OperateRuntimeOptions {
    * single calls, which is exactly what every deployment did before this existed.
    */
   readonly abacBatchEvaluator?: AbacBatchEvaluator;
+  /**
+   * Seals the keyset cursor an entity list hands back, and opens the one it is given (ADR-0346).
+   *
+   * Absent serves the cursor as the plaintext `base64url(JSON.stringify({k, id}))` it has always
+   * been, which is every deployment without a cursor secret. That is a disclosure rather than a
+   * degradation — ADR-0345's row filtering derives `nextCursor` from the last row of the *store's*
+   * slice, so under filtering it names rows the caller is never shown — so the choice is made where
+   * a deployment can be told about it: `apps/operate-server` refuses to boot when a list grant
+   * filters rows and no sealer is configured.
+   *
+   * It reaches the handler context and nothing else. The stores are deliberately untouched: a
+   * cursor is opaque to the **client**, not to the store, so sealing is an envelope at the request
+   * boundary and `encodeKeyset` / `decodeKeyset` keep producing and consuming the plaintext keyset.
+   */
+  readonly cursorSealer?: CursorSealer;
   /** Allocates document numbers for sequence-defaulted fields on create. */
   readonly allocator?: SequenceAllocator;
   /** Backs the admin settings endpoints + runtime numbering overrides. */
@@ -716,6 +732,7 @@ export function compileOperateServer(
     ...(options.abacBatchEvaluator !== undefined
       ? { abacBatchEvaluator: options.abacBatchEvaluator }
       : {}),
+    ...(options.cursorSealer !== undefined ? { cursorSealer: options.cursorSealer } : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   };
 

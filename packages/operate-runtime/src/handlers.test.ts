@@ -20,7 +20,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec } from "./operations.js";
-import { InMemoryEntityStore, type ListPage } from "./store.js";
+import { SEALED_CURSOR_PREFIX, buildCursorSealer } from "./cursor-seal.js";
+import { InMemoryEntityStore, decodeKeyset, type ListPage } from "./store.js";
 import { buildValidationPlans } from "./validation.js";
 import { buildClassifiedFieldIndex } from "./write-mask.js";
 
@@ -1623,5 +1624,169 @@ describe("operate handlers — addressing rows by a withheld field is refused", 
       query: { sort: "label" },
     });
     expect(out.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cursor envelope.
+//
+// The keyset cursor was `base64url(JSON.stringify({k, id}))` — plainly reversible — and is derived
+// from the last row of the *store's* slice, which under row filtering may be a row the caller is
+// never shown. So at `limit=1` a caller walked the collection and collected one id per page,
+// including ids of rows they cannot read. The cursor is opaque to the *client* and not to the
+// store, so the fix is an envelope at this boundary: open on the way in, seal on the way out, and
+// `store.ts` / `list-sql.ts` go on producing the plaintext keyset they always did.
+// ---------------------------------------------------------------------------
+
+const CURSOR_KEY = new Uint8Array(32).fill(3);
+const CURSOR_SEALER = buildCursorSealer(() => CURSOR_KEY);
+
+/** Flips one character at the front of the sealed body — the end can carry unused base64 bits. */
+function tamper(sealed: string): string {
+  const at = SEALED_CURSOR_PREFIX.length;
+  const was = sealed.slice(at, at + 1);
+  return `${sealed.slice(0, at)}${was === "A" ? "B" : "A"}${sealed.slice(at + 1)}`;
+}
+
+describe("operate handlers — the keyset cursor is sealed at the handler boundary", () => {
+  it("serves a sealed cursor and walks the whole collection with it", async () => {
+    const store = await withRoster();
+    const ctx = clinicCtx(store, evaluator("satisfied"), { cursorSealer: CURSOR_SEALER });
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page_ = 0; page_ < ROSTER.length; page_ += 1) {
+      const out = await hit(ctx, "roster.list", {
+        role: "clinician",
+        query: { limit: "1", sort: "name", ...(cursor !== null ? { cursor } : {}) },
+      });
+      expect(out.status).toBe(200);
+      const got = page(out);
+      for (const row of got.data) seen.push(row["id"] as string);
+      cursor = got.nextCursor;
+      if (cursor === null) break;
+      expect(cursor.startsWith(SEALED_CURSOR_PREFIX)).toBe(true);
+      // Opaque to the client: the plaintext codec cannot read the token back.
+      expect(decodeKeyset(cursor)).toBeNull();
+    }
+    // End to end across pages, and terminating on `nextCursor === null` as before.
+    expect(seen).toEqual(["r-1", "r-2", "r-3"]);
+    expect(cursor).toBeNull();
+  });
+
+  it("a null cursor stays null and never becomes a sealed empty string", async () => {
+    // An absent cursor is the end of the walk; a sealed empty string is a position, and a caller
+    // reading `nextCursor !== null` as "there is more" would loop forever on one.
+    const store = await withRoster();
+    const out = await hit(
+      clinicCtx(store, evaluator("satisfied"), { cursorSealer: CURSOR_SEALER }),
+      "roster.list",
+      { role: "clinician" },
+    );
+    expect(page(out).nextCursor).toBeNull();
+  });
+
+  it("400s a tampered cursor and never calls the store", async () => {
+    const store = await withRoster();
+    const ctx = clinicCtx(store, evaluator("satisfied"), { cursorSealer: CURSOR_SEALER });
+    const sealed =
+      page(await hit(ctx, "roster.list", { role: "clinician", query: { limit: "1", sort: "name" } }))
+        .nextCursor ?? "";
+    expect(sealed).not.toBe("");
+    store.pageCalls = 0;
+    const out = await hit(ctx, "roster.list", {
+      role: "clinician",
+      query: { limit: "1", sort: "name", cursor: tamper(sealed) },
+    });
+    // 400 and not 403 — nothing about this caller's authorization changed — and above all not a
+    // silent restart from the beginning, which would read as the walk working.
+    expect(out.status).toBe(400);
+    expect(bodyOf(out)["error"]).toBe("cursor_not_for_this_request");
+    expect(store.pageCalls).toBe(0);
+  });
+
+  it("400s a cursor replayed under a different sort, and the issuing sort still works", async () => {
+    // The open and the seal read **one** context, so a cursor is confined to the request shape it
+    // was issued under. It also closes a pre-existing soundness hole: `isAfter` compares the
+    // cursor's `k[i]` against `sort[i]`'s field, so a mismatched sort produced a meaningless keyset
+    // comparison. The fix reaches sealed cursors only; the legacy path keeps the hole.
+    const store = await withRoster();
+    const ctx = clinicCtx(store, evaluator("satisfied"), { cursorSealer: CURSOR_SEALER });
+    const cursor =
+      page(await hit(ctx, "roster.list", { role: "clinician", query: { limit: "1", sort: "name" } }))
+        .nextCursor ?? "";
+    store.pageCalls = 0;
+    const wrong = await hit(ctx, "roster.list", {
+      role: "clinician",
+      query: { limit: "1", sort: "ward", cursor },
+    });
+    expect(wrong.status).toBe(400);
+    expect(store.pageCalls).toBe(0);
+    // The same token under the sort it was issued for is accepted, so the refusal is the binding
+    // rather than the seal failing generally.
+    const right = await hit(ctx, "roster.list", {
+      role: "clinician",
+      query: { limit: "1", sort: "name", cursor },
+    });
+    expect(right.status).toBe(200);
+    expect(page(right).data.map((r) => r["id"])).toEqual(["r-2"]);
+  });
+
+  it("accepts a legacy plaintext cursor and pages correctly", async () => {
+    // So a rollout does not break the walks already in flight. Safe for confidentiality because a
+    // client can only construct a plaintext cursor whose contents it already knows — the threat
+    // closed here is reading ours, not forging one, and forging was always possible.
+    const store = await withRoster();
+    const legacy =
+      page(
+        await hit(clinicCtx(store, evaluator("satisfied")), "roster.list", {
+          role: "clinician",
+          query: { limit: "1", sort: "name" },
+        }),
+      ).nextCursor ?? "";
+    expect(legacy.startsWith(SEALED_CURSOR_PREFIX)).toBe(false);
+    const out = await hit(
+      clinicCtx(store, evaluator("satisfied"), { cursorSealer: CURSOR_SEALER }),
+      "roster.list",
+      { role: "clinician", query: { limit: "1", sort: "name", cursor: legacy } },
+    );
+    expect(out.status).toBe(200);
+    expect(page(out).data.map((r) => r["id"])).toEqual(["r-2"]);
+    // And the token it hands back is sealed, so a walk converts on its first page under the sealer.
+    expect(page(out).nextCursor?.startsWith(SEALED_CURSOR_PREFIX)).toBe(true);
+  });
+
+  it("seals the cursor of a fully denied page — the position the disclosure was about", async () => {
+    // `ward` descending puts B first, so the whole first page is withheld and the store's cursor is
+    // built from a row this caller is never shown. That token is what used to be legible.
+    const store = await withRoster();
+    const ctx = clinicCtx(store, OWN_WARD, { cursorSealer: CURSOR_SEALER });
+    const out = await hit(ctx, "roster.list", {
+      role: "clinician",
+      query: { limit: "1", sort: "ward", order: "desc" },
+    });
+    const { data, nextCursor } = page(out);
+    expect(data).toEqual([]);
+    expect(nextCursor).not.toBeNull();
+    expect(nextCursor?.startsWith(SEALED_CURSOR_PREFIX)).toBe(true);
+    expect(decodeKeyset(nextCursor)).toBeNull();
+    // The walk still reaches the rows the caller is entitled to, so sealing costs no coverage.
+    const next = await hit(ctx, "roster.list", {
+      role: "clinician",
+      query: { limit: "1", sort: "ward", order: "desc", cursor: nextCursor ?? "" },
+    });
+    expect(page(next).data.length).toBe(1);
+  });
+
+  it("with no sealer the cursor is the store's plaintext keyset, byte for byte", async () => {
+    // The pre-sealer behaviour, pinned: absent means plaintext, the arm takes the path it always
+    // took, and the boot refusal that makes that a choice lives in `apps/operate-server`.
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, evaluator("satisfied")), "roster.list", {
+      role: "clinician",
+      query: { limit: "1", sort: "name" },
+    });
+    const { nextCursor } = page(out);
+    expect(nextCursor).toBe(store.lastPage?.nextCursor);
+    expect(decodeKeyset(nextCursor)).not.toBeNull();
   });
 });

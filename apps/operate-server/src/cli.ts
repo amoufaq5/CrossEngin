@@ -12,6 +12,7 @@ import {
 } from "@crossengin/types/meta-schema";
 
 import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
+import { ALLOW_CURSOR_DISCLOSURE_FLAG } from "./cursor-encryption.js";
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
 import {
   SENSITIVE_FIELD_CLASS_FLAG,
@@ -54,6 +55,20 @@ export interface ServeOptions {
    * produce.
    */
   readonly allowPlaintextPhi: boolean;
+  /**
+   * Accepts ADR-0345's cursor disclosure knowingly, when a `list` grant filters rows and no
+   * `CURSOR_ENCRYPTION_SECRET` is set.
+   *
+   * `--allow-plaintext-phi`'s shape and not `obligation_unevaluable`'s: ADR-0340 refused an escape
+   * hatch because serving a grant with its qualifier removed is the *opposite* of what the manifest
+   * declares, while a plaintext cursor is degraded-but-coherent — the filter works, the rows are
+   * withheld, and only their positions leak. An operator whose ids are opaque and whose sort key is
+   * uninteresting may reasonably accept that; one who has not thought about it should be refused.
+   *
+   * It accepts a disclosure rather than requesting one, so it does **not** suppress sealing: a
+   * deployment that sets the secret gets sealed cursors whether or not it also passes this.
+   */
+  readonly allowCursorDisclosure: boolean;
   readonly schema: string | null;
   readonly apiKeys: readonly string[];
   readonly jwksKeys: readonly string[];
@@ -459,6 +474,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let manifestPath: string | null = null;
   let store: StoreKind = "memory";
   let allowPlaintextPhi = false;
+  let allowCursorDisclosure = false;
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
   const apiKeys: string[] = [];
@@ -742,6 +758,8 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--allow-plaintext-phi") {
       allowPlaintextPhi = true;
+    } else if (arg === ALLOW_CURSOR_DISCLOSURE_FLAG) {
+      allowCursorDisclosure = true;
     } else if (arg === "--classified-write-mask") {
       classifiedWriteMask = true;
     } else if (
@@ -1698,6 +1716,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jobInvokeRoles,
     workflowCancelRoles,
     allowPlaintextPhi,
+    allowCursorDisclosure,
     sensitiveFieldRoles,
     abacPolicies,
     sensitiveFieldClasses,
@@ -2030,6 +2049,16 @@ Options:
                        says otherwise. Not applicable to pg-columns, which
                        encrypts (set COLUMN_ENCRYPTION_SECRET in the
                        environment -- never argv, which ps can read).
+  --allow-cursor-disclosure
+                       Serve plaintext keyset cursors on a list whose abac
+                       policy filters rows. Off by default: nextCursor is
+                       base64url JSON derived from the last row the STORE
+                       returned, which under filtering may be a row the caller
+                       was never shown -- so it names withheld rows' positions,
+                       and at limit=1 their ids. Set CURSOR_ENCRYPTION_SECRET in
+                       the environment (never argv) to seal them instead; this
+                       flag only accepts the disclosure, and does not suppress
+                       sealing when a secret is set.
   --schema <name>      Postgres schema for the entity store (default meta;
                        public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)

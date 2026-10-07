@@ -38,6 +38,7 @@ import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { validateBody, type EntityValidationPlan } from "./validation.js";
 import { isTransactional, projectRecord, type EntityRecord, type EntityStore } from "./store.js";
 import { maskWrite, type WriteMaskMode, type WriteMaskRefusal } from "./write-mask.js";
+import type { CursorRefusal, CursorSealer } from "./cursor-seal.js";
 import type { RouteAction, RouteSpec } from "./operations.js";
 
 const FALLBACK_LIST_CONFIG: ListConfig = {
@@ -96,6 +97,16 @@ export interface HandlerContext {
    * without its single sibling.
    */
   readonly abacBatchEvaluator?: AbacBatchEvaluator;
+  /**
+   * Seals the keyset cursor at this boundary — opened on the way in, sealed on the way out — so the
+   * token a client holds is opaque to the client and still the plaintext keyset to every store.
+   *
+   * **Absent means cursors are served plaintext**, which is the pre-ADR-0346 behaviour and is what
+   * every deployment without a cursor secret gets; the arm then takes exactly the path it took
+   * before. The boot refusal that makes that a deliberate choice rather than an oversight lives in
+   * `apps/operate-server`, which is the layer that knows whether a secret was configured.
+   */
+  readonly cursorSealer?: CursorSealer;
   readonly clock?: { now(): Date };
 }
 
@@ -246,7 +257,30 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
       case "list": {
         const config = spec.listConfig ?? FALLBACK_LIST_CONFIG;
         const fields = parseFields(request.query);
-        const query = { ...parseListQuery(request.query, config), ...(fields !== null ? { fields } : {}) };
+        const asked = { ...parseListQuery(request.query, config), ...(fields !== null ? { fields } : {}) };
+        // The sealer's context is built **once** and used for both the open and the seal below. An
+        // open that succeeded against one context and a seal issued under another would hand the
+        // caller a cursor their very next request cannot use — a walk that dies on page two — so the
+        // two halves read one object rather than constructing it twice.
+        //
+        // `asked.sort` is the *effective* sort, the view's default where the request named none, and
+        // that is the right thing to bind: it is the ordering the store's keyset is aligned to, so a
+        // cursor is confined to the ordering it was derived under whether or not the caller spelled
+        // it out. Null with no sealer, so that path allocates nothing and `query` below is `asked`
+        // itself.
+        const sealing =
+          ctx.cursorSealer === undefined
+            ? null
+            : {
+                sealer: ctx.cursorSealer,
+                context: { tenantId, entity: spec.entity, sort: asked.sort },
+              };
+        // Before the store call and before the addressing guard: a cursor that is not for this
+        // request is answered without reading anything.
+        const opened =
+          sealing !== null && asked.cursor !== null ? sealing.sealer.open(asked.cursor, sealing.context) : null;
+        if (opened?.kind === "refused") return cursorRefused(opened.reason);
+        const query = opened === null ? asked : { ...asked, cursor: opened.value };
         if (obligationOutstanding) {
           // Before the store call: a query that may not be answered must not be run, and the
           // refusal is about what the caller asked to be *told* rather than about anything the
@@ -268,7 +302,8 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         const data = fields === null ? visible : visible.map((r) => projectRecord(r, fields));
         return json(200, {
           data,
-          // **`nextCursor` passes through untouched, and a short page is the correct answer.** It is
+          // **`nextCursor` is the store's position and not the visible rows', and a short page is
+          // the correct answer.** It is
           // derived in the store from the last row of *its* slice and is non-null iff the store had
           // more rows, so termination is `nextCursor === null` and nothing else. Re-deriving it from
           // the last *visible* row would make a fully-denied page carry no cursor, and the walk
@@ -281,7 +316,16 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           // per request depend on the policy's selectivity — a caller who may see 1% of rows would
           // cost ~100 store calls for one page — which is a denial of service reachable from a
           // manifest declaration. One store call per request, exactly as before.
-          page: { limit: query.limit, nextCursor: page.nextCursor },
+          //
+          // The seal is an envelope *around* that rule and does not touch it: `null` stays `null`,
+          // because an absent cursor is the end of the walk and a sealed empty string is a position.
+          page: {
+            limit: query.limit,
+            nextCursor:
+              sealing === null || page.nextCursor === null
+                ? page.nextCursor
+                : sealing.sealer.seal(page.nextCursor, sealing.context),
+          },
         });
       }
       case "read": {
@@ -649,6 +693,38 @@ function addressingRefused(entity: string, addressing: WithheldAddressing): Hand
     detail: `'${addressing.field}' on '${entity}' may not address rows while rows are being withheld: ${reason}`,
     field: addressing.field,
   });
+}
+
+/**
+ * Why each cursor refusal is answered and under which error code, as a **total map** for
+ * `WITHHELD_ADDRESSING`'s reason: a second refusal reason becomes a compile error rather than a 400
+ * with no explanation. There is one today, and `CURSOR_REFUSALS` says why that is a property of the
+ * cryptography and not a gap.
+ */
+const CURSOR_REFUSAL_OUTPUTS: Readonly<
+  Record<CursorRefusal, { readonly error: string; readonly detail: string }>
+> = {
+  not_for_this_request: {
+    error: "cursor_not_for_this_request",
+    detail:
+      "the page cursor was not issued for this request: a cursor is bound to the tenant, the entity and the sort it was issued under, and replaying it under any other is refused. Start the walk again with no cursor.",
+  },
+};
+
+/**
+ * **400, and neither a 403 nor a silent restart.**
+ *
+ * Not a 403, because nothing about this caller's authorization changed — they passed the entity-level
+ * check to reach here — and a 403 would send an operator to the permission map, where there is
+ * nothing to fix. Not a restart from the beginning, because answering 200 with page one for a cursor
+ * that failed to authenticate reads as the walk working; a bad request is what this is.
+ *
+ * The detail names the three bindings and nothing else — no field, no value, and above all not which
+ * of the bindings failed, because GCM cannot say.
+ */
+function cursorRefused(reason: CursorRefusal): HandlerOutput {
+  const { error, detail } = CURSOR_REFUSAL_OUTPUTS[reason];
+  return json(400, { error, detail });
 }
 
 /** Current time as an ISO string, honoring an injected clock for deterministic tests. */

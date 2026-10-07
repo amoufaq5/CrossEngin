@@ -2,11 +2,13 @@ import { hkdfSync } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
+import { AEAD_KEY_BYTES } from "./aead.js";
 import { sha256 } from "./hashing.js";
 import {
   COLUMN_KEY_BYTES,
   COLUMN_KEY_DERIVATION_INFO,
   COLUMN_SECRET_REFUSAL_REASONS,
+  CURSOR_KEY_DERIVATION_INFO,
   ColumnSecretRefused,
   DEFAULT_KEY_GENERATION,
   MIN_COLUMN_SECRET_BYTES,
@@ -14,8 +16,10 @@ import {
   PLATFORM_COLUMN_KEY_SCOPE,
   columnKeyFingerprint,
   deriveTenantColumnKey,
+  deriveTenantCursorKey,
   isColumnSecretRefusalReason,
   parseColumnEncryptionSecret,
+  parseCursorEncryptionSecret,
 } from "./key-derivation.js";
 
 const SECRET_TEXT = "crossengin-column-secret-0123456789abcdef";
@@ -26,6 +30,11 @@ const OTHER_TENANT = "22222222-2222-4222-8222-222222222222";
 describe("key-derivation constants", () => {
   it("pins the info string", () => {
     expect(COLUMN_KEY_DERIVATION_INFO).toBe("crossengin.column-encryption.v1");
+  });
+
+  it("pins the cursor info string, and that it is not the column one", () => {
+    expect(CURSOR_KEY_DERIVATION_INFO).toBe("crossengin.list-cursor.v1");
+    expect(CURSOR_KEY_DERIVATION_INFO).not.toBe(COLUMN_KEY_DERIVATION_INFO);
   });
 
   it("pins the secret floors and the derived key size", () => {
@@ -258,6 +267,177 @@ describe("deriveTenantColumnKey", () => {
   });
 });
 
+describe("parseCursorEncryptionSecret", () => {
+  it("accepts a varied secret and returns its bytes", () => {
+    const bytes = parseCursorEncryptionSecret(SECRET_TEXT);
+    expect(bytes.length).toBe(SECRET_TEXT.length);
+    expect(Buffer.from(bytes).toString("utf8")).toBe(SECRET_TEXT);
+  });
+
+  it("applies the same floors as the column parser, through the same validator", () => {
+    expect(parseCursorEncryptionSecret("crossengin-cursor-secret-0123456").length).toBe(
+      32,
+    );
+    expect(() => parseCursorEncryptionSecret("crossengin-cursor-secret-012345")).toThrow(
+      ColumnSecretRefused,
+    );
+    expect(() => parseCursorEncryptionSecret("ABCDEFGHIJKLMNO".repeat(3))).toThrow(
+      ColumnSecretRefused,
+    );
+  });
+
+  it("names the list-cursor secret rather than the column one in both refusals", () => {
+    // The whole reason the label is a parameter: an operator told "column encryption
+    // secret refused" while configuring the cursor secret is sent to the wrong variable.
+    for (const weak of ["tiny!", "ABCDEFGHIJKLMNO".repeat(3)]) {
+      try {
+        parseCursorEncryptionSecret(weak);
+        expect.unreachable("expected a refusal");
+      } catch (err) {
+        const message = (err as Error).message;
+        expect(message).toContain("list-cursor encryption secret refused");
+        expect(message).not.toContain("column encryption secret");
+      }
+    }
+  });
+
+  it("keeps the column parser naming the column secret", () => {
+    try {
+      parseColumnEncryptionSecret("tiny!");
+      expect.unreachable("expected a refusal");
+    } catch (err) {
+      expect((err as Error).message).toContain("column encryption secret refused");
+    }
+  });
+
+  it("reports the same machine-readable reasons as the column parser", () => {
+    for (const [weak, reason] of [
+      ["tiny!", "too_short"],
+      ["ABCDEFGHIJKLMNO".repeat(3), "too_uniform"],
+    ] as const) {
+      try {
+        parseCursorEncryptionSecret(weak);
+        expect.unreachable("expected a refusal");
+      } catch (err) {
+        expect((err as ColumnSecretRefused).reason).toBe(reason);
+      }
+    }
+  });
+});
+
+describe("deriveTenantCursorKey", () => {
+  const CURSOR_SECRET = parseCursorEncryptionSecret(SECRET_TEXT);
+
+  it("returns raw bytes of exactly the length the AEAD takes", () => {
+    const key = deriveTenantCursorKey(CURSOR_SECRET, TENANT);
+    expect(key).toBeInstanceOf(Uint8Array);
+    expect(key.length).toBe(AEAD_KEY_BYTES);
+    expect(AEAD_KEY_BYTES).toBe(32);
+  });
+
+  it("matches HKDF-SHA256 computed independently with node:crypto", () => {
+    const expected = new Uint8Array(
+      hkdfSync(
+        "sha256",
+        new TextEncoder().encode(SECRET_TEXT),
+        new TextEncoder().encode(TENANT),
+        new TextEncoder().encode(`${CURSOR_KEY_DERIVATION_INFO}:gen1`),
+        32,
+      ),
+    );
+    expect(Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT, 1))).toEqual(
+      Buffer.from(expected),
+    );
+  });
+
+  it("matches pinned known-answer vectors", () => {
+    // Pinned as literals as well as recomputed above, so changing the derivation
+    // cannot leave a green suite: every cursor already issued would stop opening, and
+    // a client holding one would get a refusal it cannot act on. Editing these
+    // literals is the deliberate act that says that was considered.
+    const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
+    expect(hex(deriveTenantCursorKey(CURSOR_SECRET, TENANT))).toBe(
+      "680bcfa97151a09d13f7f6afa4f5c8ae573d491252a8eeaf2cfaa346e80f60cb",
+    );
+    expect(hex(deriveTenantCursorKey(CURSOR_SECRET, TENANT, 2))).toBe(
+      "38ba7f45bed8532f90f4ece9c15bb1bb4a2f6898f882c34586ce0830eebe0d85",
+    );
+    expect(hex(deriveTenantCursorKey(CURSOR_SECRET, PLATFORM_COLUMN_KEY_SCOPE))).toBe(
+      "c64f7513dc15cb9d5576ed10332032d44e977c7f96e247a970bca275d8234f30",
+    );
+  });
+
+  it("is not the column key for the same secret and tenant", () => {
+    // The info strings are the only separation there is, so it is asserted rather than
+    // assumed: without it a leaked cursor key would decrypt a PHI column.
+    const cursor = deriveTenantCursorKey(CURSOR_SECRET, TENANT);
+    const column = Buffer.from(deriveTenantColumnKey(SECRET, TENANT), "base64");
+    expect(Buffer.from(cursor)).not.toEqual(column);
+    expect(column.length).toBe(cursor.length);
+  });
+
+  it("is stable across calls", () => {
+    expect(Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT))).toEqual(
+      Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT)),
+    );
+  });
+
+  it("is distinct per tenant", () => {
+    expect(Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT))).not.toEqual(
+      Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, OTHER_TENANT)),
+    );
+  });
+
+  it("is distinct per generation", () => {
+    expect(Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT, 1))).not.toEqual(
+      Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT, 2)),
+    );
+  });
+
+  it("is distinct per secret", () => {
+    const other = parseCursorEncryptionSecret("a-different-deployment-secret-0123456789");
+    expect(Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT))).not.toEqual(
+      Buffer.from(deriveTenantCursorKey(other, TENANT)),
+    );
+  });
+
+  it("defaults the generation to DEFAULT_KEY_GENERATION", () => {
+    expect(Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT))).toEqual(
+      Buffer.from(deriveTenantCursorKey(CURSOR_SECRET, TENANT, DEFAULT_KEY_GENERATION)),
+    );
+  });
+
+  it("refuses an empty tenantId rather than treating it as platform scope", () => {
+    expect(() => deriveTenantCursorKey(CURSOR_SECRET, "")).toThrow(/non-empty/);
+  });
+
+  it("refuses a non-positive or fractional generation", () => {
+    expect(() => deriveTenantCursorKey(CURSOR_SECRET, TENANT, 0)).toThrow(/generation/);
+    expect(() => deriveTenantCursorKey(CURSOR_SECRET, TENANT, -1)).toThrow(/generation/);
+    expect(() => deriveTenantCursorKey(CURSOR_SECRET, TENANT, 1.5)).toThrow(/generation/);
+    expect(() => deriveTenantCursorKey(CURSOR_SECRET, TENANT, Number.NaN)).toThrow(
+      /generation/,
+    );
+  });
+
+  it("refuses a weak secret handed in directly, bypassing the parser", () => {
+    // The same single validator, so there is no outcome in which a refused secret
+    // yields a cursor key anyway.
+    for (const [weak, reason] of [
+      ["tiny", "too_short"],
+      ["z".repeat(64), "too_uniform"],
+    ] as const) {
+      try {
+        deriveTenantCursorKey(new TextEncoder().encode(weak), TENANT);
+        expect.unreachable("expected a refusal");
+      } catch (err) {
+        expect((err as ColumnSecretRefused).reason).toBe(reason);
+        expect((err as Error).message).toContain("list-cursor encryption secret");
+      }
+    }
+  });
+});
+
 describe("columnKeyFingerprint", () => {
   it("returns 16 lowercase hex characters", () => {
     expect(columnKeyFingerprint(deriveTenantColumnKey(SECRET, TENANT))).toMatch(
@@ -288,6 +468,9 @@ describe("no module error leaks secret or key material", () => {
     const validMarkerSecretText = `${marker}-0123456789-xyzwq!`;
     const validSecret = parseColumnEncryptionSecret(validMarkerSecretText);
     const derivedKey = deriveTenantColumnKey(validSecret, TENANT);
+    const derivedCursorKeyHex = Buffer.from(
+      deriveTenantCursorKey(validSecret, TENANT),
+    ).toString("hex");
 
     const attempts: readonly (() => unknown)[] = [
       // too_short, with the marker inside the refused secret
@@ -306,6 +489,12 @@ describe("no module error leaks secret or key material", () => {
       () => deriveTenantColumnKey(validSecret, TENANT, 0),
       () => deriveTenantColumnKey(validSecret, TENANT, 1.5),
       () => columnKeyFingerprint(""),
+      // the cursor parser and derivation, by the same four routes
+      () => parseCursorEncryptionSecret(marker),
+      () => parseCursorEncryptionSecret(`${marker}${"A".repeat(30)}`),
+      () => deriveTenantCursorKey(new TextEncoder().encode(marker), TENANT),
+      () => deriveTenantCursorKey(validSecret, ""),
+      () => deriveTenantCursorKey(validSecret, TENANT, 0),
     ];
 
     const messages: string[] = [];
@@ -323,6 +512,7 @@ describe("no module error leaks secret or key material", () => {
       expect(message).not.toContain(marker);
       expect(message).not.toContain(validMarkerSecretText);
       expect(message).not.toContain(derivedKey);
+      expect(message).not.toContain(derivedCursorKeyHex);
     }
   });
 });

@@ -1,28 +1,48 @@
 /**
- * Derivation of per-tenant column-encryption keys from one deployment secret.
+ * Derivation of per-tenant keys from one deployment secret.
  *
- * This module is a **key-derivation function, not a cipher**. It mints the text key
- * `pgcrypto`'s `pgp_sym_encrypt(plaintext, key)` takes; the encryption itself happens
- * in Postgres. Nothing here encrypts, decrypts or wraps anything, which is why
- * `KEY_ALGORITHMS`, `KEY_PURPOSES` and `CRYPTO_OPERATIONS` are deliberately untouched
- * — `isCryptoOperation("encrypt")` stays false because this package still performs no
- * encryption.
+ * This module is a **key-derivation function, not a cipher**. The column key it mints
+ * is the text key `pgcrypto`'s `pgp_sym_encrypt(plaintext, key)` takes, so that
+ * encryption happens in Postgres; the cursor key it mints is consumed by `aeadSeal` in
+ * this process. Nothing here encrypts, decrypts or wraps anything.
+ * `KEY_ALGORITHMS`, `KEY_PURPOSES` and `CRYPTO_OPERATIONS` are deliberately untouched —
+ * they describe the key *registry*, and no key derived here is ever registered.
  *
- * A derived column key is deliberately **not** a `KeyHandle`. A handle exists so a key
- * with material at rest can be registered, rotated, revoked and audited by reference;
- * this key has no material at rest. It is recomputed on demand from the deployment
+ * A derived key is deliberately **not** a `KeyHandle`. A handle exists so a key with
+ * material at rest can be registered, rotated, revoked and audited by reference; these
+ * keys have no material at rest. They are recomputed on demand from the deployment
  * secret and the tenant id, so there is no registry row to keep, no public half to
  * publish, and nothing stored that a database read could disclose. Rotation is
  * expressed by the generation in the HKDF info string rather than by a lifecycle
  * record. The only thing that must be protected is the deployment secret itself.
+ *
+ * The two derivations are separated **only** by their info strings, which is what keeps
+ * one compromise from being two: a leaked cursor key must not decrypt a PHI column.
+ * Each new consumer therefore gets its own `*_KEY_DERIVATION_INFO`, never a reuse of
+ * another's.
  */
 
 import { hkdfSync } from "node:crypto";
 
+import { AEAD_KEY_BYTES } from "./aead.js";
 import { sha256 } from "./hashing.js";
 
 /** HKDF-SHA256 info string. The generation suffix makes a rotation expressible. */
 export const COLUMN_KEY_DERIVATION_INFO = "crossengin.column-encryption.v1";
+
+/**
+ * The info string for the entity-list cursor key. A separate label and not a reuse of
+ * the column one: see the module header.
+ */
+export const CURSOR_KEY_DERIVATION_INFO = "crossengin.list-cursor.v1";
+
+/**
+ * The human names the two refusals use. A deployment reading `column encryption secret
+ * refused` while it was configuring the cursor secret would be sent to the wrong
+ * variable, which is the whole reason the label is a parameter.
+ */
+const COLUMN_SECRET_LABEL = "column encryption secret";
+const CURSOR_SECRET_LABEL = "list-cursor encryption secret";
 
 export const MIN_COLUMN_SECRET_BYTES = 32;
 
@@ -53,11 +73,27 @@ export const COLUMN_SECRET_REFUSAL_REASONS = ["too_short", "too_uniform"] as con
 export type ColumnSecretRefusalReason =
   (typeof COLUMN_SECRET_REFUSAL_REASONS)[number];
 
+/**
+ * The refusal for **every** deployment secret this module validates, not only the
+ * column one — the name is now narrower than the class. Kept deliberately: renaming it
+ * is 38 references across four files for a cosmetic gain, and the message is
+ * parameterised instead, so an operator is sent to the right variable even though the
+ * class they catch is misnamed. The imprecision is recorded as a follow-up rather than
+ * fixed here.
+ *
+ * `label` defaults to the column secret because the only construction sites are the two
+ * refusals in `refuseWeakSecret`, which both pass it explicitly, and because the
+ * default is the behaviour every existing caller already saw.
+ */
 export class ColumnSecretRefused extends Error {
   readonly reason: ColumnSecretRefusalReason;
 
-  constructor(reason: ColumnSecretRefusalReason, detail: string) {
-    super(`column encryption secret refused (${reason}): ${detail}`);
+  constructor(
+    reason: ColumnSecretRefusalReason,
+    detail: string,
+    label: string = COLUMN_SECRET_LABEL,
+  ) {
+    super(`${label} refused (${reason}): ${detail}`);
     this.name = "ColumnSecretRefused";
     this.reason = reason;
   }
@@ -73,9 +109,12 @@ export function isColumnSecretRefusalReason(
 }
 
 /**
- * The one validator. Both the parser and the derivation call it, so a caller that
- * skipped the parser cannot derive from a secret the parser would have refused, and
- * the two can never drift into disagreeing about what an acceptable secret is.
+ * The one validator. Every parser and every derivation in this module calls it, so a
+ * caller that skipped the parser cannot derive from a secret the parser would have
+ * refused, and no two of them can drift into disagreeing about what an acceptable
+ * deployment secret is. There is one floor, so a secret good enough for a PHI column is
+ * good enough for a cursor and vice versa; `label` changes only which variable the
+ * operator is told to fix.
  *
  * It **refuses**; it never pads, stretches or hashes a weak secret up to length. A
  * padded secret has exactly the entropy it arrived with and would read as compliant
@@ -84,11 +123,12 @@ export function isColumnSecretRefusalReason(
  * Neither refusal's detail may contain any part of the secret — only the measured
  * figures, which is what an operator needs to fix it.
  */
-function refuseWeakSecret(bytes: Uint8Array): void {
+function refuseWeakSecret(bytes: Uint8Array, label: string): void {
   if (bytes.length < MIN_COLUMN_SECRET_BYTES) {
     throw new ColumnSecretRefused(
       "too_short",
       `secret is ${bytes.length.toString()} bytes of UTF-8; minimum is ${MIN_COLUMN_SECRET_BYTES.toString()}`,
+      label,
     );
   }
   const distinct = new Set(bytes).size;
@@ -96,6 +136,7 @@ function refuseWeakSecret(bytes: Uint8Array): void {
     throw new ColumnSecretRefused(
       "too_uniform",
       `secret has ${distinct.toString()} distinct byte value(s) across ${bytes.length.toString()} bytes; minimum is ${MIN_COLUMN_SECRET_DISTINCT_BYTES.toString()}`,
+      label,
     );
   }
 }
@@ -113,7 +154,20 @@ function refuseWeakSecret(bytes: Uint8Array): void {
  */
 export function parseColumnEncryptionSecret(raw: string): Uint8Array {
   const bytes = new TextEncoder().encode(raw);
-  refuseWeakSecret(bytes);
+  refuseWeakSecret(bytes, COLUMN_SECRET_LABEL);
+  return bytes;
+}
+
+/**
+ * The same validation for the list-cursor deployment secret, differing only in the
+ * variable the refusal names. Read as raw UTF-8 bytes for
+ * `parseColumnEncryptionSecret`'s reasons.
+ *
+ * @throws ColumnSecretRefused `too_short` or `too_uniform`.
+ */
+export function parseCursorEncryptionSecret(raw: string): Uint8Array {
+  const bytes = new TextEncoder().encode(raw);
+  refuseWeakSecret(bytes, CURSOR_SECRET_LABEL);
   return bytes;
 }
 
@@ -125,6 +179,29 @@ export function parseColumnEncryptionSecret(raw: string): Uint8Array {
  */
 function columnKeyInfo(generation: number): string {
   return `${COLUMN_KEY_DERIVATION_INFO}:gen${generation.toString()}`;
+}
+
+function cursorKeyInfo(generation: number): string {
+  return `${CURSOR_KEY_DERIVATION_INFO}:gen${generation.toString()}`;
+}
+
+/**
+ * The salt and generation checks both derivations share, extracted so a second
+ * derivation cannot be written with one of them weaker than the other. Neither detail
+ * may contain the secret or the derived key; `tenantId` and `generation` are a caller's
+ * own arguments and are quoted so the operator can see what was passed.
+ */
+function requireDerivationArguments(tenantId: string, generation: number): void {
+  if (tenantId.length === 0) {
+    throw new Error(
+      `tenantId must be non-empty; platform scope is spelled "${PLATFORM_COLUMN_KEY_SCOPE}"`,
+    );
+  }
+  if (!Number.isInteger(generation) || generation < 1) {
+    throw new Error(
+      `generation must be an integer >= 1, got ${String(generation)}`,
+    );
+  }
 }
 
 /**
@@ -153,17 +230,8 @@ export function deriveTenantColumnKey(
   tenantId: string,
   generation: number = DEFAULT_KEY_GENERATION,
 ): string {
-  refuseWeakSecret(secret);
-  if (tenantId.length === 0) {
-    throw new Error(
-      `tenantId must be non-empty; platform scope is spelled "${PLATFORM_COLUMN_KEY_SCOPE}"`,
-    );
-  }
-  if (!Number.isInteger(generation) || generation < 1) {
-    throw new Error(
-      `generation must be an integer >= 1, got ${String(generation)}`,
-    );
-  }
+  refuseWeakSecret(secret, COLUMN_SECRET_LABEL);
+  requireDerivationArguments(tenantId, generation);
   const derived = hkdfSync(
     "sha256",
     secret,
@@ -172,6 +240,43 @@ export function deriveTenantColumnKey(
     COLUMN_KEY_BYTES,
   );
   return Buffer.from(derived).toString("base64");
+}
+
+/**
+ * HKDF-SHA256(ikm = secret, salt = tenantId utf8,
+ * info = `${CURSOR_KEY_DERIVATION_INFO}:gen${generation}`, `AEAD_KEY_BYTES`), as **raw
+ * bytes**.
+ *
+ * Bytes and not base64, which is the one place this differs from
+ * `deriveTenantColumnKey`: that key is base64 *because* its consumer is
+ * `pgp_sym_encrypt(plaintext, key)` and takes the key as text, while this one's
+ * consumer is `aeadSeal` in this process and takes it as bytes. Encoding here would be
+ * an encode-then-decode round trip whose two ends can disagree about padding, for no
+ * reader in between.
+ *
+ * The length is `AEAD_KEY_BYTES` rather than a second literal 32, so the derivation
+ * cannot drift from the cipher that consumes it.
+ *
+ * Salt and info discipline, and the refusal of an empty `tenantId`, are
+ * `deriveTenantColumnKey`'s — see its doc for why the tenant is the salt and the
+ * generation is the info, and not the reverse.
+ */
+export function deriveTenantCursorKey(
+  secret: Uint8Array,
+  tenantId: string,
+  generation: number = DEFAULT_KEY_GENERATION,
+): Uint8Array {
+  refuseWeakSecret(secret, CURSOR_SECRET_LABEL);
+  requireDerivationArguments(tenantId, generation);
+  return new Uint8Array(
+    hkdfSync(
+      "sha256",
+      secret,
+      new TextEncoder().encode(tenantId),
+      new TextEncoder().encode(cursorKeyInfo(generation)),
+      AEAD_KEY_BYTES,
+    ),
+  );
 }
 
 /**

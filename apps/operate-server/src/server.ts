@@ -1,5 +1,7 @@
 import type { ForwardedProto, HttpMethod, PipelineExecution } from "@crossengin/api-gateway";
 import type { AbacBatchEvaluator, AbacEvaluator, SensitiveFieldPolicy } from "@crossengin/auth";
+import type { CursorSealer } from "@crossengin/operate-runtime";
+import type { CursorSealingMode } from "./cursor-encryption.js";
 import type { IdempotencyStore, RateLimitChecker } from "@crossengin/api-gateway-runtime";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import type { Region } from "@crossengin/residency";
@@ -260,6 +262,18 @@ export interface BuildOperateHttpServerOptions {
    */
   readonly idempotencyStore?: IdempotencyStore;
   /**
+   * Seals the keyset cursors entity lists hand back (ADR-0346), and the mode the boot check is told.
+   *
+   * Grouped for `abac`'s reason: the sealer and the mode must agree, and they are silently wrong if
+   * formed apart — a sealer with mode `absent` would seal cursors while the check refused the boot
+   * for not sealing them, and a mode of `sealed` with no sealer would pass the check while serving
+   * the disclosure it exists to prevent. `resolveCursorSealing` is the one producer of the pair.
+   */
+  readonly cursorSealing?: {
+    readonly mode: CursorSealingMode;
+    readonly sealer: CursorSealer | null;
+  };
+  /**
    * The deployment's ABAC policy layer, or absent for none — in which case a manifest declaring an
    * obligation is refused below (ADR-0340).
    *
@@ -315,6 +329,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     manifest: options.manifest,
     answerableKeys: options.abac?.answerableKeys ?? new Set(),
     recordBearingKeys: options.abac?.recordBearingKeys ?? new Set(),
+    // `absent` when the caller supplied nothing, which is the refusing value: a caller that forgot
+    // to resolve the mode must not be read as having sealed the cursors.
+    cursorSealing: options.cursorSealing?.mode ?? "absent",
   });
   if (obligations.refusal !== null) throw new AbacObligationsUnevaluable(obligations);
 
@@ -355,6 +372,9 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
     ...(options.abac !== undefined ? { abacEvaluator: options.abac.evaluator } : {}),
     ...(options.abac?.evaluateBatch !== undefined
       ? { abacBatchEvaluator: options.abac.evaluateBatch }
+      : {}),
+    ...(options.cursorSealing?.sealer != null
+      ? { cursorSealer: options.cursorSealing.sealer }
       : {}),
     ...(options.now !== undefined ? { clock: { now: options.now } } : {}),
   });

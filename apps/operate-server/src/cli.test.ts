@@ -1282,6 +1282,34 @@ describe("--workflow-workers", () => {
     expect(parseServeArgs([...PG, "--allow-plaintext-phi"]).allowPlaintextPhi).toBe(true);
   });
 
+  it("defaults --allow-cursor-disclosure off, so a filtered list's cursor is sealed or refused", () => {
+    expect(parseServeArgs([...PG]).allowCursorDisclosure).toBe(false);
+    expect(parseServeArgs([...PG, "--allow-cursor-disclosure"]).allowCursorDisclosure).toBe(true);
+  });
+
+  it("does not refuse --allow-cursor-disclosure beside a store, unlike --allow-plaintext-phi", () => {
+    // The asymmetry is deliberate and is about *where the question can be answered*. Whether
+    // plaintext PHI is even reachable is decidable from argv (`--store pg-columns` cannot produce
+    // it), so that flag is refused here. Whether this one is redundant depends on
+    // CURSOR_ENCRYPTION_SECRET, which `parseServeArgs` deliberately cannot read — so the
+    // set-and-unused case is a warning in `node.ts`, where both halves are in hand, and every
+    // store parses the flag without complaint.
+    for (const store of ["memory", "pg", "pg-columns"]) {
+      expect(
+        parseServeArgs(["--pack", "erp-core", "--store", store, "--allow-cursor-disclosure"])
+          .allowCursorDisclosure,
+      ).toBe(true);
+    }
+  });
+
+  it("documents the cursor disclosure the flag accepts, not only that it exists", () => {
+    // The help entry has to carry the mechanism, for the sensitive-field entry's reason: an
+    // operator cannot tell whether accepting a disclosure is safe from the words "off by default".
+    expect(helpText).toContain("--allow-cursor-disclosure");
+    expect(helpText).toContain("CURSOR_ENCRYPTION_SECRET");
+    expect(helpText).toContain("never argv");
+  });
+
   it("refuses --allow-plaintext-phi on pg-columns, where plaintext is not an outcome", () => {
     // Not ignored, on this file's standing rule: a phi column is BYTEA on the typed store, so the
     // write is encrypted or refused for a missing secret — never the plaintext the flag claims to

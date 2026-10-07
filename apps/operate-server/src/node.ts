@@ -101,6 +101,12 @@ import {
   surveyPhiFields,
 } from "./column-encryption.js";
 import {
+  ALLOW_CURSOR_DISCLOSURE_FLAG,
+  CURSOR_ENCRYPTION_SECRET_VAR,
+  formatCursorSealing,
+  resolveCursorSealing,
+} from "./cursor-encryption.js";
+import {
   CLASSIFIED_WRITE_MASK_FLAG,
   buildSensitiveFieldPolicy,
   checkClassifiedWriteMask,
@@ -671,13 +677,38 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   if (abacPolicies.size > 0) console.info(`[abac] ${formatAbacPolicies(abacPolicies)}`);
 
   const abacRecordBearingKeys = recordBearingPolicyKeys(abacPolicies);
+  // Read from the environment and never argv (ADR-0301: `ps` can read argv), like the column
+  // secret above it. Resolved before the obligation check because that check refuses a boot whose
+  // list grants filter rows with the cursor left in the clear, and it can only ask that question
+  // once it knows which of the three modes is in force.
+  const cursorSealing = resolveCursorSealing({
+    secret: process.env[CURSOR_ENCRYPTION_SECRET_VAR] ?? null,
+    allowDisclosure: options.allowCursorDisclosure,
+  });
   const abacObligations = checkAbacObligations({
     manifest,
     answerableKeys: new Set(abacPolicies.keys()),
     recordBearingKeys: abacRecordBearingKeys,
+    cursorSealing: cursorSealing.mode,
   });
   console.info(`[abac] ${formatAbacObligationCheck(abacObligations)}`);
   if (abacObligations.refusal !== null) throw new AbacObligationsUnevaluable(abacObligations);
+  // Said on every boot, not only when a list filters rows: a deployment that set the secret should
+  // see that its cursors are sealed, and one that accepted the disclosure should see that it did.
+  console.info(`[cursor] ${formatCursorSealing(cursorSealing.mode)}`);
+  // `--allow-plaintext-phi`'s "set and unused" shape rather than its CLI refusal: the refusal there
+  // can be decided from argv alone (`--store pg-columns` cannot produce plaintext), while whether
+  // this flag is redundant depends on an environment variable `parseServeArgs` deliberately cannot
+  // read. So it is said here, where both halves are in hand. A warning and not a refusal, because
+  // the flag accepts a disclosure rather than requesting one — a deployment that set the secret
+  // *and* passed the flag gets sealed cursors, which is what it would want either way.
+  if (cursorSealing.mode === "sealed" && options.allowCursorDisclosure) {
+    console.warn(
+      `[cursor] ${ALLOW_CURSOR_DISCLOSURE_FLAG} is set and unused: ` +
+        `${CURSOR_ENCRYPTION_SECRET_VAR} is configured, so cursors are sealed and there is no` +
+        " disclosure to accept. Drop the flag.",
+    );
+  }
 
   const sensitiveFieldDeclaration = {
     privilegedRoles: options.sensitiveFieldRoles,
@@ -2778,6 +2809,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     manifest,
     store,
     apiKeys,
+    cursorSealing,
     allocator,
     settingsStore,
     policyForEntity: sensitivePolicyForEntity,
@@ -3424,6 +3456,11 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
         return buildOperateHttpServer({
           manifest: tenantManifest,
           store: tenantStoreFor(tenantManifest),
+          // The deployment's, not the tenant's: the secret is one deployment secret and the key is
+          // derived per tenant inside the sealer, so an activated manifest gets sealed cursors on
+          // the same terms — and the boot refusal travels with it, since this is the function that
+          // carries the obligation check (ADR-0340's placement).
+          cursorSealing,
           // The same declaration a per-tenant gateway gets, because the policy is a property of
           // the deployment rather than of one manifest. The *survey* is not re-run here — see
           // ADR-0339 Q6: a tenant activating a manifest whose required classified field no role

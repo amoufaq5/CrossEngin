@@ -18,6 +18,12 @@ import {
   type AbacObligationCheck,
 } from "./abac-obligations.js";
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
+import {
+  ALLOW_CURSOR_DISCLOSURE_FLAG,
+  CURSOR_ENCRYPTION_SECRET_VAR,
+  CURSOR_SEALING_MODES,
+  type CursorSealingMode,
+} from "./cursor-encryption.js";
 import { BUILTIN_PACK_NAMES, loadBuiltinPack } from "./manifest-source.js";
 
 function manifest(parts: Partial<Manifest> = {}): Manifest {
@@ -57,6 +63,12 @@ function synthetic(n: number): readonly AbacObligation[] {
   }));
 }
 
+/**
+ * A synthetic result. `cursorSealing` defaults to `"sealed"` throughout this file, and every
+ * `checkAbacObligations` input below says so explicitly for the same reason: a fixture about
+ * something else must not trip the cursor refusal, which fires only when rows are withheld and
+ * nothing seals the cursor. The cursor refusal's own describe block passes each mode on purpose.
+ */
 function check(parts: Partial<AbacObligationCheck> = {}): AbacObligationCheck {
   return {
     obligations: [],
@@ -66,24 +78,42 @@ function check(parts: Partial<AbacObligationCheck> = {}): AbacObligationCheck {
     createBlocked: [],
     rowFiltered: [],
     listSortConflicts: [],
+    cursorDisclosing: [],
+    cursorSealing: "sealed",
     refusal: null,
     ...parts,
   };
 }
 
 describe("ABAC_OBLIGATION_REFUSALS", () => {
-  it("names all four refusals, in the order they are reported", () => {
+  it("names all five refusals, in the order they are reported", () => {
     expect(ABAC_OBLIGATION_REFUSALS).toEqual([
       "obligation_unevaluable",
       "policy_undeclared",
       "record_unavailable",
       "list_sort_addresses_withheld_field",
+      "cursor_discloses_withheld_rows",
     ]);
   });
 
-  it("has no escape-hatch member, because serving an unevaluated obligation is not a state to opt into", () => {
-    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(4);
+  it("names every member after the defect and none after a permission to serve it", () => {
+    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(5);
     expect(ABAC_OBLIGATION_REFUSALS.some((r) => /allow|skip|ignore|unchecked/.test(r))).toBe(false);
+  });
+
+  /**
+   * The escape-hatch line, asserted rather than left to the doc comment. Exactly one refusal
+   * names an `--allow*` flag, and it is the one whose state is degraded-but-coherent: the policy
+   * is evaluated and the rows are withheld, and only their positions escape. Serving an
+   * obligation the deployment cannot evaluate is not such a state, so those four must offer no
+   * opt-out at all — which is checkable from the text, since a flag that is not named is a flag
+   * an operator cannot reach.
+   */
+  it("offers an --allow opt-out in exactly one refusal's text, and it is the cursor one", () => {
+    const naming = ABAC_OBLIGATION_REFUSALS.filter((refusal) =>
+      /--allow/.test(new AbacObligationsUnevaluable(check({ refusal })).message),
+    );
+    expect(naming).toEqual(["cursor_discloses_withheld_rows"]);
   });
 });
 
@@ -99,6 +129,7 @@ describe("checkAbacObligations", () => {
       manifest: withOneObligation(),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toHaveLength(1);
     expect(result.evaluatorDeclared).toBe(false);
@@ -110,6 +141,7 @@ describe("checkAbacObligations", () => {
       manifest: withOneObligation(),
       answerableKeys: new Set(["same_facility"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toHaveLength(1);
     expect(result.evaluatorDeclared).toBe(true);
@@ -121,6 +153,7 @@ describe("checkAbacObligations", () => {
       manifest: manifest({ permissions: { Patient: { read: { roles: ["clinician"] } } } }),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
@@ -131,6 +164,7 @@ describe("checkAbacObligations", () => {
       manifest: manifest({ permissions: {} }),
       answerableKeys: new Set(["same_facility"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
@@ -143,6 +177,7 @@ describe("checkAbacObligations", () => {
       manifest: m,
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
@@ -155,6 +190,7 @@ describe("checkAbacObligations", () => {
       }),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toEqual([
       { entity: "Invoice", operation: "update", field: null, policyKey: "own_entity" },
@@ -170,6 +206,7 @@ describe("checkAbacObligations", () => {
       }),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toHaveLength(1);
     const [only] = result.obligations;
@@ -188,6 +225,7 @@ describe("checkAbacObligations", () => {
       }),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toEqual([
       { entity: "Patient", operation: "read", field: "mrn", policyKey: "treating" },
@@ -205,6 +243,7 @@ describe("checkAbacObligations", () => {
       }),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toEqual([
       {
@@ -229,6 +268,7 @@ describe("checkAbacObligations", () => {
       }),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toEqual([]);
   });
@@ -252,6 +292,7 @@ describe("checkAbacObligations", () => {
       }),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations.map((o) => o.policyKey).sort()).toEqual(["a", "b", "c", "d", "e"]);
   });
@@ -263,6 +304,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
       manifest: withTwoObligations(),
       answerableKeys: new Set(["same_facility"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.evaluatorDeclared).toBe(true);
     expect(result.refusal).toBe("policy_undeclared");
@@ -275,6 +317,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
       manifest: withTwoObligations(),
       answerableKeys: new Set(["same_facility", "own_jurisdiction"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBeNull();
     expect(result.unanswerable).toEqual([]);
@@ -285,6 +328,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
       manifest: withOneObligation(),
       answerableKeys: new Set(["same_facility", "unused"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBeNull();
     expect(result.unanswerable).toEqual([]);
@@ -300,6 +344,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
       manifest: withTwoObligations(),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.evaluatorDeclared).toBe(false);
     expect(result.refusal).toBe("obligation_unevaluable");
@@ -311,6 +356,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
       manifest: withOneObligation(),
       answerableKeys: new Set(["Same_Facility"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBe("policy_undeclared");
     expect(result.unanswerable).toHaveLength(1);
@@ -321,6 +367,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
       manifest: manifest({ permissions: { Patient: { read: { roles: ["clinician"] } } } }),
       answerableKeys: new Set(["same_facility"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBeNull();
     expect(result.unanswerable).toEqual([]);
@@ -333,6 +380,7 @@ describe("the policy_undeclared refusal text", () => {
       manifest: withTwoObligations(),
       answerableKeys: new Set(["same_facility"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
   }
 
@@ -375,6 +423,7 @@ describe("the policy_undeclared refusal text", () => {
       manifest: withTwoObligations(),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(new AbacObligationsUnevaluable(none).message).not.toBe(
       new AbacObligationsUnevaluable(undeclared()).message,
@@ -506,6 +555,7 @@ describe("the builtin pack census", () => {
         manifest: resolved,
         answerableKeys: new Set(),
         recordBearingKeys: new Set(),
+        cursorSealing: "sealed",
       }).obligations.length;
     }
     expect(Object.keys(counts)).toHaveLength(7);
@@ -537,6 +587,7 @@ describe("the builtin pack census", () => {
       manifest: withOneObligation(),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toEqual([
       { entity: "Patient", operation: "read", field: null, policyKey: "same_facility" },
@@ -562,6 +613,7 @@ describe("the builtin pack census", () => {
       manifest: qualified,
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.obligations).toHaveLength(1);
     expect(result.refusal).toBe("obligation_unevaluable");
@@ -615,6 +667,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       manifest: m,
       answerableKeys: new Set(["rec"]),
       recordBearingKeys: new Set(["rec"]),
+      cursorSealing: "sealed",
     });
 
   it("refuses at entity create alone, where no call site can ever supply a record", () => {
@@ -690,6 +743,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       manifest: at("list"),
       answerableKeys: new Set(["rec"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.rowFiltered).toEqual([]);
     expect(result.refusal).toBeNull();
@@ -754,6 +808,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       manifest: at("create"),
       answerableKeys: new Set(["rec"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBeNull();
     expect(result.recordUnavailable).toEqual([]);
@@ -767,6 +822,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       manifest: at("create"),
       answerableKeys: new Set(["other"]),
       recordBearingKeys: new Set(["rec"]),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBe("policy_undeclared");
   });
@@ -776,6 +832,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       manifest: at("create"),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBe("obligation_unevaluable");
   });
@@ -823,6 +880,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
         manifest: pack,
         answerableKeys: new Set(["rec"]),
         recordBearingKeys: new Set(["rec"]),
+        cursorSealing: "sealed",
       });
       expect(result.recordUnavailable, name).toEqual([]);
       expect(result.createBlocked, name).toEqual([]);
@@ -887,6 +945,7 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
       manifest: m,
       answerableKeys: new Set(["rec"]),
       recordBearingKeys: new Set(["rec"]),
+      cursorSealing: "sealed",
     });
 
   it("refuses when the default sort names a classified field of a row-filtered entity", () => {
@@ -919,6 +978,7 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
       manifest: sortManifest({ sortField: "note", obligationOn: "list" }),
       answerableKeys: new Set(["rec"]),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBeNull();
     expect(result.listSortConflicts).toEqual([]);
@@ -929,6 +989,7 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
       manifest: sortManifest({ sortField: "note", obligationOn: "list" }),
       answerableKeys: new Set(),
       recordBearingKeys: new Set(),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBe("obligation_unevaluable");
     expect(result.listSortConflicts).toEqual([]);
@@ -1080,6 +1141,7 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
         manifest: { ...pack, permissions },
         answerableKeys: new Set(["rec"]),
         recordBearingKeys: new Set(["rec"]),
+        cursorSealing: "sealed",
       });
       // The vacuity control: the sweep is walking a real permission map, so a zero is a
       // measurement and not an empty loop.
@@ -1107,6 +1169,7 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
       },
       answerableKeys: new Set(["same_facility"]),
       recordBearingKeys: new Set(["same_facility"]),
+      cursorSealing: "sealed",
     });
     expect(result.refusal).toBe("list_sort_addresses_withheld_field");
     expect(result.listSortConflicts).toEqual([
@@ -1118,5 +1181,268 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
       },
     ]);
     expect(formatAbacObligationCheck(result)).toContain("Patient.family_name (pii)");
+  });
+});
+
+describe("the cursor_discloses_withheld_rows refusal", () => {
+  /**
+   * A record-bearing `list` grant and **no view**, so the default sort is empty and the sort
+   * refusal cannot pre-empt this one. The entity declares one classified field and one plain
+   * field, so the ordering fixture below can add a view sorting on either.
+   */
+  const CHART_ENTITY = {
+    name: "Chart",
+    fields: [
+      { name: "note", type: { kind: "text" as const }, classification: "phi" as const },
+      { name: "label", type: { kind: "text" as const } },
+    ],
+  };
+
+  function filtered(cursorSealing: CursorSealingMode): AbacObligationCheck {
+    return checkAbacObligations({
+      manifest: manifest({
+        entities: [CHART_ENTITY],
+        permissions: { Chart: { list: { roles: ["clinician"], abac: "rec" } } },
+      }),
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(["rec"]),
+      cursorSealing,
+    });
+  }
+
+  it("refuses when rows are filtered and nothing seals the cursor", () => {
+    const result = filtered("absent");
+    expect(result.rowFiltered).toHaveLength(1);
+    expect(result.refusal).toBe("cursor_discloses_withheld_rows");
+    expect(result.cursorDisclosing).toEqual([
+      { entity: "Chart", operation: "list", field: null, policyKey: "rec" },
+    ]);
+  });
+
+  it("does not refuse when the cursor is sealed", () => {
+    const result = filtered("sealed");
+    expect(result.rowFiltered).toHaveLength(1);
+    expect(result.refusal).toBeNull();
+    expect(result.cursorDisclosing).toEqual([]);
+  });
+
+  it("does not refuse when the disclosure was accepted knowingly", () => {
+    const result = filtered("plaintext_accepted");
+    expect(result.rowFiltered).toHaveLength(1);
+    expect(result.refusal).toBeNull();
+    expect(result.cursorDisclosing).toEqual([]);
+  });
+
+  it("refuses on exactly one of the three modes, driven off the enum", () => {
+    // Both directions over the real mode list, so a fourth mode is tested here rather than
+    // inheriting whichever branch the gate happened to end on.
+    const refusing = CURSOR_SEALING_MODES.filter(
+      (mode) => filtered(mode).refusal === "cursor_discloses_withheld_rows",
+    );
+    expect(refusing).toEqual(["absent"]);
+  });
+
+  it("does not refuse when no grant filters rows, whatever the mode", () => {
+    // A reversible cursor is only a disclosure where something is withheld. Most deployments
+    // withhold nothing, and refusing them would be a refusal with no defect behind it.
+    for (const cursorSealing of CURSOR_SEALING_MODES) {
+      const result = checkAbacObligations({
+        manifest: manifest({
+          permissions: { Chart: { read: { roles: ["clinician"], abac: "rec" } } },
+        }),
+        answerableKeys: new Set(["rec"]),
+        recordBearingKeys: new Set(["rec"]),
+        cursorSealing,
+      });
+      expect(result.rowFiltered, cursorSealing).toEqual([]);
+      expect(result.cursorDisclosing, cursorSealing).toEqual([]);
+      expect(result.refusal, cursorSealing).toBeNull();
+    }
+  });
+
+  it("does not refuse a manifest with no obligation at all, whatever the mode", () => {
+    for (const cursorSealing of CURSOR_SEALING_MODES) {
+      const result = checkAbacObligations({
+        manifest: manifest({ permissions: { Chart: { list: { roles: ["clinician"] } } } }),
+        answerableKeys: new Set(["rec"]),
+        recordBearingKeys: new Set(["rec"]),
+        cursorSealing,
+      });
+      expect(result.refusal, cursorSealing).toBeNull();
+      expect(result.cursorDisclosing, cursorSealing).toEqual([]);
+    }
+  });
+
+  it("reports the no-evaluator refusal first, because its remedy supersedes sealing a cursor", () => {
+    // With no evaluator nothing is classified record-bearing, so `rowFiltered` is empty and this
+    // refusal is vacuously silent — which is why it sits after both questions that do not need
+    // the declaration.
+    const result = checkAbacObligations({
+      manifest: manifest({
+        entities: [CHART_ENTITY],
+        permissions: { Chart: { list: { roles: ["clinician"], abac: "rec" } } },
+      }),
+      answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
+      cursorSealing: "absent",
+    });
+    expect(result.refusal).toBe("obligation_unevaluable");
+    expect(result.cursorDisclosing).toEqual([]);
+  });
+
+  it("reports the sort refusal first when a manifest trips both, because sealing does not rescue a sort", () => {
+    // The list handler's addressing guard refuses every request on that entity before a cursor is
+    // minted, so an operator who answered this refusal by setting a secret would find the entity
+    // still unservable and the sort remedy still owed.
+    const result = checkAbacObligations({
+      manifest: manifest({
+        entities: [CHART_ENTITY],
+        views: {
+          chartList: {
+            kind: "list",
+            entity: "Chart",
+            columns: [{ field: "note" }],
+            sort: [{ field: "note", direction: "asc" }],
+            pageSize: 50,
+          },
+        } as unknown as Manifest["views"],
+        permissions: { Chart: { list: { roles: ["clinician"], abac: "rec" } } },
+      }),
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(["rec"]),
+      cursorSealing: "absent",
+    });
+    expect(result.listSortConflicts).toHaveLength(1);
+    expect(result.cursorDisclosing).toHaveLength(1);
+    expect(result.refusal).toBe("list_sort_addresses_withheld_field");
+  });
+
+  it("reports the record-unavailable refusal first when a manifest trips both", () => {
+    const result = checkAbacObligations({
+      manifest: manifest({
+        entities: [CHART_ENTITY],
+        permissions: {
+          Chart: {
+            create: { roles: ["clinician"], abac: "rec" },
+            list: { roles: ["clinician"], abac: "rec" },
+          },
+        },
+      }),
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(["rec"]),
+      cursorSealing: "absent",
+    });
+    expect(result.cursorDisclosing).toHaveLength(1);
+    expect(result.refusal).toBe("record_unavailable");
+  });
+
+  it("names the cursor's construction, the row it comes from and the limit=1 consequence", () => {
+    const message = new AbacObligationsUnevaluable(filtered("absent")).message;
+    expect(message).toContain("base64url(JSON.stringify({k: [...sort values], id}))");
+    expect(message).toContain("last row of the store's slice");
+    expect(message).toContain("a row the caller is never shown");
+    expect(message).toContain("`limit=1`");
+    expect(message).toContain("enumeration of the ids");
+  });
+
+  it("names both remedies, the environment variable first and the flag second", () => {
+    const message = new AbacObligationsUnevaluable(filtered("absent")).message;
+    expect(message).toContain(CURSOR_ENCRYPTION_SECRET_VAR);
+    expect(message).toContain(ALLOW_CURSOR_DISCLOSURE_FLAG);
+    expect(message.indexOf(CURSOR_ENCRYPTION_SECRET_VAR)).toBeLessThan(
+      message.indexOf(ALLOW_CURSOR_DISCLOSURE_FLAG),
+    );
+  });
+
+  it("names the grant and what a denial there does, rather than only counting", () => {
+    const message = new AbacObligationsUnevaluable(filtered("absent")).message;
+    expect(message).toContain("1 abac-qualified grant(s)");
+    expect(message).toContain("Chart.list requires abac policy 'rec'");
+    expect(message).toContain("the denied rows are dropped from the page");
+  });
+
+  it("is the same text the boot line carries, so the two cannot disagree", () => {
+    const result = filtered("absent");
+    expect(formatAbacObligationCheck(result)).toContain(
+      new AbacObligationsUnevaluable(result).message,
+    );
+  });
+
+  it("carries the disclosing obligations on the thrown error, so a boot catch need not re-derive them", () => {
+    const result = filtered("absent");
+    const error = new AbacObligationsUnevaluable(result);
+    expect(error.refusal).toBe("cursor_discloses_withheld_rows");
+    expect(error.cursorDisclosing).toEqual(result.cursorDisclosing);
+  });
+
+  it("names every disclosing grant up to the detail limit and withholds the rest", () => {
+    const perms: Record<string, { list: { roles: string[]; abac: string } }> = {};
+    for (let i = 0; i < OBLIGATION_DETAIL_LIMIT + 2; i += 1) {
+      perms[`E${i.toString()}`] = { list: { roles: ["r"], abac: "rec" } };
+    }
+    const result = checkAbacObligations({
+      manifest: manifest({ permissions: perms }),
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(["rec"]),
+      cursorSealing: "absent",
+    });
+    expect(result.cursorDisclosing).toHaveLength(OBLIGATION_DETAIL_LIMIT + 2);
+    const message = new AbacObligationsUnevaluable(result).message;
+    expect(message).toContain(`${(OBLIGATION_DETAIL_LIMIT + 2).toString()} abac-qualified`);
+    expect(message).toContain("(+2 more)");
+  });
+
+  /**
+   * ADR-0322's rule on the accepted path: a surface that degrades rather than refusing has to say
+   * so out loud, on every boot and not only in the shell history of whoever passed the flag.
+   */
+  it("reports the accepted disclosure on the boot line without setting a refusal", () => {
+    const result = filtered("plaintext_accepted");
+    expect(result.refusal).toBeNull();
+    const line = formatAbacObligationCheck(result);
+    expect(line).toContain(ALLOW_CURSOR_DISCLOSURE_FLAG);
+    expect(line).toContain("stays reversible base64url JSON");
+    expect(line).toContain(CURSOR_ENCRYPTION_SECRET_VAR);
+    // Still the healthy line, with the row-filtering note it always carried.
+    expect(line).toContain("filter rows out of the page");
+  });
+
+  it("says nothing about the cursor on the boot line when it is sealed", () => {
+    const line = formatAbacObligationCheck(filtered("sealed"));
+    expect(line).toContain("filter rows out of the page");
+    expect(line).not.toContain(ALLOW_CURSOR_DISCLOSURE_FLAG);
+    expect(line).not.toContain(CURSOR_ENCRYPTION_SECRET_VAR);
+  });
+
+  it("says nothing about the cursor when the disclosure was accepted and nothing is withheld", () => {
+    // The note is conditioned on `rowFiltered`, not on the flag: a deployment that passed the
+    // flag and withholds no rows has accepted nothing, and saying otherwise every boot is the
+    // standing warning operators learn to ignore.
+    const line = formatAbacObligationCheck(
+      checkAbacObligations({
+        manifest: manifest({
+          permissions: { Chart: { read: { roles: ["clinician"], abac: "rec" } } },
+        }),
+        answerableKeys: new Set(["rec"]),
+        recordBearingKeys: new Set(["rec"]),
+        cursorSealing: "plaintext_accepted",
+      }),
+    );
+    expect(line).not.toContain(ALLOW_CURSOR_DISCLOSURE_FLAG);
+  });
+
+  it("declares none of the seven builtin packs disclosing, because none declares an obligation", async () => {
+    // The measurement that makes this refusal vacuous today and a forcing function later: no pack
+    // declares an `abac` grant, so the unsealed cursor every deployment serves discloses nothing.
+    for (const name of BUILTIN_PACK_NAMES) {
+      const result = checkAbacObligations({
+        manifest: await loadBuiltinPack(name),
+        answerableKeys: new Set(["rec"]),
+        recordBearingKeys: new Set(["rec"]),
+        cursorSealing: "absent",
+      });
+      expect(result.cursorDisclosing, name).toEqual([]);
+      expect(result.refusal, name).toBeNull();
+    }
   });
 });

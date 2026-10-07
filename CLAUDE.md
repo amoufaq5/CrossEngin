@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 340 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 341 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~17,244 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~17,364 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -385,6 +385,45 @@ type errors.
   non-null cursor**, the walk terminates, and two principals holding one role see an exact
   complement of the seven rows.
 
+  ADR-0346 closes ADR-0345's own Q1 and the class is **a format that was never meant to be read, and
+  was**. `ListQuery.cursor` has been documented as an "opaque keyset cursor" since it was written and
+  is `base64url(JSON.stringify({k, id}))` — opaque by *convention*, which is not a property, and row
+  filtering is what turned the convention into a disclosure.
+  It opens by correcting this file: ADR-0338 is recorded here as having added "no cipher to a package
+  with three pins asserting it has none", and **the pins never said that**. They describe the key
+  *registry* — which algorithms a registered `KeyHandle` may have, what a handle is for, which
+  key-management acts are audited — which is exactly why ADR-0338 could add `key-derivation.ts` and
+  leave all three alone. An AEAD over a **derived** key is outside all three for the same reason, so
+  this increment adds the package's first cipher and the pins stay, with
+  `isCryptoOperation("encrypt")` still false and a test pinning that `aes-256-gcm` is not a
+  registerable algorithm *because* adding it would mean a registered cipher key needing a
+  private-material column `meta.crypto_keys` does not have.
+  What made it a small increment: **the cursor is opaque to the client, not to the store**, so
+  sealing is an envelope at the handler boundary and `store.ts`, `entity-ops.ts`, `column-store.ts`
+  and `list-sql.ts` are untouched — they go on producing and consuming the plaintext keyset.
+  Three decisions carry it. **One refusal reason**, `not_for_this_request`, because GCM fails
+  identically for a tampered ciphertext, a wrong tenant, a wrong entity, a changed sort and a rotated
+  key — the context is an *input to the authenticator*, not a field that comes back — so two reasons
+  would claim a distinction the primitive does not make. **A declared `s1.` tag at a fixed offset**
+  rather than a probe, and the concrete reason is that the formats are not distinguishable by
+  inspection: "does it parse as `{k, id}`?" would read a sealed cursor whose random nonce happened to
+  decode into JSON as plaintext. And **legacy plaintext is accepted**, so no walk in flight breaks —
+  safe because a client can only construct a cursor whose contents it already knows, since the threat
+  is reading *ours* and forging was always possible; the cost is that a legacy cursor carries no
+  binding. The binding is canonical JSON of `[tenantId, entity, sortSpec]`, not a delimiter-joined
+  string, because `entity:"A"` + `field:"b:asc"` collides with `entity:"A:b"` + `field:"asc"` under
+  `:`; it is deliberately **not** bound to the principal, since filtering is post-hoc over one store
+  ordering so A's position is a sound position for B; and a soundness fix falls out of the sort
+  binding, because `isAfter` compares `k[i]` against `sort[i]`'s field so a cursor replayed under a
+  different `?sort` is meaningless today.
+  The boot refusal gets an **escape hatch** — `--allow-cursor-disclosure`, ADR-0338's
+  `--allow-plaintext-phi` shape and deliberately not ADR-0340's no-hatch shape, because a plaintext
+  cursor is degraded-but-coherent (the filter works, the rows are withheld, only positions leak)
+  while an unevaluated obligation is the opposite of what a manifest declares. Live, the two modes on
+  the same request are the whole increment: one hands back
+  `{"k":["l2"],"id":"rec_muybya7w0002"}` — `l2` being an oncology row this cardiology caller is
+  withheld on every page — and the other `s1.wfHmgacd…`.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -562,7 +601,15 @@ packages exist at only one layer, noted below where that is true.
   **untouched**, so a page may be short or empty with a non-null cursor and termination is
   `nextCursor === null` and nothing else. Deliberately not through ADR-0342's `resolveObligation`,
   which turns a refusal into a 403 — right for an act about one named record, wrong here, because
-  the point of the position is that a denial is not an error. `withheldAddressing` runs **before**
+  the point of the position is that a denial is not an error. **The cursor is sealed at that boundary since ADR-0346** when
+  `HandlerContext.cursorSealer` is present — opened on the way in, sealed on the way out, so the
+  token a client holds is opaque to the client and still the plaintext keyset to every store, which
+  is why the stores needed no edit. One `sealing` object holds the sealer and the context, because an
+  open that succeeded against one context and a seal issued under another would hand back a cursor
+  the caller's very next request cannot use: a walk that dies on page two. The context is
+  `[tenantId, entity, sort]` with the **effective** sort, so a cursor is confined to the ordering its
+  keyset is aligned to whether or not the caller spelled it out; `cursor_not_for_this_request` is the
+  400. Absent, the arm takes exactly the path it took before. `withheldAddressing` runs **before**
   the store call and 400s a `?sort` / `?filter` / `?q` naming a classified field while rows are
   being withheld, one code per surface; its withheld set is the entity's classified fields rather
   than this caller's redaction set (computed at the gateway, after the handler returns), so it is
@@ -1060,10 +1107,35 @@ packages exist at only one layer, noted below where that is true.
 - **`crypto`** — real cryptography over `node:crypto`: SHA-256/BLAKE2b-512 hashing and hash
   chains, HMAC-SHA256 webhook signing with replay windows, Ed25519 sign/verify/keypair,
   opaque tenant-scoped `KeyHandle`s behind a `KeyStore`, and auto-audit of key management.
-  **Still no symmetric cipher** — and `key-derivation.ts` (ADR-0338) is deliberately a **KDF, not a
-  cipher**, so the three pins asserting the absence stay exactly as they are (`KEY_ALGORITHMS` has no
-  cipher member, `KEY_PURPOSES` no encryption purpose, `CRYPTO_OPERATIONS` no encrypt/decrypt, with a
-  test asserting `isCryptoOperation("encrypt") === false`). `deriveTenantColumnKey` is HKDF-SHA256
+  **There is a symmetric cipher since ADR-0346 — `aead.ts`, AES-256-GCM — and the three pins stay
+  exactly as they are**, because they never asserted what this file used to say they did. They
+  describe the key *registry*: `KEY_ALGORITHMS` is `MAC_ALGORITHMS ∪ SIGNATURE_ALGORITHMS`, the
+  algorithms a registered `KeyHandle` may have; `KEY_PURPOSES` is what a handle is *for*;
+  `CRYPTO_OPERATIONS` is the audited **key-management** vocabulary. That is exactly why ADR-0338
+  could add `key-derivation.ts` and leave all three alone, and an AEAD over a **derived** key is
+  outside all three for the same reason — no material at rest, no `meta.crypto_keys` row, no
+  lifecycle. `isCryptoOperation("encrypt")` is still false, and a test pins that `aes-256-gcm` is not
+  in `KEY_ALGORITHMS` with the positive reason: adding it would mean a *registered* cipher key, which
+  would need the private-material column that table does not have. A cursor seal must not be audited
+  either — one per page at request rate is the 124 TB/yr argument that refused
+  `meta.feature_flag_evaluations` a writer (ADR-0336).
+  `aeadSeal`/`aeadOpen` are `nonce || ciphertext || tag` (12 ‖ n ‖ 16, a contract rather than an
+  implementation detail since other code transports the bytes), with a **fresh random nonce per
+  seal** — never a counter, since there is no state to hold one and GCM nonce reuse under one key
+  discloses the XOR of two plaintexts *and* leaks the authentication subkey. `aeadOpen` answers
+  `null` for every rejection and throws for none, because its input is a string a client sends back
+  and a throw would make a stale cursor a 500; a **wrong-length key throws**, because that is a
+  deployment bug wrong for every input and answering it with `null` would make a misconfiguration
+  indistinguishable from an attack. `aad` is a **required** parameter, and the honest reason is at
+  the call site rather than in the cipher: an empty AAD is cryptographically identical to never
+  calling `setAAD`, so requiring it buys nothing from GCM and everything from the signature — an
+  unbound seal still encrypts and still authenticates, so nothing looks wrong while it is valid in
+  every context instead of the one it was issued for.
+  `deriveTenantCursorKey` is the second derivation, returning **raw bytes** where the column key
+  returns base64 (`aeadSeal` takes bytes, `pgp_sym_encrypt` takes text), and the two are separated
+  **only by their info strings** — which is what keeps one compromise from being two, so a leaked
+  cursor key must not decrypt a PHI column. Pinned by a test asserting the two keys differ for one
+  secret and one tenant, and by a known-answer vector computed two ways. `deriveTenantColumnKey` is HKDF-SHA256
   with the **tenant id as salt** and the generation in the `info` string — that way round because
   HKDF's salt is the per-instance separator and info is the context label, and swapping them would
   make two tenants' keys differ only in info. A derived column key is **not** a `KeyHandle`: no
@@ -2984,12 +3056,16 @@ opened them.
   denial of service reachable from a manifest declaration. Verified live: a fully-denied page returns
   **0 rows with a non-null cursor**, the walk still terminates, and two principals holding one role
   see an exact complement of the seven rows.
-  What remains: **(1)** the cursor discloses the **position** of withheld rows — the sort key and the
-  `id` — which is irreducible for sound stateless paging, since advancing past a row means naming
-  where it was, and at `limit=1` it is an **id enumeration** this repo did not previously permit. The
-  fix is an **encrypted cursor**, which needs the symmetric cipher `packages/crypto` deliberately
-  does not have (three pins; ADR-0338 kept it that way), so it belongs to the increment that adds
-  AES-256-GCM for the DEK envelope. **(2)** the withheld set is the entity's classified fields rather
+  **ADR-0346 corrected one thing ADR-0345 claimed**: the per-page withheld count is *derivable*
+  despite not being reported. `applyListQuery` sets `hasMore = start + slice.length < rows.length`
+  and a slice only stops early at the end of the rows, so a non-null `nextCursor` implies a **full**
+  slice and `withheld = limit − data.length` for every page but the last. So not reporting it keeps
+  the figure off the last page and keeps it from being a contract, rather than withholding it. The
+  association list is what made that visible — its cursor is an `offset` the client sends, advancing
+  deterministically by `limit`, so there the count was never hidden at all.
+  What remains: **(1)** ~~the cursor discloses the position of withheld rows~~ — **closed by
+  ADR-0346**, which sealed it with AES-256-GCM under a per-tenant derived key and found that the
+  three pins never forbade a cipher in the first place. See the next entry. **(2)** the withheld set is the entity's classified fields rather
   than this caller's redaction set, so a privileged caller's classified `?sort` is refused too while
   an obligation is outstanding; exact would mean resolving `SensitiveFieldPolicy` and the per-field
   read grants a second time in the handler, which is a second place for the read and write halves to
@@ -3001,6 +3077,35 @@ opened them.
   boot report assumes. **(5)** whether sorting by a field you cannot read should be refused
   **generally**, rather than only while rows are being withheld, is unexamined — today it is
   permitted, and the ordering it reveals is a pre-existing channel this increment did not widen.
+- **The entity-list cursor is sealed, and what is left of it** (ADR-0346 closed ADR-0345's Q1).
+  AES-256-GCM over a per-tenant HKDF key derived from `CURSOR_ENCRYPTION_SECRET` (environment, never
+  argv — ADR-0301), as an **envelope at the handler boundary**, so the stores still produce and
+  consume the plaintext keyset. `cursor_discloses_withheld_rows` is the fifth boot refusal, firing
+  iff a list grant filters rows and the mode is `absent`, with `--allow-cursor-disclosure` as the
+  escape hatch. Sealing is **uniform** when a secret is set — every entity list, not only the
+  filtered ones — because one format beats a per-entity matrix and makes cursors stop being a
+  readable surface at all. Verified live: the same request yields
+  `{"k":["l2"],"id":"rec_…"}` in one mode and `s1.wfHmgacd…` in the other, a different `?sort` and a
+  tampered cursor are both 400, and a legacy plaintext cursor still pages.
+  **The refusal ordering argument I first gave was wrong** and the real one is better: vacuity from
+  `rowFiltered` is equally true of `list_sort_addresses_withheld_field`, so it orders nothing — the
+  reason the cursor refusal comes *after* the sort one is that ADR-0345's addressing guard sees the
+  manifest's **default** sort and 400s every list request on that entity **before a cursor is
+  minted**, so sealing does not rescue a classified default sort and an operator who set the secret
+  would find the remedy still owed. Pinned by a test.
+  What remains: **(1)** **ADR-0338's DEK envelope and crypto-shredding is now unblocked** — the AEAD
+  is the primitive it was waiting on — and still needs a KEK source, an unwrap cache, a decision
+  about an unreadable DEK row, and CHECK migrations on `meta.crypto_keys`, which is structurally a
+  *public*-key directory. **(2)** no rotation path: a cursor sealed under generation N refuses under
+  N+1 (pinned), and the `s1.` tag is there so an envelope naming its generation can land without a
+  page-boundary 400. **(3)** `ColumnSecretRefused` and `PLATFORM_COLUMN_KEY_SCOPE` are now narrower
+  than their uses — both serve any derived key; the **messages** are parameterised so an operator is
+  sent to the right variable, and the class rename is 38 references across four files. **(4)** nothing
+  reads `OpenedCursor`'s `plain`-vs-`opened` distinction, so legacy traffic during a rollout is not
+  counted and there is no switch to retire the legacy path — which is also the only way to close the
+  sort-mismatch hole on that path. **(5)** a wrong-length key would be a 500 rather than a 400, right
+  in direction and unreachable today because the one key source derives exactly `AEAD_KEY_BYTES`,
+  pinned.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3922,7 +4027,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 340 records; 261 Accepted, 79 Proposed (the
+title or status change cannot drift. 341 records; 262 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

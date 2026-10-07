@@ -31,9 +31,16 @@
  * `ABAC_DENIAL_EFFECT` says what a denial there *does* — refuse the request, withhold a field,
  * or filter the row out of the page. A position that can be asked and whose denial filters rows
  * is not a configuration error; it is a list that behaves differently, and the author is **told**
- * rather than refused. The one thing that is still refused on that path is a list whose *default*
- * sort addresses a field the same page may withhold, because the cursor derived from it is handed
- * back on every request and no caller can opt out of a sort the manifest chose.
+ * rather than refused.
+ *
+ * Two things *are* still refused on that path, and both are about the same artefact: the keyset
+ * cursor, which is `base64url(JSON.stringify({k: [...sort values], id}))` derived from the last
+ * row of the **store's** slice — under row filtering, a row the caller was never shown. A list
+ * whose *default* sort addresses a classified field is refused because no caller can opt out of a
+ * sort the manifest chose; and a row-filtering list on a deployment that neither seals the cursor
+ * nor accepted its disclosure is refused because the cursor discloses the withheld rows'
+ * positions whatever the sort is. The second is the only refusal here with an escape hatch, for
+ * the reason given on `ABAC_OBLIGATION_REFUSALS`.
  */
 
 import { resolvedFields, type Manifest } from "@crossengin/kernel";
@@ -51,22 +58,37 @@ import { listConfigForEntity } from "@crossengin/operate-runtime";
 import { entityClassifiedFields, type DataClassification } from "@crossengin/types/meta-schema";
 
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
+import {
+  ALLOW_CURSOR_DISCLOSURE_FLAG,
+  CURSOR_ENCRYPTION_SECRET_VAR,
+  type CursorSealingMode,
+} from "./cursor-encryption.js";
 
 /**
- * There is deliberately no escape-hatch flag for any of these refusals. ADR-0338 shipped
- * `--allow-plaintext-phi` because plaintext PHI is a degraded-but-coherent state an operator
- * may knowingly accept; an unevaluated obligation is not degraded, it is the opposite of what
- * the manifest declares, so a flag here would be an option to serve the hole on purpose.
+ * Four of these five have deliberately no escape-hatch flag, and the fifth has one deliberately,
+ * and the line between them is ADR-0340's. That ADR refused a flag because serving a grant with
+ * its qualifier removed is the *opposite* of what the manifest declares: an unevaluated
+ * obligation is not a degraded state an operator may knowingly accept, it is the hole, so a flag
+ * would be an option to serve it on purpose. `record_unavailable` is the same fact at a position,
+ * and `list_sort_addresses_withheld_field` needs no flag for a stronger reason still — every
+ * remedy for it is a one-line manifest edit the refusal names, so a flag would buy nothing but
+ * the leak.
  *
- * `list_sort_addresses_withheld_field` is the one whose reason is not that, and it needs no flag
- * for a stronger one: it is a **disclosure**, not an unenforced rule. Every remedy for it is a
- * one-line manifest edit the refusal names, so a flag would buy nothing but the leak.
+ * `cursor_discloses_withheld_rows` is ADR-0338's `--allow-plaintext-phi` shape instead, and it
+ * earns the hatch by being **degraded but coherent**: the policy is evaluated, the denied rows
+ * are withheld from the page, and what escapes is only their *position* — the sort values and
+ * id the keyset cursor is derived from. An operator whose ids are opaque and whose sort key is
+ * uninteresting may knowingly accept that, exactly as one may knowingly accept plaintext PHI on
+ * a store that cannot encrypt. So the flag mirrors that one, including being named in the
+ * refusal: a refusal that hides its own opt-out is a refusal an operator works around by
+ * weakening the manifest instead.
  */
 export const ABAC_OBLIGATION_REFUSALS = [
   "obligation_unevaluable",
   "policy_undeclared",
   "record_unavailable",
   "list_sort_addresses_withheld_field",
+  "cursor_discloses_withheld_rows",
 ] as const;
 export type AbacObligationRefusal = (typeof ABAC_OBLIGATION_REFUSALS)[number];
 
@@ -120,6 +142,19 @@ export interface AbacObligationCheckInput {
    * is reported by `policy_undeclared`, which is checked first.
    */
   readonly recordBearingKeys: ReadonlySet<string>;
+  /**
+   * Whether this deployment seals the entity-list keyset cursor, accepts its disclosure
+   * knowingly, or has neither.
+   *
+   * Required rather than optional, for `recordBearingKeys`' reason. There is no safe default: an
+   * optional field would have to default to one of the three, and the only one that refuses
+   * nothing is `sealed` — so a caller who forgot it would assert sealing this deployment does not
+   * do, and a manifest whose `list` grant withholds rows would boot handing every caller the
+   * positions of the rows it withheld. That is the silent degradation this module exists to
+   * convert into a boot refusal, so the compiler asks instead (ADR-0330's rule: an optional field
+   * can be forgotten with the type still valid).
+   */
+  readonly cursorSealing: CursorSealingMode;
 }
 
 export interface AbacObligationCheck {
@@ -182,6 +217,18 @@ export interface AbacObligationCheck {
    * `rowFiltered`. Non-empty is the `list_sort_addresses_withheld_field` refusal.
    */
   readonly listSortConflicts: readonly ListSortConflict[];
+  /**
+   * The `rowFiltered` obligations whose withheld rows a reversible cursor would disclose — so
+   * `rowFiltered` itself when the deployment seals nothing and nothing was accepted, and empty
+   * otherwise. Non-empty is the `cursor_discloses_withheld_rows` refusal.
+   *
+   * A set rather than a boolean beside `rowFiltered`, because the refusal names the grants an
+   * operator has to look at, and because a caller catching the error should not have to re-apply
+   * the sealing condition to work out which of the reported obligations the cursor reaches.
+   */
+  readonly cursorDisclosing: readonly AbacObligation[];
+  /** Echoed from the input, so one `AbacObligationCheck` is enough to render the boot line. */
+  readonly cursorSealing: CursorSealingMode;
   readonly refusal: AbacObligationRefusal | null;
 }
 
@@ -278,20 +325,34 @@ export function checkAbacObligations(input: AbacObligationCheckInput): AbacOblig
     (o) => ABAC_DENIAL_EFFECT[abacGrantPosition(o)] === "filters_rows",
   );
   const conflicts = listSortConflicts(input.manifest, rowFiltered);
+  // A reversible cursor is only a disclosure where something is withheld, so this is
+  // `rowFiltered` gated on the mode and never the mode alone: a deployment that seals nothing and
+  // withholds nothing has nothing to disclose, which is every deployment serving a manifest with
+  // no record-bearing `list` grant.
+  const cursorDisclosing = input.cursorSealing === "absent" ? rowFiltered : [];
 
   // First refusal wins, and the order is chosen so the one reported is the one whose remedy is
   // true (ADR-0340's ordering argument). With no evaluator, `recordBearingKeys` is empty by
-  // construction, so nothing could be classified record-bearing and the last two would be
+  // construction, so nothing could be classified record-bearing and the last three would be
   // vacuously silent — hence they come after both questions that do not need the declaration.
-  // `list_sort_addresses_withheld_field` is last of all for the same reason one notch further in:
-  // it is computed from `rowFiltered`, which is a subset of the record-bearing set, so it cannot
-  // fire unless `record_unavailable` has already had its chance.
+  // `list_sort_addresses_withheld_field` and `cursor_discloses_withheld_rows` are last of all for
+  // the same reason one notch further in: both are computed from `rowFiltered`, a subset of the
+  // record-bearing set, so neither can fire unless `record_unavailable` has had its chance.
+  //
+  // And the cursor refusal comes after the sort one rather than before it, which is not merely
+  // the order they were written in: **sealing does not rescue a classified default sort.** Per
+  // `listSortMessage`, the list handler's own addressing guard sees the manifest's default sort
+  // and refuses every list request on that entity before a cursor is ever minted, so a deployment
+  // that answered the cursor refusal by setting a secret would find the entity still unservable
+  // and the remedy it was given still owed. The reverse is not true — fixing the sort leaves the
+  // cursor refusal standing for every other row-filtered entity, which is then reported.
   let refusal: AbacObligationRefusal | null = null;
   if (obligations.length > 0) {
     if (!evaluatorDeclared) refusal = "obligation_unevaluable";
     else if (unanswerable.length > 0) refusal = "policy_undeclared";
     else if (recordUnavailable.length > 0) refusal = "record_unavailable";
     else if (conflicts.length > 0) refusal = "list_sort_addresses_withheld_field";
+    else if (cursorDisclosing.length > 0) refusal = "cursor_discloses_withheld_rows";
   }
 
   return {
@@ -302,6 +363,8 @@ export function checkAbacObligations(input: AbacObligationCheckInput): AbacOblig
     createBlocked,
     rowFiltered,
     listSortConflicts: conflicts,
+    cursorDisclosing,
+    cursorSealing: input.cursorSealing,
     refusal,
   };
 }
@@ -471,6 +534,38 @@ function listSortMessage(conflicts: readonly ListSortConflict[]): string {
 }
 
 /**
+ * The cursor refusal's text, and the second refusal on the row-filtering path.
+ *
+ * It names the cursor's **construction** rather than calling it "reversible", because the remedy
+ * depends on believing the claim: an operator weighing `${ALLOW_CURSOR_DISCLOSURE_FLAG}` has to be
+ * able to see for themselves that `base64url(JSON.stringify(…))` is an encoding and not a token,
+ * and that the row it was derived from is one the filter removed.
+ *
+ * The `limit=1` sentence is the part that decides the grade. A disclosure of one withheld row's
+ * sort values per page sounds marginal; the same disclosure under a caller-chosen `limit` of 1 is
+ * an enumeration of the ids of every row the policy denied, one request at a time, which is a
+ * different fact about the same mechanism and the one an operator needs before accepting it.
+ *
+ * Both remedies, in the order an operator would try them: the secret first, because it removes
+ * the disclosure, and the flag second, because it accepts it. Naming the flag second rather than
+ * not at all is the ADR-0338 shape — see `ABAC_OBLIGATION_REFUSALS`.
+ */
+function cursorDisclosureMessage(cursorDisclosing: readonly AbacObligation[]): string {
+  return (
+    `${cursorDisclosing.length.toString()} abac-qualified grant(s) filter rows out of a list ` +
+    `page while this deployment's entity-list cursor is unsealed, so the cursor carries back the ` +
+    `position of a row the caller was never shown: ${renderWithDenialEffect(cursorDisclosing)}. ` +
+    `The cursor is base64url(JSON.stringify({k: [...sort values], id})) and is derived from the ` +
+    `last row of the store's slice, which under row filtering may be a row the caller is never ` +
+    `shown — so that row's sort values and its id travel back on every page, and at \`limit=1\` ` +
+    `each page's cursor names exactly one withheld row, which is an enumeration of the ids the ` +
+    `policy denied. Set ${CURSOR_ENCRYPTION_SECRET_VAR} so every entity-list cursor is sealed ` +
+    `with a per-tenant key, or pass ${ALLOW_CURSOR_DISCLOSURE_FLAG} to accept the disclosure ` +
+    `knowingly.`
+  );
+}
+
+/**
  * The refusal detail, selected by refusal and shared by the boot line and the thrown error so the
  * two cannot disagree.
  */
@@ -481,6 +576,9 @@ function refusalMessage(check: AbacObligationCheck): string {
   }
   if (check.refusal === "list_sort_addresses_withheld_field") {
     return listSortMessage(check.listSortConflicts);
+  }
+  if (check.refusal === "cursor_discloses_withheld_rows") {
+    return cursorDisclosureMessage(check.cursorDisclosing);
   }
   return unevaluableMessage(check.obligations);
 }
@@ -533,6 +631,25 @@ function rowFilteredNote(rowFiltered: readonly AbacObligation[]): string {
 }
 
 /**
+ * The accepted-disclosure note, appended to an otherwise healthy boot line.
+ *
+ * Said on every boot rather than once at the moment the flag was passed, which is
+ * `createBlockedNote`'s and `rowFilteredNote`'s rule and ADR-0322's: a surface that degrades
+ * rather than refusing has to say so out loud. The flag buys a boot, not silence — and this one
+ * is a *standing* disclosure of every withheld row's position, so the deployment that accepted it
+ * should meet the sentence again every time it starts, not only in the shell history of whoever
+ * added the flag.
+ */
+function cursorPlaintextNote(rowFiltered: readonly AbacObligation[]): string {
+  return (
+    `; ${ALLOW_CURSOR_DISCLOSURE_FLAG} was given, so the keyset cursor of those ` +
+    `${rowFiltered.length.toString()} list(s) stays reversible base64url JSON derived from the ` +
+    `last row of the store's slice — a row the caller may never have been shown, whose sort ` +
+    `values and id the cursor therefore discloses. Set ${CURSOR_ENCRYPTION_SECRET_VAR} to seal it`
+  );
+}
+
+/**
  * One boot line. The no-obligations case says so **affirmatively**: "we surveyed and found
  * none" cannot be claimed from the absence of a log line, which is this repo's recurring
  * rule, and it is the line that makes the refusal's vacuity visible on every boot.
@@ -548,7 +665,10 @@ export function formatAbacObligationCheck(check: AbacObligationCheck): string {
     `abac obligations: ${check.obligations.length.toString()} declared and an evaluator is ` +
     `declared, so each is evaluated per request: ${renderObligations(check.obligations)}` +
     (check.createBlocked.length > 0 ? createBlockedNote(check.createBlocked) : "") +
-    (check.rowFiltered.length > 0 ? rowFilteredNote(check.rowFiltered) : "")
+    (check.rowFiltered.length > 0 ? rowFilteredNote(check.rowFiltered) : "") +
+    (check.rowFiltered.length > 0 && check.cursorSealing === "plaintext_accepted"
+      ? cursorPlaintextNote(check.rowFiltered)
+      : "")
   );
 }
 
@@ -566,6 +686,7 @@ export class AbacObligationsUnevaluable extends Error {
   readonly unanswerable: readonly AbacObligation[];
   readonly recordUnavailable: readonly AbacObligation[];
   readonly listSortConflicts: readonly ListSortConflict[];
+  readonly cursorDisclosing: readonly AbacObligation[];
 
   constructor(check: AbacObligationCheck) {
     super(refusalMessage(check));
@@ -577,5 +698,6 @@ export class AbacObligationsUnevaluable extends Error {
     this.unanswerable = check.unanswerable;
     this.recordUnavailable = check.recordUnavailable;
     this.listSortConflicts = check.listSortConflicts;
+    this.cursorDisclosing = check.cursorDisclosing;
   }
 }
