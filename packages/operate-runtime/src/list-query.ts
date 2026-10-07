@@ -237,3 +237,62 @@ function inValues(value: string | readonly string[]): string[] {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }
+
+/** Which query surface addressed a withheld field, and which field it was. */
+export interface WithheldAddressing {
+  readonly surface: "sort" | "filter" | "search";
+  readonly field: string;
+}
+
+/**
+ * The first place a query addresses rows by a withheld field, or null when it addresses none.
+ *
+ * The rule it enforces: **while rows are being withheld, a caller may not address rows by a field
+ * they may not read.** It is asked only under a record-level policy that is dropping rows — with
+ * every row visible each of these surfaces only ever tells the caller about rows they are shown
+ * anyway, which is why none of them has ever needed a guard before.
+ *
+ * Three surfaces, one rule, two reasons:
+ *
+ * - **`sort` is the sharpest, and it is not only the sort a caller asks for.** The keyset cursor is
+ *   `base64url(JSON.stringify({k: […sort values], id}))` — plainly reversible — and it is derived
+ *   from the last row of the **store's** slice, which under row filtering may be a row the caller
+ *   is never shown. So ordering by a classified field puts that field's value, for a withheld row,
+ *   into a string handed straight back. `query.sort` is the view's **default** sort when the
+ *   request names none, which is deliberately not exempted: measured on resolved
+ *   `erp-healthcare`, `Patient`'s list view sorts by `family_name` (`pii`) by default and its
+ *   first column is `mrn` (`phi`, and the field ADR-0338 made ciphertext at rest), so a
+ *   record-bearing `list` policy on `Patient` refuses `GET /v1/patients` with no query string at
+ *   all. That is the correct answer rather than an over-reach — the default sort really does put a
+ *   withheld row's family name in the cursor — and the two remedies are to grant the caller the
+ *   class or to point the view's default sort at an unclassified column.
+ * - **`filter` and `search` are a chosen-predicate oracle.** The caller picks a value and the
+ *   response distinguishes match from no-match — through the cursor's presence if through nothing
+ *   else — so a withheld row's contents can be tested one value at a time. That channel does not
+ *   exist today, because without a record policy a caller who can predicate on a row simply *sees*
+ *   it.
+ *
+ * What it deliberately does **not** cover: the cursor still carries the **position** of a withheld
+ * row — the default sort key and its id. That is irreducible, since advancing past a row means
+ * naming where it was, and this guard's job is to hold the disclosure to position rather than
+ * contents.
+ *
+ * Surfaces are checked `sort`, `filter`, `search` and the first hit is returned, so a query
+ * offending on two of them names the same one every time and the refusal a caller reads is stable.
+ */
+export function withheldAddressing(
+  query: ListQuery,
+  withheldFields: ReadonlySet<string>,
+): WithheldAddressing | null {
+  if (withheldFields.size === 0) return null;
+  for (const sort of query.sort) {
+    if (withheldFields.has(sort.field)) return { surface: "sort", field: sort.field };
+  }
+  for (const filter of query.filters) {
+    if (withheldFields.has(filter.field)) return { surface: "filter", field: filter.field };
+  }
+  for (const field of query.search?.fields ?? []) {
+    if (withheldFields.has(field)) return { surface: "search", field };
+  }
+  return null;
+}

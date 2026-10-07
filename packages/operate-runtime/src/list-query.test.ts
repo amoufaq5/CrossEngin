@@ -7,8 +7,10 @@ import {
   listConfigForEntity,
   parseFields,
   parseListQuery,
+  withheldAddressing,
   type ListConfig,
 } from "./list-query.js";
+import type { ListQuery } from "./store.js";
 
 function manifestWithListView(): Manifest {
   return {
@@ -180,5 +182,131 @@ describe("parseFields", () => {
   it("returns null when absent or empty", () => {
     expect(parseFields({})).toBeNull();
     expect(parseFields({ fields: " , " })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The addressing guard.
+//
+// Once a record-level `list` policy withholds rows, the three row-addressing surfaces stop being
+// harmless: `?sort` puts a withheld row's value in the cursor (the keyset is built from the last
+// row of the *store's* slice, which may be a row the caller never sees), and `?filter` / `?q` make
+// the response a chosen-predicate oracle over a row the caller cannot read.
+// ---------------------------------------------------------------------------
+
+const WITHHELD = new Set(["mrn", "handle"]);
+
+function query(overrides: Partial<ListQuery> = {}): ListQuery {
+  return { limit: 25, cursor: null, sort: [], filters: [], ...overrides };
+}
+
+describe("withheldAddressing", () => {
+  it("answers null for a query that addresses nothing", () => {
+    expect(withheldAddressing(query(), WITHHELD)).toBeNull();
+  });
+
+  it("flags a sort on a withheld field, and not one on an ordinary field", () => {
+    expect(withheldAddressing(query({ sort: [{ field: "handle", direction: "asc" }] }), WITHHELD)).toEqual({
+      surface: "sort",
+      field: "handle",
+    });
+    expect(withheldAddressing(query({ sort: [{ field: "name", direction: "asc" }] }), WITHHELD)).toBeNull();
+  });
+
+  it("flags a withheld field anywhere in a multi-key sort", () => {
+    const q = query({
+      sort: [
+        { field: "name", direction: "asc" },
+        { field: "mrn", direction: "desc" },
+      ],
+    });
+    expect(withheldAddressing(q, WITHHELD)).toEqual({ surface: "sort", field: "mrn" });
+  });
+
+  it("flags a filter on a withheld field, whichever operator it carries", () => {
+    expect(withheldAddressing(query({ filters: [{ field: "mrn", op: "eq", value: "MRN-1" }] }), WITHHELD)).toEqual({
+      surface: "filter",
+      field: "mrn",
+    });
+    expect(
+      withheldAddressing(query({ filters: [{ field: "handle", op: "contains", value: "ab" }] }), WITHHELD),
+    ).toEqual({ surface: "filter", field: "handle" });
+    expect(withheldAddressing(query({ filters: [{ field: "ward", op: "eq", value: "A" }] }), WITHHELD)).toBeNull();
+  });
+
+  it("flags a search whose field set reaches a withheld field", () => {
+    const q = query({ search: { term: "ada", fields: ["name", "handle"] } });
+    expect(withheldAddressing(q, WITHHELD)).toEqual({ surface: "search", field: "handle" });
+  });
+
+  it("does not flag a search over ordinary fields, nor an absent one", () => {
+    expect(withheldAddressing(query({ search: { term: "ada", fields: ["name"] } }), WITHHELD)).toBeNull();
+    expect(withheldAddressing(query(), WITHHELD)).toBeNull();
+  });
+
+  it("checks sort, then filter, then search — so a query offending on all three is stable", () => {
+    // Deterministic order is the whole reason the surfaces are checked rather than collected: the
+    // refusal a caller reads must not depend on object iteration or on which surface was parsed
+    // first.
+    const all = query({
+      sort: [{ field: "handle", direction: "asc" }],
+      filters: [{ field: "mrn", op: "eq", value: "x" }],
+      search: { term: "x", fields: ["mrn"] },
+    });
+    expect(withheldAddressing(all, WITHHELD)).toEqual({ surface: "sort", field: "handle" });
+
+    const withoutSort = query({
+      filters: [{ field: "mrn", op: "eq", value: "x" }],
+      search: { term: "x", fields: ["handle"] },
+    });
+    expect(withheldAddressing(withoutSort, WITHHELD)).toEqual({ surface: "filter", field: "mrn" });
+  });
+
+  it("flags the view's DEFAULT sort, so a query with no sort at all can offend", () => {
+    // The sharpest member and the one a reader would not expect: `query.sort` is the view's default
+    // when the request names none, so a record-bearing `list` policy refuses the bare collection
+    // GET. Measured on resolved `erp-healthcare`, `Patient`'s list view sorts by `family_name`
+    // (`pii`) by default. Deliberately **not** exempted — the default sort really does put a
+    // withheld row's value in the cursor — so the remedies are to grant the class or to point the
+    // view's default sort at an unclassified column.
+    const config = listConfigForEntity(
+      {
+        entities: [
+          {
+            name: "Patient",
+            fields: [
+              { name: "family_name", type: { kind: "text" } },
+              { name: "status", type: { kind: "enum" } },
+            ],
+          },
+        ],
+        views: {
+          patientList: {
+            kind: "list",
+            entity: "Patient",
+            sort: [{ field: "family_name", direction: "asc" }],
+            columns: [{ field: "family_name" }, { field: "status" }],
+          },
+        },
+      } as unknown as Manifest,
+      "Patient",
+    );
+    expect(config.defaultSort).toEqual([{ field: "family_name", direction: "asc" }]);
+    expect(withheldAddressing(parseListQuery({}, config), new Set(["family_name"]))).toEqual({
+      surface: "sort",
+      field: "family_name",
+    });
+  });
+
+  it("an empty withheld set never offends, whatever the query addresses", () => {
+    // The guard is only asked when rows are being withheld; with none withheld every one of these
+    // surfaces is reporting on rows the caller is shown anyway, which is how every deployment
+    // today behaves.
+    const all = query({
+      sort: [{ field: "mrn", direction: "asc" }],
+      filters: [{ field: "handle", op: "eq", value: "x" }],
+      search: { term: "x", fields: ["mrn", "handle"] },
+    });
+    expect(withheldAddressing(all, new Set())).toBeNull();
   });
 });

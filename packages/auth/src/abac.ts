@@ -74,9 +74,12 @@ export interface AbacBatchAnswer {
  * The batch arm beside {@link AbacEvaluator}: one call for a set of questions whose answers are all
  * needed before any of them is acted on.
  *
- * **Which of the five readers batch, and the reasons differ:**
- * - `rbacCheck` — one obligation per call. There is nothing to group it with, so `RbacCheckInput`
- *   gains no batch field.
+ * **Which of the readers batch, and the reasons differ:**
+ * - `rbacCheck` — one obligation per call, so there is nothing to group. It therefore **ignores**
+ *   `RbacCheckInput.abacBatchEvaluator`, which exists for the reader below it.
+ * - `rbacCheckForRecords` — **batches.** One grant decided for every row of a page, so the question
+ *   set is known before any answer is needed. It shares `rbacCheck`'s input type precisely so the
+ *   two evaluator arms cannot be handed to the wrong form.
  * - `computeFieldRedaction` — callerless and superseded by the classified pair, so an arm here would
  *   equip dead code and leave the two read paths with different costs.
  * - `computeClassifiedFieldRedaction` / `…ForRecords` — **batches.** Every obligated field is
@@ -88,8 +91,8 @@ export interface AbacBatchAnswer {
  *   the evaluator only after the role check passes, one position over.
  *
  * This is **prose and deliberately not a total map.** `ABAC_OUTCOME_ALLOWS` is a map because a new
- * enum *member* must be a compile error; these five are hand-written functions, and a map over them
- * could not make a sixth reader a compile error — it would be a constant nobody reads.
+ * enum *member* must be a compile error; these are hand-written functions, and a map over them could
+ * not make the next reader a compile error — it would be a constant nobody reads.
  */
 export type AbacBatchEvaluator = (
   inputs: readonly AbacEvaluationInput[],
@@ -265,11 +268,11 @@ function readBatchAnswers(
  *    be woken for nothing, and it is what keeps the length check in `readBatchAnswers`
  *    non-vacuous — two empty arrays line up trivially.
  * 2. **No `evaluator` → every discharge `undischargeable`, and `batch` is not called either.**
- *    `evaluateBatch` is a sibling of `evaluator`, never a replacement: three of the five readers that
- *    call an evaluator (`rbacCheck` and the two write masks) can only ever ask one question, so a
- *    seam carrying only a batch is half-wired — every entity-level obligation in that deployment
- *    would already be answering `undischargeable` — and the one reader that *could* use the batch
- *    refuses rather than enforcing a policy the rest of the deployment cannot.
+ *    `evaluateBatch` is a sibling of `evaluator`, never a replacement: three of the readers that call
+ *    an evaluator (`rbacCheck` and the two write masks) can only ever ask one question, so a seam
+ *    carrying only a batch is half-wired — every single-question obligation in that deployment would
+ *    already be answering `undischargeable` — and the readers that *could* use the batch refuse
+ *    rather than enforcing a policy the rest of the deployment cannot.
  * 3. **A request whose principal's attributes were never resolved is `undischargeable` and is
  *    excluded from the set handed to the evaluator**, exactly as `dischargeAbac` refuses it before
  *    calling one (ADR-0341). So the array a batch evaluator receives holds only questions it could
@@ -392,9 +395,11 @@ export function formatAbacObligation(o: AbacObligation): string {
 }
 
 /**
- * Every position a permission map can carry an obligation in, which is also every position whose
- * record availability differs. The two entity families are split by whether the grant sits on an
- * operation or on a field, because that is what decides which call site evaluates it.
+ * Every position a permission map can carry an obligation in. The two entity families are split by
+ * whether the grant sits on an operation or on a field, because that is what decides which call site
+ * evaluates it — and the call site is what decides both of the things the maps below answer:
+ * `ABAC_RECORD_AVAILABILITY`, whether the position can be asked at all, and `ABAC_DENIAL_EFFECT`,
+ * what a refusal there does to the response.
  */
 export const ABAC_GRANT_POSITIONS = [
   "entity_create",
@@ -421,16 +426,17 @@ export type AbacRecordAvailability = (typeof ABAC_RECORD_AVAILABILITIES)[number]
  * discovering it as a `deferred` refusal on the first request — ADR-0334's conversion of a page-one
  * failure into a boot refusal, applied to an authorization input.
  *
- * `never` is not a limitation of the handler that could be fixed by loading more: in `entity_create`
- * the record does not exist, and in `entity_list` the subject is a set. `sometimes` belongs to
- * `field_update` alone, and the split inside it is the sharpest consequence — see
- * `ABAC_RECORD_AVAILABILITY_REASONS`.
+ * `never` is not a limitation of the handler that could be fixed by loading more: `entity_create` is
+ * its only member, and the record it would be about does not exist until the write commits.
+ * `sometimes` belongs to `field_update` alone, and the split inside it is the sharpest consequence —
+ * see `ABAC_RECORD_AVAILABILITY_REASONS`.
  *
- * `field_read` and `entity_list` are the pair worth telling apart, because the two look alike from
- * here and are not: a **field read** policy filters *columns within a row*, which a response can
- * express per record, so redaction locates each record and answers for it. An **entity list**
- * policy would filter *rows*, which is a different operation — dropping rows from a page would make
- * its `nextCursor` and any count describe a set the caller was never shown.
+ * `field_read` and `entity_list` are still the pair worth telling apart, but **not on this axis**:
+ * both have the record, and both did all along. What separates them is what a denial *does*, which
+ * `ABAC_DENIAL_EFFECT` now answers — a **field read** policy withholds *columns within a row*, so
+ * the record comes back shorter; an **entity list** policy withholds *whole rows*, so the page comes
+ * back shorter. Reading that difference as an availability difference is what kept both of them
+ * refused at boot for longer than the facts warranted.
  */
 export const ABAC_RECORD_AVAILABILITY: Readonly<
   Record<AbacGrantPosition, AbacRecordAvailability>
@@ -439,7 +445,7 @@ export const ABAC_RECORD_AVAILABILITY: Readonly<
   entity_read: "always",
   entity_update: "always",
   entity_delete: "always",
-  entity_list: "never",
+  entity_list: "always",
   entity_transition: "always",
   field_read: "always",
   field_update: "sometimes",
@@ -462,13 +468,59 @@ export const ABAC_RECORD_AVAILABILITY_REASONS: Readonly<Record<AbacGrantPosition
   entity_delete:
     "the delete handler fetches the record before removing it, so the stored record is in hand before the decision",
   entity_list:
-    "a list decides for a set of records, so a per-record answer is a filter and not an authorization decision",
+    "the list handler loads the page before it returns, so every row is in hand, and a denial drops that row from the page rather than refusing the request",
   entity_transition:
     "a transition reads the record to check the state it is moving from, so the stored record is in hand before the decision",
   field_read:
     "response redaction locates the records a response carries from the operation's declared shape and computes the field set per record, so a per-field read policy is answered against the record the field came from",
   field_update:
     "the update path supplies the record and the create path cannot, so an obligated field is not settable at create",
+};
+
+export const ABAC_DENIAL_EFFECTS = ["refuses_request", "withholds_field", "filters_rows"] as const;
+
+export type AbacDenialEffect = (typeof ABAC_DENIAL_EFFECTS)[number];
+
+/**
+ * What a refusal in each position does to the response — the **second axis**, and the one a manifest
+ * author actually feels.
+ *
+ * `ABAC_RECORD_AVAILABILITY` answers whether a position can be asked, and until row filtering
+ * existed that was the only axis worth having, because the answer to a denial was the same
+ * everywhere: refuse the request. It is not any more. Declaring a record policy on `list` 403s
+ * nobody — it silently shortens their pages — so a deployment reading only the availability map
+ * would be told its declaration is answerable and nothing about what answering it costs. A boot
+ * **report** reads this map; nothing refuses on it, because none of the three effects is a
+ * misconfiguration.
+ *
+ * `entity_create` is `refuses_request` even though a boot refusal makes it unreachable. That is what
+ * it would do if it were reached, and a total map with a hole in it is the thing a total map exists
+ * to prevent — the position would otherwise have to be remembered when the refusal moves.
+ */
+export const ABAC_DENIAL_EFFECT: Readonly<Record<AbacGrantPosition, AbacDenialEffect>> = {
+  entity_create: "refuses_request",
+  entity_read: "refuses_request",
+  entity_update: "refuses_request",
+  entity_delete: "refuses_request",
+  entity_list: "filters_rows",
+  entity_transition: "refuses_request",
+  field_read: "withholds_field",
+  field_update: "refuses_request",
+};
+
+/**
+ * Per **effect**, not per position: the effect's own name carries the position-specific part, so a
+ * description keyed by position would be eight spellings of three facts and the three could drift
+ * apart. A sentence fragment, like `ABAC_RECORD_AVAILABILITY_REASONS`, so a report line can append
+ * it after the obligation it is about.
+ */
+export const ABAC_DENIAL_EFFECT_DESCRIPTIONS: Readonly<Record<AbacDenialEffect, string>> = {
+  refuses_request:
+    "the whole request is refused, so the caller is told the act was not permitted and nothing is served",
+  withholds_field:
+    "the field is dropped from the record the response carries, so the rest of that record is still served",
+  filters_rows:
+    "the denied rows are dropped from the page and no refusal is reported, so a caller sees a shorter page and not an error",
 };
 
 function entityPosition(op: OperationName): AbacGrantPosition {

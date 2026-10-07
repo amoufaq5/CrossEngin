@@ -126,12 +126,14 @@ export interface OperateRuntimeOptions {
    * fan-out. Since ADR-0343 response redaction computes a field set per record, so a page of N
    * records with F obligated fields asks N×F questions; this lets the deployment be asked once.
    *
-   * It is forwarded to the redaction registry alone, and the other four readers this options
-   * object feeds deliberately get nothing: `rbacCheck` asks exactly one question per call, and the
-   * write mask stops at the first refusing field, so batching it would evaluate fields past the
-   * rejection — more work, and it would hand the deployment's policy layer questions whose answers
-   * were never needed, which is ADR-0340's reason `rbacCheck` consults the evaluator only after
-   * the role check passes.
+   * It is forwarded to the redaction registry **and to the handler context**. ADR-0344 forwarded it
+   * to the registry alone and said the handler path had no reader with a fan-out, which was true of
+   * the readers that existed: `rbacCheck` asks one question per call, and the write mask stops at
+   * the first refusing field, so batching it would evaluate past the rejection — more work, and it
+   * would hand the policy layer questions whose answers were never needed (ADR-0340's reason
+   * `rbacCheck` consults the evaluator only after the role check). Row filtering added the reader
+   * that was missing: `rbacCheckForRecords` decides one `list` grant for a whole page, so the list
+   * handler now has exactly the fan-out the registry had.
    *
    * Absent is not an opt-out and needs no refusal: the obligation is still enforced, through N
    * single calls, which is exactly what every deployment did before this existed.
@@ -711,6 +713,9 @@ export function compileOperateServer(
     ...(options.settingsStore !== undefined ? { settingsStore: options.settingsStore } : {}),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),
+    ...(options.abacBatchEvaluator !== undefined
+      ? { abacBatchEvaluator: options.abacBatchEvaluator }
+      : {}),
     ...(options.clock !== undefined ? { clock: options.clock } : {}),
   };
 

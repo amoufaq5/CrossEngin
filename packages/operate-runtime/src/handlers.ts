@@ -3,12 +3,15 @@ import {
   ABAC_RECORD_AVAILABILITY_REASONS,
   isAbacDeferred,
   rbacCheck,
+  rbacCheckForRecords,
+  type AbacBatchEvaluator,
   type AbacEvaluator,
   type AbacGrantPosition,
   type AuthorizationDecision,
   type ClassifiedField,
   type PermissionMap,
   type Principal,
+  type RbacCheckInput,
   type RoleDefinition,
   type RoleName,
   type SensitiveFieldPolicy,
@@ -17,7 +20,15 @@ import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import { principalAbacAttributes } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput, PrincipalRoles } from "@crossengin/api-gateway-runtime";
 
-import { DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, parseFields, parseListQuery, type ListConfig } from "./list-query.js";
+import {
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  parseFields,
+  parseListQuery,
+  withheldAddressing,
+  type ListConfig,
+  type WithheldAddressing,
+} from "./list-query.js";
 import { applyLiteralDefaults, type LiteralDefaultPlan } from "./defaults.js";
 import { applySequenceDefaults, type SequenceAllocator, type SequenceFieldPlan } from "./sequences.js";
 import { applySettingsDefaults, type SettingsDefaultPlan } from "./settings-defaults.js";
@@ -78,6 +89,13 @@ export interface HandlerContext {
    * `undischargeable` and refuse, which is what makes an abac-qualified grant conditional at all.
    */
   readonly abacEvaluator?: AbacEvaluator;
+  /**
+   * The batch arm beside `abacEvaluator`, read only where one grant is decided for a whole page:
+   * the `list` arm's row filter. A deployment that supplies neither pays nothing; one that supplies
+   * only this gets every obligation refused, because `dischargeAbacBatch` will not use a batch
+   * without its single sibling.
+   */
+  readonly abacBatchEvaluator?: AbacBatchEvaluator;
   readonly clock?: { now(): Date };
 }
 
@@ -165,7 +183,12 @@ function entityForbidden(action: RouteAction, decision: AuthorizationDecision): 
  * Builds the gateway `Handler` for one route spec: enforces the manifest's RBAC
  * (403 on an unauthorized role), executes the CRUD/transition against the store,
  * and returns the full record. Field-level redaction happens at the gateway's
- * `transform_response` stage, per-caller — handlers return everything.
+ * `transform_response` stage, per-caller — handlers return every field.
+ *
+ * Every *row*, too, with one exception: a record-bearing obligation on the entity's `list` grant is
+ * answered per row and the refused rows are dropped from the page. That is row filtering and it
+ * cannot move to the gateway, because the gateway sees a response and not the records the page was
+ * a slice of.
  */
 export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler {
   return async ({ request, principal, params, parsedBody }) => {
@@ -177,26 +200,32 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
     // Hoisted rather than re-derived per call site: the write mask asks the same question of the
     // same principal, and two independent constructions could answer it from two role sets.
     const auth = authPrincipal(principal, ctx.principalRoles);
-    // Built once and called twice rather than constructed twice, because the deferred question and
-    // the re-asked one must differ in **nothing but the record**: two construction sites could
-    // drift in the principal, the operation or the evaluator, and then "the record admitted it"
-    // would be an answer to a different question from the one that deferred.
+    // Built once and used three ways — asked with no record, re-asked with one, and handed to
+    // `rbacCheckForRecords` for a whole page — because every one of those must differ in **nothing
+    // but the record**: separate construction sites could drift in the principal, the operation or
+    // the evaluator, and then "the record admitted it" would be an answer to a different question
+    // from the one that deferred.
+    const entityCheck: Omit<RbacCheckInput, "record"> = {
+      principal: auth,
+      permissions: ctx.permissions,
+      roles: ctx.roles,
+      entity: spec.entity,
+      operation: spec.authOperation,
+      ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
+      ...(ctx.abacBatchEvaluator !== undefined ? { abacBatchEvaluator: ctx.abacBatchEvaluator } : {}),
+    };
     const askEntity = (record?: Readonly<Record<string, unknown>>): AuthorizationDecision =>
-      rbacCheck({
-        principal: auth,
-        permissions: ctx.permissions,
-        roles: ctx.roles,
-        entity: spec.entity,
-        operation: spec.authOperation,
-        ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
-        ...(record !== undefined ? { record } : {}),
-      });
+      rbacCheck({ ...entityCheck, ...(record !== undefined ? { record } : {}) });
     const decision = askEntity();
     // A `deferred` refusal is "the policy needs the stored record and this call site had none", and
     // it stays a **refusal** — `ABAC_OUTCOME_ALLOWS.deferred` is false — until the action loads the
     // record and asks again. So this flag records an outstanding obligation and grants nothing: an
     // action that forgets to re-ask refuses, which is ADR-0340's defect (an obligation handed back
     // and dropped) failing in the safe direction one level up.
+    //
+    // `list` re-asks differently from the other four and that is the one thing to know about it: it
+    // asks once per row of the page it loaded and **drops** the rows that are refused, because a
+    // list decides for a set and there is no single record a 403 could be about. See the arm.
     const obligationOutstanding =
       !decision.allowed && isAbacDeferred(decision.abac) && actionCanSupplyRecord(spec.action);
     if (!decision.allowed && !obligationOutstanding) return entityForbidden(spec.action, decision);
@@ -218,10 +247,40 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         const config = spec.listConfig ?? FALLBACK_LIST_CONFIG;
         const fields = parseFields(request.query);
         const query = { ...parseListQuery(request.query, config), ...(fields !== null ? { fields } : {}) };
+        if (obligationOutstanding) {
+          // Before the store call: a query that may not be answered must not be run, and the
+          // refusal is about what the caller asked to be *told* rather than about anything the
+          // store holds. The withheld set is the entity's classified fields and not this caller's
+          // own redaction set, which is computed at the gateway after the handler has returned —
+          // so it is wider than strictly necessary, wrong only in the refusing direction, and only
+          // while a record policy is dropping rows at all.
+          const addressing = withheldAddressing(
+            query,
+            new Set((ctx.classifiedFields?.get(spec.entity) ?? []).map((f) => f.name)),
+          );
+          if (addressing !== null) return addressingRefused(spec.entity, addressing);
+        }
         const page = await ctx.store.listPage(tenantId, spec.entity, query);
-        const data = fields === null ? page.records : page.records.map((r) => projectRecord(r, fields));
+        // Deliberately **not** `resolveObligation`: that helper turns a refusal into a 403, which is
+        // right where the act decides about one named record and wrong here — the whole point of
+        // this position is that a denial is not an error, it is a row the caller is not shown.
+        const visible = obligationOutstanding ? admittedRecords(entityCheck, page.records) : page.records;
+        const data = fields === null ? visible : visible.map((r) => projectRecord(r, fields));
         return json(200, {
           data,
+          // **`nextCursor` passes through untouched, and a short page is the correct answer.** It is
+          // derived in the store from the last row of *its* slice and is non-null iff the store had
+          // more rows, so termination is `nextCursor === null` and nothing else. Re-deriving it from
+          // the last *visible* row would make a fully-denied page carry no cursor, and the walk
+          // would then stop early — silently truncating a result the caller is entitled to — or, on
+          // a cursor taken from a row that was dropped, repeat. So a page may come back with fewer
+          // than `limit` rows, or with none, while the cursor is non-null; the next reader's
+          // instinct will be to "fix" that, and the fix is the bug.
+          //
+          // Nor is the page re-filled by fetching until `limit` rows survive: that makes the work
+          // per request depend on the policy's selectivity — a caller who may see 1% of rows would
+          // cost ~100 store calls for one page — which is a denial of service reachable from a
+          // manifest declaration. One store call per request, exactly as before.
           page: { limit: query.limit, nextCursor: page.nextCursor },
         });
       }
@@ -523,6 +582,72 @@ async function applyTransition(
       transitionTo: t.toState,
     });
     return json(200, after);
+  });
+}
+
+/**
+ * The rows of a page this principal's record-level policy admits, in order.
+ *
+ * **One `rbacCheckForRecords` and never a loop of `rbacCheck`.** The entity, grant and role arms do
+ * not depend on the record, so the plural form resolves them once for the whole page and pools the
+ * obligations into exactly one batch — which is what keeps a page of 500 rows from becoming 500
+ * round trips to a deployment's policy service. Each element is what `rbacCheck` would have
+ * returned for that record, so filtering on `allowed` decides nothing the single form would not.
+ *
+ * It reports **nothing** about what it dropped, and that is the decision rather than an omission: a
+ * withheld count is an inference channel the caller narrows with filters, and unlike ADR-0342's
+ * 403 — where the caller had *named* the record and so already knew it might exist — a list caller
+ * named nothing.
+ */
+function admittedRecords(
+  entityCheck: Omit<RbacCheckInput, "record">,
+  records: readonly EntityRecord[],
+): readonly EntityRecord[] {
+  const decisions = rbacCheckForRecords(entityCheck, records);
+  // `?? false` rather than `!`: a decisions array shorter than the page would otherwise admit its
+  // tail, and a gap where an authorization answer should be has to drop the row, not keep it.
+  return records.filter((_, index) => decisions[index]?.allowed ?? false);
+}
+
+/**
+ * Why each addressing surface is refused and under which error code, as a **total map** so a fourth
+ * surface is a compile error rather than a refusal with no explanation attached to it.
+ */
+const WITHHELD_ADDRESSING: Readonly<
+  Record<WithheldAddressing["surface"], { readonly error: string; readonly reason: string }>
+> = {
+  sort: {
+    error: "sort_addresses_withheld_field",
+    reason:
+      "the page cursor is built from the last row the store returned, which may be a row you are not shown, so ordering by a field you may not read would hand you that row's value",
+  },
+  filter: {
+    error: "filter_addresses_withheld_field",
+    reason:
+      "the response distinguishes a match from no match, so filtering on a field you may not read would let the contents of a row you are not shown be tested one value at a time",
+  },
+  search: {
+    error: "search_addresses_withheld_field",
+    reason:
+      "free-text search spans a field you may not read, so the response would let the contents of a row you are not shown be tested one term at a time",
+  },
+};
+
+/**
+ * **400 and not 403.** This caller may list the entity — they passed the entity-level role check to
+ * reach here — and it is the *query* that cannot be answered. A 403 would say the act was refused
+ * and send an operator to the permission map, where there is nothing to fix.
+ *
+ * The field is named and no value ever is: the sort and filter spellings came from the caller, but
+ * `search`'s field list is the manifest's, and a refusal that echoed the term would report what was
+ * being probed back to the prober.
+ */
+function addressingRefused(entity: string, addressing: WithheldAddressing): HandlerOutput {
+  const { error, reason } = WITHHELD_ADDRESSING[addressing.surface];
+  return json(400, {
+    error,
+    detail: `'${addressing.field}' on '${entity}' may not address rows while rows are being withheld: ${reason}`,
+    field: addressing.field,
   });
 }
 

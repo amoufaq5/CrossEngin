@@ -1,9 +1,14 @@
 import {
+  ABAC_RECORD_AVAILABILITY,
+  isAbacDeferred,
   rbacCheck,
+  rbacCheckForRecords,
+  type AbacBatchEvaluator,
   type AbacEvaluator,
   type AuthorizationDecision,
   type PermissionMap,
   type Principal,
+  type RbacCheckInput,
   type RoleDefinition,
   type RoleName,
 } from "@crossengin/auth";
@@ -178,6 +183,12 @@ export interface AssociationHandlerContext {
    * route behind it answer one grant the same way.
    */
   readonly abacEvaluator?: AbacEvaluator;
+  /**
+   * The batch arm beside `abacEvaluator`, read only by the list family's row filter. The same seam
+   * `HandlerContext` carries, and registered from the same object, so an association list and the
+   * entity list behind it pool one grant's obligations the same way.
+   */
+  readonly abacBatchEvaluator?: AbacBatchEvaluator;
 }
 
 function json(status: number, body: unknown): HandlerOutput {
@@ -189,11 +200,18 @@ function json(status: number, body: unknown): HandlerOutput {
  * obligation has to appear on every one of them — three routes that answer the same grant and
  * report it three ways would be a list to keep in step, which is this repo's recurring defect.
  * `denied` and `undischargeable` are different actions for an operator, so the outcome is named.
+ *
+ * `structuralReason` is appended by a family at which a `deferred` obligation can never be
+ * discharged, following `handlers.ts`' `entityForbidden`: `deferred` on its own reads like a retry,
+ * and a family with nothing to retry with has to say why.
  */
-function forbidden(decision: AuthorizationDecision): HandlerOutput {
+function forbidden(decision: AuthorizationDecision, structuralReason?: string): HandlerOutput {
   return json(403, {
     error: "forbidden",
-    detail: decision.reason,
+    detail:
+      structuralReason === undefined
+        ? decision.reason
+        : `${decision.reason ?? "refused"}: ${structuralReason}`,
     ...(decision.abac !== undefined
       ? { abacPolicyKey: decision.abac.policyKey, abacOutcome: decision.abac.outcome }
       : {}),
@@ -216,33 +234,56 @@ function authPrincipal(resolved: ResolvedPrincipal | null, principalRoles: Assoc
 }
 
 /**
+ * The related records this principal's record-level policy admits, in order, reporting **nothing**
+ * about the ones it dropped — see `handlers.ts`' `admittedRecords` for why a withheld count is an
+ * inference channel and not a courtesy.
+ */
+function admitted(
+  check: Omit<RbacCheckInput, "record">,
+  records: readonly EntityRecord[],
+): readonly EntityRecord[] {
+  const decisions = rbacCheckForRecords(check, records);
+  return records.filter((_, index) => decisions[index]?.allowed ?? false);
+}
+
+/**
  * `GET /v1/<owner>/{id}/<related>` — RBAC-checks `list` on the *related* entity, resolves the owner's
  * association links (`listLinks` narrowed to the owner side), fetches each linked related record, and
- * returns `{data}` (full records; the gateway redacts per-caller at the edge, exactly like the list
+ * returns `{data}` (every field; the gateway redacts per-caller at the edge, exactly like the list
  * endpoint). A store without association support returns `501 associations_unsupported` rather than an
  * empty list, so the caller can tell "no support" from "no links".
+ *
+ * A record-bearing obligation on that `list` grant **filters the page**, exactly as the entity list
+ * arm does: the related records are loaded here anyway, so each one can be asked about and the
+ * refused ones dropped. Its cursor needs no addressing guard and cannot be unsettled by the
+ * filtering — see the two comments inside.
  */
 export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: AssociationHandlerContext): Handler {
   return async ({ request, principal, params }) => {
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
 
-    // No `record`, and structurally none: this answers `list` for the *set* of records linked to
-    // the owner, so a per-record answer would be a filter and not an authorization decision —
-    // `ABAC_RECORD_AVAILABILITY.entity_list` is `never` for exactly that reason. A record-bearing
-    // policy therefore answers `deferred`, which `ABAC_OUTCOME_ALLOWS` refuses, and the refusal
-    // lands on the `!decision.allowed` arm below with no special case. Stated rather than left to
-    // be rediscovered: a reader who notices the links *are* loaded further down might reach for
-    // them, and they are the wrong records — the policy is about the related entity, one row each.
-    const decision = rbacCheck({
+    // The record-free ask, one question for the whole page. A record-bearing policy answers
+    // `deferred`, which `ABAC_OUTCOME_ALLOWS` refuses — so the flag below records an outstanding
+    // obligation and grants nothing, and the records are filtered by it once they are loaded. The
+    // availability is read from `ABAC_RECORD_AVAILABILITY` rather than assumed, because that map is
+    // the contract a boot check refuses a manifest against: a route deciding for itself that it can
+    // re-ask would make the refusal and the request path disagree about one position.
+    const check: Omit<RbacCheckInput, "record"> = {
       principal: authPrincipal(principal, ctx.principalRoles),
       permissions: ctx.permissions,
       roles: ctx.roles,
       entity: spec.relatedEntity,
       operation: "list",
       ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
-    });
-    if (!decision.allowed) return forbidden(decision);
+      ...(ctx.abacBatchEvaluator !== undefined ? { abacBatchEvaluator: ctx.abacBatchEvaluator } : {}),
+    };
+    const decision = rbacCheck(check);
+    const obligationOutstanding =
+      !decision.allowed &&
+      isAbacDeferred(decision.abac) &&
+      ABAC_RECORD_AVAILABILITY.entity_list === "always";
+    if (!decision.allowed && !obligationOutstanding) return forbidden(decision);
 
     if (!isAssociationReader(ctx.store)) {
       return json(501, { error: "associations_unsupported", detail: "the entity store does not support associations" });
@@ -264,7 +305,23 @@ export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: Ass
     const allIds = links.map((l) => (spec.ownerIsLeft ? l.rightId : l.leftId));
     const pageIds = allIds.slice(offset, offset + limit);
     const records = await Promise.all(pageIds.map((id) => ctx.store.get(tenantId, spec.relatedEntity, id)));
-    const data = records.filter((r): r is EntityRecord => r !== null);
+    const loaded = records.filter((r): r is EntityRecord => r !== null);
+    // One `rbacCheckForRecords` over the loaded related records, never a loop of `rbacCheck`: the
+    // entity, grant and role arms do not depend on the record, so they are resolved once for the
+    // page and the obligations pool into a single batch. `?? false` and not `!`, so a decisions
+    // array shorter than the page drops its tail rather than admitting it.
+    //
+    // **No addressing guard here, and none is possible to need.** `handlers.ts` refuses a `?sort`,
+    // `?filter` or `?q` on a withheld field because the entity list's keyset cursor carries the
+    // sort *values* of the store's last row, which under filtering may be a row the caller never
+    // sees. This route has no such surface: there is no `?sort`, `?filter` or `?q` on it at all,
+    // and its cursor is a plain offset into the owner's links.
+    const data = obligationOutstanding ? admitted(check, loaded) : loaded;
+    // Computed from `allIds`, so the filtering cannot disturb it: the offset addresses the owner's
+    // *links* and not the rows that survived, which is the same property the entity list arm holds
+    // by leaving the store's `nextCursor` alone. A page may come back short, or empty, with a
+    // non-null cursor — termination is `nextCursor === null` and nothing else, and re-filling the
+    // page would make the work per request depend on the policy's selectivity.
     const nextCursor = offset + limit < allIds.length ? String(offset + limit) : null;
     return json(200, { data, page: { limit, nextCursor } });
   };
@@ -340,6 +397,10 @@ export function associationCountRouteFromSpec(spec: AssociationCountRouteSpec): 
   };
 }
 
+/** Why a record-bearing obligation is refused outright here while its sibling list route filters. */
+const COUNT_HAS_NO_ROWS_TO_FILTER =
+  "a count answers for the whole set with one number, so there are no rows to drop and no record to answer against, and fetching every linked record to count the admitted ones would be unbounded";
+
 /**
  * `GET /v1/<owner>/{id}/<related>/count` — RBAC-checks `list` on the *related* entity, then returns
  * `{count}`: the number of the owner's association links (`countLinks` narrowed to the owner side). A
@@ -350,9 +411,15 @@ export function buildAssociationCountHandler(spec: AssociationCountRouteSpec, ct
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
 
-    // No `record`, for the list family's reason and one sharper: a count answers for a set and
-    // returns a number, so there is not even a record set to filter. A record-bearing policy
-    // answers `deferred` and refuses below.
+    // No `record`, and this family is where that is still structural. Its sibling list route now
+    // filters — a record-bearing policy on this very grant drops rows there — but a count answers
+    // for the whole set with one number, so there is nothing to filter and no row to be answered
+    // against. A record-bearing policy therefore answers `deferred`, which `ABAC_OUTCOME_ALLOWS`
+    // refuses, and the refusal lands on the `!decision.allowed` arm with no special case.
+    //
+    // The reason is **carried in the 403** rather than inherited from
+    // `ABAC_RECORD_AVAILABILITY_REASONS`: that map now says the list position has every row in
+    // hand, which is true of the route this one counts for and not of this one.
     const decision = rbacCheck({
       principal: authPrincipal(principal, ctx.principalRoles),
       permissions: ctx.permissions,
@@ -361,7 +428,12 @@ export function buildAssociationCountHandler(spec: AssociationCountRouteSpec, ct
       operation: "list",
       ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
     });
-    if (!decision.allowed) return forbidden(decision);
+    if (!decision.allowed) {
+      return forbidden(
+        decision,
+        isAbacDeferred(decision.abac) ? COUNT_HAS_NO_ROWS_TO_FILTER : undefined,
+      );
+    }
 
     if (!isAssociationCounter(ctx.store)) {
       return json(501, { error: "associations_unsupported", detail: "the entity store does not support associations" });
@@ -488,10 +560,10 @@ export function buildAssociationWriteHandler(spec: AssociationWriteRouteSpec, ct
     if (tenantId === null) return json(401, { error: "tenant_required" });
 
     // No `record`, so a record-bearing policy on the owner's `update` grant answers `deferred` and
-    // refuses below — and unlike the list and count families, this one is an **unclosed position
-    // rather than a structural impossibility**. The grant is `update` on the owner entity, the
-    // owner's id is in the path, and the store could load that record and the decision be re-asked
-    // with it, exactly as the entity `update` handler does. It is not loaded today: link and unlink
+    // refuses below — and unlike the count family, this one is an **unclosed position rather than
+    // a structural impossibility**. The grant is `update` on the owner entity, the owner's id is in
+    // the path, and the store could load that record and the decision be re-asked with it, exactly
+    // as the entity `update` handler does. It is not loaded today: link and unlink
     // are store calls on the join table and never read the owner at all, so supplying the record
     // means adding a fetch to a route that has none. Until then a record-bearing policy makes the
     // owner's associations unwritable, which is the fail-closed direction and is what this refusal

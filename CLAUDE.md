@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 339 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 340 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~17,151 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~17,244 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -347,6 +347,44 @@ type errors.
   three obligated fields goes from **1,503 evaluator calls to 2**, and live the crossings are
   2 per response with **zero** on the single arm.
 
+  ADR-0345 closes ADR-0343's Q2 and the class is **a denial that is not a refusal**. It is the
+  *mirror* of ADR-0343: that increment found a structural refusal that was really a wiring one, and
+  here the stated reason was **true** — ADR-0343's own sentence, *"an entity-list policy would
+  filter rows, leaving the page's cursor describing a set the caller was not shown"*, is exactly
+  what happens. So one refusal was imaginary and one was real, and the real one closes by paying its
+  price rather than by discovering there wasn't one.
+  The crux is the cursor. `encodeKeyset` is `base64url(JSON.stringify({k, id}))` — plainly
+  reversible — and `nextCursor` comes from the **last row of the store's slice**. Of the three
+  candidates, two are unsound: the **last visible row** leaves a fully-denied page with no cursor,
+  so the walk loops or silently truncates (a wrong answer, which this repo ranks below a refusal);
+  **re-filling to `limit`** makes the work per request a function of the policy's *selectivity*, so
+  a caller who may see 1% of rows costs ~100 store calls for one page — a denial of service
+  reachable from a manifest declaration. So the store's cursor passes through **untouched**, and the
+  price is that **a page can be short or empty while `nextCursor` is non-null**: termination is
+  `nextCursor === null` and nothing else. Verified against every in-repo consumer. There is no
+  withheld count either, and the contrast with ADR-0342 is the useful part — a record-level denial
+  is a 403 and not a 404 *because the caller had named the record*; here they named nothing, so
+  **who named the record** is what decides whether telling them it exists costs anything.
+  The residual is that the cursor names the **position** of withheld rows, which is irreducible —
+  advancing past a withheld row means naming where it was. One rule holds it to position rather than
+  contents: **while rows are being withheld, a caller may not address rows by a field they may not
+  read**, over `?sort` (the cursor carries the value), `?filter` and `?q` (a chosen-predicate oracle
+  the response answers through the cursor's presence). A 400 per surface, **before the store call**.
+  A classified *default* sort is a **boot refusal** instead, because the sort came from the manifest
+  and no caller can opt out — and the measured member is `erp-healthcare`'s `Patient`, sorting by
+  `family_name`, which is **`pii`** and deliberately *not* one of ADR-0338's five ciphertext fields
+  (an earlier draft claimed that tie and it is false). 132 list views across the resolved packs,
+  every one with a default sort, 28 distinct by `(entity, sort)`, one hit.
+  `ABAC_DENIAL_EFFECT` is the **second axis** this made real: availability answers *can this
+  position be asked*, and until now that was the only axis worth having because a denial always
+  refused. The association **list** filters too (its cursor is an offset into the owner's links, so
+  no disclosure applies), while the **count** keeps refusing with **no logic change** — `deferred`
+  is already `false` — and needed only its own sentence in the 403, because the availability reason
+  now says the list position has every row in hand, which is true of the route it counts for and not
+  of itself. Live, the case the design turns on: a fully-denied page returns **0 rows with a
+  non-null cursor**, the walk terminates, and two principals holding one role see an exact
+  complement of the seven rows.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -518,7 +556,21 @@ packages exist at only one layer, noted below where that is true.
 - **`operate-runtime`** — the largest package and the heart of the product: it compiles a
   resolved manifest into a live multi-tenant API. Route/operation derivation and slugs,
   an `EntityStore` interface with typed list filters + keyset pagination + projection,
-  RBAC-enforcing CRUD/lifecycle handlers, association (m2m) routes, numbering sequences,
+  RBAC-enforcing CRUD/lifecycle handlers — which **filter rows** since ADR-0345, when a
+  record-bearing obligation sits on an entity's `list` grant: the arm asks `rbacCheckForRecords`
+  once for the page it loaded and drops the refused rows, passing the store's `nextCursor` through
+  **untouched**, so a page may be short or empty with a non-null cursor and termination is
+  `nextCursor === null` and nothing else. Deliberately not through ADR-0342's `resolveObligation`,
+  which turns a refusal into a 403 — right for an act about one named record, wrong here, because
+  the point of the position is that a denial is not an error. `withheldAddressing` runs **before**
+  the store call and 400s a `?sort` / `?filter` / `?q` naming a classified field while rows are
+  being withheld, one code per surface; its withheld set is the entity's classified fields rather
+  than this caller's redaction set (computed at the gateway, after the handler returns), so it is
+  wider than necessary and wrong only in the refusing direction. The association **list** filters
+  the same way and needs no guard — its cursor is an offset into the owner's links and the route has
+  no query surfaces — while the association **count** refuses, with no logic change, carrying its
+  own reason because the availability prose now says the list position has every row in hand, which
+  is true of the route it counts for and not of itself. Also association (m2m) routes, numbering sequences,
   tenant settings, a `UiSchema` builder that drives the web client, plus write **guards**
   (period locks, posted-entry immutability) and write **effects** — the double-entry
   accounting core: GL postings for invoices/bills/payments/credit notes, tax breakdown,
@@ -902,7 +954,20 @@ packages exist at only one layer, noted below where that is true.
   so a policy service is not woken for nothing. ADR-0341's `abacAttributes === null` refusal settles
   **before** the array is built, so a batch evaluator receives only answerable questions and its
   length is the number of those.
-  All five readers fail closed — `rbacCheck` plus the four field functions, which take one
+  **`rbacCheckForRecords(input, records)` is the plural entity check** (ADR-0345), one decision per
+  record and positionally aligned, which is what row filtering runs on. The entity, grant and
+  **role** arms resolve once — none depends on the record — and only the obligation is asked per
+  row, pooled into exactly one `dischargeAbacBatch`. Each element is identical to what `rbacCheck`
+  would return for that record, reason and `abac` included, and that is held **by construction**:
+  both readers go through one private `lookupGrant` and one `decideFromDischarge`, so the
+  elementwise property cannot rest on two functions agreeing. The input is
+  `Omit<RbacCheckInput, "record">` for the plural read path's reason, and
+  `RbacCheckInput.abacBatchEvaluator` rides on the shared input — ignored by `rbacCheck`, which asks
+  one question — so a caller cannot hand the single evaluator to one form and the batch to the
+  other. An elementwise-equality test asserts *agreement*, not correctness, so ADR-0340's
+  role-check-first ordering is fenced **separately** with a spy: both readers share `lookupGrant`
+  and would regress together.
+  All readers fail closed — `rbacCheck` and `rbacCheckForRecords` plus the four field functions, which take one
   trailing `AbacEnforcement {entity, evaluator?, evaluateBatch?, record?}` whose `entity` is *required*, so a caller cannot
   ask for enforcement without naming the entity the policy is about, and **omitting the parameter
   refuses rather than skips** (pinned by a `toEqual` against the no-evaluator result, so a forgotten
@@ -947,9 +1012,22 @@ packages exist at only one layer, noted below where that is true.
   is total and does not throw: three operation names are unreachable for a field obligation and are
   mapped to the entity position for that operation rather than defaulting, because the permissive
   default is the one a fall-through would pick. **`never` is pinned as the exact set
-  `{entity_create, entity_list}`** since ADR-0343, not asserted key by key, because per-key
-  assertions on this map are what let `field_read` sit on the wrong value — so flipping a third
-  position back fails there rather than passing quietly.
+  `{entity_create}`** since ADR-0345 — it was `{entity_create, entity_list}` after ADR-0343 — and as
+  an exact set rather than key by key, because per-key assertions on this map are what let
+  `field_read` sit on the wrong value, so flipping a position back fails there rather than passing
+  quietly. `entity_list` is `always` now: the list handler loads the page before it returns, so
+  every row is in hand, and **a denial there drops the row from the page rather than refusing the
+  request**. ADR-0343's `field_read`-vs-`entity_list` distinction survives but **moves axis** — both
+  have the record and both always did; what separates them is what a denial *does*, and reading that
+  as an availability difference is what kept both refused at boot longer than the facts warranted.
+  **`ABAC_DENIAL_EFFECT` is that second axis** (ADR-0345), a total map over the eight positions to
+  `refuses_request` / `withholds_field` / `filters_rows`, with descriptions keyed per **effect** —
+  three strings, not eight, since the effect's name already carries the position-specific part.
+  Availability answers *can this position be asked*; until row filtering existed that was the only
+  axis worth having, because the answer to a denial was the same everywhere. `entity_create` reads
+  `refuses_request` though a boot refusal makes it unreachable, because a total map with a hole is
+  what a total map exists to prevent. Read by the boot report and by nothing else, deliberately: the
+  list arm *is* the `filters_rows` behaviour, so branching on the map there would be a tautology.
   **`FieldRedactionResult.deferred` is the other half of the two-pass** (ADR-0343): the fields whose
   role check passed and whose *only* refusal is an obligation answering `deferred`, so it answers
   exactly "would supplying the record possibly change this?". A field refused on roles, or answered
@@ -2092,6 +2170,26 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `would_make_entity_uncreatable`, naming the classification declaration as the remedy for
   something no declaration can fix. First refusal wins, so it has to be the one whose remedy is
   true.
+  **A fourth refusal and a third report joined it in ADR-0345.** `rowFiltered` names the
+  record-bearing obligations whose position's `ABAC_DENIAL_EFFECT` is `filters_rows` — derived
+  through that map, so the string `"entity_list"` appears nowhere in the module's logic — and is
+  **reported, not refused**, for `createBlocked`'s reason: a denial that drops a row is a coherent
+  answer. It gets its own sentence because **none of its three consequences is guessable from the
+  declaration**, and all three are things a client integration gets wrong silently: a page comes
+  back shorter than `limit` and may be empty while `nextCursor` is non-null, so a client stopping on
+  an empty `data` stops early; the association count route over that entity refuses; and a
+  `?sort`/`?filter`/`?q` naming a classified field is refused at request time.
+  `list_sort_addresses_withheld_field` is the refusal, last in the order for `record_unavailable`'s
+  reason — it is computed from `recordBearingKeys`, so with no evaluator it would be vacuously
+  silent. It fires when a view's **default** sort names a classified field of an entity in
+  `rowFiltered`, read through `listConfigForEntity` (the same function the handler uses) over
+  `resolvedFields`, so a classified **trait** field is in scope. The predicate is *classified* and
+  deliberately **not** `isSensitiveDataClass`-narrowed, so it is the same set the request-time guard
+  uses — narrowing it would let a boot pass still 400 on page one for an `internal`-classified sort.
+  And the refusal is **not** preventing a leak: the guard already stops the value reaching a cursor,
+  so what it converts is a *certain page-one 400 on every request* into a boot failure naming the
+  view, the field, its classification and three remedies — ADR-0334's conversion again, since the
+  sort came from the manifest and no caller can opt out.
   **`--abac-policy <key>=<attribute>:<op>[:<operand>]` is the policy layer** (ADR-0341, ops `eq` /
   `ne` / `in` / `present`; ADR-0342 added `eq_record` / `ne_record` / `in_record`, whose operand is
   a **field of the record** rather than a literal), colon-delimited after the key because that is `--rate-limit-policy`'s
@@ -2838,9 +2936,9 @@ opened them.
   corrected three of the things this entry said: **one** reader takes the arm and not five, the shape
   is not `(inputs) => readonly AbacOutcome[]` (an answer echoes its index, because a permutation is
   otherwise undetectable), and the fan-out is records × fields rather than records. See the next
-  entry. **(2)** **entity `list` still cannot**, and the honest shape for it is **row
-  filtering**, which changes what `page.nextCursor` and any count mean — a different feature, not a
-  wider redaction. **(3)** a record with a **nested** object gets the record's own set applied to
+  entry. **(2)** ~~entity `list` still cannot~~ — **closed by ADR-0345**, and this entry's
+  prediction was right: it *is* row filtering and it *did* change what `nextCursor` means. See the
+  next entry. **(3)** a record with a **nested** object gets the record's own set applied to
   the nested value by `redactJsonValue`'s walk: correct for the flat JSONB documents entity records
   are today, unexamined for a nested shape where the nested object is arguably its own record.
   **(4)** the shape is declared per operation by `compileOperateServer`; a deployment supplying its
@@ -2857,13 +2955,17 @@ opened them.
   index must be its own position. Measured on the same tree with both arms live: a 500-row page with
   three obligated fields goes from **1,503 evaluator calls to 2**, with identical answers; live, one
   list request makes **2** seam crossings and **zero** on the single arm, and boot makes none.
-  Two of the five readers batch; the write masks must not, because first-refusal-wins means a pool
-  would ask about fields whose answers are never needed.
+  **Three** readers batch since ADR-0345 added `rbacCheckForRecords` — the classified read pair and
+  the plural entity check — and the write masks must not, because first-refusal-wins means a pool
+  would ask about fields whose answers are never needed. The reader counts are deliberately gone
+  from the code: ADR-0344's own doc said "five readers" and a sixth landed one increment later.
   What remains: **(1)** a permuted *outcome* list with ascending indices is still accepted — the
   echo catches a reordered answer **list**, not one that mislabels each element, and there is no
   cheap check for the second. **(2)** `rbacCheck` is still one question per call, so a request
   holding an entity grant **and** a field mask asks separately; grouping those is a different seam,
-  because the two decisions happen at different points in the handler. **(3)** the degenerate batch
+  because the two decisions happen at different points in the handler. ADR-0345 corrected this
+  entry's sibling claim — ADR-0344 said the handler path had no reader with a fan-out, which was
+  true of the readers that existed and false one increment later. **(3)** the degenerate batch
   in `abac-policy.ts` exists to exercise a branch, so if a real batch producer ever lands it should
   **replace** rather than join it — two producers for one policy layer is the divergence
   `privilegedForClass` is behind one definition to prevent. **(4)** the pool is per *call*, so the
@@ -2872,6 +2974,33 @@ opened them.
   aliased record contributes duplicate cells to the batch, unreachable from the pipeline since
   `JSON.parse` never aliases, and not worth de-duplicating for a case only a direct
   `redactRecords` call can produce.
+- **An entity `list` policy filters rows, and what is left of it** (ADR-0345 closed ADR-0343's Q2).
+  A record-bearing obligation on a `list` grant drops the refused rows from the page instead of
+  refusing the request; `entity_list` is `always` and `never` is now the one-member set
+  `{entity_create}`. The store's `nextCursor` passes through **untouched**, which is the whole
+  soundness argument: taking it from the last *visible* row leaves a fully-denied page with no
+  cursor, so the walk loops or silently truncates, and re-filling to `limit` makes the work per
+  request a function of the policy's selectivity (~100 store calls for a caller who may see 1%) — a
+  denial of service reachable from a manifest declaration. Verified live: a fully-denied page returns
+  **0 rows with a non-null cursor**, the walk still terminates, and two principals holding one role
+  see an exact complement of the seven rows.
+  What remains: **(1)** the cursor discloses the **position** of withheld rows — the sort key and the
+  `id` — which is irreducible for sound stateless paging, since advancing past a row means naming
+  where it was, and at `limit=1` it is an **id enumeration** this repo did not previously permit. The
+  fix is an **encrypted cursor**, which needs the symmetric cipher `packages/crypto` deliberately
+  does not have (three pins; ADR-0338 kept it that way), so it belongs to the increment that adds
+  AES-256-GCM for the DEK envelope. **(2)** the withheld set is the entity's classified fields rather
+  than this caller's redaction set, so a privileged caller's classified `?sort` is refused too while
+  an obligation is outstanding; exact would mean resolving `SensitiveFieldPolicy` and the per-field
+  read grants a second time in the handler, which is a second place for the read and write halves to
+  drift. **(3)** association **link/unlink** is now an **unclosed** position rather than a structural
+  one — the grant is `update` on the owner, the owner's id is in the path, and the record could be
+  loaded and the decision re-asked exactly as entity `update` does. Vacuous today: zero
+  `many_to_many` across the packs. **(4)** a deployment supplying its own evaluator or its own
+  `RedactionRegistry` gets no check that its list grants' policies are record-bearing in the way the
+  boot report assumes. **(5)** whether sorting by a field you cannot read should be refused
+  **generally**, rather than only while rows are being withheld, is unexamined — today it is
+  permitted, and the ordering it reveals is a pre-existing channel this increment did not widen.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3793,7 +3922,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 339 records; 260 Accepted, 79 Proposed (the
+title or status change cannot drift. 340 records; 261 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

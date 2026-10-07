@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { TenantId, UserId } from "@crossengin/types";
 import {
+  ABAC_DENIAL_EFFECT,
+  ABAC_DENIAL_EFFECTS,
+  ABAC_DENIAL_EFFECT_DESCRIPTIONS,
   ABAC_GRANT_POSITIONS,
   ABAC_OUTCOME_ALLOWS,
   ABAC_RECORD_AVAILABILITIES,
@@ -21,6 +24,7 @@ import {
   type AbacBatchRequest,
   type AbacEvaluationInput,
   type AbacEvaluator,
+  type AbacDenialEffect,
   type AbacGrantPosition,
   type AbacObligation,
 } from "./abac.js";
@@ -862,8 +866,11 @@ describe("ABAC_RECORD_AVAILABILITY", () => {
     expect(ABAC_RECORD_AVAILABILITY.entity_create).toBe("never");
   });
 
-  it("answers 'never' for a list: the subject is a set, so a per-row answer is a filter", () => {
-    expect(ABAC_RECORD_AVAILABILITY.entity_list).toBe("never");
+  it("answers 'always' for a list: the handler loads the page, so every row is in hand", () => {
+    // Flipped from `never`, and for the same shape of reason `field_read` was: the obstacle was
+    // never that no record exists, it was that a denial there is a *filter*. Having the record and
+    // what a denial does with it are two axes, and `ABAC_DENIAL_EFFECT` is the second.
+    expect(ABAC_RECORD_AVAILABILITY.entity_list).toBe("always");
   });
 
   it("answers 'always' for a field read: redaction answers per record", () => {
@@ -873,19 +880,22 @@ describe("ABAC_RECORD_AVAILABILITY", () => {
     expect(ABAC_RECORD_AVAILABILITY.field_read).toBe("always");
   });
 
-  it("answers 'always' for read, update, delete, a transition and a field read", () => {
+  it("answers 'always' for read, update, delete, list, a transition and a field read", () => {
     expect(ABAC_RECORD_AVAILABILITY.entity_read).toBe("always");
     expect(ABAC_RECORD_AVAILABILITY.entity_update).toBe("always");
     expect(ABAC_RECORD_AVAILABILITY.entity_delete).toBe("always");
+    expect(ABAC_RECORD_AVAILABILITY.entity_list).toBe("always");
     expect(ABAC_RECORD_AVAILABILITY.entity_transition).toBe("always");
     expect(ABAC_RECORD_AVAILABILITY.field_read).toBe("always");
   });
 
-  it("answers 'never' for exactly the two positions with no record to find", () => {
-    // Pinned as a set rather than per key, so flipping a third position back to `never` without
-    // arguing for it fails here. A `never` position is refused at boot with no escape hatch.
+  it("answers 'never' for exactly one position, the one with no record to find", () => {
+    // Pinned as the exact set rather than per key, because per-key assertions on this map are what
+    // let `field_read` sit on the wrong value: flipping a position back to `never` without arguing
+    // for it fails here rather than passing quietly. A `never` position is refused at boot with no
+    // escape hatch.
     const never = ABAC_GRANT_POSITIONS.filter((p) => ABAC_RECORD_AVAILABILITY[p] === "never");
-    expect(never).toEqual(["entity_create", "entity_list"]);
+    expect(never).toEqual(["entity_create"]);
   });
 
   it("answers 'sometimes' for a field update, and only for that one", () => {
@@ -945,9 +955,18 @@ describe("ABAC_RECORD_AVAILABILITY_REASONS", () => {
     }
   });
 
-  it("names the structural obstacle on each 'never' position", () => {
+  it("names the structural obstacle on the one 'never' position", () => {
     expect(ABAC_RECORD_AVAILABILITY_REASONS.entity_create).toContain("does not exist");
-    expect(ABAC_RECORD_AVAILABILITY_REASONS.entity_list).toContain("set of records");
+  });
+
+  it("names what supplies the record on a list, and that a denial there filters", () => {
+    // Two facts, both load-bearing: a `never` reason left on an `always` position would refuse a
+    // policy the deployment can in fact answer, and an author reading only "the page is in hand"
+    // would expect a 403 where they will get a shorter page.
+    const reason = ABAC_RECORD_AVAILABILITY_REASONS.entity_list;
+    expect(reason).toContain("page");
+    expect(reason).toContain("drops that row");
+    expect(reason).not.toContain("set of records");
   });
 
   it("names what supplies the record on a field read, now that one does", () => {
@@ -957,6 +976,130 @@ describe("ABAC_RECORD_AVAILABILITY_REASONS", () => {
     const reason = ABAC_RECORD_AVAILABILITY_REASONS.field_read;
     expect(reason).toContain("per record");
     expect(reason).not.toContain("cannot");
+  });
+});
+
+describe("ABAC_DENIAL_EFFECTS", () => {
+  it("names the three things a refusal can do to a response", () => {
+    expect(ABAC_DENIAL_EFFECTS).toEqual(["refuses_request", "withholds_field", "filters_rows"]);
+  });
+
+  it("matches the AbacDenialEffect union exhaustively", () => {
+    const exhaustive: Record<AbacDenialEffect, true> = {
+      refuses_request: true,
+      withholds_field: true,
+      filters_rows: true,
+    };
+    expect(Object.keys(exhaustive).sort()).toEqual([...ABAC_DENIAL_EFFECTS].sort());
+  });
+});
+
+describe("ABAC_DENIAL_EFFECT", () => {
+  it("is total: exactly one key per position", () => {
+    expect(Object.keys(ABAC_DENIAL_EFFECT)).toHaveLength(ABAC_GRANT_POSITIONS.length);
+    expect(Object.keys(ABAC_DENIAL_EFFECT).sort()).toEqual([...ABAC_GRANT_POSITIONS].sort());
+  });
+
+  it("only ever answers with a declared effect", () => {
+    for (const p of ABAC_GRANT_POSITIONS) {
+      expect(ABAC_DENIAL_EFFECTS).toContain(ABAC_DENIAL_EFFECT[p]);
+    }
+  });
+
+  it("filters rows for exactly one position, the list", () => {
+    // The exact set, not the one key: this is the axis `ABAC_RECORD_AVAILABILITY` could not express,
+    // and a second position silently acquiring it would mean a page shortening somewhere nobody
+    // argued for.
+    const filtering = ABAC_GRANT_POSITIONS.filter(
+      (p) => ABAC_DENIAL_EFFECT[p] === "filters_rows",
+    );
+    expect(filtering).toEqual(["entity_list"]);
+  });
+
+  it("withholds a field for exactly one position, the field read", () => {
+    const withholding = ABAC_GRANT_POSITIONS.filter(
+      (p) => ABAC_DENIAL_EFFECT[p] === "withholds_field",
+    );
+    expect(withholding).toEqual(["field_read"]);
+  });
+
+  it("refuses the request everywhere else, field_update included", () => {
+    // A field *update* denial is a 403 and not a silent drop: writing part of a patch and discarding
+    // the rest would report success for a write the caller did not make.
+    const refusing = ABAC_GRANT_POSITIONS.filter(
+      (p) => ABAC_DENIAL_EFFECT[p] === "refuses_request",
+    );
+    expect(refusing).toEqual([
+      "entity_create",
+      "entity_read",
+      "entity_update",
+      "entity_delete",
+      "entity_transition",
+      "field_update",
+    ]);
+  });
+
+  it("answers for entity_create even though a boot refusal makes it unreachable", () => {
+    // Honest rather than a hole: it is what a denial there would do, and a total map with a gap is
+    // the thing a total map exists to prevent — the position would otherwise have to be remembered
+    // the day the boot refusal moves.
+    expect(ABAC_DENIAL_EFFECT.entity_create).toBe("refuses_request");
+    expect(ABAC_RECORD_AVAILABILITY.entity_create).toBe("never");
+  });
+
+  it("is a second axis: the two maps do not determine each other", () => {
+    // `entity_read` and `entity_list` agree on availability and differ on effect; `entity_create`
+    // and `entity_read` differ on availability and agree on effect. Either map alone loses a fact.
+    expect(ABAC_RECORD_AVAILABILITY.entity_read).toBe(ABAC_RECORD_AVAILABILITY.entity_list);
+    expect(ABAC_DENIAL_EFFECT.entity_read).not.toBe(ABAC_DENIAL_EFFECT.entity_list);
+    expect(ABAC_RECORD_AVAILABILITY.entity_create).not.toBe(ABAC_RECORD_AVAILABILITY.entity_read);
+    expect(ABAC_DENIAL_EFFECT.entity_create).toBe(ABAC_DENIAL_EFFECT.entity_read);
+  });
+});
+
+describe("ABAC_DENIAL_EFFECT_DESCRIPTIONS", () => {
+  it("is total: exactly one description per effect", () => {
+    expect(Object.keys(ABAC_DENIAL_EFFECT_DESCRIPTIONS)).toHaveLength(ABAC_DENIAL_EFFECTS.length);
+    expect(Object.keys(ABAC_DENIAL_EFFECT_DESCRIPTIONS).sort()).toEqual(
+      [...ABAC_DENIAL_EFFECTS].sort(),
+    );
+  });
+
+  it("has a non-empty description for every effect", () => {
+    for (const e of ABAC_DENIAL_EFFECTS) {
+      expect(ABAC_DENIAL_EFFECT_DESCRIPTIONS[e].length).toBeGreaterThan(0);
+    }
+  });
+
+  it("says something beyond the effect name", () => {
+    // Same rule as the availability reasons: a description that only restates its key is worthless
+    // to the operator reading the boot report it is printed in.
+    for (const e of ABAC_DENIAL_EFFECTS) {
+      const description = ABAC_DENIAL_EFFECT_DESCRIPTIONS[e];
+      expect(description).not.toBe(e);
+      expect(description).not.toBe(e.replace("_", " "));
+      expect(description.split(" ").length).toBeGreaterThan(5);
+    }
+  });
+
+  it("reads as a fragment, not a sentence, so it appends to a report line", () => {
+    for (const e of ABAC_DENIAL_EFFECTS) {
+      const description = ABAC_DENIAL_EFFECT_DESCRIPTIONS[e];
+      expect(description[0]).toBe(description[0]?.toLowerCase());
+      expect(description.endsWith(".")).toBe(false);
+    }
+  });
+
+  it("gives each effect a distinct description", () => {
+    expect(new Set(ABAC_DENIAL_EFFECTS.map((e) => ABAC_DENIAL_EFFECT_DESCRIPTIONS[e])).size).toBe(
+      ABAC_DENIAL_EFFECTS.length,
+    );
+  });
+
+  it("describes every position's effect, so a report can always say what a denial does", () => {
+    for (const p of ABAC_GRANT_POSITIONS) {
+      expect(ABAC_DENIAL_EFFECT_DESCRIPTIONS[ABAC_DENIAL_EFFECT[p]].length).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -1062,11 +1205,12 @@ describe("abacRecordAvailabilityFor", () => {
     expect(abacRecordAvailabilityFor(obligation("read", "mrn"))).toBe("always");
   });
 
-  it("answers 'never' for the obligation on a list grant, which a field read is not", () => {
-    // The pair that looks alike and is not: a field read filters columns within a row, which a
-    // response expresses per record; a list would filter rows, and a page whose rows were dropped
-    // describes a set through its cursor and count that the caller was never shown.
-    expect(abacRecordAvailabilityFor(obligation("list", null))).toBe("never");
+  it("answers 'always' for the obligation on a list grant, as it does for a field read", () => {
+    // The pair that looks alike: on *this* axis they now agree, because both have the record and
+    // always did. What separates them is what a denial does, which `ABAC_DENIAL_EFFECT` answers —
+    // a field read withholds columns within a row, a list withholds whole rows.
+    expect(abacRecordAvailabilityFor(obligation("list", null))).toBe("always");
+    expect(ABAC_DENIAL_EFFECT.entity_list).not.toBe(ABAC_DENIAL_EFFECT.field_read);
   });
 
   it("answers 'always' for an obligated update on the entity", () => {
@@ -1075,7 +1219,7 @@ describe("abacRecordAvailabilityFor", () => {
 
   it("answers for every obligation in the surveyed fixture", () => {
     expect(surveyAbacObligations(SURVEY_PERMS).map(abacRecordAvailabilityFor)).toEqual([
-      "never",
+      "always",
       "always",
       "always",
       "always",

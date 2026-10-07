@@ -1,6 +1,8 @@
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import type { Handler, HandlerOutput } from "@crossengin/api-gateway-runtime";
 import type {
+  AbacBatchAnswer,
+  AbacBatchEvaluator,
   AbacEvaluationInput,
   AbacEvaluator,
   AbacOutcome,
@@ -528,6 +530,12 @@ describe("association handlers — abac obligation", () => {
     readonly entity: string;
     readonly operation: Operation;
     readonly ok: number;
+    /**
+     * What a record-bearing policy does here. The list family **filters** — it loads the related
+     * records anyway, so each one can be asked about — while count has no rows to drop and
+     * link/unlink never reads the owner at all.
+     */
+    readonly onDeferred: "refuses" | "filters";
   }
 
   const families: readonly Family[] = [
@@ -539,6 +547,7 @@ describe("association handlers — abac obligation", () => {
       entity: "Product",
       operation: "list",
       ok: 200,
+      onDeferred: "filters",
     },
     {
       name: "count",
@@ -547,6 +556,7 @@ describe("association handlers — abac obligation", () => {
       entity: "Product",
       operation: "list",
       ok: 200,
+      onDeferred: "refuses",
     },
     {
       name: "write",
@@ -556,6 +566,7 @@ describe("association handlers — abac obligation", () => {
       entity: "Tag",
       operation: "update",
       ok: 204,
+      onDeferred: "refuses",
     },
   ];
 
@@ -588,28 +599,29 @@ describe("association handlers — abac obligation", () => {
       expect(store.linked).toEqual([]);
     });
 
-    it(`${family.name}: 403s a deferred outcome, because no record can be supplied here`, async () => {
-      // ADR-0341's open end #1. None of the three families holds a single record: list and count
-      // answer for a *set*, and link/unlink never read the owner. So a record-bearing policy
-      // answers `deferred`, `ABAC_OUTCOME_ALLOWS` refuses it, and it lands on the ordinary
-      // `!decision.allowed` arm with no special case — correct by construction, and pinned here so
-      // that stays true rather than being rediscovered. The two kinds differ in what would fix
-      // them: list and count are structural, while link/unlink is an unclosed position (the owner
-      // record *could* be loaded, exactly as the entity `update` handler loads it, and is not).
-      const store = new FakeStore();
-      const out = await call(
-        family.build(abacCtx(store, answering("deferred"))),
-        family.name === "write" ? "editor" : "viewer",
-        family.params,
-      );
-      expect(out.status).toBe(403);
-      expect(abacBody(out)["abacPolicyKey"]).toBe(ABAC_KEY);
-      expect(abacBody(out)["abacOutcome"]).toBe("deferred");
-      // And nothing behind the check ran, so the deferral did not become a half-done write.
-      expect(store.lastListLinks).toBeNull();
-      expect(store.lastCountLinks).toBeNull();
-      expect(store.linked).toEqual([]);
-    });
+    if (family.onDeferred === "refuses") {
+      it(`${family.name}: 403s a deferred outcome, because no record can be supplied here`, async () => {
+        // A record-bearing policy answers `deferred`, `ABAC_OUTCOME_ALLOWS` refuses it, and it
+        // lands on the ordinary `!decision.allowed` arm with no special case. The two remaining
+        // members differ in what would fix them: a count is structural — it answers for the whole
+        // set with one number, so there are no rows to drop and no record to answer against —
+        // while link/unlink is an unclosed position, since the owner's record *could* be loaded
+        // exactly as the entity `update` handler loads it, and is not.
+        const store = new FakeStore();
+        const out = await call(
+          family.build(abacCtx(store, answering("deferred"))),
+          family.name === "write" ? "editor" : "viewer",
+          family.params,
+        );
+        expect(out.status).toBe(403);
+        expect(abacBody(out)["abacPolicyKey"]).toBe(ABAC_KEY);
+        expect(abacBody(out)["abacOutcome"]).toBe("deferred");
+        // And nothing behind the check ran, so the deferral did not become a half-done write.
+        expect(store.lastListLinks).toBeNull();
+        expect(store.lastCountLinks).toBeNull();
+        expect(store.linked).toEqual([]);
+      });
+    }
 
     it(`${family.name}: never hands the evaluator a record`, async () => {
       // The counterpart of the refusal above: the obligation is asked once, with the key absent —
@@ -678,5 +690,163 @@ describe("association handlers — abac obligation", () => {
     };
     const out = await call(buildAssociationListHandler(spec, ctx), "viewer", { id: "tag-1" });
     expect(out.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The association list filters, and the count explains why it cannot.
+//
+// `ABAC_RECORD_AVAILABILITY.entity_list` used to be `never`, and this route's comment claimed the
+// same thing it did: that a per-record answer here "would be a filter and not an authorization
+// decision". The filter is what the position wanted — the related records are loaded here anyway,
+// one row each, which is exactly what the policy is about.
+// ---------------------------------------------------------------------------
+
+/** Admits a row iff it is in ward A; defers while no record is in hand. */
+const OWN_WARD: AbacEvaluator = (input) =>
+  input.record === undefined ? "deferred" : input.record["ward"] === "A" ? "satisfied" : "denied";
+
+function linkedStore(): FakeStore {
+  const store = new FakeStore();
+  store.links = [
+    { leftId: "tag-1", rightId: "prod-a" },
+    { leftId: "tag-1", rightId: "prod-b" },
+    { leftId: "tag-1", rightId: "prod-c" },
+  ];
+  store.seed("Product", "prod-a", { id: "prod-a", ward: "A" });
+  store.seed("Product", "prod-b", { id: "prod-b", ward: "B" });
+  store.seed("Product", "prod-c", { id: "prod-c", ward: "A" });
+  return store;
+}
+
+function assocPage(out: HandlerOutput): {
+  data: Record<string, unknown>[];
+  nextCursor: string | null;
+} {
+  const body = abacBody(out);
+  return {
+    data: body["data"] as Record<string, unknown>[],
+    nextCursor: (body["page"] as { nextCursor: string | null }).nextCursor,
+  };
+}
+
+function callWithQuery(
+  handler: Handler,
+  role: string,
+  query: Record<string, string>,
+): Promise<HandlerOutput> {
+  return Promise.resolve(
+    handler({
+      request: { query } as never,
+      route: {} as never,
+      principal: principal(role),
+      params: { id: "tag-1" },
+      parsedBody: null,
+    }),
+  );
+}
+
+describe("buildAssociationListHandler — a record-bearing obligation filters the page", () => {
+  it("drops the related records the policy denies and keeps the rest, in order", async () => {
+    const store = linkedStore();
+    const out = await call(buildAssociationListHandler(spec, abacCtx(store, OWN_WARD)), "viewer", {
+      id: "tag-1",
+    });
+    expect(out.status).toBe(200);
+    expect(assocPage(out).data.map((r) => r["id"])).toEqual(["prod-a", "prod-c"]);
+  });
+
+  it("leaves the cursor addressing the owner's links, not the rows that survived", async () => {
+    // The offset is into `allIds`, so filtering cannot disturb it — the same property the entity
+    // list arm holds by leaving the store's `nextCursor` alone. Here the first page is **entirely**
+    // denied and still advertises offset 1, because prod-c is behind it and the caller is entitled
+    // to it.
+    const store = linkedStore();
+    const first = await callWithQuery(
+      buildAssociationListHandler(spec, abacCtx(store, OWN_WARD)),
+      "viewer",
+      { limit: "1", cursor: "1" },
+    );
+    expect(assocPage(first).data).toEqual([]);
+    expect(assocPage(first).nextCursor).toBe("2");
+    const next = await callWithQuery(
+      buildAssociationListHandler(spec, abacCtx(store, OWN_WARD)),
+      "viewer",
+      { limit: "1", cursor: "2" },
+    );
+    expect(assocPage(next).data.map((r) => r["id"])).toEqual(["prod-c"]);
+    expect(assocPage(next).nextCursor).toBeNull();
+  });
+
+  it("reports nothing about what it withheld", async () => {
+    const out = await call(buildAssociationListHandler(spec, abacCtx(linkedStore(), OWN_WARD)), "viewer", {
+      id: "tag-1",
+    });
+    expect(Object.keys(abacBody(out)).sort()).toEqual(["data", "page"]);
+    expect(Object.keys(abacBody(out)["page"] as object).sort()).toEqual(["limit", "nextCursor"]);
+  });
+
+  it("costs exactly one evaluator batch for a page of N records", async () => {
+    let calls = 0;
+    const sizes: number[] = [];
+    const batch: AbacBatchEvaluator = (inputs): readonly AbacBatchAnswer[] => {
+      calls += 1;
+      sizes.push(inputs.length);
+      return inputs.map((input, index) => ({ index, outcome: OWN_WARD(input) }));
+    };
+    const ctx: AssociationHandlerContext = {
+      ...abacCtx(linkedStore(), OWN_WARD),
+      abacBatchEvaluator: batch,
+    };
+    const out = await call(buildAssociationListHandler(spec, ctx), "viewer", { id: "tag-1" });
+    expect(assocPage(out).data.map((r) => r["id"])).toEqual(["prod-a", "prod-c"]);
+    expect(calls).toBe(1);
+    expect(sizes).toEqual([3]);
+  });
+
+  it("an evaluator that defers again drops every row rather than admitting any", async () => {
+    const out = await call(
+      buildAssociationListHandler(spec, abacCtx(linkedStore(), answering("deferred"))),
+      "viewer",
+      { id: "tag-1" },
+    );
+    expect(out.status).toBe(200);
+    expect(assocPage(out).data).toEqual([]);
+  });
+
+  it("a role the related entity's list grant does not name is still a 403", async () => {
+    const store = linkedStore();
+    const out = await call(buildAssociationListHandler(spec, abacCtx(store, OWN_WARD)), "cashier", {
+      id: "tag-1",
+    });
+    expect(out.status).toBe(403);
+    expect(store.lastListLinks).toBeNull();
+  });
+});
+
+describe("buildAssociationCountHandler — a record-bearing obligation is refused with its reason", () => {
+  it("names why a count cannot filter the way its sibling list route does", async () => {
+    const out = await call(
+      buildAssociationCountHandler(countSpecFixture, abacCtx(new FakeStore(), answering("deferred"))),
+      "viewer",
+      { id: "tag-1" },
+    );
+    expect(out.status).toBe(403);
+    expect(abacBody(out)["abacOutcome"]).toBe("deferred");
+    expect(abacBody(out)["detail"]).toContain("no rows to drop");
+    expect(abacBody(out)["detail"]).toContain("unbounded");
+  });
+
+  it("a non-deferred refusal carries no such reason, so the existing detail is unchanged", async () => {
+    // `undischargeable` is a deployment gap and not a position's shape, so appending "a count has
+    // no rows to drop" to it would name the wrong remedy.
+    const out = await call(
+      buildAssociationCountHandler(countSpecFixture, abacCtx(new FakeStore())),
+      "viewer",
+      { id: "tag-1" },
+    );
+    expect(out.status).toBe(403);
+    expect(abacBody(out)["abacOutcome"]).toBe("undischargeable");
+    expect(abacBody(out)["detail"]).not.toContain("no rows to drop");
   });
 });

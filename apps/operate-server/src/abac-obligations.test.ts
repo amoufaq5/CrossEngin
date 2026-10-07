@@ -1,4 +1,11 @@
-import { formatAbacObligation, type AbacObligation } from "@crossengin/auth";
+import {
+  formatAbacObligation,
+  ABAC_DENIAL_EFFECT,
+  ABAC_GRANT_POSITIONS,
+  ABAC_RECORD_AVAILABILITY,
+  type AbacGrantPosition,
+  type AbacObligation,
+} from "@crossengin/auth";
 import type { Manifest } from "@crossengin/kernel";
 import { describe, expect, it } from "vitest";
 
@@ -57,22 +64,25 @@ function check(parts: Partial<AbacObligationCheck> = {}): AbacObligationCheck {
     unanswerable: [],
     recordUnavailable: [],
     createBlocked: [],
+    rowFiltered: [],
+    listSortConflicts: [],
     refusal: null,
     ...parts,
   };
 }
 
 describe("ABAC_OBLIGATION_REFUSALS", () => {
-  it("names all three refusals", () => {
+  it("names all four refusals, in the order they are reported", () => {
     expect(ABAC_OBLIGATION_REFUSALS).toEqual([
       "obligation_unevaluable",
       "policy_undeclared",
       "record_unavailable",
+      "list_sort_addresses_withheld_field",
     ]);
   });
 
   it("has no escape-hatch member, because serving an unevaluated obligation is not a state to opt into", () => {
-    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(3);
+    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(4);
     expect(ABAC_OBLIGATION_REFUSALS.some((r) => /allow|skip|ignore|unchecked/.test(r))).toBe(false);
   });
 });
@@ -574,6 +584,32 @@ describe("checkAbacObligations against a record-bearing policy", () => {
     });
   }
 
+  const transitionAt = (): Manifest =>
+    manifest({
+      permissions: {
+        Chart: { transitions: { admit: { roles: ["clinician"], abac: "rec" } } },
+      },
+    });
+
+  /**
+   * One fixture per grant position, **total** over `AbacGrantPosition` — so a ninth position is a
+   * compile error here rather than a position silently untested by the two maps' pins below.
+   *
+   * None of these manifests declares an entity or a view, so `listConfigForEntity` sees no list
+   * view and the default sort is empty. That is deliberate: it isolates `rowFiltered` from the
+   * sort refusal, which gets its own fixtures.
+   */
+  const POSITION_MANIFEST: Readonly<Record<AbacGrantPosition, Manifest>> = {
+    entity_create: at("create"),
+    entity_read: at("read"),
+    entity_update: at("update"),
+    entity_delete: at("delete"),
+    entity_list: at("list"),
+    entity_transition: transitionAt(),
+    field_read: fieldAt("read"),
+    field_update: fieldAt("update"),
+  };
+
   const declared = (m: Manifest): AbacObligationCheck =>
     checkAbacObligations({
       manifest: m,
@@ -581,33 +617,116 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       recordBearingKeys: new Set(["rec"]),
     });
 
-  it("refuses at entity create and list, where no call site can ever supply a record", () => {
-    // Two positions, not three: ADR-0343 closed field `read` by giving response redaction the
-    // operation's declared record shape, so it locates the records a response carries and computes
-    // the field set per record. Entity `list` stays refused and the distinction is the reason — a
-    // field policy filters *columns within a row*, which a response can express per record, while
-    // an entity-list policy would filter *rows* and leave the page's cursor describing a set the
-    // caller was not shown.
-    for (const m of [at("create"), at("list")]) {
-      const result = declared(m);
-      expect(result.refusal).toBe("record_unavailable");
-      expect(result.recordUnavailable).toHaveLength(1);
-      expect(result.createBlocked).toEqual([]);
-    }
+  it("refuses at entity create alone, where no call site can ever supply a record", () => {
+    // One position, not three, and the set is asserted by walking every position through the real
+    // function rather than by naming the one that refuses — so a future flip in either direction
+    // fails here with the position named.
+    //
+    // Field `read` left when ADR-0343 gave response redaction the operation's declared record
+    // shape, so it locates the records a response carries and computes the field set per record.
+    // Entity `list` left now, and the reason is the mirror of what kept it: the list handler loads
+    // the page before it returns, so every row was in hand all along. What separates `list` from
+    // `field_read` is not availability but `ABAC_DENIAL_EFFECT` — one withholds columns within a
+    // row, the other withholds whole rows — and reading that as an availability difference is what
+    // kept both refused for longer than the facts warranted.
+    const refusing = ABAC_GRANT_POSITIONS.filter(
+      (p) => declared(POSITION_MANIFEST[p]).refusal === "record_unavailable",
+    );
+    expect(refusing).toEqual(["entity_create"]);
   });
 
-  it("admits at entity read, update, delete, a transition and a field read", () => {
-    const transition = manifest({
-      permissions: {
-        Chart: { transitions: { admit: { roles: ["clinician"], abac: "rec" } } },
-      },
-    });
-    for (const m of [at("read"), at("update"), at("delete"), transition, fieldAt("read")]) {
+  it("agrees with ABAC_RECORD_AVAILABILITY about which positions can never be asked", () => {
+    // The pin on the contract side: the refusal is the map read through `checkAbacObligations`, so
+    // the two must name the same single position or one of them is a second copy of the other.
+    expect(ABAC_GRANT_POSITIONS.filter((p) => ABAC_RECORD_AVAILABILITY[p] === "never")).toEqual([
+      "entity_create",
+    ]);
+  });
+
+  it("admits at entity read, update, delete, list, a transition and a field read", () => {
+    for (const m of [
+      at("read"),
+      at("update"),
+      at("delete"),
+      at("list"),
+      transitionAt(),
+      fieldAt("read"),
+    ]) {
       const result = declared(m);
       expect(result.refusal).toBeNull();
       expect(result.recordUnavailable).toEqual([]);
       expect(result.createBlocked).toEqual([]);
     }
+  });
+
+  it("reports a record-bearing entity list obligation as rowFiltered without refusing", () => {
+    const result = declared(at("list"));
+    expect(result.refusal).toBeNull();
+    expect(result.recordUnavailable).toEqual([]);
+    expect(result.rowFiltered).toEqual([
+      { entity: "Chart", operation: "list", field: null, policyKey: "rec" },
+    ]);
+  });
+
+  it("derives rowFiltered through ABAC_DENIAL_EFFECT, not by naming a position", () => {
+    // The assertion the brief asks for: drive the expectation off the map, so the test fails if
+    // the map and the filter ever disagree about which grants filter rows. Both directions, and a
+    // vacuity guard, because an empty `filters_rows` set would make the loop pass having asked
+    // nothing.
+    const filtering = ABAC_GRANT_POSITIONS.filter((p) => ABAC_DENIAL_EFFECT[p] === "filters_rows");
+    expect(filtering.length).toBeGreaterThan(0);
+    for (const position of filtering) {
+      expect(declared(POSITION_MANIFEST[position]).rowFiltered, position).toHaveLength(1);
+    }
+    for (const position of ABAC_GRANT_POSITIONS.filter(
+      (p) => ABAC_DENIAL_EFFECT[p] !== "filters_rows",
+    )) {
+      expect(declared(POSITION_MANIFEST[position]).rowFiltered, position).toEqual([]);
+    }
+  });
+
+  it("reports nothing as rowFiltered when the key is not record-bearing", () => {
+    const result = checkAbacObligations({
+      manifest: at("list"),
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(),
+    });
+    expect(result.rowFiltered).toEqual([]);
+    expect(result.refusal).toBeNull();
+  });
+
+  it("names all three consequences of row filtering on the boot line", () => {
+    // None of them is guessable from the declaration, and each is something a client integration
+    // gets wrong silently, so each is said rather than implied.
+    const line = formatAbacObligationCheck(declared(at("list")));
+    expect(line).toContain("filter rows out of the page");
+    expect(line).toContain("shorter than `limit`");
+    expect(line).toContain("`nextCursor === null`");
+    expect(line).toContain("count route");
+    expect(line).toContain("`?sort`");
+    expect(line).toContain("may not address rows by a field they may not read");
+  });
+
+  it("appends the denial effect's own description rather than restating it", () => {
+    const line = formatAbacObligationCheck(declared(at("list")));
+    expect(line).toContain("Chart.list requires abac policy 'rec'");
+    expect(line).toContain("the denied rows are dropped from the page and no refusal is reported");
+  });
+
+  it("says both notes when a manifest carries a filtered list and an obligated field update", () => {
+    const both = manifest({
+      permissions: {
+        Chart: {
+          list: { roles: ["clinician"], abac: "rec" },
+          fields: { note: { update: { roles: ["clinician"], abac: "rec" } } },
+        },
+      },
+    });
+    const result = declared(both);
+    expect(result.refusal).toBeNull();
+    const line = formatAbacObligationCheck(result);
+    expect(line).toContain("not settable at create");
+    expect(line).toContain("filter rows out of the page");
   });
 
   it("reports a field update obligation without refusing, because a create genuinely has no record", () => {
@@ -671,11 +790,19 @@ describe("checkAbacObligations against a record-bearing policy", () => {
   });
 
   it("carries the subset on the thrown error, so a caller need not re-derive it", () => {
-    const result = declared(at("list"));
+    const result = declared(at("create"));
     const error = new AbacObligationsUnevaluable(result);
     expect(error.refusal).toBe("record_unavailable");
     expect(error.recordUnavailable).toHaveLength(1);
-    expect(error.message).toContain("a filter and not an authorization decision");
+    expect(error.message).toContain("does not exist until the write commits");
+  });
+
+  it("names entity list and field read among the positions an obligation can be moved to", () => {
+    // The remedy list grew as the refusal shrank. A remedy that omitted the two positions that
+    // just became available would send an operator to the three that were always there.
+    const message = new AbacObligationsUnevaluable(declared(at("create"))).message;
+    expect(message).toContain("`list`");
+    expect(message).toContain("per-field `read`");
   });
 
   it("truncates the reasoned render at the detail limit", () => {
@@ -699,6 +826,297 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       });
       expect(result.recordUnavailable, name).toEqual([]);
       expect(result.createBlocked, name).toEqual([]);
+      expect(result.rowFiltered, name).toEqual([]);
+      expect(result.listSortConflicts, name).toEqual([]);
     }
+  });
+});
+
+describe("the list_sort_addresses_withheld_field refusal", () => {
+  /**
+   * One entity with a classified field and an unclassified one, so a view can sort by either.
+   * `note` is `phi`; `label` carries no classification at all.
+   */
+  const CHART_ENTITY = {
+    name: "Chart",
+    fields: [
+      { name: "note", type: { kind: "text" as const }, classification: "phi" as const },
+      { name: "label", type: { kind: "text" as const } },
+    ],
+  };
+
+  /**
+   * A `list` view over `Chart` sorting by `field`.
+   *
+   * Cast rather than built through `ListViewSchema`, because `@crossengin/views` is not a
+   * dependency of this app. `listConfigForEntity` reads a view structurally — `kind`, `entity`,
+   * `sort`, `columns`, `pageSize` — so every field that decides the default sort is present here,
+   * and the defaults a parse would fill in are ones neither it nor this test reads.
+   */
+  function chartListView(field: string): Manifest["views"] {
+    return {
+      chartList: {
+        kind: "list",
+        entity: "Chart",
+        columns: [{ field }],
+        sort: [{ field, direction: "asc" }],
+        pageSize: 50,
+      },
+    } as unknown as Manifest["views"];
+  }
+
+  function sortManifest(opts: {
+    readonly sortField: "note" | "label";
+    readonly obligationOn: "list" | "read" | null;
+  }): Manifest {
+    const grant = { roles: ["clinician"], abac: "rec" };
+    return manifest({
+      entities: [CHART_ENTITY],
+      views: chartListView(opts.sortField),
+      permissions: {
+        Chart:
+          opts.obligationOn === null
+            ? { list: { roles: ["clinician"] } }
+            : { [opts.obligationOn]: grant },
+      },
+    });
+  }
+
+  const declared = (m: Manifest): AbacObligationCheck =>
+    checkAbacObligations({
+      manifest: m,
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(["rec"]),
+    });
+
+  it("refuses when the default sort names a classified field of a row-filtered entity", () => {
+    const result = declared(sortManifest({ sortField: "note", obligationOn: "list" }));
+    expect(result.refusal).toBe("list_sort_addresses_withheld_field");
+    expect(result.listSortConflicts).toEqual([
+      { entity: "Chart", field: "note", classification: "phi", policyKey: "rec" },
+    ]);
+  });
+
+  it("does not refuse when the default sort names an unclassified field", () => {
+    const result = declared(sortManifest({ sortField: "label", obligationOn: "list" }));
+    expect(result.refusal).toBeNull();
+    expect(result.listSortConflicts).toEqual([]);
+    // The obligation is still there and still filters rows — only the cursor is clean.
+    expect(result.rowFiltered).toHaveLength(1);
+  });
+
+  it("does not refuse when the entity has no list obligation", () => {
+    // The question is "which of the entities whose rows are filtered sorts by a classified field",
+    // and an entity whose `read` grant is obligated withholds no rows from its page at all.
+    const result = declared(sortManifest({ sortField: "note", obligationOn: "read" }));
+    expect(result.refusal).toBeNull();
+    expect(result.rowFiltered).toEqual([]);
+    expect(result.listSortConflicts).toEqual([]);
+  });
+
+  it("does not refuse when the list obligation's key is not record-bearing", () => {
+    const result = checkAbacObligations({
+      manifest: sortManifest({ sortField: "note", obligationOn: "list" }),
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(),
+    });
+    expect(result.refusal).toBeNull();
+    expect(result.listSortConflicts).toEqual([]);
+  });
+
+  it("does not refuse when no evaluator is declared, because the prior refusal's remedy is the true one", () => {
+    const result = checkAbacObligations({
+      manifest: sortManifest({ sortField: "note", obligationOn: "list" }),
+      answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
+    });
+    expect(result.refusal).toBe("obligation_unevaluable");
+    expect(result.listSortConflicts).toEqual([]);
+  });
+
+  it("does not refuse when the manifest declares no abac grant at all", () => {
+    const result = declared(sortManifest({ sortField: "note", obligationOn: null }));
+    expect(result.obligations).toEqual([]);
+    expect(result.refusal).toBeNull();
+    expect(result.listSortConflicts).toEqual([]);
+  });
+
+  it("does not refuse when the entity has no list view, so no default sort exists", () => {
+    const noView = manifest({
+      entities: [CHART_ENTITY],
+      permissions: { Chart: { list: { roles: ["clinician"], abac: "rec" } } },
+    });
+    const result = declared(noView);
+    expect(result.rowFiltered).toHaveLength(1);
+    expect(result.listSortConflicts).toEqual([]);
+    expect(result.refusal).toBeNull();
+  });
+
+  it("reports record_unavailable first when a manifest trips both", () => {
+    // Ordering: the sort rule is computed from `rowFiltered`, a subset of the record-bearing set,
+    // so it must not pre-empt a refusal whose remedy an operator has to apply first.
+    const both = manifest({
+      entities: [CHART_ENTITY],
+      views: chartListView("note"),
+      permissions: {
+        Chart: {
+          create: { roles: ["clinician"], abac: "rec" },
+          list: { roles: ["clinician"], abac: "rec" },
+        },
+      },
+    });
+    const result = declared(both);
+    expect(result.recordUnavailable).toHaveLength(1);
+    expect(result.listSortConflicts).toHaveLength(1);
+    expect(result.refusal).toBe("record_unavailable");
+  });
+
+  it("names the entity, the field and the classification, and never a value", () => {
+    const result = declared(sortManifest({ sortField: "note", obligationOn: "list" }));
+    const message = formatAbacObligationCheck(result);
+    expect(message).toContain("Chart.note (phi)");
+    expect(message).toContain("under abac policy 'rec'");
+  });
+
+  it("says why there is no per-request fix, and names every remedy", () => {
+    const message = new AbacObligationsUnevaluable(
+      declared(sortManifest({ sortField: "note", obligationOn: "list" })),
+    ).message;
+    expect(message).toContain("base64url(JSON.stringify({k: [...sort values], id}))");
+    expect(message).toContain("last row of the store's slice");
+    expect(message).toContain("the sort came from the manifest and not from the request");
+    expect(message).toContain("Change that view's `sort`");
+    expect(message).toContain("drop the classification from the field");
+    expect(message).toContain("remove the `abac` key");
+    expect(message).toContain("the role grant beside it is enforced and stays");
+  });
+
+  it("is the same text the boot line carries, so the two cannot disagree", () => {
+    const result = declared(sortManifest({ sortField: "note", obligationOn: "list" }));
+    expect(formatAbacObligationCheck(result)).toContain(
+      new AbacObligationsUnevaluable(result).message,
+    );
+  });
+
+  it("carries the conflicts on the thrown error, so a boot catch need not parse the message", () => {
+    const result = declared(sortManifest({ sortField: "note", obligationOn: "list" }));
+    const error = new AbacObligationsUnevaluable(result);
+    expect(error.refusal).toBe("list_sort_addresses_withheld_field");
+    expect(error.listSortConflicts).toEqual(result.listSortConflicts);
+  });
+
+  it("names one conflict per entity+field however many times the sort repeats it", () => {
+    // One manifest edit is one finding: reporting it twice would make an operator look for a
+    // second place to change.
+    const repeated = manifest({
+      entities: [CHART_ENTITY],
+      views: {
+        chartList: {
+          kind: "list",
+          entity: "Chart",
+          columns: [{ field: "note" }],
+          sort: [
+            { field: "note", direction: "asc" },
+            { field: "note", direction: "desc" },
+          ],
+          pageSize: 50,
+        },
+      } as unknown as Manifest["views"],
+      permissions: { Chart: { list: { roles: ["clinician"], abac: "rec" } } },
+    });
+    expect(declared(repeated).listSortConflicts).toHaveLength(1);
+  });
+
+  it("names a conflict on each classified field a multi-key sort addresses", () => {
+    const twoKeys = manifest({
+      entities: [
+        {
+          ...CHART_ENTITY,
+          fields: [
+            ...CHART_ENTITY.fields,
+            { name: "owner", type: { kind: "text" as const }, classification: "pii" as const },
+          ],
+        },
+      ],
+      views: {
+        chartList: {
+          kind: "list",
+          entity: "Chart",
+          columns: [{ field: "note" }, { field: "owner" }, { field: "label" }],
+          sort: [
+            { field: "label", direction: "asc" },
+            { field: "note", direction: "asc" },
+            { field: "owner", direction: "asc" },
+          ],
+          pageSize: 50,
+        },
+      } as unknown as Manifest["views"],
+      permissions: { Chart: { list: { roles: ["clinician"], abac: "rec" } } },
+    });
+    // Every component of the sort key lands in the cursor, so a clean leading component does not
+    // excuse a classified trailing one.
+    expect(declared(twoKeys).listSortConflicts.map((c) => c.field)).toEqual(["note", "owner"]);
+  });
+
+  /**
+   * The live member, measured over the real resolved packs rather than asserted from the brief.
+   *
+   * No pack declares an `abac` grant, so the refusal is vacuous today — which is why the sweep has
+   * to *add* a record-bearing `list` obligation to every entity before it can see anything. What it
+   * then finds is the one pair the rule would name the moment somebody declares such a policy for
+   * real.
+   */
+  it("names Patient.family_name across the seven resolved builtin packs, and nothing else", async () => {
+    const found: string[] = [];
+    for (const name of BUILTIN_PACK_NAMES) {
+      const pack = await loadBuiltinPack(name);
+      const permissions = Object.fromEntries(
+        (pack.entities ?? []).map((e) => [
+          e.name,
+          { ...(pack.permissions?.[e.name] ?? {}), list: { roles: ["r"], abac: "rec" } },
+        ]),
+      );
+      const result = checkAbacObligations({
+        manifest: { ...pack, permissions },
+        answerableKeys: new Set(["rec"]),
+        recordBearingKeys: new Set(["rec"]),
+      });
+      // The vacuity control: the sweep is walking a real permission map, so a zero is a
+      // measurement and not an empty loop.
+      expect(result.obligations.length, name).toBeGreaterThan(0);
+      expect(result.rowFiltered.length, name).toBeGreaterThan(0);
+      for (const c of result.listSortConflicts) {
+        found.push(`${name} ${c.entity}.${c.field} (${c.classification})`);
+      }
+    }
+    expect(found).toEqual(["erp-healthcare Patient.family_name (pii)"]);
+  });
+
+  it("refuses that pack end to end once such a policy is declared on Patient", async () => {
+    const pack = await loadBuiltinPack("erp-healthcare");
+    const result = checkAbacObligations({
+      manifest: {
+        ...pack,
+        permissions: {
+          ...(pack.permissions ?? {}),
+          Patient: {
+            ...(pack.permissions ?? {})["Patient"],
+            list: { roles: ["clinician"], abac: "same_facility" },
+          },
+        },
+      },
+      answerableKeys: new Set(["same_facility"]),
+      recordBearingKeys: new Set(["same_facility"]),
+    });
+    expect(result.refusal).toBe("list_sort_addresses_withheld_field");
+    expect(result.listSortConflicts).toEqual([
+      {
+        entity: "Patient",
+        field: "family_name",
+        classification: "pii",
+        policyKey: "same_facility",
+      },
+    ]);
+    expect(formatAbacObligationCheck(result)).toContain("Patient.family_name (pii)");
   });
 });

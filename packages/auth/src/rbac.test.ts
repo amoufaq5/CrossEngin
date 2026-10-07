@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { TenantId, UserId } from "@crossengin/types";
-import type { AbacEvaluationInput, AbacEvaluator } from "./abac.js";
-import { rbacCheck } from "./rbac.js";
-import type { AbacOutcome, PermissionMap, Principal, RoleDefinition } from "./types.js";
+import type {
+  AbacBatchAnswer,
+  AbacBatchEvaluator,
+  AbacEvaluationInput,
+  AbacEvaluator,
+} from "./abac.js";
+import { rbacCheck, rbacCheckForRecords } from "./rbac.js";
+import type {
+  AbacOutcome,
+  AuthorizationDecision,
+  PermissionMap,
+  Principal,
+  RoleDefinition,
+} from "./types.js";
 
 const ROLES: ReadonlyMap<string, RoleDefinition> = new Map([
   ["staff", { name: "staff" }],
@@ -656,5 +667,296 @@ describe("rbacCheck — the record a policy needs", () => {
     const input = s.calls[0] as AbacEvaluationInput;
     expect("record" in input).toBe(true);
     expect(input.record).toEqual({});
+  });
+});
+
+/**
+ * The plural form. Its contract is almost entirely a statement about the singular one: every element
+ * must be what `rbacCheck` would have said for that record, which is what lets a list handler filter
+ * a page by calling this and keeping the rows that pass.
+ */
+describe("rbacCheckForRecords", () => {
+  const BASE = {
+    principal: principal("pharmacist"),
+    permissions: PERMS,
+    roles: ROLES,
+    entity: "prescription",
+    operation: "update" as const,
+  };
+
+  const RECORDS: readonly Readonly<Record<string, unknown>>[] = [
+    { id: "rx-1", department: "oncology" },
+    { id: "rx-2", department: "cardiology" },
+    { id: "rx-3", department: "oncology" },
+  ];
+
+  function spyEvaluator(evaluate: (input: AbacEvaluationInput) => AbacOutcome): {
+    readonly fn: AbacEvaluator;
+    readonly calls: AbacEvaluationInput[];
+  } {
+    const calls: AbacEvaluationInput[] = [];
+    return {
+      fn: (input) => {
+        calls.push(input);
+        return evaluate(input);
+      },
+      calls,
+    };
+  }
+
+  /** The same answers through the batch arm, so a test can compare the two paths elementwise. */
+  function spyBatch(evaluate: (input: AbacEvaluationInput) => AbacOutcome): {
+    readonly fn: AbacBatchEvaluator;
+    readonly calls: AbacEvaluationInput[][];
+  } {
+    const calls: AbacEvaluationInput[][] = [];
+    return {
+      fn: (inputs): readonly AbacBatchAnswer[] => {
+        calls.push([...inputs]);
+        return inputs.map((input, index) => ({ index, outcome: evaluate(input) }));
+      },
+      calls,
+    };
+  }
+
+  /** What the singular reader says for each record, which is the whole of what the plural one owes. */
+  function singly(
+    input: Omit<Parameters<typeof rbacCheck>[0], "record">,
+    records: readonly Readonly<Record<string, unknown>>[],
+  ): readonly AuthorizationDecision[] {
+    return records.map((record) => rbacCheck({ ...input, record }));
+  }
+
+  it("returns [] for no records, consulting nothing", () => {
+    const single = spyEvaluator(() => "satisfied");
+    const batch = spyBatch(() => "satisfied");
+    expect(
+      rbacCheckForRecords({ ...BASE, abacEvaluator: single.fn, abacBatchEvaluator: batch.fn }, []),
+    ).toEqual([]);
+    expect(single.calls).toEqual([]);
+    expect(batch.calls).toEqual([]);
+  });
+
+  it("returns one decision per record, positionally", () => {
+    const out = rbacCheckForRecords(
+      { ...BASE, abacEvaluator: (input) => (input.record?.id === "rx-2" ? "denied" : "satisfied") },
+      RECORDS,
+    );
+    expect(out).toHaveLength(RECORDS.length);
+    expect(out.map((d) => d.allowed)).toEqual([true, false, true]);
+  });
+
+  it("hands each evaluation the record at its own position", () => {
+    const single = spyEvaluator(() => "satisfied");
+    rbacCheckForRecords({ ...BASE, abacEvaluator: single.fn }, RECORDS);
+    expect(single.calls.map((i) => i.record)).toEqual([...RECORDS]);
+    // Verbatim, not copied: a policy over `record.department` is answered against what the handler
+    // loaded, and this module is a courier.
+    expect(single.calls[0]?.record).toBe(RECORDS[0]);
+  });
+
+  it("is elementwise identical to rbacCheck for every outcome of the enum", () => {
+    // The property the handler depends on. Reason text and the attached discharge are compared too,
+    // not just `allowed`: a filter that kept the right rows while logging a different refusal would
+    // pass a weaker assertion.
+    for (const outcome of ["satisfied", "denied", "deferred", "undischargeable"] as const) {
+      const input = { ...BASE, abacEvaluator: (): AbacOutcome => outcome };
+      expect(rbacCheckForRecords(input, RECORDS)).toEqual(singly(input, RECORDS));
+    }
+  });
+
+  it("is elementwise identical to rbacCheck through the batch arm too", () => {
+    // `rbacCheck` ignores `abacBatchEvaluator`, so this compares the pooled path against the
+    // per-question one. They must not diverge just because a deployment declared a batch.
+    const evaluate = (input: AbacEvaluationInput): AbacOutcome =>
+      input.record?.department === "oncology" ? "satisfied" : "denied";
+    const batch = spyBatch(evaluate);
+    const input = { ...BASE, abacEvaluator: evaluate, abacBatchEvaluator: batch.fn };
+    expect(rbacCheckForRecords(input, RECORDS)).toEqual(singly(input, RECORDS));
+  });
+
+  it("is elementwise identical to rbacCheck with no evaluator at all", () => {
+    expect(rbacCheckForRecords(BASE, RECORDS)).toEqual(singly(BASE, RECORDS));
+    expect(rbacCheckForRecords(BASE, RECORDS).map((d) => d.abac?.outcome)).toEqual([
+      "undischargeable",
+      "undischargeable",
+      "undischargeable",
+    ]);
+  });
+
+  it("is elementwise identical to rbacCheck on a role refusal", () => {
+    const input = {
+      ...BASE,
+      principal: principal("staff"),
+      abacEvaluator: (): AbacOutcome => "satisfied",
+    };
+    const out = rbacCheckForRecords(input, RECORDS);
+    expect(out).toEqual(singly(input, RECORDS));
+    expect(out.map((d) => d.reason)).toEqual([
+      ...Array(RECORDS.length).fill(singly(input, RECORDS)[0]?.reason),
+    ]);
+  });
+
+  it("is elementwise identical to rbacCheck for an entity with no permissions declared", () => {
+    const input = { ...BASE, entity: "unknown" };
+    const out = rbacCheckForRecords(input, RECORDS);
+    expect(out).toEqual(singly(input, RECORDS));
+    expect(out[0]?.reason).toMatch(/no permissions declared/);
+  });
+
+  it("is elementwise identical to rbacCheck for an operation with no grant", () => {
+    const input = { ...BASE, operation: "list" as const };
+    const out = rbacCheckForRecords(input, RECORDS);
+    expect(out).toEqual(singly(input, RECORDS));
+    expect(out[0]?.reason).toMatch(/no permission grant/);
+  });
+
+  it("is elementwise identical to rbacCheck for an unresolved-attribute principal", () => {
+    const input = {
+      ...BASE,
+      principal: { ...principal("pharmacist"), abacAttributes: null },
+      abacEvaluator: (): AbacOutcome => "satisfied",
+    };
+    expect(rbacCheckForRecords(input, RECORDS)).toEqual(singly(input, RECORDS));
+  });
+
+  it("is elementwise identical to rbacCheck on a transition grant", () => {
+    const input = {
+      ...BASE,
+      operation: { kind: "transition", name: "verify" } as const,
+      abacEvaluator: (): AbacOutcome => "satisfied",
+    };
+    expect(rbacCheckForRecords(input, RECORDS)).toEqual(singly(input, RECORDS));
+  });
+
+  it("pools N records into exactly one batch call", () => {
+    const batch = spyBatch(() => "satisfied");
+    rbacCheckForRecords(
+      { ...BASE, abacEvaluator: () => "denied", abacBatchEvaluator: batch.fn },
+      RECORDS,
+    );
+    expect(batch.calls).toHaveLength(1);
+    expect(batch.calls[0]).toHaveLength(RECORDS.length);
+    expect(batch.calls[0]?.map((i) => i.record)).toEqual([...RECORDS]);
+  });
+
+  it("answers different outcomes for different records in that one call", () => {
+    const batch = spyBatch((input) =>
+      input.record?.department === "oncology" ? "satisfied" : "denied",
+    );
+    const out = rbacCheckForRecords(
+      { ...BASE, abacEvaluator: () => "undischargeable", abacBatchEvaluator: batch.fn },
+      RECORDS,
+    );
+    expect(batch.calls).toHaveLength(1);
+    expect(out.map((d) => d.allowed)).toEqual([true, false, true]);
+    expect(out.map((d) => d.abac?.outcome)).toEqual(["satisfied", "denied", "satisfied"]);
+  });
+
+  it("consults nothing when the grant carries no obligation", () => {
+    const single = spyEvaluator(() => "denied");
+    const batch = spyBatch(() => "denied");
+    const out = rbacCheckForRecords(
+      {
+        ...BASE,
+        operation: "read",
+        abacEvaluator: single.fn,
+        abacBatchEvaluator: batch.fn,
+      },
+      RECORDS,
+    );
+    // One `null` discharge for the whole page, not one per record: a deployment wiring an evaluator
+    // must not start refusing grants nobody qualified.
+    expect(out).toEqual([{ allowed: true }, { allowed: true }, { allowed: true }]);
+    expect(single.calls).toEqual([]);
+    expect(batch.calls).toEqual([]);
+  });
+
+  it("consults nothing when the role check already failed", () => {
+    // ADR-0340's ordering, which the fan-out must not lose: a 403 is already owed for every row, and
+    // asking anyway would hand the deployment's policy layer a principal it has no business seeing —
+    // once per record, which is the version of the mistake that also costs a page of calls.
+    const single = spyEvaluator(() => "satisfied");
+    const batch = spyBatch(() => "satisfied");
+    const out = rbacCheckForRecords(
+      {
+        ...BASE,
+        principal: principal("staff"),
+        abacEvaluator: single.fn,
+        abacBatchEvaluator: batch.fn,
+      },
+      RECORDS,
+    );
+    expect(out.map((d) => d.allowed)).toEqual([false, false, false]);
+    expect(single.calls).toEqual([]);
+    expect(batch.calls).toEqual([]);
+  });
+
+  it("consults nothing for an entity with no permissions declared", () => {
+    const single = spyEvaluator(() => "satisfied");
+    const batch = spyBatch(() => "satisfied");
+    rbacCheckForRecords(
+      { ...BASE, entity: "unknown", abacEvaluator: single.fn, abacBatchEvaluator: batch.fn },
+      RECORDS,
+    );
+    expect(single.calls).toEqual([]);
+    expect(batch.calls).toEqual([]);
+  });
+
+  it("gives every element the same refusal object on a prelude failure", () => {
+    // The entity, grant and role arms do not depend on the record, so they are decided once — and a
+    // per-element copy would be an invitation to make one of them per record later.
+    const out = rbacCheckForRecords({ ...BASE, principal: principal("staff") }, RECORDS);
+    expect(out[0]).toBe(out[1]);
+    expect(out[1]).toBe(out[2]);
+  });
+
+  it("refuses a batch that breaks positional correspondence, for every record", () => {
+    // Inherited from `dischargeAbacBatch`: a permutation is a silent mis-authorization of which
+    // roughly half allows, so the whole page is refused rather than partly trusted.
+    const scrambling: AbacBatchEvaluator = (inputs) =>
+      inputs.map((_input, index) => ({ index: inputs.length - 1 - index, outcome: "satisfied" }));
+    const out = rbacCheckForRecords(
+      { ...BASE, abacEvaluator: () => "satisfied", abacBatchEvaluator: scrambling },
+      RECORDS,
+    );
+    expect(out.map((d) => d.allowed)).toEqual([false, false, false]);
+    expect(out.map((d) => d.abac?.outcome)).toEqual([
+      "undischargeable",
+      "undischargeable",
+      "undischargeable",
+    ]);
+  });
+
+  it("refuses every record when the evaluator throws", () => {
+    const out = rbacCheckForRecords(
+      {
+        ...BASE,
+        abacEvaluator: () => {
+          throw new Error("policy service unreachable");
+        },
+      },
+      RECORDS,
+    );
+    expect(out.map((d) => d.abac?.outcome)).toEqual([
+      "undischargeable",
+      "undischargeable",
+      "undischargeable",
+    ]);
+  });
+
+  it("names the policy key in every refusal, so a filtered row is explicable", () => {
+    const out = rbacCheckForRecords({ ...BASE, abacEvaluator: () => "denied" }, RECORDS);
+    for (const d of out) {
+      expect(d.reason).toContain("data.access.allow_update");
+      expect(d.abac).toEqual({ policyKey: "data.access.allow_update", outcome: "denied" });
+    }
+  });
+
+  it("takes an input with no record field, so one cannot be supplied twice", () => {
+    // Structural rather than a precedence rule: the records travel in the array, and a second source
+    // for one fact would have to be resolved by a silent winner or a refusal the type can prevent.
+    // @ts-expect-error `record` is omitted from the plural form's input.
+    rbacCheckForRecords({ ...BASE, record: RECORDS[0] }, RECORDS);
   });
 });

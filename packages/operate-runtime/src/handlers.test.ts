@@ -1,13 +1,17 @@
 import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import { buildIncomingRequest, type HandlerOutput } from "@crossengin/api-gateway-runtime";
 import type {
+  AbacBatchAnswer,
+  AbacBatchEvaluator,
   AbacEvaluationInput,
   AbacEvaluator,
   AbacOutcome,
+  ClassifiedField,
   PermissionMap,
   RoleDefinition,
   RoleName,
 } from "@crossengin/auth";
+import { ABAC_GRANT_POSITIONS, ABAC_RECORD_AVAILABILITY } from "@crossengin/auth";
 import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
@@ -16,7 +20,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec } from "./operations.js";
-import { InMemoryEntityStore } from "./store.js";
+import { InMemoryEntityStore, type ListPage } from "./store.js";
 import { buildValidationPlans } from "./validation.js";
 import { buildClassifiedFieldIndex } from "./write-mask.js";
 
@@ -656,7 +660,29 @@ const CLINIC = {
         { name: "phase", type: { kind: "text", maxLength: 20 } },
       ],
     },
+    {
+      // The list position, which filters rather than refusing. `ward` is the predicate the policy
+      // reads; `handle` is classified, so it is the field the addressing guard withholds, and
+      // `name` is its unclassified control.
+      name: "Roster",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        { name: "name", type: { kind: "text", maxLength: 40 } },
+        { name: "ward", type: { kind: "text", maxLength: 10 } },
+        { name: "handle", type: { kind: "text", maxLength: 40 }, classification: "pii" },
+      ],
+    },
   ],
+  views: {
+    // Every column sortable + filterable (the defaults) and all three text, so `?sort`, `?filter`
+    // and `?q` all reach `handle`.
+    rosterList: {
+      kind: "list",
+      entity: "Roster",
+      pageSize: 50,
+      columns: [{ field: "name" }, { field: "ward" }, { field: "handle" }],
+    },
+  },
   workflows: {
     chart_lifecycle: {
       kind: "entityLifecycle",
@@ -698,6 +724,13 @@ const CLINIC = {
       delete: { roles: ["clinician"] },
       transitions: { seal: { roles: ["clinician"], abac: ABAC_KEY } },
     },
+    Roster: {
+      list: { roles: ["clerk", "clinician"], abac: ABAC_KEY },
+      read: { roles: ["clinician"] },
+      create: { roles: ["clinician"] },
+      update: { roles: ["clinician"] },
+      delete: { roles: ["clinician"] },
+    },
   },
 } as unknown as Manifest;
 
@@ -711,6 +744,7 @@ const CLINIC_ROLES = new Map<RoleName, RoleDefinition>([
 function clinicCtx(
   store: InMemoryEntityStore,
   abacEvaluator?: AbacEvaluator,
+  extra?: Partial<HandlerContext>,
 ): HandlerContext {
   return {
     store,
@@ -720,6 +754,7 @@ function clinicCtx(
     validationPlans: buildValidationPlans(CLINIC),
     classifiedFields: buildClassifiedFieldIndex(CLINIC),
     ...(abacEvaluator !== undefined ? { abacEvaluator } : {}),
+    ...(extra ?? {}),
   };
 }
 
@@ -737,6 +772,7 @@ async function hit(
     role: string;
     params?: Record<string, string>;
     body?: Record<string, unknown>;
+    query?: Record<string, string>;
     /** Rewrites the resolved principal — used to drop the attributes the fixture resolves. */
     principal?: (p: ResolvedPrincipal | null) => ResolvedPrincipal | null;
   },
@@ -754,6 +790,7 @@ async function hit(
       scheme: "https",
       bodyBytes: null,
       clientIp: "203.0.113.1",
+      ...(opts.query !== undefined ? { query: opts.query } : {}),
     }),
     route: routeFromSpec(spec),
     principal: (opts.principal ?? ((p) => p))(principal(opts.role)),
@@ -1199,17 +1236,13 @@ describe("operate handlers — a deferred obligation is final where no record ca
     expect(seen[0]?.record).toBeUndefined();
   });
 
-  it("list: 403s, names the structural reason, and reaches no store call", async () => {
-    const store = new CountingStore();
-    const seen: AbacEvaluationInput[] = [];
-    const out = await hit(clinicCtx(store, recordBearing("satisfied", seen)), "ward.list", {
-      role: "clinician",
-    });
-    expect(out.status).toBe(403);
-    expect(bodyOf(out)["abacOutcome"]).toBe("deferred");
-    expect(bodyOf(out)["detail"]).toContain("a per-record answer is a filter");
-    expect(store.calls).toEqual([]);
-    expect(seen.length).toBe(1);
+  it("create is the only one: `never` is exactly that position", () => {
+    // `entity_list` used to sit here on the reading that a per-record answer is "a filter and not
+    // an authorization decision". The filter is what shipped, so the set is a singleton — pinned
+    // as the exact set rather than key by key, so flipping a position back fails here.
+    expect(
+      ABAC_GRANT_POSITIONS.filter((p) => ABAC_RECORD_AVAILABILITY[p] === "never"),
+    ).toEqual(["entity_create"]);
   });
 
   it("a non-deferred refusal carries no structural reason, so the existing detail is unchanged", async () => {
@@ -1317,5 +1350,278 @@ describe("operate handlers — a record-bearing obligation on a field grant", ()
     });
     expect(undischargeable.status).toBe(403);
     expect(bodyOf(undischargeable)["abacOutcome"]).toBe("undischargeable");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A record-bearing obligation on the `list` grant: row filtering.
+//
+// ADR-0342 refused this position at boot on the reading that "a list decides for a set of records,
+// so a per-record answer is a filter and not an authorization decision". The filter is what the
+// position wanted all along — the handler loads the page before it returns, so every row is in
+// hand — and the whole design turns on leaving `ListPage.nextCursor` alone: it is derived in the
+// store from the last row of *its* slice and is non-null iff the store had more rows, so a page
+// may come back short, or empty, while the walk is still unfinished.
+//
+// Two things the filter deliberately does not do, each pinned below: it does not report how many
+// rows it withheld (an inference channel a caller narrows with filters), and it does not re-fill
+// the page (work per request would scale with the policy's selectivity).
+// ---------------------------------------------------------------------------
+
+/** Records the `ListPage` the store itself produced, so "the cursor is untouched" is asserted. */
+class CapturingStore extends InMemoryEntityStore {
+  lastPage: ListPage | null = null;
+  pageCalls = 0;
+
+  override async listPage(
+    ...args: Parameters<InMemoryEntityStore["listPage"]>
+  ): Promise<ListPage> {
+    this.pageCalls += 1;
+    const page = await super.listPage(...args);
+    this.lastPage = page;
+    return page;
+  }
+}
+
+/** Counts reads of the classified-field index, so "the guard is not consulted" is asserted. */
+class SpyingClassifiedFields extends Map<string, readonly ClassifiedField[]> {
+  reads = 0;
+
+  override get(key: string): readonly ClassifiedField[] | undefined {
+    this.reads += 1;
+    return super.get(key);
+  }
+}
+
+/** Admits a row iff it is in ward A; defers while no record is in hand. */
+const OWN_WARD: AbacEvaluator = (input) =>
+  input.record === undefined ? "deferred" : input.record["ward"] === "A" ? "satisfied" : "denied";
+
+interface BatchLog {
+  calls: number;
+  readonly sizes: number[];
+}
+
+/** `OWN_WARD` as a batch, logging every call so one page is proved to cost one batch. */
+function batching(log: BatchLog): AbacBatchEvaluator {
+  return (inputs): readonly AbacBatchAnswer[] => {
+    log.calls += 1;
+    log.sizes.push(inputs.length);
+    return inputs.map((input, index) => ({ index, outcome: OWN_WARD(input) }));
+  };
+}
+
+const ROSTER = [
+  { id: "r-1", name: "Ada", ward: "A", handle: "@ada" },
+  { id: "r-2", name: "Bea", ward: "B", handle: "@bea" },
+  { id: "r-3", name: "Cyd", ward: "A", handle: "@cyd" },
+];
+
+async function withRoster(store: CapturingStore = new CapturingStore()): Promise<CapturingStore> {
+  for (const row of ROSTER) await store.create(TENANT, "Roster", row);
+  store.pageCalls = 0;
+  store.lastPage = null;
+  return store;
+}
+
+function page(out: HandlerOutput): { data: Record<string, unknown>[]; nextCursor: string | null } {
+  const body = bodyOf(out);
+  return {
+    data: body["data"] as Record<string, unknown>[],
+    nextCursor: (body["page"] as { nextCursor: string | null }).nextCursor,
+  };
+}
+
+describe("operate handlers — list with no outstanding obligation is unchanged", () => {
+  it("serves every row and never consults the classified-field index", async () => {
+    // A discharged obligation is not an outstanding one, so the arm must take exactly the path it
+    // took before this change: no guard, no per-row check, the store's page verbatim. The spy
+    // proving zero reads is the point — `?sort=handle` is a classified sort and is served.
+    const store = await withRoster();
+    const classifiedFields = new SpyingClassifiedFields(buildClassifiedFieldIndex(CLINIC));
+    const out = await hit(
+      clinicCtx(store, evaluator("satisfied"), { classifiedFields }),
+      "roster.list",
+      { role: "clinician", query: { sort: "handle" } },
+    );
+    expect(out.status).toBe(200);
+    expect(page(out).data.map((r) => r["id"])).toEqual(["r-1", "r-2", "r-3"]);
+    expect(classifiedFields.reads).toBe(0);
+    expect(store.pageCalls).toBe(1);
+  });
+
+  it("a grant carrying no obligation at all is likewise untouched", async () => {
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, evaluator("denied")), "chart.list", { role: "clinician" });
+    expect(out.status).toBe(200);
+  });
+});
+
+describe("operate handlers — a record-bearing list obligation filters rows", () => {
+  it("drops the rows the policy denies and keeps the rest, in order", async () => {
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, OWN_WARD), "roster.list", { role: "clinician" });
+    expect(out.status).toBe(200);
+    expect(page(out).data.map((r) => r["id"])).toEqual(["r-1", "r-3"]);
+    // One store call, not one per surviving row and not a re-fill loop.
+    expect(store.pageCalls).toBe(1);
+  });
+
+  it("leaves nextCursor exactly as the store returned it", async () => {
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, OWN_WARD), "roster.list", {
+      role: "clinician",
+      query: { limit: "2" },
+    });
+    const { data, nextCursor } = page(out);
+    expect(data.map((r) => r["id"])).toEqual(["r-1"]);
+    expect(nextCursor).toBe(store.lastPage?.nextCursor);
+    expect(nextCursor).not.toBeNull();
+  });
+
+  it("a fully denied page is empty with a non-null cursor — the case the design turns on", async () => {
+    // Taking the cursor from the last *visible* row would make this page report no cursor, and the
+    // caller's walk would stop here: r-3 is in ward A and they are entitled to it. Termination is
+    // `nextCursor === null` and nothing else, so an empty page with a cursor is correct and a
+    // short page is never a bug to be fixed by re-filling.
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, OWN_WARD), "roster.list", {
+      role: "clinician",
+      // `ward` descending puts B first, so the whole first page is denied.
+      query: { limit: "1", sort: "ward", order: "desc" },
+    });
+    const { data, nextCursor } = page(out);
+    expect(data).toEqual([]);
+    expect(store.lastPage?.records.length).toBe(1);
+    expect(nextCursor).toBe(store.lastPage?.nextCursor);
+    expect(nextCursor).not.toBeNull();
+    // And the walk really does reach the rows it is entitled to.
+    const next = await hit(clinicCtx(store, OWN_WARD), "roster.list", {
+      role: "clinician",
+      query: { limit: "1", sort: "ward", order: "desc", cursor: nextCursor ?? "" },
+    });
+    expect(page(next).data.length).toBe(1);
+  });
+
+  it("reports nothing about what it withheld", async () => {
+    // A withheld count is an inference channel a caller narrows with filters, and unlike
+    // ADR-0342's 403 — where the caller had *named* the record — a list caller named nothing.
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, OWN_WARD), "roster.list", { role: "clinician" });
+    const body = bodyOf(out);
+    expect(Object.keys(body).sort()).toEqual(["data", "page"]);
+    expect(Object.keys(body["page"] as object).sort()).toEqual(["limit", "nextCursor"]);
+  });
+
+  it("costs exactly one evaluator batch for a page of N records", async () => {
+    const store = await withRoster();
+    const log: BatchLog = { calls: 0, sizes: [] };
+    const out = await hit(
+      clinicCtx(store, OWN_WARD, { abacBatchEvaluator: batching(log) }),
+      "roster.list",
+      { role: "clinician" },
+    );
+    expect(out.status).toBe(200);
+    expect(page(out).data.map((r) => r["id"])).toEqual(["r-1", "r-3"]);
+    // One call, holding all three questions — not three calls, and not one call per surviving row.
+    expect(log.calls).toBe(1);
+    expect(log.sizes).toEqual([ROSTER.length]);
+  });
+
+  it("drops a row whose answer is missing or deferred a second time", async () => {
+    // An evaluator that defers even with the record in hand cannot be satisfied on this path, so
+    // every row goes. `deferred` is `false` in `ABAC_OUTCOME_ALLOWS`, which is what makes a
+    // forgotten re-ask a denial rather than a grant.
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, () => "deferred"), "roster.list", { role: "clinician" });
+    expect(out.status).toBe(200);
+    expect(page(out).data).toEqual([]);
+  });
+
+  it("applies ?fields= to the surviving rows only", async () => {
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, OWN_WARD), "roster.list", {
+      role: "clinician",
+      query: { fields: "name" },
+    });
+    expect(page(out).data).toEqual([
+      { id: "r-1", name: "Ada" },
+      { id: "r-3", name: "Cyd" },
+    ]);
+  });
+
+  it("a role the list grant does not name is still a 403, not an empty page", async () => {
+    // The role arm refuses before any obligation is discharged, and `rbacCheckForRecords` is never
+    // reached: a caller who may not list at all must be told so, not handed a filtered nothing.
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, OWN_WARD), "ward.list", { role: "clerk" });
+    expect(out.status).toBe(403);
+    expect(store.pageCalls).toBe(0);
+  });
+});
+
+describe("operate handlers — addressing rows by a withheld field is refused", () => {
+  interface AddressingCase {
+    readonly name: string;
+    readonly query: Record<string, string>;
+    readonly error: string;
+  }
+
+  const CASES: readonly AddressingCase[] = [
+    { name: "sort", query: { sort: "handle" }, error: "sort_addresses_withheld_field" },
+    { name: "filter", query: { handle: "@bea" }, error: "filter_addresses_withheld_field" },
+    { name: "search", query: { q: "bea" }, error: "search_addresses_withheld_field" },
+  ];
+
+  for (const c of CASES) {
+    it(`${c.name}: 400s and never calls the store`, async () => {
+      const store = await withRoster();
+      const out = await hit(clinicCtx(store, OWN_WARD), "roster.list", {
+        role: "clinician",
+        query: c.query,
+      });
+      // 400 and not 403: this caller may list Roster — they passed the role check to get here —
+      // and it is the query that cannot be answered.
+      expect(out.status).toBe(400);
+      expect(bodyOf(out)["error"]).toBe(c.error);
+      expect(bodyOf(out)["field"]).toBe("handle");
+      expect(store.pageCalls).toBe(0);
+    });
+  }
+
+  it("names the field and the reason, and never a value the caller was probing with", async () => {
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, OWN_WARD), "roster.list", {
+      role: "clinician",
+      query: { handle: "@probe-for-this" },
+    });
+    const serialized = JSON.stringify(bodyOf(out));
+    expect(serialized).toContain("handle");
+    expect(serialized).toContain("Roster");
+    expect(serialized).not.toContain("@probe-for-this");
+  });
+
+  it("an ordinary field is addressable on every surface", async () => {
+    const store = await withRoster();
+    const queries: ReadonlyArray<Record<string, string>> = [
+      { sort: "ward" },
+      { ward: "A" },
+      { sort: "name", order: "desc" },
+    ];
+    for (const query of queries) {
+      const out = await hit(clinicCtx(store, OWN_WARD), "roster.list", { role: "clinician", query });
+      expect(out.status).toBe(200);
+    }
+  });
+
+  it("an entity with no classified field is never refused", async () => {
+    // `ctx.classifiedFields` has no `Ward` entry, and an absent entry is an empty withheld set.
+    const store = new CapturingStore();
+    await store.create(TENANT, "Ward", { id: WARD_ID, label: "A" });
+    const out = await hit(clinicCtx(store, OWN_WARD), "ward.list", {
+      role: "clinician",
+      query: { sort: "label" },
+    });
+    expect(out.status).toBe(200);
   });
 });
