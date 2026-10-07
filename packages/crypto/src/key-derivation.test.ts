@@ -11,12 +11,14 @@ import {
   CURSOR_KEY_DERIVATION_INFO,
   ColumnSecretRefused,
   DEFAULT_KEY_GENERATION,
+  KEK_KEY_DERIVATION_INFO,
   MIN_COLUMN_SECRET_BYTES,
   MIN_COLUMN_SECRET_DISTINCT_BYTES,
   PLATFORM_COLUMN_KEY_SCOPE,
   columnKeyFingerprint,
   deriveTenantColumnKey,
   deriveTenantCursorKey,
+  deriveTenantKek,
   isColumnSecretRefusalReason,
   parseColumnEncryptionSecret,
   parseCursorEncryptionSecret,
@@ -35,6 +37,17 @@ describe("key-derivation constants", () => {
   it("pins the cursor info string, and that it is not the column one", () => {
     expect(CURSOR_KEY_DERIVATION_INFO).toBe("crossengin.list-cursor.v1");
     expect(CURSOR_KEY_DERIVATION_INFO).not.toBe(COLUMN_KEY_DERIVATION_INFO);
+  });
+
+  it("pins the key-encryption info string, and that all three are distinct", () => {
+    expect(KEK_KEY_DERIVATION_INFO).toBe("crossengin.key-encryption.v1");
+    expect(
+      new Set([
+        COLUMN_KEY_DERIVATION_INFO,
+        CURSOR_KEY_DERIVATION_INFO,
+        KEK_KEY_DERIVATION_INFO,
+      ]).size,
+    ).toBe(3);
   });
 
   it("pins the secret floors and the derived key size", () => {
@@ -438,6 +451,131 @@ describe("deriveTenantCursorKey", () => {
   });
 });
 
+describe("deriveTenantKek", () => {
+  it("returns raw bytes of exactly the length the AEAD takes", () => {
+    const kek = deriveTenantKek(SECRET, TENANT);
+    expect(kek).toBeInstanceOf(Uint8Array);
+    expect(kek.length).toBe(AEAD_KEY_BYTES);
+  });
+
+  it("matches HKDF-SHA256 computed independently with node:crypto", () => {
+    const expected = new Uint8Array(
+      hkdfSync(
+        "sha256",
+        new TextEncoder().encode(SECRET_TEXT),
+        new TextEncoder().encode(TENANT),
+        new TextEncoder().encode(`${KEK_KEY_DERIVATION_INFO}:gen1`),
+        32,
+      ),
+    );
+    expect(Buffer.from(deriveTenantKek(SECRET, TENANT, 1))).toEqual(
+      Buffer.from(expected),
+    );
+  });
+
+  it("matches pinned known-answer vectors", () => {
+    // Pinned as literals as well as recomputed above, and the stakes here are higher
+    // than for either sibling: a cursor key that changes refuses a cursor a client can
+    // re-request, and a column key that changes is a re-encryption migration, but a
+    // key-encryption key that changes makes every stored wrapped data key unopenable —
+    // and a data key is not regenerable, so the data under it is gone. Editing these
+    // literals is the deliberate act that says that was considered.
+    const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
+    expect(hex(deriveTenantKek(SECRET, TENANT))).toBe(
+      "d1fa82e9585863483a6361d00d3314999a8d1ef4d633e0106fd5d7f854e8fc0f",
+    );
+    expect(hex(deriveTenantKek(SECRET, TENANT, 2))).toBe(
+      "107b0ada927d63ad3648f7a59f86dce1db19940a2c73fb716ded5c89d93e89e9",
+    );
+    expect(hex(deriveTenantKek(SECRET, PLATFORM_COLUMN_KEY_SCOPE))).toBe(
+      "8cf0bcff6a9743d1a87c04b2cba52494243004cd9fc6052cf9087b98a4abe829",
+    );
+  });
+
+  it("is none of the other two keys for the same secret and tenant", () => {
+    // All three come from one deployment secret and one tenant id, so the info string
+    // is the entire separation between them — asserted rather than assumed, because
+    // without it a leaked key-encryption key would be a column key.
+    const column = Buffer.from(deriveTenantColumnKey(SECRET, TENANT), "base64");
+    const cursor = Buffer.from(deriveTenantCursorKey(SECRET, TENANT));
+    const kek = Buffer.from(deriveTenantKek(SECRET, TENANT));
+    expect(kek).not.toEqual(column);
+    expect(kek).not.toEqual(cursor);
+    expect(column).not.toEqual(cursor);
+    expect(new Set([column, cursor, kek].map((b) => b.toString("hex"))).size).toBe(3);
+  });
+
+  it("is stable across calls", () => {
+    expect(Buffer.from(deriveTenantKek(SECRET, TENANT))).toEqual(
+      Buffer.from(deriveTenantKek(SECRET, TENANT)),
+    );
+  });
+
+  it("is distinct per tenant", () => {
+    expect(Buffer.from(deriveTenantKek(SECRET, TENANT))).not.toEqual(
+      Buffer.from(deriveTenantKek(SECRET, OTHER_TENANT)),
+    );
+  });
+
+  it("is distinct per generation", () => {
+    expect(Buffer.from(deriveTenantKek(SECRET, TENANT, 1))).not.toEqual(
+      Buffer.from(deriveTenantKek(SECRET, TENANT, 2)),
+    );
+  });
+
+  it("is distinct per secret", () => {
+    const other = parseColumnEncryptionSecret("a-different-deployment-secret-0123456789");
+    expect(Buffer.from(deriveTenantKek(SECRET, TENANT))).not.toEqual(
+      Buffer.from(deriveTenantKek(other, TENANT)),
+    );
+  });
+
+  it("defaults the generation to DEFAULT_KEY_GENERATION", () => {
+    expect(Buffer.from(deriveTenantKek(SECRET, TENANT))).toEqual(
+      Buffer.from(deriveTenantKek(SECRET, TENANT, DEFAULT_KEY_GENERATION)),
+    );
+  });
+
+  it("refuses an empty tenantId rather than treating it as platform scope", () => {
+    expect(() => deriveTenantKek(SECRET, "")).toThrow(/non-empty/);
+  });
+
+  it("refuses a non-positive or fractional generation", () => {
+    expect(() => deriveTenantKek(SECRET, TENANT, 0)).toThrow(/generation/);
+    expect(() => deriveTenantKek(SECRET, TENANT, -1)).toThrow(/generation/);
+    expect(() => deriveTenantKek(SECRET, TENANT, 1.5)).toThrow(/generation/);
+    expect(() => deriveTenantKek(SECRET, TENANT, Number.NaN)).toThrow(/generation/);
+  });
+
+  it("refuses a weak secret handed in directly, naming the key-encryption derivation", () => {
+    // The same single validator, so there is no outcome in which a refused secret
+    // yields a key-encryption key anyway — and the label says which derivation refused,
+    // since all three read one variable and a refusal naming the wrong one sends an
+    // operator looking for a second secret that does not exist.
+    for (const [weak, reason] of [
+      ["tiny", "too_short"],
+      ["z".repeat(64), "too_uniform"],
+    ] as const) {
+      try {
+        deriveTenantKek(new TextEncoder().encode(weak), TENANT);
+        expect.unreachable("expected a refusal");
+      } catch (err) {
+        expect((err as ColumnSecretRefused).reason).toBe(reason);
+        const message = (err as Error).message;
+        expect(message).toContain("key-encryption secret");
+        // It names the variable too, which its two siblings do not need to: they each have one of
+        // their own, while the KEK reads COLUMN_ENCRYPTION_SECRET. A label naming only the role
+        // would send an operator looking for a KEK variable that does not exist.
+        expect(message).toContain("COLUMN_ENCRYPTION_SECRET");
+        // Still not the *column* derivation's label — the operator must be able to tell which of
+        // the three refused, even though the secret to fix is the same one.
+        expect(message).not.toContain("column encryption secret refused");
+        expect(message).not.toContain("list-cursor encryption secret");
+      }
+    }
+  });
+});
+
 describe("columnKeyFingerprint", () => {
   it("returns 16 lowercase hex characters", () => {
     expect(columnKeyFingerprint(deriveTenantColumnKey(SECRET, TENANT))).toMatch(
@@ -471,6 +609,9 @@ describe("no module error leaks secret or key material", () => {
     const derivedCursorKeyHex = Buffer.from(
       deriveTenantCursorKey(validSecret, TENANT),
     ).toString("hex");
+    const derivedKekHex = Buffer.from(deriveTenantKek(validSecret, TENANT)).toString(
+      "hex",
+    );
 
     const attempts: readonly (() => unknown)[] = [
       // too_short, with the marker inside the refused secret
@@ -495,6 +636,11 @@ describe("no module error leaks secret or key material", () => {
       () => deriveTenantCursorKey(new TextEncoder().encode(marker), TENANT),
       () => deriveTenantCursorKey(validSecret, ""),
       () => deriveTenantCursorKey(validSecret, TENANT, 0),
+      // and the key-encryption derivation, by the same routes
+      () => deriveTenantKek(new TextEncoder().encode(marker), TENANT),
+      () => deriveTenantKek(new TextEncoder().encode(`${marker}${"A".repeat(30)}`), TENANT),
+      () => deriveTenantKek(validSecret, ""),
+      () => deriveTenantKek(validSecret, TENANT, 0),
     ];
 
     const messages: string[] = [];
@@ -513,6 +659,7 @@ describe("no module error leaks secret or key material", () => {
       expect(message).not.toContain(validMarkerSecretText);
       expect(message).not.toContain(derivedKey);
       expect(message).not.toContain(derivedCursorKeyHex);
+      expect(message).not.toContain(derivedKekHex);
     }
   });
 });

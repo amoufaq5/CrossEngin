@@ -272,8 +272,8 @@ describe("no table carries the permissive platform arm any more", () => {
 });
 
 describe("META_TABLES", () => {
-  it("contains 145 tables", () => {
-    expect(META_TABLES).toHaveLength(145);
+  it("contains 146 tables", () => {
+    expect(META_TABLES).toHaveLength(146);
   });
 
   it("each table is in the meta schema with a unique name", () => {
@@ -415,6 +415,7 @@ describe("META_TABLES", () => {
       "tenant_ai_settings",
       "tenant_credits",
       "tenant_data_exports",
+      "tenant_data_keys",
       "tenant_lifecycle_events",
       "tenant_residency_profiles",
       "tenant_storage_usage",

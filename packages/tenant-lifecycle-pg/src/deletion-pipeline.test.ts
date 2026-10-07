@@ -503,10 +503,12 @@ describe("deleteTenantAtomically", () => {
       "meta.operate_entity_records",
     ]);
     expect(out.erasedSharedTables.rowCount).toBe(9);
-    // Coverage, which the scope deliberately does not carry: 96 of the catalog's 114 tenant-scoped
+    // Coverage, which the scope deliberately does not carry: 97 of the catalog's 115 tenant-scoped
     // tables examined, 18 left — 16 as the platform's record of the deletion and 2 under a statutory
-    // obligation.
-    expect(out.erasedSharedTables.examinedTables).toHaveLength(96);
+    // obligation. The 97th is ADR-0347's `meta.tenant_data_keys`: the wrapped per-tenant column key
+    // is a tenant's row like any other, so the erasure that already walks this set destroys it, and
+    // the crypto-shred is a consequence of the existing pipeline rather than a new step in it.
+    expect(out.erasedSharedTables.examinedTables).toHaveLength(97);
     expect(out.erasedSharedTables.retainedTables).toHaveLength(RETAINED_SHARED_TABLES.length);
   });
 

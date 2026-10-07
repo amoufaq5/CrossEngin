@@ -16,10 +16,10 @@
  * expressed by the generation in the HKDF info string rather than by a lifecycle
  * record. The only thing that must be protected is the deployment secret itself.
  *
- * The two derivations are separated **only** by their info strings, which is what keeps
- * one compromise from being two: a leaked cursor key must not decrypt a PHI column.
- * Each new consumer therefore gets its own `*_KEY_DERIVATION_INFO`, never a reuse of
- * another's.
+ * The three derivations are separated **only** by their info strings, which is what keeps
+ * one compromise from being three: a leaked cursor key must not decrypt a PHI column, and
+ * a leaked key-encryption key must not be either. Each new consumer therefore gets its own
+ * `*_KEY_DERIVATION_INFO`, never a reuse of another's.
  */
 
 import { hkdfSync } from "node:crypto";
@@ -37,12 +37,32 @@ export const COLUMN_KEY_DERIVATION_INFO = "crossengin.column-encryption.v1";
 export const CURSOR_KEY_DERIVATION_INFO = "crossengin.list-cursor.v1";
 
 /**
- * The human names the two refusals use. A deployment reading `column encryption secret
+ * The info string for the key-encryption key that wraps a per-tenant data key. A third
+ * label and not a reuse of either: see the module header. The KEK is derived from the
+ * **same** deployment secret as the column key, so the info string is the entire
+ * separation between a key that encrypts PHI and a key that encrypts the key that
+ * encrypts PHI — which is why there is no parser and no second variable for it.
+ */
+export const KEK_KEY_DERIVATION_INFO = "crossengin.key-encryption.v1";
+
+/**
+ * The human names the refusals use. A deployment reading `column encryption secret
  * refused` while it was configuring the cursor secret would be sent to the wrong
  * variable, which is the whole reason the label is a parameter.
+ *
+ * The key-encryption label names a *role* rather than a variable, because the KEK has no
+ * variable of its own: a deployment turning the envelope on supplies no new secret, so
+ * the operator reading this refusal is being told which derivation refused, and the
+ * secret to fix is `COLUMN_ENCRYPTION_SECRET` either way.
  */
 const COLUMN_SECRET_LABEL = "column encryption secret";
 const CURSOR_SECRET_LABEL = "list-cursor encryption secret";
+// Names the variable as well as the role, unlike its two siblings, and the asymmetry is the point:
+// those two each have an environment variable of their own, so naming the role points at it. The KEK
+// has none — it reads `COLUMN_ENCRYPTION_SECRET`, which is what makes the envelope a mode switch
+// rather than a new credential — so a refusal saying only "key-encryption secret" would name a
+// variable that does not exist and send an operator looking for it.
+const KEK_SECRET_LABEL = "key-encryption secret (COLUMN_ENCRYPTION_SECRET)";
 
 export const MIN_COLUMN_SECRET_BYTES = 32;
 
@@ -185,6 +205,10 @@ function cursorKeyInfo(generation: number): string {
   return `${CURSOR_KEY_DERIVATION_INFO}:gen${generation.toString()}`;
 }
 
+function kekKeyInfo(generation: number): string {
+  return `${KEK_KEY_DERIVATION_INFO}:gen${generation.toString()}`;
+}
+
 /**
  * The salt and generation checks both derivations share, extracted so a second
  * derivation cannot be written with one of them weaker than the other. Neither detail
@@ -274,6 +298,42 @@ export function deriveTenantCursorKey(
       secret,
       new TextEncoder().encode(tenantId),
       new TextEncoder().encode(cursorKeyInfo(generation)),
+      AEAD_KEY_BYTES,
+    ),
+  );
+}
+
+/**
+ * HKDF-SHA256(ikm = secret, salt = tenantId utf8,
+ * info = `${KEK_KEY_DERIVATION_INFO}:gen${generation}`, `AEAD_KEY_BYTES`), as **raw
+ * bytes** — the key-encryption key that `wrapDataKey` seals a per-tenant data key under.
+ *
+ * **The same deployment secret as the column key, separated only by the info string.**
+ * That makes the envelope a *mode switch* rather than a new credential: a deployment
+ * enabling it deploys nothing, and so cannot reach the half-configured state where a data
+ * key is wrapped under a key-encryption key nobody has — which, for a key that exists only
+ * wrapped, would be indistinguishable from the key having been destroyed. The separation
+ * that does the work is the label, exactly as it is between the column and cursor keys.
+ *
+ * Bytes and not base64, for `deriveTenantCursorKey`'s reason: the consumer is `aeadSeal`
+ * in this process and takes bytes.
+ *
+ * Salt and generation discipline, and the refusal of an empty `tenantId`, are
+ * `deriveTenantColumnKey`'s.
+ */
+export function deriveTenantKek(
+  secret: Uint8Array,
+  tenantId: string,
+  generation: number = DEFAULT_KEY_GENERATION,
+): Uint8Array {
+  refuseWeakSecret(secret, KEK_SECRET_LABEL);
+  requireDerivationArguments(tenantId, generation);
+  return new Uint8Array(
+    hkdfSync(
+      "sha256",
+      secret,
+      new TextEncoder().encode(tenantId),
+      new TextEncoder().encode(kekKeyInfo(generation)),
       AEAD_KEY_BYTES,
     ),
   );

@@ -11851,6 +11851,103 @@ export const META_NOTIFICATION_FAX_OBSERVATIONS: TableDefinition = {
   },
 };
 
+/**
+ * The wrapped per-tenant data key for at-rest column encryption (ADR-0347).
+ *
+ * ADR-0338 derives that key — `HKDF(COLUMN_ENCRYPTION_SECRET, salt = tenantId, info = …)` — and
+ * stores nothing, which is why it cannot be **destroyed**: the key exists wherever the deployment
+ * secret does, so an Article 17 erasure that drops a tenant's schema leaves every backup's
+ * ciphertext recoverable forever. This table is the half that makes destruction expressible: the key
+ * is generated at random, wrapped under a KEK derived from the same deployment secret, and the
+ * wrapped bytes are the only copy.
+ *
+ * **What destroying a row buys, stated precisely, because ADR-0338 overclaimed it.** It is not
+ * "unrecoverable including from backups": the wrapped key and the ciphertext share this database, so
+ * one backup holds both. It is a **bounded deletion horizon** — after the row is gone the data is
+ * recoverable only from backups taken before that moment, and only until those expire — where a
+ * derived key gives no horizon at all. That bound is the deployment's backup retention, and a KEK
+ * held outside the backup set (a KMS, `KEY_MANAGEMENT_KINDS`' `customer-managed-byok`) is what would
+ * remove it.
+ *
+ * `tenant_id` is **NOT NULL** and there is deliberately no platform arm: a data key is always one
+ * tenant's, so `tenant_id IS NULL` would match nothing and ADR-0332's split would be three policies
+ * where one is the whole truth. The isolation policy alone is therefore not the permissive shape
+ * that sweep was about — there is no platform row to forge.
+ *
+ * It **cascades with the tenant**, which is the opposite of `PLATFORM_RECORD_TABLES`' rule and for
+ * the same reason read the other way: a table whose purpose is to outlive the tenant must not
+ * cascade, and this one's purpose is to *not* outlive it. The erasure deletes the row by name first
+ * (it carries `tenant_id`, so `eraseSharedTablesWithin` reaches it), so the cascade is a second
+ * fence rather than the mechanism.
+ */
+export const META_TENANT_DATA_KEYS: TableDefinition = {
+  schema: "meta",
+  name: "tenant_data_keys",
+  columns: [
+    { name: "id", type: "UUID", notNull: true, default: "uuid_generate_v7()" },
+    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },
+    /** The DEK's own generation. A rekey mints the next one; `1` is the first envelope key. */
+    {
+      name: "generation",
+      type: "INTEGER",
+      notNull: true,
+      default: "1",
+      check: "generation >= 1",
+    },
+    /**
+     * `aeadSeal(kek, dek, dataKeyWrapAad(tenantId, generation))` — `nonce || ciphertext || tag`.
+     * The AAD binds the wrap to this row's tenant and generation, so a row copied between tenants
+     * fails to unwrap and `tenant_id` is not the only thing keeping them apart.
+     */
+    { name: "wrapped_key", type: "BYTEA", notNull: true },
+    /**
+     * Which KEK generation wrapped it. Recorded rather than assumed because a KEK rotation re-wraps
+     * every DEK without re-encrypting a single column — the envelope's unambiguous win — and a
+     * row's own answer is what makes that rotation checkable mid-flight.
+     */
+    {
+      name: "kek_generation",
+      type: "INTEGER",
+      notNull: true,
+      check: "kek_generation >= 1",
+    },
+    /**
+     * Where the key came from, which is what decides whether destroying the row destroys anything.
+     *
+     * `random` is `generateDataKey()` and has no derivation path, so the row is the only copy.
+     * `seeded_from_derived` is ADR-0338's derived key stored as-is, which keeps a tenant's existing
+     * ciphertext readable through the switch and is **not shreddable** — the key is still
+     * recomputable from the deployment secret. The distinction is a column and not an inference
+     * because the shreddability claim is read off it, and a claim inferred from the key's bytes
+     * would be unanswerable.
+     */
+    {
+      name: "provenance",
+      type: "TEXT",
+      notNull: true,
+      check: "provenance IN ('random', 'seeded_from_derived')",
+    },
+    { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
+  ],
+  primaryKey: ["id"],
+  uniqueConstraints: [
+    {
+      name: "tenant_data_keys_tenant_generation_key",
+      columns: ["tenant_id", "generation"],
+    },
+  ],
+  indexes: [{ name: "idx_tenant_data_keys_tenant", columns: ["tenant_id"] }],
+  rls: {
+    enabled: true,
+    policies: [
+      {
+        name: "tenant_data_keys_tenant_isolation",
+        using: TENANT_ISOLATION_USING,
+      },
+    ],
+  },
+};
+
 export const META_TABLES: readonly TableDefinition[] = [
   META_TENANTS,
   META_USERS,
@@ -11997,4 +12094,5 @@ export const META_TABLES: readonly TableDefinition[] = [
   META_NOTIFICATION_READ_WATERMARKS,
   META_NOTIFICATION_USER_QUIET_HOURS,
   META_NOTIFICATION_FAX_OBSERVATIONS,
+  META_TENANT_DATA_KEYS,
 ];

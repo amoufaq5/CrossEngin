@@ -92,6 +92,16 @@ services:
       # to either one is REFUSED at boot. To serve one, switch `--store` to `pg-columns` and set
       # COLUMN_ENCRYPTION_SECRET above. `--allow-plaintext-phi` overrides the refusal and is what
       # its name says: the fields are stored in the clear.
+      #
+      # On such a deployment, `--column-key-mode envelope` stores each tenant's column key as a
+      # random data key, wrapped under a key derived from COLUMN_ENCRYPTION_SECRET, so destroying
+      # that row is expressible -- which is what bounds the recovery horizon after an Article 17
+      # erasure. Note what it does NOT buy: the wrapped key and the ciphertext are in this same
+      # database, so one backup holds both, and the bound is this deployment's backup retention
+      # rather than the destruction itself. A tenant that already holds ciphertext written under
+      # the derived key is SEEDED from it (so their data stays readable) and its row records
+      # `seeded_from_derived`, which is still recomputable from the secret -- so destroying it
+      # destroys nothing until that tenant is rekeyed, and there is no rekey executor yet.
       - --pack
       - ${OPERATE_PACK:-erp-core}
       - --store

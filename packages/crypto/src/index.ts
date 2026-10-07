@@ -1,6 +1,7 @@
 export * from "./aead.js";
 export * from "./algorithms.js";
 export * from "./audit.js";
+export * from "./data-key.js";
 export * from "./hashing.js";
 export * from "./hmac.js";
 export * from "./key-derivation.js";

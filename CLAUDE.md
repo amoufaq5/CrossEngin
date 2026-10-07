@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 341 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 342 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~17,364 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~17,483 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -424,6 +424,40 @@ type errors.
   `{"k":["l2"],"id":"rec_muybya7w0002"}` — `l2` being an oncology row this cardiology caller is
   withheld on every page — and the other `s1.wfHmgacd…`.
 
+  ADR-0347 takes the item that has sat top of this file's PHI entry since ADR-0338 — the DEK
+  envelope, and with it crypto-shredding — and the class is **a claim nothing could have supported**.
+  Most of the increment is correcting the motivation on file. ADR-0338 recorded the envelope's gain
+  as making a tenant's PHI *"unrecoverable including from backups, a claim ADR-0316's `DROP SCHEMA`
+  cannot make"*, and that is **false**: the wrapped key and the ciphertext it protects live in one
+  database, so one backup holds both and restoring it restores the pair. What the envelope buys is a
+  **bounded deletion horizon** — afterwards the data is recoverable only from backups predating the
+  destruction, and only until those expire, so the bound is the deployment's backup retention rather
+  than the destruction itself — where a derived key gives **no horizon at all**, since it exists
+  wherever `COLUMN_ENCRYPTION_SECRET` does. That difference is the whole value and is enough;
+  claiming more is ADR-0337's falsely-true control in a new place. A KEK in an external KMS is what
+  would support the original claim, and is the top follow-up.
+  The second correction is what shaped the design: **it holds only for a key that is random**. A
+  deployment switching modes has tenants already holding ciphertext under the derived key and
+  **nothing records which key wrote a column**, so provisioning a random key for one of them makes
+  their PHI permanently unreadable. The only safe migration is to **seed** that tenant's data key
+  with the bytes of the key their ciphertext is already under — and a seeded key stays recomputable
+  from the deployment secret, so destroying its row destroys nothing. So shreddability is a property
+  of **the row and not the mode**: `provenance` is on the table, `shreddabilityOf(mode, provenance?)`
+  answers over the pair, and an `envelope` with no provenance in hand answers `derivable`, the
+  conservative direction, because claiming `shreddable` for a recomputable key tells a deployment
+  its Article 17 erasure bounded a horizon it did not.
+  Two things fell out. The erasure needed **no new code** — `meta.tenant_data_keys` carries
+  `tenant_id` and cascades from `meta.tenants`, which is deliberately the *opposite* of
+  ADR-0335's `PLATFORM_RECORD_TABLES` rule, since those tables exist to outlive their tenant and
+  this one exists not to — confirmed by the shared-table erasure's own counts failing on 114 → 115
+  the moment it was catalogued. And **the probe was wrong, and only live could say so**: the first
+  one asked whether the tenant's own Postgres schema existed, which is sound only for ADR-0314's
+  per-tenant manifests, so for a boot manifest — whose column tables sit in the shared schema — it
+  answered `false` for every tenant, handed each a random key and made the PHI written one step
+  earlier unreadable. It asks the direct question now (does a table carrying an encrypted column
+  hold a row for this tenant), with `42P01` as the one honest `false` and every other uncertainty
+  resolving to `true`.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -503,7 +537,7 @@ packages exist at only one layer, noted below where that is true.
 ### Substrate (the kernel itself)
 
 - **`kernel`** — the meta-schema and manifest compiler. Four areas: `bootstrap/`
-  (`META_TABLES`, the catalog of **145** platform Postgres tables, plus deterministic DDL
+  (`META_TABLES`, the catalog of **146** platform Postgres tables, plus deterministic DDL
   emit), `ddl/` (the DDL *vocabulary* — `resolvedFields`, field→Postgres types, built-in
   traits, column naming, default rendering, identifier quoting, structural entity diff;
   it does **not** emit entity tables, `operate-runtime-pg` does — ADR-0284),
@@ -1146,11 +1180,34 @@ packages exist at only one layer, noted below where that is true.
   derivation is pinned by a **known-answer vector** computed two ways, because a silent change to it
   would make every existing ciphertext undecryptable. `columnKeyFingerprint` exists so a key can be
   *identified* in a log line without being disclosed.
+  **`data-key.ts` is the one key here that is not derived** (ADR-0347). `generateDataKey()` is
+  `randomBytes(32)` and nothing else — deliberately not seeded from the tenant id or the deployment
+  secret, because *a key that can be recomputed cannot be destroyed*, so wrapping a derived key
+  would buy a row to delete and no consequence for deleting it. `wrapDataKey`/`unwrapDataKey` are
+  thin over `aeadSeal`/`aeadOpen` and restate none of their rules; `dataKeyWrapAad(tenantId,
+  generation)` is canonical JSON of the pair for `cursorSealAad`'s reason. A wrong-length data key
+  **throws**, and it matters most on `dataKeyToColumnKey`, whose consumer `pgp_sym_encrypt` accepts a
+  key of **any** length — so a short key rendered to base64 would encrypt PHI weakly and report
+  success. `deriveTenantKek` is the third derivation, the same construction under a third `info`
+  tag, which is what keeps the envelope from adding a credential: it adds a *row* to keep or destroy
+  and no second secret. A KEK held outside the database is the one thing that would support
+  ADR-0338's original "including from backups" claim; see *What's actually left*.
 - **`crypto-pg`** — a Postgres key registry for those handles (tenant-scoped rows, rotate /
   revoke / list). Thin: registry, records, tenant context. Note what it is **not**: `meta.crypto_keys`
   has no private-material column and its `algorithm` CHECK names only `hmac-sha256`/`ed25519`, so it
   is structurally a *public*-key directory and a wrapped data key cannot live there without migrating
   two CHECKs and a regex — which is half the reason ADR-0338 derives rather than stores.
+  **`data-key-store.ts` is where a wrapped data key lives instead** (ADR-0347), over its own
+  `meta.tenant_data_keys`. `ensure(tenantId, seed?)` is idempotent under an **xact**-scoped advisory
+  lock (`TENANT_SCHEMA_LOCK_SQL`'s shape, not `kernel-pg`'s applier lock — that one is a *session*
+  lock node-pg refuses inside a transaction, and this lock must be held by the transaction that
+  reads and inserts), and a row that exists **ignores the seed**, so the provenance decision is made
+  once per tenant and never revisited. `provenance` is derived from whether a seed was supplied and
+  never accepted from a caller. `destroy` is a **hard delete** and not a `destroyed_at` flag,
+  because a soft delete leaves the wrapped key in the row — a tombstone claiming a destruction over
+  a key still there and still openable is ADR-0323's tampered scope in a new place. Every statement
+  sets tenant context, **the reads too**, since that table's isolation policy is its only arm
+  (ADR-0335's class).
 - **`compliance`** — contracts only: the compliance-pack shape (metadata, parameters,
   contributions) and the resolver that merges pack clauses into a manifest.
 - **`residency`** — 8 regions × 5 broad regions, cloud providers, residency profiles with
@@ -2325,6 +2382,32 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   increment's own defect, one layer in, caught in review. A secret that is set and **unused** warns
   rather than refusing, since the variable may be set for a sibling service. The router is built
   **per tenant gateway** so `encryptedEntities` comes from that tenant's own manifest.
+  **`--column-key-mode derived|envelope` chooses where that key comes from** (ADR-0347), default
+  `derived`, and `envelope` on a deployment that encrypts no column is **refused at boot by name** —
+  a mode that silently does nothing would let an operator believe a tenant's key is destroyable when
+  there is no key and no ciphertext to destroy, which is the overclaim that increment exists to
+  correct. The derived source stays live in envelope mode because it is the **seed**, so the two are
+  one decision rather than alternatives; the secret is parsed **once, eagerly**, before either
+  closure, since `buildEnvelopeKeySource` takes bytes and so cannot repeat
+  `buildColumnKeySource`'s refusal. `data-key-envelope.ts` holds the mode, the shreddability pair
+  and the two boot lines, performs no encryption, issues no SQL and never reads the environment.
+  `shreddabilityOf(mode, provenance?)` answers `shreddable` / `derivable` / `not_applicable` over
+  the **pair** and not a boolean, because whether destroying a row destroys anything is a property
+  of **that row** — an `envelope` with no provenance in hand answers `derivable`, the conservative
+  direction, since claiming `shreddable` for a recomputable key tells a deployment its Article 17
+  erasure bounded a horizon it did not, while the converse costs an unnecessary rekey.
+  The key source **caches the promise and not the value**, because here a cache miss is a database
+  round trip and N concurrent cold writes would be N callers racing to create one tenant's first
+  row (`fcm-token.ts`'s in-flight collapse); a rejection is **not** remembered. Nothing is caught: a
+  failed unwrap or a wrong-length key is a refused request, because the available fallback —
+  deriving instead — would split one tenant's ciphertext across two keys with nothing recording
+  which, and a refused write is recoverable where that is not.
+  `tenantMayHoldCiphertext` is the seed decision's input and **every uncertainty resolves to
+  `true`**: seeding a tenant that holds nothing costs only shreddability, while randomising one that
+  does makes their PHI permanently unreadable. `42P01` is the one honest `false`. Its first version
+  asked whether the tenant's own schema existed — sound only for ADR-0314's per-tenant manifests,
+  and for a boot manifest it answered `false` for every tenant; found live, which is where a proxy
+  that is merely indirect and one that is wrong first become distinguishable.
   **The fax run counter is opt-in** (`--bounce-fax-observations`, `--bounce-fax-suppress-after`,
   `--bounce-fax-window-hours`, ADR-0332): a threshold below `MIN_FAX_SUPPRESSION_THRESHOLD` is
   **refused rather than clamped**, because a threshold of 1 is the inference ADR-0302 forbids and
@@ -2433,12 +2516,12 @@ Recurring patterns enforced by zod `superRefine`:
 
 ## Meta-schema
 
-`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **145**
+`packages/kernel/src/bootstrap/meta-schema.ts` is the central catalog of **146**
 platform-level Postgres tables. Each new package adds tables there and updates
 `meta-schema.test.ts` (count, sorted expected-names list, column assertions).
 
 **A fresh database holds one more table than the catalog does**, and it is not a stale count:
-`information_schema` reports 146 `meta` base tables against `META_TABLES`' 145, because
+`information_schema` reports 147 `meta` base tables against `META_TABLES`' 146, because
 `_meta_migrations` is created by `kernel-pg`'s applier for its own per-statement hash bookkeeping and
 is deliberately not emitted from the catalog. Verified. Count the catalog, not the database.
 
@@ -2478,6 +2561,14 @@ per tenant and the erasure still skips them by name. Reordering the retirement d
 ADR-0329 records that `meta.audit_log.tenant_id` references `meta.tenants`, so retiring first makes
 every erasure unrecordable. `packages/testing/src/strategy/pg-record-retention.ts` compares the two
 halves from disk in **both directions**, with a negative control.
+
+**`meta.tenant_data_keys` carries `TENANT_FK` for exactly the inverted reason** (ADR-0347): it is
+the one table whose *survival* defeats its own purpose, since a wrapped key outliving its tenant is
+a key nobody destroyed. So it cascades, and the Article 17 erasure needed no new code to reach it —
+confirmed by the shared-table erasure's own target counts failing on 114 → 115 the moment it was
+catalogued, which is the fence doing its job rather than a test to update. It carries **no platform
+arm**: a data key is never platform-scoped, `tenant_id` is NOT NULL, and a platform read arm would
+let any tenant's gateway session read every tenant's wrapped key.
 
 Append new tables to the bottom of the array in build order, not alphabetically —
 the expected-names test sorts independently.
@@ -2814,12 +2905,11 @@ opened them.
   being opt-in — there, on-by-default would refuse requests of a deployment that works today; here
   nothing served PHI correctly today, so the refusal breaks nothing that worked. The shipped compose is
   `erp-core`, which declares no `phi`/`regulated` field (it has 10 `pii` and 11 `commercial_sensitive` ones, which are classified but not encrypt-at-rest).
-  What remains, in order: **(1)** the **DEK envelope** and with it crypto-shredding — the one thing
-  deriving does not buy, since a derived key cannot be destroyed, so Article 17 gains nothing here and
-  destroying a wrapped DEK would make a tenant's PHI unrecoverable *including from backups*, a claim
-  ADR-0316's `DROP SCHEMA` cannot make. It needs AES-256-GCM in `packages/crypto`, a KEK source, an
-  unwrap cache and a decision about an unreadable DEK row; the derivation is already
-  generation-tagged, so it is generation 2 rather than a rewrite. **(2)** rotation has **no executor**
+  What remains, in order: **(1)** ~~the **DEK envelope** and with it crypto-shredding~~ — **closed by
+  ADR-0347**, which also found that this entry's own statement of the gain was **false**: destroying a
+  wrapped DEK does *not* make PHI "unrecoverable including from backups", because the wrapped key and
+  the ciphertext live in one database and one backup holds both. What it buys is a **bounded deletion
+  horizon**, and only for a `random` key. See the next entry. **(2)** rotation has **no executor**
   — `KeyRotationMigrator` is still callerless, which is exactly why the `generation` parameter is
   exposed by no flag or env var: a deployment that bumped it would make every existing ciphertext
   undecryptable with no way back. **(3)** `unique: true` is unenforced on the column store
@@ -2834,6 +2924,44 @@ opened them.
   `KEY_MANAGEMENT_KINDS`' `customer-managed-byok` models; `ColumnEncryptionKeySource` is the seam.
   **(6)** an encrypted field is dropped from `?sort` and filters **silently**, which ADR-0091 decided
   and matters more now that the ciphertext is real.
+- **The column key can be a stored, wrapped data key, and what that is actually worth** (ADR-0347
+  closed the entry above's Q1 and **corrected the claim it was asking for**). ADR-0338 and this file
+  recorded the envelope's gain as making a tenant's PHI *"unrecoverable including from backups"*;
+  that is false, because the wrapped key and the ciphertext it protects live in **one database**, so
+  one backup holds both and restoring it restores the pair. What the envelope buys is a **bounded
+  deletion horizon** — afterwards recoverable only from backups predating the destruction, and only
+  until those expire, so the bound is the deployment's backup retention — where a derived key gives
+  **no horizon at all**, since it exists wherever `COLUMN_ENCRYPTION_SECRET` does. That difference
+  is the whole value and is enough to ship for; claiming more is ADR-0337's falsely-true control in
+  a new place.
+  And it holds **only for a key that is random**, which is what shaped the design: a deployment
+  switching modes has tenants already holding ciphertext under the derived key and **nothing records
+  which key wrote a column**, so the only safe migration is to *seed* their data key with the bytes
+  of the key that ciphertext is already under — and a seeded key stays recomputable from the
+  deployment secret. So `provenance` is on the row, shreddability answers over `(mode, provenance)`,
+  and `--column-key-mode` is default-`derived` and opt-in.
+  What remains, in order: **(1)** the **rekey executor**. `KeyRotationMigrator` is still callerless,
+  so a `seeded_from_derived` tenant cannot be moved to a random key — which means that for an
+  *existing* deployment this increment bought the mechanism and **not yet the horizon**, since every
+  migrated tenant with data is seeded. It needs a decision about a migration that halts partway, and
+  `provenance` is exactly the field naming which tenants want it. **(2)** a **KMS-held KEK**, which
+  is what would support ADR-0338's original claim — revoking a key held outside the cluster bounds
+  recovery from *every* backup, where destroying an in-database row does not. `kek_generation` is on
+  the row for it, so it is a second generation rather than a rewrite, and
+  `KEY_MANAGEMENT_KINDS.customer-managed-byok` models the per-tenant form. **(3)** nothing reads a
+  **real** provenance: `shreddabilityOf` is called with the mode alone, so the boot line cannot say
+  whether a given tenant is shreddable and an operator has no way to ask. A platform route or a CLI
+  subcommand would, and it is the surface that makes (1) actionable. **(4)**
+  `PostgresDataKeyStore.destroy` has **no caller** — the erasure destroys the row by cascade, which
+  is correct and leaves the method reachable by nothing; that is `pg-unreachable-stores.ts`'s
+  question asked of a *method*, which that rule does not ask. **(5)** the key-source cache is **not
+  evicted on destruction**, harmless only because a destruction happens inside the pipeline that
+  retires the tenant row in the same transaction (ADR-0319, ADR-0320) and `--tenant-status-gate`
+  refuses the tenant afterwards; a destruction reachable outside that pipeline needs an eviction.
+  **(6)** no `key_generation` column on the entity tables, so a tenant's encrypted columns must all
+  sit under one key and a partial rekey is unsafe — it is what would make a mis-seeded tenant
+  recoverable, and it is a kernel change, since it reaches `emitEntityTableDdl`'s column plan and the
+  encrypting-view trigger path where the key ref is baked into a plpgsql function body.
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
   sensitive-classified fields across the seven packs, **39 were unreadable by every role in every
@@ -3253,7 +3381,7 @@ opened them.
   that join are now known and a boot warning says it before the sweep does. A *read* route over the
   captured executions is still unbuilt and would still need the `--audit-read-routes` apparatus (a
   role, a recorded read, a tenant refusal); detection by CLI is what shipped.
-- **77 of 145 catalogued tables have no writer, and every one is declared with a reason**
+- **77 of 146 catalogued tables have no writer, and every one is declared with a reason**
   (ADR-0334, ADR-0335). `packages/testing/src/strategy/pg-storeless-tables.ts` classifies them —
   `static_catalog` (2), `out_of_band` (1), `dynamic_writer` (1), `superseded` (8), `unwritten_table`
   (25, ADR-0300's class: a live store writes the siblings), `unbuilt_subsystem` (40) — each with an
@@ -4027,7 +4155,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 341 records; 262 Accepted, 79 Proposed (the
+title or status change cannot drift. 342 records; 263 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

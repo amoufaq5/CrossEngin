@@ -13,6 +13,7 @@ import {
 
 import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
 import { ALLOW_CURSOR_DISCLOSURE_FLAG } from "./cursor-encryption.js";
+import { COLUMN_KEY_MODES, COLUMN_KEY_MODE_FLAG, type ColumnKeyMode } from "./data-key-envelope.js";
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
 import {
   SENSITIVE_FIELD_CLASS_FLAG,
@@ -69,6 +70,18 @@ export interface ServeOptions {
    * deployment that sets the secret gets sealed cursors whether or not it also passes this.
    */
   readonly allowCursorDisclosure: boolean;
+  /**
+   * How the at-rest column key is obtained (ADR-0347): `derived` recomputes it from
+   * `COLUMN_ENCRYPTION_SECRET` on demand and stores nothing, `envelope` stores a wrapped per-tenant
+   * data key so it can be **destroyed**.
+   *
+   * `derived` stays the default because switching is one-way per tenant in practice — the first
+   * request provisions a row, and a tenant seeded from the derived key keeps its ciphertext
+   * readable while one provisioned at random does not go back. The mode is declared rather than
+   * inferred from whether the table has rows, so a deployment cannot drift into the envelope by
+   * accident.
+   */
+  readonly columnKeyMode: ColumnKeyMode;
   readonly schema: string | null;
   readonly apiKeys: readonly string[];
   readonly jwksKeys: readonly string[];
@@ -475,6 +488,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let store: StoreKind = "memory";
   let allowPlaintextPhi = false;
   let allowCursorDisclosure = false;
+  let columnKeyMode: ColumnKeyMode = "derived";
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
   const apiKeys: string[] = [];
@@ -760,6 +774,15 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       allowPlaintextPhi = true;
     } else if (arg === ALLOW_CURSOR_DISCLOSURE_FLAG) {
       allowCursorDisclosure = true;
+    } else if (arg === COLUMN_KEY_MODE_FLAG || arg.startsWith(`${COLUMN_KEY_MODE_FLAG}=`)) {
+      const raw = takeValue(arg, next, COLUMN_KEY_MODE_FLAG);
+      if (!(COLUMN_KEY_MODES as readonly string[]).includes(raw)) {
+        throw new CliUsageError(
+          `${COLUMN_KEY_MODE_FLAG} must be one of ${COLUMN_KEY_MODES.join(" | ")}, got '${raw}'`,
+        );
+      }
+      columnKeyMode = raw as ColumnKeyMode;
+      i += consumed();
     } else if (arg === "--classified-write-mask") {
       classifiedWriteMask = true;
     } else if (
@@ -1717,6 +1740,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     workflowCancelRoles,
     allowPlaintextPhi,
     allowCursorDisclosure,
+    columnKeyMode,
     sensitiveFieldRoles,
     abacPolicies,
     sensitiveFieldClasses,
@@ -2059,6 +2083,18 @@ Options:
                        the environment (never argv) to seal them instead; this
                        flag only accepts the disclosure, and does not suppress
                        sealing when a secret is set.
+  --column-key-mode <m>
+                       How the at-rest column key is obtained: derived | envelope
+                       (default derived). derived recomputes it per tenant from
+                       COLUMN_ENCRYPTION_SECRET and stores nothing, so it cannot
+                       be destroyed and an erased tenant's PHI stays recoverable
+                       from any backup for as long as that secret exists.
+                       envelope stores a wrapped per-tenant data key, so
+                       destroying the row bounds recovery to backups taken
+                       before it, until those expire. A tenant that already has
+                       a schema is seeded from the derived key to keep its
+                       ciphertext readable, and is then NOT shreddable; one
+                       provisioned fresh gets a random key and is.
   --schema <name>      Postgres schema for the entity store (default meta;
                        public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)

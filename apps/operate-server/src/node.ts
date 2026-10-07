@@ -44,6 +44,7 @@ import {
   ingestStripeWebhook,
   surveyTenantSchemaWithCollateral,
   type ColumnEncryptionKeySource,
+  columnPlansForManifest,
 } from "@crossengin/operate-runtime-pg";
 
 import type { PruneOptions, ReplayOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
@@ -106,6 +107,12 @@ import {
   formatCursorSealing,
   resolveCursorSealing,
 } from "./cursor-encryption.js";
+import {
+  COLUMN_KEY_MODE_FLAG,
+  buildEnvelopeKeySource,
+  formatColumnKeyMode,
+  type TenantCiphertextProbe,
+} from "./data-key-envelope.js";
 import {
   CLASSIFIED_WRITE_MASK_FLAG,
   buildSensitiveFieldPolicy,
@@ -347,7 +354,8 @@ import {
   tenantSourceScopes,
   type CheckpointLifecycle,
 } from "./checkpoint-scheduler.js";
-import { PostgresKeyRegistry } from "@crossengin/crypto-pg";
+import { PostgresDataKeyStore, PostgresKeyRegistry } from "@crossengin/crypto-pg";
+import { deriveTenantKek, parseColumnEncryptionSecret } from "@crossengin/crypto";
 import { PostgresChainCheckpointStore, PostgresChainLogReader } from "@crossengin/forensics-pg";
 import {
   PostgresIncidentDeclarer,
@@ -560,6 +568,74 @@ interface ResolvedStores {
   readonly columnKey?: ColumnEncryptionKeySource;
 }
 
+/**
+ * Whether a tenant may already hold column ciphertext written under the derived key.
+ *
+ * The answer decides whether the envelope **seeds** that tenant's data key from the derived one or
+ * generates a random one, and the two mistakes are not symmetric: seeding a tenant that holds
+ * nothing costs only shreddability, while randomising one that holds ciphertext makes that
+ * ciphertext **permanently unreadable**. So every uncertainty resolves to `true`.
+ *
+ * It asks the direct question — does any table carrying an encrypted column hold a row for this
+ * tenant — rather than a proxy. The first version of this probe asked whether the tenant's *own*
+ * Postgres schema existed, which is sound only for the per-tenant manifests of ADR-0314: a boot
+ * manifest's column tables live in the deployment's shared schema, so that probe answered `false`
+ * for every tenant, handed each of them a random key and made PHI written the day before
+ * unreadable. Found live, which is where it had to be found — nothing offline distinguishes a
+ * proxy that is merely indirect from one that is wrong.
+ *
+ * A missing table is `false` by the same reasoning as an absent schema was: a table the store has
+ * not created cannot hold a row. A probe that throws for any other reason answers `true`, which is
+ * sticky — the provenance is written once — and that is the safe direction rather than a good one.
+ */
+function tenantMayHoldCiphertext(
+  conn: PgConnection,
+  manifest: Manifest,
+  schema: string | undefined,
+): TenantCiphertextProbe {
+  const resolved = schema ?? "public";
+  const encrypted = encryptedEntityNames(manifest, { schema: resolved });
+  const plans = columnPlansForManifest(manifest, { schema: resolved });
+  const tables = [...encrypted].flatMap((entity) => {
+    const plan = plans.get(entity);
+    return plan === undefined ? [] : [plan.table];
+  });
+  return async (tenantId: string): Promise<boolean> => {
+    // No encrypted column anywhere means no ciphertext to protect, so a random key is safe and the
+    // tenant is shreddable. That is the one `false` this probe can give without asking Postgres.
+    if (tables.length === 0) return false;
+    for (const table of tables) {
+      try {
+        const result = await conn.query<{ readonly one: number }>(
+          `SELECT 1 AS one FROM ${quoteQualified(resolved, table)} WHERE tenant_id = $1 LIMIT 1`,
+          [tenantId],
+        );
+        if (result.rows.length > 0) return true;
+      } catch (err) {
+        // `42P01` is "relation does not exist", which answers the question: the store has not
+        // created this entity's table, so it holds nothing. Anything else is unknown, and unknown
+        // resolves to "may hold".
+        if (!isUndefinedTable(err)) return true;
+      }
+    }
+    return false;
+  };
+}
+
+/** Postgres `undefined_table`. A table that does not exist holds no rows, which is an answer. */
+function isUndefinedTable(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { readonly code?: unknown }).code === "42P01"
+  );
+}
+
+function quoteQualified(schema: string, table: string): string {
+  const ident = (raw: string): string => `"${raw.replace(/"/g, '""')}"`;
+  return `${ident(schema)}.${ident(table)}`;
+}
+
 async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<ResolvedStores> {
   // Decided before a connection is opened, because every outcome here is about whether this
   // deployment may serve this manifest at all. A classification that silently means nothing is
@@ -581,7 +657,7 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   // PHI" on the record and throw immediately after: the very shape of defect this increment
   // closes, one layer in. Built once and shared, so the per-tenant derivation is cached across
   // every store that needs it rather than once per store.
-  const columnKey =
+  const derivedColumnKey =
     phiDecision.verdict === "encrypted" ? buildColumnKeySource(rawSecret) : undefined;
   if (phiDecision.fields.length > 0) {
     // Said at boot either way, including when it is fine: "this deployment encrypts PHI" and
@@ -596,7 +672,7 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
   // got. It is not a refusal — the variable may be set globally for a sibling service, and
   // refusing would break a deployment that works — but going quiet is how the original defect
   // lasted four phases.
-  if (rawSecret.trim().length > 0 && columnKey === undefined) {
+  if (rawSecret.trim().length > 0 && derivedColumnKey === undefined) {
     console.warn(
       `[phi] ${COLUMN_ENCRYPTION_SECRET_VAR} is set and unused: ` +
         (phiDecision.fields.length === 0
@@ -612,8 +688,47 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
       settingsStore: new InMemorySettingsStore(),
     };
   }
+  if (options.columnKeyMode === "envelope" && derivedColumnKey === undefined) {
+    // The envelope stores a key for an encryption this deployment does not perform. Refused rather
+    // than ignored, for `--allow-plaintext-phi`-on-`pg-columns`' reason: a mode that silently does
+    // nothing lets an operator believe a tenant's key is destroyable when there is no key and no
+    // ciphertext to destroy, which is the overclaim this whole increment exists to correct.
+    throw new Error(
+      `${COLUMN_KEY_MODE_FLAG} envelope needs a deployment that encrypts a column: ` +
+        `verdict ${phiDecision.verdict} — use --store pg-columns with ` +
+        `${COLUMN_ENCRYPTION_SECRET_VAR} set, or drop the flag.`,
+    );
+  }
   const conn = createNodePgConnection(parsePgEnvConfig());
   const schema = options.schema ?? undefined;
+  // The envelope is built here and not beside the derivation, because it needs the connection the
+  // derivation does not. The derived source stays live either way: in envelope mode it is the
+  // **seed** for a tenant that may already hold ciphertext, so the two are one decision rather than
+  // alternatives.
+  //
+  // The secret is parsed **once, eagerly**, here rather than inside either closure: that is
+  // `buildColumnKeySource`'s rule, and this is where it has to land now, because
+  // `buildEnvelopeKeySource` takes bytes and so cannot repeat it. A weak secret therefore still
+  // fails at boot naming the measured figures rather than on the first PHI write.
+  const columnKey = ((): ColumnEncryptionKeySource | undefined => {
+    if (derivedColumnKey === undefined || options.columnKeyMode !== "envelope") {
+      return derivedColumnKey;
+    }
+    const secret = parseColumnEncryptionSecret(rawSecret);
+    const store = new PostgresDataKeyStore(
+      conn,
+      (tenantId) => deriveTenantKek(secret, tenantId),
+      schema !== undefined ? { schema } : {},
+    );
+    return buildEnvelopeKeySource({
+      store,
+      secret,
+      mayHoldCiphertext: tenantMayHoldCiphertext(conn, manifest, schema),
+    });
+  })();
+  if (derivedColumnKey !== undefined) {
+    console.info(`[phi] ${formatColumnKeyMode(options.columnKeyMode)}`);
+  }
   const allocator = new PostgresSequenceAllocator(conn, schema);
   const settingsStore = new PostgresSettingsStore(conn, schema);
   if (options.store === "pg-columns") {
