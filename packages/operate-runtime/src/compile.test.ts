@@ -277,9 +277,11 @@ describe("compileOperateServer — the redaction index is derived from the route
     // index itself is the thing to walk — every id in it must be one the handler registry serves.
     const served = new Set(compiled.handlers.operationIds());
     expect(served.size).toBeGreaterThan(0);
-    for (const [entity, ids] of compiled.redactionOperationIds) {
-      expect(ids.length, entity).toBeGreaterThan(0);
-      for (const id of ids) expect(served.has(id), `${entity}: ${id}`).toBe(true);
+    for (const [entity, ops] of compiled.redactionOperationIds) {
+      expect(ops.length, entity).toBeGreaterThan(0);
+      for (const op of ops) {
+        expect(served.has(op.operationId), `${entity}: ${op.operationId}`).toBe(true);
+      }
     }
     // The two shapes the deleted default produced, named explicitly so neither can come back.
     expect(compiled.redactionRegistry.specFor("patient.get")).toBeNull();
@@ -287,7 +289,7 @@ describe("compileOperateServer — the redaction index is derived from the route
   });
 
   it("registers a multi-word entity under its camel-cased id, never the lower-cased one", () => {
-    const ids = compiled.redactionOperationIds.get("WorkOrder") ?? [];
+    const ids = (compiled.redactionOperationIds.get("WorkOrder") ?? []).map((o) => o.operationId);
     expect(ids).toEqual(
       expect.arrayContaining([
         "workOrder.list",
@@ -301,18 +303,44 @@ describe("compileOperateServer — the redaction index is derived from the route
     expect(compiled.redactionRegistry.specFor("workOrder.update")).not.toBeNull();
   });
 
+  it("carries each operation's own record shape, derived from its action", () => {
+    // The third direction ADR-0343 added to this index: not only "is every covered id one the
+    // derivation emits", but "is each covered with the shape its own action produces". A list
+    // registered as `record` would answer a per-field record policy against the page wrapper.
+    const shapeOf = (entity: string, id: string): string | undefined =>
+      (compiled.redactionOperationIds.get(entity) ?? []).find((o) => o.operationId === id)
+        ?.recordShape;
+    expect(shapeOf("WorkOrder", "workOrder.list")).toBe("page");
+    expect(shapeOf("WorkOrder", "workOrder.read")).toBe("record");
+    expect(shapeOf("WorkOrder", "workOrder.create")).toBe("record");
+    expect(shapeOf("WorkOrder", "workOrder.update")).toBe("record");
+    // A 204 with no body: there is no record to locate and nothing to redact.
+    expect(shapeOf("WorkOrder", "workOrder.delete")).toBe("none");
+    // And the registry was keyed with it, so the gateway reads the same answer.
+    expect(compiled.redactionRegistry.specFor("workOrder.list")?.recordShape).toBe("page");
+    expect(compiled.redactionRegistry.specFor("workOrder.read")?.recordShape).toBe("record");
+  });
+
   it("attributes an association list route to the entity whose records it serves", () => {
     // `association.ts` says of this handler: "full records; the gateway redacts per-caller at the
     // edge, exactly like the list endpoint". It did not — the route was in no entity's mapping at
     // all. It is attributed by `relatedEntity`, because that is whose records come back.
-    expect(compiled.redactionOperationIds.get("Patient")).toContain("widget.patient.list");
+    const idsFor = (entity: string): readonly string[] =>
+      (compiled.redactionOperationIds.get(entity) ?? []).map((o) => o.operationId);
+    expect(idsFor("Patient")).toContain("widget.patient.list");
     expect(compiled.redactionRegistry.specFor("widget.patient.list")).not.toBeNull();
     expect(compiled.redactionRegistry.specFor("widget.patient.count")).not.toBeNull();
     // The mirror route serves Widget records, which carry no classification, so no spec.
-    expect(compiled.redactionOperationIds.get("Widget")).toContain("patient.widget.list");
+    expect(idsFor("Widget")).toContain("patient.widget.list");
     expect(compiled.redactionRegistry.specFor("patient.widget.list")).toBeNull();
     // link/unlink are the owner's own update, and return 204 — attributed to the owner.
-    expect(compiled.redactionOperationIds.get("Patient")).toContain("patient.widget.link");
+    expect(idsFor("Patient")).toContain("patient.widget.link");
+    // Attribution and shape are different questions (ADR-0343): the list serves the *related*
+    // entity's records as a page, the count serves none of them, and link/unlink are attributed to
+    // the owner while returning none of its records either. A route can be attributed to an entity
+    // and carry none of it.
+    expect(compiled.redactionRegistry.specFor("widget.patient.list")?.recordShape).toBe("page");
+    expect(compiled.redactionRegistry.specFor("widget.patient.count")?.recordShape).toBe("none");
   });
 
   it("holds no entry for an entity with no classified field, and registers none", () => {
@@ -372,8 +400,10 @@ describe("compileOperateServer — coverage over a real pack", () => {
 
   it("every id in the index is served by the handler registry", () => {
     const served = new Set(compiled.handlers.operationIds());
-    for (const [entity, ids] of compiled.redactionOperationIds) {
-      for (const id of ids) expect(served.has(id), `${entity}: ${id}`).toBe(true);
+    for (const [entity, ops] of compiled.redactionOperationIds) {
+      for (const op of ops) {
+        expect(served.has(op.operationId), `${entity}: ${op.operationId}`).toBe(true);
+      }
     }
   });
 });

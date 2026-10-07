@@ -581,8 +581,14 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       recordBearingKeys: new Set(["rec"]),
     });
 
-  it("refuses at entity create, list and field read, where no call site can ever supply a record", () => {
-    for (const m of [at("create"), at("list"), fieldAt("read")]) {
+  it("refuses at entity create and list, where no call site can ever supply a record", () => {
+    // Two positions, not three: ADR-0343 closed field `read` by giving response redaction the
+    // operation's declared record shape, so it locates the records a response carries and computes
+    // the field set per record. Entity `list` stays refused and the distinction is the reason — a
+    // field policy filters *columns within a row*, which a response can express per record, while
+    // an entity-list policy would filter *rows* and leave the page's cursor describing a set the
+    // caller was not shown.
+    for (const m of [at("create"), at("list")]) {
       const result = declared(m);
       expect(result.refusal).toBe("record_unavailable");
       expect(result.recordUnavailable).toHaveLength(1);
@@ -590,13 +596,13 @@ describe("checkAbacObligations against a record-bearing policy", () => {
     }
   });
 
-  it("admits at entity read, update, delete and a transition, where the handler loads the record", () => {
+  it("admits at entity read, update, delete, a transition and a field read", () => {
     const transition = manifest({
       permissions: {
         Chart: { transitions: { admit: { roles: ["clinician"], abac: "rec" } } },
       },
     });
-    for (const m of [at("read"), at("update"), at("delete"), transition]) {
+    for (const m of [at("read"), at("update"), at("delete"), transition, fieldAt("read")]) {
       const result = declared(m);
       expect(result.refusal).toBeNull();
       expect(result.recordUnavailable).toEqual([]);

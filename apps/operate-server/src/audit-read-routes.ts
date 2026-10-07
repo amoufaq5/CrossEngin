@@ -207,6 +207,15 @@ function specFor(
     classifiedFields,
     roles: ctx.classification.roles,
     rolesForPrincipal: ctx.principalRoles,
+    // One entry's payload at a time, so the shape is a record — this path already redacts per row,
+    // which is what ADR-0343 gave the gateway. It deliberately supplies **no** record and no
+    // `abac`, so a record-bearing field policy resolves `undischargeable` here and the field stays
+    // redacted. Two reasons, and the second is the real one: the "record" on this path is a
+    // *historical snapshot* in `before`/`after`, not the live row, so a policy of the form "only on
+    // a patient in your department" would be answered against the department the record held when
+    // it was written rather than the one it holds now — a different question, and the wrong one to
+    // answer silently.
+    recordShape: "record",
     ...(ctx.classification.policy !== undefined ? { policy: ctx.classification.policy } : {}),
   };
 }

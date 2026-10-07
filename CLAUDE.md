@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 337 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 338 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~17,020 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~17,065 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -279,7 +279,7 @@ type errors.
   contract — `ABAC_RECORD_AVAILABILITY` over eight positions, with its reasons — and a fourth
   outcome **`deferred`**, mapped `false`, makes a deferral a *refusal pending a record*: a call site
   that ignores it denies, which is ADR-0340's dropped obligation prevented one level up, where the
-  forgetting would have been per handler instead of per function. The three positions that can never
+  forgetting would have been per handler instead of per function. The positions that can never
   supply a record are **refused at boot by name**; the one that sometimes can is **reported** rather
   than refused, because "you may only set this field on a record that is yours" is a coherent
   declaration whose consequence — not settable at create — is a fact to say and not a
@@ -287,6 +287,27 @@ type errors.
   discharged**, and a record-level denial is a **403 and not a 404**: a 404 would make a
   record-predicate refusal indistinguishable from a missing record, and neither the caller nor an
   operator could then tell "not yours" from "not there".
+
+  ADR-0343 takes the refusal ADR-0342 ranked first among its own open ends and finds that it was
+  **not the kind of refusal it claimed to be**. The class is **a structural refusal that was really
+  a wiring one**, and the repo already had the vocabulary to tell them apart and did not apply it:
+  `pg-unreachable-stores.ts` splits a blocked store into `prerequisite_of_unbuilt_surface` (blocked
+  by *ordering*) from `contract_cannot_carry_the_surface` (blocked by *shape*) on the stated grounds
+  that calling both "unwired" sends the next person to write the route that cannot be written
+  honestly — and ADR-0342's three `never` positions were exactly those two kinds mixed. A create has
+  no row and a list's answer is a row *set*: both shape. Field `read` had the record all along and
+  the stage never looked: ordering. So response redaction is **per record** now, driven by a
+  `ResponseRecordShape` (`record` / `page` / `none`) **declared** from the route's action through a
+  total map and never probed from the body, because a heuristic over the response decides an
+  authorization answer and a record carrying its own `data` array would be misread. The cost is
+  decided by the **`deferred` outcome doing a second job**: compute once with no record, and if
+  nothing deferred stop — one evaluation, today's walk, today's bytes, for every deployment that
+  declared no record policy. Only a deferral pays per record, and the per-record pass can only ever
+  *relax* the record-free one, so every fallback is the stricter set and fail-closed is the
+  algorithm's default direction rather than an invariant to remember. Two `never` positions remain
+  and both are now shape, with the distinction stated: **a field policy filters columns within a
+  row, which a response can express per record; an entity-list policy would filter rows**, leaving
+  the page's cursor describing a set the caller was not shown.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -564,6 +585,25 @@ packages exist at only one layer, noted below where that is true.
   `redactionOperationIds` so the mapping is checkable in **both** directions — `MapRedactionRegistry`
   answers only `specFor(id)`, and that missing direction is what let a `.get` no route emits sit in
   the list unnoticed.
+  **Redaction is per record since ADR-0343**, which closed the position ADR-0342 refused at boot. The
+  stage computed one field set for the whole body and `redactJsonValue` dropped those names
+  *wherever* they appeared — which is why it handled a bare record and a `{data: […]}` page alike,
+  and why it could not answer a per-field policy about *which* record. `ResponseRecordShape`
+  (`record` / `page` / `none`) is **declared** on the spec and **required**, derived by
+  `compileOperateServer` from `ACTION_RECORD_SHAPE`, a total map over `RouteAction` — never probed
+  from the body, because a heuristic there decides an authorization answer and a record carrying its
+  own `data` array would be read as a page. `SHAPE_REDACTORS` is a total map so a fourth shape is a
+  compile error rather than inheriting `none`, the permissive branch. The **two passes are keyed on
+  the deferral**: compute once with no record, and if `FieldRedactionResult.deferred` is empty apply
+  the old walk — one evaluation, identical bytes, for every deployment with no record policy, which
+  is all of them today. Only a deferral recomputes per record, and the per-record pass can only
+  **relax** the record-free one, so the page wrapper's own keys, a non-object `data` element and a
+  `record` body that is not an object all fall back to the *stricter* record-free set: fail-closed by
+  construction. The stage's `redacted_<n>_fields` reason reports the **record-free** count on both
+  paths, because on the per-record path the counts differ per row and a sum would scale with the page
+  size. This is what ended ADR-0338's shared-spec property — the shape is a property of the
+  *operation*, so a spec keyed by operation carries it, and the sharing that remains
+  (`classifiedFields`, `entityPermissions`, `roles`) is pinned structurally instead.
 - **`api-gateway-pg`** — Postgres implementations of the runtime's four store interfaces
   (idempotency, route registry with TTL cache, sliding-window rate-limit checker,
   pipeline-execution store) plus a replayer that flags out-of-order stages, pass-with-4xx,
@@ -818,9 +858,13 @@ packages exist at only one layer, noted below where that is true.
   safety argument: reporting it as an allow-with-an-outstanding-obligation would be ADR-0340's
   dropped obligation one level up, where the drop is per handler instead of per function and so
   harder to see. `isAbacDeferred` is the one spelling. `dischargeAbac` deliberately gains **no**
-  record-absence refusal — only the evaluator knows whether a key needs a record, and five of the
-  eight positions are record-free, so such a refusal would reject predicates over the principal's
-  own attributes that never wanted one; that contrasts with the `abacAttributes === null` arm, where
+  record-absence refusal — only the evaluator knows whether a key needs a record, and such a refusal
+  would reject predicates over the principal's own attributes that never wanted one, at every
+  position `ABAC_RECORD_AVAILABILITY` does not answer `always` for *and* at the **first pass** of
+  every position it does (ADR-0343's two-pass legitimately asks once with no record). The count this
+  sentence used to carry ("five of the eight") was wrong before ADR-0343 and is deliberately gone:
+  `never` was three and `never` plus `sometimes` four, and a figure here breaks again on the next
+  flip. That contrasts with the `abacAttributes === null` arm, where
   the seam *always* claims to carry the input, so absence is unambiguously a gap.
   **Availability is part of the contract**: `ABAC_RECORD_AVAILABILITY` over the eight
   `ABAC_GRANT_POSITIONS` answers `always` / `sometimes` / `never`, with
@@ -829,7 +873,19 @@ packages exist at only one layer, noted below where that is true.
   definition apiece, and a reason that restates its own key fails a shape test. `abacGrantPosition`
   is total and does not throw: three operation names are unreachable for a field obligation and are
   mapped to the entity position for that operation rather than defaulting, because the permissive
-  default is the one a fall-through would pick.
+  default is the one a fall-through would pick. **`never` is pinned as the exact set
+  `{entity_create, entity_list}`** since ADR-0343, not asserted key by key, because per-key
+  assertions on this map are what let `field_read` sit on the wrong value — so flipping a third
+  position back fails there rather than passing quietly.
+  **`FieldRedactionResult.deferred` is the other half of the two-pass** (ADR-0343): the fields whose
+  role check passed and whose *only* refusal is an obligation answering `deferred`, so it answers
+  exactly "would supplying the record possibly change this?". A field refused on roles, or answered
+  `denied` or `undischargeable`, is **not** in it — re-asking cannot change a statement about this
+  principal, a statement that nothing could answer, or a missing role — and the
+  classification-default branch carries no obligation and can never contribute. It is a
+  **subsequence** of `redacted`, not merely a subset: both are pushed in field-list order in one
+  loop pass, so a caller can zip either against its own field list, and a property test asserts
+  **exactly one** of `ABAC_OUTCOMES` contributes, derived from the enum rather than restated.
 - **`sso`** — federated identity contracts: SAML 2.0 + OIDC provider configs, SCIM 2.0
   provisioning, claim mappings with transforms and JIT user policies, session lifecycle,
   login audit.
@@ -2640,11 +2696,13 @@ opened them.
   could tell "not yours" from "not there", and a wrong answer is worse than a refusal (ADR-0336).
   The cost is that the caller learns the id exists, and the population that can learn it already
   holds the entity grant.
-  What remains: **(1)** **field `read` cannot carry a record policy**, which is the most surprising
-  of the three refusals, because a per-record field policy is the canonical ABAC example — closing
-  it means per-record projection in the handler, reaching the list and association-list paths and
-  `projectRecord`, and the redaction stage is operation-keyed and response-shaped by construction
-  (ADR-0338). **(2)** the **principal's own id is not an operand**, so ownership is spelled
+  What remains: **(1)** ~~field `read` cannot carry a record policy~~ — **closed by ADR-0343**,
+  which also corrected this entry twice: the fix did **not** need per-record projection in the
+  handler (the gateway already parses the body, and the shape is derivable from the action the route
+  was built from), and the refusal was never structural — it was the one of ADR-0342's three
+  `never` positions blocked by *ordering* rather than by *shape*, a distinction
+  `pg-unreachable-stores.ts` had already drawn and this file had not applied here. See the next
+  entry. **(2)** the **principal's own id is not an operand**, so ownership is spelled
   `owns=user_id:eq_record:owner_id` and needs the user's id written into their membership
   attributes; a reserved left-operand spelling would shadow a real attribute of that name, the
   `hasOwnProperty` lesson in a new place. **(3)** **link/unlink could load the owner record and does
@@ -2664,6 +2722,39 @@ opened them.
   is the only one of the four field functions not routing through the shared `obligationAdmits`
   predicate; no behaviour difference, but that asymmetry is the shape that let the read and write
   halves diverge in the first place.
+- **A per-field read policy is answered per record, and what is left of it** (ADR-0343 closed
+  ADR-0342's Q1 and corrected two of the things that ADR said about it). The class is **a structural
+  refusal that was really a wiring one**: ADR-0342 refused three positions under one reason shape,
+  and its `field_read` reason — *"response redaction computes one field set per response and applies
+  it by a generic JSON walk, so it cannot identify which record a field belongs to"* — was a true
+  statement about the implementation and a false one about the question. A create has no row and a
+  list's answer is a row *set*; a `GET /v1/charts/{id}` response **is** the record and a page's
+  `data` **is** a list of them. `pg-unreachable-stores.ts` had already drawn exactly that line
+  (`prerequisite_of_unbuilt_surface` vs `contract_cannot_carry_the_surface`) on the stated grounds
+  that calling both "unwired" sends the next person to write the route that cannot be written
+  honestly — and this file had not applied it here.
+  The cost is what makes it shippable: the **`deferred` outcome does a second job**. ADR-0342 added
+  it so a call site unable to supply a record refuses rather than grants; here it tells a call site
+  that *can* supply one that it should, so the fast path is one evaluation and today's bytes and only
+  a deferral pays per record. No second list naming which fields are record-bearing — ADR-0288's
+  shape, which this repo has found wrong four times.
+  What remains: **(1)** `AbacEvaluator` has **no batch seam**, so a deployment-supplied evaluator
+  that makes a network call pays one per record per page. Bounded by `MAX_PAGE_SIZE`, and for
+  `--abac-policy` each call is a map lookup and a string compare; a
+  `(inputs: readonly AbacEvaluationInput[]) => readonly AbacOutcome[]` arm would fix it and touches
+  all five readers. **(2)** **entity `list` still cannot**, and the honest shape for it is **row
+  filtering**, which changes what `page.nextCursor` and any count mean — a different feature, not a
+  wider redaction. **(3)** a record with a **nested** object gets the record's own set applied to
+  the nested value by `redactJsonValue`'s walk: correct for the flat JSONB documents entity records
+  are today, unexamined for a nested shape where the nested object is arguably its own record.
+  **(4)** the shape is declared per operation by `compileOperateServer`; a deployment supplying its
+  own `RedactionRegistry` declares its own and **nothing checks the declaration against the
+  responses that route actually produces**. **(5)** `audit-read-routes.ts` declares
+  `recordShape: "record"` and deliberately supplies **no** record and no evaluator, so a
+  record-bearing field policy resolves `undischargeable` and stays redacted — because that path's
+  "record" is a *historical snapshot* in `before`/`after`, so "only on a patient in your department"
+  would be answered against the department the row held when it was written. Whether that is the
+  question a trail reader is asking is undecided.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3585,7 +3676,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 337 records; 258 Accepted, 79 Proposed (the
+title or status change cannot drift. 338 records; 259 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

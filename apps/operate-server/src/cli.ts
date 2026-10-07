@@ -2232,9 +2232,11 @@ Options:
                        eq, ne, in (comma list), present — e.g. clinical_only=department:eq:clinical.
                        Ops over a field of the RECORD: eq_record, ne_record, in_record — e.g.
                        same_dept=department:eq_record:department, owns=user_id:eq_record:owner_id.
-                       A record op is refused at boot on an entity create or list grant and on a
-                       field read grant, where no call site can supply a record. Declaring any
-                       policy also switches on the attribute directory, and needs a Postgres store
+                       A per-field read grant is answered per record, so a list page can disclose
+                       the field on one row and withhold it on the next. A record op is refused at
+                       boot on an entity create or list grant, where no call site can supply one.
+                       Declaring any policy also switches on the attribute directory, and needs a
+                       Postgres store
   --classified-write-mask  Enforce the classification default on writes: a sensitive field with no
                        declared update grant is writable only by a privileged role. Off by default
                        because a declared per-field update grant is enforced either way, and

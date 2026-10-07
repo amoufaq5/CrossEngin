@@ -11,6 +11,7 @@ import type { ResolvedPrincipal } from "@crossengin/api-gateway";
 import {
   MapRedactionRegistry,
   type PrincipalRoles,
+  type ResponseRecordShape,
   type ResponseRedactionSpec,
 } from "./redaction.js";
 
@@ -40,9 +41,22 @@ export interface RedactionSpecOptions {
   readonly abacEvaluator?: AbacEvaluator;
 }
 
+/**
+ * One operation serving an entity, and where that operation's response puts the records.
+ *
+ * The shape rides along with the id rather than being derivable from it: `patient.admit` is a
+ * workflow transition whose id comes from the manifest and whose body is one record, and nothing
+ * about the *string* says so. The caller deriving the routes knows both facts at once, so it says
+ * both at once.
+ */
+export interface RedactedOperation {
+  readonly operationId: string;
+  readonly recordShape: ResponseRecordShape;
+}
+
 export interface ManifestRedactionOptions extends RedactionSpecOptions {
   /**
-   * Every operationId whose response can carry this entity's records — not the
+   * Every operation whose response can carry this entity's records — not the
    * read ones, all of them. Required, and deliberately with no default: the
    * operationIds of an entity's lifecycle transitions come out of the
    * *manifest's workflows*, so a `(entityName: string) => string[]` computed
@@ -56,9 +70,20 @@ export interface ManifestRedactionOptions extends RedactionSpecOptions {
    * because nothing ever compared it against the ids route derivation emits.
    * So the caller that derives the routes supplies the index; fail closed means
    * demanding the answer rather than guessing half of it.
+   *
+   * Since ADR-0342's field-`read` closure each entry also carries its response shape, for the same
+   * reason: a shape computed here would be computed from the id, and the id does not say.
    */
-  readonly operationsForEntity: (entityName: string) => readonly string[];
+  readonly operationsForEntity: (entityName: string) => readonly RedactedOperation[];
 }
+
+/**
+ * An entity's spec minus the one member that is per-operation. Everything here is shared by
+ * reference across that entity's operations; only `recordShape` is added per registration, which is
+ * what ends ADR-0338's "one spec object for all of an entity's operations" — the honest consequence
+ * of the shape being a property of the operation rather than of the entity.
+ */
+export type EntityRedactionSpec = Omit<ResponseRedactionSpec, "recordShape">;
 
 /**
  * An entity declares a classified field and the caller's index names no
@@ -85,7 +110,7 @@ export function redactionSpecForEntity(
   roles: ReadonlyMap<RoleName, RoleDefinition>,
   options: RedactionSpecOptions,
   entityPermissions?: EntityPermissions,
-): ResponseRedactionSpec | null {
+): EntityRedactionSpec | null {
   const classified = entityClassifiedFields(entity);
   if (classified.length === 0) return null;
   const classifiedFields: ClassifiedField[] = classified.map((c) => ({
@@ -111,10 +136,13 @@ export function redactionSpecForEntity(
 /**
  * Builds a `RedactionRegistry` from a manifest: every entity that declares a
  * classified field contributes a `ResponseRedactionSpec`, registered against
- * every operationId `operationsForEntity` names for it — which the caller
+ * every operation `operationsForEntity` names for it — which the caller
  * derives from the routes it actually registered, since nothing here can know
  * them. Entities with no classified fields are skipped; an entity that has them
  * and no operation is a `RedactionCoverageError` rather than a silent omission.
+ *
+ * One spec per operation now, because `recordShape` is per operation; the shared members stay
+ * shared by reference, so the per-operation object is a spread of one base and a string.
  */
 export function redactionRegistryFromManifest(
   manifest: RedactionManifestInput,
@@ -124,17 +152,17 @@ export function redactionRegistryFromManifest(
   const roles = rolesMapOf(manifest.roles);
 
   for (const entity of manifest.entities ?? []) {
-    const spec = redactionSpecForEntity(
+    const base = redactionSpecForEntity(
       entity,
       roles,
       options,
       manifest.permissions?.[entity.name],
     );
-    if (spec === null) continue;
-    const operationIds = options.operationsForEntity(entity.name);
-    if (operationIds.length === 0) throw new RedactionCoverageError(entity.name);
-    for (const operationId of operationIds) {
-      registry.register(operationId, spec);
+    if (base === null) continue;
+    const operations = options.operationsForEntity(entity.name);
+    if (operations.length === 0) throw new RedactionCoverageError(entity.name);
+    for (const operation of operations) {
+      registry.register(operation.operationId, { ...base, recordShape: operation.recordShape });
     }
   }
 

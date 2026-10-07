@@ -14,8 +14,9 @@ import { sha256 } from "@crossengin/crypto";
 
 import { type OutgoingResponse, outgoingResponseFromJson } from "./adapters.js";
 import {
-  computeRedactedFields,
+  computeResponseRedaction,
   redactJsonValue,
+  redactRecords,
   type RedactionRegistry,
 } from "./redaction.js";
 import {
@@ -919,6 +920,19 @@ export class GatewayRuntime {
     return null;
   }
 
+  /**
+   * Two passes, keyed on the deferral (ADR-0342's field-`read` closure).
+   *
+   * The first pass asks with **no record** — today's single evaluation. If nothing deferred, the
+   * old whole-tree walk applies and the stage is byte-identical and costs exactly what it did,
+   * which is every deployment that has declared no record-bearing field policy. Only when a field
+   * answered `deferred` does the response carry an obligation a record could change, and only then
+   * is the set recomputed per record.
+   *
+   * The direction matters and is what makes every fallback safe: a per-record pass can only
+   * **relax** the record-free one (a `deferred` becoming `satisfied`), never tighten it. So any
+   * position where a record cannot be found gets the record-free set, which is the stricter one.
+   */
   private applyResponseRedaction(ctx: PipelineState): number {
     if (this.redactionRegistry === null) return 0;
     const route = ctx.routeMatch?.route ?? null;
@@ -928,21 +942,39 @@ export class GatewayRuntime {
     if (!contentType.includes("application/json")) return 0;
     const spec = this.redactionRegistry.specFor(route.operationId);
     if (spec === null) return 0;
-    const redacted = computeRedactedFields(spec, ctx.principal);
-    if (redacted.length === 0) return 0;
+    const base = computeResponseRedaction(spec, ctx.principal);
+    // Still safe as the first gate: without a record every record-bearing obligation answers
+    // `deferred`, which redacts — so `redacted` empty implies `deferred` empty, and the fast path
+    // cannot skip an obligation a record would have changed.
+    if (base.redacted.length === 0) return 0;
     let parsed: unknown;
     try {
       parsed = JSON.parse(new TextDecoder().decode(resp.bodyBytes));
     } catch {
       return 0;
     }
-    const scrubbed = redactJsonValue(parsed, new Set(redacted));
+    const baseSet = new Set(base.redacted);
+    const scrubbed =
+      base.deferred.length === 0
+        ? redactJsonValue(parsed, baseSet)
+        : redactRecords(spec.recordShape, parsed, (record) =>
+            record === null
+              ? baseSet
+              : new Set(computeResponseRedaction(spec, ctx.principal, record).redacted),
+          );
     ctx.finalResponse = outgoingResponseFromJson({
       status: resp.status,
       headers: resp.headers,
       body: scrubbed,
     });
-    return redacted.length;
+    // The **record-free** count, on both paths. It is the one figure that describes the response as
+    // a whole: on the per-record path the counts differ per row, so a sum would scale with the page
+    // size and a max or min would name a figure true of one row and of no other. The record-free
+    // count is also the honest reading of the stage's claim — "this many classified fields were
+    // withheld from this principal before any record was consulted" — and reporting it keeps the
+    // reason comparable across the two paths rather than making it depend on how many rows came
+    // back.
+    return base.redacted.length;
   }
 
   private async stageApplySecurityHeaders(ctx: PipelineState, rec: PipelineRecorder): Promise<ProblemEnvelope | null> {

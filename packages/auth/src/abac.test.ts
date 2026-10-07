@@ -862,15 +862,26 @@ describe("ABAC_RECORD_AVAILABILITY", () => {
     expect(ABAC_RECORD_AVAILABILITY.entity_list).toBe("never");
   });
 
-  it("answers 'never' for a field read: redaction computes one field set per response", () => {
-    expect(ABAC_RECORD_AVAILABILITY.field_read).toBe("never");
+  it("answers 'always' for a field read: redaction answers per record", () => {
+    // Flipped from `never`: response redaction locates the records a response carries and computes
+    // the field set for each, so a per-field read policy is answered against the record the field
+    // came from. `FieldRedactionResult.deferred` is what tells it whether that second pass is owed.
+    expect(ABAC_RECORD_AVAILABILITY.field_read).toBe("always");
   });
 
-  it("answers 'always' for read, update, delete and a transition", () => {
+  it("answers 'always' for read, update, delete, a transition and a field read", () => {
     expect(ABAC_RECORD_AVAILABILITY.entity_read).toBe("always");
     expect(ABAC_RECORD_AVAILABILITY.entity_update).toBe("always");
     expect(ABAC_RECORD_AVAILABILITY.entity_delete).toBe("always");
     expect(ABAC_RECORD_AVAILABILITY.entity_transition).toBe("always");
+    expect(ABAC_RECORD_AVAILABILITY.field_read).toBe("always");
+  });
+
+  it("answers 'never' for exactly the two positions with no record to find", () => {
+    // Pinned as a set rather than per key, so flipping a third position back to `never` without
+    // arguing for it fails here. A `never` position is refused at boot with no escape hatch.
+    const never = ABAC_GRANT_POSITIONS.filter((p) => ABAC_RECORD_AVAILABILITY[p] === "never");
+    expect(never).toEqual(["entity_create", "entity_list"]);
   });
 
   it("answers 'sometimes' for a field update, and only for that one", () => {
@@ -933,7 +944,15 @@ describe("ABAC_RECORD_AVAILABILITY_REASONS", () => {
   it("names the structural obstacle on each 'never' position", () => {
     expect(ABAC_RECORD_AVAILABILITY_REASONS.entity_create).toContain("does not exist");
     expect(ABAC_RECORD_AVAILABILITY_REASONS.entity_list).toContain("set of records");
-    expect(ABAC_RECORD_AVAILABILITY_REASONS.field_read).toContain("one field set per response");
+  });
+
+  it("names what supplies the record on a field read, now that one does", () => {
+    // The reason is the whole of what an operator is told, so it has to have stopped claiming the
+    // obstacle that was removed: a `never` reason on an `always` position would read as a refusal
+    // for a policy the deployment can in fact answer.
+    const reason = ABAC_RECORD_AVAILABILITY_REASONS.field_read;
+    expect(reason).toContain("per record");
+    expect(reason).not.toContain("cannot");
   });
 });
 
@@ -1035,8 +1054,15 @@ describe("abacRecordAvailabilityFor", () => {
     }
   });
 
-  it("answers 'never' for the obligation on a field read grant", () => {
-    expect(abacRecordAvailabilityFor(obligation("read", "mrn"))).toBe("never");
+  it("answers 'always' for the obligation on a field read grant", () => {
+    expect(abacRecordAvailabilityFor(obligation("read", "mrn"))).toBe("always");
+  });
+
+  it("answers 'never' for the obligation on a list grant, which a field read is not", () => {
+    // The pair that looks alike and is not: a field read filters columns within a row, which a
+    // response expresses per record; a list would filter rows, and a page whose rows were dropped
+    // describes a set through its cursor and count that the caller was never shown.
+    expect(abacRecordAvailabilityFor(obligation("list", null))).toBe("never");
   });
 
   it("answers 'always' for an obligated update on the entity", () => {
@@ -1048,7 +1074,7 @@ describe("abacRecordAvailabilityFor", () => {
       "never",
       "always",
       "always",
-      "never",
+      "always",
       "sometimes",
     ]);
   });

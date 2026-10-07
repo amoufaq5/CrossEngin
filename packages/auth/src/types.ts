@@ -108,6 +108,29 @@ export interface AuthorizationDecision {
 export interface FieldRedactionResult {
   readonly readable: readonly string[];
   readonly redacted: readonly string[];
+  /**
+   * The redacted fields whose refusal **a record could still change** — a strict subset of
+   * `redacted`, since a deferred field is redacted right now.
+   *
+   * A field is here **iff** the role check passed and the only thing refusing it is an obligation
+   * that answered `deferred`: the policy needs the record the act is about and the caller had none.
+   * A field refused on **roles**, or whose obligation answered `denied` or `undischargeable`, is
+   * **not** here, because re-asking with a record cannot change any of those — `denied` is a
+   * statement about this principal, `undischargeable` says nothing could answer, and a role refusal
+   * is not an obligation at all. The classification default carries no obligation, so it can never
+   * contribute.
+   *
+   * So it answers exactly one question: *would supplying the record possibly change this answer?*
+   * That is what lets a caller holding several records compute the field set once with no record and
+   * stop when this is empty — which is every deployment that declared no record-bearing field
+   * policy — and recompute per record only when it is not.
+   *
+   * **Required, not optional.** A caller that could omit it would compute an empty set, conclude
+   * nothing defers, and serve the record-free answer — which is total redaction — for ever. That is
+   * the silent total denial ADR-0339 found and ADR-0340 closed, and an optional field can be
+   * forgotten with the type still valid (ADR-0330).
+   */
+  readonly deferred: readonly string[];
 }
 
 export interface WriteMaskResult {

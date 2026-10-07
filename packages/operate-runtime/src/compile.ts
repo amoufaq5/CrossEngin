@@ -23,6 +23,8 @@ import {
   type PrincipalResolver,
   type PrincipalRoles,
   type RateLimitChecker,
+  type RedactedOperation,
+  type ResponseRecordShape,
 } from "@crossengin/api-gateway-runtime";
 
 import {
@@ -31,7 +33,7 @@ import {
   type AdminContext,
 } from "./admin-handlers.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
-import { manifestRouteSpecs, routeFromSpec, type RouteSpec } from "./operations.js";
+import { manifestRouteSpecs, routeFromSpec, type RouteAction, type RouteSpec } from "./operations.js";
 import {
   associationCountRouteFromSpec,
   associationRouteFromSpec,
@@ -545,14 +547,46 @@ function buildSettingsDefaultPlans(manifest: Manifest): Map<string, SettingsDefa
  * association `{count}` cost nothing, while deciding per action whether its
  * response carries a record is the judgement call that produced the defect.
  */
+/**
+ * Which shape each entity action's response carries its records in, as a **total map** over
+ * `RouteAction` so a seventh action is a compile error rather than a member inheriting whichever
+ * answer a condition happened to give it — and the answer it would inherit is `record`, which on a
+ * list would answer a per-field record policy against the *page wrapper* instead of a row.
+ *
+ * `delete` is `none` rather than `record`: it answers 204 with no body at all, so there is nothing
+ * to locate and nothing to redact. A transition answers the updated record, like `update`.
+ */
+const ACTION_RECORD_SHAPE: Readonly<Record<RouteAction, ResponseRecordShape>> = {
+  list: "page",
+  read: "record",
+  create: "record",
+  update: "record",
+  delete: "none",
+  transition: "record",
+};
+
+/**
+ * Entity → the operations whose responses can carry its records, each with the shape it carries
+ * them in. The shape is **declared from the action**, never probed from the body: a heuristic over
+ * the response (`"if it has a data array…"`) would misread a record that happens to carry one, and
+ * this decides an authorization answer (ADR-0328's rule, ADR-0343).
+ */
 function entityOperationIndex(
-  specs: readonly { readonly entity: string; readonly operationId: string }[],
-): ReadonlyMap<string, readonly string[]> {
-  const index = new Map<string, string[]>();
+  specs: readonly {
+    readonly entity: string;
+    readonly operationId: string;
+    readonly recordShape: ResponseRecordShape;
+  }[],
+): ReadonlyMap<string, readonly RedactedOperation[]> {
+  const index = new Map<string, RedactedOperation[]>();
   for (const spec of specs) {
-    const ids = index.get(spec.entity);
-    if (ids === undefined) index.set(spec.entity, [spec.operationId]);
-    else if (!ids.includes(spec.operationId)) ids.push(spec.operationId);
+    const ops = index.get(spec.entity);
+    const op: RedactedOperation = {
+      operationId: spec.operationId,
+      recordShape: spec.recordShape,
+    };
+    if (ops === undefined) index.set(spec.entity, [op]);
+    else if (!ops.some((o) => o.operationId === op.operationId)) ops.push(op);
   }
   return index;
 }
@@ -566,9 +600,12 @@ function entityOperationIndex(
  * entity has at least its five CRUD specs — and here because "the index has no
  * entry" must never be the one path that serves classified fields in the clear.
  */
-function fallbackOperationIds(entityName: string): readonly string[] {
+function fallbackOperationIds(entityName: string): readonly RedactedOperation[] {
   const actions: readonly CrudOperation[] = ["list", "create", "read", "update", "delete"];
-  return actions.map((action) => operationId(entityName, action));
+  return actions.map((action) => ({
+    operationId: operationId(entityName, action),
+    recordShape: ACTION_RECORD_SHAPE[action],
+  }));
 }
 
 export interface CompiledOperateServer {
@@ -584,8 +621,12 @@ export interface CompiledOperateServer {
    * derivation actually emits". The absence of that second direction is what
    * let a phantom `<entity>.get` and a lower-cased id sit in the old mapping
    * unnoticed, matching nothing.
+   *
+   * Each entry carries the shape its response holds records in (ADR-0343), so the mapping is
+   * checkable in a third direction as well: not only that every covered id is one the derivation
+   * emits, but that each is covered with the shape its own action produces.
    */
-  readonly redactionOperationIds: ReadonlyMap<string, readonly string[]>;
+  readonly redactionOperationIds: ReadonlyMap<string, readonly RedactedOperation[]>;
 }
 
 /**
@@ -819,11 +860,34 @@ export function compileOperateServer(
   // compile actually derived — the entity routes above (CRUD *and* one per lifecycle transition,
   // whose ids come out of the manifest's workflows) plus the association routes, where the
   // records served belong to the *related* entity and the link/unlink pair belongs to the owner.
+  //
+  // The three association families carry their own shapes rather than an action: the list answers
+  // `{data, page}` like an entity list, the count answers `{count}` and so carries no record at
+  // all, and link/unlink answer a link summary and not the owner record — which is why that pair is
+  // `none` even though its *attribution* is the owner entity. Attribution answers "whose fields
+  // could appear here" and the shape answers "where"; a route can be attributed to an entity and
+  // still return none of its records.
   const operationIdsByEntity = entityOperationIndex([
-    ...routeSpecs,
-    ...associationListSpecs.map((s) => ({ entity: s.relatedEntity, operationId: s.operationId })),
-    ...associationCountSpecs.map((s) => ({ entity: s.relatedEntity, operationId: s.operationId })),
-    ...associationWriteSpecs.map((s) => ({ entity: s.ownerEntity, operationId: s.operationId })),
+    ...routeSpecs.map((s) => ({
+      entity: s.entity,
+      operationId: s.operationId,
+      recordShape: ACTION_RECORD_SHAPE[s.action],
+    })),
+    ...associationListSpecs.map((s) => ({
+      entity: s.relatedEntity,
+      operationId: s.operationId,
+      recordShape: "page" as const,
+    })),
+    ...associationCountSpecs.map((s) => ({
+      entity: s.relatedEntity,
+      operationId: s.operationId,
+      recordShape: "none" as const,
+    })),
+    ...associationWriteSpecs.map((s) => ({
+      entity: s.ownerEntity,
+      operationId: s.operationId,
+      recordShape: "none" as const,
+    })),
   ]);
   const redactionRegistry = redactionRegistryFromManifest(manifest, {
     rolesForPrincipal: options.principalRoles,

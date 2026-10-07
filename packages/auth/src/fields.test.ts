@@ -847,10 +847,12 @@ describe("the four field functions — the record a policy needs", () => {
       entity: "Prescription",
       evaluator: recordBearing,
     });
-    // `field_read` is a `never` position, so this is the ordinary outcome there rather than an edge
-    // case: redaction computes one field set per response and has no record to supply.
+    // This is the *first* pass of a per-record redaction — asked with no record, to learn whether
+    // any field's policy wants one. The field is redacted now, and `deferred` is what says the
+    // answer could change; `field_read` is an `always` position because of that second pass.
     expect(r.redacted).toEqual(["mrn"]);
     expect(r.readable).toEqual([]);
+    expect(r.deferred).toEqual(["mrn"]);
   });
 
   it("computeFieldRedaction reads the field once the record is supplied", () => {
@@ -1082,5 +1084,302 @@ describe("the four field functions — the record a policy needs", () => {
       record: RECORD,
     });
     expect(r.readable).toEqual(["plain"]);
+  });
+});
+
+/**
+ * `FieldRedactionResult.deferred` — the signal that makes per-record redaction possible without
+ * costing anything when no record-bearing field policy is declared.
+ *
+ * The gateway's two-pass needs one fact the read path could not express: *which* fields are
+ * redacted only because their obligation wanted a record. Before this, a field refused on roles, a
+ * field `denied` by policy and a field waiting on a record all landed in `redacted`
+ * indistinguishably — so the only safe reading of a non-empty `redacted` was "locate every record
+ * and ask again", which every deployment would have paid for and almost none would have needed.
+ */
+describe("FieldRedactionResult.deferred", () => {
+  const RECORD: Readonly<Record<string, unknown>> = { id: "p-1", owner_id: "u" };
+
+  /** Deferred without a record, satisfied with one — the shape of an "owns this row" policy. */
+  const mixedByRecord: AbacEvaluator = (input) =>
+    input.record === undefined ? "deferred" : "satisfied";
+
+  /** Keyed on the policy key, so one evaluator produces every outcome in one pass. */
+  const mixed: AbacEvaluator = (input) => {
+    if (input.policyKey === "defers") return input.record === undefined ? "deferred" : "satisfied";
+    if (input.policyKey === "denies") return "denied";
+    return "undischargeable";
+  };
+
+  const MIXED_PERMS: EntityPermissions = {
+    fields: {
+      // Roles admit, obligation wants a record: the one field a record could rescue.
+      waiting: { read: { roles: ["clinician"], abac: "defers" } },
+      // Roles admit, policy said no: a statement about this principal that a record cannot revisit.
+      refused: { read: { roles: ["clinician"], abac: "denies" } },
+      // Roles admit, nothing could answer.
+      unanswerable: { read: { roles: ["clinician"], abac: "unknown" } },
+      // Roles refuse, and it carries an obligation anyway — the evaluator must not be reached.
+      forbidden: { read: { roles: ["registrar"], abac: "defers" } },
+      // Roles admit, no obligation.
+      plain: { read: { roles: ["clinician"] } },
+    },
+  };
+
+  const MIXED_NAMES = ["waiting", "refused", "unanswerable", "forbidden", "plain", "open"];
+
+  const MIXED_CLASSIFIED: readonly ClassifiedField[] = MIXED_NAMES.map((name) => ({ name }));
+
+  it("is empty when no field carries an obligation", () => {
+    const r = computeFieldRedaction(
+      principal("technician"),
+      PERMS,
+      ROLES,
+      ["internal_notes", "narcotic_schedule"],
+    );
+    // `narcotic_schedule` is redacted on roles, so there is something in `redacted` and still
+    // nothing to re-ask about: an empty `deferred` beside a non-empty `redacted` is the common case
+    // and is exactly what lets the caller stop after one pass.
+    expect(r.redacted).toEqual(["narcotic_schedule"]);
+    expect(r.deferred).toEqual([]);
+  });
+
+  it("is empty for a field list with no rules at all", () => {
+    expect(computeFieldRedaction(principal("technician"), PERMS, ROLES, ["a"]).deferred).toEqual(
+      [],
+    );
+    expect(
+      computeClassifiedFieldRedaction(principal("front_desk"), NO_FIELD_PERMS, CLINICAL_ROLES, [
+        { name: "status" },
+      ]).deferred,
+    ).toEqual([]);
+  });
+
+  it("names a deferred field in both redacted and deferred — computeFieldRedaction", () => {
+    const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => "deferred",
+    });
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.deferred).toEqual(["mrn"]);
+    expect(r.readable).toEqual([]);
+  });
+
+  it("names a deferred field in both redacted and deferred — computeClassifiedFieldRedaction", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      {},
+      { entity: "Patient", evaluator: () => "deferred" },
+    );
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.deferred).toEqual(["mrn"]);
+  });
+
+  it("empties on the second pass once the record is supplied, on both functions", () => {
+    // The whole point of the signal: the caller re-asks with the record and the field comes back.
+    const read = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: mixedByRecord,
+      record: RECORD,
+    });
+    expect(read.readable).toEqual(["mrn"]);
+    expect(read.deferred).toEqual([]);
+
+    const classified = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      {},
+      { entity: "Patient", evaluator: mixedByRecord, record: RECORD },
+    );
+    expect(classified.readable).toEqual(["mrn"]);
+    expect(classified.deferred).toEqual([]);
+  });
+
+  it("excludes a denied field, because a record cannot change a statement about the principal", () => {
+    for (const r of [
+      computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+        entity: "Prescription",
+        evaluator: () => "denied",
+      }),
+      computeClassifiedFieldRedaction(
+        principal("clinician"),
+        CLASSIFIED_ABAC_PERMS,
+        CLINICAL_ROLES,
+        [{ name: "mrn", classification: "phi" }],
+        {},
+        { entity: "Patient", evaluator: () => "denied" },
+      ),
+    ]) {
+      expect(r.redacted).toEqual(["mrn"]);
+      expect(r.deferred).toEqual([]);
+    }
+  });
+
+  it("excludes an undischargeable field, however the deployment arrived at it", () => {
+    // Three routes to one outcome — an evaluator that says so, no evaluator, and no `abac`
+    // parameter at all — and none of them is a question a record could answer.
+    const byAnswer = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: () => "undischargeable",
+    });
+    const noEvaluator = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+    });
+    const noParameter = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"]);
+    for (const r of [byAnswer, noEvaluator, noParameter]) {
+      expect(r.redacted).toEqual(["mrn"]);
+      expect(r.deferred).toEqual([]);
+    }
+  });
+
+  it("excludes a field whose evaluator threw", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      {},
+      {
+        entity: "Patient",
+        evaluator: () => {
+          throw new Error("policy layer down");
+        },
+      },
+    );
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.deferred).toEqual([]);
+  });
+
+  it("excludes a field refused on roles, and never reaches the evaluator for it", () => {
+    // The ordering ADR-0340 fixed, read through the new field: a roles refusal is not an obligation,
+    // so it must neither be re-asked nor shown to the deployment's policy layer.
+    const spy = recordingEvaluator("deferred");
+    const r = computeFieldRedaction(principal("technician"), ABAC_PERMS, ROLES, ["mrn"], {
+      entity: "Prescription",
+      evaluator: spy.fn,
+    });
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.deferred).toEqual([]);
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("excludes a roles-refused field on the classified function too, with no evaluation", () => {
+    const spy = recordingEvaluator("deferred");
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      CLASSIFIED_ABAC_PERMS,
+      CLINICAL_ROLES,
+      [{ name: "mrn", classification: "phi" }],
+      // Privileged for the class and still refused: an explicit rule is the answer for its field,
+      // and the obligation behind it is not consulted once the roles say no.
+      { privilegedRoles: ["front_desk"] },
+      { entity: "Patient", evaluator: spy.fn },
+    );
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.deferred).toEqual([]);
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("excludes a classification-default redaction, which carries no obligation", () => {
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"] },
+    );
+    expect(r.redacted).toEqual(["mrn", "given_name"]);
+    expect(r.deferred).toEqual([]);
+  });
+
+  it("excludes a classification default even when an evaluator would defer", () => {
+    // The default branch never calls an evaluator, so a record-bearing policy declared elsewhere
+    // cannot make a class-withheld field look re-askable.
+    const r = computeClassifiedFieldRedaction(
+      principal("front_desk"),
+      NO_FIELD_PERMS,
+      CLINICAL_ROLES,
+      CLINICAL_FIELDS,
+      { privilegedRoles: ["clinician"] },
+      { entity: "Patient", evaluator: () => "deferred" },
+    );
+    expect(r.deferred).toEqual([]);
+  });
+
+  it("excludes an unresolved-attribute principal's obligated field", () => {
+    // `null` attributes resolve `undischargeable` before any evaluator runs, so the remedy is an
+    // attribute directory and not a record — re-asking with one would change nothing.
+    const r = computeFieldRedaction(
+      { ...principal("pharmacist"), abacAttributes: null },
+      ABAC_PERMS,
+      ROLES,
+      ["mrn"],
+      { entity: "Prescription", evaluator: () => "deferred", record: RECORD },
+    );
+    expect(r.redacted).toEqual(["mrn"]);
+    expect(r.deferred).toEqual([]);
+  });
+
+  it("holds deferred ⊆ redacted over a mixed fixture, on both functions", () => {
+    const enforcement = { entity: "Patient", evaluator: mixed };
+    const flat = computeFieldRedaction(
+      principal("clinician"),
+      MIXED_PERMS,
+      CLINICAL_ROLES,
+      MIXED_NAMES,
+      enforcement,
+    );
+    const classified = computeClassifiedFieldRedaction(
+      principal("clinician"),
+      MIXED_PERMS,
+      CLINICAL_ROLES,
+      MIXED_CLASSIFIED,
+      {},
+      enforcement,
+    );
+
+    for (const r of [flat, classified]) {
+      // The subset relation pinned rather than implied: a caller reads `deferred` to decide whether
+      // to re-ask, and a name in it that is not redacted would mean re-asking about a field already
+      // being served.
+      for (const name of r.deferred) expect(r.redacted).toContain(name);
+      expect(r.deferred).toEqual(["waiting"]);
+      expect(r.redacted).toEqual(["waiting", "refused", "unanswerable", "forbidden"]);
+      expect(r.readable).toEqual(["plain", "open"]);
+      // Totality: every field lands in exactly one of the two outcome lists.
+      expect([...r.readable, ...r.redacted].sort()).toEqual([...MIXED_NAMES].sort());
+    }
+  });
+
+  it("agrees with ABAC_OUTCOMES: exactly one outcome contributes to deferred", () => {
+    const contributing = ABAC_OUTCOMES.filter((outcome) => {
+      const r = computeFieldRedaction(principal("pharmacist"), ABAC_PERMS, ROLES, ["mrn"], {
+        entity: "Prescription",
+        evaluator: () => outcome,
+      });
+      return r.deferred.includes("mrn");
+    });
+    expect(contributing).toEqual(["deferred"]);
+  });
+
+  it("is reported in field order, so a caller can zip it against the field list", () => {
+    const r = computeFieldRedaction(
+      principal("clinician"),
+      {
+        fields: {
+          a: { read: { roles: ["clinician"], abac: "defers" } },
+          b: { read: { roles: ["clinician"], abac: "defers" } },
+        },
+      },
+      CLINICAL_ROLES,
+      ["b", "a"],
+      { entity: "Patient", evaluator: mixed },
+    );
+    expect(r.deferred).toEqual(["b", "a"]);
   });
 });

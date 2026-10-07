@@ -1,10 +1,10 @@
 # ADR index
 
-337 records. Generated from the ADR files themselves — regenerate rather than
+338 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 258  **Proposed:** 79
+- **Accepted:** 259  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -349,3 +349,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0340](0340-the-obligation-nobody-discharged.md) | The obligation nobody discharged | — | Accepted | 2026-10-06 |
 | [0341](0341-the-attribute-nobody-read.md) | The attribute nobody read | — | Accepted | 2026-10-06 |
 | [0342](0342-the-record-nobody-could-ask-about.md) | The record nobody could ask about | — | Accepted | 2026-10-07 |
+| [0343](0343-the-refusal-that-was-a-wiring-problem.md) | The refusal that was a wiring problem | — | Accepted | 2026-10-07 |

@@ -15,10 +15,42 @@ export interface PrincipalRoles {
   readonly secondaryRoles?: readonly RoleName[];
 }
 
+export const RESPONSE_RECORD_SHAPES = ["record", "page", "none"] as const;
+
+/**
+ * Where the records are in one operation's response body.
+ *
+ * - `record` — the body **is** one record: `read`, `create`, `update`, a workflow transition.
+ * - `page` — `{data: [record, …], page: {…}}`: entity `list`, the association list.
+ * - `none` — the body carries no record at all: `delete`'s 204, the association `count`'s
+ *   `{count}`.
+ *
+ * **Declared, never probed.** It is tempting to read the shape off the body — "if it has a `data`
+ * array it is a page" — and that is a heuristic in an authorization path, which this repo refuses
+ * (ADR-0328: declared beats probed). It is also wrong on real data: a record whose own fields
+ * include a `data` array would be read as a page and its field policy answered against whichever
+ * element happened to be first, and a page whose `data` key was renamed would be read as one
+ * record. The shape is a property of the *operation*, which the caller deriving the routes knows
+ * for certain, so it is asked for rather than guessed.
+ */
+export type ResponseRecordShape = (typeof RESPONSE_RECORD_SHAPES)[number];
+
 export interface ResponseRedactionSpec {
   readonly classifiedFields: readonly ClassifiedField[];
   readonly roles: ReadonlyMap<RoleName, RoleDefinition>;
   readonly rolesForPrincipal: (principal: ResolvedPrincipal | null) => PrincipalRoles;
+  /**
+   * Required, for `operationsForEntity`'s reason (ADR-0338): a default that cannot possibly be
+   * right for every operation fails silently in the unsafe direction. Here the unsafe default is
+   * `record`, which would answer a per-record policy against the page *wrapper* — an object whose
+   * keys are `data` and `page` and which carries none of the fields a policy compares. So the
+   * operation that knows its own response shape says so.
+   *
+   * This is also what ends ADR-0338's "one spec object shared across all of an entity's
+   * operations": the shape differs per operation, so the spec does too. Everything else in the
+   * spec is still shared by reference.
+   */
+  readonly recordShape: ResponseRecordShape;
   readonly entityPermissions?: EntityPermissions;
   readonly policy?: SensitiveFieldPolicy;
   /**
@@ -50,15 +82,36 @@ export class MapRedactionRegistry implements RedactionRegistry {
 
 const UNPRIVILEGED_ROLE = "__unprivileged__";
 
+export interface ResponseRedaction {
+  readonly redacted: readonly string[];
+  /**
+   * The subset of `redacted` whose role check passed and whose obligation answered `deferred` —
+   * the policy needs the record and none was supplied. A field refused on roles, or answered
+   * `denied` or `undischargeable`, is **not** here, because re-asking with a record cannot change
+   * any of those.
+   *
+   * So a non-empty list is the signal that this response carries a record-bearing obligation and
+   * is worth a second, per-record pass. That is ADR-0342's `deferred` outcome doing the work it was
+   * designed for: the deferral *is* the declaration, rather than a second list somewhere naming
+   * which fields are record-bearing and drifting from the grants it describes.
+   */
+  readonly deferred: readonly string[];
+}
+
 /**
  * Fail-closed: a role the spec's `roles` map doesn't know (anonymous,
  * a stale token role, a typo) is mapped to an unprivileged sentinel rather
  * than throwing, so an unrecognized principal sees the most-redacted view.
+ *
+ * `record` absent is a caller that **had none** — spread conditionally into the `AbacEnforcement`,
+ * never passed as `{}`, which would assert an empty record and let a policy be answered against
+ * fields nobody loaded (ADR-0331's distinction, one level in).
  */
-export function computeRedactedFields(
+export function computeResponseRedaction(
   spec: ResponseRedactionSpec,
   principal: ResolvedPrincipal | null,
-): readonly string[] {
+  record?: Readonly<Record<string, unknown>>,
+): ResponseRedaction {
   const { primaryRole, secondaryRoles } = spec.rolesForPrincipal(principal);
   const requested = [primaryRole, ...(secondaryRoles ?? [])];
   const safeRoles = new Map(spec.roles);
@@ -77,14 +130,30 @@ export function computeRedactedFields(
     abacAttributes: principalAbacAttributes(principal),
     mfaProofAgeSeconds: principal?.mfaProofAgeSeconds ?? null,
   };
-  return computeClassifiedFieldRedaction(
+  const enforcement: AbacEnforcement | undefined =
+    spec.abac === undefined
+      ? undefined
+      : { ...spec.abac, ...(record !== undefined ? { record } : {}) };
+  const result = computeClassifiedFieldRedaction(
     authPrincipal,
     spec.entityPermissions ?? {},
     safeRoles,
     spec.classifiedFields,
     spec.policy,
-    spec.abac,
-  ).redacted;
+    enforcement,
+  );
+  return { redacted: result.redacted, deferred: result.deferred };
+}
+
+/**
+ * The record-free field set, which is what every caller outside the two-pass wanted and still
+ * wants: `apps/operate-server`'s audit-read routes redact a trail row, not an entity record.
+ */
+export function computeRedactedFields(
+  spec: ResponseRedactionSpec,
+  principal: ResolvedPrincipal | null,
+): readonly string[] {
+  return computeResponseRedaction(spec, principal).redacted;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -110,4 +179,83 @@ export function redactJsonValue(value: unknown, redacted: ReadonlySet<string>): 
     return out;
   }
   return value;
+}
+
+/**
+ * Resolves the field set for one record, or for no record at all.
+ *
+ * `null` means *there is no record here* — the page wrapper's own keys, a body that is not an
+ * object where the shape said one record would be, a non-object element of `data`. Every such
+ * position gets the **record-free** set, and that is the whole safety argument of the two-pass:
+ * the per-record pass can only ever **relax** the record-free one (a `deferred` becoming
+ * `satisfied`), never tighten it, so falling back to the record-free set is falling back to the
+ * stricter answer. Fail-closed by construction rather than by remembering to be careful.
+ */
+export type RedactedFieldsFor = (
+  record: Readonly<Record<string, unknown>> | null,
+) => ReadonlySet<string>;
+
+type ShapeRedactor = (body: unknown, redactedFor: RedactedFieldsFor) => unknown;
+
+/**
+ * A **total map** rather than a `switch` with a `default`, so a fourth response shape is a compile
+ * error here instead of a member silently inheriting whichever branch the chain ended on — which,
+ * for a `switch` written in the order of this union, would be `none`: the *permissive* branch,
+ * since `none` applies the record-free set by the ordinary whole-tree walk and never looks for a
+ * record. A new shape inheriting that would redact a response nobody had decided how to read.
+ */
+const SHAPE_REDACTORS: Readonly<Record<ResponseRecordShape, ShapeRedactor>> = {
+  /** No record in the body, so the record-free set applied by the ordinary walk. */
+  none: (body, redactedFor) => redactJsonValue(body, redactedFor(null)),
+
+  /**
+   * The body is the record, when it is an object at all. A string, an array or `null` where the
+   * operation declared one record is a response this stage cannot locate a record in, so it gets
+   * the stricter record-free set.
+   */
+  record: (body, redactedFor) =>
+    isPlainObject(body)
+      ? redactJsonValue(body, redactedFor(body))
+      : redactJsonValue(body, redactedFor(null)),
+
+  /**
+   * `{data: [record, …], page: {…}}`. Each plain-object element of `data` is redacted with **its
+   * own** set — the point of the whole increment — and everything else is record-free: the
+   * wrapper's other keys (`page: {limit, nextCursor}`, a `cursor`) and any element that is not an
+   * object. A wrapper that is not an object, or whose `data` is absent or not an array, falls back
+   * to the ordinary walk with the record-free set, which is exactly today's behaviour.
+   */
+  page: (body, redactedFor) => {
+    if (!isPlainObject(body) || !Array.isArray(body["data"])) {
+      return redactJsonValue(body, redactedFor(null));
+    }
+    const base = redactedFor(null);
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(body)) {
+      if (base.has(k)) continue;
+      if (k !== "data") {
+        out[k] = redactJsonValue(v, base);
+        continue;
+      }
+      out[k] = (v as readonly unknown[]).map((element) =>
+        isPlainObject(element)
+          ? redactJsonValue(element, redactedFor(element))
+          : redactJsonValue(element, base),
+      );
+    }
+    return out;
+  },
+};
+
+export function redactRecords(
+  shape: ResponseRecordShape,
+  body: unknown,
+  redactedFor: RedactedFieldsFor,
+): unknown {
+  return SHAPE_REDACTORS[shape](body, redactedFor);
+}
+
+/** The shapes `redactRecords` can apply — the map's own keys, so the two cannot disagree. */
+export function redactableResponseShapes(): readonly ResponseRecordShape[] {
+  return Object.keys(SHAPE_REDACTORS) as readonly ResponseRecordShape[];
 }

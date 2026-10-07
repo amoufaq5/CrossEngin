@@ -60,10 +60,12 @@ export interface AbacEnforcement {
   /**
    * What the four field-level functions pass through to `AbacEvaluationInput.record`.
    *
-   * Absent means **the caller had no record**, which is the ordinary case for two of the three field
-   * positions: response redaction computes one field set per response and so never holds a single
-   * record, and the create path has none to hold. A record-bearing policy then answers `deferred`,
-   * which `ABAC_OUTCOME_ALLOWS` refuses.
+   * Absent means **the caller had no record**, which is ordinary on two paths: the create path has
+   * none to hold, and response redaction asks once with no record to learn whether any field's
+   * policy needs one before it goes to the trouble of locating records. A record-bearing policy
+   * then answers `deferred`, which `ABAC_OUTCOME_ALLOWS` refuses and
+   * `FieldRedactionResult.deferred` reports per field, so the second pass happens exactly when it
+   * would change an answer.
    */
   readonly record?: Readonly<Record<string, unknown>>;
 }
@@ -108,9 +110,10 @@ export function isAbacDeferred(discharge: AbacDischarge | null | undefined): boo
  *
  * `context.record` rides through the spread below with no code here reading it, deliberately:
  * **only the evaluator knows whether a given policy key needs a record.** A record-absence refusal
- * here would reject every obligation at every record-free position — which is five of the eight in
- * `ABAC_RECORD_AVAILABILITY` — including the ones whose policy is a predicate over the principal's
- * own attributes and never wanted a record at all. That is the opposite mistake from the
+ * here would reject every obligation at every position `ABAC_RECORD_AVAILABILITY` does not answer
+ * `always` for, and every first pass at one that it does — including the ones whose policy is a
+ * predicate over the principal's own attributes and never wanted a record at all. That is the
+ * opposite mistake from the
  * `abacAttributes === null` arm, where the input is one the seam *always* claims to carry and so a
  * missing value is unambiguously a gap.
  */
@@ -246,9 +249,15 @@ export type AbacRecordAvailability = (typeof ABAC_RECORD_AVAILABILITIES)[number]
  * failure into a boot refusal, applied to an authorization input.
  *
  * `never` is not a limitation of the handler that could be fixed by loading more: in `entity_create`
- * the record does not exist, in `entity_list` the subject is a set, and in `field_read` the decision
- * is one field set for a whole response. `sometimes` belongs to `field_update` alone, and the split
- * inside it is the sharpest consequence — see `ABAC_RECORD_AVAILABILITY_REASONS`.
+ * the record does not exist, and in `entity_list` the subject is a set. `sometimes` belongs to
+ * `field_update` alone, and the split inside it is the sharpest consequence — see
+ * `ABAC_RECORD_AVAILABILITY_REASONS`.
+ *
+ * `field_read` and `entity_list` are the pair worth telling apart, because the two look alike from
+ * here and are not: a **field read** policy filters *columns within a row*, which a response can
+ * express per record, so redaction locates each record and answers for it. An **entity list**
+ * policy would filter *rows*, which is a different operation — dropping rows from a page would make
+ * its `nextCursor` and any count describe a set the caller was never shown.
  */
 export const ABAC_RECORD_AVAILABILITY: Readonly<
   Record<AbacGrantPosition, AbacRecordAvailability>
@@ -259,7 +268,7 @@ export const ABAC_RECORD_AVAILABILITY: Readonly<
   entity_delete: "always",
   entity_list: "never",
   entity_transition: "always",
-  field_read: "never",
+  field_read: "always",
   field_update: "sometimes",
 };
 
@@ -284,7 +293,7 @@ export const ABAC_RECORD_AVAILABILITY_REASONS: Readonly<Record<AbacGrantPosition
   entity_transition:
     "a transition reads the record to check the state it is moving from, so the stored record is in hand before the decision",
   field_read:
-    "response redaction computes one field set per response and applies it by a generic JSON walk, so it cannot identify which record a field belongs to",
+    "response redaction locates the records a response carries from the operation's declared shape and computes the field set per record, so a per-field read policy is answered against the record the field came from",
   field_update:
     "the update path supplies the record and the create path cannot, so an obligated field is not settable at create",
 };

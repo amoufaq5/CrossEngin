@@ -2,7 +2,7 @@ import {
   isSensitiveDataClass,
   type DataClassification,
 } from "@crossengin/types/meta-schema";
-import { ABAC_OUTCOME_ALLOWS, dischargeAbac } from "./abac.js";
+import { ABAC_OUTCOME_ALLOWS, dischargeAbac, isAbacDeferred } from "./abac.js";
 import type { AbacEnforcement } from "./abac.js";
 import { resolveEffectiveRoles } from "./roles.js";
 import type {
@@ -67,6 +67,7 @@ export function computeFieldRedaction(
   const fields = entityPerms.fields;
   const readable: string[] = [];
   const redacted: string[] = [];
+  const deferred: string[] = [];
 
   for (const name of fieldNames) {
     const rule = fields?.[name]?.read;
@@ -82,10 +83,16 @@ export function computeFieldRedaction(
     // redaction was already owed.
     const discharge = dischargeFieldObligation(rule.abac, principal, "read", name, abac);
     if (obligationAdmits(discharge)) readable.push(name);
-    else redacted.push(name);
+    else {
+      redacted.push(name);
+      // Reported from inside this arm, so only a field the roles admitted can ever be deferred:
+      // the roles refusal above returns before a discharge exists, which is what keeps `deferred`
+      // answering "a record could change this" rather than "something refused this".
+      if (isAbacDeferred(discharge)) deferred.push(name);
+    }
   }
 
-  return { readable, redacted };
+  return { readable, redacted, deferred };
 }
 
 export function validateWriteMask(
@@ -184,20 +191,33 @@ export function computeClassifiedFieldRedaction(
   const fieldPerms = entityPerms.fields;
   const readable: string[] = [];
   const redacted: string[] = [];
+  const deferred: string[] = [];
 
   for (const field of fields) {
     const rule = fieldPerms?.[field.name]?.read;
     if (rule !== undefined) {
-      const admitted =
-        rule.roles.some((r) => effective.has(r)) &&
-        obligationAdmits(dischargeFieldObligation(rule.abac, principal, "read", field.name, abac));
-      if (admitted) readable.push(field.name);
-      else redacted.push(field.name);
+      const rolesAdmit = rule.roles.some((r) => effective.has(r));
+      // The discharge is held in a local only so the refusal can be *classified*; the ternary keeps
+      // the short-circuit the `&&` had, so the evaluator is still consulted only after the roles
+      // check passes (ADR-0340) and a role-refused field never reaches the deployment's policy
+      // layer. `null` on the roles-refused arm is not a no-obligation discharge — `rolesAdmit`
+      // gates the admit test below — it is simply the value for "no evaluation happened".
+      const discharge = rolesAdmit
+        ? dischargeFieldObligation(rule.abac, principal, "read", field.name, abac)
+        : null;
+      if (rolesAdmit && obligationAdmits(discharge)) readable.push(field.name);
+      else {
+        redacted.push(field.name);
+        if (isAbacDeferred(discharge)) deferred.push(field.name);
+      }
       continue;
     }
     if (field.classification !== undefined && defaultRedacts(policy, field.classification)) {
       // Asked per class, not once per principal: a role may be privileged for `pii` and not for
       // `phi`, and a single `hasPrivilege` computed outside the loop could not express that.
+      //
+      // This arm never contributes to `deferred`: a classification default is answered
+      // from roles alone and carries no obligation, so no record could overturn it.
       if (privilegedForClass(policy, effective, field.classification)) readable.push(field.name);
       else redacted.push(field.name);
       continue;
@@ -205,7 +225,7 @@ export function computeClassifiedFieldRedaction(
     readable.push(field.name);
   }
 
-  return { readable, redacted };
+  return { readable, redacted, deferred };
 }
 
 /**

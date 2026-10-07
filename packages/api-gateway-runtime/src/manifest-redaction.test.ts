@@ -7,6 +7,7 @@ import {
   RedactionCoverageError,
   redactionRegistryFromManifest,
   redactionSpecForEntity,
+  type RedactedOperation,
   type RedactionManifestInput,
 } from "./manifest-redaction.js";
 
@@ -50,19 +51,22 @@ const policyForEntity = () => ({ privilegedRoles: ["clinician"] });
 // `operationsForEntity` is required and has no default: a mapping computed from the entity name
 // cannot name a lifecycle transition (its id comes from the manifest's workflow), so every default
 // is wrong for exactly the write operations whose responses carry the record. This fixture plays
-// the part `compileOperateServer` plays in production — every operation serving the entity.
-const OPS: Readonly<Record<string, readonly string[]>> = {
-  Patient: [
-    "patient.list",
-    "patient.create",
-    "patient.read",
-    "patient.update",
-    "patient.delete",
-    "patient.admit",
-  ],
-  Widget: ["widget.list", "widget.create", "widget.read", "widget.update", "widget.delete"],
+// the part `compileOperateServer` plays in production — every operation serving the entity, each
+// with the shape of its own response, which the id itself does not say.
+function crudOperations(prefix: string): readonly RedactedOperation[] {
+  return [
+    { operationId: `${prefix}.list`, recordShape: "page" },
+    { operationId: `${prefix}.create`, recordShape: "record" },
+    { operationId: `${prefix}.read`, recordShape: "record" },
+    { operationId: `${prefix}.update`, recordShape: "record" },
+    { operationId: `${prefix}.delete`, recordShape: "none" },
+  ];
+}
+const OPS: Readonly<Record<string, readonly RedactedOperation[]>> = {
+  Patient: [...crudOperations("patient"), { operationId: "patient.admit", recordShape: "record" }],
+  Widget: crudOperations("widget"),
 };
-const operationsForEntity = (name: string): readonly string[] => OPS[name] ?? [];
+const operationsForEntity = (name: string): readonly RedactedOperation[] => OPS[name] ?? [];
 
 /**
  * A principal whose attribute lookup actually happened. Since ADR-0341 an obligation is refused
@@ -112,9 +116,21 @@ describe("redactionRegistryFromManifest", () => {
       policyForEntity,
       operationsForEntity,
     });
-    for (const opId of OPS["Patient"] ?? []) {
-      expect(registry.specFor(opId), opId).not.toBeNull();
+    for (const op of OPS["Patient"] ?? []) {
+      expect(registry.specFor(op.operationId), op.operationId).not.toBeNull();
     }
+  });
+
+  it("registers each operation's own response shape", () => {
+    const registry = redactionRegistryFromManifest(MANIFEST, {
+      rolesForPrincipal,
+      policyForEntity,
+      operationsForEntity,
+    });
+    expect(registry.specFor("patient.list")?.recordShape).toBe("page");
+    expect(registry.specFor("patient.read")?.recordShape).toBe("record");
+    expect(registry.specFor("patient.admit")?.recordShape).toBe("record");
+    expect(registry.specFor("patient.delete")?.recordShape).toBe("none");
   });
 
   it("registers nothing for an operationId the caller did not name", () => {
@@ -183,21 +199,42 @@ describe("redactionRegistryFromManifest", () => {
     expect(registry.specFor("patient.read")?.entityPermissions).toBe(PATIENT_PERMS);
   });
 
-  it("shares one spec object across all of an entity's operations", () => {
+  it("shares every member but the shape across an entity's operations", () => {
+    // ADR-0338's identity assertion, weakened exactly as far as ADR-0342 forces and no further:
+    // `recordShape` is a property of the *operation*, so the spec objects differ — but each is a
+    // spread of one base, so the members that make it expensive to build are still the same
+    // references. Asserting that keeps the sharing that does hold pinned, rather than dropping the
+    // test and letting a future change rebuild the classified-field list per operation unnoticed.
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
       operationsForEntity,
     });
-    expect(registry.specFor("patient.create")).toBe(registry.specFor("patient.read"));
-    expect(registry.specFor("patient.admit")).toBe(registry.specFor("patient.read"));
+    const read = registry.specFor("patient.read");
+    const create = registry.specFor("patient.create");
+    const list = registry.specFor("patient.list");
+    const admit = registry.specFor("patient.admit");
+    if (read === null || create === null || list === null || admit === null) {
+      throw new Error("expected specs");
+    }
+    for (const other of [create, list, admit]) {
+      expect(other).not.toBe(read);
+      expect(other.classifiedFields).toBe(read.classifiedFields);
+      expect(other.entityPermissions).toBe(read.entityPermissions);
+      expect(other.roles).toBe(read.roles);
+      expect(other.rolesForPrincipal).toBe(read.rolesForPrincipal);
+      expect(other.policy).toBe(read.policy);
+      expect(other.abac).toBe(read.abac);
+    }
+    expect(list.recordShape).not.toBe(read.recordShape);
   });
 
   it("honours a custom operationsForEntity mapping", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
-      operationsForEntity: (name) => (name === "Patient" ? ["v1.patients.search"] : []),
+      operationsForEntity: (name) =>
+        name === "Patient" ? [{ operationId: "v1.patients.search", recordShape: "page" }] : [],
     });
     expect(registry.specFor("v1.patients.search")).not.toBeNull();
     expect(registry.specFor("patient.read")).toBeNull();
