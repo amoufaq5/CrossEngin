@@ -118,6 +118,7 @@ import {
   buildAbacEvaluator,
   formatAbacPolicies,
   parseAbacPolicies,
+  recordBearingPolicyKeys,
 } from "./abac-policy.js";
 import {
   CachedAbacAttributeDirectory,
@@ -668,7 +669,12 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const abacEvaluator = abacPolicies.size > 0 ? buildAbacEvaluator(abacPolicies) : undefined;
   if (abacPolicies.size > 0) console.info(`[abac] ${formatAbacPolicies(abacPolicies)}`);
 
-  const abacObligations = checkAbacObligations({ manifest, answerableKeys: new Set(abacPolicies.keys()) });
+  const abacRecordBearingKeys = recordBearingPolicyKeys(abacPolicies);
+  const abacObligations = checkAbacObligations({
+    manifest,
+    answerableKeys: new Set(abacPolicies.keys()),
+    recordBearingKeys: abacRecordBearingKeys,
+  });
   console.info(`[abac] ${formatAbacObligationCheck(abacObligations)}`);
   if (abacObligations.refusal !== null) throw new AbacObligationsUnevaluable(abacObligations);
 
@@ -746,6 +752,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       : {
           evaluator: abacEvaluator,
           answerableKeys: new Set(abacPolicies.keys()),
+          recordBearingKeys: abacRecordBearingKeys,
           ...(abacAttributeDirectory !== undefined ? { attributeDirectory: abacAttributeDirectory } : {}),
         };
   // Offline subscription entitlement: verify an Ed25519 license token against the

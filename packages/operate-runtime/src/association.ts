@@ -227,6 +227,13 @@ export function buildAssociationListHandler(spec: AssociationRouteSpec, ctx: Ass
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
 
+    // No `record`, and structurally none: this answers `list` for the *set* of records linked to
+    // the owner, so a per-record answer would be a filter and not an authorization decision —
+    // `ABAC_RECORD_AVAILABILITY.entity_list` is `never` for exactly that reason. A record-bearing
+    // policy therefore answers `deferred`, which `ABAC_OUTCOME_ALLOWS` refuses, and the refusal
+    // lands on the `!decision.allowed` arm below with no special case. Stated rather than left to
+    // be rediscovered: a reader who notices the links *are* loaded further down might reach for
+    // them, and they are the wrong records — the policy is about the related entity, one row each.
     const decision = rbacCheck({
       principal: authPrincipal(principal, ctx.principalRoles),
       permissions: ctx.permissions,
@@ -343,6 +350,9 @@ export function buildAssociationCountHandler(spec: AssociationCountRouteSpec, ct
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
 
+    // No `record`, for the list family's reason and one sharper: a count answers for a set and
+    // returns a number, so there is not even a record set to filter. A record-bearing policy
+    // answers `deferred` and refuses below.
     const decision = rbacCheck({
       principal: authPrincipal(principal, ctx.principalRoles),
       permissions: ctx.permissions,
@@ -477,6 +487,15 @@ export function buildAssociationWriteHandler(spec: AssociationWriteRouteSpec, ct
     const tenantId = principal?.tenantId ?? null;
     if (tenantId === null) return json(401, { error: "tenant_required" });
 
+    // No `record`, so a record-bearing policy on the owner's `update` grant answers `deferred` and
+    // refuses below — and unlike the list and count families, this one is an **unclosed position
+    // rather than a structural impossibility**. The grant is `update` on the owner entity, the
+    // owner's id is in the path, and the store could load that record and the decision be re-asked
+    // with it, exactly as the entity `update` handler does. It is not loaded today: link and unlink
+    // are store calls on the join table and never read the owner at all, so supplying the record
+    // means adding a fetch to a route that has none. Until then a record-bearing policy makes the
+    // owner's associations unwritable, which is the fail-closed direction and is what this refusal
+    // says.
     const decision = rbacCheck({
       principal: authPrincipal(principal, ctx.principalRoles),
       permissions: ctx.permissions,

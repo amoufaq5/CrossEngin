@@ -24,6 +24,11 @@ import type {
  * Reading it the other way would reproduce the defect this closes, one parameter over. It
  * short-circuits before `dischargeAbac` because `AbacEvaluationInput.entity` is required and this
  * caller has no entity to name; no evaluator is consulted on that path either way.
+ *
+ * An **absent** `abac.record` is not a skip either: a record-bearing policy answers `deferred`,
+ * which `obligationAdmits` refuses through the same total map. So the two ways a caller can be
+ * under-equipped — no evaluator, no record — both land on a refusal rather than a pass-through,
+ * through two different outcomes that name two different remedies.
  */
 function dischargeFieldObligation(
   policyKey: string | undefined,
@@ -36,7 +41,13 @@ function dischargeFieldObligation(
   if (abac === undefined) return { policyKey, outcome: "undischargeable" };
   return dischargeAbac(
     policyKey,
-    { principal, entity: abac.entity, operation, field },
+    {
+      principal,
+      entity: abac.entity,
+      operation,
+      field,
+      ...(abac.record !== undefined ? { record: abac.record } : {}),
+    },
     abac.evaluator,
   );
 }

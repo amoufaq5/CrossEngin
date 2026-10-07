@@ -588,6 +588,43 @@ describe("association handlers — abac obligation", () => {
       expect(store.linked).toEqual([]);
     });
 
+    it(`${family.name}: 403s a deferred outcome, because no record can be supplied here`, async () => {
+      // ADR-0341's open end #1. None of the three families holds a single record: list and count
+      // answer for a *set*, and link/unlink never read the owner. So a record-bearing policy
+      // answers `deferred`, `ABAC_OUTCOME_ALLOWS` refuses it, and it lands on the ordinary
+      // `!decision.allowed` arm with no special case — correct by construction, and pinned here so
+      // that stays true rather than being rediscovered. The two kinds differ in what would fix
+      // them: list and count are structural, while link/unlink is an unclosed position (the owner
+      // record *could* be loaded, exactly as the entity `update` handler loads it, and is not).
+      const store = new FakeStore();
+      const out = await call(
+        family.build(abacCtx(store, answering("deferred"))),
+        family.name === "write" ? "editor" : "viewer",
+        family.params,
+      );
+      expect(out.status).toBe(403);
+      expect(abacBody(out)["abacPolicyKey"]).toBe(ABAC_KEY);
+      expect(abacBody(out)["abacOutcome"]).toBe("deferred");
+      // And nothing behind the check ran, so the deferral did not become a half-done write.
+      expect(store.lastListLinks).toBeNull();
+      expect(store.lastCountLinks).toBeNull();
+      expect(store.linked).toEqual([]);
+    });
+
+    it(`${family.name}: never hands the evaluator a record`, async () => {
+      // The counterpart of the refusal above: the obligation is asked once, with the key absent —
+      // `"record" in input === false`, which is "the caller had none" and not "the record is
+      // empty". A family that started supplying one would make the refusal above wrong.
+      const seen: AbacEvaluationInput[] = [];
+      await call(
+        family.build(abacCtx(new FakeStore(), answering("satisfied", seen))),
+        family.name === "write" ? "editor" : "viewer",
+        family.params,
+      );
+      expect(seen.length).toBe(1);
+      expect("record" in (seen[0] as object)).toBe(false);
+    });
+
     it(`${family.name}: a satisfied evaluator reaches the store`, async () => {
       const store = new FakeStore();
       const out = await call(

@@ -55,18 +55,24 @@ function check(parts: Partial<AbacObligationCheck> = {}): AbacObligationCheck {
     obligations: [],
     evaluatorDeclared: false,
     unanswerable: [],
+    recordUnavailable: [],
+    createBlocked: [],
     refusal: null,
     ...parts,
   };
 }
 
 describe("ABAC_OBLIGATION_REFUSALS", () => {
-  it("names both refusals", () => {
-    expect(ABAC_OBLIGATION_REFUSALS).toEqual(["obligation_unevaluable", "policy_undeclared"]);
+  it("names all three refusals", () => {
+    expect(ABAC_OBLIGATION_REFUSALS).toEqual([
+      "obligation_unevaluable",
+      "policy_undeclared",
+      "record_unavailable",
+    ]);
   });
 
   it("has no escape-hatch member, because serving an unevaluated obligation is not a state to opt into", () => {
-    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(2);
+    expect(ABAC_OBLIGATION_REFUSALS).toHaveLength(3);
     expect(ABAC_OBLIGATION_REFUSALS.some((r) => /allow|skip|ignore|unchecked/.test(r))).toBe(false);
   });
 });
@@ -82,6 +88,7 @@ describe("checkAbacObligations", () => {
     const result = checkAbacObligations({
       manifest: withOneObligation(),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toHaveLength(1);
     expect(result.evaluatorDeclared).toBe(false);
@@ -92,6 +99,7 @@ describe("checkAbacObligations", () => {
     const result = checkAbacObligations({
       manifest: withOneObligation(),
       answerableKeys: new Set(["same_facility"]),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toHaveLength(1);
     expect(result.evaluatorDeclared).toBe(true);
@@ -102,6 +110,7 @@ describe("checkAbacObligations", () => {
     const result = checkAbacObligations({
       manifest: manifest({ permissions: { Patient: { read: { roles: ["clinician"] } } } }),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
@@ -111,6 +120,7 @@ describe("checkAbacObligations", () => {
     const result = checkAbacObligations({
       manifest: manifest({ permissions: {} }),
       answerableKeys: new Set(["same_facility"]),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
@@ -119,7 +129,11 @@ describe("checkAbacObligations", () => {
   it("treats an absent `permissions` key as no obligations rather than throwing", () => {
     const m = manifest();
     expect(m.permissions).toBeUndefined();
-    const result = checkAbacObligations({ manifest: m, answerableKeys: new Set() });
+    const result = checkAbacObligations({
+      manifest: m,
+      answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
+    });
     expect(result.obligations).toEqual([]);
     expect(result.refusal).toBeNull();
   });
@@ -130,6 +144,7 @@ describe("checkAbacObligations", () => {
         permissions: { Invoice: { update: { roles: ["ap_clerk"], abac: "own_entity" } } },
       }),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toEqual([
       { entity: "Invoice", operation: "update", field: null, policyKey: "own_entity" },
@@ -144,6 +159,7 @@ describe("checkAbacObligations", () => {
         },
       }),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toHaveLength(1);
     const [only] = result.obligations;
@@ -161,6 +177,7 @@ describe("checkAbacObligations", () => {
         },
       }),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toEqual([
       { entity: "Patient", operation: "read", field: "mrn", policyKey: "treating" },
@@ -177,6 +194,7 @@ describe("checkAbacObligations", () => {
         },
       }),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toEqual([
       {
@@ -200,6 +218,7 @@ describe("checkAbacObligations", () => {
         },
       }),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toEqual([]);
   });
@@ -222,6 +241,7 @@ describe("checkAbacObligations", () => {
         },
       }),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations.map((o) => o.policyKey).sort()).toEqual(["a", "b", "c", "d", "e"]);
   });
@@ -232,6 +252,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
     const result = checkAbacObligations({
       manifest: withTwoObligations(),
       answerableKeys: new Set(["same_facility"]),
+      recordBearingKeys: new Set(),
     });
     expect(result.evaluatorDeclared).toBe(true);
     expect(result.refusal).toBe("policy_undeclared");
@@ -243,6 +264,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
     const result = checkAbacObligations({
       manifest: withTwoObligations(),
       answerableKeys: new Set(["same_facility", "own_jurisdiction"]),
+      recordBearingKeys: new Set(),
     });
     expect(result.refusal).toBeNull();
     expect(result.unanswerable).toEqual([]);
@@ -252,6 +274,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
     const result = checkAbacObligations({
       manifest: withOneObligation(),
       answerableKeys: new Set(["same_facility", "unused"]),
+      recordBearingKeys: new Set(),
     });
     expect(result.refusal).toBeNull();
     expect(result.unanswerable).toEqual([]);
@@ -266,6 +289,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
     const result = checkAbacObligations({
       manifest: withTwoObligations(),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.evaluatorDeclared).toBe(false);
     expect(result.refusal).toBe("obligation_unevaluable");
@@ -276,6 +300,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
     const result = checkAbacObligations({
       manifest: withOneObligation(),
       answerableKeys: new Set(["Same_Facility"]),
+      recordBearingKeys: new Set(),
     });
     expect(result.refusal).toBe("policy_undeclared");
     expect(result.unanswerable).toHaveLength(1);
@@ -285,6 +310,7 @@ describe("checkAbacObligations against an incomplete evaluator", () => {
     const result = checkAbacObligations({
       manifest: manifest({ permissions: { Patient: { read: { roles: ["clinician"] } } } }),
       answerableKeys: new Set(["same_facility"]),
+      recordBearingKeys: new Set(),
     });
     expect(result.refusal).toBeNull();
     expect(result.unanswerable).toEqual([]);
@@ -296,6 +322,7 @@ describe("the policy_undeclared refusal text", () => {
     return checkAbacObligations({
       manifest: withTwoObligations(),
       answerableKeys: new Set(["same_facility"]),
+      recordBearingKeys: new Set(),
     });
   }
 
@@ -337,6 +364,7 @@ describe("the policy_undeclared refusal text", () => {
     const none = checkAbacObligations({
       manifest: withTwoObligations(),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(new AbacObligationsUnevaluable(none).message).not.toBe(
       new AbacObligationsUnevaluable(undeclared()).message,
@@ -467,6 +495,7 @@ describe("the builtin pack census", () => {
       counts[name] = checkAbacObligations({
         manifest: resolved,
         answerableKeys: new Set(),
+        recordBearingKeys: new Set(),
       }).obligations.length;
     }
     expect(Object.keys(counts)).toHaveLength(7);
@@ -497,6 +526,7 @@ describe("the builtin pack census", () => {
     const result = checkAbacObligations({
       manifest: withOneObligation(),
       answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
     });
     expect(result.obligations).toEqual([
       { entity: "Patient", operation: "read", field: null, policyKey: "same_facility" },
@@ -518,8 +548,151 @@ describe("the builtin pack census", () => {
         },
       },
     };
-    const result = checkAbacObligations({ manifest: qualified, answerableKeys: new Set() });
+    const result = checkAbacObligations({
+      manifest: qualified,
+      answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
+    });
     expect(result.obligations).toHaveLength(1);
     expect(result.refusal).toBe("obligation_unevaluable");
+  });
+});
+
+describe("checkAbacObligations against a record-bearing policy", () => {
+  /** One obligation at `position`, keyed `rec` so a caller can declare it record-bearing. */
+  function at(position: "create" | "list" | "read" | "update" | "delete"): Manifest {
+    return manifest({
+      permissions: { Chart: { [position]: { roles: ["clinician"], abac: "rec" } } },
+    });
+  }
+
+  function fieldAt(op: "read" | "update"): Manifest {
+    return manifest({
+      permissions: {
+        Chart: { fields: { note: { [op]: { roles: ["clinician"], abac: "rec" } } } },
+      },
+    });
+  }
+
+  const declared = (m: Manifest): AbacObligationCheck =>
+    checkAbacObligations({
+      manifest: m,
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(["rec"]),
+    });
+
+  it("refuses at entity create, list and field read, where no call site can ever supply a record", () => {
+    for (const m of [at("create"), at("list"), fieldAt("read")]) {
+      const result = declared(m);
+      expect(result.refusal).toBe("record_unavailable");
+      expect(result.recordUnavailable).toHaveLength(1);
+      expect(result.createBlocked).toEqual([]);
+    }
+  });
+
+  it("admits at entity read, update, delete and a transition, where the handler loads the record", () => {
+    const transition = manifest({
+      permissions: {
+        Chart: { transitions: { admit: { roles: ["clinician"], abac: "rec" } } },
+      },
+    });
+    for (const m of [at("read"), at("update"), at("delete"), transition]) {
+      const result = declared(m);
+      expect(result.refusal).toBeNull();
+      expect(result.recordUnavailable).toEqual([]);
+      expect(result.createBlocked).toEqual([]);
+    }
+  });
+
+  it("reports a field update obligation without refusing, because a create genuinely has no record", () => {
+    // The one `sometimes` position. Refusing would reject a coherent declaration — "you may only
+    // set this field on a record that is yours" — for the one path that cannot satisfy it.
+    const result = declared(fieldAt("update"));
+    expect(result.refusal).toBeNull();
+    expect(result.createBlocked).toEqual([
+      { entity: "Chart", operation: "update", field: "note", policyKey: "rec" },
+    ]);
+    expect(result.recordUnavailable).toEqual([]);
+  });
+
+  it("says so on the boot line, naming the field and why it cannot be set at create", () => {
+    const line = formatAbacObligationCheck(declared(fieldAt("update")));
+    expect(line).toContain("not settable at create");
+    expect(line).toContain("Chart.update -> note");
+    expect(line).toContain("the create path cannot");
+  });
+
+  it("classifies nothing as record-bearing when the key is not declared as one", () => {
+    // The same manifest that refuses above is served when the policy compares against the
+    // principal's own attributes: the position is only wrong for a policy that needs a record.
+    const result = checkAbacObligations({
+      manifest: at("create"),
+      answerableKeys: new Set(["rec"]),
+      recordBearingKeys: new Set(),
+    });
+    expect(result.refusal).toBeNull();
+    expect(result.recordUnavailable).toEqual([]);
+  });
+
+  it("reports the undeclared-key refusal first, because its remedy is the true one", () => {
+    // A key no evaluator answers is reported as that, even at a position a record could never
+    // reach: telling an operator to move an obligation whose policy does not exist would send
+    // them to fix the second problem first.
+    const result = checkAbacObligations({
+      manifest: at("create"),
+      answerableKeys: new Set(["other"]),
+      recordBearingKeys: new Set(["rec"]),
+    });
+    expect(result.refusal).toBe("policy_undeclared");
+  });
+
+  it("cannot classify anything record-bearing with no evaluator, so the no-evaluator refusal stands", () => {
+    const result = checkAbacObligations({
+      manifest: at("create"),
+      answerableKeys: new Set(),
+      recordBearingKeys: new Set(),
+    });
+    expect(result.refusal).toBe("obligation_unevaluable");
+  });
+
+  it("names the position's reason and all three remedies in the refusal", () => {
+    const result = declared(at("create"));
+    const message = formatAbacObligationCheck(result);
+    expect(message).toContain("Chart.create requires abac policy 'rec'");
+    expect(message).toContain("does not exist until the write commits");
+    expect(message).toContain(ABAC_POLICY_FLAG);
+    expect(message).toContain("the role grant beside it is enforced and stays");
+  });
+
+  it("carries the subset on the thrown error, so a caller need not re-derive it", () => {
+    const result = declared(at("list"));
+    const error = new AbacObligationsUnevaluable(result);
+    expect(error.refusal).toBe("record_unavailable");
+    expect(error.recordUnavailable).toHaveLength(1);
+    expect(error.message).toContain("a filter and not an authorization decision");
+  });
+
+  it("truncates the reasoned render at the detail limit", () => {
+    const perms: Record<string, { create: { roles: string[]; abac: string } }> = {};
+    for (let i = 0; i < OBLIGATION_DETAIL_LIMIT + 3; i += 1) {
+      perms[`E${i.toString()}`] = { create: { roles: ["r"], abac: "rec" } };
+    }
+    const result = declared(manifest({ permissions: perms }));
+    expect(result.recordUnavailable).toHaveLength(OBLIGATION_DETAIL_LIMIT + 3);
+    expect(formatAbacObligationCheck(result)).toContain("(+3 more)");
+  });
+
+  it("declares none of the seven builtin packs record-bearing, because none declares an obligation", async () => {
+    // The measurement that makes this refusal vacuous today and a forcing function later.
+    for (const name of BUILTIN_PACK_NAMES) {
+      const pack = await loadBuiltinPack(name);
+      const result = checkAbacObligations({
+        manifest: pack,
+        answerableKeys: new Set(["rec"]),
+        recordBearingKeys: new Set(["rec"]),
+      });
+      expect(result.recordUnavailable, name).toEqual([]);
+      expect(result.createBlocked, name).toEqual([]);
+    }
   });
 });

@@ -471,3 +471,190 @@ describe("rbacCheck — unresolved abac attributes", () => {
     expect(r.reason).toContain("effective roles");
   });
 });
+
+describe("rbacCheck — the record a policy needs", () => {
+  const RECORD: Readonly<Record<string, unknown>> = { id: "rx-1", department: "oncology" };
+
+  function spy(outcome: AbacOutcome): {
+    readonly fn: AbacEvaluator;
+    readonly calls: AbacEvaluationInput[];
+  } {
+    const calls: AbacEvaluationInput[] = [];
+    return {
+      fn: (input) => {
+        calls.push(input);
+        return outcome;
+      },
+      calls,
+    };
+  }
+
+  /** An evaluator whose policy is about the row: deferred without one, satisfied with it. */
+  const recordBearing: AbacEvaluator = (input) =>
+    input.record === undefined ? "deferred" : "satisfied";
+
+  it("refuses when the policy needs a record and the caller supplied none", () => {
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: recordBearing,
+    });
+    // `deferred` is a refusal, not a skip: a caller that reads it as "nothing to check" would grant
+    // an obligation nothing evaluated.
+    expect(r.allowed).toBe(false);
+    expect(r.abac).toEqual({ policyKey: "data.access.allow_update", outcome: "deferred" });
+  });
+
+  it("names the policy key and the deferred outcome in the reason", () => {
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: recordBearing,
+    });
+    expect(r.reason).toContain("data.access.allow_update");
+    expect(r.reason).toMatch(/deferred\)$/);
+  });
+
+  it("gives deferred a different reason from denied and from undischargeable", () => {
+    const base = {
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update" as const,
+    };
+    const deferred = rbacCheck({ ...base, abacEvaluator: () => "deferred" });
+    const denied = rbacCheck({ ...base, abacEvaluator: () => "denied" });
+    const undischargeable = rbacCheck({ ...base });
+    // Three refusals, three remedies — load the record, change the principal's attributes, wire a
+    // policy layer — so they must not read alike.
+    expect(new Set([deferred.reason, denied.reason, undischargeable.reason]).size).toBe(3);
+  });
+
+  it("allows the same grant once the record is supplied", () => {
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: recordBearing,
+      record: RECORD,
+    });
+    expect(r.allowed).toBe(true);
+    expect(r.abac).toEqual({ policyKey: "data.access.allow_update", outcome: "satisfied" });
+  });
+
+  it("passes the record through to the evaluator verbatim", () => {
+    const s = spy("satisfied");
+    rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: s.fn,
+      record: RECORD,
+    });
+    expect(s.calls).toHaveLength(1);
+    expect(s.calls[0]?.record).toBe(RECORD);
+  });
+
+  it("omits the record key entirely when none was supplied", () => {
+    // Absent, not `undefined`: an evaluator telling "no record supplied" from "a record of nothing"
+    // reads the key's presence.
+    const s = spy("satisfied");
+    rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: s.fn,
+    });
+    const input = s.calls[0] as AbacEvaluationInput;
+    expect("record" in input).toBe(false);
+  });
+
+  it("passes the record on a transition too", () => {
+    const s = spy("satisfied");
+    rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: { kind: "transition", name: "verify" },
+      abacEvaluator: s.fn,
+      record: RECORD,
+    });
+    expect(s.calls[0]?.record).toBe(RECORD);
+    expect(s.calls[0]?.operation).toEqual({ kind: "transition", name: "verify" });
+  });
+
+  it("does not consult the evaluator when the role check failed, record or not", () => {
+    const s = spy("satisfied");
+    const r = rbacCheck({
+      principal: principal("staff"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: s.fn,
+      record: RECORD,
+    });
+    expect(r.allowed).toBe(false);
+    expect(s.calls).toEqual([]);
+  });
+
+  it("leaves an unobligated grant untouched when a record is supplied", () => {
+    // A record is an input to a policy, never a trigger for one: a grant carrying no `abac` must
+    // behave identically whether or not the caller happened to have loaded the row.
+    const r = rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "read",
+      abacEvaluator: () => "deferred",
+      record: RECORD,
+    });
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it("refuses an unresolved-attribute principal before the record can matter", () => {
+    const s = spy("satisfied");
+    const r = rbacCheck({
+      principal: { ...principal("pharmacist"), abacAttributes: null },
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: s.fn,
+      record: RECORD,
+    });
+    expect(r.abac?.outcome).toBe("undischargeable");
+    expect(s.calls).toEqual([]);
+  });
+
+  it("carries an empty record through as a record", () => {
+    const s = spy("satisfied");
+    rbacCheck({
+      principal: principal("pharmacist"),
+      permissions: PERMS,
+      roles: ROLES,
+      entity: "prescription",
+      operation: "update",
+      abacEvaluator: s.fn,
+      record: {},
+    });
+    const input = s.calls[0] as AbacEvaluationInput;
+    expect("record" in input).toBe(true);
+    expect(input.record).toEqual({});
+  });
+});

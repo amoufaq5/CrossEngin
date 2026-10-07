@@ -29,20 +29,27 @@
 
 import type { Manifest } from "@crossengin/kernel";
 import {
+  abacGrantPosition,
+  abacRecordAvailabilityFor,
   formatAbacObligation,
   surveyAbacObligations,
+  ABAC_RECORD_AVAILABILITY_REASONS,
   type AbacObligation,
 } from "@crossengin/auth";
 
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
 
 /**
- * There is deliberately no escape-hatch flag for either refusal. ADR-0338 shipped
+ * There is deliberately no escape-hatch flag for any of these refusals. ADR-0338 shipped
  * `--allow-plaintext-phi` because plaintext PHI is a degraded-but-coherent state an operator
  * may knowingly accept; an unevaluated obligation is not degraded, it is the opposite of what
  * the manifest declares, so a flag here would be an option to serve the hole on purpose.
  */
-export const ABAC_OBLIGATION_REFUSALS = ["obligation_unevaluable", "policy_undeclared"] as const;
+export const ABAC_OBLIGATION_REFUSALS = [
+  "obligation_unevaluable",
+  "policy_undeclared",
+  "record_unavailable",
+] as const;
 export type AbacObligationRefusal = (typeof ABAC_OBLIGATION_REFUSALS)[number];
 
 /** Entity+field pairs printed before the line truncates. */
@@ -60,6 +67,21 @@ export interface AbacObligationCheckInput {
    * *this* grant" is the question, and only the key set can be asked it.
    */
   readonly answerableKeys: ReadonlySet<string>;
+  /**
+   * The subset of those keys whose policy compares against a **field of the record** — the half
+   * ADR-0341's Q1 left inexpressible and this increment closes.
+   *
+   * Required rather than optional, and the reason is the direction of the mistake: a caller that
+   * forgot it would compute an empty set, find no record-bearing obligation anywhere and refuse
+   * nothing, so a manifest putting a record policy on a `create` would boot and deny that grant at
+   * every request — the silent total denial this whole module exists to convert into a boot
+   * refusal. An optional field can be forgotten with the type still valid (ADR-0330's rule), so
+   * the compiler asks instead.
+   *
+   * In a correct deployment it is a subset of `answerableKeys`: a key the evaluator cannot answer
+   * is reported by `policy_undeclared`, which is checked first.
+   */
+  readonly recordBearingKeys: ReadonlySet<string>;
 }
 
 export interface AbacObligationCheck {
@@ -73,6 +95,26 @@ export interface AbacObligationCheck {
    * layer at all).
    */
   readonly unanswerable: readonly AbacObligation[];
+  /**
+   * Record-bearing obligations at a position where no call site can **ever** supply a record —
+   * entity `create` (the record does not exist until the write commits), entity `list` (the subject
+   * is a set, so a per-record answer is a filter and not an authorization decision) and field
+   * `read` (response redaction computes one field set per response and applies it by a generic JSON
+   * walk, so it cannot tell which record a field came from). Each would be denied at every request.
+   */
+  readonly recordUnavailable: readonly AbacObligation[];
+  /**
+   * Record-bearing obligations on a per-field `update` grant, where the availability is
+   * `sometimes`: the update path loads the record and the create path has none, so the field is
+   * not settable at create.
+   *
+   * Reported and **not refused**, because unlike the three above this is a real consequence of a
+   * coherent declaration rather than a configuration error — "you may only set this field on a
+   * record that is yours" genuinely cannot admit a create. So the boot line says it and the
+   * deployment starts (ADR-0322's rule: a surface that degrades rather than refusing has to say so
+   * out loud).
+   */
+  readonly createBlocked: readonly AbacObligation[];
   readonly refusal: AbacObligationRefusal | null;
 }
 
@@ -90,13 +132,31 @@ export function checkAbacObligations(input: AbacObligationCheckInput): AbacOblig
     ? obligations.filter((o) => !input.answerableKeys.has(o.policyKey))
     : [];
 
+  // Availability is read off `@crossengin/auth`'s total map rather than re-listed here, so the
+  // positions a record can reach and the handlers that reach them have one definition.
+  const recordBearing = obligations.filter((o) => input.recordBearingKeys.has(o.policyKey));
+  const recordUnavailable = recordBearing.filter((o) => abacRecordAvailabilityFor(o) === "never");
+  const createBlocked = recordBearing.filter((o) => abacRecordAvailabilityFor(o) === "sometimes");
+
+  // First refusal wins, and the order is chosen so the one reported is the one whose remedy is
+  // true (ADR-0340's ordering argument). With no evaluator, `recordBearingKeys` is empty by
+  // construction, so nothing could be classified record-bearing and `record_unavailable` would be
+  // vacuously silent — hence it comes last, after both questions that do not need the declaration.
   let refusal: AbacObligationRefusal | null = null;
   if (obligations.length > 0) {
     if (!evaluatorDeclared) refusal = "obligation_unevaluable";
     else if (unanswerable.length > 0) refusal = "policy_undeclared";
+    else if (recordUnavailable.length > 0) refusal = "record_unavailable";
   }
 
-  return { obligations, evaluatorDeclared, unanswerable, refusal };
+  return {
+    obligations,
+    evaluatorDeclared,
+    unanswerable,
+    recordUnavailable,
+    createBlocked,
+    refusal,
+  };
 }
 
 /**
@@ -143,13 +203,65 @@ function undeclaredMessage(unanswerable: readonly AbacObligation[]): string {
 }
 
 /**
+ * `Chart.create requires abac policy 'same_dept' — ⟨why no record can reach it⟩`, one per line.
+ *
+ * The reason is attached **per obligation** and comes from `ABAC_RECORD_AVAILABILITY_REASONS`
+ * rather than being written here, so the position's reason and the handler that enforces it have
+ * one definition. Repeating a reason across two obligations at the same position is accepted: an
+ * operator reads the line for the grant they are fixing, and grouping would make a truncated list
+ * ambiguous about which reason belonged to which grant.
+ */
+function renderWithReason(obligations: readonly AbacObligation[]): string {
+  const shown = obligations
+    .slice(0, OBLIGATION_DETAIL_LIMIT)
+    .map(
+      (o) =>
+        `${formatAbacObligation(o)} — ${ABAC_RECORD_AVAILABILITY_REASONS[abacGrantPosition(o)]}`,
+    );
+  const hidden = obligations.length - shown.length;
+  const suffix = hidden > 0 ? `; (+${hidden.toString()} more)` : "";
+  return `${shown.join("; ")}${suffix}`;
+}
+
+/**
+ * The record-position refusal's text. Three remedies, in the order an operator would try them:
+ * weaken the policy, move the obligation, or drop it. The first is named with the flag because the
+ * CLI can do it; the second is a manifest edit and is described rather than flagged.
+ */
+function recordUnavailableMessage(recordUnavailable: readonly AbacObligation[]): string {
+  return (
+    `${recordUnavailable.length.toString()} abac-qualified grant(s) name a policy that compares ` +
+    `against a field of the record, at a position where no call site can ever supply one, so each ` +
+    `would be denied at every request rather than evaluated: ${renderWithReason(recordUnavailable)}. ` +
+    `Declare that key as a comparison that does not reference the record ` +
+    `(${ABAC_POLICY_FLAG} <key>=<attribute>:eq|ne|in|present[:<value>]), move the \`abac\` key to a ` +
+    `grant that does supply a record (an entity \`read\`/\`update\`/\`delete\`, a transition, or a ` +
+    `per-field \`update\`), or remove it — the role grant beside it is enforced and stays.`
+  );
+}
+
+/**
  * The refusal detail, selected by refusal and shared by the boot line and the thrown error so the
  * two cannot disagree.
  */
 function refusalMessage(check: AbacObligationCheck): string {
-  return check.refusal === "policy_undeclared"
-    ? undeclaredMessage(check.unanswerable)
-    : unevaluableMessage(check.obligations);
+  if (check.refusal === "policy_undeclared") return undeclaredMessage(check.unanswerable);
+  if (check.refusal === "record_unavailable") {
+    return recordUnavailableMessage(check.recordUnavailable);
+  }
+  return unevaluableMessage(check.obligations);
+}
+
+/**
+ * The `sometimes` note, appended to an otherwise healthy boot line. Said on every boot rather than
+ * only when somebody asks, because an obligated field silently refusing every create is exactly
+ * the shape of thing a deployment reads as the rule working.
+ */
+function createBlockedNote(createBlocked: readonly AbacObligation[]): string {
+  return (
+    `; ${createBlocked.length.toString()} obligated field(s) are therefore not settable at ` +
+    `create: ${renderWithReason(createBlocked)}`
+  );
 }
 
 /**
@@ -166,7 +278,8 @@ export function formatAbacObligationCheck(check: AbacObligationCheck): string {
   }
   return (
     `abac obligations: ${check.obligations.length.toString()} declared and an evaluator is ` +
-    `declared, so each is evaluated per request: ${renderObligations(check.obligations)}`
+    `declared, so each is evaluated per request: ${renderObligations(check.obligations)}` +
+    (check.createBlocked.length > 0 ? createBlockedNote(check.createBlocked) : "")
   );
 }
 
@@ -182,14 +295,16 @@ export class AbacObligationsUnevaluable extends Error {
   readonly refusal: AbacObligationRefusal;
   readonly obligations: readonly AbacObligation[];
   readonly unanswerable: readonly AbacObligation[];
+  readonly recordUnavailable: readonly AbacObligation[];
 
   constructor(check: AbacObligationCheck) {
     super(refusalMessage(check));
     this.name = "AbacObligationsUnevaluable";
-    // A check whose `refusal` the caller did not consult still names one, and it is the stricter
-    // of the two: `obligation_unevaluable` claims nothing about which keys are declared.
+    // A check whose `refusal` the caller did not consult still names one, and it is the strictest
+    // of the three: `obligation_unevaluable` claims nothing about which keys are declared.
     this.refusal = check.refusal ?? "obligation_unevaluable";
     this.obligations = check.obligations;
     this.unanswerable = check.unanswerable;
+    this.recordUnavailable = check.recordUnavailable;
   }
 }

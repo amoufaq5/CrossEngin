@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 336 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 337 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 145 meta-schema tables, ~16,770 tests**, all green, no
+**87 packages + 3 apps, 145 meta-schema tables, ~17,020 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -266,6 +266,27 @@ type errors.
   refusal `policy_undeclared`, because "an evaluator exists" was never the question; a
   declared-but-incomplete policy set answers `undischargeable` for exactly the keys it lacks, which
   is the same silence the boot refusal exists to end.
+
+  ADR-0342 crosses the bound ADR-0341 named, and the class is **a question the seam could not be
+  asked**: the input had no place to put the record half of all ABAC policies are about. Putting it
+  there was not the hard part. **No call site had the record at the moment it decided** —
+  `rbacCheck` runs before any store call in every handler — and the availability is neither uniform
+  nor derivable from the grant: entity `create` never has one, `read` loads it immediately *after*
+  the check, `update`/`delete` load it *conditionally* and after the write mask, a transition loads
+  it unconditionally, `list`'s subject is a **set** so a per-row answer is a filter and not a 403,
+  field `read` is redacted once per *response* by a generic JSON walk that cannot identify a record
+  boundary, and field `update` sees only the caller's patch. So availability became part of the
+  contract — `ABAC_RECORD_AVAILABILITY` over eight positions, with its reasons — and a fourth
+  outcome **`deferred`**, mapped `false`, makes a deferral a *refusal pending a record*: a call site
+  that ignores it denies, which is ADR-0340's dropped obligation prevented one level up, where the
+  forgetting would have been per handler instead of per function. The three positions that can never
+  supply a record are **refused at boot by name**; the one that sometimes can is **reported** rather
+  than refused, because "you may only set this field on a record that is yours" is a coherent
+  declaration whose consequence — not settable at create — is a fact to say and not a
+  misconfiguration. The handlers' invariant is that **nothing is written before the obligation is
+  discharged**, and a record-level denial is a **403 and not a 404**: a 404 would make a
+  record-predicate refusal indistinguishable from a missing record, and neither the caller nor an
+  operator could then tell "not yours" from "not there".
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -765,9 +786,11 @@ packages exist at only one layer, noted below where that is true.
   never `denied`, because the second is a claim about this principal's attributes and the first says
   nothing could answer; an evaluator that **throws**, or returns a value outside `ABAC_OUTCOMES`, →
   `undischargeable`, since an exception inside an authorization check must not become an allow nor
-  a 500 a client retries. `ABAC_OUTCOME_ALLOWS` is a total map so a fourth outcome is a compile
-  error. All five readers fail closed — `rbacCheck` plus the four field functions, which take one
-  trailing `AbacEnforcement {entity, evaluator?}` whose `entity` is *required*, so a caller cannot
+  a 500 a client retries. `ABAC_OUTCOME_ALLOWS` is a total map so a new outcome is a compile
+  error — which ADR-0342 then relied on, because `deferred` had to be *written down* to be read at
+  all, where an `if`-shaped condition would have had to have it added to the denying branch.
+  All five readers fail closed — `rbacCheck` plus the four field functions, which take one
+  trailing `AbacEnforcement {entity, evaluator?, record?}` whose `entity` is *required*, so a caller cannot
   ask for enforcement without naming the entity the policy is about, and **omitting the parameter
   refuses rather than skips** (pinned by a `toEqual` against the no-evaluator result, so a forgotten
   argument cannot become a silent grant). `AuthorizationDecision.requiresAbac` is **deleted** rather
@@ -787,6 +810,26 @@ packages exist at only one layer, noted below where that is true.
   there was nothing to check, so a missing input cannot matter — and a deployment-supplied evaluator
   cannot answer from attributes nobody gathered even if it forgets to look. `abacAttributesResolved`
   is the one spelling of that comparison.
+  **And the record is on the input since ADR-0342**, with the same provenance rule one level out:
+  `AbacEvaluationInput.record?` absent means *the call site could not supply one*, never *the record
+  is empty*. The fourth outcome **`deferred`** is what an evaluator answers when its policy needs a
+  record and got none, and it is `false` in `ABAC_OUTCOME_ALLOWS` — so it is a **refusal pending a
+  record**, and a call site that ignores it refuses rather than grants. That direction is the whole
+  safety argument: reporting it as an allow-with-an-outstanding-obligation would be ADR-0340's
+  dropped obligation one level up, where the drop is per handler instead of per function and so
+  harder to see. `isAbacDeferred` is the one spelling. `dischargeAbac` deliberately gains **no**
+  record-absence refusal — only the evaluator knows whether a key needs a record, and five of the
+  eight positions are record-free, so such a refusal would reject predicates over the principal's
+  own attributes that never wanted one; that contrasts with the `abacAttributes === null` arm, where
+  the seam *always* claims to carry the input, so absence is unambiguously a gap.
+  **Availability is part of the contract**: `ABAC_RECORD_AVAILABILITY` over the eight
+  `ABAC_GRANT_POSITIONS` answers `always` / `sometimes` / `never`, with
+  `ABAC_RECORD_AVAILABILITY_REASONS` carrying the sentence the boot refusal prints — so the position
+  a record can reach, the handler that reaches it and the message explaining why it cannot have one
+  definition apiece, and a reason that restates its own key fails a shape test. `abacGrantPosition`
+  is total and does not throw: three operation names are unreachable for a field obligation and are
+  mapped to the entity position for that operation rather than defaulting, because the permissive
+  default is the one a fall-through would pick.
 - **`sso`** — federated identity contracts: SAML 2.0 + OIDC provider configs, SCIM 2.0
   provisioning, claim mappings with transforms and JIT user policies, session lifecycle,
   login audit.
@@ -1906,8 +1949,9 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `would_make_entity_uncreatable`, naming the classification declaration as the remedy for
   something no declaration can fix. First refusal wins, so it has to be the one whose remedy is
   true.
-  **`--abac-policy <key>=<attribute>:<op>[:<value>]` is the policy layer** (ADR-0341, ops `eq` /
-  `ne` / `in` / `present`), colon-delimited after the key because that is `--rate-limit-policy`'s
+  **`--abac-policy <key>=<attribute>:<op>[:<operand>]` is the policy layer** (ADR-0341, ops `eq` /
+  `ne` / `in` / `present`; ADR-0342 added `eq_record` / `ne_record` / `in_record`, whose operand is
+  a **field of the record** rather than a literal), colon-delimited after the key because that is `--rate-limit-policy`'s
   convention here, and a repeated key is **refused** rather than last-wins since which of two
   policies decides an authorization must not depend on argv order. Declaring one is *also* what
   builds the attribute directory — the producer is wired exactly when a consumer exists, so a
@@ -1921,13 +1965,31 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   **`undischargeable`, not `denied`**, because that is a configuration gap rather than a statement
   about the principal. Attribute lookup is `hasOwnProperty`-guarded, which is not pedantry: a policy
   naming `constructor` or `toString` would otherwise find the attribute *present* on every
-  principal, a fail-open reachable from the declaration alone.
-  `BuildOperateHttpServerOptions.abac` groups the evaluator, the **keys it can answer** and the
-  attribute directory as **one** object, because the three must agree and two of the pairings are
-  silently wrong if they can be formed apart: an evaluator without its key set leaves the per-tenant
-  check unable to ask whether the manifest's obligations are answerable, and an evaluator without a
-  directory refuses every obligation. `answerableKeys` is required beside the evaluator; the
-  directory is the one genuinely optional member.
+  principal, a fail-open reachable from the declaration alone — and **the record is a second source
+  with the same exposure**, so the guard covers it too, since a record field named `constructor`
+  would otherwise be present on every record.
+  **Three record operators rather than a `record.<field>` prefix on the operand** (ADR-0342): a
+  prefix collides with a literal that happens to start with `record.`, so one spec would have two
+  readings and the parser would pick one silently; the operator *is* the declaration of which kind
+  of comparison this is, and `ABAC_OPERATOR_NEEDS_RECORD` is the total map `recordBearingPolicyKeys`
+  and the boot check read. The declaration decides which keys need a record, because only the
+  deployment knows. Two more total maps sit beside it, and the first fixed a live bug: parse arity
+  was `operatorRaw !== "in"`, so `in_record` would have been treated as single-valued and
+  `teams=team:in_record:a,b` refused with a message pointing at `in` — `OPERATOR_OPERANDS` owns that
+  axis now, and `OPERATOR_RENDERED_WORD` owns display so nothing dispatches on the spelling
+  (`replace("_record","")`). `formatAbacPolicies` renders `department eq record.department` and a
+  multi-field `in_record` as `record.(a,b)`, so a literal `in a,b` line cannot be misread as a
+  record one — and the module's absolute rule now covers both sources: **no attribute value and no
+  record value may appear in anything it logs**, only the declaration the operator typed. An
+  absent or structured value on **either** side denies for all three, `ne_record` included.
+  `BuildOperateHttpServerOptions.abac` groups the evaluator, the **keys it can answer**, the
+  **keys that need a record** and the attribute directory as **one** object, because they must agree
+  and most of the pairings are silently wrong if they can be formed apart: an evaluator without its
+  key set leaves the per-tenant check unable to ask whether the manifest's obligations are
+  answerable, one without `recordBearingKeys` cannot tell a record policy from an attribute policy
+  and so would boot a manifest that puts a record policy on a `create`, and one without a
+  directory refuses every obligation. `answerableKeys` and `recordBearingKeys` are required beside
+  the evaluator; the directory is the one genuinely optional member.
   **At-rest PHI is decided at boot** (ADR-0338): `resolveStore` surveys the manifest's
   `phi`/`regulated` fields (through `resolvedFields`, so a classified *trait* field cannot be missed),
   calls `decidePhiStorage`, and either refuses or builds one `buildColumnKeySource` shared by the boot
@@ -2533,13 +2595,10 @@ opened them.
   the tenant gate's three TTL figures with `DEFAULT_MAX_STALE_MS` now shared), a credential naming
   no person gets no lookup, and `--abac-policy` is both the consumer and the switch that builds the
   producer.
-  What remains: **(1)** **the record gap, which is the live one.** `AbacEvaluationInput` carries no
-  record, so "owns this row" and `user.department == record.department` are inexpressible by **any**
-  evaluator here — OPA included — and the narrow vocabulary that shipped covers only the
-  principal-attribute half. Closing it is a contract decision with a real asymmetry in it: `read`
-  and `update` hold a stored record, `create` holds only the client's patch and `list` holds a set,
-  so either the input gains an optional record that is absent for exactly the operations a policy
-  most wants it for, or ABAC splits into record-free and record-bearing kinds. **(2)** a directory
+  What remains: **(1)** ~~the record gap~~ — **closed by ADR-0342**, and the asymmetry this entry
+  predicted is what shaped it: the input gained an optional record, availability became a total map
+  over grant positions, and the three positions that can never supply one are refused at boot. See
+  the next entry. **(2)** a directory
   failure lands as an unclassified **500** through the listener's top-level catch, where ADR-0334
   deliberately chose **503** for the same could-not-establish condition on the tenant-status gate —
   right in direction, coarser in kind, and the typed error would have to reach a generic catch.
@@ -2552,6 +2611,59 @@ opened them.
   `search.PermissionTagInput.abacAttributes` is still the only other *consumer* in the workspace,
   with its own value type and no runtime — `deriveSessionTags` would now have a real source to
   flatten.
+- **A record-bearing ABAC policy is expressible and enforced, and what is left of it** (ADR-0342
+  closed ADR-0341's Q1). The class is **a question the seam could not be asked**: all five readers'
+  evaluator inputs carried exactly `{entity, field?, operation, policyKey, principal}` — measured
+  against the committed tree in a worktree — so half of all ABAC policies were inexpressible by any
+  evaluator, OPA included.
+  Putting a record on the input was not the hard part. **No call site had the record at the moment
+  it decided**, and the availability is neither uniform nor derivable from the grant: entity
+  `create` never has one, `read` loads it immediately *after* the check, `update`/`delete` load it
+  *conditionally* (`hasGuards || hasEffects || expectedUpdatedAt`) and after the write mask, a
+  transition loads it unconditionally (the cheapest position), `list`'s subject is a **set** so a
+  per-row answer is a filter and not a 403, field `read` is redacted **once per response** by a
+  generic JSON walk that cannot identify a record boundary, and field `update` sees only the
+  caller's patch. So the design is five parts: `record?` on the input with ADR-0331's provenance
+  rule; a fourth outcome **`deferred`** mapped `false`, so a call site that ignores it refuses;
+  availability as a total map with its reasons; a **boot refusal** at the three `never` positions
+  and a **boot report** at the one `sometimes` position (a field `update` obligation is coherent and
+  its consequence — the field is not settable at create — is said rather than refused, ADR-0322's
+  rule); and `eq_record` / `ne_record` / `in_record` on `--abac-policy`.
+  The invariant the handlers implement is **nothing is written before the obligation is
+  discharged**: a deferral permits exactly one act before re-asking, loading the record. `read`
+  re-asks after `store.get`; `update` and `delete` **force** the conditional load and re-ask
+  immediately after it, before the 409 and before the guard; the transition re-asks before its
+  from-state 409, because authorization precedes business logic. Re-asking calls `rbacCheck` again
+  with the record rather than taking a second path, so one function decides both times.
+  A record-level denial is a **403 and not a 404**: a 404 would make a record-predicate refusal
+  indistinguishable from a missing record, so neither the caller nor an operator reading the log
+  could tell "not yours" from "not there", and a wrong answer is worse than a refusal (ADR-0336).
+  The cost is that the caller learns the id exists, and the population that can learn it already
+  holds the entity grant.
+  What remains: **(1)** **field `read` cannot carry a record policy**, which is the most surprising
+  of the three refusals, because a per-record field policy is the canonical ABAC example — closing
+  it means per-record projection in the handler, reaching the list and association-list paths and
+  `projectRecord`, and the redaction stage is operation-keyed and response-shaped by construction
+  (ADR-0338). **(2)** the **principal's own id is not an operand**, so ownership is spelled
+  `owns=user_id:eq_record:owner_id` and needs the user's id written into their membership
+  attributes; a reserved left-operand spelling would shadow a real attribute of that name, the
+  `hasOwnProperty` lesson in a new place. **(3)** **link/unlink could load the owner record and does
+  not**, so that association position is unclosed rather than structural — list and count are
+  structural, since both answer for a set. Vacuous today: **zero** `many_to_many` relations across
+  the seven packs. **(4)** a record-bearing obligation on a `required` classified field makes its
+  entity uncreatable, and `--classified-write-mask`'s survey catches it only when that flag is on,
+  because `surveySensitiveFields` passes no `AbacEnforcement` (ADR-0340's Q6 made actionable).
+  **(5)** the comparison is **scalar to scalar**, so a record field holding an array — a tags list,
+  a set of owners — is `structured` and denies for every operator, which leaves "the principal's
+  team is one of the record's owners" inexpressible. **(6)** the **422 ordering degrades** for a
+  record-bearing field obligation: the mask short-circuits on the first refusing field and a
+  deferral is a refusal, so a caller with both a role violation on a later field and an invalid body
+  now gets the 422 first. Bounded — ADR-0339's argument is about an *unauthorized* caller harvesting
+  the entity's shape, and this one has already passed the entity role check — and pinned by a test
+  so the change is visible in the suite rather than only in a comment. **(7)** `validateWriteMask`
+  is the only one of the four field functions not routing through the shared `obligationAdmits`
+  predicate; no behaviour difference, but that asymmetry is the shape that let the read and write
+  halves diverge in the first place.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -3473,7 +3585,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 336 records; 257 Accepted, 79 Proposed (the
+title or status change cannot drift. 337 records; 258 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

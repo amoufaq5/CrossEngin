@@ -1,15 +1,23 @@
 import { describe, expect, it } from "vitest";
 import type { TenantId, UserId } from "@crossengin/types";
 import {
+  ABAC_GRANT_POSITIONS,
   ABAC_OUTCOME_ALLOWS,
+  ABAC_RECORD_AVAILABILITIES,
+  ABAC_RECORD_AVAILABILITY,
+  ABAC_RECORD_AVAILABILITY_REASONS,
   UNDISCHARGEABLE_ABAC_EVALUATOR,
   abacAttributesResolved,
+  abacGrantPosition,
+  abacRecordAvailabilityFor,
   describeOperation,
   dischargeAbac,
   formatAbacObligation,
+  isAbacDeferred,
   surveyAbacObligations,
   type AbacEvaluationInput,
   type AbacEvaluator,
+  type AbacGrantPosition,
   type AbacObligation,
 } from "./abac.js";
 import {
@@ -63,8 +71,8 @@ function spyEvaluator(answer: AbacOutcome): {
 }
 
 describe("ABAC_OUTCOMES", () => {
-  it("names exactly three outcomes", () => {
-    expect(ABAC_OUTCOMES).toEqual(["satisfied", "denied", "undischargeable"]);
+  it("names exactly four outcomes", () => {
+    expect(ABAC_OUTCOMES).toEqual(["satisfied", "denied", "undischargeable", "deferred"]);
   });
 
   it("separates a refusal about the principal from an inability to answer", () => {
@@ -72,6 +80,12 @@ describe("ABAC_OUTCOMES", () => {
     // answer at all. Collapsing them would send an operator to the wrong remedy.
     expect(ABAC_OUTCOMES).toContain("denied");
     expect(ABAC_OUTCOMES).toContain("undischargeable");
+  });
+
+  it("separates 'needs the record' from both of those", () => {
+    // `deferred` is a statement about the *call site*, not about the principal and not about the
+    // policy layer's reachability: the remedy is to load the record and ask again.
+    expect(ABAC_OUTCOMES).toContain("deferred");
   });
 });
 
@@ -81,7 +95,18 @@ describe("ABAC_OUTCOME_ALLOWS", () => {
       satisfied: true,
       denied: false,
       undischargeable: false,
+      deferred: false,
     });
+  });
+
+  it("refuses 'deferred', so a caller that never re-asks denies", () => {
+    // The whole load-bearing value. A `deferred` read as a skip would grant an obligation nothing
+    // evaluated — ADR-0340's defect reintroduced one level up.
+    expect(ABAC_OUTCOME_ALLOWS.deferred).toBe(false);
+  });
+
+  it("has exactly one key per outcome", () => {
+    expect(Object.keys(ABAC_OUTCOME_ALLOWS)).toHaveLength(ABAC_OUTCOMES.length);
   });
 
   it("is total over ABAC_OUTCOMES", () => {
@@ -629,5 +654,402 @@ describe("RbacGrantSchema — the policy key bound", () => {
     expect(() =>
       RbacGrantSchema.parse({ roles: ["a"], abac: "data.access.allow_update" }),
     ).not.toThrow();
+  });
+});
+
+const RECORD: Readonly<Record<string, unknown>> = { id: "rx-1", department: "oncology" };
+
+describe("dischargeAbac — the record", () => {
+  it("passes a supplied record through to the evaluator verbatim", () => {
+    const spy = spyEvaluator("satisfied");
+    dischargeAbac("p.key", { ...CONTEXT, record: RECORD }, spy.evaluator);
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0]?.record).toEqual(RECORD);
+  });
+
+  it("does not copy or reshape it — the evaluator sees the same object", () => {
+    // A policy over `record.department` is answered against whatever the handler loaded; this module
+    // is a courier and must not normalise a value a policy will compare.
+    const spy = spyEvaluator("satisfied");
+    dischargeAbac("p.key", { ...CONTEXT, record: RECORD }, spy.evaluator);
+    expect(spy.calls[0]?.record).toBe(RECORD);
+  });
+
+  it("omits the key entirely when the caller passed none", () => {
+    // `"record" in input === false`, not merely `undefined`: an evaluator distinguishing "no record
+    // supplied" from "a record of nothing" needs the key absent, which is the same distinction
+    // `abacAttributes`' null draws one level in.
+    const spy = spyEvaluator("satisfied");
+    dischargeAbac("p.key", CONTEXT, spy.evaluator);
+    const input = spy.calls[0] as AbacEvaluationInput;
+    expect("record" in input).toBe(false);
+  });
+
+  it("carries an empty record through as a record, not as an absence", () => {
+    const spy = spyEvaluator("satisfied");
+    dischargeAbac("p.key", { ...CONTEXT, record: {} }, spy.evaluator);
+    const input = spy.calls[0] as AbacEvaluationInput;
+    expect("record" in input).toBe(true);
+    expect(input.record).toEqual({});
+  });
+
+  it("does not itself refuse a record-free obligation", () => {
+    // Deliberate: only the evaluator knows whether a policy key needs a record, so a refusal here
+    // would reject every obligation at every record-free position including the ones over the
+    // principal's own attributes.
+    expect(dischargeAbac("p.key", CONTEXT, () => "satisfied")).toEqual({
+      policyKey: "p.key",
+      outcome: "satisfied",
+    });
+  });
+
+  it("still refuses undischargeable on unresolved attributes when a record is supplied", () => {
+    // The attribute rule is upstream of the record rule: a record cannot make up for an input
+    // nobody gathered.
+    const spy = spyEvaluator("satisfied");
+    const d = dischargeAbac("p.key", { ...UNRESOLVED_CONTEXT, record: RECORD }, spy.evaluator);
+    expect(d).toEqual({ policyKey: "p.key", outcome: "undischargeable" });
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("returns null for no obligation even when a record is supplied", () => {
+    const spy = spyEvaluator("satisfied");
+    expect(dischargeAbac(undefined, { ...CONTEXT, record: RECORD }, spy.evaluator)).toBeNull();
+    expect(spy.calls).toEqual([]);
+  });
+
+  it("hands the evaluator the record beside the field on a field-level input", () => {
+    const spy = spyEvaluator("satisfied");
+    dischargeAbac("p.key", { ...CONTEXT, field: "mrn", record: RECORD }, spy.evaluator);
+    expect(spy.calls).toEqual([
+      {
+        policyKey: "p.key",
+        principal: PRINCIPAL,
+        entity: "prescription",
+        operation: "update",
+        field: "mrn",
+        record: RECORD,
+      },
+    ]);
+  });
+});
+
+describe("dischargeAbac — a deferred answer", () => {
+  it("passes deferred through rather than coercing it", () => {
+    // `deferred` is inside the enum now, so `isAbacOutcome` admits it; before this change the same
+    // string would have been rewritten to `undischargeable`, which names the wrong remedy.
+    expect(dischargeAbac("p.key", CONTEXT, () => "deferred")).toEqual({
+      policyKey: "p.key",
+      outcome: "deferred",
+    });
+  });
+
+  it("does not allow", () => {
+    const d = dischargeAbac("p.key", CONTEXT, () => "deferred");
+    expect(d).not.toBeNull();
+    expect(ABAC_OUTCOME_ALLOWS[(d as AbacDischargeLike).outcome]).toBe(false);
+  });
+
+  it("echoes the policy key, so the refusal names the policy awaiting a record", () => {
+    expect(dischargeAbac("rx.owns_row", CONTEXT, () => "deferred")?.policyKey).toBe("rx.owns_row");
+  });
+
+  it("can be satisfied by the same evaluator once the record is supplied", () => {
+    // The whole round trip: refuse, load, re-ask. An evaluator that needs a record is a function of
+    // whether one arrived, and nothing in this module decides that for it.
+    const evaluator: AbacEvaluator = (input) =>
+      input.record === undefined ? "deferred" : "satisfied";
+    expect(dischargeAbac("p.key", CONTEXT, evaluator)?.outcome).toBe("deferred");
+    expect(dischargeAbac("p.key", { ...CONTEXT, record: RECORD }, evaluator)?.outcome).toBe(
+      "satisfied",
+    );
+  });
+
+  it("still denies when the record arrives and the policy refuses it", () => {
+    const evaluator: AbacEvaluator = (input) =>
+      input.record === undefined ? "deferred" : "denied";
+    expect(dischargeAbac("p.key", { ...CONTEXT, record: RECORD }, evaluator)?.outcome).toBe(
+      "denied",
+    );
+  });
+});
+
+interface AbacDischargeLike {
+  readonly outcome: AbacOutcome;
+}
+
+describe("isAbacDeferred", () => {
+  it("is true for a deferred discharge", () => {
+    expect(isAbacDeferred({ policyKey: "k", outcome: "deferred" })).toBe(true);
+  });
+
+  it("is false for the other three outcomes", () => {
+    for (const outcome of ABAC_OUTCOMES) {
+      expect(isAbacDeferred({ policyKey: "k", outcome })).toBe(outcome === "deferred");
+    }
+  });
+
+  it("is false for null — no obligation existed, so nothing is pending", () => {
+    expect(isAbacDeferred(null)).toBe(false);
+  });
+
+  it("is false for undefined", () => {
+    expect(isAbacDeferred(undefined)).toBe(false);
+  });
+
+  it("agrees with what dischargeAbac produced", () => {
+    expect(isAbacDeferred(dischargeAbac("p.key", CONTEXT, () => "deferred"))).toBe(true);
+    expect(isAbacDeferred(dischargeAbac("p.key", CONTEXT, () => "satisfied"))).toBe(false);
+    expect(isAbacDeferred(dischargeAbac(undefined, CONTEXT, () => "deferred"))).toBe(false);
+  });
+
+  it("never reads as an allow: every deferred discharge is refused by the total map", () => {
+    const d = dischargeAbac("p.key", CONTEXT, () => "deferred");
+    expect(isAbacDeferred(d)).toBe(true);
+    expect(ABAC_OUTCOME_ALLOWS[(d as AbacDischargeLike).outcome]).toBe(false);
+  });
+});
+
+describe("dischargeAbac — an out-of-enum answer is still refused", () => {
+  function bogus(value: unknown): AbacEvaluator {
+    return (() => value) as AbacEvaluator;
+  }
+
+  it("refuses 'defer', which is not the enum member", () => {
+    expect(dischargeAbac("p.key", CONTEXT, bogus("defer"))?.outcome).toBe("undischargeable");
+  });
+
+  it("refuses 'Deferred' — the match is exact", () => {
+    expect(dischargeAbac("p.key", CONTEXT, bogus("Deferred"))?.outcome).toBe("undischargeable");
+  });
+});
+
+describe("ABAC_GRANT_POSITIONS", () => {
+  it("names the eight positions a permission map can carry an obligation in", () => {
+    expect(ABAC_GRANT_POSITIONS).toEqual([
+      "entity_create",
+      "entity_read",
+      "entity_update",
+      "entity_delete",
+      "entity_list",
+      "entity_transition",
+      "field_read",
+      "field_update",
+    ]);
+  });
+
+  it("matches the AbacGrantPosition union exhaustively", () => {
+    const exhaustive: Record<AbacGrantPosition, true> = {
+      entity_create: true,
+      entity_read: true,
+      entity_update: true,
+      entity_delete: true,
+      entity_list: true,
+      entity_transition: true,
+      field_read: true,
+      field_update: true,
+    };
+    expect(Object.keys(exhaustive).sort()).toEqual([...ABAC_GRANT_POSITIONS].sort());
+  });
+});
+
+describe("ABAC_RECORD_AVAILABILITY", () => {
+  it("answers 'never' for a create: the record does not exist yet", () => {
+    expect(ABAC_RECORD_AVAILABILITY.entity_create).toBe("never");
+  });
+
+  it("answers 'never' for a list: the subject is a set, so a per-row answer is a filter", () => {
+    expect(ABAC_RECORD_AVAILABILITY.entity_list).toBe("never");
+  });
+
+  it("answers 'never' for a field read: redaction computes one field set per response", () => {
+    expect(ABAC_RECORD_AVAILABILITY.field_read).toBe("never");
+  });
+
+  it("answers 'always' for read, update, delete and a transition", () => {
+    expect(ABAC_RECORD_AVAILABILITY.entity_read).toBe("always");
+    expect(ABAC_RECORD_AVAILABILITY.entity_update).toBe("always");
+    expect(ABAC_RECORD_AVAILABILITY.entity_delete).toBe("always");
+    expect(ABAC_RECORD_AVAILABILITY.entity_transition).toBe("always");
+  });
+
+  it("answers 'sometimes' for a field update, and only for that one", () => {
+    // The update path holds the record and the create path cannot, so this is the one position
+    // whose answer depends on which handler is asking.
+    expect(ABAC_RECORD_AVAILABILITY.field_update).toBe("sometimes");
+    const sometimes = ABAC_GRANT_POSITIONS.filter(
+      (p) => ABAC_RECORD_AVAILABILITY[p] === "sometimes",
+    );
+    expect(sometimes).toEqual(["field_update"]);
+  });
+
+  it("is total: exactly one key per position", () => {
+    expect(Object.keys(ABAC_RECORD_AVAILABILITY)).toHaveLength(ABAC_GRANT_POSITIONS.length);
+    expect(Object.keys(ABAC_RECORD_AVAILABILITY).sort()).toEqual([...ABAC_GRANT_POSITIONS].sort());
+  });
+
+  it("only ever answers with a declared availability", () => {
+    for (const p of ABAC_GRANT_POSITIONS) {
+      expect(ABAC_RECORD_AVAILABILITIES).toContain(ABAC_RECORD_AVAILABILITY[p]);
+    }
+  });
+});
+
+describe("ABAC_RECORD_AVAILABILITY_REASONS", () => {
+  it("is total: exactly one reason per position", () => {
+    expect(Object.keys(ABAC_RECORD_AVAILABILITY_REASONS)).toHaveLength(
+      ABAC_GRANT_POSITIONS.length,
+    );
+    expect(Object.keys(ABAC_RECORD_AVAILABILITY_REASONS).sort()).toEqual(
+      [...ABAC_GRANT_POSITIONS].sort(),
+    );
+  });
+
+  it("has a non-empty reason for every position", () => {
+    // A ninth position cannot land with a missing reason: the boot refusal prints these, and an
+    // empty one would refuse a deployment without saying why.
+    for (const p of ABAC_GRANT_POSITIONS) {
+      expect(ABAC_RECORD_AVAILABILITY_REASONS[p].length).toBeGreaterThan(0);
+    }
+  });
+
+  it("says something beyond the position name", () => {
+    // A reason that only restates its key is worthless to the operator reading it.
+    for (const p of ABAC_GRANT_POSITIONS) {
+      const reason = ABAC_RECORD_AVAILABILITY_REASONS[p];
+      expect(reason).not.toBe(p);
+      expect(reason.split(" ").length).toBeGreaterThan(5);
+    }
+  });
+
+  it("reads as a fragment, not a sentence, so it appends to a refusal", () => {
+    for (const p of ABAC_GRANT_POSITIONS) {
+      const reason = ABAC_RECORD_AVAILABILITY_REASONS[p];
+      expect(reason[0]).toBe(reason[0]?.toLowerCase());
+      expect(reason.endsWith(".")).toBe(false);
+    }
+  });
+
+  it("names the structural obstacle on each 'never' position", () => {
+    expect(ABAC_RECORD_AVAILABILITY_REASONS.entity_create).toContain("does not exist");
+    expect(ABAC_RECORD_AVAILABILITY_REASONS.entity_list).toContain("set of records");
+    expect(ABAC_RECORD_AVAILABILITY_REASONS.field_read).toContain("one field set per response");
+  });
+});
+
+describe("abacGrantPosition", () => {
+  function obligation(
+    operation: AbacObligation["operation"],
+    field: string | null,
+  ): AbacObligation {
+    return { entity: "Patient", operation, field, policyKey: "k" };
+  }
+
+  it("maps each entity-level operation to its own position", () => {
+    expect(abacGrantPosition(obligation("create", null))).toBe("entity_create");
+    expect(abacGrantPosition(obligation("read", null))).toBe("entity_read");
+    expect(abacGrantPosition(obligation("update", null))).toBe("entity_update");
+    expect(abacGrantPosition(obligation("delete", null))).toBe("entity_delete");
+    expect(abacGrantPosition(obligation("list", null))).toBe("entity_list");
+  });
+
+  it("maps a transition to entity_transition", () => {
+    expect(abacGrantPosition(obligation({ kind: "transition", name: "admit" }, null))).toBe(
+      "entity_transition",
+    );
+  });
+
+  it("maps a field read and a field update to the field positions", () => {
+    expect(abacGrantPosition(obligation("read", "mrn"))).toBe("field_read");
+    expect(abacGrantPosition(obligation("update", "mrn"))).toBe("field_update");
+  });
+
+  it("covers every position, so the eight are all reachable", () => {
+    const reached = new Set<AbacGrantPosition>([
+      abacGrantPosition(obligation("create", null)),
+      abacGrantPosition(obligation("read", null)),
+      abacGrantPosition(obligation("update", null)),
+      abacGrantPosition(obligation("delete", null)),
+      abacGrantPosition(obligation("list", null)),
+      abacGrantPosition(obligation({ kind: "transition", name: "t" }, null)),
+      abacGrantPosition(obligation("read", "mrn")),
+      abacGrantPosition(obligation("update", "mrn")),
+    ]);
+    expect([...reached].sort()).toEqual([...ABAC_GRANT_POSITIONS].sort());
+  });
+
+  it("is total for a field obligation on an operation surveyAbacObligations cannot emit", () => {
+    // A `FieldPermission` has only `read` and `update` arms, so these are unreachable from a
+    // permission map — answered rather than thrown, because an exception in an authorization survey
+    // is worse than the decidable answer.
+    expect(abacGrantPosition(obligation("create", "mrn"))).toBe("entity_create");
+    expect(abacGrantPosition(obligation("delete", "mrn"))).toBe("entity_delete");
+    expect(abacGrantPosition(obligation("list", "mrn"))).toBe("entity_list");
+  });
+
+  it("maps a transition carrying a field to entity_transition", () => {
+    // The transition grant has no field arm, so the field cannot be what the act is about.
+    expect(abacGrantPosition(obligation({ kind: "transition", name: "admit" }, "mrn"))).toBe(
+      "entity_transition",
+    );
+  });
+
+  it("never throws on anything surveyAbacObligations produces", () => {
+    for (const o of surveyAbacObligations(SURVEY_PERMS)) {
+      expect(ABAC_GRANT_POSITIONS).toContain(abacGrantPosition(o));
+    }
+  });
+
+  it("classifies the surveyed fixture's five obligations", () => {
+    expect(surveyAbacObligations(SURVEY_PERMS).map(abacGrantPosition)).toEqual([
+      "entity_list",
+      "entity_update",
+      "entity_transition",
+      "field_read",
+      "field_update",
+    ]);
+  });
+});
+
+describe("abacRecordAvailabilityFor", () => {
+  function obligation(
+    operation: AbacObligation["operation"],
+    field: string | null,
+  ): AbacObligation {
+    return { entity: "Patient", operation, field, policyKey: "k" };
+  }
+
+  it("agrees with ABAC_RECORD_AVAILABILITY for every position", () => {
+    const cases: readonly (readonly [AbacObligation, AbacGrantPosition])[] = [
+      [obligation("create", null), "entity_create"],
+      [obligation("read", null), "entity_read"],
+      [obligation("update", null), "entity_update"],
+      [obligation("delete", null), "entity_delete"],
+      [obligation("list", null), "entity_list"],
+      [obligation({ kind: "transition", name: "t" }, null), "entity_transition"],
+      [obligation("read", "mrn"), "field_read"],
+      [obligation("update", "mrn"), "field_update"],
+    ];
+    for (const [o, position] of cases) {
+      expect(abacRecordAvailabilityFor(o)).toBe(ABAC_RECORD_AVAILABILITY[position]);
+    }
+  });
+
+  it("answers 'never' for the obligation on a field read grant", () => {
+    expect(abacRecordAvailabilityFor(obligation("read", "mrn"))).toBe("never");
+  });
+
+  it("answers 'always' for an obligated update on the entity", () => {
+    expect(abacRecordAvailabilityFor(obligation("update", null))).toBe("always");
+  });
+
+  it("answers for every obligation in the surveyed fixture", () => {
+    expect(surveyAbacObligations(SURVEY_PERMS).map(abacRecordAvailabilityFor)).toEqual([
+      "never",
+      "always",
+      "always",
+      "never",
+      "sometimes",
+    ]);
   });
 });

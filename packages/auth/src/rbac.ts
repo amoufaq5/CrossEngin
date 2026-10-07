@@ -19,6 +19,15 @@ export interface RbacCheckInput {
   readonly entity: string;
   readonly operation: Operation;
   readonly abacEvaluator?: AbacEvaluator;
+  /**
+   * The stored record this act is about, present when the caller has loaded it.
+   *
+   * Absent is what makes a record-bearing obligation answer `deferred`, which is `allowed: false`
+   * with `abac.outcome === "deferred"` — a refusal the caller resolves by loading the record and
+   * asking again, never by ignoring it. `ABAC_RECORD_AVAILABILITY` says which positions can supply
+   * one at all.
+   */
+  readonly record?: Readonly<Record<string, unknown>>;
 }
 
 export function rbacCheck(input: RbacCheckInput): AuthorizationDecision {
@@ -54,7 +63,12 @@ export function rbacCheck(input: RbacCheckInput): AuthorizationDecision {
   // principal it has no business seeing.
   const discharge = dischargeAbac(
     grant.abac,
-    { principal: input.principal, entity: input.entity, operation: input.operation },
+    {
+      principal: input.principal,
+      entity: input.entity,
+      operation: input.operation,
+      ...(input.record !== undefined ? { record: input.record } : {}),
+    },
     input.abacEvaluator,
   );
   if (discharge === null) return { allowed: true };

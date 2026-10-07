@@ -271,11 +271,17 @@ export interface BuildOperateHttpServerOptions {
    * unresolved attribute set as unanswerable. So `answerableKeys` is required beside the evaluator
    * and the directory is the one genuinely optional member — a policy over no attributes at all
    * (`present` on nothing) is expressible, if useless.
+   *
+   * `recordBearingKeys` joined them for the same reason: without it this function cannot tell a
+   * policy that compares against the record from one that does not, so a manifest putting a record
+   * policy on a `create` would compile and deny that grant at every request.
    */
   readonly abac?: {
     readonly evaluator: AbacEvaluator;
     /** The policy keys `evaluator` can answer. Checked against the manifest's obligations. */
     readonly answerableKeys: ReadonlySet<string>;
+    /** Of those, the keys whose comparison references a field of the record. */
+    readonly recordBearingKeys: ReadonlySet<string>;
     readonly attributeDirectory?: AbacAttributeDirectory;
   };
 }
@@ -300,6 +306,7 @@ export function buildOperateHttpServer(options: BuildOperateHttpServerOptions): 
   const obligations = checkAbacObligations({
     manifest: options.manifest,
     answerableKeys: options.abac?.answerableKeys ?? new Set(),
+    recordBearingKeys: options.abac?.recordBearingKeys ?? new Set(),
   });
   if (obligations.refusal !== null) throw new AbacObligationsUnevaluable(obligations);
 

@@ -16,7 +16,16 @@ export const RoleDefinitionSchema = z.object({
 
 export type RoleDefinition = z.infer<typeof RoleDefinitionSchema>;
 
-export const ABAC_OUTCOMES = ["satisfied", "denied", "undischargeable"] as const;
+/**
+ * The four answers an obligation can get.
+ *
+ * `deferred` is the one that is not about the principal at all: **the obligation needs the record
+ * the act is about and the call site had none.** It is not a statement about this principal's
+ * attributes, and it is not an allow — a caller that cannot supply a record refuses, and one that
+ * can re-asks with it. `ABAC_OUTCOME_ALLOWS` maps it to `false`, so a caller that never re-asks
+ * refuses rather than grants.
+ */
+export const ABAC_OUTCOMES = ["satisfied", "denied", "undischargeable", "deferred"] as const;
 
 export type AbacOutcome = (typeof ABAC_OUTCOMES)[number];
 

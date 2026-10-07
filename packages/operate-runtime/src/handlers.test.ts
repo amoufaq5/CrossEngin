@@ -638,7 +638,34 @@ const CLINIC = {
         { name: "label", type: { kind: "text", maxLength: 40 } },
       ],
     },
+    {
+      // Entity-level on **every** operation, so one entity exercises all five positions: the three
+      // that can go and load the record and the two that structurally cannot.
+      name: "Ward",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        { name: "label", type: { kind: "text", maxLength: 40 } },
+      ],
+    },
+    {
+      // The transition position: the record is already loaded unconditionally, so what is under
+      // test is *where* the obligation is asked relative to the from-state 409.
+      name: "Chart",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        { name: "phase", type: { kind: "text", maxLength: 20 } },
+      ],
+    },
   ],
+  workflows: {
+    chart_lifecycle: {
+      kind: "entityLifecycle",
+      entity: "Chart",
+      stateField: "phase",
+      initial: "open",
+      transitions: [{ name: "seal", from: "open", to: "sealed" }],
+    },
+  },
   roles: { clerk: { name: "clerk" }, clinician: { name: "clinician" } },
   permissions: {
     Patient: {
@@ -655,6 +682,21 @@ const CLINIC = {
       create: { roles: ["clerk", "clinician"] },
       update: { roles: ["clinician"], abac: ABAC_KEY },
       delete: { roles: ["clinician"] },
+    },
+    Ward: {
+      list: { roles: ["clinician"], abac: ABAC_KEY },
+      read: { roles: ["clinician"], abac: ABAC_KEY },
+      create: { roles: ["clinician"], abac: ABAC_KEY },
+      update: { roles: ["clinician"], abac: ABAC_KEY },
+      delete: { roles: ["clinician"], abac: ABAC_KEY },
+    },
+    Chart: {
+      list: { roles: ["clinician"] },
+      read: { roles: ["clinician"] },
+      create: { roles: ["clinician"] },
+      update: { roles: ["clinician"] },
+      delete: { roles: ["clinician"] },
+      transitions: { seal: { roles: ["clinician"], abac: ABAC_KEY } },
     },
   },
 } as unknown as Manifest;
@@ -919,5 +961,361 @@ describe("operate handlers — abac obligation on a field grant (the write mask)
       body: { family_name: "Lovelace" },
     });
     expect(out.status).toBe(201);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A record-bearing obligation (ADR-0341's open end #1).
+//
+// `AbacEvaluationInput` carried no record, so "owns this row" was inexpressible by any evaluator —
+// and the reason was structural rather than an omission: `rbacCheck` runs before any store call in
+// every handler, so a record-bearing obligation could not be answered where the decision was made.
+// A `deferred` outcome is the refusal that says so, and the invariant below is what the handlers
+// now hold: **nothing is written before the obligation is discharged.** The only step permitted
+// between the deferral and the re-ask is loading the record.
+// ---------------------------------------------------------------------------
+
+/**
+ * An evaluator whose policy needs the stored record: `deferred` while it is absent, `whenPresent`
+ * once it arrives. Every input is captured, so a test asserts the count *and* the order — two
+ * calls, record absent then present, is the whole shape of the re-ask, and one call means either
+ * the obligation was never re-asked (so a `deferred` admitted a write) or never asked at all.
+ */
+function recordBearing(whenPresent: AbacOutcome, seen: AbacEvaluationInput[]): AbacEvaluator {
+  return (input) => {
+    seen.push(input);
+    return input.record === undefined ? "deferred" : whenPresent;
+  };
+}
+
+/** Records every store call, so "the refusal preceded the store" is asserted and not assumed. */
+class CountingStore extends InMemoryEntityStore {
+  readonly calls: string[] = [];
+
+  override get(...args: Parameters<InMemoryEntityStore["get"]>): ReturnType<InMemoryEntityStore["get"]> {
+    this.calls.push("get");
+    return super.get(...args);
+  }
+
+  override listPage(
+    ...args: Parameters<InMemoryEntityStore["listPage"]>
+  ): ReturnType<InMemoryEntityStore["listPage"]> {
+    this.calls.push("listPage");
+    return super.listPage(...args);
+  }
+
+  override create(
+    ...args: Parameters<InMemoryEntityStore["create"]>
+  ): ReturnType<InMemoryEntityStore["create"]> {
+    this.calls.push("create");
+    return super.create(...args);
+  }
+
+  override update(
+    ...args: Parameters<InMemoryEntityStore["update"]>
+  ): ReturnType<InMemoryEntityStore["update"]> {
+    this.calls.push("update");
+    return super.update(...args);
+  }
+
+  override remove(
+    ...args: Parameters<InMemoryEntityStore["remove"]>
+  ): ReturnType<InMemoryEntityStore["remove"]> {
+    this.calls.push("remove");
+    return super.remove(...args);
+  }
+}
+
+const WARD_ID = "ward-1";
+const CHART_ID = "chart-1";
+
+interface ReAskCase {
+  readonly name: string;
+  readonly opId: string;
+  readonly entity: string;
+  readonly seed: Record<string, unknown>;
+  readonly body?: Record<string, unknown>;
+  readonly ok: number;
+}
+
+/** The four actions `ABAC_RECORD_AVAILABILITY` calls `always`: each one can load and re-ask. */
+const RE_ASK_CASES: readonly ReAskCase[] = [
+  { name: "read", opId: "ward.read", entity: "Ward", seed: { id: WARD_ID, label: "A" }, ok: 200 },
+  {
+    name: "update",
+    opId: "ward.update",
+    entity: "Ward",
+    seed: { id: WARD_ID, label: "A" },
+    body: { label: "B" },
+    ok: 200,
+  },
+  { name: "delete", opId: "ward.delete", entity: "Ward", seed: { id: WARD_ID, label: "A" }, ok: 204 },
+  { name: "transition", opId: "chart.seal", entity: "Chart", seed: { id: CHART_ID, phase: "open" }, ok: 200 },
+];
+
+async function seeded(entity: string, seed: Record<string, unknown>): Promise<InMemoryEntityStore> {
+  const store = new InMemoryEntityStore();
+  await store.create(TENANT, entity, seed);
+  return store;
+}
+
+describe("operate handlers — an entity obligation deferred for want of a record is re-asked", () => {
+  for (const c of RE_ASK_CASES) {
+    it(`${c.name}: defers with no record, admits with it, and asks exactly twice`, async () => {
+      const store = await seeded(c.entity, c.seed);
+      const seen: AbacEvaluationInput[] = [];
+      const out = await hit(clinicCtx(store, recordBearing("satisfied", seen)), c.opId, {
+        role: "clinician",
+        params: { id: c.seed["id"] as string },
+        ...(c.body !== undefined ? { body: c.body } : {}),
+      });
+      expect(out.status).toBe(c.ok);
+      expect(seen.length).toBe(2);
+      expect(seen[0]?.record).toBeUndefined();
+      expect(seen[1]?.record).toMatchObject({ id: c.seed["id"] });
+      // The same policy key both times: the re-ask differs in nothing but the record.
+      expect(seen.map((i) => i.policyKey)).toEqual([ABAC_KEY, ABAC_KEY]);
+    });
+
+    it(`${c.name}: 403s when the policy denies with the record in hand`, async () => {
+      const store = await seeded(c.entity, c.seed);
+      const seen: AbacEvaluationInput[] = [];
+      const out = await hit(clinicCtx(store, recordBearing("denied", seen)), c.opId, {
+        role: "clinician",
+        params: { id: c.seed["id"] as string },
+        ...(c.body !== undefined ? { body: c.body } : {}),
+      });
+      expect(out.status).toBe(403);
+      expect(bodyOf(out)["abacOutcome"]).toBe("denied");
+      expect(bodyOf(out)["abacPolicyKey"]).toBe(ABAC_KEY);
+      // The record **did** reach the evaluator, so the refusal is the policy's answer about this
+      // row and not a restatement of the missing input that deferred.
+      expect(seen.length).toBe(2);
+      expect(seen[1]?.record).toMatchObject({ id: c.seed["id"] });
+      // And nothing was written: the seeded record is intact and still there.
+      expect(await store.get(TENANT, c.entity, c.seed["id"] as string)).toMatchObject(c.seed);
+    });
+  }
+
+  it("read: a deferred-then-denied obligation is a 403 and never a 404", async () => {
+    // Answering 404 for a record that exists would make a record-predicate refusal
+    // indistinguishable from a missing record, so an operator could not tell "not yours" from
+    // "not there". The contrast is the assertion: the same route 404s for an id that is absent.
+    const store = await seeded("Ward", { id: WARD_ID, label: "A" });
+    const seen: AbacEvaluationInput[] = [];
+    const ctx = clinicCtx(store, recordBearing("denied", seen));
+    expect((await hit(ctx, "ward.read", { role: "clinician", params: { id: WARD_ID } })).status).toBe(403);
+    expect((await hit(ctx, "ward.read", { role: "clinician", params: { id: "nope" } })).status).toBe(404);
+  });
+
+  it("update: the record is loaded even with no guards, effects or expectedUpdatedAt", async () => {
+    // `needsBefore` had three reasons and an outstanding obligation is a fourth. Without it the
+    // record is never fetched for a plain patch, and the obligation could only ever refuse.
+    const store = new CountingStore();
+    await store.create(TENANT, "Ward", { id: WARD_ID, label: "A" });
+    store.calls.length = 0;
+    const seen: AbacEvaluationInput[] = [];
+    const out = await hit(clinicCtx(store, recordBearing("satisfied", seen)), "ward.update", {
+      role: "clinician",
+      params: { id: WARD_ID },
+      body: { label: "B" },
+    });
+    expect(out.status).toBe(200);
+    expect(store.calls).toEqual(["get", "update"]);
+  });
+
+  it("update: the obligation is re-asked before the 409, not after", async () => {
+    // A stale `expectedUpdatedAt` *and* a denying record obligation. A 409 is a lost-update report
+    // about a record this caller may turn out not to be allowed to touch at all, so authorization
+    // answers first — reversing the two would disclose that the record had been modified.
+    const store = await seeded("Ward", { id: WARD_ID, label: "A", updated_at: "2026-06-03T12:00:00.000Z" });
+    const seen: AbacEvaluationInput[] = [];
+    const out = await hit(clinicCtx(store, recordBearing("denied", seen)), "ward.update", {
+      role: "clinician",
+      params: { id: WARD_ID },
+      body: { label: "B", expectedUpdatedAt: "1999-01-01T00:00:00.000Z" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["abacOutcome"]).toBe("denied");
+    // The same request with the obligation satisfied gets the 409 it is otherwise owed, so the
+    // 403 is an ordering result and not a conflict the obligation happened to mask.
+    const conflicted = await hit(clinicCtx(store, recordBearing("satisfied", [])), "ward.update", {
+      role: "clinician",
+      params: { id: WARD_ID },
+      body: { label: "B", expectedUpdatedAt: "1999-01-01T00:00:00.000Z" },
+    });
+    expect(conflicted.status).toBe(409);
+  });
+
+  it("transition: a denying obligation on a wrong from-state answers 403, not 409", async () => {
+    // Authorization precedes business logic. The 409 names the state the record is in, which is a
+    // fact about a record this caller may not be allowed to move.
+    const store = await seeded("Chart", { id: CHART_ID, phase: "sealed" });
+    const out = await hit(clinicCtx(store, recordBearing("denied", [])), "chart.seal", {
+      role: "clinician",
+      params: { id: CHART_ID },
+    });
+    expect(out.status).toBe(403);
+    // Satisfied, and the same record in the same wrong state gets the 409.
+    const conflicted = await hit(clinicCtx(store, recordBearing("satisfied", [])), "chart.seal", {
+      role: "clinician",
+      params: { id: CHART_ID },
+    });
+    expect(conflicted.status).toBe(409);
+    expect(bodyOf(conflicted)["error"]).toBe("invalid_transition");
+  });
+
+  it("delete: a denying obligation does not call remove", async () => {
+    const store = new CountingStore();
+    await store.create(TENANT, "Ward", { id: WARD_ID, label: "A" });
+    store.calls.length = 0;
+    const out = await hit(clinicCtx(store, recordBearing("denied", [])), "ward.delete", {
+      role: "clinician",
+      params: { id: WARD_ID },
+    });
+    expect(out.status).toBe(403);
+    expect(store.calls).toEqual(["get"]);
+    expect(await store.get(TENANT, "Ward", WARD_ID)).not.toBeNull();
+  });
+});
+
+describe("operate handlers — a deferred obligation is final where no record can ever arrive", () => {
+  it("create: 403s, names the structural reason, and reaches no store call", async () => {
+    const store = new CountingStore();
+    const seen: AbacEvaluationInput[] = [];
+    const out = await hit(clinicCtx(store, recordBearing("satisfied", seen)), "ward.create", {
+      role: "clinician",
+      body: { label: "A" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["abacOutcome"]).toBe("deferred");
+    expect(bodyOf(out)["abacPolicyKey"]).toBe(ABAC_KEY);
+    // The reason, not merely the outcome: `deferred` on its own reads like a retry, and a create
+    // has nothing to retry with.
+    expect(bodyOf(out)["detail"]).toContain("does not exist until the write commits");
+    expect(store.calls).toEqual([]);
+    // Asked exactly once — there is no second question to ask.
+    expect(seen.length).toBe(1);
+    expect(seen[0]?.record).toBeUndefined();
+  });
+
+  it("list: 403s, names the structural reason, and reaches no store call", async () => {
+    const store = new CountingStore();
+    const seen: AbacEvaluationInput[] = [];
+    const out = await hit(clinicCtx(store, recordBearing("satisfied", seen)), "ward.list", {
+      role: "clinician",
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["abacOutcome"]).toBe("deferred");
+    expect(bodyOf(out)["detail"]).toContain("a per-record answer is a filter");
+    expect(store.calls).toEqual([]);
+    expect(seen.length).toBe(1);
+  });
+
+  it("a non-deferred refusal carries no structural reason, so the existing detail is unchanged", async () => {
+    // `undischargeable` is a deployment gap at every position, so appending "a create has no
+    // stored record" to it would name the wrong remedy.
+    const out = await hit(clinicCtx(new InMemoryEntityStore()), "ward.create", {
+      role: "clinician",
+      body: { label: "A" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["abacOutcome"]).toBe("undischargeable");
+    expect(bodyOf(out)["detail"]).not.toContain("does not exist until the write commits");
+  });
+});
+
+describe("operate handlers — a record-bearing obligation on a field grant", () => {
+  const PATIENT_ID = "pat-1";
+
+  async function withPatient(): Promise<InMemoryEntityStore> {
+    return seeded("Patient", { id: PATIENT_ID, family_name: "Hopper", mrn: "MRN-1" });
+  }
+
+  it("update: deferred before the transaction, re-run with `before`, and 200 when it admits", async () => {
+    const store = await withPatient();
+    const seen: AbacEvaluationInput[] = [];
+    const out = await hit(clinicCtx(store, recordBearing("satisfied", seen)), "patient.update", {
+      role: "clinician",
+      params: { id: PATIENT_ID },
+      body: { mrn: "MRN-2" },
+    });
+    expect(out.status).toBe(200);
+    expect(bodyOf(out)["mrn"]).toBe("MRN-2");
+    // Twice, and both about the *field*: `Patient`'s entity grants carry no obligation, so every
+    // call here comes from the mask.
+    expect(seen.length).toBe(2);
+    expect(seen.map((i) => i.field)).toEqual(["mrn", "mrn"]);
+    expect(seen[0]?.record).toBeUndefined();
+    expect(seen[1]?.record).toMatchObject({ id: PATIENT_ID, mrn: "MRN-1" });
+  });
+
+  it("update: 403s when the record denies, leaving the stored value untouched", async () => {
+    const store = await withPatient();
+    const seen: AbacEvaluationInput[] = [];
+    const out = await hit(clinicCtx(store, recordBearing("denied", seen)), "patient.update", {
+      role: "clinician",
+      params: { id: PATIENT_ID },
+      body: { mrn: "MRN-REPLACED" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["field"]).toBe("mrn");
+    expect(bodyOf(out)["rule"]).toBe("abac_obligation");
+    expect(bodyOf(out)["abacOutcome"]).toBe("denied");
+    expect(seen[1]?.record).toMatchObject({ mrn: "MRN-1" });
+    expect((await store.get(TENANT, "Patient", PATIENT_ID))?.["mrn"]).toBe("MRN-1");
+  });
+
+  it("update: the record is loaded for the mask's sake alone", async () => {
+    const store = new CountingStore();
+    await store.create(TENANT, "Patient", { id: PATIENT_ID, family_name: "Hopper", mrn: "MRN-1" });
+    store.calls.length = 0;
+    await hit(clinicCtx(store, recordBearing("satisfied", [])), "patient.update", {
+      role: "clinician",
+      params: { id: PATIENT_ID },
+      body: { mrn: "MRN-2" },
+    });
+    expect(store.calls).toEqual(["get", "update"]);
+  });
+
+  it("create: the same grant refuses deferred and final, naming the field position's reason", async () => {
+    const store = new CountingStore();
+    const out = await hit(clinicCtx(store, recordBearing("satisfied", [])), "patient.create", {
+      role: "clinician",
+      body: { family_name: "Hopper", mrn: "MRN-1" },
+    });
+    expect(out.status).toBe(403);
+    expect(bodyOf(out)["field"]).toBe("mrn");
+    expect(bodyOf(out)["rule"]).toBe("abac_obligation");
+    expect(bodyOf(out)["abacOutcome"]).toBe("deferred");
+    expect(bodyOf(out)["detail"]).toContain("the create path cannot");
+    expect(store.calls).toEqual([]);
+  });
+
+  it("the ordering cost: a deferring field obligation plus an invalid body answers 422", async () => {
+    // Pinned deliberately, because it is the one behavioural cost of the re-ask. The mask
+    // short-circuits on the *first* refusing field and a deferral is a refusal — but a deferral is
+    // no longer a *return*, so the handler falls through to validation and the 422 answers first.
+    //
+    // Bounded, on ADR-0339's own ordering argument: the 403-before-422 rule exists so an
+    // *unauthorized* caller cannot harvest the entity's shape from a 422, and this caller has
+    // already passed the entity-level `update` role check — they could learn the same shape from a
+    // valid write on a record they do own.
+    const store = await withPatient();
+    const deferring = await hit(clinicCtx(store, recordBearing("satisfied", [])), "patient.update", {
+      role: "clinician",
+      params: { id: PATIENT_ID },
+      body: { mrn: "MRN-2", family_name: "" },
+    });
+    expect(deferring.status).toBe(422);
+    // The contrast is what makes it a pin rather than a coincidence: an `undischargeable`
+    // obligation is a refusal with nothing to re-ask, so it still answers 403 first.
+    const undischargeable = await hit(clinicCtx(store), "patient.update", {
+      role: "clinician",
+      params: { id: PATIENT_ID },
+      body: { mrn: "MRN-2", family_name: "" },
+    });
+    expect(undischargeable.status).toBe(403);
+    expect(bodyOf(undischargeable)["abacOutcome"]).toBe("undischargeable");
   });
 });

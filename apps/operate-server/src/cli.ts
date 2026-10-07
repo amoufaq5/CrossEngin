@@ -2226,12 +2226,15 @@ Options:
   --sensitive-field-class <class>=<role>  Per-class entity grant, same grammar and same
                        authoritative-per-class rule as --audit-read-sensitive-class;
                        "<class>=" withholds it from everyone. Does NOT imply the write mask below
-  --abac-policy <key>=<attr>:<op>[:<value>]  Declare an ABAC policy a manifest grant's abac key
-                       resolves against (repeatable). Ops: eq, ne, in (comma list), present —
-                       e.g. clinical_only=department:eq:clinical. Predicates the PRINCIPAL's own
-                       attributes, read from meta.user_tenant_membership.abac_attributes; the seam
-                       carries no record, so "owns this row" is not expressible here. Declaring one
-                       also switches on the attribute directory, and requires a Postgres store
+  --abac-policy <key>=<attr>:<op>[:<operand>]  Declare an ABAC policy a manifest grant's abac key
+                       resolves against (repeatable). The attribute is the PRINCIPAL's, read from
+                       meta.user_tenant_membership.abac_attributes. Ops over a declared VALUE:
+                       eq, ne, in (comma list), present — e.g. clinical_only=department:eq:clinical.
+                       Ops over a field of the RECORD: eq_record, ne_record, in_record — e.g.
+                       same_dept=department:eq_record:department, owns=user_id:eq_record:owner_id.
+                       A record op is refused at boot on an entity create or list grant and on a
+                       field read grant, where no call site can supply a record. Declaring any
+                       policy also switches on the attribute directory, and needs a Postgres store
   --classified-write-mask  Enforce the classification default on writes: a sensitive field with no
                        declared update grant is writable only by a privileged role. Off by default
                        because a declared per-field update grant is enforced either way, and

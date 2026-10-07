@@ -56,7 +56,13 @@ export interface WriteMaskRefusal {
   readonly rule: "explicit_update_grant" | "classification_default" | "abac_obligation";
   /** The grant's opaque policy key, set iff `rule === "abac_obligation"`. */
   readonly abacPolicyKey?: string;
-  /** `denied` (the attributes did not match) vs `undischargeable` (no evaluator could answer). */
+  /**
+   * Which of the three refusing outcomes: `denied` (the attributes did not match),
+   * `undischargeable` (no evaluator could answer) and `deferred` (the policy needs the stored
+   * record and this call site had none). The third is the only one a caller can act on — an update
+   * re-asks it inside the transaction with `before` supplied — and on a create it is **final**,
+   * because the record the policy is about does not exist until the write commits.
+   */
   readonly abacOutcome?: AbacOutcome;
 }
 
@@ -92,6 +98,12 @@ export interface WriteMaskInput {
    * on it is the defect this seam exists to close.
    */
   readonly abacEvaluator?: AbacEvaluator;
+  /**
+   * The stored record the write lands on, when the caller has it. Absent means the call site had
+   * none — not that the record is empty — and a per-field `update` grant whose policy needs one
+   * then answers `deferred`, which refuses. A create has no record and never will.
+   */
+  readonly record?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -168,9 +180,13 @@ export function maskWrite(input: WriteMaskInput): WriteMaskRefusal | null {
     // Passed even with no evaluator. Omitting it answers `undischargeable` just the same, so
     // either way fails closed, but naming the entity is what lets the refusal say which policy on
     // which record was not discharged.
+    // The record is spread conditionally rather than passed as `input.record`, because
+    // `AbacEnforcement.record` draws the same distinction `AbacEvaluationInput` does: an absent key
+    // means the caller had none, and an explicit `undefined` would be a third state nothing reads.
     {
       entity: input.entity,
       ...(input.abacEvaluator !== undefined ? { evaluator: input.abacEvaluator } : {}),
+      ...(input.record !== undefined ? { record: input.record } : {}),
     },
   );
   if (result.ok) return null;

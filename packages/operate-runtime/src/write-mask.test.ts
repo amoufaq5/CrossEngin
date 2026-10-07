@@ -355,6 +355,7 @@ function abacMask(
   role: RoleName,
   writtenKeys: readonly string[],
   abacEvaluator?: AbacEvaluator,
+  record?: Readonly<Record<string, unknown>>,
 ) {
   return maskWrite({
     mode,
@@ -365,6 +366,7 @@ function abacMask(
     classifiedFields: CLASSIFIED,
     writtenKeys,
     ...(abacEvaluator !== undefined ? { abacEvaluator } : {}),
+    ...(record !== undefined ? { record } : {}),
   });
 }
 
@@ -428,5 +430,88 @@ describe("maskWrite — an abac obligation is refused in both modes", () => {
 
   it("leaves an ordinary field alone, which never reaches a grant at all", () => {
     expect(abacMask("explicit_only", "clinician", ["status"], answering("denied"))).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The record a per-field obligation's policy is about (ADR-0341's open end #1).
+//
+// `AbacEvaluationInput` carried no record, so "owns this row" was inexpressible by any evaluator.
+// A policy that needs one and is handed none answers `deferred`, which refuses — so the mask's job
+// here is to pass the record through *verbatim* when it has one and to leave the key **absent**
+// when it does not, because absent means "the caller had none" and not "the record is empty".
+// ---------------------------------------------------------------------------
+
+describe("maskWrite — the record the obligation's policy is about", () => {
+  const STORED: Readonly<Record<string, unknown>> = { id: "pat-1", mrn: "MRN-1", care_team: ["dr-a"] };
+
+  it("hands the record to the evaluator verbatim, beside the policy key and the field", () => {
+    const seen: AbacEvaluationInput[] = [];
+    abacMask("explicit_only", "clinician", ["mrn"], answering("satisfied", seen), STORED);
+    expect(seen.length).toBe(1);
+    // Identity, not a structural copy: a mask that rebuilt the record could drop a key the policy
+    // reads, and the evaluator would then answer about a record the write is not landing on.
+    expect(seen[0]?.record).toBe(STORED);
+    expect([seen[0]?.policyKey, seen[0]?.field]).toEqual([ABAC_KEY, "mrn"]);
+  });
+
+  it("omits the key entirely when the caller had no record", () => {
+    // `"record" in input === false`, not `record === undefined`: the distinction the whole
+    // mechanism rests on is absent-vs-present, and an explicitly-undefined key would be a third
+    // state nothing reads.
+    const seen: AbacEvaluationInput[] = [];
+    abacMask("explicit_only", "clinician", ["mrn"], answering("satisfied", seen));
+    expect(seen.length).toBe(1);
+    expect("record" in (seen[0] as object)).toBe(false);
+  });
+
+  it("passes an empty record through as present, which is a different fact from absent", () => {
+    const seen: AbacEvaluationInput[] = [];
+    abacMask("explicit_only", "clinician", ["mrn"], answering("satisfied", seen), {});
+    expect("record" in (seen[0] as object)).toBe(true);
+    expect(seen[0]?.record).toEqual({});
+  });
+
+  for (const mode of WRITE_MASK_MODES) {
+    it(`${mode}: a deferred outcome refuses as an abac_obligation, naming the outcome`, () => {
+      // `deferred` is the third refusing outcome and must surface as itself: reporting it as
+      // `undischargeable` would send an operator to configure an evaluator they already have, and
+      // reporting it as `explicit_update_grant` to widen a grant that already names them.
+      expect(abacMask(mode, "clinician", ["mrn"], answering("deferred"))).toEqual({
+        field: "mrn",
+        rule: "abac_obligation",
+        abacPolicyKey: ABAC_KEY,
+        abacOutcome: "deferred",
+        classification: "phi",
+      });
+    });
+  }
+
+  it("an evaluator that needs the record defers without it and admits with it", () => {
+    // The pair the handler's re-ask is built on, at this layer: one evaluator, two answers,
+    // differing in nothing but whether the record was supplied.
+    const needsRecord: AbacEvaluator = (input) => (input.record === undefined ? "deferred" : "satisfied");
+    expect(abacMask("explicit_only", "clinician", ["mrn"], needsRecord)?.abacOutcome).toBe("deferred");
+    expect(abacMask("explicit_only", "clinician", ["mrn"], needsRecord, STORED)).toBeNull();
+  });
+
+  it("supplying a record does not reach a grant with no obligation", () => {
+    // `nickname`'s grant carries no `abac`, so there is nothing to discharge and the record is
+    // never consulted — passing one must not turn an unqualified grant into an evaluated one.
+    const seen: AbacEvaluationInput[] = [];
+    expect(
+      abacMask("explicit_only", "clinician", ["nickname"], answering("denied", seen), STORED),
+    ).toBeNull();
+    expect(seen).toEqual([]);
+  });
+
+  it("the role check still answers before the record is ever handed over", () => {
+    // A `clerk` is not named by `mrn`'s grant, so no evaluation happens and the record — which may
+    // be a row they have no business being asked about — does not reach the deployment's policy.
+    const seen: AbacEvaluationInput[] = [];
+    expect(abacMask("explicit_only", "clerk", ["mrn"], answering("satisfied", seen), STORED)?.rule).toBe(
+      "explicit_update_grant",
+    );
+    expect(seen).toEqual([]);
   });
 });
