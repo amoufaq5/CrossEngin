@@ -9,6 +9,7 @@ import {
   type AbacGrantPosition,
   type AuthorizationDecision,
   type ClassifiedField,
+  type FieldWriteOperation,
   type PermissionMap,
   type Principal,
   type RbacCheckInput,
@@ -360,7 +361,13 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         // exist until this write commits. So a record-bearing obligation answers `deferred` here
         // and that is **final**, carrying the structural reason — `deferred` on its own reads like
         // a retry, and there is nothing to retry with.
-        const createMask = evaluateMask(ctx, spec.entity, auth, Object.keys(parsedBody ?? {}));
+        const createMask = evaluateMask(
+          ctx,
+          spec.entity,
+          auth,
+          "create",
+          Object.keys(parsedBody ?? {}),
+        );
         if (createMask !== null) {
           return maskForbidden(
             spec.entity,
@@ -429,7 +436,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
         // learn the same shape from a valid write on a record they do own. A mode flag on the mask
         // to recover the ordering would be worse than the ordering: a boolean that changes
         // fail-closed semantics is the thing this seam exists to not have.
-        const updateMask = evaluateMask(ctx, spec.entity, auth, Object.keys(raw));
+        const updateMask = evaluateMask(ctx, spec.entity, auth, "update", Object.keys(raw));
         if (updateMask?.kind === "refused") return maskForbidden(spec.entity, updateMask.refusal);
         const maskDeferred = updateMask?.kind === "deferred";
         const updateErrors = validateEntity(ctx, spec.entity, raw, "update");
@@ -459,7 +466,7 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
             // A second `deferred` with the record supplied is an evaluator that cannot be satisfied
             // on this path, so it is refused like any other non-allowing outcome — and with no
             // structural reason appended, because the position *can* supply a record and did.
-            const again = evaluateMask(ctx, spec.entity, auth, Object.keys(raw), before);
+            const again = evaluateMask(ctx, spec.entity, auth, "update", Object.keys(raw), before);
             if (again !== null) return maskForbidden(spec.entity, again.refusal);
           }
           if (expectedUpdatedAt !== null && before !== null) {
@@ -773,6 +780,7 @@ function evaluateMask(
   ctx: HandlerContext,
   entity: string,
   principal: Principal,
+  writeOp: FieldWriteOperation,
   writtenKeys: readonly string[],
   record?: Readonly<Record<string, unknown>>,
 ): MaskOutcome | null {
@@ -789,6 +797,7 @@ function evaluateMask(
     roles: ctx.roles,
     classifiedFields: ctx.classifiedFields?.get(entity) ?? [],
     writtenKeys,
+    writeOp,
     ...(policy !== undefined ? { policy } : {}),
     ...(ctx.abacEvaluator !== undefined ? { abacEvaluator: ctx.abacEvaluator } : {}),
     ...(record !== undefined ? { record } : {}),

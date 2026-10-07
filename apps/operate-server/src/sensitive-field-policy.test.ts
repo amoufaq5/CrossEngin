@@ -524,38 +524,49 @@ describe("formatSensitiveFieldSurvey", () => {
 });
 
 describe("the real packs", () => {
-  it("finds Patient.mrn in the healthcare pack, closed in both directions", () => {
+  it("finds Patient.mrn in the healthcare pack, now granted in both directions", () => {
+    // Both lists were **empty** until ADR-0348 authored the pack's grants: unreadable by every role
+    // and writable by anybody holding entity `update`. The write set is narrower than the read set
+    // by one role on purpose — `front_desk` sets the number at registration through the `create`
+    // arm, which this survey does not report, and can neither read it back nor change it.
     const s = survey({ manifest: buildErpHealthcarePack() });
     expect(find(s, "Patient", "mrn")).toMatchObject({
       classification: "phi",
       required: true,
-      readableBy: [],
-      writableBy: [],
+      readableBy: ["clinical_admin", "clinician", "hipaa_auditor"],
+      writableBy: ["clinical_admin", "clinician"],
     });
   });
 
-  it("makes Patient uncreatable with no declaration, and creatable with one", () => {
+  it("leaves Patient creatable with no declaration at all, now that the pack grants its fields", () => {
+    // These five required phi/pii fields were the healthcare half of the 12 that a bare
+    // `--classified-write-mask` would have made uncreatable. The pack declares them now, so the
+    // flag needs no deployment declaration to be safe here — which is what makes it a candidate for
+    // becoming the default rather than opt-in.
     const hc = buildErpHealthcarePack();
-    expect(
-      survey({ manifest: hc })
-        .uncreatable.filter((f) => f.entity === "Patient")
-        .map((f) => f.field),
-    ).toEqual(["mrn", "given_name", "family_name", "date_of_birth", "sex"]);
+    expect(survey({ manifest: hc }).uncreatable).toEqual([]);
     expect(
       survey({ manifest: hc, declaration: declaration({ privilegedRoles: ["clinical_admin"] }) })
         .uncreatable,
     ).toEqual([]);
   });
 
-  it("finds Citizen.national_id in the government pack, which has explicit grants", () => {
+  it("finds Citizen.national_id in the government pack, whose read and update are unchanged", () => {
     const s = survey({ manifest: buildErpGovernmentPack() });
     expect(find(s, "Citizen", "national_id")).toMatchObject({
       classification: "regulated",
       required: true,
-      // The explicit per-field grants win, so this is one of the 7 fields never closed.
+      // One of the 7 fields that always had explicit grants, and ADR-0348 changed **neither** of
+      // these two lists — it added a `create` arm beside them. `writableBy` reports the `update`
+      // grant, so a case worker still cannot change a national id; what the arm fixed is that they
+      // can now **set** one, which is what registering a citizen requires.
       readableBy: ["gov_admin", "case_worker", "gov_auditor"],
       writableBy: ["gov_admin"],
     });
+    // The fix itself, read off the declaration rather than the survey.
+    expect(
+      buildErpGovernmentPack().permissions?.Citizen?.fields?.national_id?.create?.roles,
+    ).toEqual(["gov_admin", "case_worker"]);
   });
 
   it("counts 46 sensitive-classified fields across the seven packs", () => {
@@ -567,25 +578,21 @@ describe("the real packs", () => {
     expect(total).toBe(46);
   });
 
-  it("counts the 12 uncreatable fields across the seven packs with no declaration", () => {
-    // The same tripwire from the other side: these are the fields whose entities a bare
-    // `--classified-write-mask` would make uncreatable, which is what the boot refusal exists for.
+  it("counts no uncreatable field across the seven packs, where there were 12", () => {
+    // The same tripwire from the other side, and the one assertion that says this increment
+    // landed. These twelve were the blocking subset of ADR-0339's boot refusal — `Employee`,
+    // `Lead`, `Opportunity`, `FixedAsset`, `Patient`, `Student` and `Permit` uncreatable by every
+    // role under a bare `--classified-write-mask`:
+    //
+    //   Employee.work_email, Lead.full_name, Opportunity.amount, FixedAsset.acquisition_cost,
+    //   Patient.mrn, Patient.given_name, Patient.family_name, Patient.date_of_birth, Patient.sex,
+    //   Student.student_email, Student.date_of_birth, Permit.fee_amount
+    //
+    // Every one is granted now, so the refusal has nothing left to name on the shipped packs. The
+    // assertion is the empty list rather than a count, so a regression prints the field.
     const named = SEVEN_PACKS.flatMap((m) =>
       survey({ manifest: m }).uncreatable.map((f) => `${f.entity}.${f.field}`),
     );
-    expect(named).toEqual([
-      "Employee.work_email",
-      "Lead.full_name",
-      "Opportunity.amount",
-      "FixedAsset.acquisition_cost",
-      "Patient.mrn",
-      "Patient.given_name",
-      "Patient.family_name",
-      "Patient.date_of_birth",
-      "Patient.sex",
-      "Student.student_email",
-      "Student.date_of_birth",
-      "Permit.fee_amount",
-    ]);
+    expect(named).toEqual([]);
   });
 });

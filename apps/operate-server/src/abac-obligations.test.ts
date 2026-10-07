@@ -628,7 +628,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
     });
   }
 
-  function fieldAt(op: "read" | "update"): Manifest {
+  function fieldAt(op: "read" | "update" | "create"): Manifest {
     return manifest({
       permissions: {
         Chart: { fields: { note: { [op]: { roles: ["clinician"], abac: "rec" } } } },
@@ -660,6 +660,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
     entity_transition: transitionAt(),
     field_read: fieldAt("read"),
     field_update: fieldAt("update"),
+    field_create: fieldAt("create"),
   };
 
   const declared = (m: Manifest): AbacObligationCheck =>
@@ -670,10 +671,12 @@ describe("checkAbacObligations against a record-bearing policy", () => {
       cursorSealing: "sealed",
     });
 
-  it("refuses at entity create alone, where no call site can ever supply a record", () => {
-    // One position, not three, and the set is asserted by walking every position through the real
-    // function rather than by naming the one that refuses — so a future flip in either direction
-    // fails here with the position named.
+  it("refuses at both create positions, where no call site can ever supply a record", () => {
+    // Two positions, not three, and the set is asserted by walking every position through the real
+    // function rather than by naming the ones that refuse — so a future flip in either direction
+    // fails here with the position named. `field_create` arrived with `FieldPermission.create`
+    // (ADR-0348) and refuses for `entity_create`'s own reason rather than a new one: a create has no
+    // stored record, at either scope.
     //
     // Field `read` left when ADR-0343 gave response redaction the operation's declared record
     // shape, so it locates the records a response carries and computes the field set per record.
@@ -685,7 +688,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
     const refusing = ABAC_GRANT_POSITIONS.filter(
       (p) => declared(POSITION_MANIFEST[p]).refusal === "record_unavailable",
     );
-    expect(refusing).toEqual(["entity_create"]);
+    expect(refusing).toEqual(["entity_create", "field_create"]);
   });
 
   it("agrees with ABAC_RECORD_AVAILABILITY about which positions can never be asked", () => {
@@ -693,6 +696,7 @@ describe("checkAbacObligations against a record-bearing policy", () => {
     // the two must name the same single position or one of them is a second copy of the other.
     expect(ABAC_GRANT_POSITIONS.filter((p) => ABAC_RECORD_AVAILABILITY[p] === "never")).toEqual([
       "entity_create",
+      "field_create",
     ]);
   });
 

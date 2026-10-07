@@ -1237,13 +1237,15 @@ describe("operate handlers — a deferred obligation is final where no record ca
     expect(seen[0]?.record).toBeUndefined();
   });
 
-  it("create is the only one: `never` is exactly that position", () => {
+  it("a create is the only kind: `never` is exactly the two create positions", () => {
     // `entity_list` used to sit here on the reading that a per-record answer is "a filter and not
-    // an authorization decision". The filter is what shipped, so the set is a singleton — pinned
-    // as the exact set rather than key by key, so flipping a position back fails here.
+    // an authorization decision". The filter is what shipped, so what remains is the two creates —
+    // pinned as the exact set rather than key by key, so flipping a position back fails here.
+    // `field_create` joined with `FieldPermission.create`: one kind of impossibility at two scopes,
+    // since the record a policy there would be about does not exist until the write commits.
     expect(
       ABAC_GRANT_POSITIONS.filter((p) => ABAC_RECORD_AVAILABILITY[p] === "never"),
-    ).toEqual(["entity_create"]);
+    ).toEqual(["entity_create", "field_create"]);
   });
 
   it("a non-deferred refusal carries no structural reason, so the existing detail is unchanged", async () => {

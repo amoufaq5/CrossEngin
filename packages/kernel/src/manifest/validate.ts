@@ -29,17 +29,25 @@ import {
 } from "@crossengin/views";
 import type { SearchManifest } from "@crossengin/search";
 import { BUILT_IN_TRAIT_FIELDS } from "../ddl/built-in-traits.js";
-import { resolvedFieldNames } from "../ddl/resolution.js";
+import { resolvedFieldNames, resolvedFields } from "../ddl/resolution.js";
 import { WorkflowValidationError } from "../workflow/errors.js";
 import { validateWorkflow } from "../workflow/validate.js";
 import { ManifestValidationError } from "./errors.js";
 import type { Manifest } from "./types.js";
 
 export function validateManifest(manifest: Manifest): void {
-  const { entityNames, fieldsByEntity } = validateEntitiesTraitsRelations(manifest);
+  const { entityNames, fieldsByEntity, requiredFieldsByEntity } =
+    validateEntitiesTraitsRelations(manifest);
   const rolesMap = validateRoles(manifest);
   const { entityTransitions, entityStates } = validateWorkflows(manifest, entityNames);
-  validatePermissions(manifest, entityNames, fieldsByEntity, rolesMap, entityTransitions);
+  validatePermissions(
+    manifest,
+    entityNames,
+    fieldsByEntity,
+    requiredFieldsByEntity,
+    rolesMap,
+    entityTransitions,
+  );
   validateIntegrations(manifest);
   validateJobs(manifest, rolesMap);
   validateFiles(manifest);
@@ -112,6 +120,11 @@ function validateClassifications(manifest: Manifest): void {
 interface EntityIndex {
   readonly entityNames: ReadonlySet<string>;
   readonly fieldsByEntity: FieldsByEntity;
+  /**
+   * The resolved fields a create must supply. Separate from `fieldsByEntity` rather than widening
+   * it, because only one rule needs it and a map of names is what every other caller wants.
+   */
+  readonly requiredFieldsByEntity: FieldsByEntity;
 }
 
 function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
@@ -163,8 +176,19 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
 
   // Only now that every trait an entity names is known to exist can its fields be resolved.
   const fieldsByEntity = new Map<string, ReadonlySet<string>>();
+  const requiredFieldsByEntity = new Map<string, ReadonlySet<string>>();
   for (const entity of entities) {
     fieldsByEntity.set(entity.name, resolvedFieldNames(entity, traits));
+    // Through `resolvedFields`, so a `required` field contributed by a **trait** is in scope. A
+    // classified trait field is exactly what ADR-0338 had to reach for the same reason.
+    requiredFieldsByEntity.set(
+      entity.name,
+      new Set(
+        resolvedFields(entity, traits)
+          .filter((f) => f.required === true)
+          .map((f) => f.name),
+      ),
+    );
   }
 
   for (const [i, entity] of entities.entries()) {
@@ -233,7 +257,7 @@ function validateEntitiesTraitsRelations(manifest: Manifest): EntityIndex {
     }
   }
 
-  return { entityNames, fieldsByEntity };
+  return { entityNames, fieldsByEntity, requiredFieldsByEntity };
 }
 
 function validateRoles(manifest: Manifest): Map<string, RoleDefinition> {
@@ -321,6 +345,7 @@ function validatePermissions(
   manifest: Manifest,
   entityNames: ReadonlySet<string>,
   fieldsByEntity: FieldsByEntity,
+  requiredFieldsByEntity: FieldsByEntity,
   rolesMap: ReadonlyMap<string, RoleDefinition>,
   entityTransitions: ReadonlyMap<string, ReadonlySet<string>>,
 ): void {
@@ -365,6 +390,7 @@ function validatePermissions(
 
     if (entityPerms.fields) {
       const allFieldNames = fieldsByEntity.get(entityName) ?? new Set<string>();
+      const requiredFields = requiredFieldsByEntity.get(entityName) ?? new Set<string>();
       const fieldPerms: Record<string, FieldPermission> = entityPerms.fields;
       for (const [fieldName, fieldPerm] of Object.entries(fieldPerms)) {
         if (!allFieldNames.has(fieldName)) {
@@ -373,15 +399,17 @@ function validatePermissions(
             `field-level permission for unknown field '${fieldName}' on entity '${entityName}'`,
           );
         }
-        if (fieldPerm.read) {
-          checkGrant(`permissions.${entityName}.fields.${fieldName}.read.roles`, fieldPerm.read);
+        for (const arm of FIELD_GRANT_ARMS) {
+          const grant = fieldPerm[arm];
+          if (grant) checkGrant(`permissions.${entityName}.fields.${fieldName}.${arm}.roles`, grant);
         }
-        if (fieldPerm.update) {
-          checkGrant(
-            `permissions.${entityName}.fields.${fieldName}.update.roles`,
-            fieldPerm.update,
-          );
-        }
+        checkFieldGrantCoherence({
+          entityName,
+          fieldName,
+          fieldPerm,
+          entityPerms,
+          required: requiredFields.has(fieldName),
+        });
       }
     }
   }
@@ -632,5 +660,104 @@ function validateSearch(
         );
       }
     }
+  }
+}
+
+/**
+ * The three arms a field grant can carry, in the order a reader meets them. A loop over this rather
+ * than three `if`s so a fourth arm is one line here and not three places to remember.
+ */
+const FIELD_GRANT_ARMS = ["read", "update", "create"] as const;
+
+interface FieldGrantCheck {
+  readonly entityName: string;
+  readonly fieldName: string;
+  readonly fieldPerm: FieldPermission;
+  readonly entityPerms: EntityPermissions;
+  readonly required: boolean;
+}
+
+/**
+ * Whether a per-field grant can mean what it says, given the entity grants beside it.
+ *
+ * Until this existed, a field grant was checked for two things — the field exists, every role is
+ * declared — and the three ways it can be *incoherent* were all reachable. Each of the three was a
+ * live defect rather than a hypothetical, and the sharpest one shipped: `erp-government` declared
+ * `Citizen.national_id` (`required`) with `update: ["gov_admin"]` while the entity's `create` grant
+ * named `case_worker` too, so from ADR-0339 — which made an explicit grant authoritative with no
+ * flag — `case_worker` could not create a Citizen at all. `POST /v1/citizens` answered 403
+ * `explicit_update_grant` for a role the manifest plainly intends to register citizens.
+ *
+ * These are **validation errors and not boot refusals**, which is the opposite of where ADR-0340
+ * put its ABAC obligation check, and for a stated reason: an obligation is refused at boot because
+ * whether a deployment can discharge it is a property of the *deployment*, while these three are
+ * properties of the manifest alone and so are decidable the moment it is written — by a pack author,
+ * by `crossengin validate`, and by the reviewer who approves what the Architect designed. A rule
+ * that can be checked earlier should be.
+ */
+function checkFieldGrantCoherence(input: FieldGrantCheck): void {
+  const { entityName, fieldName, fieldPerm, entityPerms, required } = input;
+  const at = `permissions.${entityName}.fields.${fieldName}`;
+
+  // R3, first, because the other two read as puzzling when the cause is simply a role that cannot
+  // reach the record at all. A field grant wider than its entity grant is not dangerous — it is
+  // inert — but it is always a mistake, and it reads as a grant that works.
+  for (const arm of FIELD_GRANT_ARMS) {
+    const grant = fieldPerm[arm];
+    if (grant === undefined) continue;
+    const entityGrant = entityPerms[arm];
+    if (entityGrant === undefined) continue;
+    const entityRoles = new Set(entityGrant.roles);
+    const unreachable = grant.roles.filter((r) => !entityRoles.has(r));
+    if (unreachable.length > 0) {
+      throw new ManifestValidationError(
+        `${at}.${arm}.roles`,
+        `grants ${arm} on '${fieldName}' to ${unreachable.map((r) => `'${r}'`).join(", ")}, ` +
+          `which the entity's own ${arm} grant does not name — so the grant reaches a role that ` +
+          `cannot reach the record and silently does nothing`,
+      );
+    }
+  }
+
+  // R2 — and `read` absent is **not** a pass. An absent read grant means the field falls to the
+  // classification default, which under `--classified-write-mask` withholds it from every
+  // unprivileged role, so an explicit `update` beside it is the same blind overwrite with the
+  // withholding expressed one level away.
+  const update = fieldPerm.update;
+  if (update !== undefined) {
+    const readable = new Set(fieldPerm.read?.roles ?? []);
+    const blind = update.roles.filter((r) => !readable.has(r));
+    if (blind.length > 0) {
+      throw new ManifestValidationError(
+        `${at}.update.roles`,
+        `lets ${blind.map((r) => `'${r}'`).join(", ")} change '${fieldName}' without reading it` +
+          (fieldPerm.read === undefined
+            ? ", because no read grant is declared beside it"
+            : ", which the read grant does not name") +
+          ` — a blind overwrite destroys a value the writer cannot see. Declare the same role on ` +
+          `read, or move it to the 'create' arm, which is deliberately not constrained this way ` +
+          `because a principal supplying a value already knows it`,
+      );
+    }
+  }
+
+  // R1, last, because its remedy ("add a create arm") only makes sense once the first two hold.
+  // The *effective* create grant, so a field that omits the arm is judged on the `update` list it
+  // falls back to — which is exactly how the shipped `Citizen.national_id` defect arose.
+  if (!required) return;
+  const entityCreate = entityPerms.create;
+  if (entityCreate === undefined) return;
+  const effectiveCreate = fieldPerm.create ?? fieldPerm.update;
+  if (effectiveCreate === undefined) return;
+  const permitted = new Set(effectiveCreate.roles);
+  const blocked = entityCreate.roles.filter((r) => !permitted.has(r));
+  if (blocked.length > 0) {
+    throw new ManifestValidationError(
+      `${at}.${fieldPerm.create !== undefined ? "create" : "update"}.roles`,
+      `makes '${entityName}' uncreatable by ${blocked.map((r) => `'${r}'`).join(", ")}: ` +
+        `'${fieldName}' is required, so a create must supply it, and those roles hold the ` +
+        `entity's create grant while this grant refuses them the field. Name them here — the ` +
+        `'create' arm can admit them without widening who may change the value afterwards`,
+    );
   }
 }

@@ -1459,3 +1459,116 @@ describe("validateManifest — search", () => {
     );
   });
 });
+
+describe("validateManifest — per-field grant coherence", () => {
+  // The three ways a field grant can be incoherent with the entity grants beside it. Each was
+  // reachable before this check existed and one of them *shipped*: `erp-government` declared
+  // `Citizen.national_id` (required, regulated) with `update: ["gov_admin"]` while the entity's
+  // `create` grant also named `case_worker`, so from ADR-0339 — which made an explicit grant
+  // authoritative with no flag — `POST /v1/citizens` as `case_worker` answered 403
+  // `explicit_update_grant`. Reproduced live before the fix.
+  const citizen = (fields: Record<string, unknown>): Manifest =>
+    ({
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      roles: {
+        admin: { name: "admin" },
+        clerk: { name: "clerk" },
+        viewer: { name: "viewer" },
+      },
+      entities: [
+        {
+          name: "Citizen",
+          traits: ["auditable"],
+          fields: [
+            { name: "ref", type: { kind: "text" }, required: true },
+            {
+              name: "national_id",
+              type: { kind: "text" },
+              required: true,
+              classification: "regulated",
+            },
+            { name: "note", type: { kind: "text" }, classification: "pii" },
+          ],
+        },
+      ],
+      permissions: {
+        Citizen: {
+          read: { roles: ["admin", "clerk", "viewer"] },
+          create: { roles: ["admin", "clerk"] },
+          update: { roles: ["admin", "clerk"] },
+          fields,
+        },
+      },
+    }) as Manifest;
+
+  it("refuses a required field whose write grant excludes a role holding the entity's create", () => {
+    expect(() =>
+      validateManifest(
+        citizen({
+          national_id: { read: { roles: ["admin", "clerk"] }, update: { roles: ["admin"] } },
+        }),
+      ),
+    ).toThrow(/makes 'Citizen' uncreatable by 'clerk'/);
+  });
+
+  it("accepts that same grant once a create arm admits the creating role", () => {
+    // The read and update lists are **unchanged** — only the third arm is added. That is the whole
+    // point of the arm: a clerk may register a citizen without being able to change a national id
+    // afterwards, which one list could not express.
+    expect(() =>
+      validateManifest(
+        citizen({
+          national_id: {
+            read: { roles: ["admin", "clerk"] },
+            update: { roles: ["admin"] },
+            create: { roles: ["admin", "clerk"] },
+          },
+        }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses an update grant naming a role the read grant does not", () => {
+    expect(() =>
+      validateManifest(
+        citizen({ note: { read: { roles: ["admin"] }, update: { roles: ["admin", "clerk"] } } }),
+      ),
+    ).toThrow(/lets 'clerk' change 'note' without reading it, which the read grant does not name/);
+  });
+
+  it("refuses an update grant with no read grant beside it, and says which case it is", () => {
+    // An absent read grant is not a pass: the field falls to the classification default, which
+    // withholds it from every unprivileged role, so this is the same blind overwrite expressed one
+    // level away. The two messages differ because the remedies differ.
+    expect(() => validateManifest(citizen({ note: { update: { roles: ["clerk"] } } }))).toThrow(
+      /because no read grant is declared beside it/,
+    );
+  });
+
+  it("does not constrain create against read, because supplying a value is not reading one", () => {
+    // The asymmetry that earns the third arm. A principal typing in a value already knows it, so
+    // writing it discloses nothing; changing a value you cannot read destroys one you cannot see.
+    expect(() =>
+      validateManifest(
+        citizen({ note: { read: { roles: ["admin"] }, create: { roles: ["admin", "clerk"] } } }),
+      ),
+    ).not.toThrow();
+  });
+
+  it("refuses a field grant naming a role the matching entity grant does not", () => {
+    // Checked first of the three, because the other two read as puzzling when the cause is a role
+    // that cannot reach the record at all. Inert rather than dangerous — and it reads as working.
+    expect(() =>
+      validateManifest(
+        citizen({ note: { read: { roles: ["admin"] }, create: { roles: ["admin", "viewer"] } } }),
+      ),
+    ).toThrow(/the entity's own create grant does not name/);
+  });
+
+  it("checks all three arms for declared roles, not only read and update", () => {
+    expect(() =>
+      validateManifest(citizen({ note: { create: { roles: ["nobody"] } } })),
+    ).toThrow(/grants role 'nobody' which is not declared in manifest.roles/);
+  });
+});

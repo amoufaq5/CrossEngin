@@ -1,9 +1,11 @@
 import {
+  fieldWriteGrant,
   validateClassifiedWriteMask,
   type AbacEvaluator,
   type AbacOutcome,
   type ClassifiedField,
   type EntityPermissions,
+  type FieldWriteOperation,
   type Principal,
   type RoleDefinition,
   type RoleName,
@@ -90,6 +92,13 @@ export interface WriteMaskInput {
   readonly classifiedFields: readonly ClassifiedField[];
   /** The keys the **caller** wrote — never a server-filled default. */
   readonly writtenKeys: readonly string[];
+  /**
+   * Which write moment this is, so a field's `create` grant is read on a create and `update` on an
+   * update. Required, for `entity`'s reason: `validateClassifiedWriteMask` defaults it to `update`
+   * and fails closed, but a *handler* that forgot it would refuse a create its manifest permits,
+   * and the compiler can ask here where it cannot there.
+   */
+  readonly writeOp: FieldWriteOperation;
   readonly policy?: SensitiveFieldPolicy;
   /**
    * Discharges an `abac` policy key carried by a per-field `update` grant. Absent means no
@@ -152,7 +161,10 @@ export function maskWrite(input: WriteMaskInput): WriteMaskRefusal | null {
   // either rule — so an ordinary field costs one map lookup and never reaches role resolution.
   const candidates: ClassifiedField[] = [];
   for (const key of input.writtenKeys) {
-    const granted = fieldPerms?.[key]?.update !== undefined;
+    // The **effective** grant for this write moment, not `update` unconditionally: a field whose
+    // only declared arm is `create` carries no `update`, so reading that key would drop it from the
+    // candidate list on a create and skip the one grant that applies to it.
+    const granted = fieldWriteGrant(fieldPerms?.[key], input.writeOp) !== undefined;
     const classification = classificationOf.get(key);
     if (!granted && classification === undefined) continue;
     // `explicit_only` is expressed by **stripping the classification**, not by a second
@@ -188,6 +200,7 @@ export function maskWrite(input: WriteMaskInput): WriteMaskRefusal | null {
       ...(input.abacEvaluator !== undefined ? { evaluator: input.abacEvaluator } : {}),
       ...(input.record !== undefined ? { record: input.record } : {}),
     },
+    input.writeOp,
   );
   if (result.ok) return null;
 

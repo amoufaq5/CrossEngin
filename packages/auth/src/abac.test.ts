@@ -833,7 +833,7 @@ describe("dischargeAbac — an out-of-enum answer is still refused", () => {
 });
 
 describe("ABAC_GRANT_POSITIONS", () => {
-  it("names the eight positions a permission map can carry an obligation in", () => {
+  it("names the nine positions a permission map can carry an obligation in", () => {
     expect(ABAC_GRANT_POSITIONS).toEqual([
       "entity_create",
       "entity_read",
@@ -843,6 +843,7 @@ describe("ABAC_GRANT_POSITIONS", () => {
       "entity_transition",
       "field_read",
       "field_update",
+      "field_create",
     ]);
   });
 
@@ -856,6 +857,7 @@ describe("ABAC_GRANT_POSITIONS", () => {
       entity_transition: true,
       field_read: true,
       field_update: true,
+      field_create: true,
     };
     expect(Object.keys(exhaustive).sort()).toEqual([...ABAC_GRANT_POSITIONS].sort());
   });
@@ -889,13 +891,17 @@ describe("ABAC_RECORD_AVAILABILITY", () => {
     expect(ABAC_RECORD_AVAILABILITY.field_read).toBe("always");
   });
 
-  it("answers 'never' for exactly one position, the one with no record to find", () => {
+  it("answers 'never' for exactly the two create positions, which have no record to find", () => {
     // Pinned as the exact set rather than per key, because per-key assertions on this map are what
     // let `field_read` sit on the wrong value: flipping a position back to `never` without arguing
     // for it fails here rather than passing quietly. A `never` position is refused at boot with no
     // escape hatch.
+    //
+    // `field_create` joined `entity_create` with `FieldPermission.create`, and the set grew rather
+    // than the rule changing: both are a create, and the record a policy there would be about does
+    // not exist until the write commits.
     const never = ABAC_GRANT_POSITIONS.filter((p) => ABAC_RECORD_AVAILABILITY[p] === "never");
-    expect(never).toEqual(["entity_create"]);
+    expect(never).toEqual(["entity_create", "field_create"]);
   });
 
   it("answers 'sometimes' for a field update, and only for that one", () => {
@@ -1036,6 +1042,7 @@ describe("ABAC_DENIAL_EFFECT", () => {
       "entity_delete",
       "entity_transition",
       "field_update",
+      "field_create",
     ]);
   });
 
@@ -1130,7 +1137,7 @@ describe("abacGrantPosition", () => {
     expect(abacGrantPosition(obligation("update", "mrn"))).toBe("field_update");
   });
 
-  it("covers every position, so the eight are all reachable", () => {
+  it("covers every position, so the nine are all reachable", () => {
     const reached = new Set<AbacGrantPosition>([
       abacGrantPosition(obligation("create", null)),
       abacGrantPosition(obligation("read", null)),
@@ -1140,15 +1147,24 @@ describe("abacGrantPosition", () => {
       abacGrantPosition(obligation({ kind: "transition", name: "t" }, null)),
       abacGrantPosition(obligation("read", "mrn")),
       abacGrantPosition(obligation("update", "mrn")),
+      abacGrantPosition(obligation("create", "mrn")),
     ]);
     expect([...reached].sort()).toEqual([...ABAC_GRANT_POSITIONS].sort());
   });
 
+  it("maps a field obligation on create to field_create, which is now reachable", () => {
+    // It used to answer `entity_create`, correctly, because a `FieldPermission` had no `create` arm
+    // and so could not carry one. It has one now, and the position is its own: the availability
+    // answer is the same as `entity_create`'s and for the same reason, but the obligation is about a
+    // field and a boot refusal that named the entity position would send an operator to the wrong
+    // grant.
+    expect(abacGrantPosition(obligation("create", "mrn"))).toBe("field_create");
+  });
+
   it("is total for a field obligation on an operation surveyAbacObligations cannot emit", () => {
-    // A `FieldPermission` has only `read` and `update` arms, so these are unreachable from a
-    // permission map — answered rather than thrown, because an exception in an authorization survey
-    // is worse than the decidable answer.
-    expect(abacGrantPosition(obligation("create", "mrn"))).toBe("entity_create");
+    // `FieldPermission` has `read`, `update` and `create` arms and no others, so these two remain
+    // unreachable from a permission map — answered rather than thrown, because an exception in an
+    // authorization survey is worse than the decidable answer.
     expect(abacGrantPosition(obligation("delete", "mrn"))).toBe("entity_delete");
     expect(abacGrantPosition(obligation("list", "mrn"))).toBe("entity_list");
   });

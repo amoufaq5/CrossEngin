@@ -379,6 +379,15 @@ export function surveyAbacObligations(permissions: PermissionMap): readonly Abac
         if (perm.update?.abac !== undefined) {
           out.push({ entity, operation: "update", field: name, policyKey: perm.update.abac });
         }
+        // The third arm is surveyed on its own and never through `update`'s fallback. A `create`
+        // grant that merely *inherits* `update` carries `update`'s obligation at `field_update`,
+        // which is already in this list; one declared in its own right is a different obligation at
+        // a different position, and a survey that resolved the fallback would report the inherited
+        // one twice and the declared one not at all — ADR-0340's dropped obligation, in the very
+        // function the boot refusal is built from.
+        if (perm.create?.abac !== undefined) {
+          out.push({ entity, operation: "create", field: name, policyKey: perm.create.abac });
+        }
       }
     }
   }
@@ -410,6 +419,7 @@ export const ABAC_GRANT_POSITIONS = [
   "entity_transition",
   "field_read",
   "field_update",
+  "field_create",
 ] as const;
 
 export type AbacGrantPosition = (typeof ABAC_GRANT_POSITIONS)[number];
@@ -426,8 +436,10 @@ export type AbacRecordAvailability = (typeof ABAC_RECORD_AVAILABILITIES)[number]
  * discovering it as a `deferred` refusal on the first request — ADR-0334's conversion of a page-one
  * failure into a boot refusal, applied to an authorization input.
  *
- * `never` is not a limitation of the handler that could be fixed by loading more: `entity_create` is
- * its only member, and the record it would be about does not exist until the write commits.
+ * `never` is not a limitation of the handler that could be fixed by loading more: its two members
+ * are `entity_create` and `field_create`, and they share one reason — the record the policy would be
+ * about does not exist until the write commits. The second arrived with `FieldPermission.create`,
+ * and it is the same fact at a narrower scope rather than a new kind of impossibility.
  * `sometimes` belongs to `field_update` alone, and the split inside it is the sharpest consequence —
  * see `ABAC_RECORD_AVAILABILITY_REASONS`.
  *
@@ -449,6 +461,7 @@ export const ABAC_RECORD_AVAILABILITY: Readonly<
   entity_transition: "always",
   field_read: "always",
   field_update: "sometimes",
+  field_create: "never",
 };
 
 /**
@@ -475,6 +488,8 @@ export const ABAC_RECORD_AVAILABILITY_REASONS: Readonly<Record<AbacGrantPosition
     "response redaction locates the records a response carries from the operation's declared shape and computes the field set per record, so a per-field read policy is answered against the record the field came from",
   field_update:
     "the update path supplies the record and the create path cannot, so an obligated field is not settable at create",
+  field_create:
+    "a create has no stored record, so a policy on who may set a field at creation is answered against nothing: `entity_create`'s reason at field scope",
 };
 
 export const ABAC_DENIAL_EFFECTS = ["refuses_request", "withholds_field", "filters_rows"] as const;
@@ -506,6 +521,9 @@ export const ABAC_DENIAL_EFFECT: Readonly<Record<AbacGrantPosition, AbacDenialEf
   entity_transition: "refuses_request",
   field_read: "withholds_field",
   field_update: "refuses_request",
+  // Unreachable for the same reason `entity_create` is — the boot refusal lands first — and written
+  // down for the same reason: a total map with a hole is what a total map exists to prevent.
+  field_create: "refuses_request",
 };
 
 /**
@@ -558,12 +576,13 @@ export function abacGrantPosition(obligation: AbacObligation): AbacGrantPosition
       return "field_read";
     case "update":
       return "field_update";
-    // `surveyAbacObligations` cannot emit these: a `FieldPermission` has only `read` and `update`
-    // arms, so a field obligation on any other operation is not reachable from a permission map.
-    // Written down anyway rather than thrown, because the mapping is decidable — the record would
-    // have to come from the same place the entity-level act gets it — and a hand-built obligation
-    // asking this question deserves an answer rather than an exception.
     case "create":
+      return "field_create";
+    // `surveyAbacObligations` cannot emit these two: a `FieldPermission` has `read`, `update` and
+    // `create` arms and no others, so a field obligation on `delete` or `list` is not reachable from
+    // a permission map. Written down anyway rather than thrown, because the mapping is decidable —
+    // the record would have to come from the same place the entity-level act gets it — and a
+    // hand-built obligation asking this question deserves an answer rather than an exception.
     case "delete":
     case "list":
       return entityPosition(obligation.operation);

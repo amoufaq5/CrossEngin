@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 342 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 343 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~17,483 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~17,542 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -458,6 +458,40 @@ type errors.
   hold a row for this tenant), with `42P01` as the one honest `false` and every other uncertainty
   resolving to `true`.
 
+  ADR-0348 closes ADR-0339's own Q1 — the **39 unauthored per-field grants**, top of this file's
+  field-authorization entry ever since — and the class is **one grant list consulted at two
+  different moments**. `FieldPermission` was `{read?, update?}` with no `create` arm, and the write
+  mask asks the same list on a create and on an update, so three things followed and all three were
+  live. *The default deployment's classified fields are **write-only***: measured through real HTTP
+  on the shipped `erp-core`, `ap_clerk` POSTed a Vendor carrying `tax_id` and `contact_email`, the
+  row holds both, and neither the create response nor `GET /v1/vendors` returns either — **to the
+  credential that just wrote them**. All 21 of `erp-core`'s classified fields are in that state, so
+  a user fills in a vendor's tax ID, it saves, and the field is blank on every later view while
+  anyone with entity `update` can silently overwrite it. *The policy everyone wants is
+  inexpressible*: **set once at registration, never changed** — an MRN, a national id, a tax
+  identity — cannot be said with one list, which is why ADR-0339 found `front_desk`
+  blind-overwriting `Patient.mrn` and could only have fixed it by stopping the desk registering
+  patients. And *ADR-0339's "each deliberate, and it cannot make anything uncreatable" is false
+  about **three of its seven***: a `required` classified field whose write grant is narrower than
+  its entity's `create` grant makes the entity uncreatable, and `Citizen.national_id` (403
+  reproduced live, `case_worker` cannot register a citizen), `WorkOrder.cost_estimate` (`foreman`
+  cannot raise one) and `PerishableLot.cost_per_unit` (`receiving_clerk` cannot receive one) were
+  all in that shape.
+  The fix is four parts and the recurring rule holds a **sixth** time — the honest fix sits one
+  level up from the pain. The pain was 39 unwritten declarations; the fix is the **arm they needed**
+  (`create?`, absent falling back to `update`, so not one shipped grant changed meaning) and the
+  **validator that makes writing them safe**, and only then the grants. The asymmetry that earns the
+  arm is the whole argument: `update ⊆ read` is enforced and **`create` is deliberately not**,
+  because *a principal supplying a value already knows it, so writing it discloses nothing, while
+  changing a value you cannot read destroys one you cannot see*. The three kernel rules are
+  **validation errors and not boot refusals**, the opposite of ADR-0340's choice and for a stated
+  reason: an obligation's dischargeability is a property of the *deployment*, while these are
+  properties of the manifest alone and so are decidable by a pack author, by `crossengin validate`
+  and by the reviewer approving what the Architect designed — a rule checkable earlier should be.
+  Two of the three defects were **found by that validator mid-increment** rather than by anybody
+  looking, which is the clearest evidence it was the right level. Every fix adds only the `create`
+  arm; no `read` or `update` list in any of the three changed.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -545,6 +579,25 @@ packages exist at only one layer, noted below where that is true.
   cross-validate, diff, patch, `manifestHash`, `meta.extends` resolution — entity
   *ordering* lives with the store that creates tables, ADR-0285), and
   `tenancy/` + `workflow/` (tenant resolution, workflow definition validation).
+  **`validatePermissions` checks a per-field grant for coherence with the entity grants beside it**
+  since ADR-0348, where before it checked only that the field exists and every role is declared —
+  and all three incoherences were reachable, **three of them live in the shipped packs**.
+  `checkFieldGrantCoherence` refuses, in this order: a field role the matching **entity** grant does
+  not name (first, because the other two read as puzzling when the cause is a role that cannot reach
+  the record at all — inert rather than dangerous, and it reads as working); an `update` role the
+  field's `read` grant does not name (a **blind overwrite**, which destroys a value the writer cannot
+  see — and an *absent* read grant is **not** a pass, since the field then falls to the
+  classification default and it is the same overwrite one level away, so the two cases get different
+  messages because the remedies differ); and a `required` field whose **effective** create grant
+  (`create ?? update`) fails to cover the entity's `create` roles, which makes the entity
+  uncreatable by a role the manifest plainly intends to create it. `requiredFieldsByEntity` comes
+  out of the entity index through `resolvedFields`, so a classified **trait** field is in scope.
+  These are **validation errors, not boot refusals** — the opposite of ADR-0340's ABAC check and for
+  a stated reason: an obligation's dischargeability is a property of the *deployment*, while all
+  three of these are properties of the manifest alone, so they are decidable by a pack author, by
+  `crossengin validate`, by the pack's own test suite and by the reviewer approving what the
+  Architect designed. A rule that can be checked earlier should be — and activation validates, so a
+  per-tenant manifest is covered with no second check to forget.
 - **`kernel-pg`** — the impure applier. `PgConnection` + `parsePgEnvConfig` + node-postgres
   binding, advisory-lock-gated per-statement migration application with `_meta_migrations`
   hash bookkeeping, preconditions, and the pgcrypto at-rest encryption stack (coverage report,
@@ -1006,6 +1059,20 @@ packages exist at only one layer, noted below where that is true.
   `operate-runtime`'s create and update handlers now, with the **same policy object** the redaction
   registry gets. `computeFieldRedaction` and `validateWriteMask` — the classification-unaware
   originals — are still callerless and superseded by the classified pair.
+  **A field grant has three arms since ADR-0348** — `read`, `update` and `create` — because the
+  first two were *one list consulted at two moments*, so a grant could not say **set once at
+  registration, never changed** and narrowing who may change a `required` field necessarily narrowed
+  who may create the record. `create` **absent falls back to `update`**, which is what let the arm
+  land without changing the meaning of a single shipped declaration, and `fieldWriteGrant(perm,
+  writeOp)` is the one spelling of that fallback so no reader re-derives it. `update ⊆ read` is
+  enforced by the kernel and **`create` is deliberately not**: a principal supplying a value already
+  knows it, so writing it discloses nothing, while changing a value you cannot read destroys one you
+  cannot see. `validateClassifiedWriteMask` takes a trailing `writeOp` defaulted to `"update"` — a
+  departure from `operationsForEntity`'s required-ness (ADR-0338) for the opposite reason: *that*
+  default could not possibly be correct, and this one is correct for the update path and **fails
+  closed** for the other, since the change grant is the narrower one wherever the two differ. It is
+  **required** on `WriteMaskInput` and `evaluateMask`, where the compiler can ask and a handler that
+  forgot it would refuse a create the manifest permits.
   **`abac.ts` is the ABAC obligation** (ADR-0340). `RbacGrant.abac` is an opaque **policy key**,
   bounded `min(1).max(200)` like `workflow-engine`'s `ABAC_CHECK_GUARD.policyKey` — the one spelling
   in the repo that was already right, and whose `defaultGuardEvaluator` already *threw* — never an
@@ -1090,13 +1157,20 @@ packages exist at only one layer, noted below where that is true.
   `ABAC_RECORD_AVAILABILITY_REASONS` carrying the sentence the boot refusal prints — so the position
   a record can reach, the handler that reaches it and the message explaining why it cannot have one
   definition apiece, and a reason that restates its own key fails a shape test. `abacGrantPosition`
-  is total and does not throw: three operation names are unreachable for a field obligation and are
+  is total and does not throw: the two operation names still unreachable for a field obligation are
   mapped to the entity position for that operation rather than defaulting, because the permissive
   default is the one a fall-through would pick. **`never` is pinned as the exact set
-  `{entity_create}`** since ADR-0345 — it was `{entity_create, entity_list}` after ADR-0343 — and as
+  `{entity_create, field_create}`** — `{entity_create, entity_list}` after ADR-0343,
+  `{entity_create}` after ADR-0345, and `field_create` joined it in ADR-0348 — and as
   an exact set rather than key by key, because per-key assertions on this map are what let
   `field_read` sit on the wrong value, so flipping a position back fails there rather than passing
-  quietly. `entity_list` is `always` now: the list handler loads the page before it returns, so
+  quietly. **`field_create` is one kind of impossibility at a second scope**, not a new kind: it
+  arrived with `FieldPermission.create` and answers `never` for `entity_create`'s own reason, since
+  the record a policy there would be about does not exist until the write commits.
+  `surveyAbacObligations` reads that arm **directly and never through the fallback**, because an
+  inherited `create` carries `update`'s obligation — already in the list — so resolving the fallback
+  would report the inherited one twice and a declared one not at all (ADR-0340's dropped obligation,
+  in the function the boot refusal is built from). `entity_list` is `always` now: the list handler loads the page before it returns, so
   every row is in hand, and **a denial there drops the row from the page rather than refusing the
   request**. ADR-0343's `field_read`-vs-`entity_list` distinction survives but **moves axis** — both
   have the record and both always did; what separates them is what a denial *does*, and reading that
@@ -2974,7 +3048,13 @@ opened them.
   `update: ["gov_admin"]`, and `front_desk` **blind-overwrote** `Patient.mrn` — replaced a medical
   record identifier it cannot read before or after, in the column ADR-0338 had just made ciphertext.
   Three parts, one of them a new default. **(1)** An explicitly declared per-field `update` grant is
-  enforced **always**, no flag: 7 fields, each deliberate, and it cannot make anything uncreatable.
+  enforced **always**, no flag: 7 fields, each deliberate — and the clause this entry used to carry,
+  *"and it cannot make anything uncreatable"*, is **false about three of the seven** (ADR-0348).
+  A `required` classified field whose write grant is narrower than its entity's `create` grant makes
+  the entity uncreatable by a role holding that grant, and `Citizen.national_id`,
+  `WorkOrder.cost_estimate` and `PerishableLot.cost_per_unit` were all in that shape: a case worker
+  could not register a citizen, a foreman could not raise a work order, a receiving clerk could not
+  receive a lot. All three are fixed, each by adding only a `create` arm.
   **(2)** `--sensitive-field-role` / `--sensitive-field-class <class>=<role>` declare who is
   privileged per class for entity routes, with `--audit-read-sensitive-*`'s grammar copied byte for
   byte and feeding **one** policy to the redaction registry *and* the write mask — so
@@ -2992,10 +3072,11 @@ opened them.
   the write; the redaction registry is keyed by response-carrying operationId while a write mask is
   keyed by entity; and the handler already holds four of the five arguments. A 403 precedes the 422,
   so a field you may not write is not answered with a list of which other fields are required.
-  What remains: **(1)** the **39 unauthored grants** — the end state is a per-field `update` and
-  `read` grant on every classified field in every pack, at which point the mask becomes the default
-  and the deployment declaration becomes the exception; the 12 required fields are the blocking
-  subset and the boot survey names them. **(2)** `computeFieldRedaction` and `validateWriteMask`,
+  What remains: **(1)** ~~the **39 unauthored grants**~~ — **closed by ADR-0348**, which also found
+  that they could not be authored as this entry described: one role list answered both write
+  moments, so narrowing who may *change* a required field necessarily narrowed who may *create* the
+  record. The fix is a third `create` arm plus three kernel coherence rules, and then the 39. See
+  the entry after next. **(2)** `computeFieldRedaction` and `validateWriteMask`,
   the classification-unaware originals, still have no callers and are probably deletable —
   a mechanical increment, and `pg-unreachable-stores.ts` does not fence *functions* (ADR-0337
   measured why). **(3)** ~~an ABAC-qualified grant grants unconditionally~~ — **closed by
@@ -3006,6 +3087,38 @@ opened them.
   surveyed; that check belongs beside ADR-0334's `unservable_field_type` in
   `applyTenantManifestSchema` — though the ABAC obligation check *is* covered per tenant, because
   ADR-0340 put it in `buildOperateHttpServer`.
+- **A field grant says who may set a value and who may change it, and what is left of it**
+  (ADR-0348 closed ADR-0339's Q1). The class is **one role list consulted at two moments**:
+  `FieldPermission` was `{read?, update?}` and the write mask asks the same list on a create and on
+  an update. Three consequences, all live. The shipped deployment's classified fields were
+  **write-only** — measured through real HTTP on `erp-core`, `ap_clerk` POSTed a Vendor with
+  `tax_id` and `contact_email`, the row holds both, and neither the create response nor
+  `GET /v1/vendors` returns either **to the credential that just wrote them**, across all 21 of that
+  pack's classified fields. **Set once at registration, never changed** was inexpressible, which is
+  why ADR-0339 found `front_desk` blind-overwriting `Patient.mrn` and could only have fixed it by
+  stopping the desk registering patients. And **three of its seven "deliberate" grants** made their
+  entity uncreatable (see the entry above). The fix: `create?` on the arm (absent ⇒ falls back to
+  `update`, so no shipped grant changed meaning), `field_create` in the ABAC position maps, three
+  kernel coherence rules, and the 39 grants authored by *deciding `read` and letting `update`
+  follow*. `update ⊆ read` is enforced, `create` deliberately is not — supplying a value you know
+  discloses nothing; changing one you cannot read destroys it.
+  What remains, in order: **(1)** `--classified-write-mask` can now become the **default** rather
+  than opt-in for the shipped packs, since its boot refusal has nothing left to name there — but a
+  *tenant's* own activated manifest can still declare an ungranted classified field, so flipping it
+  needs that path surveyed too (ADR-0339's Q5, still open and now the blocker for this). **(2)**
+  nothing fences a **new** classified field being granted at all: the three rules check that a
+  *declared* grant is coherent, not that one exists. A fourth rule — "a sensitive-classified field
+  has a grant" — would refuse **zero** fields today and is the cheapest moment it will ever have,
+  which is exactly `pg-storeless-tables.ts`' argument one domain across. **(3)** `FieldPermission`
+  has no `delete` arm and no per-transition arm, so *"this field may not be changed while the record
+  is `posted`"* remains a write **guard** question and not a grant one; the two vocabularies do not
+  meet. **(4)** `field_create` is unreachable in practice — a `create`-arm `abac` key is refused at
+  boot by ADR-0340's check because its availability is `never` — so the position exists to be
+  refused by name rather than served, which is correct and worth knowing before someone "wires" it.
+  **(5)** the `read` narrowing is a judgement per field (drop the general-purpose observer roles),
+  not a derivable rule, so a pack author adding a classified field gets the three refusals and no
+  guidance. **(6)** `computeFieldRedaction` and `validateWriteMask` are now *further* from the live
+  pair, since neither knows about the third arm, and still callerless.
 - **The ABAC obligation is enforced now, and what is left of it** (ADR-0340 closed ADR-0339's Q3).
   An ABAC-qualified grant granted unconditionally in **five** functions — `rbacCheck` plus all four
   in `fields.ts`, each reading `rule.roles` and never `rule.abac` — and two of those four are the
@@ -4155,7 +4268,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 342 records; 263 Accepted, 79 Proposed (the
+title or status change cannot drift. 343 records; 264 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

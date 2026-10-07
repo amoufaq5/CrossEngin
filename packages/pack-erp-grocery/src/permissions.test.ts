@@ -1,15 +1,15 @@
 import { fieldWriteGrant, type EntityPermissions, type FieldPermission } from "@crossengin/auth";
 import { describe, expect, it } from "vitest";
-import { ERP_GOVERNMENT_ENTITIES } from "./entities.js";
+import { ERP_GROCERY_ENTITIES } from "./entities.js";
 import {
-  CASE_PERMISSIONS,
-  CITIZEN_PERMISSIONS,
-  ERP_GOVERNMENT_PERMISSIONS,
+  ERP_GROCERY_PERMISSIONS,
+  PERISHABLE_LOT_PERMISSIONS,
+  SUPPLIER_PERMISSIONS,
 } from "./permissions.js";
-import { ERP_GOVERNMENT_ROLES } from "./roles.js";
-import { CASE_LIFECYCLE_WORKFLOW } from "./workflows.js";
+import { ERP_GROCERY_ROLES } from "./roles.js";
+import { PERISHABLE_LOT_LIFECYCLE_WORKFLOW } from "./workflows.js";
 
-const KNOWN_ROLES = new Set(Object.keys(ERP_GOVERNMENT_ROLES));
+const KNOWN_ROLES = new Set(Object.keys(ERP_GROCERY_ROLES));
 
 type GrantedField = {
   readonly entity: string;
@@ -17,15 +17,14 @@ type GrantedField = {
   readonly perm: FieldPermission;
   readonly entityPerms: EntityPermissions;
   readonly required: boolean;
-  readonly classification: string | undefined;
 };
 
 // Derived from the declarations rather than restated, so these assertions cannot
 // drift from the grants the way a hand-maintained role list does.
 function grantedFields(): readonly GrantedField[] {
   const out: GrantedField[] = [];
-  for (const entity of ERP_GOVERNMENT_ENTITIES) {
-    const entityPerms = ERP_GOVERNMENT_PERMISSIONS[entity.name];
+  for (const entity of ERP_GROCERY_ENTITIES) {
+    const entityPerms = ERP_GROCERY_PERMISSIONS[entity.name];
     if (!entityPerms?.fields) continue;
     const fieldPerms: Record<string, FieldPermission> = entityPerms.fields;
     for (const [field, perm] of Object.entries(fieldPerms)) {
@@ -37,24 +36,24 @@ function grantedFields(): readonly GrantedField[] {
         perm,
         entityPerms,
         required: declared?.required === true,
-        classification: declared?.classification,
       });
     }
   }
   return out;
 }
 
-describe("government permissions", () => {
-  it("covers exactly the three government entities", () => {
-    expect(Object.keys(ERP_GOVERNMENT_PERMISSIONS).sort()).toEqual([
-      "Case",
-      "Citizen",
-      "Permit",
-    ]);
+function rolesMissingFromCreate(g: GrantedField): readonly string[] {
+  const effective = fieldWriteGrant(g.perm, "create")?.roles ?? [];
+  return (g.entityPerms.create?.roles ?? []).filter((r) => !effective.includes(r));
+}
+
+describe("grocery permissions", () => {
+  it("covers exactly the two grocery entities", () => {
+    expect(Object.keys(ERP_GROCERY_PERMISSIONS).sort()).toEqual(["PerishableLot", "Supplier"]);
   });
 
   it("only grants roles declared in the pack", () => {
-    for (const perms of Object.values(ERP_GOVERNMENT_PERMISSIONS)) {
+    for (const perms of Object.values(ERP_GROCERY_PERMISSIONS)) {
       const buckets = [perms.list, perms.read, perms.create, perms.update, perms.delete];
       for (const bucket of buckets) {
         for (const role of bucket?.roles ?? []) expect(KNOWN_ROLES.has(role)).toBe(true);
@@ -74,37 +73,22 @@ describe("government permissions", () => {
     }
   });
 
-  it("excludes the permit officer from reading the national id", () => {
-    const idRead = CITIZEN_PERMISSIONS.fields?.national_id?.read?.roles ?? [];
-    expect(idRead).not.toContain("permit_officer");
-    expect(idRead).toContain("gov_auditor");
-  });
-
-  it("grants the four Case lifecycle transitions", () => {
-    expect(Object.keys(CASE_PERMISSIONS.transitions ?? {}).sort()).toEqual([
-      "approve",
-      "close",
-      "deny",
-      "submit_for_review",
-    ]);
-  });
-
-  it("each guarded transition has a matching grant; close is admin-only", () => {
-    const grants = CASE_PERMISSIONS.transitions ?? {};
-    for (const t of CASE_LIFECYCLE_WORKFLOW.transitions) {
+  it("each guarded transition has a matching grant", () => {
+    const grants = PERISHABLE_LOT_PERMISSIONS.transitions ?? {};
+    for (const t of PERISHABLE_LOT_LIFECYCLE_WORKFLOW.transitions) {
       const guarded = (t.guards ?? []).some(
-        (g) => g.kind === "permission" && g.permission === `Case.transition.${t.name}`,
+        (g) => g.kind === "permission" && g.permission === `PerishableLot.transition.${t.name}`,
       );
       if (guarded) expect(grants[t.name]).toBeDefined();
     }
-    expect(grants["close"]?.roles).toEqual(["gov_admin"]);
+    expect(Object.keys(grants).sort()).toEqual(["deplete", "shelve"]);
   });
 });
 
-describe("government field grants (ADR-0348)", () => {
+describe("grocery field grants (ADR-0348)", () => {
   it("grants every classified field in the pack", () => {
     const granted = new Set(grantedFields().map((g) => `${g.entity}.${g.field}`));
-    const classified = ERP_GOVERNMENT_ENTITIES.flatMap((e) =>
+    const classified = ERP_GROCERY_ENTITIES.flatMap((e) =>
       e.fields.filter((f) => f.classification !== undefined).map((f) => `${e.name}.${f.name}`),
     );
     expect(classified.length).toBeGreaterThan(0);
@@ -127,23 +111,30 @@ describe("government field grants (ADR-0348)", () => {
     let checked = 0;
     for (const g of grantedFields()) {
       if (!g.required) continue;
-      const effective = fieldWriteGrant(g.perm, "create")?.roles ?? [];
-      const missing = (g.entityPerms.create?.roles ?? []).filter((r) => !effective.includes(r));
+      const missing = rolesMissingFromCreate(g);
       expect(missing, `${g.entity}.${g.field} is uncreatable by ${missing.join()}`).toEqual([]);
       checked += 1;
     }
-    // Vacuity guard: national_id and fee_amount are both required.
-    expect(checked).toBeGreaterThanOrEqual(2);
+    // Vacuity guard: cost_per_unit is required.
+    expect(checked).toBeGreaterThanOrEqual(1);
+  });
+
+  it("lets a receiving clerk book a lot's cost without ever reading one", () => {
+    const perm = PERISHABLE_LOT_PERMISSIONS.fields?.cost_per_unit;
+    // The entity grant and the create arm have to agree, or a required field
+    // makes the entity uncreatable by a role holding the entity's create grant.
+    expect(fieldWriteGrant(perm, "create")?.roles).toEqual(
+      PERISHABLE_LOT_PERMISSIONS.create?.roles,
+    );
+    expect(fieldWriteGrant(perm, "create")?.roles).toContain("receiving_clerk");
+    expect(fieldWriteGrant(perm, "update")?.roles).not.toContain("receiving_clerk");
+    expect(perm?.read?.roles).not.toContain("receiving_clerk");
   });
 
   it("R3 — no field grant names a role the entity grant does not reach", () => {
     for (const g of grantedFields()) {
-      for (const [arm, entityOp] of [
-        ["read", "read"],
-        ["update", "update"],
-        ["create", "create"],
-      ] as const) {
-        const entityRoles = g.entityPerms[entityOp]?.roles ?? [];
+      for (const arm of ["read", "update", "create"] as const) {
+        const entityRoles = g.entityPerms[arm]?.roles ?? [];
         for (const role of g.perm[arm]?.roles ?? []) {
           expect(entityRoles, `${g.entity}.${g.field} ${arm}:${role}`).toContain(role);
         }
@@ -151,14 +142,10 @@ describe("government field grants (ADR-0348)", () => {
     }
   });
 
-  it("lets a case worker set a national id but never change one", () => {
-    const perm = CITIZEN_PERMISSIONS.fields?.national_id;
-    // The entity grant and the create arm have to agree, which is the whole fix:
-    // before it, a case_worker holding Citizen.create was refused on a required
-    // field and could not register a citizen at all.
-    expect(fieldWriteGrant(perm, "create")?.roles).toEqual(CITIZEN_PERMISSIONS.create?.roles);
-    expect(fieldWriteGrant(perm, "update")?.roles).toEqual(["gov_admin"]);
-    expect(fieldWriteGrant(perm, "create")?.roles).toContain("case_worker");
-    expect(fieldWriteGrant(perm, "update")?.roles).not.toContain("case_worker");
+  it("withholds the supplier's contact from the receiving clerk who reads the supplier", () => {
+    expect(SUPPLIER_PERMISSIONS.read?.roles).toContain("receiving_clerk");
+    expect(SUPPLIER_PERMISSIONS.fields?.contact_email?.read?.roles).not.toContain(
+      "receiving_clerk",
+    );
   });
 });

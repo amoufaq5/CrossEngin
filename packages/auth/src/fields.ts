@@ -10,10 +10,12 @@ import {
 } from "./abac.js";
 import type { AbacBatchRequest, AbacEnforcement, AbacEvaluationInput } from "./abac.js";
 import { resolveEffectiveRoles } from "./roles.js";
+import { fieldWriteGrant } from "./types.js";
 import type {
   AbacDischarge,
   EntityPermissions,
   FieldRedactionResult,
+  FieldWriteOperation,
   OperationName,
   Principal,
   RoleDefinition,
@@ -429,12 +431,25 @@ export function validateClassifiedWriteMask(
   patchFields: readonly ClassifiedField[],
   policy: SensitiveFieldPolicy = {},
   abac?: AbacEnforcement,
+  /**
+   * Which of the two write moments this is, so the `create` arm is read on a create and `update` on
+   * an update. `fieldWriteGrant` owns the fallback, so this function does not restate it.
+   *
+   * Trailing and defaulted rather than required, which is a departure from `operationsForEntity`
+   * (ADR-0338) and defensible for the opposite reason: that default could not possibly be correct,
+   * and this one is correct for the update path and **fails closed** for the other. A forgotten
+   * argument enforces the *change* grant on a create, and for every field where the two arms differ
+   * the change grant is the narrower one — so the mistake refuses a create it should have admitted
+   * rather than admitting one it should have refused. That is the direction an omitted
+   * `AbacEnforcement` already fails in on this same function.
+   */
+  writeOp: FieldWriteOperation = "update",
 ): WriteMaskResult {
   const effective = resolveEffectiveRoles(principal, roles);
   const fieldPerms = entityPerms.fields;
 
   for (const field of patchFields) {
-    const rule = fieldPerms?.[field.name]?.update;
+    const rule = fieldWriteGrant(fieldPerms?.[field.name], writeOp);
     if (rule !== undefined) {
       if (!rule.roles.some((r) => effective.has(r))) {
         return { ok: false, rejectedField: field.name };
@@ -442,7 +457,7 @@ export function validateClassifiedWriteMask(
       const discharge = dischargeFieldObligation(
         rule.abac,
         principal,
-        "update",
+        writeOp,
         field.name,
         abac,
       );

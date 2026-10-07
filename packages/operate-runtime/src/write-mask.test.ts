@@ -5,6 +5,7 @@ import {
   type AbacOutcome,
   type ClassifiedField,
   type EntityPermissions,
+  type FieldWriteOperation,
   type Principal,
   type RoleDefinition,
   type RoleName,
@@ -68,6 +69,7 @@ function mask(
   role: RoleName,
   writtenKeys: readonly string[],
   policy?: SensitiveFieldPolicy,
+  writeOp: FieldWriteOperation = "update",
 ) {
   return maskWrite({
     mode,
@@ -77,6 +79,7 @@ function mask(
     roles: ROLES,
     classifiedFields: CLASSIFIED,
     writtenKeys,
+    writeOp,
     ...(policy !== undefined ? { policy } : {}),
   });
 }
@@ -253,6 +256,7 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
       roles: ROLES,
       classifiedFields: [{ name: "diagnosis_note", classification: "phi" }],
       writtenKeys: ["diagnosis_note"],
+      writeOp: "update",
       policy,
     });
     expect(refusal).toEqual({
@@ -270,6 +274,7 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
         roles: ROLES,
         classifiedFields: [{ name: "given_name", classification: "pii" }],
         writtenKeys: ["given_name"],
+        writeOp: "update",
         policy,
       }),
     ).toBeNull();
@@ -297,6 +302,7 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
         roles: ROLES,
         classifiedFields: [{ name: "memo", classification: "internal" }],
         writtenKeys: ["memo"],
+        writeOp: "update",
       }),
     ).toBeNull();
   });
@@ -311,6 +317,7 @@ describe("maskWrite — classified (opt-in, ADR-0329's symmetric rule)", () => {
         roles: ROLES,
         classifiedFields: [{ name: "unit_cost", classification: "commercial_sensitive" }],
         writtenKeys: ["unit_cost"],
+        writeOp: "update",
       })?.field,
     ).toBe("unit_cost");
   });
@@ -356,6 +363,7 @@ function abacMask(
   writtenKeys: readonly string[],
   abacEvaluator?: AbacEvaluator,
   record?: Readonly<Record<string, unknown>>,
+  writeOp: FieldWriteOperation = "update",
 ) {
   return maskWrite({
     mode,
@@ -365,6 +373,7 @@ function abacMask(
     roles: ROLES,
     classifiedFields: CLASSIFIED,
     writtenKeys,
+    writeOp,
     ...(abacEvaluator !== undefined ? { abacEvaluator } : {}),
     ...(record !== undefined ? { record } : {}),
   });
@@ -513,5 +522,92 @@ describe("maskWrite — the record the obligation's policy is about", () => {
       "explicit_update_grant",
     );
     expect(seen).toEqual([]);
+  });
+});
+
+describe("maskWrite — the create arm selects a different grant from the update arm", () => {
+  // The registration shape, and the reason `FieldPermission` grew a third arm: a clerk **sets** the
+  // medical record number they were handed and can neither read it back nor change it afterwards.
+  // One role list could not say that — narrowing who may change a required field narrowed who may
+  // create the record, which is how `erp-government` shipped a Citizen `case_worker` could not
+  // create (ADR-0339 made an explicit grant authoritative with no flag).
+  const SET_ONCE: EntityPermissions = {
+    create: { roles: ["clerk", "clinician"] },
+    update: { roles: ["clerk", "clinician"] },
+    fields: {
+      mrn: {
+        read: { roles: ["clinician"] },
+        update: { roles: ["clinician"] },
+        create: { roles: ["clerk", "clinician"] },
+      },
+    },
+  };
+
+  const run = (role: RoleName, writeOp: FieldWriteOperation) =>
+    maskWrite({
+      mode: "classified",
+      entity: ENTITY,
+      principal: principal(role),
+      entityPerms: SET_ONCE,
+      roles: ROLES,
+      classifiedFields: CLASSIFIED,
+      writtenKeys: ["mrn"],
+      writeOp,
+    });
+
+  it("admits the registrar on a create", () => {
+    expect(run("clerk", "create")).toBeNull();
+  });
+
+  it("refuses the same registrar on an update", () => {
+    expect(run("clerk", "update")).toEqual({
+      field: "mrn",
+      rule: "explicit_update_grant",
+      classification: "phi",
+    });
+  });
+
+  it("admits the clinician on both, since they hold every arm", () => {
+    expect(run("clinician", "create")).toBeNull();
+    expect(run("clinician", "update")).toBeNull();
+  });
+
+  it("falls back to update when no create arm is declared, so existing grants are unchanged", () => {
+    // The property that let this arm land without touching a single shipped declaration: with no
+    // `create` key, both moments read `update` and answer exactly as they did before.
+    for (const op of ["create", "update"] as const) {
+      expect(mask("classified", "clerk", ["mrn"], undefined, op)).toEqual({
+        field: "mrn",
+        rule: "explicit_update_grant",
+        classification: "phi",
+      });
+      expect(mask("classified", "clinician", ["mrn"], undefined, op)).toBeNull();
+    }
+  });
+
+  it("reads the create arm when it is the only declared write arm", () => {
+    // The candidate filter asks `fieldWriteGrant`, not `update` — reading `update` here would drop
+    // the key from the candidate list on a create and skip the one grant that governs it.
+    const createOnly: EntityPermissions = {
+      create: { roles: ["clerk", "clinician"] },
+      update: { roles: ["clerk", "clinician"] },
+      fields: { nickname: { read: { roles: ["clerk", "clinician"] }, create: { roles: ["clinician"] } } },
+    };
+    const only = (role: RoleName, writeOp: FieldWriteOperation) =>
+      maskWrite({
+        mode: "classified",
+        entity: ENTITY,
+        principal: principal(role),
+        entityPerms: createOnly,
+        roles: ROLES,
+        classifiedFields: CLASSIFIED,
+        writtenKeys: ["nickname"],
+        writeOp,
+      });
+    expect(only("clerk", "create")?.field).toBe("nickname");
+    expect(only("clinician", "create")).toBeNull();
+    // `nickname` is unclassified and has no `update` arm, so on an update there is no rule at all
+    // and nothing refuses — the fallback finding nothing is not the same as finding an empty grant.
+    expect(only("clerk", "update")).toBeNull();
   });
 });

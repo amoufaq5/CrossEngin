@@ -52,7 +52,35 @@ export type RbacGrant = z.infer<typeof RbacGrantSchema>;
 export const FieldPermissionSchema = z.object({
   read: RbacGrantSchema.optional(),
   update: RbacGrantSchema.optional(),
+  /**
+   * Who may **set** this field on a create, where `update` is who may **change** it afterwards.
+   *
+   * Absent falls back to `update`, so every declaration written before this arm existed keeps its
+   * exact meaning — the arm adds a distinction rather than changing a default. What it makes
+   * expressible is *set once, never changed*: a medical record number, a national id, a tax
+   * identity. Before it, one list answered both moments, so narrowing who may change a **required**
+   * field necessarily narrowed who may create the record — which is why `erp-government` shipped a
+   * `Citizen` that `case_worker` could not create despite holding the entity's `create` grant.
+   *
+   * It is deliberately **not** constrained to be a subset of `read`, where `update` is: a principal
+   * supplying a value already knows it, so writing it discloses nothing, while changing a value you
+   * cannot read destroys one you cannot see. That asymmetry is the whole reason two arms are better
+   * than one wider list.
+   */
+  create: RbacGrantSchema.optional(),
 });
+
+/** The one spelling of the fallback, so no reader re-derives it. */
+export function fieldWriteGrant(
+  perm: FieldPermission | undefined,
+  writeOp: FieldWriteOperation,
+): RbacGrant | undefined {
+  if (perm === undefined) return undefined;
+  return writeOp === "create" ? (perm.create ?? perm.update) : perm.update;
+}
+
+export const FIELD_WRITE_OPERATIONS = ["create", "update"] as const;
+export type FieldWriteOperation = (typeof FIELD_WRITE_OPERATIONS)[number];
 
 export type FieldPermission = z.infer<typeof FieldPermissionSchema>;
 
