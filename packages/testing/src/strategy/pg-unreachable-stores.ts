@@ -37,7 +37,13 @@ import { REPO_ROOT, workspaceRoots } from "./workspace-sql-scan.js";
  *     `SloEnforcementReplayer`, `AccessReviewReplayer`, `GatewayReplayer`, each advertised in
  *     CLAUDE.md as a shipped capability and two of them bug-fixed (ADR-0330, ADR-0333) while nothing
  *     called them — plus `TraceCollector`, `SyntheticTracker`, `KeyRotationMigrator`,
- *     `CampaignScheduler`, `RegionRouter` and `WorkflowSignalBridge`.
+ *     `CampaignScheduler`, `RegionRouter` and `WorkflowSignalBridge`. That list is a record of what
+ *     the widening *found*, so it is kept whole as members of it resolve, and the two resolutions so
+ *     far are the two different answers a finding here can have: `CampaignScheduler` was **deleted**
+ *     (ADR-0337 — a second spelling of live code), and `KeyRotationMigrator` was **wired**
+ *     (ADR-0349 — `crypto-pg`'s per-tenant rekey constructs it). Neither is declared below any
+ *     more, which is the rule working rather than the list rotting: a resolved member's line is
+ *     deleted, and until it is, `overtaken` says so.
  *  2. **`apps/*` was out of scope by declaration**, so an app-internal store the app never
  *     constructs — the same defect — was unasked. In scope now, and the walk is per *member* rather
  *     than per `<member>/src`, because `apps/operate-web` has **no `src/`** (its code is `app/`,
@@ -1714,20 +1720,6 @@ export const UNREACHABLE_STORES: readonly UnreachableDeclaration[] = Object.free
     consequence:
       "Customer communications are not stored, so the GDPR 72h breach-notification deadline the contract enforces is never recorded against a published notice and a deployment cannot show what it told whom, when, or that it retracted anything.",
     note: "ADR-0296's third store. Its own comment names the missing half: platform-wide with no tenant-scoped read path, `which is also why nothing tenant-facing is wired to this store even though affected_tenants is one of the audiences`.",
-  },
-
-  /* --------------------------------------------------------------- kernel-pg (1) */
-  {
-    scope: "symbol",
-    pkg: "packages/kernel-pg",
-    symbol: "KeyRotationMigrator",
-    reason: "prerequisite_of_unbuilt_surface",
-    blockedBy:
-      "a key-rotation surface on either binary. `planColumnKeyRotation` and `reencryptColumnSql` are pure and reachable through the package's exports, and this class is the thing that would *execute* a plan against a live cluster — so what is missing is a `crossengin-pg rotate-keys` subcommand taking a key handle and a plan, plus the operator confirmation a re-encrypting UPDATE over a populated PHI column needs. Ordering, not shape.",
-    tables: [],
-    consequence:
-      "A pgcrypto key rotation is planned and never executed: `crypto-pg`'s registry can mark a key rotated while every encrypted column still holds ciphertext under the old key, so the registry's claim and the data disagree and nothing in the workspace closes the gap. ADR-0338 sharpened this from latent to load-bearing: at-rest column encryption is now live, with a per-tenant key derived from `COLUMN_ENCRYPTION_SECRET` under a generation-tagged HKDF `info` string — so a rotation is *expressible* for the first time, and because this executor has no caller the generation is deliberately exposed by no flag or env var. A deployment that could bump it would make every existing ciphertext undecryptable (`Wrong key or corrupt data` on read) with no way back. The knob lands in the same increment as this class's caller, and not before.",
-    note: "`encryption-writepath.ts` ships the planner, the SQL emitter, the formatter and this executor; the first three are exercised through `kernel-pg`'s CLI and the executor is constructed only by its own test.",
   },
 
   /* --------------------------------------------------------- observability-runtime (2) */

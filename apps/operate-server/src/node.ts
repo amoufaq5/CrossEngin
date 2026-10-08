@@ -43,8 +43,8 @@ import {
   eraseTenantSchemaWithin,
   ingestStripeWebhook,
   surveyTenantSchemaWithCollateral,
+  tenantSchemaName,
   type ColumnEncryptionKeySource,
-  columnPlansForManifest,
 } from "@crossengin/operate-runtime-pg";
 
 import type { PruneOptions, ReplayOptions, ServeOptions, VerifyChainOptions } from "./cli.js";
@@ -109,10 +109,19 @@ import {
 } from "./cursor-encryption.js";
 import {
   COLUMN_KEY_MODE_FLAG,
+  DEFAULT_COLUMN_KEY_TTL_MS,
   buildEnvelopeKeySource,
   formatColumnKeyMode,
-  type TenantCiphertextProbe,
+  formatShreddability,
+  shreddabilityOf,
 } from "./data-key-envelope.js";
+import { buildTenantCiphertextProbe } from "./tenant-ciphertext-probe.js";
+import {
+  TENANT_WRITE_STATUS_DETAIL,
+  probeTenantWriteStatus,
+  type RekeyOptions,
+  type TenantWriteStatus,
+} from "./rekey.js";
 import {
   CLASSIFIED_WRITE_MASK_FLAG,
   buildSensitiveFieldPolicy,
@@ -354,7 +363,14 @@ import {
   tenantSourceScopes,
   type CheckpointLifecycle,
 } from "./checkpoint-scheduler.js";
-import { PostgresDataKeyStore, PostgresKeyRegistry } from "@crossengin/crypto-pg";
+import {
+  PostgresDataKeyStore,
+  PostgresKeyRegistry,
+  rekeyTenant,
+  surveyTenantRekey,
+  type TenantRekeyResult,
+  type TenantRekeySurvey,
+} from "@crossengin/crypto-pg";
 import { deriveTenantKek, parseColumnEncryptionSecret } from "@crossengin/crypto";
 import { PostgresChainCheckpointStore, PostgresChainLogReader } from "@crossengin/forensics-pg";
 import {
@@ -568,74 +584,6 @@ interface ResolvedStores {
   readonly columnKey?: ColumnEncryptionKeySource;
 }
 
-/**
- * Whether a tenant may already hold column ciphertext written under the derived key.
- *
- * The answer decides whether the envelope **seeds** that tenant's data key from the derived one or
- * generates a random one, and the two mistakes are not symmetric: seeding a tenant that holds
- * nothing costs only shreddability, while randomising one that holds ciphertext makes that
- * ciphertext **permanently unreadable**. So every uncertainty resolves to `true`.
- *
- * It asks the direct question — does any table carrying an encrypted column hold a row for this
- * tenant — rather than a proxy. The first version of this probe asked whether the tenant's *own*
- * Postgres schema existed, which is sound only for the per-tenant manifests of ADR-0314: a boot
- * manifest's column tables live in the deployment's shared schema, so that probe answered `false`
- * for every tenant, handed each of them a random key and made PHI written the day before
- * unreadable. Found live, which is where it had to be found — nothing offline distinguishes a
- * proxy that is merely indirect from one that is wrong.
- *
- * A missing table is `false` by the same reasoning as an absent schema was: a table the store has
- * not created cannot hold a row. A probe that throws for any other reason answers `true`, which is
- * sticky — the provenance is written once — and that is the safe direction rather than a good one.
- */
-function tenantMayHoldCiphertext(
-  conn: PgConnection,
-  manifest: Manifest,
-  schema: string | undefined,
-): TenantCiphertextProbe {
-  const resolved = schema ?? "public";
-  const encrypted = encryptedEntityNames(manifest, { schema: resolved });
-  const plans = columnPlansForManifest(manifest, { schema: resolved });
-  const tables = [...encrypted].flatMap((entity) => {
-    const plan = plans.get(entity);
-    return plan === undefined ? [] : [plan.table];
-  });
-  return async (tenantId: string): Promise<boolean> => {
-    // No encrypted column anywhere means no ciphertext to protect, so a random key is safe and the
-    // tenant is shreddable. That is the one `false` this probe can give without asking Postgres.
-    if (tables.length === 0) return false;
-    for (const table of tables) {
-      try {
-        const result = await conn.query<{ readonly one: number }>(
-          `SELECT 1 AS one FROM ${quoteQualified(resolved, table)} WHERE tenant_id = $1 LIMIT 1`,
-          [tenantId],
-        );
-        if (result.rows.length > 0) return true;
-      } catch (err) {
-        // `42P01` is "relation does not exist", which answers the question: the store has not
-        // created this entity's table, so it holds nothing. Anything else is unknown, and unknown
-        // resolves to "may hold".
-        if (!isUndefinedTable(err)) return true;
-      }
-    }
-    return false;
-  };
-}
-
-/** Postgres `undefined_table`. A table that does not exist holds no rows, which is an answer. */
-function isUndefinedTable(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { readonly code?: unknown }).code === "42P01"
-  );
-}
-
-function quoteQualified(schema: string, table: string): string {
-  const ident = (raw: string): string => `"${raw.replace(/"/g, '""')}"`;
-  return `${ident(schema)}.${ident(table)}`;
-}
-
 async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<ResolvedStores> {
   // Decided before a connection is opened, because every outcome here is about whether this
   // deployment may serve this manifest at all. A classification that silently means nothing is
@@ -723,7 +671,21 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
     return buildEnvelopeKeySource({
       store,
       secret,
-      mayHoldCiphertext: tenantMayHoldCiphertext(conn, manifest, schema),
+      // The boot schema the column store actually writes to, which is `public` when `--schema` is
+      // absent — `ColumnMappedEntityStore`'s own default, and not this module's `undefined`.
+      mayHoldCiphertext: buildTenantCiphertextProbe({ conn, bootSchema: schema ?? "public" }),
+      ...(options.columnKeyTtlMs !== null ? { ttlMs: options.columnKeyTtlMs } : {}),
+      // The first caller `formatShreddability` has ever had. ADR-0347 shipped it as "the one place
+      // an operator reads" and `resolveColumnKey` discarded the provenance, so no deployment could
+      // answer whether destroying a given tenant's key destroys anything — which is also the input
+      // a rekey needs. Per tenant and once, on the cold resolution, because it is a property of
+      // that tenant's row and not of the mode.
+      onResolved: (tenantId, provenance) => {
+        console.info(
+          `[phi] tenant ${tenantId}: ` +
+            `${formatShreddability(shreddabilityOf(options.columnKeyMode, provenance))}`,
+        );
+      },
     });
   })();
   if (derivedColumnKey !== undefined) {
@@ -4058,6 +4020,105 @@ export async function runVerifyChain(options: VerifyChainOptions): Promise<Chain
       return await verifyChainFromCheckpoint(reader, registry, checkpoints, tenantId);
     }
     return await verifyChainFull(reader, registry, tenantId);
+  } finally {
+    await conn.close();
+  }
+}
+
+/** What `operate-server rekey` reports, either as a plan or as a completed rotation. */
+export interface RekeyReport {
+  readonly tenantId: string;
+  readonly dataSchema: string;
+  readonly writeStatus: TenantWriteStatus;
+  readonly survey: TenantRekeySurvey;
+  /** Absent on `--plan`, and on a run the survey refused. */
+  readonly result: TenantRekeyResult | null;
+  readonly staleKeyWindowMs: number;
+  readonly ok: boolean;
+}
+
+/**
+ * Surveys, optionally rekeys, and reports — the runner behind the `rekey` subcommand.
+ *
+ * The write-status gate is a **refusal with a named hatch**, which is where this departs from the
+ * other three maintenance subcommands: they are read-only and this one is not. A tenant whose
+ * `meta.tenants.status` still permits writes has serving processes that may hold the previous key
+ * in cache, and a write under that key stores new ciphertext the new key cannot read, splitting the
+ * tenant's data across two keys with nothing on any row recording which. That is the one outcome
+ * here that cannot be undone, so it is refused by default and `--allow-live-rekey` is the
+ * admission — ADR-0338's `--allow-plaintext-phi` shape, for a hazard an operator may legitimately
+ * have closed another way, such as taking the fleet down.
+ *
+ * `no_tenant_row` **reports rather than refuses**, because `--api-key 'key:role:tenant'` names an
+ * arbitrary UUID with no `meta.tenants` row in any dev deployment (ADR-0334's own boot survey found
+ * exactly that), so refusing on absence would block the subcommand precisely where it is most
+ * needed and teach an operator to pass the hatch by reflex.
+ */
+export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
+  const rawSecret = process.env[COLUMN_ENCRYPTION_SECRET_VAR] ?? "";
+  if (rawSecret.trim().length === 0) {
+    throw new Error(
+      `rekey needs ${COLUMN_ENCRYPTION_SECRET_VAR}: the stored data key is wrapped under a ` +
+        "key-encryption key derived from it, so without the secret the current key cannot be " +
+        "unwrapped and the rotation has nothing to re-encrypt from.",
+    );
+  }
+  // Parsed eagerly, so a secret that is present and too weak fails here rather than after the
+  // survey has printed a plan an operator would then act on.
+  const secret = parseColumnEncryptionSecret(rawSecret);
+  const metaSchema = options.schema ?? undefined;
+  const dataSchema = options.dataSchema ?? "public";
+  const conn = createNodePgConnection(parsePgEnvConfig());
+  try {
+    const store = new PostgresDataKeyStore(
+      conn,
+      (tenantId) => deriveTenantKek(secret, tenantId),
+      metaSchema !== undefined ? { schema: metaSchema } : {},
+    );
+    const writeStatus = await probeTenantWriteStatus(
+      conn,
+      metaSchema ?? "meta",
+      options.tenantId,
+    );
+    const survey = await surveyTenantRekey({
+      conn,
+      store,
+      tenantId: options.tenantId,
+      dataSchema,
+      // The one alternative worth naming: a tenant serving its own activated manifest holds its
+      // encrypted columns here and nowhere `--data-schema public` can see, and an empty plan is how
+      // that mistake surfaces. The name comes from `operate-runtime-pg`, so this module invents no
+      // naming convention of its own.
+      alternativeSchemas: [tenantSchemaName(options.tenantId)],
+    });
+    const staleKeyWindowMs = DEFAULT_COLUMN_KEY_TTL_MS;
+    if (options.plan || survey.refusals.length > 0) {
+      return {
+        tenantId: options.tenantId,
+        dataSchema,
+        writeStatus,
+        survey,
+        result: null,
+        staleKeyWindowMs,
+        ok: survey.refusals.length === 0,
+      };
+    }
+    if (writeStatus === "permits_writes" && !options.allowLiveRekey) {
+      throw new Error(
+        `tenant ${options.tenantId} still accepts writes: ${TENANT_WRITE_STATUS_DETAIL.permits_writes}` +
+          " Suspend it for the duration, or pass --allow-live-rekey if the fleet is already down.",
+      );
+    }
+    const result = await rekeyTenant({ conn, store, tenantId: options.tenantId, dataSchema });
+    return {
+      tenantId: options.tenantId,
+      dataSchema,
+      writeStatus,
+      survey,
+      result,
+      staleKeyWindowMs,
+      ok: true,
+    };
   } finally {
     await conn.close();
   }

@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~17,542 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~17,720 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -2520,6 +2520,19 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   transaction**, because `RETURNING` answers with the *new* row and `PENDING_DELETION_SOURCES` has
   three members, so the predicate's candidate list does not say which one matched (and there is no
   `RETURNING OLD` before PG 18 against a floor of 14).
+  **`operate-server rekey` is the fourth maintenance subcommand** (ADR-0349) and the only one that
+  writes: `--tenant <uuid> --confirm-tenant <uuid> [--plan]` moves one tenant's at-rest column key
+  to a fresh random data key in a single transaction, re-encrypting their encrypted columns and
+  retiring the old generation, which is what makes a later destruction bound anything. The tenant id
+  is typed **twice** (ADR-0316's `confirmTenantId` rule, required even under `--plan` so the
+  invocation an operator reviews is the one they re-run) and there is deliberately no `--yes`, since
+  a flag meaning "I meant it" can be pasted from a runbook without reading the id. **Two** schema
+  flags, which this subcommand cannot avoid: one `--schema` drives `PostgresDataKeyStore` (default
+  `meta`) and `ColumnMappedEntityStore` (default `public`), so a single value would address the
+  wrapped key correctly and the ciphertext wrongly for at least one configuration — and, finding no
+  key where it looked, provision a second one. It must run on a session RLS does not confine, and
+  refuses `permits_writes` with `--allow-live-rekey` as the hatch while **reporting**
+  `no_tenant_row`, because an api-key principal naming an unprovisioned UUID reads that way.
   **`operate-server replay` is the first caller the six drift replayers ever had** (ADR-0337), and
   it is read-only. `REPLAY_SCOPE_SUPPORT` is a **total map** over the six subsystems because they do
   not share one scoping story, and the three arms are read off the catalog rather than chosen:
@@ -2638,9 +2651,17 @@ halves from disk in **both directions**, with a negative control.
 
 **`meta.tenant_data_keys` carries `TENANT_FK` for exactly the inverted reason** (ADR-0347): it is
 the one table whose *survival* defeats its own purpose, since a wrapped key outliving its tenant is
-a key nobody destroyed. So it cascades, and the Article 17 erasure needed no new code to reach it —
-confirmed by the shared-table erasure's own target counts failing on 114 → 115 the moment it was
-catalogued, which is the fence doing its job rather than a test to update. It carries **no platform
+a key nobody destroyed. The Article 17 erasure needed no new code to reach it — confirmed by the
+shared-table erasure's own target counts failing on 114 → 115 the moment it was catalogued, which is
+the fence doing its job rather than a test to update — but **the mechanism is the delete by name and
+not the cascade** (ADR-0349): `eraseSharedTablesWithin` reaches the row because it carries
+`tenant_id`, and the `ON DELETE CASCADE` has **never fired and cannot**, because nothing in the
+workspace ever deletes a `meta.tenants` row. Retirement is `UPDATE … SET status`. So the cascade is
+not a second fence; it is inert, and this file credited it with the erasure for two increments.
+The constraint is **not** inert, though, and that is its live consequence: a tenant with no
+`meta.tenants` row cannot have a data key at all, so `--column-key-mode envelope` answers every PHI
+read and write for an unprovisioned api-key tenant with `tenant_data_keys_tenant_id_fkey` — reported
+as a 504. A boot survey names them. It carries **no platform
 arm**: a data key is never platform-scoped, `tenant_id` is NOT NULL, and a platform read arm would
 let any tenant's gateway session read every tenant's wrapped key.
 
@@ -3014,11 +3035,12 @@ opened them.
   of the key that ciphertext is already under — and a seeded key stays recomputable from the
   deployment secret. So `provenance` is on the row, shreddability answers over `(mode, provenance)`,
   and `--column-key-mode` is default-`derived` and opt-in.
-  What remains, in order: **(1)** the **rekey executor**. `KeyRotationMigrator` is still callerless,
-  so a `seeded_from_derived` tenant cannot be moved to a random key — which means that for an
-  *existing* deployment this increment bought the mechanism and **not yet the horizon**, since every
-  migrated tenant with data is seeded. It needs a decision about a migration that halts partway, and
-  `provenance` is exactly the field naming which tenants want it. **(2)** a **KMS-held KEK**, which
+  What remains, in order: **(1)** ~~the **rekey executor**~~ — **closed by ADR-0349**, which also
+  found that `KeyRotationMigrator`'s "decision about a migration that halts partway" was the wrong
+  question: a half-rotated tenant is **unserveable either way**, since one key is resolved per
+  tenant per operation, so a resume ledger would make an unrecoverable state resumable in principle
+  and still unreadable in fact. Per-*tenant* scoping makes one transaction the answer where
+  per-schema did not. See the entry after next. **(2)** a **KMS-held KEK**, which
   is what would support ADR-0338's original claim — revoking a key held outside the cluster bounds
   recovery from *every* backup, where destroying an in-database row does not. `kek_generation` is on
   the row for it, so it is a second generation rather than a rewrite, and
@@ -3026,16 +3048,79 @@ opened them.
   **real** provenance: `shreddabilityOf` is called with the mode alone, so the boot line cannot say
   whether a given tenant is shreddable and an operator has no way to ask. A platform route or a CLI
   subcommand would, and it is the surface that makes (1) actionable. **(4)**
-  `PostgresDataKeyStore.destroy` has **no caller** — the erasure destroys the row by cascade, which
-  is correct and leaves the method reachable by nothing; that is `pg-unreachable-stores.ts`'s
-  question asked of a *method*, which that rule does not ask. **(5)** the key-source cache is **not
-  evicted on destruction**, harmless only because a destruction happens inside the pipeline that
-  retires the tenant row in the same transaction (ADR-0319, ADR-0320) and `--tenant-status-gate`
-  refuses the tenant afterwards; a destruction reachable outside that pipeline needs an eviction.
+  `PostgresDataKeyStore.destroy` has **no caller**, and the reason given here was **wrong twice**:
+  the erasure deletes the row **by name** (`eraseSharedTablesWithin` reaches it, and the
+  meta-schema's own comment says so), and the `ON DELETE CASCADE` beside it has **never fired and
+  cannot**, because nothing in the workspace ever deletes a `meta.tenants` row — retirement is
+  `UPDATE … SET status`. So the cascade is not a second fence. The method is still reachable by
+  nothing, which is `pg-unreachable-stores.ts`'s question asked of a *method*, which that rule does
+  not ask. **(5)** the key-source cache's eviction, where the claim here was **false and cited an
+  ADR that rejected its own premise**: it said a destruction happens inside the pipeline that
+  retires the tenant row "in the same transaction (ADR-0319, ADR-0320)", and ADR-0320 has a section
+  headed *"The tenant row is retired **after** the pipeline commits"* listing that option as
+  **rejected** — and both legs were conditional anyway, since the retirement runs in a `try`/`catch`
+  reporting `tenantRetired: false` on a **200** and `--tenant-status-gate` is opt-in and off by
+  default. ADR-0349 **bounds** it with `--column-key-ttl-ms` (1000..300000, default 30s, the tenant
+  status directory's figure) rather than closing it: a rekey changes the key out of process, so
+  until the entry lapses a serving process's **reads** raise `Wrong key or corrupt data` — loud, and
+  never a wrong answer — while its **writes** would store new values under the previous key and
+  split the tenant's columns across two keys with nothing recording which. Closing it needs the
+  serving fleet *told*.
   **(6)** no `key_generation` column on the entity tables, so a tenant's encrypted columns must all
   sit under one key and a partial rekey is unsafe — it is what would make a mis-seeded tenant
   recoverable, and it is a kernel change, since it reaches `emitEntityTableDdl`'s column plan and the
   encrypting-view trigger path where the key ref is baked into a plpgsql function body.
+- **A seeded tenant can be moved to a random key, and what is left of it** (ADR-0349 closed
+  ADR-0347's Q1). The class is **an executor whose only atomic unit was the wrong one**:
+  `KeyRotationMigrator` rotates a whole *schema*, one *column* per transaction, and for a per-tenant
+  key both axes are wrong. `reencryptColumnSql` emitted `WHERE col IS NOT NULL` and
+  `ReencryptColumnInput` had **no field that could carry a predicate**, so under a boot manifest —
+  where every tenant's encrypted columns share one schema with a `tenant_id` column — a rekey for
+  one tenant would re-encrypt every other tenant's PHI under this tenant's key pair, and in envelope
+  mode could not get that far, since `pgp_sym_decrypt` raises on the first foreign row. And the
+  per-column split bought nothing: a resume ledger makes a half-applied rotation *resumable* while
+  `ColumnEncryptionKeySource` resolves exactly one key per tenant per operation, so a half-rotated
+  tenant is unreadable either way. `ReencryptScope` is **required** and discriminated
+  (`{kind:"tenant"}` / `{kind:"every_row", because}`), and all three statements the rekey issues are
+  built from **one** `scopeWhere`, so the counts it compares cannot be about different row sets.
+  `rekeyTenant` lives in `crypto-pg` — the one package depending on both `kernel-pg`'s emitter and
+  `@crossengin/crypto`'s wrap — and is **one transaction**: context, per-tenant advisory lock, load
+  generation G, mint a **random** DEK, refuse if the two key *values* match, set both key GUCs as
+  bound `set_config` parameters, rotate, **confirm every rewritten row reads back under the new
+  key**, write G+1 as `random`, delete every earlier generation. Nothing is caught: a returned
+  result means the ciphertext and the key row agree, a throw means neither moved.
+  `rls_would_confine_this_session` **stays**, and its reason is the subtle part — for a
+  tenant-scoped rotation the confinement *is* the scope, which is true of the **rows** and false of
+  the **count**, because a confined session reports `0 rows re-encrypted`, byte-identical to "this
+  tenant holds no ciphertext", and the rekey's next act is to delete the generation those rows are
+  under. So the tenant predicate is **not a second belt beside RLS — it is the only confinement**.
+  Verified live as a non-owner: the fence refuses a role that owns nothing; the write-status gate
+  refuses an `active` tenant; suspended, the rekey reports `generation 1 → 2, provenance
+  seeded_from_derived → random` with 1 row confirmed readable under the new key; tenant A's
+  ciphertext then raises `Wrong key or corrupt data` under the derived key it was written with while
+  **tenant B's still returns its value** — an exact complement; and destroying A's row makes their
+  PHI unreadable **with `COLUMN_ENCRYPTION_SECRET` in hand**, which is what ADR-0347 shipped the
+  mechanism for and could not show.
+  Three facts the live run produced that nothing offline could. **(a)**
+  `--column-key-mode envelope` **cannot provision a key for a tenant with no `meta.tenants` row**:
+  `tenant_data_keys_tenant_id_fkey` references `meta.tenants(id)`, so such a deployment accepts the
+  boot, logs `column key mode: envelope`, and answers every PHI read and write with that constraint
+  violation — as an HTTP **504**, a retryable status for a permanent fault — and `--api-key` names
+  an arbitrary UUID, which ADR-0334's survey established has no row in any dev deployment. A boot
+  survey in `surveyUserFkReadiness`' shape reports it, three-valued, because a count of 0 means
+  either absent or unreadable. **(b)** a `--store pg-columns` deployment's serving role **must own
+  its entity tables**, since `ensureSchema` runs on every boot and its `ALTER` and policy statements
+  are owner-only — so on the column store RLS is never the confinement *for that role* and the
+  `tenant_id` predicates are, which is this increment's conclusion reached from the other end.
+  **(c)** `meta.tenants.schema_name` is UNIQUE, so two tenants cannot share one.
+  What remains: **(1)** the stale-key window is bounded and not closed — see the envelope entry's
+  Q5. **(2)** `--column-key-mode derived` has no rotation at all, and the HKDF generation is still
+  exposed by no flag, now for a better reason: a rekey mints a new **data key** generation, so the
+  derived seed is only ever the default. **(3)** no `key_generation` column on the entity tables, so
+  a partial rekey stays unsafe and the single transaction is the whole defence. **(4)** the rekey is
+  a CLI subcommand and not a route, so nothing *schedules* one — a deployment wanting every seeded
+  tenant migrated runs it per tenant and reads `shreddabilityOf` to find them.
+
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
   sensitive-classified fields across the seven packs, **39 were unreadable by every role in every

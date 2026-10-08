@@ -47,6 +47,39 @@ export const COLUMN_KEY_MODE_FLAG = "--column-key-mode";
 export const COLUMN_KEY_MODES = ["derived", "envelope"] as const;
 export type ColumnKeyMode = (typeof COLUMN_KEY_MODES)[number];
 
+/**
+ * How long a resolved column key is served from memory.
+ *
+ * ADR-0347 cached the promise with no expiry and said the limitation out loud: destroying a
+ * tenant's data key leaves a stale entry behind. A **rekey** makes that limitation reachable in the
+ * worse direction, because the key does not disappear — it *changes*, and a process still serving
+ * the previous one goes on writing new ciphertext under it, splitting one tenant's columns across
+ * two keys with nothing on any row recording which. So the cache gets a bound.
+ *
+ * 30s is `CachedTenantStatusDirectory`'s own figure rather than a new number, and for the same
+ * reason: both cache a fact about a tenant that a maintenance action changes **out of process**, so
+ * the TTL is how long that action takes to bite.
+ *
+ * It bounds the window and does not close it. Closing it would need the serving process to be told,
+ * which is a different increment; until then the operator is told instead, by the rekey's own
+ * `formatStaleKeyWindow` line.
+ */
+export const DEFAULT_COLUMN_KEY_TTL_MS = 30_000;
+
+/** The flag naming it, in the module that owns the feature — `COLUMN_KEY_MODE_FLAG`'s rule. */
+export const COLUMN_KEY_TTL_FLAG = "--column-key-ttl-ms";
+
+/**
+ * The range the flag accepts, refused out of band rather than clamped (`--max-request-body`'s rule,
+ * and `--tenant-status-ttl-ms`' bounds to the millisecond).
+ *
+ * The floor is not cosmetic: the TTL is the only thing standing between a rekey and a second key
+ * being written by a replica, and a value under a second makes the cache a per-request round trip
+ * on the PHI write path — which is the cost `buildEnvelopeKeySource`'s cache exists to avoid, so a
+ * deployment setting it there has almost certainly mistaken the unit.
+ */
+export const COLUMN_KEY_TTL_BOUNDS = { min: 1_000, max: 300_000 } as const;
+
 export const DATA_KEY_SHREDDABILITY = ["shreddable", "derivable", "not_applicable"] as const;
 export type DataKeyShreddability = (typeof DATA_KEY_SHREDDABILITY)[number];
 
@@ -167,12 +200,29 @@ export function formatShreddability(s: DataKeyShreddability): string {
  * `dataKeyToColumnKey` is itself a named function.
  *
  * The generation is the default, deliberately and not as an omission: it is the generation every
- * existing ciphertext was written under, because no flag or environment variable exposes another
- * one and `KeyRotationMigrator` has no executor, so a tenant's ciphertext cannot be under any
- * other.
+ * existing ciphertext was written under, and no flag or environment variable exposes another one.
+ *
+ * `KeyRotationMigrator` has a caller now, so the clause that used to carry this claim — "and the
+ * migrator has no executor" — no longer does. What keeps it true is that a **rekey mints a new
+ * data key generation, not a new HKDF generation**: the seed is wanted only for ciphertext written
+ * before any envelope row existed, which is by definition under the derived key's default
+ * generation, and `ensure` ignores a seed for a tenant whose row exists — so a rekeyed tenant is
+ * never seeded again.
  */
 function derivedSeed(secret: Uint8Array, tenantId: string): Uint8Array {
   return new Uint8Array(Buffer.from(deriveTenantColumnKey(secret, tenantId), "base64"));
+}
+
+/**
+ * The key and the **row's** provenance, which is not the same fact as the probe's answer: `ensure`
+ * is idempotent and a row that exists ignores the seed, so a tenant probed `true` whose row is
+ * already `random` is `random`. Reporting the probe's answer instead would be a claim about what
+ * this process asked for rather than about what the deployment holds — and ADR-0347's open end is
+ * precisely that nothing reads a *real* provenance.
+ */
+interface ResolvedColumnKey {
+  readonly key: string;
+  readonly provenance: DataKeyProvenance;
 }
 
 async function resolveColumnKey(
@@ -180,7 +230,7 @@ async function resolveColumnKey(
   secret: Uint8Array,
   mayHoldCiphertext: TenantCiphertextProbe,
   tenantId: string,
-): Promise<string> {
+): Promise<ResolvedColumnKey> {
   // The seed decision, and the only irreversible one here. Seeding a tenant that holds no
   // ciphertext costs **shreddability** — the row records `seeded_from_derived` and destroying it
   // bounds nothing until a rekey. Randomising a tenant that *does* hold ciphertext makes that
@@ -189,13 +239,46 @@ async function resolveColumnKey(
   // `true`; the caller's probe is conservative in exactly that direction, answering `true` both
   // for a tenant whose schema merely exists and when the probe itself fails.
   if (await mayHoldCiphertext(tenantId)) {
-    return dataKeyToColumnKey(
-      (await store.ensure(tenantId, { seed: derivedSeed(secret, tenantId) })).dek,
-    );
+    const seeded = await store.ensure(tenantId, { seed: derivedSeed(secret, tenantId) });
+    return { key: dataKeyToColumnKey(seeded.dek), provenance: seeded.provenance };
   }
   // No seed, so the store generates a random data key and the row records `random` — the only
   // provenance for which destroying the row is worth anything.
-  return dataKeyToColumnKey((await store.ensure(tenantId)).dek);
+  const fresh = await store.ensure(tenantId);
+  return { key: dataKeyToColumnKey(fresh.dek), provenance: fresh.provenance };
+}
+
+/**
+ * Hands one cold resolution's provenance to the deployment's reporter, and **swallows a throw**.
+ *
+ * The only catch in this module, and it is the opposite of the rule below it for a stated reason:
+ * this callback is a log line, so failing a PHI write to protect a boot-time report would refuse
+ * the very thing the key exists to serve. Everything else here propagates.
+ */
+function reportResolution(
+  onResolved: ((tenantId: string, provenance: DataKeyProvenance) => void) | undefined,
+  tenantId: string,
+  provenance: DataKeyProvenance,
+): void {
+  if (onResolved === undefined) return;
+  try {
+    onResolved(tenantId, provenance);
+  } catch {
+    // Deliberately silent: a reporter that cannot report is not a reason to refuse a write, and
+    // this module has no logger of its own to complain through.
+  }
+}
+
+/**
+ * One tenant's resolved key with the instant the resolution **started**.
+ *
+ * `at` is the start and not the completion, so a resolution that takes longer than the TTL expires
+ * immediately rather than earning a fresh window from its own slowness — the conservative
+ * direction, since the hazard the TTL bounds is an old key still being written with.
+ */
+interface ColumnKeyCacheEntry {
+  readonly at: number;
+  readonly resolving: Promise<string>;
 }
 
 /**
@@ -208,8 +291,11 @@ async function resolveColumnKey(
  * **The cache is the point.** `buildColumnKeySource` caches a derivation that is already cheap,
  * because it runs on every transaction touching an encrypted column; here the same call is a
  * **database round trip**, so a cache hit is the difference between one read per tenant and one
- * read per write. Keyed on the tenant id alone for that function's stated reason: a generation is
- * fixed for the life of one source, so a rotation is a new source rather than an invalidation.
+ * read per write. Keyed on the tenant id alone, which is not `buildColumnKeySource`'s reason: there
+ * the generation is pinned at construction, so a rotation genuinely *is* a new source. Here the
+ * generation is whatever the tenant's row holds, and a rekey changes it under a live process — so
+ * the key is not fixed for the life of the source and the TTL below is what keeps the entry from
+ * outliving the row it came from.
  *
  * **The promise is cached, not the resolved value.** N concurrent writes for a cold tenant would
  * otherwise each reach `ensure`, which is the burst `fcm-token.ts`'s in-flight promise exists to
@@ -218,7 +304,8 @@ async function resolveColumnKey(
  * the next caller retries rather than inheriting a transient database error as a permanently dead
  * tenant.
  *
- * **Nothing is caught.** A `DataKeyUnwrapFailed` means a wrong key-encryption key or a corrupted
+ * **Nothing on the resolution path is caught** — `reportResolution` is the one exception and says
+ * why in its own place. A `DataKeyUnwrapFailed` means a wrong key-encryption key or a corrupted
  * row, and the available fallback — deriving instead — would write new columns under a second key
  * with nothing recording which row used which, splitting one tenant's ciphertext irreversibly. A
  * refused write is recoverable; that is not. `dataKeyToColumnKey` throws on a wrong-length data
@@ -226,12 +313,29 @@ async function resolveColumnKey(
  * rendered to base64 would encrypt PHI weakly and report success. Both are deployment-grade
  * faults, and the honest answer to one is a refused request rather than a served wrong key.
  *
- * The one limitation, said rather than left to be discovered: **destroying a tenant's data key
- * leaves a stale cache entry**, and this source would go on serving the destroyed key from
- * memory. It is harmless because a destruction happens inside the Article 17 pipeline, which
- * retires the tenant row in the same transaction (ADR-0319, ADR-0320) — nothing serves that
- * tenant afterwards, and `--tenant-status-gate` refuses it at the edge. A destruction reachable
- * outside that pipeline would need an eviction.
+ * **The cache is bounded, and the bound is the honest limitation.** ADR-0347 cached the promise
+ * with no expiry and argued the stale entry was harmless, because a destruction happens inside the
+ * Article 17 pipeline, "which retires the tenant row in the same transaction (ADR-0319,
+ * ADR-0320)". That argument is wrong twice over. ADR-0320 has a section headed *"The tenant row is
+ * retired **after** the pipeline commits"* and lists retiring it inside the transaction as
+ * **rejected** — the audit row's `tenant_id` references `meta.tenants`, so retiring first makes the
+ * erasure unrecordable. And both legs are conditional anyway: the retirement runs in a `try`/`catch`
+ * that reports `tenantRetired: false` on a **200**, and `--tenant-status-gate` is opt-in and off by
+ * default.
+ *
+ * A **rekey** then makes the same staleness reachable in the direction that loses data. A
+ * destruction leaves a key that opens nothing, so a stale entry's reads raise — loud, and never a
+ * wrong answer. A rekey *changes* the key, so a process still serving the previous one reads with a
+ * raise and **writes** new ciphertext under the old key, splitting this tenant's columns across two
+ * keys with nothing on any row recording which. `DEFAULT_COLUMN_KEY_TTL_MS` bounds that window; it
+ * does not close it, because closing it would need the serving process to be told. Until then the
+ * rekey says so to the operator, through `formatStaleKeyWindow`.
+ *
+ * **`onResolved` is how a real provenance finally gets read.** `resolveColumnKey` used to discard
+ * `StoredDataKey.provenance`, which is why `formatShreddability` — the function this doc calls the
+ * one place an operator reads — had no caller in any deployment, and why ADR-0347's third open end
+ * says nothing reads a real provenance. It fires **once per cold resolution**, not per call, so it
+ * is a line per tenant rather than a line per write.
  *
  * The secret is taken **as bytes already parsed**, not as a raw string: `parseColumnEncryptionSecret`
  * is the only producer of acceptable bytes, so the eager refusal `buildColumnKeySource` performs
@@ -243,19 +347,45 @@ export function buildEnvelopeKeySource(input: {
   readonly store: PostgresDataKeyStore;
   readonly secret: Uint8Array;
   readonly mayHoldCiphertext: TenantCiphertextProbe;
+  /** Defaults to `DEFAULT_COLUMN_KEY_TTL_MS`. The CLI bounds it; this function does not. */
+  readonly ttlMs?: number;
+  /** Injected so a test can expire an entry without sleeping. */
+  readonly now?: () => number;
+  /** Called once per **cold** resolution with the row's own provenance. May throw; see below. */
+  readonly onResolved?: (tenantId: string, provenance: DataKeyProvenance) => void;
 }): ColumnEncryptionKeySource {
-  const { store, secret, mayHoldCiphertext } = input;
-  const cache = new Map<string, Promise<string>>();
+  const { store, secret, mayHoldCiphertext, onResolved } = input;
+  const ttlMs = input.ttlMs ?? DEFAULT_COLUMN_KEY_TTL_MS;
+  const now = input.now ?? Date.now;
+  const cache = new Map<string, ColumnKeyCacheEntry>();
   return (tenantId: string): Promise<string> => {
+    const startedAt = now();
     const hit = cache.get(tenantId);
-    if (hit !== undefined) return hit;
-    const resolving = resolveColumnKey(store, secret, mayHoldCiphertext, tenantId).catch(
-      (error: unknown) => {
-        cache.delete(tenantId);
+    // `<` rather than `<=`, which is `CachedTenantStatusDirectory.statusFor`'s comparison: one
+    // spelling for one question, so the two cannot disagree about the instant a TTL lapses.
+    if (hit !== undefined && startedAt - hit.at < ttlMs) return hit.resolving;
+    // An expired entry whose promise is still in flight is **dropped, not awaited**. The in-flight
+    // collapse below operates within one TTL window, which is what it is for; waiting on a
+    // resolution that began before the window would serve the key this re-resolution exists to
+    // replace.
+    const resolving: Promise<string> = resolveColumnKey(
+      store,
+      secret,
+      mayHoldCiphertext,
+      tenantId,
+    )
+      .then((resolved) => {
+        reportResolution(onResolved, tenantId, resolved.provenance);
+        return resolved.key;
+      })
+      .catch((error: unknown) => {
+        // A **rejection is not remembered**, and only this entry is forgotten: a slow failing
+        // resolution may already have been replaced by a newer one past the TTL, and deleting that
+        // would discard a good key.
+        if (cache.get(tenantId)?.resolving === resolving) cache.delete(tenantId);
         throw error;
-      },
-    );
-    cache.set(tenantId, resolving);
+      });
+    cache.set(tenantId, { at: startedAt, resolving });
     return resolving;
   };
 }

@@ -3,14 +3,18 @@ import type { PgConnection } from "./connection.js";
 import {
   COLUMN_ENCRYPTION_KEY_ENV,
   COLUMN_ENCRYPTION_KEY_GUC,
+  COLUMN_ENCRYPTION_KEY_OLD_GUC,
   COLUMN_KEY_REFUSAL_REASONS,
   DEFAULT_COLUMN_KEY_REF,
   EncryptionApplier,
   ENCRYPTED_COLUMN_QUERY,
+  OLD_COLUMN_KEY_REF,
+  PARTITIONED_ENCRYPTED_TABLE_QUERY,
   columnKeyRefFor,
   ensurePgcryptoExtension,
   formatEncryptionCoverage,
   introspectEncryptedColumns,
+  introspectPartitionedEncryptedTables,
   isRaisingKeyRef,
   parseColumnDirectives,
   pgcryptoInstalled,
@@ -143,6 +147,75 @@ describe("column key ref vocabulary", () => {
     expect(() => columnKeyRefFor("app.key.extra")).toThrow(/not a GUC name/);
     expect(() => columnKeyRefFor("app. key")).toThrow(/not a GUC name/);
     expect(() => columnKeyRefFor("9app.key")).toThrow(/not a GUC name/);
+  });
+
+  it("names the old-key GUC a rekey reads from, derived the same way", () => {
+    expect(COLUMN_ENCRYPTION_KEY_OLD_GUC).toBe("app.column_encryption_key_old");
+    expect(OLD_COLUMN_KEY_REF).toBe(columnKeyRefFor(COLUMN_ENCRYPTION_KEY_OLD_GUC));
+  });
+
+  it("keeps the two key refs distinct, which is what makes a rekey expressible", () => {
+    // A rekey decrypts under one and encrypts under the other in a single statement, so both have
+    // to be readable from inside one expression.
+    expect(OLD_COLUMN_KEY_REF).not.toBe(DEFAULT_COLUMN_KEY_REF);
+  });
+
+  it("makes the old-key ref raising too", () => {
+    // Both sides, for the same measured reason: on the new-key side a resolved NULL makes
+    // pgp_sym_encrypt return NULL silently and overwrite every PHI value; on the old-key side
+    // pgp_sym_decrypt(col, NULL) is NULL, which is then encrypted — the same loss one function in.
+    expect(isRaisingKeyRef(OLD_COLUMN_KEY_REF)).toBe(true);
+    expect(OLD_COLUMN_KEY_REF).not.toContain(",");
+  });
+});
+
+describe("introspectPartitionedEncryptedTables", () => {
+  const rows = [
+    { table_name: "observation", comment: "crossengin.encrypt=at_rest" },
+    { table_name: "observation", comment: "crossengin.data_class=phi; crossengin.encrypt=at_rest" },
+    { table_name: "ledger_entry", comment: "crossengin.data_class=phi; crossengin.encrypt=at_rest" },
+  ];
+
+  it("asks for partitioned parents only, and binds the schema", async () => {
+    let observed = "";
+    let params: readonly unknown[] | undefined;
+    const conn = mockConn((sql, boundParams) => {
+      observed = sql;
+      params = boundParams;
+      return { rows: [], rowCount: 0 };
+    });
+    await introspectPartitionedEncryptedTables(conn, "t_clinic");
+    expect(observed).toBe(PARTITIONED_ENCRYPTED_TABLE_QUERY);
+    expect(observed).toContain("c.relkind = 'p'");
+    expect(params).toEqual(["t_clinic"]);
+  });
+
+  it("names each partitioned table once, however many of its columns are hinted", async () => {
+    const conn = mockConn(() => ({ rows, rowCount: rows.length }));
+    expect(await introspectPartitionedEncryptedTables(conn, "t_clinic")).toEqual([
+      "observation",
+      "ledger_entry",
+    ]);
+  });
+
+  it("applies the directive parser rather than trusting the LIKE", async () => {
+    const conn = mockConn(() => ({
+      rows: [{ table_name: "note", comment: "see crossengin.encrypt=at_rest_later for the plan" }],
+      rowCount: 1,
+    }));
+    expect(await introspectPartitionedEncryptedTables(conn, "t_clinic")).toEqual([]);
+  });
+
+  it("answers empty for a schema that partitions nothing", async () => {
+    const conn = mockConn(() => ({ rows: [], rowCount: 0 }));
+    expect(await introspectPartitionedEncryptedTables(conn, "public")).toEqual([]);
+  });
+
+  it("is a different statement from the one that finds ordinary tables", () => {
+    // Separate on purpose: widening ENCRYPTED_COLUMN_QUERY's relkind filter would make an UPDATE on
+    // a partitioned parent double-encrypt every leaf that also carries the hint.
+    expect(PARTITIONED_ENCRYPTED_TABLE_QUERY).not.toBe(ENCRYPTED_COLUMN_QUERY);
+    expect(ENCRYPTED_COLUMN_QUERY).toContain("c.relkind = 'r'");
   });
 });
 

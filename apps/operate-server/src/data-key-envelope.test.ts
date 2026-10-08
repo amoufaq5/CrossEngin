@@ -15,7 +15,10 @@ import { describe, expect, it } from "vitest";
 import {
   COLUMN_KEY_MODES,
   COLUMN_KEY_MODE_FLAG,
+  COLUMN_KEY_TTL_BOUNDS,
+  COLUMN_KEY_TTL_FLAG,
   DATA_KEY_SHREDDABILITY,
+  DEFAULT_COLUMN_KEY_TTL_MS,
   buildEnvelopeKeySource,
   formatColumnKeyMode,
   formatShreddability,
@@ -57,6 +60,14 @@ function fakeStore(
     readonly fail?: () => unknown;
     readonly failTimes?: number;
     readonly dek?: Uint8Array;
+    /**
+     * Forces the row's provenance regardless of the seed, so a test can make the **row** disagree
+     * with the probe — which is the real case, since `ensure` is idempotent and a row that already
+     * exists ignores a seed.
+     */
+    readonly provenance?: DataKeyProvenance;
+    /** Held until released, so a test can observe an in-flight resolution. */
+    readonly gate?: Promise<void>;
   } = {},
 ): FakeStore {
   const ensureCalls: EnsureCall[] = [];
@@ -71,6 +82,7 @@ function fakeStore(
       // Yield once, so a concurrent burst genuinely overlaps rather than resolving inside the
       // first caller's synchronous frame — which would let a value cache pass this test.
       await Promise.resolve();
+      if (behaviour.gate !== undefined) await behaviour.gate;
       if (fail !== undefined && failuresLeft > 0) {
         failuresLeft -= 1;
         throw fail();
@@ -80,7 +92,8 @@ function fakeStore(
         tenantId,
         generation: 1,
         kekGeneration: 1,
-        provenance: seed === undefined ? "random" : "seeded_from_derived",
+        provenance:
+          behaviour.provenance ?? (seed === undefined ? "random" : "seeded_from_derived"),
         dek: seed ?? behaviour.dek ?? RANDOM_DEK,
       };
     },
@@ -88,6 +101,34 @@ function fakeStore(
     destroy: async (): Promise<number> => 0,
   };
   return { ensureCalls, store: store as unknown as PostgresDataKeyStore };
+}
+
+/** A clock the tests move by hand — no real timers, no sleeping on a TTL. */
+function fakeClock(startMs = 1_000): { now: () => number; advance: (ms: number) => void } {
+  let ms = startMs;
+  return {
+    now: () => ms,
+    advance: (by: number) => {
+      ms += by;
+    },
+  };
+}
+
+function deferred(): { readonly promise: Promise<void>; readonly release: () => void } {
+  let release = (): void => undefined;
+  const promise = new Promise<void>((resolve) => {
+    release = (): void => {
+      resolve();
+    };
+  });
+  return { promise, release: () => release() };
+}
+
+/** Drains the microtask queue so an in-flight `ensure` has actually been entered. */
+async function settleMicrotasks(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
 }
 
 function countingProbe(answer: boolean): {
@@ -451,6 +492,290 @@ describe("buildEnvelopeKeySource", () => {
     });
     await expect(source(TENANT_A)).rejects.toThrow("probe unavailable");
     expect(ensureCalls).toHaveLength(0);
+  });
+});
+
+describe("the column key TTL", () => {
+  it("names the flag the CLI parses", () => {
+    expect(COLUMN_KEY_TTL_FLAG).toBe("--column-key-ttl-ms");
+  });
+
+  it("defaults to the tenant-status directory's own figure", () => {
+    expect(DEFAULT_COLUMN_KEY_TTL_MS).toBe(30_000);
+  });
+
+  it("has bounds the default sits inside", () => {
+    // A default outside its own bounds would be refused by the flag it is the default for.
+    expect(COLUMN_KEY_TTL_BOUNDS.min).toBeLessThanOrEqual(DEFAULT_COLUMN_KEY_TTL_MS);
+    expect(COLUMN_KEY_TTL_BOUNDS.max).toBeGreaterThanOrEqual(DEFAULT_COLUMN_KEY_TTL_MS);
+    expect(COLUMN_KEY_TTL_BOUNDS.min).toBeLessThan(COLUMN_KEY_TTL_BOUNDS.max);
+  });
+
+  it("serves one resolution for every call inside the window", async () => {
+    const { store, ensureCalls } = fakeStore();
+    const clock = fakeClock();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      ttlMs: 1_000,
+      now: clock.now,
+    });
+    await source(TENANT_A);
+    clock.advance(999);
+    await source(TENANT_A);
+    expect(ensureCalls).toHaveLength(1);
+  });
+
+  it("re-resolves once the window has lapsed", async () => {
+    // The window is what bounds a rekey's hazard: past it, a process picks the new key up without
+    // being told. `<` and not `<=`, so exactly `ttlMs` later is already stale.
+    const { store, ensureCalls } = fakeStore();
+    const clock = fakeClock();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      ttlMs: 1_000,
+      now: clock.now,
+    });
+    await source(TENANT_A);
+    clock.advance(1_000);
+    await source(TENANT_A);
+    expect(ensureCalls).toHaveLength(2);
+  });
+
+  it("caches without expiry only as far as its default, not forever", async () => {
+    const { store, ensureCalls } = fakeStore();
+    const clock = fakeClock();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      now: clock.now,
+    });
+    await source(TENANT_A);
+    clock.advance(DEFAULT_COLUMN_KEY_TTL_MS - 1);
+    await source(TENANT_A);
+    expect(ensureCalls).toHaveLength(1);
+    clock.advance(1);
+    await source(TENANT_A);
+    expect(ensureCalls).toHaveLength(2);
+  });
+
+  it("drops an expired entry whose promise is still in flight rather than awaiting it", async () => {
+    // The in-flight collapse operates **within** one window. Waiting on a resolution that began
+    // before the window would hand back the key the re-resolution exists to replace.
+    const gate = deferred();
+    const { store, ensureCalls } = fakeStore({ gate: gate.promise });
+    const clock = fakeClock();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      ttlMs: 1_000,
+      now: clock.now,
+    });
+    const first = source(TENANT_A);
+    await settleMicrotasks();
+    expect(ensureCalls).toHaveLength(1);
+
+    clock.advance(5_000);
+    const second = source(TENANT_A);
+    await settleMicrotasks();
+    expect(ensureCalls).toHaveLength(2);
+    expect(second).not.toBe(first);
+
+    gate.release();
+    await expect(first).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
+    await expect(second).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
+  });
+
+  it("keeps collapsing concurrent callers inside one window", async () => {
+    const gate = deferred();
+    const { store, ensureCalls } = fakeStore({ gate: gate.promise });
+    const clock = fakeClock();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      ttlMs: 1_000,
+      now: clock.now,
+    });
+    const all = [source(TENANT_A), source(TENANT_A), source(TENANT_A)];
+    await settleMicrotasks();
+    expect(ensureCalls).toHaveLength(1);
+    gate.release();
+    expect(new Set(await Promise.all(all)).size).toBe(1);
+  });
+
+  it("does not remember a rejection, and a later window resolves cleanly", async () => {
+    const { store, ensureCalls } = fakeStore({ fail: () => new Error("transient"), failTimes: 1 });
+    const clock = fakeClock();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      ttlMs: 1_000,
+      now: clock.now,
+    });
+    await expect(source(TENANT_A)).rejects.toThrow("transient");
+    await expect(source(TENANT_A)).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
+    clock.advance(2_000);
+    await expect(source(TENANT_A)).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
+    expect(ensureCalls).toHaveLength(3);
+  });
+
+  it("a slow rejection does not evict the entry that replaced it", async () => {
+    // The guard on the rejection path: a resolution that fails after its window has lapsed must
+    // forget only itself, or it would discard a good key somebody else is already serving.
+    const gate = deferred();
+    const { store, ensureCalls } = fakeStore({
+      fail: () => new Error("slow failure"),
+      failTimes: 1,
+      gate: gate.promise,
+    });
+    const clock = fakeClock();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      ttlMs: 1_000,
+      now: clock.now,
+    });
+    const doomed = source(TENANT_A);
+    await settleMicrotasks();
+    clock.advance(5_000);
+    const replacement = source(TENANT_A);
+    await settleMicrotasks();
+    gate.release();
+    await expect(doomed).rejects.toThrow("slow failure");
+    await expect(replacement).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
+    expect(ensureCalls).toHaveLength(2);
+
+    // Still inside the replacement's window, so it is served from the cache rather than re-read.
+    await expect(source(TENANT_A)).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
+    expect(ensureCalls).toHaveLength(2);
+  });
+});
+
+describe("onResolved", () => {
+  it("fires once per cold resolution, not once per call", async () => {
+    const seen: { tenantId: string; provenance: DataKeyProvenance }[] = [];
+    const { store } = fakeStore();
+    const clock = fakeClock();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      ttlMs: 1_000,
+      now: clock.now,
+      onResolved: (tenantId, provenance) => {
+        seen.push({ tenantId, provenance });
+      },
+    });
+    await source(TENANT_A);
+    await source(TENANT_A);
+    expect(seen).toEqual([{ tenantId: TENANT_A, provenance: "random" }]);
+
+    clock.advance(1_000);
+    await source(TENANT_A);
+    expect(seen).toHaveLength(2);
+  });
+
+  it("reports the row's provenance and not the probe's answer", async () => {
+    // `ensure` is idempotent and a row that exists ignores the seed, so a tenant the probe answers
+    // `true` for can hold a `random` row from an earlier rekey. Reporting the probe's answer would
+    // be a claim about what this process asked for rather than about what the deployment holds —
+    // which is ADR-0347's "nothing reads a real provenance" reproduced one layer in.
+    const seen: DataKeyProvenance[] = [];
+    const { store, ensureCalls } = fakeStore({ provenance: "random" });
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(true).probe,
+      onResolved: (_tenantId, provenance) => {
+        seen.push(provenance);
+      },
+    });
+    await source(TENANT_A);
+    expect(ensureCalls[0]?.options?.seed).toBeInstanceOf(Uint8Array);
+    expect(seen).toEqual(["random"]);
+  });
+
+  it("reports seeded_from_derived for a tenant that was seeded", async () => {
+    const seen: DataKeyProvenance[] = [];
+    const { store } = fakeStore();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(true).probe,
+      onResolved: (_tenantId, provenance) => {
+        seen.push(provenance);
+      },
+    });
+    await source(TENANT_A);
+    expect(seen).toEqual(["seeded_from_derived"]);
+    // And it is the input `formatShreddability` has never had a caller for.
+    expect(formatShreddability(shreddabilityOf("envelope", seen[0]))).toContain("derivable");
+  });
+
+  it("reports once per tenant", async () => {
+    const seen: string[] = [];
+    const { store } = fakeStore();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      onResolved: (tenantId) => {
+        seen.push(tenantId);
+      },
+    });
+    await source(TENANT_A);
+    await source(TENANT_B);
+    await source(TENANT_A);
+    expect(seen).toEqual([TENANT_A, TENANT_B]);
+  });
+
+  it("does not fire for a failed resolution", async () => {
+    const seen: string[] = [];
+    const { store } = fakeStore({ fail: () => new Error("transient"), failTimes: 1 });
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      onResolved: (tenantId) => {
+        seen.push(tenantId);
+      },
+    });
+    await expect(source(TENANT_A)).rejects.toThrow("transient");
+    expect(seen).toEqual([]);
+  });
+
+  it("a throwing reporter does not fail the key resolution", async () => {
+    // The one swallowed exception in this module: a reporter is a log line, and refusing a PHI
+    // write to protect a boot-time report would refuse the thing the key exists to serve.
+    const { store } = fakeStore();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+      onResolved: () => {
+        throw new Error("logger exploded");
+      },
+    });
+    await expect(source(TENANT_A)).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
+  });
+
+  it("is optional, and omitting it changes nothing", async () => {
+    const { store, ensureCalls } = fakeStore();
+    const source = buildEnvelopeKeySource({
+      store,
+      secret: SECRET,
+      mayHoldCiphertext: countingProbe(false).probe,
+    });
+    await expect(source(TENANT_A)).resolves.toBe(dataKeyToColumnKey(RANDOM_DEK));
+    expect(ensureCalls).toHaveLength(1);
   });
 });
 

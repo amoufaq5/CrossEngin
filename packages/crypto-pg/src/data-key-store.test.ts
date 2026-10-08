@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { PgConnection, PgQueryResult } from "@crossengin/kernel-pg";
-import {
-  DATA_KEY_BYTES,
-  dataKeyWrapAad,
-  generateDataKey,
-  wrapDataKey,
-} from "@crossengin/crypto";
+import type { PgConnection } from "@crossengin/kernel-pg";
+import { DATA_KEY_BYTES, generateDataKey } from "@crossengin/crypto";
 
 import {
   DATA_KEY_LOCK_SQL,
@@ -13,6 +8,12 @@ import {
   DataKeyUnwrapFailed,
   PostgresDataKeyStore,
 } from "./data-key-store.js";
+import {
+  fakeDataKeysPg,
+  storedDataKeyRow,
+  type CapturedStatement,
+  type StoredDataKeyRowOptions,
+} from "./test-fakes.js";
 import { SET_TENANT_CONTEXT_SQL } from "./tenant-context.js";
 
 const TENANT_A = "11111111-1111-4111-8111-111111111111";
@@ -22,190 +23,16 @@ const TENANT_B = "22222222-2222-4222-8222-222222222222";
 const KEK = new Uint8Array(32).fill(7);
 const kekFor = (): Uint8Array => KEK;
 
-interface Captured {
-  readonly sql: string;
-  readonly params: readonly unknown[] | undefined;
-  /** False for a statement issued outside `transaction`, which is the defect ADR-0335 found twice. */
-  readonly inTx: boolean;
-}
-
-/** Thrown where Postgres raises `new row violates row-level security policy`. */
-class FakeRlsViolation extends Error {
-  constructor(detail: string) {
-    super(
-      `new row violates row-level security policy for table "tenant_data_keys": ${detail}`,
-    );
-    this.name = "FakeRlsViolation";
-  }
-}
-
-interface FakeDataKeysOptions {
-  /**
-   * Run as the table's owner: RLS is not applied at all, so the statement's own predicate is the
-   * only thing left. Both arms exist because this class of defect is invisible from either vantage
-   * alone — a non-owner's unscoped statement is refused by the policy whether the store carries a
-   * predicate or not.
-   */
-  readonly owner?: boolean;
-  readonly seedRows?: readonly Record<string, unknown>[];
-}
-
-interface FakeDataKeysPg {
-  readonly conn: PgConnection;
-  readonly captured: readonly Captured[];
-  readonly rows: Record<string, unknown>[];
-}
-
-/**
- * In-memory `meta.tenant_data_keys` with RLS-like scoping, modelled on this package's
- * `fakeCryptoKeysPg`.
- *
- * Two tripwires carry the weight, and both are the point of having a fake at all rather than a
- * recorder: a **write** with no `tenant_id` — the bound column on an INSERT, the predicate on a
- * DELETE — throws, because as the owner such a statement reaches whichever scope's row it finds;
- * and a non-owner write whose tenant is not the session's scope raises, because this table's
- * isolation policy is its only arm and therefore the only thing carrying a `WITH CHECK`.
- *
- * It diverges from `fakeCryptoKeysPg` in one place: a **read** with no `tenant_id` predicate throws
- * here too. That fake exempts reads on purpose, because `classifyScopedWriteRefusal`'s diagnosing
- * re-read is deliberately unscoped and asks whether the row sits in another scope. This store has no
- * such re-read, so there is nothing to exempt and the stricter rule costs nothing.
- */
-function fakeDataKeysPg(options: FakeDataKeysOptions = {}): FakeDataKeysPg {
-  const owner = options.owner === true;
-  const rows: Record<string, unknown>[] = [...(options.seedRows ?? [])];
-  const captured: Captured[] = [];
-
-  function makeClient(inTx: boolean): PgConnection {
-    let currentTenant: string | null = null;
-
-    function statementScope(sql: string, p: readonly unknown[], kind: string): string {
-      const strict = sql.match(/tenant_id\s*=\s*\$(\d+)/);
-      if (strict !== null) return String(p[Number(strict[1]) - 1]);
-      throw new Error(
-        `this fake refuses a ${kind} that carries no tenant_id predicate: as the table's owner ` +
-          "it reaches whichever scope's row it finds",
-      );
-    }
-
-    const query = async (
-      sql: string,
-      params?: readonly unknown[],
-    ): Promise<PgQueryResult> => {
-      const p = params ?? [];
-      captured.push({ sql, params, inTx });
-
-      if (sql.includes("set_config")) {
-        currentTenant = (p[0] as string | null) ?? null;
-        return { rows: [], rowCount: 0 };
-      }
-      if (sql.includes("pg_advisory_xact_lock")) {
-        return { rows: [], rowCount: 0 };
-      }
-
-      if (sql.includes("INSERT INTO")) {
-        const columns = sql.match(/\(([^)]*)\)\s*VALUES/);
-        if (columns === null || !/\btenant_id\b/.test(columns[1] ?? "")) {
-          throw new Error(
-            "this fake refuses an INSERT that does not name tenant_id: the column is NOT NULL and " +
-              "is the row's whole scope",
-          );
-        }
-        const names = (columns[1] ?? "").split(",").map((c) => c.trim());
-        const row: Record<string, unknown> = {};
-        names.forEach((name, i) => {
-          row[name] = p[i];
-        });
-        const tenantId = String(row["tenant_id"]);
-        if (!owner && tenantId !== currentTenant) {
-          throw new FakeRlsViolation(
-            `tenant ${tenantId} is not the session's scope (${String(currentTenant)})`,
-          );
-        }
-        const duplicate = rows.some(
-          (r) =>
-            r["tenant_id"] === row["tenant_id"] && r["generation"] === row["generation"],
-        );
-        if (duplicate) {
-          const err = new Error(
-            'duplicate key value violates unique constraint "tenant_data_keys_tenant_generation_key"',
-          );
-          (err as Error & { code?: string }).code = "23505";
-          throw err;
-        }
-        rows.push(row);
-        return { rows: [], rowCount: 1 };
-      }
-
-      if (sql.includes("DELETE FROM")) {
-        const scope = statementScope(sql, p, "DELETE");
-        const doomed = rows.filter(
-          (r) =>
-            r["tenant_id"] === scope && (owner || r["tenant_id"] === currentTenant),
-        );
-        for (const r of doomed) rows.splice(rows.indexOf(r), 1);
-        return { rows: [], rowCount: doomed.length };
-      }
-
-      if (sql.includes("SELECT")) {
-        const scope = statementScope(sql, p, "SELECT");
-        let visible = rows.filter(
-          (r) => owner || r["tenant_id"] === currentTenant,
-        );
-        visible = visible.filter((r) => r["tenant_id"] === scope);
-        const generation = sql.match(/generation\s*=\s*\$(\d+)/);
-        if (generation !== null) {
-          const want = p[Number(generation[1]) - 1];
-          visible = visible.filter((r) => r["generation"] === want);
-        }
-        if (sql.includes("ORDER BY generation DESC")) {
-          visible = [...visible].sort(
-            (a, b) => Number(b["generation"]) - Number(a["generation"]),
-          );
-        }
-        if (/LIMIT 1/.test(sql)) visible = visible.slice(0, 1);
-        return { rows: visible, rowCount: visible.length };
-      }
-
-      return { rows: [], rowCount: 0 };
-    };
-
-    return {
-      query: query as PgConnection["query"],
-      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) =>
-        fn(makeClient(true))) as PgConnection["transaction"],
-      withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) =>
-        fn()) as PgConnection["withAdvisoryLock"],
-      close: (async () => undefined) as PgConnection["close"],
-    };
-  }
-
-  return { conn: makeClient(false), captured, rows };
-}
-
+/** `storedDataKeyRow` against this file's single KEK, so every row here is openable by it. */
 function storedRow(
   tenantId: string,
   dek: Uint8Array,
-  opts: {
-    readonly generation?: number;
-    readonly kekGeneration?: number;
-    readonly provenance?: string;
-    readonly aadTenantId?: string;
-  } = {},
+  opts: StoredDataKeyRowOptions = {},
 ): Record<string, unknown> {
-  const generation = opts.generation ?? 1;
-  return {
-    tenant_id: tenantId,
-    generation,
-    wrapped_key: Buffer.from(
-      wrapDataKey(KEK, dek, dataKeyWrapAad(opts.aadTenantId ?? tenantId, generation)),
-    ),
-    kek_generation: opts.kekGeneration ?? 1,
-    provenance: opts.provenance ?? "random",
-  };
+  return storedDataKeyRow(KEK, tenantId, dek, opts);
 }
 
-function sqlOf(captured: readonly Captured[]): string[] {
+function sqlOf(captured: readonly CapturedStatement[]): string[] {
   return captured.map((c) => c.sql);
 }
 
@@ -737,5 +564,296 @@ describe("destroy", () => {
     await store.destroy(TENANT_A);
     const after = await store.ensure(TENANT_A);
     expect(Buffer.from(before.dek).equals(Buffer.from(after.dek))).toBe(false);
+  });
+});
+
+/**
+ * What the real binding does and both fakes here do not: `node-pg` throws
+ * `nested transactions are not supported`. Wrapping a fake in this is how an offline test can see
+ * the difference between a seam that runs in the caller's transaction and one that opens its own —
+ * the failure mode ADR-0333's boundary cannot otherwise report, because a fake happily hands out a
+ * second client.
+ */
+function refusesNesting(conn: PgConnection): PgConnection {
+  return {
+    query: conn.query.bind(conn),
+    transaction: (async () => {
+      throw new Error("nested transactions are not supported");
+    }) as PgConnection["transaction"],
+    withAdvisoryLock: conn.withAdvisoryLock.bind(conn),
+    close: conn.close.bind(conn),
+  };
+}
+
+describe("loadWithin", () => {
+  it("reads inside the caller's transaction, opening none of its own", async () => {
+    const dek = generateDataKey();
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, dek)] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+
+    const key = await fake.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.loadWithin(refusesNesting(tx), TENANT_A);
+    });
+
+    expect(Buffer.from(key?.dek ?? new Uint8Array()).equals(Buffer.from(dek))).toBe(true);
+  });
+
+  it("sets no tenant context of its own: the caller's is the only one", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+
+    await fake.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.loadWithin(tx, TENANT_A);
+    });
+
+    expect(sqlOf(fake.captured).filter((s) => s.includes("set_config"))).toHaveLength(1);
+  });
+
+  it("carries the strict scope predicate beside the caller's context", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await fake.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.loadWithin(tx, TENANT_A);
+    });
+
+    const read = fake.captured.find((c) => isTableRead(c.sql));
+    expect(read?.sql).toContain("tenant_id = $1");
+    expect(read?.sql).not.toContain("tenant_id IS NULL");
+    expect(read?.params).toEqual([TENANT_A]);
+  });
+
+  it("binds an explicit generation", async () => {
+    const gen1 = generateDataKey();
+    const fake = fakeDataKeysPg({
+      seedRows: [
+        storedRow(TENANT_A, gen1, { generation: 1 }),
+        storedRow(TENANT_A, generateDataKey(), { generation: 2 }),
+      ],
+    });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    const key = await fake.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.loadWithin(tx, TENANT_A, 1);
+    });
+    expect(key?.generation).toBe(1);
+    expect(Buffer.from(key?.dek ?? new Uint8Array()).equals(Buffer.from(gen1))).toBe(true);
+  });
+
+  it("answers null for a tenant with no row", async () => {
+    const fake = fakeDataKeysPg();
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    const key = await fake.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      return store.loadWithin(tx, TENANT_A);
+    });
+    expect(key).toBeNull();
+  });
+
+  it("refuses a malformed tenant id before any statement", async () => {
+    const fake = fakeDataKeysPg();
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await expect(store.loadWithin(fake.conn, "not a uuid;")).rejects.toThrow(/invalid tenantId/);
+    expect(fake.captured).toHaveLength(0);
+  });
+
+  it("still refuses a row wrapped under another generation's AAD", async () => {
+    const row = storedRow(TENANT_A, generateDataKey(), { generation: 1 });
+    const fake = fakeDataKeysPg({ seedRows: [{ ...row, generation: 2 }] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await expect(
+      fake.conn.transaction(async (tx) => {
+        await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+        return store.loadWithin(tx, TENANT_A);
+      }),
+    ).rejects.toBeInstanceOf(DataKeyUnwrapFailed);
+  });
+});
+
+describe("rekeyWithin", () => {
+  /** The caller's half of the contract: the context and the lock, then the seam. */
+  async function rekey(
+    fake: ReturnType<typeof fakeDataKeysPg>,
+    store: PostgresDataKeyStore,
+    dek: Uint8Array,
+    fromGeneration: number,
+  ): Promise<Awaited<ReturnType<PostgresDataKeyStore["rekeyWithin"]>>> {
+    return fake.conn.transaction(async (tx) => {
+      await tx.query(SET_TENANT_CONTEXT_SQL, [TENANT_A]);
+      await tx.query(DATA_KEY_LOCK_SQL, [TENANT_A]);
+      return store.rekeyWithin(refusesNesting(tx), TENANT_A, dek, fromGeneration);
+    });
+  }
+
+  it("writes the next generation with provenance random", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    const next = generateDataKey();
+
+    const row = await rekey(fake, store, next, 1);
+
+    expect(row.generation).toBe(2);
+    // Never `seeded_from_derived`: a rekey has just rewritten the ciphertext this key protects, so
+    // there is nothing left that the previous key had to stay able to read.
+    expect(row.provenance).toBe("random");
+    expect(Buffer.from(row.dek).equals(Buffer.from(next))).toBe(true);
+    const insert = fake.captured.find((c) => c.sql.includes("INSERT INTO"));
+    expect(insert?.sql).toContain("(tenant_id, generation, wrapped_key, kek_generation, provenance)");
+    expect(insert?.params?.[1]).toBe(2);
+    expect(insert?.params?.[4]).toBe("random");
+  });
+
+  it("destroys every earlier generation and reports how many", async () => {
+    const fake = fakeDataKeysPg({
+      seedRows: [
+        storedRow(TENANT_A, generateDataKey(), { generation: 1 }),
+        storedRow(TENANT_A, generateDataKey(), { generation: 2 }),
+        storedRow(TENANT_B, generateDataKey(), { generation: 1 }),
+      ],
+    });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+
+    const row = await rekey(fake, store, generateDataKey(), 2);
+
+    expect(row.generation).toBe(3);
+    expect(row.priorGenerationsDestroyed).toBe(2);
+    expect(
+      fake.rows
+        .filter((r) => r["tenant_id"] === TENANT_A)
+        .map((r) => r["generation"]),
+    ).toEqual([3]);
+  });
+
+  it("bounds the delete by generation, so it cannot reach the row it just wrote", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await rekey(fake, store, generateDataKey(), 1);
+
+    const del = fake.captured.find((c) => c.sql.includes("DELETE FROM"));
+    expect(del?.sql).toContain("tenant_id = $1");
+    expect(del?.sql).toContain("generation <= $2");
+    expect(del?.params).toEqual([TENANT_A, 1]);
+    expect(fake.rows).toHaveLength(1);
+  });
+
+  it("writes before it deletes", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await rekey(fake, store, generateDataKey(), 1);
+
+    const order = sqlOf(fake.captured);
+    const insert = order.findIndex((s) => s.includes("INSERT INTO"));
+    const del = order.findIndex((s) => s.includes("DELETE FROM"));
+    expect(insert).toBeGreaterThanOrEqual(0);
+    expect(insert).toBeLessThan(del);
+  });
+
+  it("opens no transaction and sets no context: the caller owns both", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await rekey(fake, store, generateDataKey(), 1);
+
+    // One `set_config` and one lock, both the caller's; `refusesNesting` is what proves the seam
+    // did not reach `conn.transaction`.
+    expect(sqlOf(fake.captured).filter((s) => s.includes("set_config"))).toHaveLength(1);
+    expect(sqlOf(fake.captured).filter((s) => s.includes("pg_advisory_xact_lock"))).toHaveLength(1);
+    expect(fake.captured.every((c) => c.inTx)).toBe(true);
+  });
+
+  it("binds the new generation into the AAD, so the row cannot be replayed as another", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await rekey(fake, store, generateDataKey(), 1);
+
+    const written = fake.rows.find((r) => r["generation"] === 2);
+    expect(written).toBeDefined();
+    // The same wrapped bytes filed at a different generation: what a row copied between
+    // generations looks like, and the AAD is the only thing refusing it.
+    fake.rows.splice(0, fake.rows.length, { ...(written ?? {}), generation: 3 });
+    await expect(store.load(TENANT_A)).rejects.toBeInstanceOf(DataKeyUnwrapFailed);
+  });
+
+  it("reports 0 destroyed when the generation it was told to rotate from is not there", async () => {
+    const fake = fakeDataKeysPg();
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    // Not a refusal: the premise `fromGeneration` states is the caller's, established under the
+    // lock. 0 here is the evidence that the premise was wrong, which is why the figure is returned
+    // rather than discarded.
+    const row = await rekey(fake, store, generateDataKey(), 1);
+    expect(row.priorGenerationsDestroyed).toBe(0);
+  });
+
+  it("refuses a fromGeneration the column's CHECK could not have held", async () => {
+    const fake = fakeDataKeysPg();
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      await expect(
+        store.rekeyWithin(fake.conn, TENANT_A, generateDataKey(), bad),
+      ).rejects.toThrow(/fromGeneration/);
+    }
+    expect(fake.captured).toHaveLength(0);
+  });
+
+  it("refuses a malformed tenant id before any statement", async () => {
+    const fake = fakeDataKeysPg();
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await expect(
+      store.rekeyWithin(fake.conn, "not a uuid;", generateDataKey(), 1),
+    ).rejects.toThrow(/invalid tenantId/);
+    expect(fake.captured).toHaveLength(0);
+  });
+
+  it("lets a wrong-length key refuse before anything is written", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    await expect(
+      rekey(fake, store, new Uint8Array(DATA_KEY_BYTES - 1), 1),
+    ).rejects.toThrow(/32 bytes/);
+    expect(sqlOf(fake.captured).some((s) => s.includes("INSERT INTO"))).toBe(false);
+    expect(sqlOf(fake.captured).some((s) => s.includes("DELETE FROM"))).toBe(false);
+  });
+
+  it("propagates a unique violation rather than catching it: the lock was not held", async () => {
+    const fake = fakeDataKeysPg({
+      seedRows: [
+        storedRow(TENANT_A, generateDataKey(), { generation: 1 }),
+        storedRow(TENANT_A, generateDataKey(), { generation: 2 }),
+      ],
+    });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    // Rotating "from 1" while a generation 2 exists is what a defeated lock produces: two rekeys
+    // both read 1 and both try to write 2. Catching this and re-reading would leave the loser
+    // having rewritten the tenant's ciphertext under a key no row holds.
+    await expect(rekey(fake, store, generateDataKey(), 1)).rejects.toThrow(/unique constraint/);
+    expect(fake.rows).toHaveLength(2);
+  });
+
+  it("leaves another tenant's generations alone even as the owner", async () => {
+    const fake = fakeDataKeysPg({
+      owner: true,
+      seedRows: [storedRow(TENANT_B, generateDataKey(), { generation: 1 })],
+    });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    const row = await rekey(fake, store, generateDataKey(), 1);
+    expect(row.priorGenerationsDestroyed).toBe(0);
+    expect(fake.rows.filter((r) => r["tenant_id"] === TENANT_B)).toHaveLength(1);
+  });
+
+  it("puts no key material in any SQL text", async () => {
+    const fake = fakeDataKeysPg({ seedRows: [storedRow(TENANT_A, generateDataKey())] });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+    const next = generateDataKey();
+    await rekey(fake, store, next, 1);
+
+    for (const secret of [
+      Buffer.from(next).toString("base64"),
+      Buffer.from(next).toString("hex"),
+      Buffer.from(KEK).toString("base64"),
+      Buffer.from(KEK).toString("hex"),
+    ]) {
+      for (const c of fake.captured) expect(c.sql).not.toContain(secret);
+    }
   });
 });

@@ -28,8 +28,19 @@ export {
   type ScopeFilter,
 } from "@crossengin/kernel-pg";
 
-export const SET_TENANT_CONTEXT_SQL =
-  "SELECT set_config('app.current_tenant_id', $1, true)";
+/**
+ * The GUC a tenant-scoped statement is confined by, spelled once.
+ *
+ * Exported beside the statement because a *rekey* sets two further settings in the same
+ * transaction, through `set_config($1, $2, true)` — the key GUCs, whose names are bound rather than
+ * written into the SQL so the key values beside them never reach SQL text. Anything deciding "is
+ * this statement the one that scopes the session?" therefore has to compare against this name
+ * rather than assume the first parameter is a tenant id, which is exactly the mistake a test double
+ * makes once and then silently rescopes every statement after it.
+ */
+export const TENANT_CONTEXT_GUC = "app.current_tenant_id";
+
+export const SET_TENANT_CONTEXT_SQL = `SELECT set_config('${TENANT_CONTEXT_GUC}', $1, true)`;
 
 /**
  * The elevation a platform-scope write to `meta.crypto_keys` needs, and the narrowest of the four

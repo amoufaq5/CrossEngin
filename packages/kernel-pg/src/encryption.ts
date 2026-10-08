@@ -90,6 +90,67 @@ export async function introspectEncryptedColumns(
   return out;
 }
 
+/**
+ * Partitioned **parents** carrying a column comment that hints at-rest encryption.
+ *
+ * Deliberately a separate query rather than a widening of `ENCRYPTED_COLUMN_QUERY`'s
+ * `c.relkind = 'r'`, and it reads `pg_description` directly rather than through `col_description`
+ * so the two statements cannot be mistaken for one another by a reader or a test double.
+ */
+export const PARTITIONED_ENCRYPTED_TABLE_QUERY = `
+  SELECT c.relname AS table_name,
+         d.description AS comment
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_description d ON d.objoid = c.oid AND d.objsubid > 0
+   WHERE c.relkind = 'p'
+     AND n.nspname = $1
+     AND d.description LIKE '%crossengin.encrypt=at_rest%'
+   ORDER BY c.relname, d.objsubid
+`;
+
+interface PartitionedEncryptedTableRow {
+  readonly table_name: string;
+  readonly comment: string | null;
+}
+
+/**
+ * Partitioned tables (`relkind = 'p'`) carrying an at-rest-encrypted column in this schema.
+ *
+ * This exists so a rotation can **refuse** rather than silently skip. `introspectEncryptedColumns`
+ * filters `relkind = 'r'`, so a partitioned parent is invisible to it and a rotation over that
+ * schema would rewrite nothing for it **and report itself complete** — after which an operator
+ * retires the old key and that data is permanently undecryptable.
+ *
+ * Widening the filter to include `'p'` is not the fix, because an `UPDATE` on a partitioned parent
+ * rewrites every leaf row. Whether a leaf also carries the hint depends on how it was created
+ * (`CREATE TABLE … PARTITION OF` does not copy column comments; `ATTACH PARTITION` of an
+ * emitter-built table does), so the widened filter would **double-encrypt** every leaf that carries
+ * it while the narrow filter skips the data entirely. Both answers are wrong, so the honest move is
+ * to say so and stop. Nothing in this repo partitions today; this refusal is what keeps that true
+ * rather than silent.
+ */
+export async function introspectPartitionedEncryptedTables(
+  conn: PgConnection,
+  schema: string,
+): Promise<readonly string[]> {
+  const result = await conn.query<PartitionedEncryptedTableRow>(
+    PARTITIONED_ENCRYPTED_TABLE_QUERY,
+    [schema],
+  );
+  // The `LIKE` is a substring test; the directive parser is what decides, so a comment merely
+  // mentioning the directive name does not refuse a rotation. Same two-step as its sibling.
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const row of result.rows) {
+    if (!parseColumnDirectives(row.comment).encryptAtRest) continue;
+    if (seen.has(row.table_name)) continue;
+    seen.add(row.table_name);
+    out.push(row.table_name);
+  }
+  return out;
+}
+
 export const PGCRYPTO_EXTENSION = "pgcrypto";
 
 export async function pgcryptoInstalled(conn: PgConnection): Promise<boolean> {
@@ -172,6 +233,32 @@ export function columnKeyRefFor(guc: string): string {
  * caller-supplied ref has it.
  */
 export const DEFAULT_COLUMN_KEY_REF = columnKeyRefFor(COLUMN_ENCRYPTION_KEY_GUC);
+
+/**
+ * The GUC holding the key a rekey reads **from**, where `COLUMN_ENCRYPTION_KEY_GUC` holds the one it
+ * writes **to**.
+ *
+ * Two GUCs rather than one because a re-encryption decrypts under one key and encrypts under the
+ * other **in a single statement** — `pgp_sym_encrypt(pgp_sym_decrypt(col, old), new)` — so both
+ * values have to be readable from inside that one expression. A sequential "set the key, rotate, set
+ * the other key" cannot express it: there is no intermediate state in which the column is plaintext.
+ *
+ * Both are `columnKeyRefFor`'s one-argument raising form, and the reason is `isRaisingKeyRef`'s
+ * measurement applied twice. On the **new**-key side a two-argument ref resolving to NULL makes
+ * `pgp_sym_encrypt(x, NULL)` return NULL silently, so a rekey with the new key unset would write NULL
+ * over every PHI value in the column and report the row count as a success. On the **old**-key side
+ * it is the same loss one function in: `pgp_sym_decrypt(col, NULL)` is NULL, which is then encrypted
+ * under the new key, so the column ends up holding ciphertext of nothing. A rekey is the one
+ * operation after which the previous key is destroyed, so neither failure is recoverable.
+ *
+ * The name `app.column_encryption_key_old` already existed in this package's
+ * `encryption-writepath.test.ts` and in **no `src` file**: the two-key capability was built, tested
+ * and reachable only from its own test (ADR-0336's class), which is why the old-key side of every
+ * rotation in this repo has been a string a test typed in rather than a declaration anything shared.
+ */
+export const COLUMN_ENCRYPTION_KEY_OLD_GUC = "app.column_encryption_key_old";
+
+export const OLD_COLUMN_KEY_REF = columnKeyRefFor(COLUMN_ENCRYPTION_KEY_OLD_GUC);
 
 const RAISING_KEY_REF_RE = /^\s*current_setting\(\s*'[^']*'\s*\)\s*$/i;
 

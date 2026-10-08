@@ -15,6 +15,17 @@ const TABLE = "tenant_data_keys";
 /** The row's own first envelope key. A rekey mints the next; `ensure` never does. */
 const FIRST_GENERATION = 1;
 
+/**
+ * The columns a write names and the columns a read projects — deliberately two constants whose
+ * values coincide today, not one shared constant.
+ *
+ * The INSERT must name every `NOT NULL` column with no default and nothing more; the SELECT must
+ * project everything `open` reads. Adding `created_at` to the projection is correct and adding it
+ * to the write would bind a value against a column that defaults itself, so deduplicating these
+ * would make the next legitimate change to one of them a silent mistake in the other.
+ */
+const INSERT_COLUMNS = "tenant_id, generation, wrapped_key, kek_generation, provenance";
+
 const READ_COLUMNS = "tenant_id, generation, wrapped_key, kek_generation, provenance";
 
 /**
@@ -43,6 +54,24 @@ export interface StoredDataKey {
   readonly provenance: DataKeyProvenance;
   /** Unwrapped. Nothing in this module logs or stringifies it. */
   readonly dek: Uint8Array;
+}
+
+/**
+ * A row `rekeyWithin` wrote, plus the one fact only it can report.
+ *
+ * `StoredDataKey` describes a row; this adds what happened to the rows that are *gone*, which a
+ * caller cannot ask afterwards because asking would have to be a read of rows that no longer exist.
+ * A `StoredDataKey` in every other respect, so every caller typed against that shape is unaffected.
+ */
+export interface RekeyedDataKey extends StoredDataKey {
+  /**
+   * Earlier generations deleted by the same statement that made this one current.
+   *
+   * `0` is a finding rather than a nicety: this tenant had a row at `fromGeneration` a moment ago,
+   * read under the same lock, so nothing having been deleted means the `DELETE` reached no row it
+   * should have — a scope or a predicate that does not match the read.
+   */
+  readonly priorGenerationsDestroyed: number;
 }
 
 export interface DataKeySeed {
@@ -95,6 +124,14 @@ export class DataKeyUnwrapFailed extends Error {
  * owner and so bypasses that policy. Strict and never the inclusive arm: there is no platform data
  * key, so a row from another scope is never evidence about this tenant — it is the row whose AAD
  * would refuse to open under this tenant's KEK.
+ *
+ * **Both halves of that still hold for the two `*Within` seams; only who establishes the first one
+ * moves.** `loadWithin` and `rekeyWithin` carry the same predicate and set no context, because they
+ * run inside a transaction a caller opened for work this store cannot see — a rekey rewrites a
+ * tenant's ciphertext and writes the new key row, and those two must commit together or not at all.
+ * The context is therefore the caller's to set and the lock the caller's to hold, which the seams'
+ * own comments spell out; they do not relax the rule, they relocate one of its two obligations and
+ * name who now owns it.
  */
 export class PostgresDataKeyStore {
   private readonly schema: string;
@@ -173,34 +210,7 @@ export class PostgresDataKeyStore {
       // still recomputable from the deployment secret, so destroying it destroys nothing.
       const provenance: DataKeyProvenance =
         seeded === undefined ? "random" : "seeded_from_derived";
-      const wrapped = wrapDataKey(
-        kek,
-        dek,
-        dataKeyWrapAad(tenantId, FIRST_GENERATION),
-      );
-      await tx.query(
-        `INSERT INTO ${this.schema}.${TABLE}
-          (tenant_id, generation, wrapped_key, kek_generation, provenance)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [
-          tenantId,
-          FIRST_GENERATION,
-          // `Buffer.from`, not the `Uint8Array` as it stands: node-postgres serialises a value by
-          // asking `Buffer.isBuffer`, and a plain `Uint8Array` falls past that to a text rendering.
-          // A fake that records `{sql, params}` cannot see the difference (ADR-0333's boundary).
-          Buffer.from(wrapped),
-          this.kekGeneration,
-          provenance,
-        ],
-      );
-      return {
-        tenantId,
-        generation: FIRST_GENERATION,
-        kekGeneration: this.kekGeneration,
-        provenance,
-        // The DEK we just wrapped, not a re-read and re-unwrap of it.
-        dek,
-      };
+      return this.insertGeneration(tx, kek, tenantId, FIRST_GENERATION, dek, provenance);
     });
   }
 
@@ -214,10 +224,107 @@ export class PostgresDataKeyStore {
   async load(tenantId: string, generation?: number): Promise<StoredDataKey | null> {
     assertScopeTenantId(tenantId);
     const kek = this.kekFor(tenantId);
-    return this.scoped(tenantId, async (tx) => {
-      const row = await this.selectLatest(tx, tenantId, generation);
-      return row === null ? null : this.open(kek, row);
-    });
+    return this.scoped(tenantId, (tx) => this.readKey(tx, kek, tenantId, generation));
+  }
+
+  /**
+   * `load` inside a caller's transaction, which must **already have set the tenant context**.
+   *
+   * The statement still carries the strict `scopeFilter`, because both arms are needed and neither
+   * substitutes for the other: the context for a non-owner, whose single isolation policy is the
+   * only thing confining the read; the predicate for the deployment connecting as the table's
+   * owner, which bypasses that policy entirely.
+   *
+   * **The caller owns the transaction, and that is not a stylistic preference.** `load` reaches
+   * `scoped`, which opens one — so a rekey calling `load` from inside its own transaction would
+   * nest, and the real `node-pg` binding throws `nested transactions are not supported` while both
+   * of this package's fakes hand the callback a fresh client and carry on. A seam that opened its
+   * own transaction would therefore be green offline and dead live, which is the one failure mode
+   * an offline fake cannot report (ADR-0333's boundary), so the seam is the shape rather than the
+   * convenience.
+   *
+   * What the caller takes on with it: the context this read is confined by, and — when the
+   * generation it reads is about to be rotated from — the lock that makes the read and the
+   * subsequent write one decision. `ensure` holds `DATA_KEY_LOCK_SQL` across its own read and
+   * insert for a stated reason; a caller reading here and writing through `rekeyWithin` has split
+   * that pair across two calls and has to hold the lock across both itself.
+   */
+  async loadWithin(
+    tx: PgConnection,
+    tenantId: string,
+    generation?: number,
+  ): Promise<StoredDataKey | null> {
+    assertScopeTenantId(tenantId);
+    return this.readKey(tx, this.kekFor(tenantId), tenantId, generation);
+  }
+
+  /**
+   * Writes generation `fromGeneration + 1` holding `dek`, deletes every earlier generation, and
+   * returns the new row — inside a caller's transaction that already holds `DATA_KEY_LOCK_SQL` and
+   * has set the tenant context.
+   *
+   * `provenance` is **always `random`** and is not a parameter: seeding exists only to keep
+   * existing ciphertext readable through the switch to the envelope, and a rekey has just rewritten
+   * that ciphertext under the key this row holds, so there is no such thing as a seeded rekey.
+   * Writing `random` is the whole point of the operation — it is what turns `shreddabilityOf` from
+   * `derivable` into `shreddable`, which is the only thing a rekey buys.
+   *
+   * Earlier generations are deleted **in the same transaction** rather than left behind: a
+   * `seeded_from_derived` row that outlives the rekey protects nothing, since its key is still
+   * recomputable from the deployment secret, and `load` would ignore it anyway for being a lower
+   * generation — so keeping it only leaves an operator a row whose provenance contradicts the
+   * tenant's actual state. `destroy` cannot do this job: it takes no generation and deletes every
+   * row for the tenant, including the one this just wrote.
+   *
+   * **The caller owns the transaction, the lock and the context**, for `loadWithin`'s reason — the
+   * real binding refuses a nested transaction where both fakes here permit one — and for one more
+   * that is specific to this method. `fromGeneration` is a premise: it says what the caller read.
+   * Held under the lock across that read and this write, it is a fact; held without, two rekeys can
+   * both read generation N and both try to write N+1. The unique `(tenant_id, generation)` is the
+   * backstop and a `23505` is still deliberately **not caught** here, exactly as in `ensure`:
+   * reaching it means the lock was not held, and catching it to re-read would be the lost-write
+   * this design refuses, in the one place where the loser has already rewritten a tenant's
+   * ciphertext.
+   */
+  async rekeyWithin(
+    tx: PgConnection,
+    tenantId: string,
+    dek: Uint8Array,
+    fromGeneration: number,
+  ): Promise<RekeyedDataKey> {
+    assertScopeTenantId(tenantId);
+    // The column carries `CHECK (generation >= 1)`, so a `fromGeneration` of 0 would write a legal
+    // row and a negative one an illegal one — but the reason to refuse here rather than let the
+    // CHECK do it is the `DELETE`: its predicate is `generation <= fromGeneration`, so a figure
+    // that is not the generation the caller actually read either destroys nothing or destroys a
+    // generation still in use, and both are silent.
+    if (!Number.isInteger(fromGeneration) || fromGeneration < FIRST_GENERATION) {
+      throw new Error(
+        `fromGeneration must be an integer >= ${FIRST_GENERATION.toString()}, got ` +
+          `${String(fromGeneration)}`,
+      );
+    }
+    const newGeneration = fromGeneration + 1;
+    const kek = this.kekFor(tenantId);
+    // The INSERT first, though the `DELETE`'s predicate cannot reach the row it writes
+    // (`generation <= fromGeneration` excludes `fromGeneration + 1`), so the two commute. What the
+    // order buys is legibility on the one failure path that exists: a defeated lock surfaces as a
+    // unique violation on this statement, before anything has been destroyed, rather than after.
+    const written = await this.insertGeneration(
+      tx,
+      kek,
+      tenantId,
+      newGeneration,
+      dek,
+      "random",
+    );
+    const scope = scopeFilter(tenantId, 1);
+    const deleted = await tx.query(
+      `DELETE FROM ${this.schema}.${TABLE}
+       WHERE ${scope.sql} AND generation <= $${String(scope.params.length + 1)}`,
+      [...scope.params, fromGeneration],
+    );
+    return { ...written, priorGenerationsDestroyed: deleted.rowCount };
   }
 
   /**
@@ -239,6 +346,65 @@ export class PostgresDataKeyStore {
       );
       return result.rowCount;
     });
+  }
+
+  /**
+   * One generation's row, wrapped under this tenant's KEK and bound to the generation it is filed
+   * at, written and returned.
+   *
+   * One definition rather than one per writer. `ensure` and `rekeyWithin` differ in *which*
+   * generation and *which* provenance they write and in nothing else, and the column list is
+   * precisely what a second copy would drift on without a symptom: the INSERT has to name every
+   * `NOT NULL` column that has no default, which is the property a fake recording `{sql, params}`
+   * structurally cannot check and `pg-column-coverage.ts` checks per statement.
+   *
+   * The AAD binds the **generation**, so a wrapped key copied from one generation's row to
+   * another's does not open — which is what keeps a rekey's new row from being satisfiable by the
+   * bytes of the one it replaces.
+   */
+  private async insertGeneration(
+    tx: PgConnection,
+    kek: Uint8Array,
+    tenantId: string,
+    generation: number,
+    dek: Uint8Array,
+    provenance: DataKeyProvenance,
+  ): Promise<StoredDataKey> {
+    const wrapped = wrapDataKey(kek, dek, dataKeyWrapAad(tenantId, generation));
+    await tx.query(
+      `INSERT INTO ${this.schema}.${TABLE}
+          (${INSERT_COLUMNS})
+         VALUES ($1, $2, $3, $4, $5)`,
+      [
+        tenantId,
+        generation,
+        // `Buffer.from`, not the `Uint8Array` as it stands: node-postgres serialises a value by
+        // asking `Buffer.isBuffer`, and a plain `Uint8Array` falls past that to a text rendering.
+        // A fake that records `{sql, params}` cannot see the difference (ADR-0333's boundary).
+        Buffer.from(wrapped),
+        this.kekGeneration,
+        provenance,
+      ],
+    );
+    return {
+      tenantId,
+      generation,
+      kekGeneration: this.kekGeneration,
+      provenance,
+      // The DEK we just wrapped, not a re-read and re-unwrap of it.
+      dek,
+    };
+  }
+
+  /** The read `load` and `loadWithin` share, so the two cannot differ about what a row means. */
+  private async readKey(
+    tx: PgConnection,
+    kek: Uint8Array,
+    tenantId: string,
+    generation?: number,
+  ): Promise<StoredDataKey | null> {
+    const row = await this.selectLatest(tx, tenantId, generation);
+    return row === null ? null : this.open(kek, row);
   }
 
   private async selectLatest(

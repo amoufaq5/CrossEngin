@@ -13,7 +13,14 @@ import {
 
 import { COLUMN_ENCRYPTION_SECRET_VAR } from "./column-encryption.js";
 import { ALLOW_CURSOR_DISCLOSURE_FLAG } from "./cursor-encryption.js";
-import { COLUMN_KEY_MODES, COLUMN_KEY_MODE_FLAG, type ColumnKeyMode } from "./data-key-envelope.js";
+import {
+  COLUMN_KEY_MODES,
+  COLUMN_KEY_MODE_FLAG,
+  COLUMN_KEY_TTL_BOUNDS,
+  COLUMN_KEY_TTL_FLAG,
+  DEFAULT_COLUMN_KEY_TTL_MS,
+  type ColumnKeyMode,
+} from "./data-key-envelope.js";
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
 import {
   SENSITIVE_FIELD_CLASS_FLAG,
@@ -28,6 +35,7 @@ import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
 import { DEFAULT_UNREAD_SCAN_LIMIT, MAX_UNREAD_SCAN_LIMIT } from "./read-state-routes.js";
 import { parseRequestBodyLimit, parseRouteBodyLimits } from "./request-body-limit.js";
+import type { RekeyOptions } from "./rekey.js";
 import { REPLAY_SUBSYSTEMS, type ReplaySubsystem } from "./replay.js";
 import {
   GatewayExecutionCaptureConfigSchema,
@@ -82,6 +90,15 @@ export interface ServeOptions {
    * accident.
    */
   readonly columnKeyMode: ColumnKeyMode;
+  /**
+   * How long a resolved per-tenant column key is served from memory, or `null` for the default.
+   *
+   * It exists because a **rekey** changes that key out of process. ADR-0347 cached it with no
+   * expiry and argued the staleness was harmless; a rekey makes it reachable in the worse
+   * direction, since a process still holding the previous key writes new ciphertext under it. The
+   * TTL bounds the window and does not close it.
+   */
+  readonly columnKeyTtlMs: number | null;
   readonly schema: string | null;
   readonly apiKeys: readonly string[];
   readonly jwksKeys: readonly string[];
@@ -489,6 +506,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let allowPlaintextPhi = false;
   let allowCursorDisclosure = false;
   let columnKeyMode: ColumnKeyMode = "derived";
+  let columnKeyTtlMs: number | null = null;
   let schema: string | null = null;
   let defaultScheme: "http" | "https" = "http";
   const apiKeys: string[] = [];
@@ -782,6 +800,25 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
         );
       }
       columnKeyMode = raw as ColumnKeyMode;
+      i += consumed();
+    } else if (arg === COLUMN_KEY_TTL_FLAG || arg.startsWith(`${COLUMN_KEY_TTL_FLAG}=`)) {
+      const raw = takeValue(arg, next, COLUMN_KEY_TTL_FLAG);
+      const n = Number(raw);
+      // Refused rather than clamped, out of band in either direction: below the floor the cache
+      // stops collapsing a cold tenant's concurrent first writes into one provisioning, and above
+      // the ceiling a rekey's stale-key window outlasts any plausible maintenance pause. Silently
+      // moving it would make the deployment believe a window it did not choose.
+      if (
+        !Number.isInteger(n) ||
+        n < COLUMN_KEY_TTL_BOUNDS.min ||
+        n > COLUMN_KEY_TTL_BOUNDS.max
+      ) {
+        throw new CliUsageError(
+          `${COLUMN_KEY_TTL_FLAG} must be an integer between ${COLUMN_KEY_TTL_BOUNDS.min.toString()}` +
+            ` and ${COLUMN_KEY_TTL_BOUNDS.max.toString()} ms, got '${raw}'`,
+        );
+      }
+      columnKeyTtlMs = n;
       i += consumed();
     } else if (arg === "--classified-write-mask") {
       classifiedWriteMask = true;
@@ -1741,6 +1778,7 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     allowPlaintextPhi,
     allowCursorDisclosure,
     columnKeyMode,
+    columnKeyTtlMs,
     sensitiveFieldRoles,
     abacPolicies,
     sensitiveFieldClasses,
@@ -2054,8 +2092,11 @@ Usage:
   operate-server --pack <name> [options]
   operate-server --manifest <file.json> [options]
 
-Subcommands:
-  prune-links          Remove a tenant's dangling m2m links (see prune-links --help)
+Subcommands (each takes --help):
+  prune-links          Remove a tenant's dangling m2m links
+  verify-chain         Verify the audit chain's links, signatures and anchors
+  replay               Re-derive each subsystem's projections from its log and report drift
+  rekey                Move one tenant's at-rest column key to a fresh random data key
 
 Manifest source (exactly one):
   --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
@@ -2094,7 +2135,17 @@ Options:
                        before it, until those expire. A tenant that already has
                        a schema is seeded from the derived key to keep its
                        ciphertext readable, and is then NOT shreddable; one
-                       provisioned fresh gets a random key and is.
+                       provisioned fresh gets a random key and is. Use
+                       'operate-server rekey' to move a seeded tenant to a
+                       random key, which is what makes a destruction mean
+                       anything.
+  --column-key-ttl-ms <n>  How long a resolved per-tenant column key is served
+                       from memory (${COLUMN_KEY_TTL_BOUNDS.min.toString()}..${COLUMN_KEY_TTL_BOUNDS.max.toString()}, default ${DEFAULT_COLUMN_KEY_TTL_MS.toString()}). A rekey
+                       changes that key out of process, so until the entry
+                       expires this process's reads of the rekeyed tenant raise
+                       'Wrong key or corrupt data' and its WRITES would store
+                       new values under the old key. Lower it before a rekey,
+                       or quiesce the tenant for the window.
   --schema <name>      Postgres schema for the entity store (default meta;
                        public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)
@@ -2610,4 +2661,132 @@ Options:
 
 Exit: 0 when every selected subsystem was readable and found nothing; 1 when anything drifted
 OR a subsystem could not be read -- an unread subsystem must not exit 0; 2 on a usage error.
+`;
+
+/**
+ * Parses the argv *after* the `rekey` token.
+ *
+ * `--confirm-tenant` is required and must equal `--tenant`, following
+ * `--tenant-erasure-routes`' `confirmTenantId` rule: the operation's last act is a `DELETE` of the
+ * only copy of a key, and rekeying the **wrong** tenant rewrites every one of their PHI rows under a
+ * key they were not previously under. There is no `--yes`, because a flag that means "I meant it"
+ * can be pasted from a runbook without reading the tenant id, which is the thing being confirmed.
+ *
+ * Two schemas and not one, which is the flag this subcommand cannot avoid having twice: a single
+ * `--schema` drives `PostgresDataKeyStore` (whose own default is `meta`) and
+ * `ColumnMappedEntityStore` (whose default is `public`), so a tool taking one value would address
+ * the wrapped key in the right place and the ciphertext in the wrong one for at least one
+ * configuration — and finding no key where it looked, provision a second one.
+ */
+export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
+  let tenantId: string | null = null;
+  let confirmTenantId: string | null = null;
+  let plan = false;
+  let schema: string | null = null;
+  let dataSchema: string | null = null;
+  let allowLiveRekey = false;
+  let format: "human" | "json" = "human";
+  let help = false;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const next = argv[i + 1];
+    const consumed = (): number => (isInline(arg) ? 0 : 1);
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+    } else if (arg === "--tenant" || arg.startsWith("--tenant=")) {
+      tenantId = takeValue(arg, next, "--tenant");
+      i += consumed();
+    } else if (arg === "--confirm-tenant" || arg.startsWith("--confirm-tenant=")) {
+      confirmTenantId = takeValue(arg, next, "--confirm-tenant");
+      i += consumed();
+    } else if (arg === "--plan") {
+      plan = true;
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
+      i += consumed();
+    } else if (arg === "--data-schema" || arg.startsWith("--data-schema=")) {
+      dataSchema = takeValue(arg, next, "--data-schema");
+      i += consumed();
+    } else if (arg === "--allow-live-rekey") {
+      allowLiveRekey = true;
+    } else if (arg === "--format" || arg.startsWith("--format=")) {
+      const raw = takeValue(arg, next, "--format");
+      if (raw !== "human" && raw !== "json") {
+        throw new CliUsageError(`invalid --format: ${raw} (human|json)`);
+      }
+      format = raw;
+      i += consumed();
+    } else {
+      throw new CliUsageError(`unknown argument: ${arg}`);
+    }
+  }
+
+  if (!help) {
+    if (tenantId === null) throw new CliUsageError("rekey requires --tenant <uuid>");
+    if (!TENANT_ID_RE.test(tenantId)) throw new CliUsageError(`invalid --tenant: ${tenantId}`);
+    // Required even under `--plan`, so the invocation an operator reviews is the invocation they
+    // then re-run without the flag. A confirmation that appears only on the destructive run is one
+    // they meet for the first time at the moment they are least likely to read it.
+    if (confirmTenantId === null) {
+      throw new CliUsageError(
+        "rekey requires --confirm-tenant <uuid>: the tenant id is typed twice because rekeying" +
+          " the wrong tenant rewrites every one of their encrypted rows under a new key",
+      );
+    }
+    if (confirmTenantId.toLowerCase() !== tenantId.toLowerCase()) {
+      throw new CliUsageError("--confirm-tenant must equal --tenant");
+    }
+  }
+
+  return {
+    tenantId: tenantId ?? "",
+    confirmTenantId: confirmTenantId ?? "",
+    plan,
+    schema,
+    dataSchema,
+    allowLiveRekey,
+    format,
+    help,
+  };
+}
+
+export const rekeyHelpText = `operate-server rekey — move one tenant's at-rest column key to a fresh random data key
+
+Usage:
+  operate-server rekey --tenant <uuid> --confirm-tenant <uuid> [--plan] [options]
+
+Why: under --column-key-mode envelope, a tenant that already held ciphertext when the deployment
+switched modes was SEEDED from the key derived from COLUMN_ENCRYPTION_SECRET, so its stored key is
+still recomputable and destroying the row destroys nothing. A rekey re-encrypts that tenant's
+encrypted columns under a freshly generated random data key and retires the old generation, which
+is what makes a later destruction bound the recovery horizon.
+
+One transaction per tenant: either the re-encrypted columns and the new key row both commit, or
+neither does. Every refusal lands before the first UPDATE, and the rotation is confirmed to read
+back under the new key before the transaction commits.
+
+Required:
+  --tenant <uuid>          The tenant to rekey
+  --confirm-tenant <uuid>  The same id again. Rekeying the wrong tenant rewrites every one of
+                           their encrypted rows under a key they were not under before.
+
+Options:
+  --plan                   Survey only: print the current generation, the provenance, the columns
+                           and their row counts, and write nothing
+  --schema <name>          Schema holding meta.tenant_data_keys (default meta)
+  --data-schema <name>     Schema holding the encrypted entity tables (default public; a tenant
+                           serving its own activated manifest uses t_<hex>)
+  --allow-live-rekey       Proceed although meta.tenants says this tenant still accepts writes.
+                           A serving process holding the previous key in cache would write new
+                           values under it, splitting this tenant's data across two keys with
+                           nothing recording which — the one outcome here that cannot be undone.
+  --format human|json      Output format (default human)
+
+The deployment secret is read from COLUMN_ENCRYPTION_SECRET and never from argv. Postgres: standard
+PG* env vars; run as a role row-level security does not confine, because a confined session's
+"0 rows re-encrypted" is indistinguishable from "this tenant holds no ciphertext".
+
+Exit: 0 on a completed rekey or a clean plan; 1 when the survey refuses; 2 on a usage error.
 `;

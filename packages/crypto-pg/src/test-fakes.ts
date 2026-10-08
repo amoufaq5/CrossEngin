@@ -1,4 +1,7 @@
 import { PLATFORM_WRITE_GRANTS, type PgConnection, type PgQueryResult } from "@crossengin/kernel-pg";
+import { dataKeyWrapAad, wrapDataKey } from "@crossengin/crypto";
+
+import { TENANT_CONTEXT_GUC } from "./tenant-context.js";
 
 /** Thrown where Postgres raises `new row violates row-level security policy`. */
 export class FakeRlsViolation extends Error {
@@ -271,4 +274,237 @@ function matchesStatementScope(
     "this fake refuses a write that carries no tenant_id predicate: as the table's owner it " +
       "reaches whichever scope's row holds that id",
   );
+}
+
+/** One statement a fake recorded, and whether it ran inside a transaction. */
+export interface CapturedStatement {
+  readonly sql: string;
+  readonly params: readonly unknown[] | undefined;
+  /** False for a statement issued outside `transaction`, which is the defect ADR-0335 found twice. */
+  readonly inTx: boolean;
+}
+
+export interface FakeDataKeysOptions {
+  /**
+   * Run as the table's owner: RLS is not applied at all, so the statement's own predicate is the
+   * only thing left. Both arms exist because this class of defect is invisible from either vantage
+   * alone — a non-owner's unscoped statement is refused by the policy whether the store carries a
+   * predicate or not.
+   */
+  readonly owner?: boolean;
+  readonly seedRows?: readonly Record<string, unknown>[];
+  /**
+   * Answers a statement this fake does not model, consulted **before** every rule below, with
+   * `null` falling through to them.
+   *
+   * It exists for the rekey, which runs a key rotation's catalog reads, row counts, `UPDATE`s and
+   * confirm passes against the *entity* schema in the same transaction as the key row's own
+   * statements. Those are not `meta.tenant_data_keys` statements and must not be judged by its
+   * tripwires: a catalog query carries no `tenant_id` predicate and would be refused for it, which
+   * would be the fake asserting a rule about a table the statement does not touch.
+   */
+  readonly answer?: (sql: string, params: readonly unknown[]) => PgQueryResult | null;
+}
+
+export interface FakeDataKeysPg {
+  readonly conn: PgConnection;
+  readonly captured: readonly CapturedStatement[];
+  readonly rows: Record<string, unknown>[];
+}
+
+/** Thrown where Postgres raises `new row violates row-level security policy`. */
+class FakeDataKeyRlsViolation extends Error {
+  constructor(detail: string) {
+    super(
+      `new row violates row-level security policy for table "tenant_data_keys": ${detail}`,
+    );
+    this.name = "FakeDataKeyRlsViolation";
+  }
+}
+
+/**
+ * In-memory `meta.tenant_data_keys` with RLS-like scoping, modelled on `fakeCryptoKeysPg` above.
+ *
+ * Two tripwires carry the weight, and both are the point of having a fake at all rather than a
+ * recorder: a **write** with no `tenant_id` — the bound column on an INSERT, the predicate on a
+ * DELETE — throws, because as the owner such a statement reaches whichever scope's row it finds;
+ * and a non-owner write whose tenant is not the session's scope raises, because this table's
+ * isolation policy is its only arm and therefore the only thing carrying a `WITH CHECK`.
+ *
+ * It diverges from `fakeCryptoKeysPg` in one place: a **read** with no `tenant_id` predicate throws
+ * here too. That fake exempts reads on purpose, because `classifyScopedWriteRefusal`'s diagnosing
+ * re-read is deliberately unscoped and asks whether the row sits in another scope. This store has
+ * no such re-read, so there is nothing to exempt and the stricter rule costs nothing.
+ *
+ * It lives here rather than in one test file because the rekey exercises the same table through a
+ * second module, and two copies of a fake are two things to keep in agreement — which is the shape
+ * of defect this repo keeps finding in lists nobody compares.
+ */
+export function fakeDataKeysPg(options: FakeDataKeysOptions = {}): FakeDataKeysPg {
+  const owner = options.owner === true;
+  const rows: Record<string, unknown>[] = [...(options.seedRows ?? [])];
+  const captured: CapturedStatement[] = [];
+
+  function makeClient(inTx: boolean): PgConnection {
+    let currentTenant: string | null = null;
+
+    function statementScope(sql: string, p: readonly unknown[], kind: string): string {
+      const strict = sql.match(/tenant_id\s*=\s*\$(\d+)/);
+      if (strict !== null) return String(p[Number(strict[1]) - 1]);
+      throw new Error(
+        `this fake refuses a ${kind} that carries no tenant_id predicate: as the table's owner ` +
+          "it reaches whichever scope's row it finds",
+      );
+    }
+
+    const query = async (
+      sql: string,
+      params?: readonly unknown[],
+    ): Promise<PgQueryResult> => {
+      const p = params ?? [];
+      captured.push({ sql, params, inTx });
+
+      const supplied = options.answer?.(sql, p) ?? null;
+      if (supplied !== null) return supplied;
+
+      if (sql.includes("set_config")) {
+        // Only `app.current_tenant_id` rescopes the session. A rekey sets two key GUCs through
+        // `set_config($1, $2, true)`, where the *name* is a bound parameter — so a fake reading
+        // `p[0]` as a tenant id would rescope the session to the string
+        // "app.column_encryption_key_old" and then refuse the rekey's own INSERT for naming a
+        // tenant that is not the session's. Both spellings are read, and neither is assumed.
+        if (sql.includes(TENANT_CONTEXT_GUC)) {
+          currentTenant = (p[0] as string | null) ?? null;
+        } else if (p[0] === TENANT_CONTEXT_GUC) {
+          currentTenant = (p[1] as string | null) ?? null;
+        }
+        return { rows: [], rowCount: 0 };
+      }
+      if (sql.includes("pg_advisory_xact_lock")) {
+        return { rows: [], rowCount: 0 };
+      }
+
+      if (sql.includes("INSERT INTO")) {
+        const columns = sql.match(/\(([^)]*)\)\s*VALUES/);
+        if (columns === null || !/\btenant_id\b/.test(columns[1] ?? "")) {
+          throw new Error(
+            "this fake refuses an INSERT that does not name tenant_id: the column is NOT NULL and " +
+              "is the row's whole scope",
+          );
+        }
+        const names = (columns[1] ?? "").split(",").map((c) => c.trim());
+        const row: Record<string, unknown> = {};
+        names.forEach((name, i) => {
+          row[name] = p[i];
+        });
+        const tenantId = String(row["tenant_id"]);
+        if (!owner && tenantId !== currentTenant) {
+          throw new FakeDataKeyRlsViolation(
+            `tenant ${tenantId} is not the session's scope (${String(currentTenant)})`,
+          );
+        }
+        const duplicate = rows.some(
+          (r) =>
+            r["tenant_id"] === row["tenant_id"] && r["generation"] === row["generation"],
+        );
+        if (duplicate) {
+          const err = new Error(
+            'duplicate key value violates unique constraint "tenant_data_keys_tenant_generation_key"',
+          );
+          (err as Error & { code?: string }).code = "23505";
+          throw err;
+        }
+        rows.push(row);
+        return { rows: [], rowCount: 1 };
+      }
+
+      if (sql.includes("DELETE FROM")) {
+        const scope = statementScope(sql, p, "DELETE");
+        // `generation <= $n` is applied rather than ignored, which is not a nicety: the rekey's
+        // DELETE retires the generations it rotated *from* and must not reach the one it has just
+        // written. A fake that dropped the conjunct would show every rekey destroying its own new
+        // key row and still reporting success.
+        const bound = sql.match(/generation\s*<=\s*\$(\d+)/);
+        const ceiling = bound === null ? null : Number(p[Number(bound[1]) - 1]);
+        const doomed = rows.filter(
+          (r) =>
+            r["tenant_id"] === scope &&
+            (owner || r["tenant_id"] === currentTenant) &&
+            (ceiling === null || Number(r["generation"]) <= ceiling),
+        );
+        for (const r of doomed) rows.splice(rows.indexOf(r), 1);
+        return { rows: [], rowCount: doomed.length };
+      }
+
+      if (sql.includes("SELECT")) {
+        const scope = statementScope(sql, p, "SELECT");
+        let visible = rows.filter((r) => owner || r["tenant_id"] === currentTenant);
+        visible = visible.filter((r) => r["tenant_id"] === scope);
+        const generation = sql.match(/generation\s*=\s*\$(\d+)/);
+        if (generation !== null) {
+          const want = p[Number(generation[1]) - 1];
+          visible = visible.filter((r) => r["generation"] === want);
+        }
+        if (sql.includes("ORDER BY generation DESC")) {
+          visible = [...visible].sort(
+            (a, b) => Number(b["generation"]) - Number(a["generation"]),
+          );
+        }
+        if (/LIMIT 1/.test(sql)) visible = visible.slice(0, 1);
+        return { rows: visible, rowCount: visible.length };
+      }
+
+      return { rows: [], rowCount: 0 };
+    };
+
+    return {
+      query: query as PgConnection["query"],
+      transaction: (async <T>(fn: (tx: PgConnection) => Promise<T>) => {
+        // This fake rolls back where `fakeCryptoKeysPg` does not, because the property the rekey
+        // exists to have is that the ciphertext and the key row land together or not at all — and a
+        // fake that kept a half-written row would show a *failed* rekey as having written one, which
+        // is the exact outcome the design refuses. Statements stay in `captured` either way: what
+        // was attempted is as interesting as what survived.
+        const snapshot = rows.map((r) => ({ ...r }));
+        try {
+          return await fn(makeClient(true));
+        } catch (error) {
+          rows.splice(0, rows.length, ...snapshot);
+          throw error;
+        }
+      }) as PgConnection["transaction"],
+      withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) =>
+        fn()) as PgConnection["withAdvisoryLock"],
+      close: (async () => undefined) as PgConnection["close"],
+    };
+  }
+
+  return { conn: makeClient(false), captured, rows };
+}
+
+export interface StoredDataKeyRowOptions {
+  readonly generation?: number;
+  readonly kekGeneration?: number;
+  readonly provenance?: string;
+  /** Wrap against a different tenant's AAD, which is what a row copied between tenants looks like. */
+  readonly aadTenantId?: string;
+}
+
+/** A `meta.tenant_data_keys` row as node-postgres would hand it back. */
+export function storedDataKeyRow(
+  kek: Uint8Array,
+  tenantId: string,
+  dek: Uint8Array,
+  options: StoredDataKeyRowOptions = {},
+): Record<string, unknown> {
+  const generation = options.generation ?? 1;
+  return {
+    tenant_id: tenantId,
+    generation,
+    wrapped_key: Buffer.from(
+      wrapDataKey(kek, dek, dataKeyWrapAad(options.aadTenantId ?? tenantId, generation)),
+    ),
+    kek_generation: options.kekGeneration ?? 1,
+    provenance: options.provenance ?? "random",
+  };
 }
