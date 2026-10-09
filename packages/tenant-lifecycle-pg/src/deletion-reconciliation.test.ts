@@ -3,6 +3,7 @@ import {
   assembleTombstone,
   type DeletionAttestation,
   type GdprDeletionRequest,
+  type TombstoneRecordStorageDeclaration,
 } from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
@@ -85,6 +86,19 @@ const SHARED_ATTESTATION: DeletionAttestation = {
 };
 
 /**
+ * The record-storage declaration the v4 bytes sign (ADR-0351), shared by every fixture here so a
+ * test that varies it is visibly varying one decision.
+ *
+ * `relationCount` is spelled out, unlike the pipeline's half of the seam: these fixtures call
+ * `assembleTombstone` directly, and the derivation from a target list is the pipeline's job.
+ */
+const RECORD_STORAGE: TombstoneRecordStorageDeclaration = {
+  model: "typed_tables",
+  schema: "public",
+  relationCount: 2,
+};
+
+/**
  * A **real** tombstone, assembled the way the pipeline assembles one and anchored the way the store
  * anchors one — not a stub. The verification under test is the real hash arithmetic, so a fixture
  * that merely looked like a record would have tested nothing.
@@ -107,6 +121,7 @@ function tombstoneOf(id = TOMB): StoredTombstone {
     ],
     // `shared_tables` erases and attests (ADR-0329); the contract refuses declaring it absent.
     capabilities: { tenant_schema: "erases", shared_tables: "erases", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
+    recordStorage: RECORD_STORAGE,
     attestations: [ATTESTATION, SHARED_ATTESTATION],
   });
   if (!assembled.ok) throw new Error(`fixture does not assemble: ${JSON.stringify(assembled.refusals)}`);
@@ -172,6 +187,7 @@ function retainingTombstone(): StoredTombstone {
       search_indexes: "absent",
       caches: "absent",
     },
+    recordStorage: RECORD_STORAGE,
     attestations,
   });
   if (!assembled.ok) {
@@ -225,6 +241,7 @@ function unreferencedTombstone(id = "tomb_unref0001aaaa"): StoredTombstone {
     ],
     // `shared_tables` erases and attests (ADR-0329); the contract refuses declaring it absent.
     capabilities: { tenant_schema: "erases", shared_tables: "erases", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
+    recordStorage: RECORD_STORAGE,
     attestations: [ATTESTATION, SHARED_ATTESTATION],
   });
   if (!assembled.ok) {
@@ -607,6 +624,46 @@ describe("verifyStoredEvidence", () => {
     // The proof still checks out, which is exactly why `contentManifestOk` is the only detector —
     // the same division of labour the scope has had since ADR-0323.
     expect(check.defects).not.toContain("proof_mismatch");
+  });
+
+  it("accepts an honest v4 proof and catches a record-storage declaration edited after storage", () => {
+    // ADR-0351, and the fourth instance of one shape. Before the declaration went inside the v4
+    // bytes this edit was invisible to everything: the chain commits to the digests and the
+    // identity, `proofSha256` commits to `contentManifestSha256`, and neither commits to where the
+    // deployment kept the tenant's records — so a stored proof's answer to "did you hold these in
+    // typed relations, and how many" could be rewritten with every hash byte-identical.
+    //
+    // `document_rows` is the edit that pays: it asserts there were no typed relations at all, which
+    // is what makes the scope's silence about them read as honest.
+    const honest = tombstoneOf();
+    expect(honest.record.proofVersion).toBe("v4");
+    expect(verifyStoredEvidence(honest)).toEqual({ ok: true, defects: [], matchesAttestations: true });
+    const edited: StoredTombstone = {
+      ...honest,
+      record: {
+        ...honest.record,
+        recordStorage: { model: "document_rows", schema: null, relationCount: 0 },
+      },
+    };
+    const check = verifyStoredEvidence(edited);
+    expect(check.ok).toBe(false);
+    expect(check.defects).toContain("scope_tampered");
+    // The proof still checks out and the attestations still compose the same scope — a declaration
+    // is a property of the deployment and composes nothing, so `contentManifestOk` is the only
+    // detector, exactly as it is for the retention claim.
+    expect(check.defects).not.toContain("proof_mismatch");
+    expect(check.matchesAttestations).toBe(true);
+  });
+
+  it("catches a relation count moved with the model left alone", () => {
+    // The narrower half, and why `relationCount` earns the version: a `typed_tables` declaration
+    // counting zero is its own claim, so an editor that only moves the figure rewrites how much the
+    // deployment held without touching what kind of store it was.
+    const edited: StoredTombstone = {
+      ...tombstoneOf(),
+      record: { ...tombstoneOf().record, recordStorage: { ...RECORD_STORAGE, relationCount: 0 } },
+    };
+    expect(verifyStoredEvidence(edited).defects).toEqual(["scope_tampered"]);
   });
 
   it("catches a retained attestation deleted out of the evidence", () => {
@@ -1078,6 +1135,12 @@ describe("auditTombstones writes nothing", () => {
       // escalates a `sev1` about a falsified Article 17 proof that was never falsified.
       retained_obligations:
         r.retainedObligations === undefined ? null : JSON.stringify(r.retainedObligations),
+      // ADR-0351, and the same trap once more with no column default behind it: `proof_version`
+      // defaults to `'v1'`, which is the honest reading of a row written before that column, and a
+      // record-storage declaration has no such reading. A row that drops this one is a v4 label
+      // with nothing to hash, so the sweep would escalate a `sev1` about a falsified Article 17
+      // proof that was never falsified.
+      record_storage: r.recordStorage === undefined ? null : JSON.stringify(r.recordStorage),
       chain_entry_hash: stored.chainEntryHash,
       chain_sequence_number: stored.chainSequenceNumber,
     };

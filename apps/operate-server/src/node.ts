@@ -122,11 +122,17 @@ import { buildTenantCiphertextProbe } from "./tenant-ciphertext-probe.js";
 import {
   bootErasureCoverageIsSuspect,
   formatBootErasureCoverage,
+  recordStorageDeclarationFor,
 } from "./boot-erasure-report.js";
 import {
   formatEnvelopeTenantReadiness,
   surveyEnvelopeTenantReadiness,
 } from "./envelope-tenant-readiness.js";
+import {
+  formatProofVersionCheck,
+  probeProofVersionCheck,
+  proofVersionCheckBlocksDeletion,
+} from "./proof-version-probe.js";
 import {
   TENANT_WRITE_STATUS_DETAIL,
   probeTenantWriteStatus,
@@ -896,6 +902,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.store === "pg-columns"
       ? bootSchemaErasurePlan(manifest, { schema: bootErasureSchema })
       : { targets: [], blockingCycle: [], relaxed: [] };
+  // ADR-0351. The same plan plus what the proof must say about it, so the two deletion call sites
+  // take one object and neither can supply a target list without the declaration that explains its
+  // number. The count is **not** here: `deleteTenantAtomically` derives it from `targets.length`,
+  // which is what makes the figure the v4 digest commits to the number of relations the erasure was
+  // handed rather than a figure this module remembered.
+  const deletionBootSchema = {
+    targets: bootSchemaErasure.targets,
+    blockingCycle: bootSchemaErasure.blockingCycle,
+    recordStorage: recordStorageDeclarationFor({
+      store: options.store,
+      schema: bootErasureSchema,
+    }),
+  };
   {
     // `memory` names no schema at all, so the resolved one is passed and that arm ignores it.
     const coverage = {
@@ -1199,6 +1218,32 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       JSON.parse(await readFile(options.deletionCapabilities, "utf8")) as unknown,
     );
   }
+  // ADR-0351. Whether this database will accept the proof version this binary emits, asked once at
+  // boot rather than by the `INSERT` at the end of a deletion pipeline.
+  //
+  // Gated on `deletionCapabilities` and **not** on a list of the flags that mount a deletion
+  // surface: ADR-0328 made that declaration required by both of them, so it is the one derived
+  // condition that cannot fall behind the flags — which is the whole of ADR-0288's lesson, found
+  // wrong three times as a hand-maintained list.
+  if (deletionCapabilities !== null && conn !== undefined) {
+    // Resolved once, and resolved the way `PostgresTombstoneStore` resolves it (`opts.schema ??
+    // "meta"`), so the probe cannot ask about a different relation from the one the `INSERT` will
+    // name. A second spelling of a default is this repo's recurring defect, and here the two
+    // spellings would disagree silently.
+    const tombstoneSchema = options.schema ?? "meta";
+    const probe = await probeProofVersionCheck(conn, tombstoneSchema);
+    const line = `[deletion] ${formatProofVersionCheck(probe, tombstoneSchema)}`;
+    if (proofVersionCheckBlocksDeletion(probe.state)) {
+      // Refused rather than mounted-loudly, which is where this departs from
+      // `decision-schema-probe.ts`: that probe guards a *projection* of an enforcement that happens
+      // either way, and here there is no degraded behaviour to protect. A deletion that cannot store
+      // its proof does not happen, so the only question is whether the operator learns it now or
+      // from a request stranded under an Article 12(3) deadline.
+      throw new Error(line);
+    }
+    if (probe.state === "admits") console.info(line);
+    else console.warn(line);
+  }
   // `--read-state-routes` is in this list because it needs the notice source and the recipient
   // resolver, and nothing else here. Left out, it mounted nothing and warned that it "requires a
   // Postgres store" on a server started with `--store pg` — a refusal naming the wrong cause, which
@@ -1435,7 +1480,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                 {
                   tenantId: req.tenantId,
                   tombstoneId: req.tombstoneId,
-                  bootSchema: bootSchemaErasure,
+                  bootSchema: deletionBootSchema,
                   kind: req.kind,
                   executedBy: req.executedBy,
                   approvedBy: req.approvedBy,
@@ -3225,7 +3270,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             {
               tenantId: input.tenantId,
               tombstoneId: input.tombstoneId,
-              bootSchema: bootSchemaErasure,
+              bootSchema: deletionBootSchema,
               // Unattended, so always the data subject's erasure — never a commercial wind-down,
               // which is a decision a person makes through the synchronous route.
               kind: "data_subject_erasure",

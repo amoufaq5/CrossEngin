@@ -10,6 +10,7 @@ import {
   type TenantLifecycleState,
   type TombstoneKind,
   type TombstoneRecord,
+  type TombstoneRecordStorageDeclaration,
 } from "@crossengin/tenant-lifecycle";
 
 import {
@@ -142,6 +143,26 @@ export const PIPELINE_PERFORMED_SUBSYSTEMS: readonly PipelinePerformedSubsystem[
   Object.keys(ATTESTERS) as PipelinePerformedSubsystem[],
 );
 
+/**
+ * The boot-schema group as a **deletion** needs it: the erasure's two fields plus what the proof
+ * must say about them (ADR-0351).
+ *
+ * One object for ADR-0342's reason, now with three members instead of two: the targets, the verdict
+ * that an order over them exists, and the model that explains their number. The pairing that would
+ * be silently wrong if they could be formed apart is the new one — a proof declaring
+ * `typed_tables` beside an empty target list is a legitimate claim, and a proof declaring
+ * `document_rows` beside 54 targets is a lie about a deployment that is about to empty them.
+ *
+ * `relationCount` is **not** here, and that is the whole shape of it. The pipeline derives it from
+ * `targets.length`, so the figure the proof commits to and the list the erasure empties cannot
+ * disagree — structurally, rather than by a cross-check the pipeline would have to remember to run.
+ * `Omit` is ADR-0344's idiom for exactly this: the records travel in the array, so supplying one
+ * twice is impossible rather than resolved by a precedence rule nobody reads.
+ */
+export interface BootSchemaDeletionInput extends BootSchemaErasureInput {
+  readonly recordStorage: Omit<TombstoneRecordStorageDeclaration, "relationCount">;
+}
+
 export interface DeleteTenantInput {
   readonly tenantId: string;
   readonly tombstoneId: string;
@@ -195,7 +216,7 @@ export interface DeleteTenantInput {
    * partway through is worse than no list at all: the refused `DELETE` aborts this transaction,
    * which ADR-0321's runner records as `aborted` and leaves `in_progress` for a human.
    */
-  readonly bootSchema: BootSchemaErasureInput;
+  readonly bootSchema: BootSchemaDeletionInput;
   readonly clock?: () => Date;
   /**
    * Where to record the `… -> deleted` transition, and what to say about it.
@@ -437,7 +458,13 @@ export async function deleteTenantAtomically(
     // ordering that keeps "a returned refusal means nothing was destroyed" true for both erasures.
     const shared = await eraseSharedTablesWithin(tx, input.tenantId, authority, {
       ...(input.schema !== undefined ? { schema: input.schema } : {}),
-      bootSchema: input.bootSchema,
+      // The erasure's own two fields, named rather than spread: it has no use for the record-storage
+      // model and must not start reading one, since what the proof says about a group is a different
+      // question from which relations to empty.
+      bootSchema: {
+        targets: input.bootSchema.targets,
+        blockingCycle: input.bootSchema.blockingCycle,
+      },
       clock,
     });
     if (shared.refusals.length > 0) {
@@ -479,6 +506,12 @@ export async function deleteTenantAtomically(
       // requires one to parse (ADR-0318).
       anchors: [PLACEHOLDER_ANCHOR(now)],
       capabilities: input.capabilities,
+      // The count comes from the list the erasure was just handed, never from the caller — so the
+      // figure the v4 bytes commit to is the number of relations this deletion actually targeted.
+      recordStorage: {
+        ...input.bootSchema.recordStorage,
+        relationCount: input.bootSchema.targets.length,
+      },
       attestations,
     });
     if (!assembled.ok) {

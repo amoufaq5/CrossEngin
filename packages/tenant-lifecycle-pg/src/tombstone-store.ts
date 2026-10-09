@@ -83,6 +83,13 @@ export const TOMBSTONE_COLUMNS = [
   // `scope_tampered` on an honest proof — then escalates it at `sev1` (ADR-0324). The forgery would be
   // introduced by the read; `assertWritable` passes, because the record is correct when it is written.
   "retained_obligations",
+  // ADR-0351, and load-bearing for the same reason as the three above, with one difference worth
+  // naming: there is no column default that could stand in for it. `proof_version` defaults to
+  // `'v1'`, which is the honest reading of a row written before that column existed; a
+  // record-storage declaration has no such reading, because every value of it is a claim. So a v4
+  // row read back without this column is a v4 label with nothing to hash — `scope_tampered` on an
+  // honest proof, escalated at `sev1` (ADR-0324) — and the only way to avoid that is to read it.
+  "record_storage",
   "chain_entry_hash",
   "chain_sequence_number",
 ] as const;
@@ -313,7 +320,8 @@ export class PostgresTombstoneStore {
           c === "anchors" ||
           c === "attestations" ||
           c === "capability_declaration" ||
-          c === "retained_obligations"
+          c === "retained_obligations" ||
+          c === "record_storage"
         )
           return `${n}::jsonb`;
         if (c === "chain_sequence_number") return `${n}::integer`;
@@ -347,6 +355,7 @@ export class PostgresTombstoneStore {
           // means this record's bytes do not cover a retention claim; `[]` is the v3 claim that
           // nothing was lawfully kept.
           stored.retainedObligations === undefined ? null : jsonOf(stored.retainedObligations),
+          stored.recordStorage === undefined ? null : jsonOf(stored.recordStorage),
           entry.entryHash,
           entry.sequenceNumber,
         ],
@@ -549,6 +558,12 @@ export function rowToStoredTombstone(row: Record<string, unknown>): StoredTombst
   // schema then refuses, and which a verifier that tolerated it would hash under the wrong tag.
   const obligations = parseJson(row["retained_obligations"]);
   if (Array.isArray(obligations)) candidate["retainedObligations"] = obligations;
+  // Handed to the schema unexamined, which is deliberate: `TombstoneRecordStorageDeclarationSchema`
+  // is the one place that decides whether a stored declaration is coherent, and a second opinion
+  // here — "does it look like a model?" — would be a shape check that can disagree with the one the
+  // digest was computed over. A row whose column holds something else fails the parse by name.
+  const storage = parseJson(row["record_storage"]);
+  if (storage !== null && storage !== undefined) candidate["recordStorage"] = storage;
 
   const record = TombstoneRecordSchema.parse(candidate);
   const attestations = parseJson(row["attestations"]);

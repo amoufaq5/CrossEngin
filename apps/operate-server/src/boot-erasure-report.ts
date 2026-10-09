@@ -35,6 +35,11 @@
  * the lines below say so wherever the figure could be read as "all of a tenant's records".
  */
 
+import type {
+  RecordStorageModel,
+  TombstoneRecordStorageDeclaration,
+} from "@crossengin/tenant-lifecycle";
+
 /**
  * The three fields as **one** type for both functions, so the pair cannot be called with inputs
  * that disagree: a caller formatting one deployment's coverage and testing another's would log a
@@ -78,6 +83,49 @@ export interface BootErasureCoverageInput {
 
 /** The label every arm leads with, so one grep finds this fact in any deployment's boot output. */
 const LABEL = "tenant record erasure";
+
+/**
+ * Which record-storage model each store is, as the v4 signed bytes name it (ADR-0351).
+ *
+ * It lives **here**, beside `STORE_ANSWER`, because this module is already the one place that knows
+ * what each store does with a tenant's records — and the boot line and the proof's claim are then
+ * two readings of one map rather than two statements that can disagree. A second total map over the
+ * same axis in `node.ts` would be the two-spellings defect with a cryptographic digest on one side
+ * of it.
+ *
+ * A total map rather than a chain, so a fourth store is a compile error instead of inheriting
+ * whichever answer the chain ended on — and the direction that matters is that an unconsidered store
+ * must not be declared to have no typed relations, since that is the claim ADR-0350's gap made
+ * unavailable and the one a proof must not assert by accident.
+ */
+const RECORD_STORAGE_FOR_STORE: Readonly<
+  Record<BootErasureCoverageInput["store"], RecordStorageModel>
+> = {
+  memory: "no_durable_store",
+  pg: "document_rows",
+  "pg-columns": "typed_tables",
+};
+
+/**
+ * What the proof should say about where this deployment keeps a tenant's records.
+ *
+ * The count is deliberately absent: `BootSchemaDeletionInput` takes model and schema only, and the
+ * deletion pipeline derives `relationCount` from the target list it hands the erasure, so the figure
+ * the digest commits to is the number of relations that deletion actually targeted.
+ *
+ * `schema` is non-null for `typed_tables` alone, which the declaration's own schema enforces — the
+ * other two models have no typed relations, so naming a schema for them would be a claim about
+ * relations that do not exist. `pg`'s documents *are* in a schema; they are also in `META_TABLES`,
+ * and their coverage is the catalogued half's.
+ */
+export function recordStorageDeclarationFor(input: {
+  readonly store: BootErasureCoverageInput["store"];
+  /** The schema the column store writes to, as the caller resolved it. */
+  readonly schema: string;
+}): Omit<TombstoneRecordStorageDeclaration, "relationCount"> {
+  const model = RECORD_STORAGE_FOR_STORE[input.store];
+  return { model, schema: model === "typed_tables" ? input.schema : null };
+}
 
 interface BootErasureAnswer {
   /** Greppable, and the only part a reader needs to tell the four answers apart. */

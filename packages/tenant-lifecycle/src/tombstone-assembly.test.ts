@@ -19,6 +19,7 @@ import {
   requiredSubsystemsFor,
   retainedObligations,
   tombstoneMatchesAttestations,
+  type AssemblyRefusalReason,
   type DeletionAttestation,
   type DeletionCapabilities,
   type DeletionSubsystem,
@@ -27,17 +28,21 @@ import {
 import {
   canonicalContentManifest,
   canonicalContentManifestV3,
+  canonicalContentManifestV4,
   computeContentManifestSha256,
   computeContentManifestSha256V2,
   computeContentManifestSha256V3,
+  computeContentManifestSha256V4,
   computeProofSha256,
   verifyTombstoneHashes,
 } from "./tombstone-proof.js";
 import {
   asCapabilityDeclaration,
   readDeclaredAbsences,
+  readRecordStorage,
   readRetentionClaim,
   type TombstoneAnchor,
+  type TombstoneRecordStorageDeclaration,
 } from "./tombstones.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -77,6 +82,19 @@ function inputOf(over: Partial<TombstoneAssemblyInput> = {}): TombstoneAssemblyI
   };
 }
 
+/** The reasons ADR-0351 added, named once so the reachability test cannot drift from the enum. */
+const RECORD_STORAGE_REFUSALS: readonly AssemblyRefusalReason[] = [
+  "record_storage_undeclared",
+  "record_storage_outside_proof",
+  "record_storage_invalid",
+];
+
+/** The reasons an input was refused for, or `[]` if it assembled. */
+function refusalsOf(input: TombstoneAssemblyInput): readonly AssemblyRefusalReason[] {
+  const out = assembleTombstone(input);
+  return out.ok ? [] : out.refusals.map((r) => r.reason);
+}
+
 describe("the vocabulary", () => {
   it("gives every subsystem an exclusive set of scope fields", () => {
     for (const s of DELETION_SUBSYSTEMS) {
@@ -87,7 +105,7 @@ describe("the vocabulary", () => {
     expect(owners).toEqual(["tenant_schema"]);
   });
 
-  it("declares four outcomes, three dispositions and twelve refusal reasons", () => {
+  it("declares four outcomes, three dispositions and fifteen refusal reasons", () => {
     expect([...ATTESTATION_OUTCOMES]).toEqual([
       "erased",
       "nothing_to_erase",
@@ -95,7 +113,19 @@ describe("the vocabulary", () => {
       "erased_and_retained",
     ]);
     expect([...SUBSYSTEM_DISPOSITIONS]).toEqual(["erases", "retains", "absent"]);
-    expect(ASSEMBLY_REFUSAL_REASONS).toHaveLength(12);
+    expect(ASSEMBLY_REFUSAL_REASONS).toHaveLength(15);
+  });
+
+  it("names every refusal reason once", () => {
+    // A duplicated member makes the length assertion above pass while one reason is unreachable by
+    // name, which is the shape of a copy-paste when a version adds three at a time.
+    expect(new Set(ASSEMBLY_REFUSAL_REASONS).size).toBe(ASSEMBLY_REFUSAL_REASONS.length);
+  });
+
+  it("declares the three record-storage refusals ADR-0351 added", () => {
+    for (const reason of RECORD_STORAGE_REFUSALS) {
+      expect(ASSEMBLY_REFUSAL_REASONS, reason).toContain(reason);
+    }
   });
 
   it("partitions the outcomes by what they may carry, covering every one", () => {
@@ -120,12 +150,28 @@ function caps(over: Partial<DeletionCapabilities> = {}): DeletionCapabilities {
 }
 
 /**
+ * The record-storage declaration every capabilities-path input carries (ADR-0351).
+ *
+ * One constant rather than a literal per input, so a test that *omits* it is visibly deliberate —
+ * which matters here more than usual, because the omission is itself a refusal (`record_storage_
+ * undeclared`) and a forgotten one would read as a test of something else.
+ */
+const RECORD_STORAGE: TombstoneRecordStorageDeclaration = {
+  model: "typed_tables",
+  schema: "public",
+  relationCount: 54,
+};
+
+/**
  * An input whose scope comes from a declaration rather than a per-call list.
  *
  * It carries a `shared_tables` attestation by default, because that subsystem can no longer be
  * declared `absent` (ADR-0329) and so is always in scope. `nothing_to_erase` so it composes nothing
  * into the scope: every scope assertion in this file is about `tenant_schema`, and a deployment
  * whose platform tables held nothing for this tenant is a real case rather than a convenience.
+ *
+ * `recordStorage` goes in before the override spread, so `{recordStorage: undefined}` reaches the
+ * assembler as a *present key with no value* and takes the refusal path rather than the default.
  */
 function declaredInputOf(
   capabilities: DeletionCapabilities,
@@ -137,6 +183,7 @@ function declaredInputOf(
         attest(),
         attest({ subsystem: "shared_tables", outcome: "nothing_to_erase", scope: undefined }),
       ],
+      recordStorage: RECORD_STORAGE,
       ...over,
     }),
     requiredSubsystems: undefined,
@@ -525,19 +572,31 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
     expect(tombstoneMatchesAttestations(out.record, [attest()])).toBe(true);
   });
 
-  it("puts the declaration and the retention claim inside the signed bytes as a v3 proof", () => {
+  it("puts the declaration, the retention claim and the record storage in the bytes as a v4 proof", () => {
     // ADR-0329 put the declaration in the bytes, because under v1 the digest could not tell "this
     // deployment has no object storage" from "nobody asked about object storage" — ADR-0317's defect
-    // one level up. ADR-0331 adds the retention claim for the same reason one place further on.
+    // one level up. ADR-0331 adds the retention claim for the same reason one place further on, and
+    // ADR-0351 the record storage: under v3 a deployment with no typed relations and one whose boot
+    // manifest declared none composed byte-identical bytes.
     const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.record.proofVersion).toBe("v3");
+    expect(out.record.proofVersion).toBe("v4");
     expect(out.record.capabilityDeclaration).toEqual(asCapabilityDeclaration(PERFORMED_ONLY));
     expect(out.record.retainedObligations).toEqual([]);
-    // And the digest is the v3 one — neither the v2 one over the same scope and declaration nor the
-    // v1 one over the scope alone. Three tags, three different answers for the same destroyed rows.
+    expect(out.record.recordStorage).toEqual(RECORD_STORAGE);
+    // And the digest is the v4 one — not the v3 one over the same scope, declaration and claim, not
+    // the v2 one, not the v1 one over the scope alone. Four tags, four different answers for the
+    // same destroyed rows.
     expect(out.record.contentManifestSha256).toBe(
+      computeContentManifestSha256V4(
+        out.record.scope,
+        asCapabilityDeclaration(PERFORMED_ONLY),
+        { obligations: [] },
+        RECORD_STORAGE,
+      ),
+    );
+    expect(out.record.contentManifestSha256).not.toBe(
       computeContentManifestSha256V3(
         out.record.scope,
         asCapabilityDeclaration(PERFORMED_ONLY),
@@ -550,6 +609,71 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
     expect(out.record.contentManifestSha256).not.toBe(
       computeContentManifestSha256(out.record.scope),
     );
+  });
+
+  it("makes the record storage readable from the proof itself", () => {
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(readRecordStorage(out.record)).toEqual({
+      declarationState: "covered_by_proof",
+      recordStorage: RECORD_STORAGE,
+    });
+  });
+
+  it("carries the declaration through unchanged, neither normalised nor re-derived", () => {
+    // The assembler composes a scope and derives the retention prose; this is a declaration, and the
+    // only honest thing to do with one is sign what it was handed. A `document_rows` deployment's
+    // zero count must not be filled in from the scope's table list either.
+    const declared: TombstoneRecordStorageDeclaration = {
+      model: "document_rows",
+      schema: null,
+      relationCount: 0,
+    };
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, { recordStorage: declared }));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.recordStorage).toEqual(declared);
+    // Equal and not the same object: what the record carries came back through the schema, which is
+    // why an incoherent declaration is a refusal rather than a signed contradiction. The typed input
+    // cannot express the cross-field rule, so a rule checked only at the boundary is one `as` away
+    // from being no rule — `capabilities`' own argument, one field across.
+    expect(out.record.recordStorage).not.toBe(declared);
+  });
+
+  it("signs a typed_tables declaration counting zero relations, which is the claim v4 exists for", () => {
+    // The third case ADR-0350's gap made unsayable: a column store serving a manifest that declares
+    // no entity. It is legitimate where every tenant activates its own manifest and the signature of
+    // the wrong pack having loaded otherwise, and neither reading is available from a v3 proof.
+    const none: TombstoneRecordStorageDeclaration = {
+      model: "typed_tables",
+      schema: "public",
+      relationCount: 0,
+    };
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, { recordStorage: none }));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.recordStorage).toEqual(none);
+    expect(verifyTombstoneHashes(out.record)).toEqual({ contentManifestOk: true, proofOk: true });
+  });
+
+  it("signs the count, so changing only relationCount moves the digest", () => {
+    // The whole reason the field is in the bytes rather than beside them. Same tenant, same
+    // destroyed rows, same declaration: one claim says the deployment held 54 typed relations and
+    // the other 55, and the proofs have to differ or the claim is decoration.
+    const first = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
+    const again = assembleTombstone(declaredInputOf(PERFORMED_ONLY));
+    const moved = assembleTombstone(
+      declaredInputOf(PERFORMED_ONLY, {
+        recordStorage: { ...RECORD_STORAGE, relationCount: 55 },
+      }),
+    );
+    expect(first.ok && again.ok && moved.ok).toBe(true);
+    if (!first.ok || !again.ok || !moved.ok) return;
+    expect(again.record.contentManifestSha256).toBe(first.record.contentManifestSha256);
+    expect(again.record.proofSha256).toBe(first.record.proofSha256);
+    expect(moved.record.scope).toEqual(first.record.scope);
+    expect(moved.record.contentManifestSha256).not.toBe(first.record.contentManifestSha256);
   });
 
   it("signs the empty retention claim rather than omitting the version", () => {
@@ -614,12 +738,15 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
   it("leaves the legacy requiredSubsystems path on v1, with nothing declared", () => {
     // v1's bytes are what every stored digest commits to. A caller naming its subsystems per call
     // has declared nothing about the deployment, so there is no declaration to sign and claiming
-    // v2 would assert one.
+    // v2 would assert one. Carrying no record storage is the same fact one field across: this path
+    // is untouched by ADR-0351, and omitting the declaration here is the correct input rather than
+    // an incomplete one.
     const out = assembleTombstone(inputOf());
     expect(out.ok).toBe(true);
     if (!out.ok) return;
     expect(out.record.proofVersion).toBe("v1");
     expect(out.record.capabilityDeclaration).toBeUndefined();
+    expect(out.record.recordStorage).toBeUndefined();
     expect(out.declaration).toBeUndefined();
     expect(out.record.contentManifestSha256).toBe(
       computeContentManifestSha256(out.record.scope),
@@ -692,8 +819,15 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
   });
 
   it("refuses when both are declared", () => {
+    // `recordStorage` is supplied, so the only fault this input has is the one being asserted: the
+    // capabilities branch is taken, which is also why a record storage here is not
+    // `record_storage_outside_proof`.
     const out = assembleTombstone(
-      inputOf({ capabilities: PERFORMED_ONLY, requiredSubsystems: ["tenant_schema"] }),
+      inputOf({
+        capabilities: PERFORMED_ONLY,
+        recordStorage: RECORD_STORAGE,
+        requiredSubsystems: ["tenant_schema"],
+      }),
     );
     expect(out.ok).toBe(false);
     if (out.ok) return;
@@ -720,6 +854,151 @@ describe("assembleTombstone, with scope derived from a declaration", () => {
     expect(out.refusals.find((r) => r.reason === "capabilities_invalid")?.detail).toContain(
       "tenant_schema",
     );
+  });
+
+  it("refuses the capabilities path with no record-storage declaration", () => {
+    // Refused rather than defaulted, because every candidate default is a *claim*. `document_rows`
+    // asserts there were no typed relations at all, which is precisely the assertion ADR-0350's gap
+    // made unavailable; and emitting v3 instead would make the proof version a function of the
+    // caller's completeness, so a forgetful caller's proof would be indistinguishable from one
+    // written before v4 existed. Neither mistake is visible to whoever later reads the proof.
+    const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, { recordStorage: undefined }));
+    expect(out.ok).toBe(false);
+    expect("record" in out).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toContain("record_storage_undeclared");
+    expect(
+      out.refusals.find((r) => r.reason === "record_storage_undeclared")?.detail,
+    ).toContain("typed relations");
+  });
+
+  it("refuses a record-storage declaration on the legacy requiredSubsystems path", () => {
+    // The mirror of the refusal above, and of `scope_declaration_ambiguous`. A caller handing one in
+    // believes it is signed; v1 bytes cover no declaration, so the record would assert something its
+    // own digest does not — the state `TombstoneRecordSchema`'s paired refinements abolish rather
+    // than accept.
+    const out = assembleTombstone(inputOf({ recordStorage: RECORD_STORAGE }));
+    expect(out.ok).toBe(false);
+    expect("record" in out).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual(["record_storage_outside_proof"]);
+    expect(out.refusals[0]?.detail).toContain("crossengin.tombstone.content.v1");
+  });
+
+  it("refuses an incoherent record-storage declaration, naming the field", () => {
+    const incoherent: readonly TombstoneRecordStorageDeclaration[] = [
+      // A model with no typed relations cannot name the schema they are in.
+      { model: "document_rows", schema: "public", relationCount: 0 },
+      // And `typed_tables` has to say where they are: `--schema` feeds two stores with two different
+      // defaults, which is the one misconfiguration this declaration could have caught.
+      { model: "typed_tables", schema: null, relationCount: 54 },
+    ];
+    for (const recordStorage of incoherent) {
+      const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, { recordStorage }));
+      expect(out.ok, recordStorage.model).toBe(false);
+      expect("record" in out).toBe(false);
+      if (out.ok) return;
+      expect(out.refusals.map((r) => r.reason), recordStorage.model).toContain(
+        "record_storage_invalid",
+      );
+      // The zod path, so an operator is sent to the field rather than to the declaration.
+      expect(
+        out.refusals.find((r) => r.reason === "record_storage_invalid")?.detail,
+        recordStorage.model,
+      ).toContain("schema:");
+    }
+  });
+
+  it("refuses a non-zero count on a model with no typed relations", () => {
+    const out = assembleTombstone(
+      declaredInputOf(PERFORMED_ONLY, {
+        recordStorage: { model: "no_durable_store", schema: null, relationCount: 3 },
+      }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(
+      out.refusals.find((r) => r.reason === "record_storage_invalid")?.detail,
+    ).toContain("relationCount:");
+  });
+
+  it("names nothing about record storage when neither scope declaration was given", () => {
+    // `record_storage_outside_proof` is reachable only once the legacy path has actually been
+    // chosen. With neither declaration the refusal that fits is `scope_undeclared`, and reporting
+    // both would name a remedy — "declare capabilities instead" — the caller has already been told.
+    const out = assembleTombstone(
+      inputOf({ requiredSubsystems: undefined, recordStorage: RECORD_STORAGE }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual(["scope_undeclared"]);
+  });
+
+  it("accumulates record_storage_undeclared with the other capabilities-path refusals", () => {
+    // It is pushed with the rest and the function returns only once everything has been checked, so
+    // an operator fixing a forgotten declaration is not then handed the four-eyes violation on the
+    // next run. The missing declaration is reported *first*, which is the order the checks run in.
+    const out = assembleTombstone(
+      declaredInputOf(caps({ ...PERFORMED_ONLY, backups: "erases" }), {
+        recordStorage: undefined,
+        approvedBy: ALICE,
+        anchors: [],
+      }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(new Set(out.refusals.map((r) => r.reason))).toEqual(
+      new Set([
+        "record_storage_undeclared",
+        "subsystem_unattested",
+        "four_eyes_violated",
+        "no_anchors",
+      ]),
+    );
+    expect(out.refusals[0]?.reason).toBe("record_storage_undeclared");
+  });
+
+  it("reports an unparseable declaration and a missing record storage together", () => {
+    // Two sequential checks rather than a chain: a declaration that does not parse must not hide the
+    // second thing the capabilities path needs, or fixing the first reveals the second.
+    const out = assembleTombstone(
+      declaredInputOf({ tenant_schema: "erases", caches: "absent" } as unknown as DeletionCapabilities, {
+        recordStorage: undefined,
+      }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual([
+      "capabilities_invalid",
+      "record_storage_undeclared",
+    ]);
+  });
+
+  it("reaches all three record-storage refusals from this file", () => {
+    // The enum assertions in "the vocabulary" say the reasons exist; this says each is produced by
+    // an input, which is the half a declared-but-unreachable reason would pass.
+    const reached = new Set<AssemblyRefusalReason>([
+      ...refusalsOf(declaredInputOf(PERFORMED_ONLY, { recordStorage: undefined })),
+      ...refusalsOf(inputOf({ recordStorage: RECORD_STORAGE })),
+      ...refusalsOf(
+        declaredInputOf(PERFORMED_ONLY, {
+          recordStorage: { model: "typed_tables", schema: null, relationCount: 1 },
+        }),
+      ),
+    ]);
+    expect(RECORD_STORAGE_REFUSALS.filter((r) => !reached.has(r))).toEqual([]);
+  });
+
+  it("computes no hash for a record storage it is about to refuse", () => {
+    for (const over of [
+      { recordStorage: undefined },
+      { recordStorage: { model: "typed_tables" as const, schema: null, relationCount: 1 } },
+    ]) {
+      const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, over));
+      expect(out.ok).toBe(false);
+      if (out.ok) return;
+      expect(JSON.stringify(out)).not.toContain("contentManifestSha256");
+    }
   });
 
   it("leaves a per-call list working exactly as before, with no declaration on the result", () => {
@@ -792,7 +1071,7 @@ describe("tombstoneMatchesAttestations", () => {
     expect(tombstoneMatchesAttestations(out.record, [])).toBe(false);
   });
 
-  it("accepts a v3 record's own evidence, retention and all", () => {
+  it("accepts a retention-signing record's own evidence, retention and all", () => {
     const attestations = [
       attest(),
       attest({
@@ -806,11 +1085,14 @@ describe("tombstoneMatchesAttestations", () => {
     const out = assembleTombstone(declaredInputOf(PERFORMED_ONLY, { attestations }));
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.record.proofVersion).toBe("v3");
+    // The capabilities path emits v4 since ADR-0351; what this check turns on is the retention
+    // claim being inside the bytes, which `proofVersionCoversRetentionClaim` answers for v3 and v4
+    // alike — so the comparison reads the coverage rather than the tag.
+    expect(out.record.proofVersion).toBe("v4");
     expect(tombstoneMatchesAttestations(out.record, attestations)).toBe(true);
   });
 
-  it("sees a retained attestation deleted out of the evidence on a v3 record", () => {
+  it("sees a retained attestation deleted out of the evidence on a retention-signing record", () => {
     // The hole the scope comparison structurally cannot see (ADR-0331). A retention-bearing
     // attestation contributes *nothing* to a `DeletionScope` — the figures describe only what was
     // destroyed — so removing one from the stored evidence left the recomposed scope identical, the
@@ -838,7 +1120,7 @@ describe("tombstoneMatchesAttestations", () => {
     expect(tombstoneMatchesAttestations(out.record, withoutRetention)).toBe(false);
   });
 
-  it("sees an obligation swapped in the evidence on a v3 record", () => {
+  it("sees an obligation swapped in the evidence on a retention-signing record", () => {
     const attestations = [
       attest(),
       attest({
@@ -860,7 +1142,7 @@ describe("tombstoneMatchesAttestations", () => {
     expect(tombstoneMatchesAttestations(out.record, rewritten)).toBe(false);
   });
 
-  it("is insensitive to attestation order on a v3 record", () => {
+  it("is insensitive to attestation order on a retention-signing record", () => {
     // The obligations are compared as a sorted set and the prose deliberately is not, so a reordered
     // evidence array — which `JSONB` can hand back — must not read as a finding. A false positive
     // here pages somebody at `sev1` (ADR-0324).
@@ -1252,6 +1534,12 @@ describe("the content manifest's bytes do not move", () => {
     search_indexes: "absent",
     caches: "absent",
   };
+  /** Its own constant, like `FIXTURE_CAPABILITIES`: the v4 pins below are bytes over exactly this. */
+  const FIXTURE_RECORD_STORAGE: TombstoneRecordStorageDeclaration = {
+    model: "typed_tables",
+    schema: "public",
+    relationCount: 54,
+  };
 
   it("pins the v1 digests for the legacy three-outcome input", () => {
     const out = assembleTombstone({
@@ -1293,20 +1581,60 @@ describe("the content manifest's bytes do not move", () => {
     ).toBe("7723c2c6fa72889c518559386607c94fc074ec98ff4154100c9de530b93cc5eb");
   });
 
-  it("pins the v3 digests the capabilities path now emits", () => {
+  it("pins the v3 digests for the same input, which the capabilities path no longer emits", () => {
+    // The v2 test's shape one version on, and for the same reason: the assembler emits v4 now
+    // (ADR-0351), so these are computed directly over the record it does emit — same scope, same
+    // declaration, same retention claim — and the constants are unchanged, so every v3 record on
+    // file still verifies. A v3 digest that moved would page a `sev1` per honest record (ADR-0323).
     const out = assembleTombstone({
       ...FIXTURE_BASE,
       capabilities: FIXTURE_CAPABILITIES,
+      recordStorage: FIXTURE_RECORD_STORAGE,
       attestations: FIXTURE_ATTESTATIONS,
     });
     expect(out.ok).toBe(true);
     if (!out.ok) return;
-    expect(out.record.proofVersion).toBe("v3");
+    const declaration = out.record.capabilityDeclaration;
+    expect(declaration).toBeDefined();
+    if (declaration === undefined) return;
+    const v3 = computeContentManifestSha256V3(out.record.scope, declaration, {
+      obligations: out.record.retainedObligations ?? [],
+      ...(out.record.retainedReason !== undefined
+        ? { retainedReason: out.record.retainedReason }
+        : {}),
+      ...(out.record.retainedDataReference !== undefined
+        ? { retainedDataReference: out.record.retainedDataReference }
+        : {}),
+    });
+    expect(v3).toBe("5703c8e68e44a108e82507951c33abb5553a339bb077e358ba945a04f5e0fe34");
+    expect(
+      computeProofSha256({
+        id: FIXTURE_BASE.id,
+        kind: FIXTURE_BASE.kind,
+        tenantId: FIXTURE_BASE.tenantId,
+        deletedAt: FIXTURE_BASE.deletedAt,
+        executedBy: FIXTURE_BASE.executedBy,
+        approvedBy: FIXTURE_BASE.approvedBy,
+        contentManifestSha256: v3,
+      }),
+    ).toBe("2b60f9bba61b40f0113d2b055119f3fb032ff88cb94f6f1a7589025f70662092");
+  });
+
+  it("pins the v4 digests the capabilities path now emits", () => {
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      capabilities: FIXTURE_CAPABILITIES,
+      recordStorage: FIXTURE_RECORD_STORAGE,
+      attestations: FIXTURE_ATTESTATIONS,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.record.proofVersion).toBe("v4");
     expect(out.record.contentManifestSha256).toBe(
-      "5703c8e68e44a108e82507951c33abb5553a339bb077e358ba945a04f5e0fe34",
+      "e80516ef5148bf2b0157226d79ee6c1c38ed9bc386a47e13948b185e8d1e45a9",
     );
     expect(out.record.proofSha256).toBe(
-      "2b60f9bba61b40f0113d2b055119f3fb032ff88cb94f6f1a7589025f70662092",
+      "f91133a9ce4b6a41a018e2ec19ef8071d7f65774e3cc3cc093b9de82a36c9371",
     );
   });
 
@@ -1314,6 +1642,7 @@ describe("the content manifest's bytes do not move", () => {
     const out = assembleTombstone({
       ...FIXTURE_BASE,
       capabilities: FIXTURE_CAPABILITIES,
+      recordStorage: FIXTURE_RECORD_STORAGE,
       attestations: FIXTURE_ATTESTATIONS,
     });
     expect(out.ok).toBe(true);
@@ -1343,7 +1672,59 @@ describe("the content manifest's bytes do not move", () => {
     );
   });
 
-  it("gives an empty retention claim its own v3 digest, distinct from a populated one", () => {
+  it("pins the canonical v4 body, record storage and all", () => {
+    const out = assembleTombstone({
+      ...FIXTURE_BASE,
+      capabilities: FIXTURE_CAPABILITIES,
+      recordStorage: FIXTURE_RECORD_STORAGE,
+      attestations: FIXTURE_ATTESTATIONS,
+    });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const declaration = out.record.capabilityDeclaration;
+    const recordStorage = out.record.recordStorage;
+    expect(declaration).toBeDefined();
+    expect(recordStorage).toBeDefined();
+    if (declaration === undefined || recordStorage === undefined) return;
+    expect(
+      canonicalContentManifestV4(
+        out.record.scope,
+        declaration,
+        {
+          obligations: out.record.retainedObligations ?? [],
+          ...(out.record.retainedReason !== undefined
+            ? { retainedReason: out.record.retainedReason }
+            : {}),
+          ...(out.record.retainedDataReference !== undefined
+            ? { retainedDataReference: out.record.retainedDataReference }
+            : {}),
+        },
+        recordStorage,
+      ),
+    ).toBe(
+      '{"backupGenerations":[],"cacheKeys":[],"capabilityDeclaration":{"backups":"retains",' +
+        '"caches":"absent","object_storage":"erases","search_indexes":"absent",' +
+        '"shared_tables":"erases","tenant_schema":"erases"},"fileCount":0,' +
+        '"objectStorageBuckets":[],"recordStorage":{"model":"typed_tables","relationCount":54,' +
+        '"schema":"public"},"retentionClaim":{"obligations":["tax_records_7y"],' +
+        '"retainedDataReference":"backup-vault://2026","retainedReason":"retained under legal' +
+        ' obligation — backups: tax_records_7y"},"rowCount":120,"schemas":["tenant_abc"],' +
+        '"searchIndexes":[],"storageBytes":69632,' +
+        '"tables":["meta.operate_entity_records","meta.users","tenant_abc.invoice"]}',
+    );
+    // `schema` is `string | null` on the type rather than an optional key, so the explicit null the
+    // retention claim had to construct is here by construction — and a stripped schema therefore
+    // cannot render identically to a model that never had one.
+    expect(
+      canonicalContentManifestV4(out.record.scope, declaration, { obligations: [] }, {
+        model: "document_rows",
+        schema: null,
+        relationCount: 0,
+      }),
+    ).toContain('"recordStorage":{"model":"document_rows","relationCount":0,"schema":null}');
+  });
+
+  it("gives an empty retention claim its own digest, distinct from a populated one, at v3 and v4", () => {
     // Two deployments, identical destroyed rows, one with a statutory retention and one without. The
     // whole reason the claim is in the bytes: before ADR-0331 these two proofs were byte-identical.
     const noRetention = FIXTURE_ATTESTATIONS.map((a) =>
@@ -1359,21 +1740,81 @@ describe("the content manifest's bytes do not move", () => {
     const out = assembleTombstone({
       ...FIXTURE_BASE,
       capabilities: { ...FIXTURE_CAPABILITIES, backups: "erases" },
+      recordStorage: FIXTURE_RECORD_STORAGE,
       attestations: noRetention,
     });
     expect(out.ok).toBe(true);
     if (!out.ok) return;
+    const declaration = out.record.capabilityDeclaration;
+    expect(declaration).toBeDefined();
+    if (declaration === undefined) return;
     expect(out.record.retainedObligations).toEqual([]);
+    // The v3 digests this input produced before ADR-0351, computed directly and unchanged.
+    const v3 = computeContentManifestSha256V3(out.record.scope, declaration, { obligations: [] });
+    expect(v3).toBe("b704258583e523390f2793f069fc6e50fb0b43c62aca86275ec4a0081d7826a9");
+    expect(
+      computeProofSha256({
+        id: FIXTURE_BASE.id,
+        kind: FIXTURE_BASE.kind,
+        tenantId: FIXTURE_BASE.tenantId,
+        deletedAt: FIXTURE_BASE.deletedAt,
+        executedBy: FIXTURE_BASE.executedBy,
+        approvedBy: FIXTURE_BASE.approvedBy,
+        contentManifestSha256: v3,
+      }),
+    ).toBe("7a81ca4fa3bee74d036d43abf7323673ee975b56c9ce8a1fc0dee13b46bcd4b2");
+    // And the v4 digests it produces now.
     expect(out.record.contentManifestSha256).toBe(
-      "b704258583e523390f2793f069fc6e50fb0b43c62aca86275ec4a0081d7826a9",
+      "f3e48e6067b78031e6fe66a439c90316560ecae83c1448eb9d0e4b447d4f12dc",
     );
     expect(out.record.proofSha256).toBe(
-      "7a81ca4fa3bee74d036d43abf7323673ee975b56c9ce8a1fc0dee13b46bcd4b2",
+      "4d9d775ab2eb12c01ea74fc7dbcc89b0c7e03526ff21c453a2062828e0b6949a",
     );
-    // The scope is identical to the populated-claim fixture's, and the digest is not.
+    // The scope is identical to the populated-claim fixture's, and neither digest is — at either
+    // version, since the record storage is the same for both and separates nothing here.
     expect(out.record.scope).toEqual(composeDeletionScope(FIXTURE_ATTESTATIONS));
+    expect(v3).not.toBe("5703c8e68e44a108e82507951c33abb5553a339bb077e358ba945a04f5e0fe34");
     expect(out.record.contentManifestSha256).not.toBe(
-      "5703c8e68e44a108e82507951c33abb5553a339bb077e358ba945a04f5e0fe34",
+      "e80516ef5148bf2b0157226d79ee6c1c38ed9bc386a47e13948b185e8d1e45a9",
+    );
+  });
+
+  it("gives a record storage with no typed relations its own v4 digest", () => {
+    // The pair ADR-0351 exists for, as a test and under the pinning block's discipline: same tenant,
+    // same destroyed rows, same declaration, same retention claim. One deployment holds the tenant's
+    // records in 54 typed relations and the other in catalogued document tables, and before v4 the
+    // two signed byte-identical bytes — which is what made the scope's silence about typed relations
+    // unreadable either way.
+    const common = {
+      ...FIXTURE_BASE,
+      capabilities: FIXTURE_CAPABILITIES,
+      attestations: FIXTURE_ATTESTATIONS,
+    };
+    const typed = assembleTombstone({ ...common, recordStorage: FIXTURE_RECORD_STORAGE });
+    const documents = assembleTombstone({
+      ...common,
+      recordStorage: { model: "document_rows", schema: null, relationCount: 0 },
+    });
+    expect(typed.ok && documents.ok).toBe(true);
+    if (!typed.ok || !documents.ok) return;
+    expect(documents.record.scope).toEqual(typed.record.scope);
+    expect(documents.record.capabilityDeclaration).toEqual(typed.record.capabilityDeclaration);
+    expect(documents.record.retainedObligations).toEqual(typed.record.retainedObligations);
+    expect(documents.record.contentManifestSha256).not.toBe(typed.record.contentManifestSha256);
+    // And under v3 they would have been the same proof, which is the defect stated as a test.
+    const claim = {
+      obligations: typed.record.retainedObligations ?? [],
+      ...(typed.record.retainedReason !== undefined
+        ? { retainedReason: typed.record.retainedReason }
+        : {}),
+      ...(typed.record.retainedDataReference !== undefined
+        ? { retainedDataReference: typed.record.retainedDataReference }
+        : {}),
+    };
+    const declaration = typed.record.capabilityDeclaration;
+    if (declaration === undefined) return;
+    expect(computeContentManifestSha256V3(documents.record.scope, declaration, claim)).toBe(
+      computeContentManifestSha256V3(typed.record.scope, declaration, claim),
     );
   });
 

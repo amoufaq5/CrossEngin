@@ -1,9 +1,11 @@
+import { META_TENANT_TOMBSTONES } from "@crossengin/kernel/bootstrap";
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
   assembleTombstone,
   verifyTombstoneHashes,
   type DeletionAttestation,
   type TombstoneRecord,
+  type TombstoneRecordStorageDeclaration,
 } from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
@@ -44,6 +46,20 @@ const SHARED_ATTESTATION: DeletionAttestation = {
 };
 
 /**
+ * The record-storage declaration the v4 bytes sign (ADR-0351), shared by every fixture here so a
+ * test that varies it is visibly varying one decision rather than restating a default.
+ *
+ * `typed_tables` with a non-zero count, because that is the deployment these fixtures describe: a
+ * `--store pg-columns` boot manifest, whose typed relations are the ones ADR-0350's erasure empties
+ * by name and whose absence was the thing a v3 proof could not say.
+ */
+const RECORD_STORAGE: TombstoneRecordStorageDeclaration = {
+  model: "typed_tables",
+  schema: "public",
+  relationCount: 2,
+};
+
+/**
  * A record whose proof carries a real statutory retention (ADR-0330, signed by ADR-0331).
  *
  * Assembled rather than patched onto `recordOf`'s output: the retention claim is inside the v3 bytes
@@ -67,6 +83,7 @@ function retainingRecordOf(): TombstoneRecord {
       search_indexes: "absent",
       caches: "absent",
     },
+    recordStorage: RECORD_STORAGE,
     attestations: [
       ATTESTATION,
       SHARED_ATTESTATION,
@@ -84,6 +101,29 @@ function retainingRecordOf(): TombstoneRecord {
   return out.record;
 }
 
+/**
+ * A **v1** record, assembled through the legacy `requiredSubsystems` path.
+ *
+ * The one shape that carries none of the four version-paired fields, which is what makes it the
+ * fixture for "null is a different fact from a declaration": its bytes cover no record storage, so
+ * the column must hold SQL NULL rather than any rendering of an absent declaration.
+ */
+function legacyRecordOf(): TombstoneRecord {
+  const out = assembleTombstone({
+    id: "tomb_store0003abc",
+    kind: "tenant_deletion",
+    tenantId: TENANT,
+    deletedAt: AT,
+    executedBy: "alice@example.test",
+    approvedBy: "bob@example.test",
+    anchors: [{ kind: "rfc3161_timestamp", reference: "caller-chose-this", anchoredAt: AT }],
+    requiredSubsystems: ["tenant_schema", "shared_tables"],
+    attestations: [ATTESTATION, SHARED_ATTESTATION],
+  });
+  if (!out.ok) throw new Error(`fixture failed: ${JSON.stringify(out.refusals)}`);
+  return out.record;
+}
+
 /** A real record, assembled the way production does, so the hashes are genuine. */
 function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
   const out = assembleTombstone({
@@ -96,6 +136,7 @@ function recordOf(over: Partial<TombstoneRecord> = {}): TombstoneRecord {
     anchors: [{ kind: "rfc3161_timestamp", reference: "caller-chose-this", anchoredAt: AT }],
     // `shared_tables` erases and attests (ADR-0329); the contract refuses declaring it absent.
     capabilities: { tenant_schema: "erases", shared_tables: "erases", object_storage: "absent", backups: "absent", search_indexes: "absent", caches: "absent" },
+    recordStorage: RECORD_STORAGE,
     attestations: [ATTESTATION, SHARED_ATTESTATION],
   });
   if (!out.ok) throw new Error(`fixture failed: ${JSON.stringify(out.refusals)}`);
@@ -176,6 +217,12 @@ function rowOf(record: TombstoneRecord, over: Record<string, unknown> = {}): Rec
       record.retainedObligations === undefined
         ? null
         : JSON.stringify(record.retainedObligations),
+    // ADR-0351, and the sharpest member of the four: the other three columns have a default that is
+    // the honest reading of a row written before them, and a record-storage declaration has none —
+    // every value of it is a claim. So a fake that dropped this column would report a tamper on
+    // every honest v4 proof and there is no column default to rescue it.
+    record_storage:
+      record.recordStorage === undefined ? null : JSON.stringify(record.recordStorage),
     chain_entry_hash: ENTRY_HASH,
     chain_sequence_number: 7,
     ...over,
@@ -192,7 +239,21 @@ describe("the column list", () => {
     expect(TOMBSTONE_COLUMNS).toContain("capability_declaration");
     // ADR-0331: the structured half of the retention claim the v3 bytes sign.
     expect(TOMBSTONE_COLUMNS).toContain("retained_obligations");
-    expect(TOMBSTONE_COLUMNS).toHaveLength(21);
+    // ADR-0351: the record-storage declaration the v4 bytes sign.
+    expect(TOMBSTONE_COLUMNS).toContain("record_storage");
+    expect(TOMBSTONE_COLUMNS).toHaveLength(22);
+  });
+
+  it("names a column the catalog declares, once each", () => {
+    // Against `META_TENANT_TOMBSTONES` rather than a second literal list, which is the sibling
+    // idiom (`shared-table-erasure.test.ts` reads `META_TABLES` the same way): a column the store
+    // names and the catalog lacks is the ADR-0332 defect, and a fake connection answers every
+    // statement by shape so nothing else here can see it. One direction only — a catalogued column
+    // this store deliberately does not read is `invalidation_of_prior_tombstone_id`'s business, not
+    // a finding — and `pg-column-coverage.ts` is where the workspace-wide version lives.
+    expect(new Set(TOMBSTONE_COLUMNS).size).toBe(TOMBSTONE_COLUMNS.length);
+    const declared = new Set(META_TENANT_TOMBSTONES.columns.map((c) => c.name));
+    for (const column of TOMBSTONE_COLUMNS) expect(declared).toContain(column);
   });
 
   it("anchors as a deletion_event", () => {
@@ -303,15 +364,44 @@ describe("write", () => {
     expect(insert?.sql).toContain(`$${(obligations + 1).toString()}::jsonb`);
   });
 
-  it("writes an empty obligations array rather than NULL for a v3 proof that kept nothing", async () => {
+  it("writes an empty obligations array rather than NULL for a v4 proof that kept nothing", async () => {
     const { conn, anchorer, calls } = fakePg();
     await new PostgresTombstoneStore(conn, anchorer).write(recordOf());
     const insert = calls.find((c) => c.sql.startsWith("INSERT INTO"));
     const index = TOMBSTONE_COLUMNS.indexOf("retained_obligations");
-    // NULL would say "this record's bytes do not cover a retention claim", which is false of a v3
+    // NULL would say "this record's bytes do not cover a retention claim", which is false of a v4
     // record and would make it unreadable: the contract pairs the field with the version.
     expect(insert?.params[index]).not.toBeNull();
     expect(JSON.parse(String(insert?.params[index]))).toEqual([]);
+  });
+
+  it("writes the signed record-storage declaration as jsonb", async () => {
+    const { conn, anchorer, calls } = fakePg();
+    const record = recordOf();
+    await new PostgresTombstoneStore(conn, anchorer).write(record);
+    const insert = calls.find((c) => c.sql.startsWith("INSERT INTO"));
+    const index = TOMBSTONE_COLUMNS.indexOf("record_storage");
+    expect(insert?.sql).toContain("record_storage");
+    // JSONB, so a round trip cannot reorder the object's keys into a different digest's worth of
+    // bytes — the same reason the obligations array is cast.
+    expect(insert?.sql).toContain(`$${(index + 1).toString()}::jsonb`);
+    expect(JSON.parse(String(insert?.params[index]))).toEqual(RECORD_STORAGE);
+    expect(record.recordStorage).toEqual(RECORD_STORAGE);
+  });
+
+  it("binds SQL NULL, not a rendering of absence, for a v1 record that declares none", async () => {
+    const { conn, anchorer, calls } = fakePg();
+    const legacy = legacyRecordOf();
+    expect(legacy.proofVersion).toBe("v1");
+    await new PostgresTombstoneStore(conn, anchorer).write(legacy);
+    const insert = calls.find((c) => c.sql.startsWith("INSERT INTO"));
+    const index = TOMBSTONE_COLUMNS.indexOf("record_storage");
+    // NULL is a different fact from a declaration: it says this record's bytes do not cover the
+    // question. `"null"` would be the JSONB scalar null and `"{}"` a claim with no model, and both
+    // would read back as a declaration the parse then refuses on a row that is perfectly honest.
+    expect(insert?.params[index]).toBeNull();
+    expect(insert?.params[index]).not.toBe("null");
+    expect(insert?.params[index]).not.toBe("{}");
   });
 
   it("refuses a record whose own hashes do not verify, before writing anything", async () => {
@@ -594,6 +684,27 @@ describe("rowToStoredTombstone", () => {
     const stored = rowToStoredTombstone(rowOf(record, { deleted_at: new Date(AT) }));
     expect(stored.record.deletedAt).toBe(AT);
   });
+
+  it("throws on an incoherent record_storage rather than dropping it", () => {
+    // `document_rows` has no typed per-entity relations, so it can name neither a schema for them
+    // nor a count of them. The mapper hands the column to the schema **unexamined** on purpose: a
+    // second shape check here could disagree with the one the digest was computed over, and then a
+    // row would be read under rules nothing signed. So an incoherent declaration is a finding
+    // (ADR-0289), not a field quietly left off the record.
+    const row = rowOf(recordOf(), {
+      record_storage: JSON.stringify({ model: "document_rows", schema: "public", relationCount: 3 }),
+    });
+    expect(() => rowToStoredTombstone(row)).toThrow(/no typed per-entity relations/);
+  });
+
+  it("throws on a v4 row whose record_storage is NULL, naming the version pairing", () => {
+    // The detectable form of the hazard the column exists to prevent. A v4 label with nothing to
+    // hash gets no manifest subject at all, so a verifier would report `scope_tampered` on an
+    // honest proof and escalate it at `sev1` (ADR-0324) — and the contract's pairing turns that
+    // into a refusal naming the field instead.
+    const row = rowOf(recordOf(), { record_storage: null });
+    expect(() => rowToStoredTombstone(row)).toThrow(/commits to a record-storage declaration/);
+  });
 });
 
 describe("verify", () => {
@@ -614,14 +725,14 @@ describe("verify", () => {
     // coherent version at all — and `rowToStoredTombstone` throws rather than answering, which is
     // ADR-0289's rule: a row the contract cannot represent is a finding, not a shorter answer.
     const record = recordOf();
-    expect(record.proofVersion).toBe("v3");
+    expect(record.proofVersion).toBe("v4");
     const { conn, anchorer } = fakePg([rowOf(record, { proof_version: "v1" })]);
     await expect(new PostgresTombstoneStore(conn, anchorer).verify(record.id)).rejects.toThrow(
       /outside the signed bytes/,
     );
   });
 
-  it("reports a v3 proof tampered if the new columns are dropped on the way back", async () => {
+  it("reports a v4 proof tampered if the new columns are dropped on the way back", async () => {
     // The real shape of the hazard, and a regression guard rather than a hypothetical: this is what
     // every read did before the two columns existed. A v2 record whose row carries neither field
     // parses cleanly as a v1 record, the verifier recomputes the digest under the v1 domain tag,
@@ -635,6 +746,7 @@ describe("verify", () => {
         proof_version: "v1",
         capability_declaration: null,
         retained_obligations: null,
+        record_storage: null,
       }),
     ]);
     const out = await new PostgresTombstoneStore(conn, anchorer).verify(record.id);
@@ -644,19 +756,25 @@ describe("verify", () => {
     expect(out.proofOk).toBe(true);
   });
 
-  it("round-trips a v3 proof through the row and verifies clean", async () => {
+  it("round-trips a v4 proof through the row and verifies clean", async () => {
     const record = recordOf();
     const { conn, anchorer } = fakePg([rowOf(record)]);
     const stored = await new PostgresTombstoneStore(conn, anchorer).read(record.id);
-    expect(stored?.record.proofVersion).toBe("v3");
-    expect(stored?.record.capabilityDeclaration).toEqual(record.capabilityDeclaration);
-    expect(stored?.record.retainedObligations).toEqual([]);
-    expect(stored?.record.contentManifestSha256).toBe(record.contentManifestSha256);
+    // Field-for-field equality rather than a tour of the interesting ones, because what the read
+    // has to preserve is the *whole* record: anything dropped on the way back relabels the proof,
+    // and the version-paired fields are the ones with no column default to rescue them.
+    expect(stored?.record).toEqual(record);
+    expect(stored?.record.proofVersion).toBe("v4");
+    expect(stored?.record.recordStorage).toEqual(RECORD_STORAGE);
+    expect(verifyTombstoneHashes(stored!.record)).toEqual({
+      contentManifestOk: true,
+      proofOk: true,
+    });
   });
 
-  it("throws rather than reading a v3 row whose obligations column was dropped", async () => {
+  it("throws rather than reading a v4 row whose obligations column was dropped", async () => {
     // ADR-0331's version of the hazard above, and the narrower half of it: `proof_version` still
-    // says v3, so the row describes no coherent version at all and `rowToStoredTombstone` throws
+    // says v4, so the row describes no coherent version at all and `rowToStoredTombstone` throws
     // instead of answering. ADR-0289's rule — a row the contract cannot represent is a finding.
     const record = recordOf();
     const { conn, anchorer } = fakePg([rowOf(record, { retained_obligations: null })]);
@@ -666,7 +784,7 @@ describe("verify", () => {
   });
 
   it("keeps an empty obligations array distinct from a NULL column", async () => {
-    // `[]` is the v3 claim that nothing was lawfully kept; NULL is a record whose bytes do not cover
+    // `[]` is the v4 claim that nothing was lawfully kept; NULL is a record whose bytes do not cover
     // the question at all. A truthiness test on the parsed JSON would have collapsed the two.
     const record = recordOf();
     const { conn, anchorer } = fakePg([rowOf(record)]);
@@ -731,6 +849,35 @@ describe("verify", () => {
     expect((await new PostgresTombstoneStore(conn, anchorer).verify(record.id)).contentManifestOk).toBe(
       false,
     );
+  });
+
+  it("catches a record-storage declaration edited after signing — the v4 deliverable", async () => {
+    // The tamper v4 exists to detect, and the one a reader of a stored proof could not otherwise
+    // tell from the truth: before the declaration was inside the bytes, rewriting it to
+    // `document_rows` — the claim that this deployment held no typed relations, and so that the
+    // scope's silence about them was honest — left both digests and the chain entry untouched.
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([
+      rowOf(record, {
+        record_storage: JSON.stringify({ model: "document_rows", schema: null, relationCount: 0 }),
+      }),
+    ]);
+    const out = await new PostgresTombstoneStore(conn, anchorer).verify(record.id);
+    expect(out.contentManifestOk).toBe(false);
+    expect(out.proofOk).toBe(true);
+  });
+
+  it("catches a relation count edited after signing, with the model left alone", async () => {
+    // The narrower half, and the reason `relationCount` is what earns the version: a `typed_tables`
+    // declaration counting zero is a claim of its own, so an editor that only moves the figure is
+    // rewriting how much the deployment had without touching what kind of store it was.
+    const record = recordOf();
+    const { conn, anchorer } = fakePg([
+      rowOf(record, { record_storage: JSON.stringify({ ...RECORD_STORAGE, relationCount: 0 }) }),
+    ]);
+    expect(
+      (await new PostgresTombstoneStore(conn, anchorer).verify(record.id)).contentManifestOk,
+    ).toBe(false);
   });
 
   it("verifies an honest retaining proof clean", async () => {

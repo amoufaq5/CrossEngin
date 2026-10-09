@@ -25,6 +25,27 @@ const AT = "2026-10-03T13:00:00.000Z";
 const TOMB = "tomb_aaaabbbbccccdddd";
 const HASH = "f".repeat(64);
 
+/** A v4 declaration: typed per-entity relations, so it names the schema they are in (ADR-0351). */
+const RECORD_STORAGE: NonNullable<StoredTombstoneLike["record"]["recordStorage"]> = {
+  model: "typed_tables",
+  schema: "clinic",
+  relationCount: 54,
+};
+
+/**
+ * Everything beyond the digests a v4 receipt's holder needs to recompute `contentManifestSha256`.
+ *
+ * A named list rather than five loose assertions, because the receipt has fallen behind the signed
+ * bytes at every previous tag and each time it was one field nobody had written down.
+ */
+const V4_RECEIPT_FIELDS = [
+  "proofVersion",
+  "capabilityDeclaration",
+  "retainedObligations",
+  "retainedDataReference",
+  "recordStorage",
+] as const;
+
 function principal(over: Partial<ResolvedPrincipal> = {}): ResolvedPrincipal {
   return {
     principalId: CALLER,
@@ -561,20 +582,50 @@ describe("tombstoneReceipt", () => {
 
   it("carries what a caller needs to recompute the digest itself", () => {
     // ADR-0320's whole argument for a receipt is that a bare "deleted" would be ADR-0317's defect in
-    // response form. Without these a holder cannot reconstruct v2 or v3 bytes, so the digests in the
-    // receipt are unverifiable figures rather than a proof — which regressed at v2 and got one field
-    // worse at v3.
+    // response form. Without these a holder cannot reconstruct the bytes, so the digests in the
+    // receipt are unverifiable figures rather than a proof — which regressed at v2, got one field
+    // worse at v3, and would have at v4 without `recordStorage`. Asserted as the **whole** set and
+    // from a named list, because each regression was one field nobody listed.
     const receipt = tombstoneReceipt(
       storedOf({
-        proofVersion: "v3",
+        proofVersion: "v4",
         capabilityDeclaration: { tenant_schema: "erases", shared_tables: "erases" },
         retainedObligations: ["tax_records_7y"],
         retainedDataReference: "meta.invoices, meta.tenant_credits",
+        recordStorage: RECORD_STORAGE,
       }),
     );
+    for (const key of V4_RECEIPT_FIELDS) expect(receipt, key).toHaveProperty(key);
+    expect(receipt["proofVersion"]).toBe("v4");
     expect(receipt["capabilityDeclaration"]).toMatchObject({ shared_tables: "erases" });
     expect(receipt["retainedObligations"]).toEqual(["tax_records_7y"]);
     expect(receipt["retainedDataReference"]).toContain("meta.invoices");
+    expect(receipt["recordStorage"]).toEqual(RECORD_STORAGE);
+  });
+
+  it("omits recordStorage entirely when the record carries none", () => {
+    // Absent, not null: a v1/v2/v3 record's bytes do not cover a record-storage declaration, and a
+    // `null` would be a key a holder could try to hash — the inference ADR-0329 refused, which reads
+    // a *deleted* declaration as an older record.
+    expect(tombstoneReceipt(storedOf())).not.toHaveProperty("recordStorage");
+  });
+
+  it("emits recordStorage when the count is zero, which is the claim v4 exists to make", () => {
+    // A column store serving a manifest that declares no entity: legitimate where every tenant
+    // activates its own manifest, and the signature of the wrong pack having loaded otherwise. A key
+    // present only for a non-zero count would hide exactly that case.
+    const receipt = tombstoneReceipt(
+      storedOf({
+        proofVersion: "v4",
+        recordStorage: { model: "typed_tables", schema: "public", relationCount: 0 },
+      }),
+    );
+    expect(receipt).toHaveProperty("recordStorage");
+    expect(receipt["recordStorage"]).toEqual({
+      model: "typed_tables",
+      schema: "public",
+      relationCount: 0,
+    });
   });
 
   it("emits an EMPTY obligation list, because that is the signed claim that nothing was kept", () => {

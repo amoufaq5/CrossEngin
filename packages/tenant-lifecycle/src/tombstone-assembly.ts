@@ -5,12 +5,14 @@ import { populateTombstoneHashes, verifyTombstoneHashes } from "./tombstone-proo
 import {
   DeletionScopeSchema,
   TombstoneRecordSchema,
+  TombstoneRecordStorageDeclarationSchema,
   asCapabilityDeclaration,
   proofVersionCoversRetentionClaim,
   type DeletionScope,
   type TombstoneAnchor,
   type TombstoneKind,
   type TombstoneRecord,
+  type TombstoneRecordStorageDeclaration,
 } from "./tombstones.js";
 
 /**
@@ -478,6 +480,30 @@ export const ASSEMBLY_REFUSAL_REASONS = [
   "capabilities_invalid",
   /** A subsystem the deployment declared it does not have reported anyway. */
   "absent_subsystem_attested",
+  /**
+   * The capabilities path was taken and no record-storage declaration came with it (ADR-0351).
+   *
+   * `scope_undeclared`'s shape one field across, and refused rather than defaulted for the reason
+   * that version exists: every candidate default is a *claim*. `document_rows` asserts there were no
+   * typed relations, which is precisely the assertion ADR-0350's gap made unavailable; omitting the
+   * field and emitting v3 would make the version a function of the caller's completeness, so a
+   * forgetful caller's proof would be indistinguishable from one written before v4 existed.
+   */
+  "record_storage_undeclared",
+  /**
+   * A record-storage declaration on the legacy `requiredSubsystems` path, whose bytes are v1 and
+   * cover nothing (ADR-0351).
+   *
+   * The mirror of the refusal above and of `scope_declaration_ambiguous`: a caller handing one in
+   * believes it is signed, and v1 bytes do not cover it, so the record would assert something its
+   * own digest does not — the state the schema's paired refinements abolish rather than accept.
+   */
+  "record_storage_outside_proof",
+  /**
+   * The declaration does not parse: a model with no typed relations naming a schema or a non-zero
+   * count, or `typed_tables` naming no schema.
+   */
+  "record_storage_invalid",
 ] as const;
 export type AssemblyRefusalReason = (typeof ASSEMBLY_REFUSAL_REASONS)[number];
 
@@ -583,6 +609,20 @@ export interface TombstoneAssemblyInput {
    * this time", and those are different claims.
    */
   readonly requiredSubsystems?: readonly DeletionSubsystem[];
+  /**
+   * Where this deployment keeps the tenant's own records, for the v4 signed bytes (ADR-0351).
+   *
+   * Required **with `capabilities`** and refused with `requiredSubsystems`, enforced by the two
+   * refusals rather than by the type — which is this input's existing idiom, since `capabilities`
+   * and `requiredSubsystems` are themselves an exactly-one rule the type does not express. A third
+   * optional field joining a pair already governed that way is narrower than reshaping the input.
+   *
+   * It is a declaration and not a measurement: every field is derivable from the store mode and the
+   * manifest before a row is read, which is why it travels here beside `capabilities` instead of on
+   * an attestation. `DeletionAttestation`'s own comment states the rule it would otherwise have
+   * broken — the figures in a proof describe what was destroyed.
+   */
+  readonly recordStorage?: TombstoneRecordStorageDeclaration;
   readonly attestations: readonly DeletionAttestation[];
   readonly invalidationOfPriorTombstoneId?: string | null;
 }
@@ -596,14 +636,16 @@ export type TombstoneAssembly =
        * The declaration the scope was derived from, when there was one — present iff `capabilities`
        * was supplied, so its absence means "named per call" rather than "nothing declared absent".
        *
-       * Since ADR-0329 the declaration is also **in** the record, inside the signed bytes, so
-       * this field is a convenience rather than the only way to read it: `record.proofVersion` is
-       * `"v3"` (`"v2"` for a record written before ADR-0331) and `readDeclaredAbsences(record)`
-       * answers from the proof itself. It is kept because
-       * a caller that supplied `capabilities` and wants them back should not have to know which
-       * proof version the assembler chose, and because the `requiredSubsystems` path still emits v1
-       * and so has no declaration in its bytes at all — there, the absence of this field and the
-       * absence from the proof mean the same thing, which is the honest reading.
+       * Since ADR-0329 the declaration is also **in** the record, inside the signed bytes, so this
+       * field is a convenience rather than the only way to read it: `readDeclaredAbsences(record)`
+       * answers from the proof itself, and `proofVersionCoversDeclaration(record.proofVersion)` is
+       * what says whether it can. The version this assembler emits is deliberately not named here —
+       * it has been v2, then v3, then v4, and a comment that names it is a hand-maintained copy of
+       * `PROOF_VERSION_COVERAGE`. The one durable fact is the split: the `capabilities` path signs a
+       * declaration and the `requiredSubsystems` path emits v1 and so has none in its bytes at all,
+       * where the absence of this field and the absence from the proof mean the same thing. It is
+       * kept because a caller that supplied `capabilities` and wants them back should not have to
+       * know which proof version the assembler chose.
        */
       readonly declaration?: DeletionCapabilities;
     }
@@ -630,6 +672,7 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
   // declaration is re-parsed even though it is typed: it arrives from a deployment's configuration,
   // and a totality rule enforced only at the boundary is a totality rule one `as` defeats.
   let declaration: DeletionCapabilities | undefined;
+  let recordStorage: TombstoneRecordStorageDeclaration | undefined;
   if (input.capabilities !== undefined) {
     const parsedCapabilities = DeletionCapabilitiesSchema.safeParse(input.capabilities);
     if (parsedCapabilities.success) {
@@ -650,12 +693,41 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
           " or the narrower of the two silently wins",
       });
     }
+    if (input.recordStorage === undefined) {
+      refusals.push({
+        reason: "record_storage_undeclared",
+        detail:
+          "the capabilities path signs a record-storage declaration (proofVersion v4) and none was" +
+          " given; a proof that does not say whether this deployment holds the tenant's records in" +
+          " typed relations cannot distinguish having none from having some nobody declared",
+      });
+    } else {
+      const parsedStorage = TombstoneRecordStorageDeclarationSchema.safeParse(input.recordStorage);
+      if (parsedStorage.success) {
+        recordStorage = parsedStorage.data;
+      } else {
+        refusals.push({
+          reason: "record_storage_invalid",
+          detail: parsedStorage.error.issues
+            .map((i) => `${i.path.join(".")}: ${i.message}`)
+            .join("; "),
+        });
+      }
+    }
   } else if (input.requiredSubsystems === undefined) {
     refusals.push({
       reason: "scope_undeclared",
       detail:
         "neither capabilities nor requiredSubsystems was declared; nothing says which subsystems" +
         " must attest, and an empty required list claims a deletion nobody checked",
+    });
+  } else if (input.recordStorage !== undefined) {
+    refusals.push({
+      reason: "record_storage_outside_proof",
+      detail:
+        "a record-storage declaration was given on the requiredSubsystems path, whose bytes are" +
+        " crossengin.tombstone.content.v1 and cover no declaration; declare capabilities instead,"
+        + " or carry no record storage",
     });
   }
 
@@ -798,11 +870,25 @@ export function assembleTombstone(input: TombstoneAssemblyInput): TombstoneAssem
     // here" could be rewritten with every hash and the chain entry byte-identical. `retainedObligations`
     // is the structured half, and the empty array is a *claim* rather than a placeholder: it is the
     // signed assertion that nothing was kept, which v1 and v2 bytes cannot make.
-    ...(declaration !== undefined
+    //
+    // ADR-0351 moves that path to `v4`, which adds the **record-storage declaration** for the fourth
+    // instance of the same shape — and the first one the lineage's own machinery produced rather
+    // than found. ADR-0350 gave the `shared_tables` erasure the boot manifest's typed relations and
+    // made the target list a required parameter, so "nobody looked" became unrepresentable in the
+    // code; the proof still could not tell a deployment that has no typed relations from one whose
+    // list came out empty, because both compose byte-identical bytes. `relationCount` is what
+    // separates them, and a `typed_tables` declaration counting zero is a claim rather than a
+    // placeholder, exactly as v3's empty obligations list is.
+    //
+    // Both fields together or neither: `recordStorage` is assigned only inside the branch that
+    // assigns `declaration`, so the pair cannot come apart, and the schema refuses the mixture in
+    // both directions if it ever did.
+    ...(declaration !== undefined && recordStorage !== undefined
       ? {
-          proofVersion: "v3" as const,
+          proofVersion: "v4" as const,
           capabilityDeclaration: asCapabilityDeclaration(declaration),
           retainedObligations: [...retainedObligations(parsed)],
+          recordStorage,
         }
       : {}),
   };

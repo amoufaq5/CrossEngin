@@ -92,3 +92,4 @@ export * from "./platform-users.js";
 export * from "./user-fk-readiness.js";
 export * from "./envelope-tenant-readiness.js";
 export * from "./boot-erasure-report.js";
+export * from "./proof-version-probe.js";

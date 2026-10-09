@@ -70,33 +70,213 @@ export type TombstoneAnchor = z.infer<typeof TombstoneAnchorSchema>;
  * this whole lineage exists to keep: ADR-0329 bought "we have no cache layer" versus "nobody asked",
  * and a conditional v3 would sell back "nothing is retained" versus "this proof cannot say". A v3
  * record signs the empty claim.
+ *
+ * `v4` adds the **record-storage declaration** (ADR-0351), for the fourth instance, and it is the
+ * one the lineage's own machinery produced. ADR-0350 widened the `shared_tables` erasure to the boot
+ * manifest's typed entity tables and made the target list a required parameter, which closed
+ * "nobody looked" *in the mechanism* — and left it open in the proof, because an empty boot group
+ * and no boot group compose byte-identical scopes. So a reader of a stored tombstone could not tell
+ * a deployment whose tenant records are catalogued JSONB rows (there are no typed relations, and
+ * the scope's silence about them is correct) from one whose column store holds 54 of them and whose
+ * boot manifest declared none. Both are legitimate; one is a configuration error the boot report
+ * warns about; and the proof said the same thing about both.
  */
-export const TOMBSTONE_PROOF_VERSIONS = ["v1", "v2", "v3"] as const;
+export const TOMBSTONE_PROOF_VERSIONS = ["v1", "v2", "v3", "v4"] as const;
 export type TombstoneProofVersion = (typeof TOMBSTONE_PROOF_VERSIONS)[number];
 export const TombstoneProofVersionSchema = z.enum(TOMBSTONE_PROOF_VERSIONS);
 
 /**
- * Which versions' bytes cover the declaration, and which cover the retention claim.
+ * What each version's bytes carry, as **one total map** over the enum.
  *
- * Two membership lists rather than an ordering test on the string: a version names a **domain tag**,
- * not an ordinal, and nothing promises the next tag is a superset of this one. `>= "v2"` would quietly
- * decide that question for a tag nobody has designed yet.
+ * It was three frozen membership lists until ADR-0351, and the reason given for that shape survives
+ * while the shape does not. The reason: *a version names a domain tag, not an ordinal, and nothing
+ * promises the next tag is a superset of this one* — so `>= "v2"` would decide that question for a
+ * tag nobody has designed. True, and an ordering comparison is still refused here. But a **map** is
+ * not an ordering comparison, and it buys the one thing the lists could not: adding a member to
+ * `TOMBSTONE_PROOF_VERSIONS` is now a **compile error** until that member says what its bytes carry.
+ *
+ * That mattered, measurably. Adding `"v4"` to the enum and nothing else typechecked, passed every
+ * test, and produced a tag that covered *nothing* — so a v4 record was structurally a v1 record, the
+ * two refinements refused it for carrying a declaration or obligations, and `readDeclaredAbsences`
+ * reported it `reason: "v1_proof"`. A silent regression of both v2 and v3. The test that existed for
+ * exactly this said so in its own comment — *"a fourth tag added to neither list would silently sign
+ * nothing new"* — and then asserted only that the predicates return a boolean, which they do for
+ * every input. `ABAC_OUTCOME_ALLOWS` is a map for this reason and this is the same reason.
+ *
+ * The three arrays below are derived from it and still exported, so the exact-membership assertions
+ * that pin the numbers keep working and no reader had to change.
  */
-export const DECLARATION_BEARING_PROOF_VERSIONS: readonly TombstoneProofVersion[] = Object.freeze([
-  "v2",
-  "v3",
-]);
-export const RETENTION_BEARING_PROOF_VERSIONS: readonly TombstoneProofVersion[] = Object.freeze([
-  "v3",
-]);
+export const PROOF_VERSION_COVERAGE: Readonly<
+  Record<
+    TombstoneProofVersion,
+    {
+      readonly declaration: boolean;
+      readonly retentionClaim: boolean;
+      readonly recordStorage: boolean;
+    }
+  >
+> = Object.freeze({
+  /** The scope alone, and the only tag whose bytes carry nothing else. */
+  v1: { declaration: false, retentionClaim: false, recordStorage: false },
+  v2: { declaration: true, retentionClaim: false, recordStorage: false },
+  v3: { declaration: true, retentionClaim: true, recordStorage: false },
+  v4: { declaration: true, retentionClaim: true, recordStorage: true },
+});
+
+export const DECLARATION_BEARING_PROOF_VERSIONS: readonly TombstoneProofVersion[] = Object.freeze(
+  TOMBSTONE_PROOF_VERSIONS.filter((v) => PROOF_VERSION_COVERAGE[v].declaration),
+);
+export const RETENTION_BEARING_PROOF_VERSIONS: readonly TombstoneProofVersion[] = Object.freeze(
+  TOMBSTONE_PROOF_VERSIONS.filter((v) => PROOF_VERSION_COVERAGE[v].retentionClaim),
+);
+export const RECORD_STORAGE_BEARING_PROOF_VERSIONS: readonly TombstoneProofVersion[] =
+  Object.freeze(TOMBSTONE_PROOF_VERSIONS.filter((v) => PROOF_VERSION_COVERAGE[v].recordStorage));
 
 export function proofVersionCoversDeclaration(version: TombstoneProofVersion): boolean {
-  return DECLARATION_BEARING_PROOF_VERSIONS.includes(version);
+  return PROOF_VERSION_COVERAGE[version].declaration;
 }
 
 export function proofVersionCoversRetentionClaim(version: TombstoneProofVersion): boolean {
-  return RETENTION_BEARING_PROOF_VERSIONS.includes(version);
+  return PROOF_VERSION_COVERAGE[version].retentionClaim;
 }
+
+export function proofVersionCoversRecordStorage(version: TombstoneProofVersion): boolean {
+  return PROOF_VERSION_COVERAGE[version].recordStorage;
+}
+
+/**
+ * The "declare one of these" half of a refusal message, rendered from its own array.
+ *
+ * The three refusals below used to name their versions literally — `"declare proofVersion 'v2' or
+ * 'v3'"` — and two of the three went stale the moment `v4` landed, telling an author to pick a
+ * version while omitting a valid answer. A hand-maintained list of the thing standing next to it is
+ * ADR-0288's `needsAuditEmitter` shape, and a *remedy* is the worst place for it: the reader is
+ * being told what to do, so a list that has fallen behind sends them to do the wrong thing.
+ *
+ * An empty array renders as a statement rather than an instruction, because "declare proofVersion"
+ * followed by nothing is not one — if no tag signs a field, the only remedy is the clause after it.
+ */
+function declareOneOf(versions: readonly TombstoneProofVersion[]): string {
+  const quoted = versions.map((v) => `'${v}'`);
+  const last = quoted.at(-1);
+  if (last === undefined) return "no proof version signs it";
+  const head = quoted.slice(0, -1);
+  return `declare proofVersion ${head.length === 0 ? last : `${head.join(", ")} or ${last}`}`;
+}
+
+/**
+ * Where a deployment keeps a tenant's own records — the fact the scope's silence depends on.
+ *
+ * Three members and not two, because a total map over a deployment's storage choices has to answer
+ * for all of them. `no_durable_store` is unreachable from a stored proof today (the tenant deletion
+ * routes refuse to mount on an in-memory store, so no proof is issued from one) and is here because
+ * a map with a hole is what a total map exists to prevent — the same reason
+ * `ABAC_DENIAL_EFFECT.entity_create` carries an answer for a position a boot refusal makes
+ * unreachable.
+ */
+export const RECORD_STORAGE_MODELS = [
+  /**
+   * Typed per-entity relations, created from the manifest by the column store. These are the
+   * relations ADR-0350's erasure empties by name, and the ones whose absence was unsayable.
+   */
+  "typed_tables",
+  /**
+   * Rows in a catalogued document table. The relations holding them are in `META_TABLES`, so the
+   * shared-table erasure has reached them since ADR-0329 and there are no *typed* relations at all.
+   */
+  "document_rows",
+  /** No durable store: the records live in one process and nothing on disk holds them. */
+  "no_durable_store",
+] as const;
+export type RecordStorageModel = (typeof RECORD_STORAGE_MODELS)[number];
+export const RecordStorageModelSchema = z.enum(RECORD_STORAGE_MODELS);
+
+/**
+ * What a proof says about where this deployment kept the tenant's own records.
+ *
+ * A **declaration**, like `capabilityDeclaration` and unlike the scope: every field is a property of
+ * the deployment and its manifest, derivable before a single row is read. That provenance is what
+ * keeps it out of the attestations — ADR-0317 gives each subsystem its scope fields exclusively, and
+ * the comment on `DeletionAttestation.retainedObligations` states the rule those fields obey: *the
+ * figures in a proof describe what was destroyed*. `relationCount` describes what the deployment
+ * **has**, so a figure here cannot be read as part of the destroyed total, and it would have had to
+ * be if it rode on an attestation beside `rowCount`.
+ *
+ * `relationCount` is the field that earns the version. The model alone separates ADR-0350's two
+ * cases, but `typed_tables` with a count of **zero** is the third and least obvious one: a column
+ * store serving a manifest that declares no entity, which is legitimate for a deployment where every
+ * tenant activates its own manifest and is the signature of the wrong pack having loaded otherwise.
+ * `boot-erasure-report.ts` warns about it at boot; without the count, a stored proof cannot say it.
+ */
+export const TombstoneRecordStorageDeclarationSchema = z
+  .object({
+    model: RecordStorageModelSchema,
+    /**
+     * The schema those typed relations are in, and `null` for every other model.
+     *
+     * Not an optional key: `canonicalStringify` drops `undefined`, so an omitted key and an explicit
+     * `null` would render identically and a *stripped* schema would be indistinguishable from a
+     * model that never had one — ADR-0331's rule, which is the only reason the retention claim's
+     * three fields are signable at all.
+     */
+    schema: z.string().min(1).nullable(),
+    /**
+     * How many typed per-entity relations the manifest declares — entity tables and m2m join tables
+     * both, since the column store creates and the erasure empties both.
+     *
+     * Deliberately **not** a count of relations examined, which would be a measurement and belong to
+     * the subsystem that measured it. It counts only *typed* relations, so `document_rows` answers 0
+     * rather than naming the two catalogued tables that hold its documents: those are in
+     * `META_TABLES`, their coverage is the catalogued half's, and a figure here that sometimes meant
+     * "typed relations" and sometimes "all relations" would be the two-spellings defect inside a
+     * signed claim.
+     */
+    relationCount: z.number().int().nonnegative(),
+  })
+  .strict()
+  .superRefine((v, ctx) => {
+    if (v.model === "typed_tables") {
+      // The schema is the half an operator can cross-check: `--schema` feeds two stores with two
+      // different defaults (`meta` for documents, `public` for columns), so a proof naming typed
+      // relations and not where they are leaves the one misconfiguration this declaration could
+      // have caught unsayable. A count of 0 is **not** refused — it is the third case the version
+      // exists to express.
+      if (v.schema === null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["schema"],
+          message:
+            "model 'typed_tables' must name the schema its relations are in; a proof that they" +
+            " exist without saying where cannot be cross-checked against the store's own default",
+        });
+      }
+      return;
+    }
+    // A model with no typed relations cannot name a schema for them or count them. Refused rather
+    // than normalised, because normalising would let a caller hand in a contradiction and get a
+    // signed claim that disagrees with what it was told.
+    if (v.schema !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["schema"],
+        message:
+          `model '${v.model}' has no typed per-entity relations, so it cannot name the schema they` +
+          " are in; use model 'typed_tables' or carry a null schema",
+      });
+    }
+    if (v.relationCount !== 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["relationCount"],
+        message:
+          `model '${v.model}' has no typed per-entity relations, so the count must be 0 (got` +
+          ` ${v.relationCount.toString()})`,
+      });
+    }
+  });
+export type TombstoneRecordStorageDeclaration = z.infer<
+  typeof TombstoneRecordStorageDeclarationSchema
+>;
 
 /**
  * The disposition vocabulary, restated rather than imported as a value: `tombstone-assembly.ts`
@@ -204,6 +384,16 @@ export const TombstoneRecordSchema = z
      * a v1 or v2 record can never say.
      */
     retainedObligations: z.array(z.enum(RETENTION_OBLIGATIONS)).optional(),
+    /**
+     * Where this deployment kept the tenant's own records, when the proof commits to it (ADR-0351).
+     *
+     * Optional because v1, v2 and v3 bytes do not cover it, and paired with `proofVersion` in both
+     * directions by the refinement below. A `typed_tables` declaration with `relationCount: 0` is a
+     * **claim** and not a placeholder — the signed assertion that this deployment's column store
+     * serves a manifest declaring no entity — which is the one thing a v1, v2 or v3 record cannot
+     * distinguish from a deployment that has no typed relations at all.
+     */
+    recordStorage: TombstoneRecordStorageDeclarationSchema.optional(),
     contentManifestSha256: z.string().regex(SHA256_REGEX),
     proofSha256: z.string().regex(SHA256_REGEX),
     anchors: z.array(TombstoneAnchorSchema).min(1),
@@ -282,8 +472,8 @@ export const TombstoneRecordSchema = z
         code: z.ZodIssueCode.custom,
         path: ["proofVersion"],
         message:
-          `a capabilityDeclaration on a '${v.proofVersion}' record is outside the signed bytes;` +
-          " declare proofVersion 'v2' or 'v3', or carry no declaration",
+          `a capabilityDeclaration on a '${v.proofVersion}' record is outside the signed bytes; ` +
+          `${declareOneOf(DECLARATION_BEARING_PROOF_VERSIONS)}, or carry no declaration`,
       });
     }
     if (proofVersionCoversRetentionClaim(v.proofVersion)) {
@@ -324,8 +514,8 @@ export const TombstoneRecordSchema = z
         code: z.ZodIssueCode.custom,
         path: ["proofVersion"],
         message:
-          `retainedObligations on a '${v.proofVersion}' record is outside the signed bytes;` +
-          " declare proofVersion 'v3' or carry no obligations",
+          `retainedObligations on a '${v.proofVersion}' record is outside the signed bytes; ` +
+          `${declareOneOf(RETENTION_BEARING_PROOF_VERSIONS)}, or carry no obligations`,
       });
     }
     if (
@@ -350,6 +540,24 @@ export const TombstoneRecordSchema = z
         code: z.ZodIssueCode.custom,
         path: ["retainedDataReference"],
         message: "retainedReason requires retainedDataReference (audit trail)",
+      });
+    }
+    if (proofVersionCoversRecordStorage(v.proofVersion) && v.recordStorage === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["recordStorage"],
+        message:
+          `proofVersion '${v.proofVersion}' commits to a record-storage declaration; without it` +
+          " the digest covers a claim the record does not carry",
+      });
+    }
+    if (!proofVersionCoversRecordStorage(v.proofVersion) && v.recordStorage !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proofVersion"],
+        message:
+          `a recordStorage declaration on a '${v.proofVersion}' record is outside the signed bytes; ` +
+          `${declareOneOf(RECORD_STORAGE_BEARING_PROOF_VERSIONS)}, or carry no declaration`,
       });
     }
     const anchorKinds = new Set<string>();
@@ -483,6 +691,44 @@ export function readRetentionClaim(record: TombstoneRecord): RetentionClaimReadi
     retainedReason: record.retainedReason ?? null,
     retainedDataReference: record.retainedDataReference ?? null,
   };
+}
+
+/**
+ * What a stored tombstone says about where the tenant's records were — and whether the proof covers
+ * the answer.
+ *
+ * The third reading in this shape, for the third version that added a declaration, and the shape is
+ * the same for the same reason: there is **no default declaration** on the unknown arm. A v1, v2 or
+ * v3 record's bytes say nothing about the storage model, and inventing `document_rows` for it would
+ * be the most dangerous possible guess — it asserts that no typed relations existed, which is
+ * exactly the claim ADR-0350's gap made unavailable and the one a reader must not be handed for
+ * free.
+ */
+export type RecordStorageReading =
+  | {
+      readonly declarationState: "covered_by_proof";
+      readonly recordStorage: TombstoneRecordStorageDeclaration;
+    }
+  | {
+      readonly declarationState: "unknown_not_in_proof";
+      /**
+       * `pre_v4_proof` is the ordinary case: the record's bytes predate the declaration entirely.
+       * `record_storage_missing` is a record labelled v4 carrying none — only reachable past the
+       * schema, and its own reason rather than an older proof, for the reason the version field is
+       * explicit at all.
+       */
+      readonly reason: "pre_v4_proof" | "record_storage_missing";
+    };
+
+export function readRecordStorage(record: TombstoneRecord): RecordStorageReading {
+  if (!proofVersionCoversRecordStorage(record.proofVersion)) {
+    return { declarationState: "unknown_not_in_proof", reason: "pre_v4_proof" };
+  }
+  const recordStorage = record.recordStorage;
+  if (recordStorage === undefined) {
+    return { declarationState: "unknown_not_in_proof", reason: "record_storage_missing" };
+  }
+  return { declarationState: "covered_by_proof", recordStorage };
 }
 
 export function isCryptographicallyAnchored(record: TombstoneRecord): boolean {

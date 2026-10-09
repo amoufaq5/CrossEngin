@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 345 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 346 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~17,930 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~18,090 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -528,7 +528,8 @@ type errors.
   moved its predicate to the dangerous one, and its existence is why nobody looked.
   The fix is one subsystem with two named groups, not a seventh subsystem — a seventh key makes
   `TombstoneCapabilityDeclarationSchema`'s `.strict()` parse fail on **every stored v2/v3 tombstone**
-  and fire ADR-0324's paging `sev1` on honest proofs, needing a `content.v4` tag. And the ordering
+  and fire ADR-0324's paging `sev1` on honest proofs, needing a fourth content tag. (ADR-0351 then
+  wrote that tag and found this was never the *decisive* objection — see below.) And the ordering
   question turned out to be the real work: `topologicalEntityOrder` orders the **reference** graph
   and deliberately appends a cycle's members in *insertion order* (ADR-0285), which has no ordering
   property at all — 18 of `erp-core`'s 51 entities are cycle leftovers and reversing that list puts
@@ -538,6 +539,48 @@ type errors.
   the proof's row figure), `set_null` given up first, and a `restrict`-only cycle named for the
   erasure to refuse by name. The recurring rule held a **seventh** time — the honest fix sits one
   level up: the pain was a target list, and the fix is the order that list needed and never had.
+
+  ADR-0351 closes ADR-0350's own Q1 and the class is the one this lineage keeps finding: **a silence
+  in the scope that the bytes cannot make honest.** v1 could not tell *we have no object storage*
+  from *nobody asked*, so ADR-0329 signed the capability declaration as `content.v2`; v2 could not
+  tell *nothing was lawfully retained* from *this proof cannot say*, so ADR-0331 signed the retention
+  claim as `content.v3`; and v3 could not tell *this deployment has no typed per-entity relations*
+  from *it has 54 and the manifest declared none* — the second being the wrong pack having loaded,
+  which `boot-erasure-report.ts` warns about at boot and no stored proof could say. Measured rather
+  than reasoned, and against a proof this repository wrote: the same scope, declaration and claim
+  hash to `d8cb6d10…` under v3 on **both** store modes, and `d8cb6d10…` is the digest **ADR-0350's
+  own live pre-fix run stored** — in the tombstone whose scope named exactly
+  `meta.operate_tenant_settings` while `public.patient` still held the PHI. So
+  `crossengin.tombstone.content.v4` signs `{model, schema, relationCount}`: the model separates
+  ADR-0350's two cases and the count separates the third, since a column store serving a manifest
+  declaring no entity is **legitimate** under per-tenant manifests and the signature of a
+  misconfiguration otherwise. It is a *declaration* and not a measurement, which is what decides
+  where it lives — every field is derivable from `--store` and the manifest before a row is read, so
+  it rides beside `capabilityDeclaration` rather than on an attestation, where a count would sit
+  next to `rowCount` and be read as part of what was destroyed. And the **count is derived, never
+  supplied**: the pipeline fills it from the target list it hands the erasure, so the figure the
+  digest commits to *is* the number of relations that deletion targeted, structurally rather than by
+  a cross-check somebody has to remember.
+  Two things were sharper than the tag. **The fence that existed was not one**: adding `"v4"` to the
+  enum and nothing else typechecked and passed every test, and `proofVersionCoversDeclaration("v4")`
+  answered `false` — so a v4 record was structurally a **v1** record, the two refinements refused it
+  for carrying a declaration or obligations, and `readDeclaredAbsences` reported it
+  `reason: "v1_proof"`: a silent regression of both v2 and v3. The test written for exactly that case
+  said so in its own comment — *"a fourth tag added to neither list would silently sign nothing
+  new"* — and then asserted only that the predicates return a boolean, which they do for every
+  input. It documented the hazard and checked nothing. So the three membership lists became **one
+  total map** `PROOF_VERSION_COVERAGE` with the arrays derived from it, which keeps the original
+  refusal intact (*a version names a domain tag, not an ordinal*, so an ordering comparison is still
+  refused) while buying what lists could not: a new member is a compile error until it says what its
+  bytes carry. And **the migration had a sharp edge that needed answering rather than noting**: the
+  column lands automatically and the widened CHECK does not (ADR-0330 — a widening CHECK cannot be
+  told from a narrowing one), so between the upgrade and that one manual `ALTER` the v4 `INSERT` is
+  refused `23514` **inside the deletion pipeline's transaction, after the tenant's data has been
+  deleted** — rollback, `aborted`, the request left `in_progress` for a human to meet under an
+  Article 12(3) deadline. `proof-version-probe.ts` asks `pg_get_constraintdef` at boot and refuses
+  the deletion surfaces printing the `ALTER`, gated on `--deletion-capabilities` being declared and
+  deliberately **not** on a list of the flags that mount a deletion surface, which is ADR-0288's
+  maintained list avoided in the place it has already been wrong three times.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -1518,7 +1561,7 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   **And the declaration is inside the signed bytes** (ADR-0329), as `crossengin.tombstone.content.v2`
   — a second domain tag, not an edit in place, because v1's bytes are what every stored digest commits
   to and appending to them would stop every existing tombstone verifying. `crossengin.tombstone.proof.v1`
-  is unchanged for *both* versions: the proof payload commits to `contentManifestSha256`, which is
+  is unchanged for *every* version: the proof payload commits to `contentManifestSha256`, which is
   version-bound by its own tag, so the proof inherits the version without its own bytes moving and the
   chain transitively witnesses the declaration. A verifier selects the version from the explicit
   `proofVersion` field and **never** by inferring it from whether a declaration is attached — an
@@ -1528,6 +1571,33 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   "we have a cache layer and it held nothing" compose **byte-identical** scopes, since
   `nothing_to_erase` may carry no figures at all, so under v1 a deployment could answer the harder
   claim with the cheaper one.
+  **And since ADR-0351 the bytes say where the tenant's records were**, as
+  `crossengin.tombstone.content.v4`, which is the fourth tag answering the fourth instance of one
+  question: v1 could not separate *no object storage* from *nobody asked*, v2 *nothing retained* from
+  *cannot say*, and v3 *no typed per-entity relations* from *54 and the manifest declared none*.
+  `TombstoneRecordStorageDeclaration` is `{model, schema, relationCount}` over
+  `RECORD_STORAGE_MODELS` (`typed_tables` / `document_rows` / `no_durable_store`), with `schema`
+  non-null for `typed_tables` **alone** and a `relationCount` of 0 on that model deliberately *not*
+  refused — a column store serving a manifest that declares no entity is legitimate under per-tenant
+  manifests and the signature of a misconfiguration otherwise, so the zero **is** the claim. It
+  travels on `TombstoneAssemblyInput` beside `capabilities` rather than on an attestation, because
+  every field is derivable before a row is read and `DeletionAttestation`'s own comment states the
+  rule a figure there would break: *the figures in a proof describe what was destroyed*. The
+  capabilities path **requires** it (`record_storage_undeclared`), so that path signs v4 and the
+  `requiredSubsystems` path still emits v1 — and no assembler emits v2 or v3 any more, though both
+  remain legal for stored records. `readRecordStorage` is the reader, with **no default declaration**
+  on the `unknown_not_in_proof` arm for `readRetentionClaim`'s reason.
+  **`PROOF_VERSION_COVERAGE` is the one total map the three membership lists became**, over
+  `TombstoneProofVersion` to `{declaration, retentionClaim, recordStorage}`, with
+  `DECLARATION_BEARING_PROOF_VERSIONS` / `RETENTION_BEARING_` / `RECORD_STORAGE_BEARING_` derived from
+  it so every exact-membership assertion kept working. The original refusal stands — *a version names
+  a domain tag, not an ordinal, and nothing promises the next tag is a superset*, so `>= "v2"` is
+  still refused — but a map is not an ordering comparison and it buys what the lists could not: adding
+  an enum member is a **compile error** until it declares its coverage. That mattered measurably;
+  see *Where we are*. The three refusal messages render their remedy from those arrays through
+  `declareOneOf`, because two of the three had already gone stale naming `'v2' or 'v3'` — a
+  hand-maintained list inside a *remedy* is the worst place for one, since the reader is being told
+  what to do.
 - **`tenant-lifecycle-pg`** — also the tenant lifecycle **trail** (ADR-0335). `lifecycle-event-store.ts`
   is the first writer `meta.tenant_lifecycle_events` ever had, whose own `PLATFORM_RECORD_TABLES`
   comment says why it matters: *without it nothing in the database distinguishes a tenant that was
@@ -1577,6 +1647,14 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   `tenant_schema`'s attestation is produced by the pipeline from the erasure that just ran and a
   caller-supplied one is dropped — an attestation about work the transaction is about to do is a
   prediction, not evidence.
+  **`DeleteTenantInput.bootSchema` carries the record-storage declaration minus its count**
+  (ADR-0351): `BootSchemaDeletionInput extends BootSchemaErasureInput` with
+  `Omit<TombstoneRecordStorageDeclaration, "relationCount">`, and the pipeline fills the count from
+  `targets.length` — the same list it hands the erasure. So the figure the v4 digest commits to **is**
+  the number of relations that deletion targeted, structurally rather than by a cross-check somebody
+  has to remember; ADR-0344's `Omit` idiom for its reason, since supplying it twice is impossible
+  rather than resolved by a precedence rule nobody reads. The erasure itself receives only
+  `{targets, blockingCycle}` and knows nothing about the declaration.
   **`PostgresDeletionRequestStore` + `DeletionRunner` make that pipeline asynchronous** (ADR-0321), because
   ADR-0320 put it behind an HTTP request that a large tenant can outlast. `meta.gdpr_deletion_requests` is
   the handle — the third never-written Phase-1 table, with the same two defects: `verified_by` referenced
@@ -2621,6 +2699,36 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   for a plan on `--store pg` would **throw** for a `duration` field the JSONB store serves perfectly
   well. The boot census of undeclared boot-schema tables runs beside it, swallowed on failure, since
   a failed read establishes nothing and the deletion-time refusal is the fence.
+  **`recordStorageDeclarationFor` lives in the same module and reads the same axis** (ADR-0351): a
+  module-private total map `RECORD_STORAGE_FOR_STORE` (`memory` → `no_durable_store`, `pg` →
+  `document_rows`, `pg-columns` → `typed_tables`) sits beside `STORE_ANSWER`, so the boot line an
+  operator reads and the claim a v4 proof signs are two readings of **one** map rather than two
+  answers to one question. It returns the declaration minus its count, which the pipeline derives.
+  **And `proof-version-probe.ts` refuses the deletion surfaces when this database's
+  `proof_version` CHECK does not name the version this binary emits** — `pg_get_constraintdef`,
+  Postgres's own deparse, asked once at boot rather than per statement, because the remedy is
+  standing manual SQL an operator runs once (`decision-schema-probe.ts`' precedent). It converts a
+  `23514` that would land **inside the deletion pipeline's transaction after the tenant's data has
+  been deleted** — rollback, `aborted`, the request stranded `in_progress` under an Article 12(3)
+  deadline — into a boot failure printing the `ALTER` pair, rendered from the **declared** version
+  list and never the stored one, since the stored one is what is being replaced. Three decisions:
+  it is gated on `--deletion-capabilities` being declared and deliberately **not** on a list of the
+  flags that mount a deletion surface, which is the one derived condition that cannot fall behind
+  them (ADR-0288's maintained list, wrong three times); it **refuses** where the rate-limit probe
+  mounts loudly, because that one guards a *projection* of an enforcement that happens either way
+  and here there is no degraded behaviour to protect; and `absent` / `unreadable` **warn and mount**,
+  ADR-0334's `missing`-versus-`unreachable` asymmetry — an observed omission has one `ALTER` as its
+  remedy, while at boot the database may simply not be up, and refusing on an unestablished fact
+  would refuse a deployment that works. A constraint whose rendering does not match the
+  `= ANY (ARRAY[…])` shape at all reads `unreadable` with the text rather than `refuses`, because
+  *this expression is not one I can read* and *this expression rejects v4* are different facts and
+  only the second has a remedy. **It reads two spellings because Postgres produces two**, measured
+  on 16.13 over the identical `CHECK (proof_version IN (…))` and differing only in the column's
+  declared type: `TEXT` gives `= ANY (ARRAY['v1'::text, …])` and `VARCHAR` gives
+  `= ANY ((ARRAY['v1'::character varying, …])::text[])`, whose extra paren the first regex rejected
+  — and since `unreadable` **mounts**, a drifted column would have left the `23514` exactly where it
+  was behind a warning. The catalog declares TEXT, so the live verification could only ever exercise
+  the first; the fake asked for the second is what found it.
   **And `surveyEnvelopeTenantReadiness` names api-key tenants with no `meta.tenants` row** under
   `--column-key-mode envelope` (ADR-0349's live finding (a)), whose every PHI read and write is
   otherwise refused by `tenant_data_keys_tenant_id_fkey` and surfaced as an HTTP **504** — a
@@ -2771,6 +2879,19 @@ read and write for an unprovisioned api-key tenant with `tenant_data_keys_tenant
 as a 504. A boot survey names them. It carries **no platform
 arm**: a data key is never platform-scoped, `tenant_id` is NOT NULL, and a platform read arm would
 let any tenant's gateway session read every tenant's wrapped key.
+
+**`meta.tenant_tombstones.record_storage` is nullable with no default, and that is the whole
+decision** (ADR-0351) — `retained_obligations`' choice for a sharper reason. NULL means *this
+record's bytes do not cover a record-storage declaration*, true of every v1, v2 and v3 row, and
+there is no honest default to give them: all three `RECORD_STORAGE_MODELS` are *claims*, so
+`{"model":"document_rows",…}` would assert that the deployment had no typed relations — precisely
+the assertion ADR-0350's gap made unavailable — written onto rows whose digests never covered it,
+and then refused by the contract's version pairing anyway. The column's sibling is the widened
+`proof_version` CHECK, and the two migrate **differently**: on an empty table the plan is
+`2 steps, 0 unreconciled`, and on a populated one `1 step, 1 unreconciled` — the column lands and
+the CHECK is handed over as SQL, because ADR-0330 cannot tell a widening CHECK from a narrowing one.
+`apps/operate-server/src/proof-version-probe.ts` is the boot fence that makes the gap between them
+survivable; see the `operate-server` entry.
 
 Append new tables to the bottom of the array in build order, not alphabetically —
 the expected-names test sorts independently.
@@ -3233,12 +3354,13 @@ opened them.
   a CLI subcommand and not a route, so nothing *schedules* one — a deployment wanting every seeded
   tenant migrated runs it per tenant and reads `shreddabilityOf` to find them.
 - **The boot-schema erasure, and what is left of it** (ADR-0350 closed the Article 17 gap on
-  `--store pg-columns`). What remains, in order: **(1)** ADR-0329's v2 distinction is closed in the
-  *mechanism* and open in the *proof* — a required parameter makes "nobody looked" unrepresentable at
-  compile time, which a `.strict()` seventh capability key could only refuse at run time, but an
-  empty boot group and no boot group still compose **byte-identical scopes**, so a reader of a stored
-  proof cannot tell a `pg` deployment from a `pg-columns` one whose list came out empty. Closing it
-  is a `crossengin.tombstone.content.v4` tag and the migration Option A was rejected for. **(2)**
+  `--store pg-columns`). What remains, in order: **(1)** ~~ADR-0329's v2 distinction is closed in the
+  *mechanism* and open in the *proof*~~ — **closed by ADR-0351**, which signed a record-storage
+  declaration as `crossengin.tombstone.content.v4` and did it in the increment after, not the one
+  "the migration Option A was rejected for": the deciding objection to a seventh subsystem was never
+  the migration but that the disposition would be a **hand-typed declaration of a derivable fact**,
+  since `--deletion-capabilities` is a file an operator writes and `--store` already is the
+  deployment's declaration. See the next entry. **(2)**
   statutory retention over a tenant's **own** records is still inexpressible — both retention sets
   are constants over `META_TABLES`, so the boot group is subject to neither, and the boot line says
   so. A per-entity retention declaration is the shape, and ADR-0330's rule says it must not be
@@ -3252,6 +3374,34 @@ opened them.
   state at deletion time. **(6)** `--schema` still feeds two stores with two different defaults
   (`meta` for JSONB, `public` for columns); `target_collides_with_catalog` refuses the dangerous
   case, and the flag still means two things.
+- **A stored proof says where the tenant's records were, and what is left of it** (ADR-0351 closed
+  ADR-0350's Q1). `crossengin.tombstone.content.v4` signs `{model, schema, relationCount}`, which
+  separates all three cases v3 collapsed; the count is **derived** from the deletion's own target
+  list; the three coverage lists became one total map `PROOF_VERSION_COVERAGE`, because adding
+  `"v4"` to the enum and nothing else typechecked, passed every test, and made a v4 record
+  structurally a **v1** record — a silent regression of both v2 and v3, past a test that documented
+  the hazard in its own comment and asserted only that the predicates return a boolean. Live, two
+  deployments whose `scope.tables` is the identical `['meta.operate_tenant_settings']` now compose
+  `f18eb91d…` (`typed_tables/public/51`) and `ee0f7594…` (`document_rows/null/0`), both verifying,
+  where under v3 both were `d8cb6d10…` — the digest ADR-0350's own pre-fix run stored.
+  What remains, in order: **(1)** full **coverage** is still outside the bytes for *both* halves —
+  the proof says how many typed relations exist, not which relations were examined, and that is
+  Option C's shape applying equally to the catalogued half. **(2)** v1, v2 and v3 records on file are
+  permanently unprotected in this respect, exactly as they are for the retention claim: nothing can
+  retrofit them and re-signing them under v4 would forge the one alarm the chain cannot raise.
+  **(3)** `tombstoneMatchesAttestations` cannot check the declaration against evidence, because there
+  is none — a cross-check would need the erasure to report its examined count as a *measurement*,
+  which is the thing Option B's reasoning refuses, so the v4 digest is the declaration's only
+  detector. **(4)** `relationCount` can disagree with `model` in the one direction the derivation
+  cannot prevent: a `document_rows` declaration beside a non-empty target list derives a non-zero
+  count, so `assembleTombstone` refuses `record_storage_invalid` and the pipeline aborts — correct,
+  and a boot-time check would be better than a deletion-time one, since the mismatch is decided by
+  `--store` and the manifest. **(5)** the probe reads **one** CHECK on one column, and every other
+  catalogued CHECK the contract widens has the same sharp edge with no probe at all; a general "does
+  the live catalog admit what this binary emits" boot survey is the shape, and this is one instance
+  of that class. **(6)** `no_durable_store` is unreachable from a stored proof, because the deletion
+  routes do not mount on `--store memory` — it exists to keep the map total, and is pinned rather
+  than served.
 
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
@@ -4386,8 +4536,9 @@ opened them.
   detector**. And the claim is signed while the **per-table obligation pairing** is not:
   `sharedTableRetention` flattens to a list of obligations plus one `dataReference` string, so a proof
   naming two obligations over three tables does not say which is under which — closing that needs a
-  structured `retainedData: [{table, obligation}]`, i.e. a **v4** tag, and it is vacuous today because
-  both statutory entries share one obligation. ADR-0330's expectation that a second obligation on the
+  structured `retainedData: [{table, obligation}]`, i.e. a **fifth** tag (`v4` went to ADR-0351's
+  record-storage declaration, and the two are independent keys rather than one edit), and it is
+  vacuous today because both statutory entries share one obligation. ADR-0330's expectation that a second obligation on the
   pure `retained` outcome would be "refused by `DeletionAttestationSchema`" was **wrong**:
   `retention.obligations[0]` builds a valid attestation, so the second was never written down rather
   than rejected, and the proof would have named one lawful basis for data held under two. That is a
@@ -4493,7 +4644,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 345 records; 266 Accepted, 79 Proposed (the
+title or status change cannot drift. 346 records; 267 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

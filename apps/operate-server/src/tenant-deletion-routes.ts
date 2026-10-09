@@ -81,7 +81,7 @@ export interface StoredTombstoneLike {
     readonly anchors: readonly { readonly kind: string; readonly reference: string }[];
     readonly retainedReason?: string;
     /**
-     * What a v2/v3 receipt needs to be **independently verifiable**, which is the whole point of
+     * What a receipt past v1 needs to be **independently verifiable**, which is the whole point of
      * ADR-0320's receipt: a bare "deleted" would be ADR-0317's defect in response form.
      *
      * Without these a caller holding the receipt cannot recompute `contentManifestSha256` at all —
@@ -89,11 +89,21 @@ export interface StoredTombstoneLike {
      * the obligations they cannot reconstruct v2 or v3 bytes. The receipt regressed at v2 and was one
      * field further away at v3. It also shipped `retainedReason` without `retainedDataReference`, so
      * it said *why* data survived and not *where*.
+     *
+     * `recordStorage` is the v4 field (ADR-0351), added in the same increment as the version for the
+     * reason the sentence above records twice: this receipt has fallen behind the bytes at every
+     * previous tag. A v4 receipt without it is a receipt whose holder can read `proofVersion: "v4"`,
+     * select the right domain tag, and still not reconstruct the body.
      */
     readonly proofVersion?: string;
     readonly capabilityDeclaration?: Readonly<Record<string, string>>;
     readonly retainedObligations?: readonly string[];
     readonly retainedDataReference?: string;
+    readonly recordStorage?: {
+      readonly model: string;
+      readonly schema: string | null;
+      readonly relationCount: number;
+    };
   };
   readonly attestations: readonly AttestationLike[];
   readonly chainEntryHash: string | null;
@@ -318,6 +328,12 @@ export function tombstoneReceipt(stored: StoredTombstoneLike): Record<string, un
     // a new place — and it is the one distinction v3 exists to make.
     ...(stored.record.retainedObligations !== undefined
       ? { retainedObligations: stored.record.retainedObligations }
+      : {}),
+    // The same rule for the v4 field, which has the same empty-looking case: a `typed_tables`
+    // declaration counting zero is the claim, so a key present only when the count is non-zero would
+    // hide exactly what the version exists to express.
+    ...(stored.record.recordStorage !== undefined
+      ? { recordStorage: stored.record.recordStorage }
       : {}),
     ...(stored.record.retainedDataReference !== undefined
       ? { retainedDataReference: stored.record.retainedDataReference }

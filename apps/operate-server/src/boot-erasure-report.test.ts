@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
+import {
+  RECORD_STORAGE_MODELS,
+  TombstoneRecordStorageDeclarationSchema,
+  type RecordStorageModel,
+} from "@crossengin/tenant-lifecycle";
 
 import {
   bootErasureCoverageIsSuspect,
   formatBootErasureCoverage,
+  recordStorageDeclarationFor,
   type BootErasureCoverageInput,
 } from "./boot-erasure-report.js";
 
@@ -373,5 +379,83 @@ describe("bootErasureCoverageIsSuspect", () => {
         }
       }
     }
+  });
+});
+
+describe("recordStorageDeclarationFor", () => {
+  /**
+   * The model each store declares, as a `Record` over the store union rather than a list — so a
+   * fourth store is a compile error here as well as at the map this mirrors, and the mapping is what
+   * is asserted rather than three calls agreeing with whatever they returned.
+   */
+  const EXPECTED_MODEL: Readonly<Record<BootErasureCoverageInput["store"], RecordStorageModel>> = {
+    memory: "no_durable_store",
+    pg: "document_rows",
+    "pg-columns": "typed_tables",
+  };
+
+  it("is total over the stores the serving binary accepts, and names no others", () => {
+    // Both directions, because the loops below run over `STORES`: a store in the union and missing
+    // from that list would be untested while reading as covered.
+    expect(Object.keys(EXPECTED_MODEL).sort()).toEqual([...STORES].sort());
+  });
+
+  it("answers the model for every store", () => {
+    for (const store of STORES) {
+      expect(recordStorageDeclarationFor({ store, schema: SCHEMA }).model).toBe(
+        EXPECTED_MODEL[store],
+      );
+    }
+  });
+
+  it("names the schema for typed_tables and null for the models that have no typed relations", () => {
+    for (const store of STORES) {
+      const declared = recordStorageDeclarationFor({ store, schema: SCHEMA });
+      expect(declared.schema).toBe(EXPECTED_MODEL[store] === "typed_tables" ? SCHEMA : null);
+    }
+  });
+
+  it("carries the caller's schema verbatim rather than a default of its own", () => {
+    expect(recordStorageDeclarationFor({ store: "pg-columns", schema: "t_deadbeef" }).schema).toBe(
+      "t_deadbeef",
+    );
+  });
+
+  it("withholds the schema from the other two models even when a real one is passed", () => {
+    // The schema is the half an operator cross-checks against the store's own default, so naming one
+    // for a model with no typed relations would be a claim about relations that do not exist — and
+    // it is the caller, not this function, that holds a schema for both database stores.
+    for (const store of ["pg", "memory"] as const) {
+      expect(recordStorageDeclarationFor({ store, schema: "public" }).schema).toBeNull();
+    }
+  });
+
+  it("produces a declaration the contract parses once the count is added", () => {
+    // The cross-check a test of the map alone cannot make: this producer and the schema's own
+    // refinement have to agree about which (model, schema) pairs are legal, and the refinement
+    // refuses `typed_tables` with a null schema and a non-typed model carrying one.
+    for (const store of STORES) {
+      const declared = recordStorageDeclarationFor({ store, schema: SCHEMA });
+      expect(
+        TombstoneRecordStorageDeclarationSchema.safeParse({ ...declared, relationCount: 0 }).success,
+        store,
+      ).toBe(true);
+    }
+    // Zero is the count every model may carry, so the loop above exercises only the arm that admits
+    // all three. A positive count is legal for the one model that has relations to count.
+    expect(
+      TombstoneRecordStorageDeclarationSchema.safeParse({
+        ...recordStorageDeclarationFor({ store: "pg-columns", schema: SCHEMA }),
+        relationCount: 54,
+      }).success,
+    ).toBe(true);
+  });
+
+  it("reaches every model the contract declares", () => {
+    // A model no store produces is a vocabulary member no deployment can claim, which is the shape
+    // of gap ADR-0350's missing declaration was. A fifth model needs a store answering it, or a
+    // stated reason it is unreachable.
+    const reached = STORES.map((store) => recordStorageDeclarationFor({ store, schema: SCHEMA }).model);
+    expect([...new Set(reached)].sort()).toEqual([...RECORD_STORAGE_MODELS].sort());
   });
 });

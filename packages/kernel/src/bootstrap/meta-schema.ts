@@ -4015,7 +4015,7 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
       type: "TEXT",
       notNull: true,
       default: "'v1'",
-      check: "proof_version IN ('v1', 'v2', 'v3')",
+      check: "proof_version IN ('v1', 'v2', 'v3', 'v4')",
     },
     /**
      * The deployment's capability declaration, inside the v2 signed bytes (ADR-0329).
@@ -4035,6 +4035,17 @@ export const META_TENANT_TOMBSTONES: TableDefinition = {
      * the contract pairs the field with the version, those rows would then fail to parse at all.
      */
     { name: "retained_obligations", type: "JSONB" },
+    /**
+     * Where this deployment kept the tenant's own records, inside the v4 signed bytes (ADR-0351).
+     *
+     * Nullable with **no default**, which is `retained_obligations`' decision for a sharper reason.
+     * NULL means "this record's bytes do not cover a record-storage declaration", true of every v1,
+     * v2 and v3 row. There is no honest default to give the others: the shape's three models are all
+     * *claims*, and `{"model":"document_rows",…}` would assert that the deployment had no typed
+     * relations — precisely the assertion ADR-0350's gap made unavailable, written onto rows whose
+     * digests never covered it, and then refused by the contract's version pairing anyway.
+     */
+    { name: "record_storage", type: "JSONB" },
     /** The chain entry this record was anchored by, written in the same transaction (ADR-0286). */
     {
       name: "chain_entry_hash",

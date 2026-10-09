@@ -1498,7 +1498,12 @@ describe("table column shapes", () => {
     expect(col("proof_version")?.type).toBe("TEXT");
     expect(col("proof_version")?.notNull).toBe(true);
     expect(col("proof_version")?.default).toBe("'v1'");
-    expect(col("proof_version")?.check).toBe("proof_version IN ('v1', 'v2', 'v3')");
+    // The literal, not a derivation: this file imports nothing outside the kernel, and
+    // `@crossengin/tenant-lifecycle` is not a dependency of this package — so the CHECK and
+    // `TOMBSTONE_PROOF_VERSIONS` are two spellings that must agree, and this is the one that fails
+    // when a tag is added there and not here. A version the contract mints and the column refuses
+    // takes the INSERT, not the parse.
+    expect(col("proof_version")?.check).toBe("proof_version IN ('v1', 'v2', 'v3', 'v4')");
     // Nullable, and paired with the version by the contract: v2 must carry it, v1 must not.
     expect(col("capability_declaration")?.type).toBe("JSONB");
     expect(col("capability_declaration")?.notNull).toBeUndefined();
@@ -1509,6 +1514,14 @@ describe("table column shapes", () => {
     expect(col("retained_obligations")?.type).toBe("JSONB");
     expect(col("retained_obligations")?.notNull).toBeUndefined();
     expect(col("retained_obligations")?.default).toBeUndefined();
+    // ADR-0351, and the *absence* of a default is the assertion rather than a side effect of the
+    // type. Every value this shape can hold is a claim about where a tenant's records were, so there
+    // is no honest filler: a `DEFAULT '{}'::jsonb` or any model literal would make every pre-v4 row
+    // read back as a signed declaration its digest never covered, and the contract pairs the field
+    // with the version, so those rows would then fail to parse at all.
+    expect(col("record_storage")?.type).toBe("JSONB");
+    expect(col("record_storage")?.notNull).toBeUndefined();
+    expect(col("record_storage")?.default).toBeUndefined();
   });
 
   it("META_TENANT_CREDITS names its issuer without making that issuer undeletable", () => {

@@ -1,24 +1,33 @@
+import { sha256 } from "@crossengin/crypto";
 import { describe, expect, it } from "vitest";
 
 import {
+  PROOF_VERSION_COVERAGE,
+  TOMBSTONE_PROOF_VERSIONS,
   TombstoneRecordSchema,
   type DeletionScope,
   type TombstoneCapabilityDeclaration,
+  type TombstoneProofVersion,
   type TombstoneRecord,
+  type TombstoneRecordStorageDeclaration,
 } from "./tombstones.js";
 import {
   canonicalContentManifest,
+  canonicalContentManifestFor,
   canonicalContentManifestV2,
   canonicalContentManifestV3,
+  canonicalContentManifestV4,
   canonicalProofPayload,
   computeContentManifestSha256,
   computeContentManifestSha256For,
   computeContentManifestSha256V2,
   computeContentManifestSha256V3,
+  computeContentManifestSha256V4,
   computeProofSha256,
   contentManifestSubjectOf,
   populateTombstoneHashes,
   verifyTombstoneHashes,
+  type ContentManifestSource,
   type TombstoneRetentionClaim,
 } from "./tombstone-proof.js";
 
@@ -850,7 +859,10 @@ const PROOF_OVER_V3_CONTENT = "6c562ee3112fa244b637f630204ef35cec150e441368faaa0
 /** The v3 digest for the pinned fixture, so v3's bytes are frozen the way v1's and v2's are. */
 const V3_FIXTURE_SHA = "25b1bdcfd340ebfb7a073cb2a5d252de51c576beb4c7098b9ceee6f21dcd7fbc";
 
-describe("the proof domain tag is shared by all three versions", () => {
+// Named for what it pins rather than for a count: these are the three tags that predate v4, each
+// asserted against the digest the *pre-change* module produced. The v4 half of the same property
+// has its own block below, because v4 has no older module to be checked against.
+describe("the proof domain tag is shared by the three versions preceding v4", () => {
   it("produces the pre-change digest over a v1 content manifest", () => {
     expect(computeProofSha256({ ...FIXTURE_BASE, contentManifestSha256: V1_FIXTURE_SHA })).toBe(
       PROOF_OVER_V1_CONTENT,
@@ -878,5 +890,472 @@ describe("the proof domain tag is shared by all three versions", () => {
     // What makes one proof tag safe for three content tags: the version is already distinguished
     // upstream, so the proof payload never has to carry it.
     expect(new Set([V1_FIXTURE_SHA, V2_FIXTURE_SHA, V3_FIXTURE_SHA]).size).toBe(3);
+  });
+});
+
+function fixtureRecordStorage(
+  overrides: Partial<TombstoneRecordStorageDeclaration> = {},
+): TombstoneRecordStorageDeclaration {
+  return { model: "typed_tables", schema: "public", relationCount: 54, ...overrides };
+}
+
+/** The model that names no typed relations, and so the one whose `schema` is a real `null`. */
+const DOCUMENT_ROWS_STORAGE = fixtureRecordStorage({
+  model: "document_rows",
+  schema: null,
+  relationCount: 0,
+});
+
+/**
+ * The v4 bytes and digest, **derived** rather than transcribed from this implementation.
+ *
+ * The three pins above could be taken from an older module's own output; v4 has no older module, so
+ * echoing whatever the new code prints would pin nothing. These were computed outside this package
+ * instead — canonical JSON assembled by hand and hashed through `node:crypto` — and the same
+ * derivation reproduces `V1_FIXTURE_SHA`, `V3_FIXTURE_SHA` and all three `PROOF_OVER_*` digests
+ * exactly. So this is an independent answer the implementation has to match.
+ */
+const V4_FIXTURE_MANIFEST =
+  '{"backupGenerations":["2026-05-15"],"cacheKeys":[],"capabilityDeclaration":' +
+  '{"backups":"absent","caches":"absent","object_storage":"absent","search_indexes":"absent",' +
+  '"shared_tables":"erases","tenant_schema":"erases"},"fileCount":25,' +
+  '"objectStorageBuckets":["files"],' +
+  '"recordStorage":{"model":"typed_tables","relationCount":54,"schema":"public"},' +
+  '"retentionClaim":{"obligations":["tax_records_7y"],' +
+  '"retainedDataReference":"backup-vault://2026",' +
+  '"retainedReason":"retained under legal obligation — backups: tax_records_7y"},' +
+  '"rowCount":1000,"schemas":["tenant_a"],"searchIndexes":[],"storageBytes":50000000,' +
+  '"tables":["orders","users"]}';
+const V4_FIXTURE_SHA = "c3439b2a01b3a296015d7e0e30e77610d9b82012325dc1b17928a7c132c85bc1";
+const PROOF_OVER_V4_CONTENT = "98315dfcb7d6f92413d0093b897788c3ae3a58e943201642a317b31e829377d7";
+
+function v3Body(): string {
+  return canonicalContentManifestV3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM);
+}
+
+function v4Body(
+  recordStorage: TombstoneRecordStorageDeclaration = fixtureRecordStorage(),
+  claim: TombstoneRetentionClaim = POPULATED_CLAIM,
+): string {
+  return canonicalContentManifestV4(fixtureScope(), fixtureDeclaration(), claim, recordStorage);
+}
+
+function v4Digest(
+  recordStorage: TombstoneRecordStorageDeclaration = fixtureRecordStorage(),
+  claim: TombstoneRetentionClaim = POPULATED_CLAIM,
+): string {
+  return computeContentManifestSha256V4(
+    fixtureScope(),
+    fixtureDeclaration(),
+    claim,
+    recordStorage,
+  );
+}
+
+describe("v4 content manifest is frozen", () => {
+  it("renders the derived bytes", () => {
+    expect(v4Body()).toBe(V4_FIXTURE_MANIFEST);
+  });
+
+  it("produces the derived digest", () => {
+    expect(v4Digest()).toBe(V4_FIXTURE_SHA);
+  });
+
+  it("leaves the three older fixtures exactly where they were", () => {
+    expect(canonicalContentManifest(fixtureScope())).toBe(V1_FIXTURE_MANIFEST);
+    expect(computeContentManifestSha256(fixtureScope())).toBe(V1_FIXTURE_SHA);
+    expect(canonicalContentManifestV2(fixtureScope(), fixtureDeclaration())).toBe(
+      V2_FIXTURE_MANIFEST,
+    );
+    expect(computeContentManifestSha256V2(fixtureScope(), fixtureDeclaration())).toBe(
+      V2_FIXTURE_SHA,
+    );
+    expect(
+      computeContentManifestSha256V3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM),
+    ).toBe(V3_FIXTURE_SHA);
+  });
+});
+
+describe("canonicalContentManifestV4", () => {
+  it("is the v3 body plus exactly one top-level key", () => {
+    const v3 = JSON.parse(v3Body()) as Record<string, unknown>;
+    const v4 = JSON.parse(v4Body()) as Record<string, unknown>;
+    const { recordStorage, ...sharedWithV3 } = v4;
+    expect(recordStorage).toEqual(fixtureRecordStorage());
+    // Every other key, and every other key's *value*, is what v3 already said — compared as parsed
+    // objects rather than read off the pinned string, so a key renamed or a value quietly rewritten
+    // fails here and not only in the fixture.
+    expect(sharedWithV3).toEqual(v3);
+  });
+
+  it("sorts the declaration's three keys, whatever order it was built in", () => {
+    const forward = fixtureRecordStorage();
+    const reversed: TombstoneRecordStorageDeclaration = {
+      relationCount: forward.relationCount,
+      schema: forward.schema,
+      model: forward.model,
+    };
+    expect(v4Body(reversed)).toBe(V4_FIXTURE_MANIFEST);
+    expect(v4Digest(reversed)).toBe(V4_FIXTURE_SHA);
+  });
+
+  it("renders a null schema as an explicit null, never as a missing key", () => {
+    expect(v4Body(DOCUMENT_ROWS_STORAGE)).toContain(
+      '"recordStorage":{"model":"document_rows","relationCount":0,"schema":null}',
+    );
+  });
+
+  it("separates a null schema from one that was stripped", () => {
+    // `canonicalStringify` drops `undefined`, so an omitted key would render a model that never had
+    // a schema and one whose schema was *removed* identically — the asymmetry ADR-0331 established,
+    // and the only reason this declaration is signable at all.
+    const stripped = {
+      model: DOCUMENT_ROWS_STORAGE.model,
+      relationCount: DOCUMENT_ROWS_STORAGE.relationCount,
+    } as unknown as TombstoneRecordStorageDeclaration;
+    expect(v4Body(stripped)).not.toBe(v4Body(DOCUMENT_ROWS_STORAGE));
+    expect(v4Digest(stripped)).not.toBe(v4Digest(DOCUMENT_ROWS_STORAGE));
+  });
+
+  it("changes when the relation count changes", () => {
+    // The field that earns the version: `typed_tables` with a count of zero is a column store
+    // serving a manifest that declares no entity, which v1/v2/v3 bytes cannot tell from a
+    // deployment holding no typed relations at all.
+    expect(v4Body(fixtureRecordStorage({ relationCount: 0 }))).not.toBe(v4Body());
+    expect(v4Digest(fixtureRecordStorage({ relationCount: 0 }))).not.toBe(v4Digest());
+  });
+
+  it("changes when the model changes", () => {
+    expect(v4Digest(DOCUMENT_ROWS_STORAGE)).not.toBe(v4Digest());
+  });
+
+  it("changes when the schema changes", () => {
+    expect(v4Digest(fixtureRecordStorage({ schema: "meta" }))).not.toBe(v4Digest());
+  });
+
+  it("still separates the retention claim it inherited from v3", () => {
+    expect(v4Digest(fixtureRecordStorage(), EMPTY_CLAIM)).not.toBe(v4Digest());
+  });
+});
+
+/**
+ * The tags are module-private, so this is where they are written down.
+ *
+ * Domain separation is the entire mechanism: the relabelling tamper below is caught because a
+ * recomputed older digest is a digest under a *different* tag. Two versions sharing a tag would
+ * make that attack undetectable while every other test in this file still passed.
+ */
+const CONTENT_DOMAIN_TAGS = {
+  v1: "crossengin.tombstone.content.v1\n",
+  v2: "crossengin.tombstone.content.v2\n",
+  v3: "crossengin.tombstone.content.v3\n",
+  v4: "crossengin.tombstone.content.v4\n",
+} satisfies Record<TombstoneProofVersion, string>;
+
+describe("the four content domain tags", () => {
+  it("are four distinct strings", () => {
+    expect(new Set(Object.values(CONTENT_DOMAIN_TAGS)).size).toBe(4);
+  });
+
+  it("are each what their version's digest is actually computed under", () => {
+    expect(computeContentManifestSha256(fixtureScope())).toBe(
+      sha256(CONTENT_DOMAIN_TAGS.v1 + canonicalContentManifest(fixtureScope())),
+    );
+    expect(computeContentManifestSha256V2(fixtureScope(), fixtureDeclaration())).toBe(
+      sha256(
+        CONTENT_DOMAIN_TAGS.v2 + canonicalContentManifestV2(fixtureScope(), fixtureDeclaration()),
+      ),
+    );
+    expect(
+      computeContentManifestSha256V3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM),
+    ).toBe(sha256(CONTENT_DOMAIN_TAGS.v3 + v3Body()));
+    expect(v4Digest()).toBe(sha256(CONTENT_DOMAIN_TAGS.v4 + v4Body()));
+  });
+
+  it("give one scope four different content digests", () => {
+    expect(
+      new Set([
+        computeContentManifestSha256(fixtureScope()),
+        computeContentManifestSha256V2(fixtureScope(), fixtureDeclaration()),
+        computeContentManifestSha256V3(fixtureScope(), fixtureDeclaration(), POPULATED_CLAIM),
+        v4Digest(),
+      ]).size,
+    ).toBe(4);
+  });
+
+  it("cover every declared version and no more", () => {
+    // `satisfies` above already makes a fifth version a compile error, and this is the same check at
+    // test time: running vitest is not running the type checker, and a tag nobody pinned is the
+    // regression this file exists to stop.
+    expect(Object.keys(CONTENT_DOMAIN_TAGS).sort()).toEqual([...TOMBSTONE_PROOF_VERSIONS].sort());
+  });
+});
+
+interface CarriedPayload {
+  readonly declaration: boolean;
+  readonly retentionClaim: boolean;
+  readonly recordStorage: boolean;
+}
+
+const CARRIED_COMBINATIONS: readonly CarriedPayload[] = [0, 1, 2, 3, 4, 5, 6, 7].map((bits) => ({
+  declaration: (bits & 1) !== 0,
+  retentionClaim: (bits & 2) !== 0,
+  recordStorage: (bits & 4) !== 0,
+}));
+
+function sourceCarrying(
+  version: TombstoneProofVersion,
+  carried: CarriedPayload,
+): ContentManifestSource {
+  return {
+    proofVersion: version,
+    scope: fixtureScope(),
+    ...(carried.declaration ? { capabilityDeclaration: fixtureDeclaration() } : {}),
+    ...(carried.retentionClaim ? { retainedObligations: [] } : {}),
+    ...(carried.recordStorage ? { recordStorage: fixtureRecordStorage() } : {}),
+  };
+}
+
+describe("contentManifestSubjectOf pairs every version with exactly what its tag covers", () => {
+  // Enumerated from the enum and `PROOF_VERSION_COVERAGE` rather than restated, so a fifth version
+  // added to `TOMBSTONE_PROOF_VERSIONS` with no branch in `contentManifestSubjectOf` fails here: it
+  // would otherwise fall off the end of the if-chain and answer with a `v1` subject, which is the
+  // silent regression that map exists to prevent.
+  for (const version of TOMBSTONE_PROOF_VERSIONS) {
+    const covers = PROOF_VERSION_COVERAGE[version];
+    for (const carried of CARRIED_COMBINATIONS) {
+      const matches =
+        covers.declaration === carried.declaration &&
+        covers.retentionClaim === carried.retentionClaim &&
+        covers.recordStorage === carried.recordStorage;
+      const label = [
+        carried.declaration ? "declaration" : "no declaration",
+        carried.retentionClaim ? "obligations" : "no obligations",
+        carried.recordStorage ? "recordStorage" : "no recordStorage",
+      ].join(" + ");
+      it(`${matches ? "accepts" : "refuses"} ${version} carrying ${label}`, () => {
+        const subject = contentManifestSubjectOf(sourceCarrying(version, carried));
+        if (matches) {
+          expect(subject?.proofVersion).toBe(version);
+        } else {
+          // Never a best-effort hash: a digest under the wrong tag would read as a tamper and one
+          // computed by ignoring an attached field would read as clean.
+          expect(subject).toBeNull();
+        }
+      });
+    }
+  }
+});
+
+describe("the v4 subject", () => {
+  it("carries all four parts and names its own version", () => {
+    const subject = contentManifestSubjectOf({
+      proofVersion: "v4",
+      scope: fixtureScope(),
+      capabilityDeclaration: fixtureDeclaration(),
+      retainedObligations: ["tax_records_7y"],
+      retainedReason: POPULATED_CLAIM.retainedReason,
+      retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+      recordStorage: fixtureRecordStorage(),
+    });
+    expect(subject?.proofVersion).toBe("v4");
+    if (subject?.proofVersion !== "v4") return;
+    expect(subject.scope).toEqual(fixtureScope());
+    expect(subject.capabilityDeclaration).toEqual(fixtureDeclaration());
+    expect(subject.retentionClaim).toEqual(POPULATED_CLAIM);
+    expect(subject.recordStorage).toEqual(fixtureRecordStorage());
+  });
+
+  it("refuses v4 with no recordStorage", () => {
+    expect(
+      contentManifestSubjectOf({
+        proofVersion: "v4",
+        scope: fixtureScope(),
+        capabilityDeclaration: fixtureDeclaration(),
+        retainedObligations: ["tax_records_7y"],
+      }),
+    ).toBeNull();
+  });
+
+  it("refuses v3 with a recordStorage declaration attached", () => {
+    expect(
+      contentManifestSubjectOf({
+        proofVersion: "v3",
+        scope: fixtureScope(),
+        capabilityDeclaration: fixtureDeclaration(),
+        retainedObligations: ["tax_records_7y"],
+        recordStorage: fixtureRecordStorage(),
+      }),
+    ).toBeNull();
+  });
+
+  it("is rendered and hashed by the version-dispatching pair", () => {
+    const subject: ContentManifestSource = {
+      proofVersion: "v4",
+      scope: fixtureScope(),
+      capabilityDeclaration: fixtureDeclaration(),
+      retainedObligations: ["tax_records_7y"],
+      retainedReason: POPULATED_CLAIM.retainedReason,
+      retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+      recordStorage: fixtureRecordStorage(),
+    };
+    const resolved = contentManifestSubjectOf(subject);
+    expect(resolved).not.toBeNull();
+    if (resolved === null) return;
+    expect(canonicalContentManifestFor(resolved)).toBe(v4Body());
+    expect(computeContentManifestSha256For(resolved)).toBe(v4Digest());
+    expect(computeContentManifestSha256For(resolved)).toBe(V4_FIXTURE_SHA);
+  });
+});
+
+describe("a v4 record verifies and a tampered record-storage declaration does not", () => {
+  const stored = TombstoneRecordSchema.parse(
+    populateTombstoneHashes({
+      ...FIXTURE_BASE,
+      scope: fixtureScope(),
+      proofVersion: "v4" as const,
+      capabilityDeclaration: fixtureDeclaration(),
+      retainedObligations: ["tax_records_7y"],
+      retainedReason: POPULATED_CLAIM.retainedReason,
+      retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+      recordStorage: fixtureRecordStorage(),
+    }),
+  );
+
+  it("round-trips under the v4 tag", () => {
+    expect(stored.proofVersion).toBe("v4");
+    expect(stored.contentManifestSha256).toBe(V4_FIXTURE_SHA);
+    expect(verifyTombstoneHashes(stored)).toEqual({ contentManifestOk: true, proofOk: true });
+  });
+
+  it("fails verification when the relation count is rewritten", () => {
+    // **This is the deliverable.** Under v3 this edit was invisible: `relationCount` was on the
+    // record and in neither digest, so a proof over 54 typed relations could be rewritten to claim
+    // none and leave `contentManifestSha256`, `proofSha256` and the chain entry byte-identical.
+    const check = verifyTombstoneHashes({
+      ...stored,
+      recordStorage: fixtureRecordStorage({ relationCount: 0 }),
+    });
+    expect(check.contentManifestOk).toBe(false);
+    // The proof commits to the *stored* manifest digest, which the editor did not touch, so
+    // `proofOk` stays true and `contentManifestOk` is the only thing that can say otherwise.
+    expect(check.proofOk).toBe(true);
+  });
+
+  it("fails verification when the storage model is rewritten", () => {
+    expect(
+      verifyTombstoneHashes({ ...stored, recordStorage: DOCUMENT_ROWS_STORAGE })
+        .contentManifestOk,
+    ).toBe(false);
+  });
+
+  it("fails verification when the schema is moved", () => {
+    expect(
+      verifyTombstoneHashes({ ...stored, recordStorage: fixtureRecordStorage({ schema: "meta" }) })
+        .contentManifestOk,
+    ).toBe(false);
+  });
+
+  it("fails verification when the declaration is removed outright", () => {
+    expect(verifyTombstoneHashes({ ...stored, recordStorage: undefined }).contentManifestOk).toBe(
+      false,
+    );
+  });
+
+  it("fails when relabelled to v3 with the declaration stripped", () => {
+    // The relabel in its fourth form, and the one the four distinct tags defeat: the v3 subject is
+    // perfectly well formed, so nothing here refuses it — the recomputed v3 digest simply cannot
+    // equal a digest taken under the v4 tag.
+    const downgraded: TombstoneRecord = { ...stored, proofVersion: "v3", recordStorage: undefined };
+    expect(contentManifestSubjectOf(downgraded)?.proofVersion).toBe("v3");
+    expect(verifyTombstoneHashes(downgraded).contentManifestOk).toBe(false);
+  });
+
+  it("fails when relabelled to v3 with the declaration left attached", () => {
+    const downgraded: TombstoneRecord = { ...stored, proofVersion: "v3" };
+    expect(contentManifestSubjectOf(downgraded)).toBeNull();
+    expect(verifyTombstoneHashes(downgraded).contentManifestOk).toBe(false);
+  });
+
+  it("fails when relabelled to v1", () => {
+    const downgraded: TombstoneRecord = {
+      ...stored,
+      proofVersion: "v1",
+      capabilityDeclaration: undefined,
+      retainedObligations: undefined,
+      recordStorage: undefined,
+    };
+    expect(contentManifestSubjectOf(downgraded)?.proofVersion).toBe("v1");
+    expect(verifyTombstoneHashes(downgraded).contentManifestOk).toBe(false);
+  });
+
+  it("gives a genuine v3 record relabelled to v4 no subject at all", () => {
+    // The inverse direction. A v3 record carries no `recordStorage`, so a forged *upgrade* cannot
+    // be checked against v4 bytes by accident — there is nothing to hash and nothing is hashed.
+    const v3Record = TombstoneRecordSchema.parse(
+      populateTombstoneHashes({
+        ...FIXTURE_BASE,
+        scope: fixtureScope(),
+        proofVersion: "v3" as const,
+        capabilityDeclaration: fixtureDeclaration(),
+        retainedObligations: ["tax_records_7y"],
+        retainedReason: POPULATED_CLAIM.retainedReason,
+        retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+      }),
+    );
+    const upgraded: TombstoneRecord = { ...v3Record, proofVersion: "v4" };
+    expect(contentManifestSubjectOf(upgraded)).toBeNull();
+    expect(verifyTombstoneHashes(upgraded).contentManifestOk).toBe(false);
+  });
+
+  it("throws rather than hash a v4 record with no recordStorage", () => {
+    const hash = (): unknown =>
+      populateTombstoneHashes({
+        ...FIXTURE_BASE,
+        scope: fixtureScope(),
+        proofVersion: "v4" as const,
+        capabilityDeclaration: fixtureDeclaration(),
+        retainedObligations: ["tax_records_7y"],
+        retainedReason: POPULATED_CLAIM.retainedReason,
+        retainedDataReference: POPULATED_CLAIM.retainedDataReference,
+      });
+    expect(hash).toThrow(/disagrees with what it carries/);
+    expect(hash).toThrow(/recordStorage/);
+  });
+
+  it("leaves a forged-and-rehashed declaration to the forensic chain", () => {
+    // The division of labour, unchanged from the declaration's and the claim's. An editor who
+    // rewrites the record storage *and* recomputes both digests passes here, and moves
+    // `proofSha256` — which the chain entry commits to (ADR-0318), so it is caught there.
+    const forged = TombstoneRecordSchema.parse(
+      populateTombstoneHashes({
+        ...stored,
+        recordStorage: fixtureRecordStorage({ relationCount: 0 }),
+      }),
+    );
+    expect(verifyTombstoneHashes(forged)).toEqual({ contentManifestOk: true, proofOk: true });
+    expect(forged.proofSha256).not.toBe(stored.proofSha256);
+  });
+});
+
+describe("the proof domain tag is unchanged by v4", () => {
+  it("produces the derived digest over a v4 content manifest", () => {
+    // Derived by the same independent model that reproduced `PROOF_OVER_V1_CONTENT`,
+    // `PROOF_OVER_V2_CONTENT` and `PROOF_OVER_V3_CONTENT` above, under
+    // `crossengin.tombstone.proof.v1` — so a fourth content tag moved the content digest and left
+    // the proof function where it is, which is the argument all four content tags rest on.
+    expect(computeProofSha256({ ...FIXTURE_BASE, contentManifestSha256: V4_FIXTURE_SHA })).toBe(
+      PROOF_OVER_V4_CONTENT,
+    );
+  });
+
+  it("gives the four versions four different proof digests for one scope", () => {
+    expect(
+      new Set(
+        [V1_FIXTURE_SHA, V2_FIXTURE_SHA, V3_FIXTURE_SHA, V4_FIXTURE_SHA].map((contentSha) =>
+          computeProofSha256({ ...FIXTURE_BASE, contentManifestSha256: contentSha }),
+        ),
+      ).size,
+    ).toBe(4);
   });
 });

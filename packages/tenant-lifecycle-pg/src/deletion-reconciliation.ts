@@ -85,10 +85,12 @@ export const EVIDENCE_DEFECTS = [
    * `contentManifestSha256` does not match what the record's own proof version says it covers.
    *
    * The name is narrower than the check and stays that way. The digest commits to the manifest as a
-   * whole, so `contentManifestOk` is one boolean over everything that version signs — the scope under
-   * v1, plus the capability declaration under v2 (ADR-0329), plus the retention claim under v3
-   * (ADR-0331). It cannot say *which* key moved, so splitting this into three defects would mean
-   * reporting a distinction nothing can make.
+   * whole, so `contentManifestOk` is one boolean over everything that version signs: the scope, plus
+   * whatever keys that tag added to it — `PROOF_VERSION_COVERAGE` is where that set is written down,
+   * and each tag has added one (ADR-0329's capability declaration, ADR-0331's retention claim,
+   * ADR-0351's record-storage declaration). It cannot say *which* key moved, so splitting this per
+   * key would mean reporting a distinction nothing can make — and the count of keys is deliberately
+   * not restated here, because a number in this comment goes stale on the next tag.
    */
   "scope_tampered",
   /** `proofSha256` does not match the record's own identity and manifest digest. */

@@ -1,8 +1,10 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import {
+  readRecordStorage,
   verifyTombstoneHashes,
   type DeletionAttestation,
   type DeletionCapabilities,
+  type TombstoneRecordStorageDeclaration,
 } from "@crossengin/tenant-lifecycle";
 import { describe, expect, it } from "vitest";
 
@@ -12,12 +14,12 @@ import {
   PIPELINE_REFUSAL_STAGES,
   deleteTenantAtomically,
   isAnchoredByChain,
+  type BootSchemaDeletionInput,
   type SchemaEraserWithin,
 } from "./deletion-pipeline.js";
 import { PostgresLifecycleEventStore } from "./lifecycle-event-store.js";
 import {
   RETAINED_SHARED_TABLES,
-  type BootSchemaErasureInput,
   type BootSchemaErasureTarget,
 } from "./shared-table-erasure.js";
 import { PostgresTombstoneStore, type TombstoneAnchorer } from "./tombstone-store.js";
@@ -36,6 +38,20 @@ const CAPABILITIES: DeletionCapabilities = {
   backups: "absent",
   search_indexes: "absent",
   caches: "absent",
+};
+
+/**
+ * What a `--store pg-columns` deployment declares about where it keeps the tenant's own records
+ * (ADR-0351) — and **without** `relationCount`, which is the whole shape of the seam: the pipeline
+ * derives the figure from the target list, so the number the v4 bytes commit to and the number of
+ * relations the erasure was handed cannot disagree.
+ *
+ * One shared value so the addition reads as one decision, and so a test varying the model is
+ * visibly varying it.
+ */
+const BOOT_RECORD_STORAGE: Omit<TombstoneRecordStorageDeclaration, "relationCount"> = {
+  model: "typed_tables",
+  schema: "public",
 };
 
 const RELATION_RE = /"([a-z_]+)"\."([a-z_]+)"/;
@@ -196,7 +212,7 @@ function inputOf(over: Partial<Parameters<typeof deleteTenantAtomically>[3]> = {
     // Empty by default, so every pre-ADR-0350 assertion below pins exactly what it pinned. Empty is
     // what a `--store pg` deployment passes: its entity records are the catalogued
     // `meta.operate_entity_records`, which the shared erasure already reaches.
-    bootSchema: { targets: [], blockingCycle: [] },
+    bootSchema: bootSchemaOf([]),
     ...over,
   };
 }
@@ -204,15 +220,17 @@ function inputOf(over: Partial<Parameters<typeof deleteTenantAtomically>[3]> = {
 /**
  * The seam as one object, so a call site naming targets does not restate the cycle verdict.
  *
- * The two travel together because most of the pairings that can be formed apart are silently wrong,
- * and a helper defaulting the verdict is the test-side version of that: no call site below can
- * accidentally omit it and have the pipeline read `undefined` as "an order exists".
+ * The three travel together because most of the pairings that can be formed apart are silently
+ * wrong, and a helper defaulting the other two is the test-side version of that: no call site below
+ * can accidentally omit the verdict and have the pipeline read `undefined` as "an order exists", or
+ * omit the declaration and have the assembler refuse for a reason the test was not about.
  */
 function bootSchemaOf(
   targets: readonly BootSchemaErasureTarget[],
   blockingCycle: readonly string[] = [],
-): BootSchemaErasureInput {
-  return { targets, blockingCycle };
+  recordStorage: Omit<TombstoneRecordStorageDeclaration, "relationCount"> = BOOT_RECORD_STORAGE,
+): BootSchemaDeletionInput {
+  return { targets, blockingCycle, recordStorage };
 }
 
 const SHARED_ROWS = { "meta.operate_entity_records": 7, "meta.operate_sequences": 2 } as const;
@@ -951,6 +969,136 @@ describe("the boot-schema target seam", () => {
       inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
     );
     expect(named.sql().some((s) => s.includes("pg_policy"))).toBe(true);
+  });
+});
+
+/**
+ * The record-storage declaration the v4 bytes sign (ADR-0351).
+ *
+ * ADR-0350 made the target list a required parameter, so "nobody looked" became unrepresentable in
+ * the code — and a stored proof still could not tell a deployment with no typed relations from one
+ * whose list came out empty, because both compose byte-identical bytes. `relationCount` is what
+ * separates them, which is why the pipeline derives it rather than accepting it.
+ */
+describe("the record-storage declaration", () => {
+  it("derives a relation count of zero from an empty target list", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf([]) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // `typed_tables` counting zero is the third case the version exists to express — a column store
+    // serving a manifest that declares no entity — and a claim rather than a placeholder.
+    expect(out.stored.record.recordStorage).toEqual({
+      model: "typed_tables",
+      schema: "public",
+      relationCount: 0,
+    });
+    expect(verifyTombstoneHashes(out.stored.record)).toEqual({
+      contentManifestOk: true,
+      proofOk: true,
+    });
+  });
+
+  it("derives the count from the list the erasure was handed, for a group of three", async () => {
+    // The figure the digest commits to is the number of relations this deletion actually targeted.
+    // A caller-supplied count could disagree with it — and a proof whose count is larger than the
+    // list says the erasure left relations alone, which is exactly the claim ADR-0350's gap made.
+    const targets: readonly BootSchemaErasureTarget[] = [
+      { schema: "public", table: "visit_participant" },
+      { schema: "public", table: "encounter" },
+      { schema: "public", table: "patient" },
+    ];
+    const h = harness({}, { sharedRows: { ...SHARED_ROWS, "public.patient": 1 } });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(targets) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.stored.record.recordStorage?.relationCount).toBe(3);
+    expect(out.stored.record.recordStorage?.relationCount).toBe(targets.length);
+  });
+
+  it("signs it as v4, and the proof reads back as covering it", async () => {
+    const h = harness({}, { sharedRows: { ...SHARED_ROWS, "public.patient": 1 } });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.stored.record.proofVersion).toBe("v4");
+    expect(readRecordStorage(out.stored.record)).toEqual({
+      declarationState: "covered_by_proof",
+      recordStorage: { model: "typed_tables", schema: "public", relationCount: 2 },
+    });
+  });
+
+  it("hands the erasure only the targets and the order verdict, not the storage model", async () => {
+    // The erasure has no use for what the proof *says* about a group and must not start reading it:
+    // which relations to empty is a different question from how to describe them. A declaration
+    // naming a schema no target is in makes the separation observable — if the value reached the
+    // erasure and it probed or censused by it, a statement before the proof would name it.
+    const h = harness({}, { sharedRows: { ...SHARED_ROWS, "public.patient": 1 } });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({
+        bootSchema: bootSchemaOf(BOOT_TARGETS, [], {
+          model: "typed_tables",
+          schema: "declared_in_the_proof_only",
+        }),
+      }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const insertAt = h.sql().findIndex((s) => s.includes("tenant_tombstones"));
+    expect(insertAt).toBeGreaterThan(0);
+    const beforeTheProof = h.calls
+      .slice(0, insertAt)
+      .map((c) => `${c.sql} ${JSON.stringify(c.params)}`)
+      .join("\n");
+    expect(beforeTheProof).not.toContain("declared_in_the_proof_only");
+    expect(beforeTheProof).not.toContain("typed_tables");
+    // The positive control, so the two assertions above cannot pass because the value went nowhere.
+    expect(out.stored.record.recordStorage?.schema).toBe("declared_in_the_proof_only");
+  });
+
+  it("aborts when the declared model cannot hold the derived count", async () => {
+    // The one incoherence deriving the figure cannot prevent: `document_rows` asserts there are no
+    // typed per-entity relations, and a non-empty target list is 54 relations this deletion is
+    // about to empty. The declaration schema refuses it, the assembler reports
+    // `record_storage_invalid`, and because the erasure has already run it throws rather than
+    // returning — so nothing is committed.
+    const h = harness({}, { sharedRows: { ...SHARED_ROWS, "public.patient": 1 } });
+    const err = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({
+        bootSchema: bootSchemaOf(BOOT_TARGETS, [], { model: "document_rows", schema: null }),
+      }),
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DeletionPipelineAborted);
+    const refusals = (err as DeletionPipelineAborted).refusals;
+    expect(refusals.map((r) => r.reason)).toEqual(["record_storage_invalid"]);
+    expect(refusals[0]?.stage).toBe("assemble");
+    expect(refusals[0]?.detail).toContain("relationCount");
+    expect(h.sql()).toContain("ROLLBACK");
+    expect(h.sql().some((s) => s === "COMMIT")).toBe(false);
+    // And the erasure got on with its job regardless, which is the separation the test above pins
+    // read from the other side: an incoherent declaration did not stop it emptying a single row.
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS (DELETE FROM"))).toBe(true);
   });
 });
 

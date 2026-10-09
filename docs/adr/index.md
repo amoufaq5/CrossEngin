@@ -1,10 +1,10 @@
 # ADR index
 
-345 records. Generated from the ADR files themselves — regenerate rather than
+346 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 266  **Proposed:** 79
+- **Accepted:** 267  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -357,3 +357,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0348](0348-the-grant-that-answered-two-questions.md) | The grant that answered two questions | — | Accepted | 2026-10-07 |
 | [0349](0349-the-rotation-that-had-no-scope.md) | The rotation that had no scope | — | Accepted | 2026-10-08 |
 | [0350](0350-the-erasure-that-reached-the-wrong-schema.md) | The erasure that reached the wrong schema | — | Accepted | 2026-10-09 |
+| [0351](0351-the-silence-that-two-deployments-shared.md) | The silence that two deployments shared | — | Accepted | 2026-10-09 |

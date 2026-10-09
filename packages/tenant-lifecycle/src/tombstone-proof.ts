@@ -3,11 +3,13 @@ import { sha256 } from "@crossengin/crypto";
 import type { RetentionObligation } from "./gdpr-deletion.js";
 import {
   proofVersionCoversDeclaration,
+  proofVersionCoversRecordStorage,
   proofVersionCoversRetentionClaim,
   type DeletionScope,
   type TombstoneCapabilityDeclaration,
   type TombstoneProofVersion,
   type TombstoneRecord,
+  type TombstoneRecordStorageDeclaration,
 } from "./tombstones.js";
 
 const CONTENT_MANIFEST_DOMAIN_TAG = "crossengin.tombstone.content.v1\n";
@@ -45,11 +47,31 @@ const CONTENT_MANIFEST_DOMAIN_TAG_V2 = "crossengin.tombstone.content.v2\n";
 const CONTENT_MANIFEST_DOMAIN_TAG_V3 = "crossengin.tombstone.content.v3\n";
 
 /**
- * Unchanged, for all three versions. The proof payload commits to `contentManifestSha256`, which is
+ * v4 adds the record-storage declaration to the content manifest (ADR-0351).
+ *
+ * A **fourth tag**, for v2's reason restated twice over: `crossengin.tombstone.content.v3` is what
+ * every stored v3 digest commits to, so appending a key to the v3 body would stop every one of them
+ * verifying — and a digest that stops verifying is reported `scope_tampered` (ADR-0323), which fires
+ * ADR-0324's paging `sev1`. A migration that forges the one alarm the forensic chain cannot raise is
+ * not a migration. Three tags were already untouchable; this makes four.
+ *
+ * What it buys is what v1, v2 and v3 could not express. ADR-0350 widened the `shared_tables` erasure
+ * to the boot manifest's typed entity tables, and the figures it produces are in the scope — but the
+ * *existence* of those relations is not, so an empty boot group and no boot group compose
+ * byte-identical bytes. A deployment keeping a tenant's records as catalogued JSONB rows and one
+ * whose column store holds 54 typed relations under a manifest declaring none both sign a proof
+ * whose silence about typed relations reads the same. One of those is correct and one is the wrong
+ * pack having loaded, and `relationCount` is what separates them.
+ */
+const CONTENT_MANIFEST_DOMAIN_TAG_V4 = "crossengin.tombstone.content.v4\n";
+
+/**
+ * Unchanged, for all four versions. The proof payload commits to `contentManifestSha256`, which is
  * itself version-bound by its tag, so the proof inherits the version without its own bytes moving —
- * and a v2 or v3 record's `proofSha256` therefore still verifies with the same function and the same
- * stored digest semantics the forensic chain anchors (ADR-0318). The chain commits to `proofSha256`,
- * so it transitively witnesses whatever the content manifest covers, whichever tag that is.
+ * and a v2, v3 or v4 record's `proofSha256` therefore still verifies with the same function and the
+ * same stored digest semantics the forensic chain anchors (ADR-0318). The chain commits to
+ * `proofSha256`, so it transitively witnesses whatever the content manifest covers, whichever tag
+ * that is.
  */
 const PROOF_DOMAIN_TAG = "crossengin.tombstone.proof.v1\n";
 
@@ -186,6 +208,41 @@ export function computeContentManifestSha256V3(
   );
 }
 
+/**
+ * The v4 body: the v3 fields plus the record-storage declaration, under one more key.
+ *
+ * Its three fields go in as they are rather than through a canonicaliser of their own, which the
+ * other two bodies needed and this one does not: there is no list to sort or deduplicate, and
+ * `schema` is **already** `string | null` on the type rather than an optional key, so the explicit
+ * `null` ADR-0331 had to construct is here by construction. `canonicalStringify` sorts the three
+ * keys like every other object in these bytes.
+ */
+export function canonicalContentManifestV4(
+  scope: DeletionScope,
+  capabilityDeclaration: TombstoneCapabilityDeclaration,
+  retentionClaim: TombstoneRetentionClaim,
+  recordStorage: TombstoneRecordStorageDeclaration,
+): string {
+  return canonicalStringify({
+    ...canonicalScopeFields(scope),
+    capabilityDeclaration,
+    retentionClaim: canonicalRetentionClaimFields(retentionClaim),
+    recordStorage,
+  });
+}
+
+export function computeContentManifestSha256V4(
+  scope: DeletionScope,
+  capabilityDeclaration: TombstoneCapabilityDeclaration,
+  retentionClaim: TombstoneRetentionClaim,
+  recordStorage: TombstoneRecordStorageDeclaration,
+): string {
+  return sha256(
+    CONTENT_MANIFEST_DOMAIN_TAG_V4 +
+      canonicalContentManifestV4(scope, capabilityDeclaration, retentionClaim, recordStorage),
+  );
+}
+
 /** What a content manifest is computed over, once the version and what it carries agree. */
 export type ContentManifestSubject =
   | { readonly proofVersion: "v1"; readonly scope: DeletionScope }
@@ -199,6 +256,13 @@ export type ContentManifestSubject =
       readonly scope: DeletionScope;
       readonly capabilityDeclaration: TombstoneCapabilityDeclaration;
       readonly retentionClaim: TombstoneRetentionClaim;
+    }
+  | {
+      readonly proofVersion: "v4";
+      readonly scope: DeletionScope;
+      readonly capabilityDeclaration: TombstoneCapabilityDeclaration;
+      readonly retentionClaim: TombstoneRetentionClaim;
+      readonly recordStorage: TombstoneRecordStorageDeclaration;
     };
 
 /** The fields a content manifest is derived from. A `TombstoneRecord` satisfies it. */
@@ -209,6 +273,7 @@ export interface ContentManifestSource {
   readonly retainedObligations?: readonly RetentionObligation[];
   readonly retainedReason?: string;
   readonly retainedDataReference?: string;
+  readonly recordStorage?: TombstoneRecordStorageDeclaration;
 }
 
 /**
@@ -234,6 +299,36 @@ export function contentManifestSubjectOf(
   if (proofVersionCoversDeclaration(version) !== (declaration !== undefined)) return null;
   if (proofVersionCoversRetentionClaim(version) !== (source.retainedObligations !== undefined)) {
     return null;
+  }
+  // The third paired field, checked the same way and for the same reason: a version that signs a
+  // record-storage declaration it does not carry has nothing to hash, and one carrying a declaration
+  // its tag does not cover claims coverage it never had.
+  if (proofVersionCoversRecordStorage(version) !== (source.recordStorage !== undefined)) {
+    return null;
+  }
+  if (version === "v4") {
+    // Narrowed by the three guards above; TypeScript cannot see through the membership tests, so
+    // these redundant checks are what make the types line up.
+    if (
+      declaration === undefined ||
+      source.retainedObligations === undefined ||
+      source.recordStorage === undefined
+    ) {
+      return null;
+    }
+    return {
+      proofVersion: "v4",
+      scope: source.scope,
+      capabilityDeclaration: declaration,
+      retentionClaim: {
+        obligations: source.retainedObligations,
+        ...(source.retainedReason !== undefined ? { retainedReason: source.retainedReason } : {}),
+        ...(source.retainedDataReference !== undefined
+          ? { retainedDataReference: source.retainedDataReference }
+          : {}),
+      },
+      recordStorage: source.recordStorage,
+    };
   }
   if (version === "v3") {
     // Both narrowings are established by the two guards above; TypeScript cannot see through the
@@ -261,6 +356,13 @@ export function contentManifestSubjectOf(
 
 export function canonicalContentManifestFor(subject: ContentManifestSubject): string {
   switch (subject.proofVersion) {
+    case "v4":
+      return canonicalContentManifestV4(
+        subject.scope,
+        subject.capabilityDeclaration,
+        subject.retentionClaim,
+        subject.recordStorage,
+      );
     case "v3":
       return canonicalContentManifestV3(
         subject.scope,
@@ -276,6 +378,13 @@ export function canonicalContentManifestFor(subject: ContentManifestSubject): st
 
 export function computeContentManifestSha256For(subject: ContentManifestSubject): string {
   switch (subject.proofVersion) {
+    case "v4":
+      return computeContentManifestSha256V4(
+        subject.scope,
+        subject.capabilityDeclaration,
+        subject.retentionClaim,
+        subject.recordStorage,
+      );
     case "v3":
       return computeContentManifestSha256V3(
         subject.scope,
@@ -318,7 +427,7 @@ export function computeProofSha256(input: ProofInput): string {
 }
 
 /**
- * Accepts all three versions, deciding from the record's own `proofVersion`.
+ * Accepts every version, deciding from the record's own `proofVersion`.
  *
  * The downgrade this has to survive: an attacker who can edit the stored row relabels it to an older
  * version and strips whatever that version does not carry, so the record is checked against bytes
@@ -370,7 +479,7 @@ export function populateTombstoneHashes<
   if (subject === null) {
     throw new Error(
       `cannot hash a tombstone whose proofVersion '${input.proofVersion ?? "v1"}' disagrees with` +
-        " what it carries (capabilityDeclaration, retainedObligations)",
+        " what it carries (capabilityDeclaration, retainedObligations, recordStorage)",
     );
   }
   const contentManifestSha256 = computeContentManifestSha256For(subject);
