@@ -23,6 +23,7 @@ import {
   sharedTableErasureAttestation,
   sharedTableErasureScope,
   sharedTableRetention,
+  type BootSchemaErasureInput,
   type SharedTableErasure,
 } from "./shared-table-erasure.js";
 import { PostgresTombstoneStore, type StoredTombstone } from "./tombstone-store.js";
@@ -60,6 +61,15 @@ import { PostgresTombstoneStore, type StoredTombstone } from "./tombstone-store.
  * session, a table the catalog declares and the database lacks, a rotted retention entry) under which
  * no deletion in this deployment is safe. A misconfigured deployment therefore destroys nothing at
  * all, not even provisionally inside a rolled-back savepoint.
+ *
+ * ADR-0350 widened that erasure to the boot manifest's own entity tables, which until then **nothing
+ * erased at all** on `--store pg-columns` — the catalogued half is `meta.*` and the schema erasure
+ * only ever drops a `t_<hex>` schema a boot-manifest tenant does not have, so the pipeline signed and
+ * anchored proofs over records still on disk. The target list arrives as a second structural seam
+ * beside `SchemaEraserWithin` and for its reason: the function that creates those tables is the only
+ * thing entitled to name them, and this package depends on nothing that could. It is one subsystem
+ * doing what its vocabulary always said, so `ATTESTERS` stays at two keys and one merged target list
+ * keeps the rule above true across both halves of it.
  */
 
 export const PIPELINE_REFUSAL_STAGES = [
@@ -166,6 +176,26 @@ export interface DeleteTenantInput {
    * and is not a parameter at all.
    */
   readonly schema?: string;
+  /**
+   * The boot manifest's own entity tables, which `shared_tables` also erases (ADR-0350).
+   *
+   * The **second structural seam**, beside `SchemaEraserWithin` and for the same reason: the column
+   * store is what creates these tables and so is the only thing entitled to name them
+   * (ADR-0284/0285), and this package does not depend on it and must not start. So the list travels
+   * as `{schema, table}` pairs the caller supplies, exactly as the schema erasure travels as a
+   * function the caller supplies.
+   *
+   * **Required**, unlike every other optional field here, because the defect this closes is a place
+   * nobody looked: an optional list would be forgotten at a call site the same way the whole group
+   * was forgotten in the erasure, and the symptom either way is a signed proof over live records.
+   * An empty list is legitimate and is the assertion that there are none — which is what `--store
+   * pg` passes, its records being the catalogued `meta.operate_entity_records`.
+   *
+   * It carries the order's own verdict beside the list, because an order the database will refuse
+   * partway through is worse than no list at all: the refused `DELETE` aborts this transaction,
+   * which ADR-0321's runner records as `aborted` and leaves `in_progress` for a human.
+   */
+  readonly bootSchema: BootSchemaErasureInput;
   readonly clock?: () => Date;
   /**
    * Where to record the `… -> deleted` transition, and what to say about it.
@@ -205,7 +235,11 @@ export type DeleteTenantOutcome =
         readonly storageBytes: number;
         readonly alreadyAbsent: boolean;
       };
-      /** What the shared-table erasure destroyed, measured by the statements that destroyed it. */
+      /**
+       * What the shared-table erasure destroyed, measured by the statements that destroyed it —
+       * the platform's own tenant-scoped rows **and** the boot manifest's entity tables, which is
+       * why every list here is schema-qualified and `schema` names only the catalogued half.
+       */
       readonly erasedSharedTables: {
         readonly schema: string;
         readonly tables: readonly string[];
@@ -403,6 +437,7 @@ export async function deleteTenantAtomically(
     // ordering that keeps "a returned refusal means nothing was destroyed" true for both erasures.
     const shared = await eraseSharedTablesWithin(tx, input.tenantId, authority, {
       ...(input.schema !== undefined ? { schema: input.schema } : {}),
+      bootSchema: input.bootSchema,
       clock,
     });
     if (shared.refusals.length > 0) {

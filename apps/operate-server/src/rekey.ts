@@ -74,6 +74,15 @@ export interface RekeyOptions {
   readonly dataSchema: string | null;
   /** Proceed although the tenant's status still permits writes. */
   readonly allowLiveRekey: boolean;
+  /**
+   * The serving fleet's `--column-key-ttl-ms`, or `null` when the operator did not say.
+   *
+   * This process does not run the gateway, so it cannot read that value — and the stale-key window
+   * is the one figure here whose understatement is dangerous, because an operator who believes the
+   * window has lapsed resumes writes while a replica still holds the previous key. Absent, the line
+   * prints the default and says it is a default and unread.
+   */
+  readonly columnKeyTtlMs: number | null;
   readonly format: "human" | "json";
   readonly help: boolean;
 }
@@ -146,9 +155,11 @@ export async function probeTenantWriteStatus(
 export const TENANT_WRITE_STATUS_DETAIL: Readonly<Record<TenantWriteStatus, string>> =
   Object.freeze({
     blocks_writes:
-      "this tenant's lifecycle state already refuses writes, so no process can write a column " +
-      "under the previous key while the rekey runs or during the stale-key window after it — this " +
-      "is the state to rekey in",
+      "this tenant's lifecycle state refuses writes — but only on a process running " +
+      "--tenant-status-gate, which is OPT-IN and off by default, so on a deployment without it " +
+      "this status is advisory and the fleet goes on accepting writes. With the gate, this is the " +
+      "state to rekey in; without it, the unconditional remedy is to stop or roll the serving " +
+      "processes for the rekey and the stale-key window after it",
     permits_writes:
       "this tenant can still be written to, so a serving process holding the previous key in its " +
       "cache may write a column under it after the rekey commits, splitting this tenant's data " +
@@ -213,11 +224,13 @@ function shreddabilityLine(provenance: DataKeyProvenance | null): string {
  * Leads with the verdict on the header line and then the refusals, following `formatChainVerification`
  * and `formatReplayReport`: the first thing read has to be whether anything is going to happen.
  *
- * Deliberately **not** the plans' SQL, which `formatKeyRotationPlan` does print. The two surfaces
- * are approving different things: `crossengin-pg encrypt --plan` emits statements an operator will
- * paste, so the SQL *is* the deliverable, while a rekey's operator is approving a **row count and a
- * lock window** for a transaction this binary will run itself. Printing the UPDATEs here would bury
- * the counts under statements nobody is meant to execute.
+ * Deliberately **not** the plans' SQL. `formatKeyRotationPlan` renders it and prints for nobody —
+ * its only caller is `formatKeyRotationSurvey`, itself callerless — so this is a choice rather than
+ * a contrast with a sibling surface; an earlier version of this comment justified it against
+ * `crossengin-pg encrypt --plan`, which prints the encrypt-on-write migration from a different
+ * planner and never a key rotation. The reason stands on its own: a rekey's operator is approving a
+ * **row count and a lock window** for a transaction this binary runs itself, so printing the
+ * UPDATEs would bury the counts under statements nobody is meant to execute.
  */
 export function formatRekeySurvey(survey: TenantRekeySurvey, status: TenantWriteStatus): string {
   const lines: string[] = [];
@@ -313,7 +326,11 @@ export function formatRekeySurvey(survey: TenantRekeySurvey, status: TenantWrite
  * about work that has happened — which is why the horizon claim belongs on this report and not on
  * the survey's, where it would describe a horizon nothing had bounded yet.
  */
-export function formatRekeyResult(result: TenantRekeyResult, staleKeyWindowMs: number): string {
+export function formatRekeyResult(
+  result: TenantRekeyResult,
+  staleKeyWindowMs: number,
+  stated: boolean,
+): string {
   const lines: string[] = [
     `rekeyed tenant ${result.tenantId}: generation ${result.fromGeneration.toString()} → ` +
       `${result.toGeneration.toString()}, provenance ${result.fromProvenance} → ` +
@@ -335,7 +352,7 @@ export function formatRekeyResult(result: TenantRekeyResult, staleKeyWindowMs: n
   // the ciphertext share one database, so one backup holds both — and a parallel sentence in this
   // file would be a second place for that overclaim to come back.
   lines.push(`  ${formatShreddability(shreddabilityOf("envelope", PROVENANCE_AFTER_REKEY))}`);
-  lines.push(formatStaleKeyWindow(staleKeyWindowMs));
+  lines.push(formatStaleKeyWindow(staleKeyWindowMs, stated));
   return lines.join("\n");
 }
 
@@ -354,9 +371,20 @@ export function formatRekeyResult(result: TenantRekeyResult, staleKeyWindowMs: n
  * the window removes the hazard instead of waiting it out. Closing the window properly would need
  * the serving process to be *told* a rekey happened, which is a different increment.
  */
-export function formatStaleKeyWindow(staleKeyWindowMs: number): string {
+export function formatStaleKeyWindow(staleKeyWindowMs: number, stated: boolean): string {
+  // `stated` is the whole honesty of this line. This process does not run the gateway and cannot
+  // read its `--column-key-ttl-ms`, so printing the default as though it were a measurement
+  // understates the hazard by up to 10x for a fleet on the 300000ms ceiling — in the direction
+  // where an operator resumes writes while a replica still holds the previous key. So an unstated
+  // figure is labelled as the default and as unread, and `--column-key-ttl-ms` on this subcommand
+  // is how an operator supplies the fleet's real value.
+  const window = stated
+    ? `${renderMs(staleKeyWindowMs)} (${COLUMN_KEY_TTL_FLAG}, as you stated it)`
+    : `${renderMs(staleKeyWindowMs)} — the DEFAULT, not a reading: this process does not run the ` +
+      `gateway and cannot see its ${COLUMN_KEY_TTL_FLAG}; pass it here to have this line reflect ` +
+      `your fleet`;
   return (
-    `  stale key window: ${renderMs(staleKeyWindowMs)} (${COLUMN_KEY_TTL_FLAG}). ` +
+    `  stale key window: ${window}. ` +
     `A serving process caches the previous key for up to that long, and this rekey committed out ` +
     `of process. Its READS raise "Wrong key or corrupt data" until the entry expires, which is ` +
     `loud and never a wrong answer; its WRITES encrypt new values under the previous key and ` +

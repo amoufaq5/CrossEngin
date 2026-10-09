@@ -2685,6 +2685,7 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
   let schema: string | null = null;
   let dataSchema: string | null = null;
   let allowLiveRekey = false;
+  let columnKeyTtlMs: number | null = null;
   let format: "human" | "json" = "human";
   let help = false;
 
@@ -2711,6 +2712,21 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
       i += consumed();
     } else if (arg === "--allow-live-rekey") {
       allowLiveRekey = true;
+    } else if (arg === COLUMN_KEY_TTL_FLAG || arg.startsWith(`${COLUMN_KEY_TTL_FLAG}=`)) {
+      const raw = takeValue(arg, next, COLUMN_KEY_TTL_FLAG);
+      const n = Number(raw);
+      if (
+        !Number.isInteger(n) ||
+        n < COLUMN_KEY_TTL_BOUNDS.min ||
+        n > COLUMN_KEY_TTL_BOUNDS.max
+      ) {
+        throw new CliUsageError(
+          `${COLUMN_KEY_TTL_FLAG} must be an integer between ${COLUMN_KEY_TTL_BOUNDS.min.toString()}` +
+            ` and ${COLUMN_KEY_TTL_BOUNDS.max.toString()} ms, got '${raw}'`,
+        );
+      }
+      columnKeyTtlMs = n;
+      i += consumed();
     } else if (arg === "--format" || arg.startsWith("--format=")) {
       const raw = takeValue(arg, next, "--format");
       if (raw !== "human" && raw !== "json") {
@@ -2747,6 +2763,7 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
     schema,
     dataSchema,
     allowLiveRekey,
+    columnKeyTtlMs,
     format,
     help,
   };
@@ -2778,6 +2795,9 @@ Options:
   --schema <name>          Schema holding meta.tenant_data_keys (default meta)
   --data-schema <name>     Schema holding the encrypted entity tables (default public; a tenant
                            serving its own activated manifest uses t_<hex>)
+  --column-key-ttl-ms <n>  The SERVING fleet's --column-key-ttl-ms, so the stale-key window this
+                           prints is your value rather than the default. This process does not run
+                           the gateway and cannot read it; unstated, the line says so.
   --allow-live-rekey       Proceed although meta.tenants says this tenant still accepts writes.
                            A serving process holding the previous key in cache would write new
                            values under it, splitting this tenant's data across two keys with

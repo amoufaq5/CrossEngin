@@ -320,6 +320,13 @@ interface VisibilityRow {
   readonly bypasses_rls: boolean;
   readonly is_owner: boolean;
   readonly rls_enabled: boolean;
+  /**
+   * `relforcerowsecurity`. Carried as a **required** boolean rather than an optional key, because a
+   * missing one answers `undefined` for a column the probe selects and `undefined` happens to take
+   * the ownership branch — i.e. the old behaviour, silently. A real catalog always answers true or
+   * false, and so does this fake.
+   */
+  readonly rls_forced: boolean;
   readonly has_scope_column: boolean;
 }
 
@@ -330,6 +337,12 @@ interface Recorded {
 
 interface MockOpts {
   readonly owner?: boolean;
+  /** `rolbypassrls` on the session's role, which overrides every policy including a forced one. */
+  readonly bypassesRls?: boolean;
+  /** `relrowsecurity`. False means no policy applies at all, forced or not. */
+  readonly rlsEnabled?: boolean;
+  /** `relforcerowsecurity`, which confines the table's **owner** too. */
+  readonly rlsForced?: boolean;
   readonly tableExists?: boolean;
   readonly updatedRows?: number;
   /** Absent means "the table has no tenant_id column", which is `tenant_column_missing`. */
@@ -365,9 +378,10 @@ function mockConn(
     ? [
         {
           role: "app_rw",
-          bypasses_rls: false,
+          bypasses_rls: opts.bypassesRls ?? false,
           is_owner: owner,
-          rls_enabled: true,
+          rls_enabled: opts.rlsEnabled ?? true,
+          rls_forced: opts.rlsForced ?? false,
           has_scope_column: opts.hasScopeColumn ?? true,
         },
       ]
@@ -813,5 +827,137 @@ describe("KeyRotationMigrator.rotateTenantWithin", () => {
       NEW_KEY,
     );
     expect(outcome).toEqual({ columns: [], rowsReencrypted: 0, rowsConfirmed: 0 });
+  });
+});
+
+/**
+ * `relforcerowsecurity` — the one catalog flag that overrides ownership.
+ *
+ * `rls_would_confine_this_session` exists because a confined session rewrites 0 rows, which is
+ * byte-identical to "this scope holds no ciphertext", and the rekey's very next act is to destroy
+ * the key those rows are under. The confinement test therefore has to answer *who bypasses the
+ * policies*, and reading `is_owner` while ignoring `FORCE ROW LEVEL SECURITY` answers it wrongly in
+ * the permissive direction for exactly the session the probe exists to stop: an owner on a forced
+ * table is confined like anyone else.
+ *
+ * Nothing in this repo sets `FORCE ROW LEVEL SECURITY` today, so these cases are latent rather than
+ * live — which is the reason to have them, since a latent arm with no test is a safety check nobody
+ * exercises.
+ */
+describe("probeTable — FORCE ROW LEVEL SECURITY", () => {
+  async function surveyWith(opts: MockOpts): Promise<readonly string[]> {
+    const observed: Recorded[] = [];
+    const conn = mockConn([ciphertextRow], observed, opts);
+    const survey = await new KeyRotationMigrator(conn).surveyTenant(
+      conn,
+      "public",
+      TENANT,
+      OLD_KEY,
+      NEW_KEY,
+    );
+    return survey.refusals.map((r) => r.reason);
+  }
+
+  it("asks the catalog for relforcerowsecurity", async () => {
+    const observed: Recorded[] = [];
+    const conn = mockConn([ciphertextRow], observed);
+    await new KeyRotationMigrator(conn).surveyTenant(conn, "public", TENANT, OLD_KEY, NEW_KEY);
+    const probe = observed.find((r) => r.sql.includes("relrowsecurity"));
+    expect(probe).toBeDefined();
+    // Selected, and aliased to the field the decision reads — a probe that fetched the column under
+    // another name would leave `row.rls_forced` undefined and take the ownership branch silently.
+    expect(probe?.sql).toContain("c.relforcerowsecurity");
+    expect(probe?.sql).toContain("AS rls_forced");
+  });
+
+  it("refuses an owner on a forced table", async () => {
+    // The whole fix: before it, `is_owner === true` answered "bypasses the policies" and this
+    // session went straight through to a 0-row rotation.
+    expect(await surveyWith({ owner: true, rlsEnabled: true, rlsForced: true })).toContain(
+      "rls_would_confine_this_session",
+    );
+  });
+
+  it("names FORCE ROW LEVEL SECURITY in the detail, since ownership is the reader's assumption", async () => {
+    const observed: Recorded[] = [];
+    const conn = mockConn([ciphertextRow], observed, {
+      owner: true,
+      rlsEnabled: true,
+      rlsForced: true,
+    });
+    const survey = await new KeyRotationMigrator(conn).surveyTenant(
+      conn,
+      "public",
+      TENANT,
+      OLD_KEY,
+      NEW_KEY,
+    );
+    const refusal = survey.refusals.find((r) => r.reason === "rls_would_confine_this_session");
+    expect(refusal?.detail).toContain("FORCE ROW LEVEL SECURITY");
+    expect(refusal?.detail).toContain("confines the owner too");
+    // Both consequences, because they are what make the refusal up-front rather than after a count:
+    // an unscoped or wrong-tenant session counts 0 (indistinguishable from an empty tenant), and a
+    // correctly-confined one would rotate fine yet cannot be told apart from here.
+    expect(refusal?.detail).toContain("counts 0 rows");
+    expect(refusal?.detail).toContain("byte-identical");
+    expect(refusal?.detail).toContain("confined to exactly this tenant");
+  });
+
+  it("does not refuse an unforced owner", async () => {
+    // Unchanged behaviour, and the case every deployment is in: an owner bypasses an ordinary
+    // policy, so the bound tenant predicate is the only confinement and the rotation is sound.
+    expect(await surveyWith({ owner: true, rlsEnabled: true, rlsForced: false })).toEqual([]);
+  });
+
+  it("does not refuse a rolbypassrls role on a forced table", async () => {
+    // `rolbypassrls` outranks FORCE: it is the one attribute that is not overridden, so a forced
+    // table must not refuse it or no deployment could ever rotate one.
+    expect(
+      await surveyWith({ owner: false, bypassesRls: true, rlsEnabled: true, rlsForced: true }),
+    ).toEqual([]);
+  });
+
+  it("decides over the whole (enabled, forced, owner, bypass) table", async () => {
+    // Written out rather than computed from the implementation's own expression, so this asserts
+    // the intended rule and not merely agreement with the code. Refusal is
+    // `rls_enabled && !(forced ? bypass : owner || bypass)`.
+    const cases: readonly (readonly [MockOpts, boolean])[] = [
+      // RLS off: nothing confines anyone, forced or not.
+      [{ rlsEnabled: false, rlsForced: false, owner: false, bypassesRls: false }, false],
+      [{ rlsEnabled: false, rlsForced: true, owner: false, bypassesRls: false }, false],
+      [{ rlsEnabled: false, rlsForced: true, owner: true, bypassesRls: false }, false],
+      // RLS on, not forced: ownership or rolbypassrls is enough.
+      [{ rlsEnabled: true, rlsForced: false, owner: false, bypassesRls: false }, true],
+      [{ rlsEnabled: true, rlsForced: false, owner: false, bypassesRls: true }, false],
+      [{ rlsEnabled: true, rlsForced: false, owner: true, bypassesRls: false }, false],
+      [{ rlsEnabled: true, rlsForced: false, owner: true, bypassesRls: true }, false],
+      // RLS on and forced: only rolbypassrls gets through, ownership no longer does.
+      [{ rlsEnabled: true, rlsForced: true, owner: false, bypassesRls: false }, true],
+      [{ rlsEnabled: true, rlsForced: true, owner: false, bypassesRls: true }, false],
+      [{ rlsEnabled: true, rlsForced: true, owner: true, bypassesRls: false }, true],
+      [{ rlsEnabled: true, rlsForced: true, owner: true, bypassesRls: true }, false],
+    ];
+    for (const [opts, refused] of cases) {
+      const reasons = await surveyWith(opts);
+      expect(reasons.includes("rls_would_confine_this_session"), JSON.stringify(opts)).toBe(
+        refused,
+      );
+    }
+  });
+
+  it("confines a whole-schema rotation's owner too", async () => {
+    // The probe is shared by both surveys, so the flag reaches `rotateSchema`'s refusal as well —
+    // where the consequence is the same one notch wider: a KEK rotation reporting success having
+    // rewritten nothing, followed by retiring the old key.
+    const observed: Recorded[] = [];
+    const conn = mockConn([ciphertextRow], observed, {
+      owner: true,
+      rlsEnabled: true,
+      rlsForced: true,
+    });
+    await expect(
+      new KeyRotationMigrator(conn).rotateSchema("t_clinic", OLD_KEY, NEW_KEY),
+    ).rejects.toThrow(/rls_would_confine_this_session/);
+    expect(sqlTexts(observed).some((s) => s.startsWith("UPDATE"))).toBe(false);
   });
 });

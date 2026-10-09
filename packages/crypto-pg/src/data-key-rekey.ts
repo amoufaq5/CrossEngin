@@ -65,6 +65,14 @@ export const REKEY_REFUSAL_REASONS = [
    * and is therefore the only place that can.
    */
   "new_key_equals_old",
+  /**
+   * The rotation rewrote **zero rows**, so the confirm pass compared `0` against `0` and proved
+   * nothing — and the next statement would destroy the only copy of the key this tenant's
+   * ciphertext is under. Raised by `rekeyTenant` inside the transaction, never by the survey: the
+   * survey counts rows *before* the rotation and a count that changes between the two is exactly
+   * what this refusal must still catch.
+   */
+  "nothing_to_reencrypt",
 ] as const;
 export type RekeyRefusalReason = (typeof REKEY_REFUSAL_REASONS)[number];
 
@@ -162,12 +170,21 @@ export interface TenantRekeyResult {
  *
  * The **only** place either value appears, and it appears as a `set_config` bind parameter: the
  * migrator issues `SELECT set_config($1, $2, true)` for each pair, so neither key reaches SQL text,
- * a `pg_stat_statements` entry, a query plan or a server log line (ADR-0301's rule, and the reason
- * `KeyRotationMigratorOptions.sessionSettings` exists at all).
+ * a `pg_stat_statements` entry or a query plan (ADR-0301's rule, and the reason
+ * `KeyRotationMigratorOptions.sessionSettings` exists at all). The claim stops there on purpose:
+ * `log_statement = 'all'` logs bind parameters too, so a deployment that has turned that on logs
+ * these keys. What a bind parameter buys is that the key is not in the statement *text* every
+ * default deployment records; it is not a guarantee against a server configured to log everything.
  *
- * The old key goes to `COLUMN_ENCRYPTION_KEY_OLD_GUC` and the new one to the GUC the serving stack
- * reads, which is what makes the rekey leave the deployment in a state its own key source agrees
- * with rather than one step out of phase.
+ * The old key goes to `COLUMN_ENCRYPTION_KEY_OLD_GUC` and the new one to the GUC the **encrypt side
+ * of `reencryptColumnSql`** reads. That is all the naming buys, and the stronger claim an earlier
+ * version of this comment made — that it leaves the deployment "in a state its own key source
+ * agrees with" — is false: both GUCs are `set_config(…, true)`, transaction-local to this rekey,
+ * and the serving stack sets `app.column_encryption_key` itself per operation from its own
+ * resolver, so which name this rotation used is invisible to it. What brings the deployment into
+ * agreement is the **row** `rekeyWithin` writes, and it is out of phase until a serving process's
+ * cache entry lapses — which is the whole subject of `formatStaleKeyWindow` and is bounded, not
+ * closed.
  */
 function rekeySessionSettings(
   oldColumnKey: string,
@@ -352,6 +369,41 @@ export async function rekeyTenant(input: TenantRekeyInput): Promise<TenantRekeyR
       DEFAULT_COLUMN_KEY_REF,
     );
 
+    // **The confirm pass is vacuous at zero, and this is the refusal that covers it.**
+    //
+    // `rotateTenantWithin` compares the rows it rewrote against the rows that read back under the
+    // new key, which is exactly the right check for every count but one: `0 === 0` passes while
+    // proving nothing. And the very next statement destroys the only copy of the key the tenant's
+    // ciphertext is under, so a rekey that rewrote nothing is the one shape of this operation that
+    // can be both successful-looking and unrecoverable.
+    //
+    // Two states produce it and **they are indistinguishable from inside this transaction**: the
+    // tenant genuinely holds no ciphertext, where destroying the key is harmless and also pointless;
+    // or their ciphertext is in a schema this invocation did not look at, where destroying it is
+    // catastrophic. The second is not hypothetical — it is the ordinary consequence of a wrong
+    // `--data-schema`, and `surveyTenantRekey`'s alternative-schema hint cannot catch it, because
+    // that fires when the schema holds no encrypted *column* while this case has the columns and
+    // none of *this tenant's* rows.
+    //
+    // So refuse, and let the caller supply the schema that does hold the rows. The harmless state
+    // loses nothing by being refused: a tenant with no ciphertext needs no rekey, and `destroy`
+    // followed by `ensure` with no seed reaches the same `random` provenance without rewriting
+    // anything. A refusal that costs a pointless act is the right trade against one that makes PHI
+    // unreadable.
+    if (rotation.rowsReencrypted === 0) {
+      throw new TenantRekeyRefused(tenantId, [
+        {
+          reason: "nothing_to_reencrypt",
+          detail:
+            `no row in schema ${input.dataSchema} was re-encrypted for tenant ${tenantId}, so ` +
+            "nothing proves this tenant's ciphertext is reachable from here — and the next " +
+            "statement would destroy the only copy of the key it is under. Either this tenant " +
+            "holds no ciphertext (in which case no rekey is needed) or it is in another schema " +
+            "(a tenant serving its own activated manifest holds it in its own); check --data-schema",
+        },
+      ]);
+    }
+
     // Last, and in the same transaction as the rewrite that just ran. The confirm pass has already
     // proved every rewritten row reads back under `next`, so this row is written over ciphertext
     // already known to be under the key it names.
@@ -369,8 +421,9 @@ export async function rekeyTenant(input: TenantRekeyInput): Promise<TenantRekeyR
     if (row.priorGenerationsDestroyed === 0) {
       throw new Error(
         `data key rekey for tenant ${tenantId} wrote generation ${row.generation.toString()} but ` +
-          `retired none of the ${current.generation.toString()} earlier generation(s) it read, so ` +
-          "the delete reached no row and the rekey must not commit",
+          `retired no earlier generation, though generation ${current.generation.toString()} was ` +
+          "read under this transaction's lock, so the delete reached no row and the rekey must " +
+          "not commit",
       );
     }
 

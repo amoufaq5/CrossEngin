@@ -42,6 +42,12 @@ interface RotationOptions {
   readonly rlsEnabled?: boolean;
   readonly isOwner?: boolean;
   readonly bypassesRls?: boolean;
+  /**
+   * `relforcerowsecurity`, which confines the **owner** too. A real catalog always answers a
+   * boolean here, so the fake does: leaving the key off would answer `undefined` for a column the
+   * probe selects, which is the "a fake that answers a statement it could not really serve" class.
+   */
+  readonly rlsForced?: boolean;
   readonly hasScopeColumn?: boolean;
   readonly rowsPerColumn?: number;
   readonly updatedPerColumn?: number;
@@ -101,6 +107,7 @@ function rotationAnswers(
             bypasses_rls: options.bypassesRls ?? false,
             is_owner: options.isOwner ?? true,
             rls_enabled: options.rlsEnabled ?? true,
+            rls_forced: options.rlsForced ?? false,
             has_scope_column: options.hasScopeColumn ?? true,
           },
         ],
@@ -203,12 +210,26 @@ function silencesDelete(conn: PgConnection): PgConnection {
 }
 
 describe("constants", () => {
-  it("names the three ways a rekey is wrong as a rekey", () => {
+  it("names the four ways a rekey is wrong as a rekey", () => {
     expect(REKEY_REFUSAL_REASONS).toEqual([
       "no_data_key_row",
       "no_encrypted_columns",
       "new_key_equals_old",
+      "nothing_to_reencrypt",
     ]);
+  });
+
+  it("has a test for every member, so a fifth cannot land unexercised", () => {
+    // The forcing function, derived from the enum rather than restated: each reason below names the
+    // test that reaches it, and a member added with no entry here fails on the key set rather than
+    // passing quietly as a safety check nothing exercises.
+    const covered: Readonly<Record<(typeof REKEY_REFUSAL_REASONS)[number], string>> = {
+      no_data_key_row: "refuses no_data_key_row before any rewrite",
+      no_encrypted_columns: "refuses no_encrypted_columns and names a schema that does hold ciphertext",
+      new_key_equals_old: "refuses when the generated key is byte-identical to the stored one",
+      nothing_to_reencrypt: "refuses a rotation that rewrote nothing, before destroying the key",
+    };
+    expect(Object.keys(covered).sort()).toEqual([...REKEY_REFUSAL_REASONS].sort());
   });
 
   it("rotates from the old-key GUC to the one the serving stack reads", () => {
@@ -551,9 +572,12 @@ describe("rekeyTenant", () => {
     // the previous generation surviving the rekey and going on claiming a recomputable key while
     // the deployment believes the tenant is shreddable.
     const f = fixture();
+    // The message names the generation it read rather than a count of earlier ones: `current
+    // .generation` is a generation *number*, so "none of the 1 earlier generation(s)" read a label
+    // as a quantity and was wrong for every tenant past generation 1.
     await expect(
       rekeyTenant({ ...inputOf(f), conn: silencesDelete(f.fake.conn) }),
-    ).rejects.toThrow(/retired none of the/);
+    ).rejects.toThrow(/retired no earlier generation, though generation 1 was read/);
     // Rolled back: the row the rekey read is the row that is still there.
     expect(f.fake.rows).toHaveLength(1);
     expect(f.fake.rows[0]?.["provenance"]).toBe("seeded_from_derived");
@@ -606,6 +630,31 @@ describe("rekeyTenant", () => {
     expect(sqlOf(f).some((s) => s.startsWith("UPDATE "))).toBe(false);
   });
 
+  it("refuses an owner that FORCE ROW LEVEL SECURITY confines", async () => {
+    // The owner arm is the one `relforcerowsecurity` overrides, and this is the operation it
+    // matters to: a confined session rewrites 0 rows and the next statement destroys the key those
+    // rows are under. Asserted through the rekey and not only through the probe, so the fix is
+    // known to reach the destructive path.
+    const f = fixture({ isOwner: true, rlsEnabled: true, bypassesRls: false, rlsForced: true });
+    const error = await rekeyTenant(inputOf(f)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(KeyRotationRefused);
+    expect((error as KeyRotationRefused).refusals[0]?.reason).toBe(
+      "rls_would_confine_this_session",
+    );
+    expect((error as KeyRotationRefused).refusals[0]?.detail).toContain(
+      "FORCE ROW LEVEL SECURITY",
+    );
+    const statements = sqlOf(f);
+    expect(statements.some((s) => s.startsWith("UPDATE "))).toBe(false);
+    expect(statements.some((s) => s.includes("DELETE FROM"))).toBe(false);
+    expect(f.fake.rows).toHaveLength(1);
+  });
+
+  it("does not refuse an unforced owner, which is every deployment today", async () => {
+    const f = fixture({ isOwner: true, rlsEnabled: true, bypassesRls: false, rlsForced: false });
+    await expect(rekeyTenant(inputOf(f))).resolves.toMatchObject({ toGeneration: 2 });
+  });
+
   it("refuses a malformed tenant id before any statement", async () => {
     const f = fixture();
     await expect(rekeyTenant({ ...inputOf(f), tenantId: "not a uuid;" })).rejects.toThrow(
@@ -622,6 +671,181 @@ describe("rekeyTenant", () => {
     expect(error).toBeInstanceOf(TenantRekeyRefused);
     expect(f.fake.rows).toHaveLength(1);
     expect(f.fake.rows[0]?.["tenant_id"]).toBe(TENANT_B);
+  });
+});
+
+/**
+ * The refusal that covers the one count at which the confirm pass proves nothing.
+ *
+ * `rotateTenantWithin` compares the rows it rewrote against the rows that read back under the new
+ * key, which is the right check for every count but zero: `0 === 0` passes having established
+ * nothing at all, and the very next statement destroys the only copy of the key this tenant's
+ * ciphertext is under. The reachable cause is a wrong `--data-schema` — the schema holds the
+ * encrypted *columns*, so `no_encrypted_columns` does not fire, and holds none of **this tenant's**
+ * rows, so the rotation rewrites nothing and the tenant's real ciphertext (in their own `t_<uuid>`
+ * schema) becomes permanently unreadable.
+ *
+ * So the assertions that matter here are over the **recorded statements** rather than over the
+ * thrown error: a refusal whose message is right while the DELETE still ran is the defect.
+ */
+describe("nothing_to_reencrypt", () => {
+  /** Encrypted columns present, and no row for this tenant: the wrong-`--data-schema` shape. */
+  const noRowsForThisTenant = (): Fixture => fixture({ rowsPerColumn: 0 });
+
+  it("refuses a rotation that rewrote nothing, before destroying the key", async () => {
+    const f = noRowsForThisTenant();
+    const error = await rekeyTenant(inputOf(f)).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(TenantRekeyRefused);
+    expect((error as TenantRekeyRefused).tenantId).toBe(TENANT_A);
+    expect((error as TenantRekeyRefused).refusals.map((r) => r.reason)).toEqual([
+      "nothing_to_reencrypt",
+    ]);
+  });
+
+  it("writes no key row and deletes no generation", async () => {
+    const f = noRowsForThisTenant();
+    await rekeyTenant(inputOf(f)).catch(() => undefined);
+
+    // The whole point of the refusal, asserted where it can be seen: nothing was destroyed. A
+    // `DELETE` bounded by `generation <= 1` would have taken the only copy of the key the tenant's
+    // ciphertext is under, and `INSERT` would have named a random one in its place.
+    const statements = sqlOf(f);
+    expect(statements.some((s) => s.includes("INSERT INTO"))).toBe(false);
+    expect(statements.some((s) => s.includes("DELETE FROM"))).toBe(false);
+    // And the row the rekey read is the row that is still there, at its original generation.
+    expect(f.fake.rows).toHaveLength(1);
+    expect(f.fake.rows[0]?.["provenance"]).toBe("seeded_from_derived");
+    expect(f.fake.rows[0]?.["generation"]).toBe(1);
+  });
+
+  it("fires after the vacuous confirm pass, which is why the confirm cannot cover it", async () => {
+    const f = noRowsForThisTenant();
+    await rekeyTenant(inputOf(f)).catch(() => undefined);
+
+    const order = sqlOf(f);
+    // The rotation really ran — UPDATE and confirm both issued, and the confirm *agreed* (0 against
+    // 0) rather than throwing. So this refusal is not a second spelling of the confirm check; it is
+    // the case the confirm check is structurally unable to answer.
+    const update = order.findIndex((s) => s.startsWith("UPDATE "));
+    const confirm = order.findIndex((s) => s.includes("AS readable"));
+    expect(update).toBeGreaterThanOrEqual(0);
+    expect(confirm).toBeGreaterThan(update);
+    const readable = f.fake.captured.filter((c) => c.sql.includes("AS readable"));
+    expect(readable).toHaveLength(2);
+  });
+
+  it("names --data-schema and the tenant's own schema, because that is the remedy", async () => {
+    const f = noRowsForThisTenant();
+    const error = await rekeyTenant(inputOf(f)).catch((e: unknown) => e);
+    const detail = (error as TenantRekeyRefused).refusals[0]?.detail ?? "";
+
+    expect(detail).toContain("--data-schema");
+    expect(detail).toContain("another schema");
+    // The tenant's own schema named as the likely place, which is what turns a puzzling refusal
+    // into an action: a tenant serving its own activated manifest holds its encrypted tables there
+    // and nowhere `--data-schema public` can see.
+    expect(detail).toContain("activated manifest holds it in its own");
+    expect(detail).toContain(DATA_SCHEMA);
+    // And it says what the next statement would have done, since "nothing was re-encrypted" alone
+    // reads as harmless.
+    expect(detail).toContain("destroy the only copy of the key");
+    // Both halves of the ambiguity, because they are indistinguishable from inside the transaction
+    // and only one of them is harmless.
+    expect(detail).toContain("holds no ciphertext");
+  });
+
+  it("transports no key material in the refusal", async () => {
+    const f = noRowsForThisTenant();
+    const error = await rekeyTenant(inputOf(f)).catch((e: unknown) => e);
+    const message = (error as Error).message;
+    expect(message).not.toContain(dataKeyToColumnKey(f.storedDek));
+    expect(message).not.toContain(Buffer.from(KEK).toString("base64"));
+    // 32 raw bytes base64 is 44 characters; the refusal carries catalog names and counts only.
+    expect(message).not.toMatch(/[A-Za-z0-9+/]{43}=/);
+  });
+
+  it("still commits a rotation that rewrote a single row", async () => {
+    // One row is the smallest non-refusing count, so this is the fence rather than a repeat of the
+    // happy path: a refusal written as `<= 0` would be indistinguishable here and a `< 1` typo as
+    // `<= 1` would not.
+    const f = fixture({ rowsPerColumn: 1 });
+    const result = await rekeyTenant(inputOf(f));
+
+    expect(result.rowsReencrypted).toBe(2);
+    expect(result.rowsConfirmed).toBe(2);
+    expect(result.toGeneration).toBe(2);
+    expect(result.priorGenerationsDestroyed).toBe(1);
+    const statements = sqlOf(f);
+    expect(statements.some((s) => s.includes("INSERT INTO"))).toBe(true);
+    expect(statements.some((s) => s.includes("DELETE FROM"))).toBe(true);
+    expect(f.fake.rows).toHaveLength(1);
+    expect(f.fake.rows[0]?.["provenance"]).toBe("random");
+    expect(f.fake.rows[0]?.["generation"]).toBe(2);
+  });
+
+  it("is a rule about the total, so one column rewriting nothing is not a refusal", async () => {
+    // Per column, zero is ordinary: the rotation's `WHERE col IS NOT NULL` skips a nullable PHI
+    // column nobody filled in, so a per-column refusal would refuse most real tenants. The
+    // aggregate is therefore the right unit — and the residual follows from it, which is why this
+    // is pinned rather than left implicit: a `--data-schema` holding *some* of this tenant's
+    // ciphertext sums above zero and is not refused, while the key it destroys also covered the
+    // rows in whatever schema this invocation never looked at.
+    const perColumn = [5, 0] as const;
+    let updates = 0;
+    let confirms = 0;
+    const base = rotationAnswers({});
+    const fake = fakeDataKeysPg({
+      seedRows: [
+        storedDataKeyRow(KEK, TENANT_A, generateDataKey(), {
+          generation: 1,
+          provenance: "seeded_from_derived",
+        }),
+      ],
+      answer: (sql, params) => {
+        // `rotateTenantWithin` issues every UPDATE and then every confirm, in one column order, so
+        // the two counters walk the same list.
+        if (sql.startsWith("UPDATE ")) {
+          const n = perColumn[updates] ?? 0;
+          updates += 1;
+          return { rows: [], rowCount: n };
+        }
+        if (sql.includes("AS readable")) {
+          const n = perColumn[confirms] ?? 0;
+          confirms += 1;
+          return { rows: [{ readable: String(n) }], rowCount: 1 };
+        }
+        return base(sql, params);
+      },
+    });
+    const store = new PostgresDataKeyStore(fake.conn, kekFor);
+
+    const result = await rekeyTenant({
+      conn: fake.conn,
+      store,
+      tenantId: TENANT_A,
+      dataSchema: DATA_SCHEMA,
+    });
+    expect(result.columns.map((c) => c.rowsReencrypted)).toEqual([5, 0]);
+    expect(result.rowsReencrypted).toBe(5);
+    expect(result.priorGenerationsDestroyed).toBe(1);
+  });
+
+  it("refuses a tenant whose only encrypted column has no rows, even with columns planned", async () => {
+    // The survey's own `no_encrypted_columns` arm cannot reach this: the columns are there, so the
+    // plan is non-empty and the alternative-schema hint never fires. Asserted here so the two
+    // refusals are not confused for one another.
+    const f = noRowsForThisTenant();
+    const survey = await surveyTenantRekey(inputOf(f, { alternativeSchemas: [TENANT_SCHEMA] }));
+    expect(survey.refusals).toEqual([]);
+    expect(survey.plans).toHaveLength(2);
+    expect(survey.rowsToRewrite).toBe(0);
+    expect(survey.alternativesWithCiphertext).toEqual([]);
+
+    const error = await rekeyTenant(inputOf(f)).catch((e: unknown) => e);
+    expect((error as TenantRekeyRefused).refusals.map((r) => r.reason)).toEqual([
+      "nothing_to_reencrypt",
+    ]);
   });
 });
 

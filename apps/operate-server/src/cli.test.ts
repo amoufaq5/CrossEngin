@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import { COLUMN_KEY_TTL_BOUNDS, DEFAULT_COLUMN_KEY_TTL_MS } from "./data-key-envelope.js";
 import {
   CliUsageError,
   helpText,
   parsePruneArgs,
+  parseRekeyArgs,
   parseServeArgs,
   parseVerifyChainArgs,
+  rekeyHelpText,
 } from "./cli.js";
 
 describe("parseServeArgs", () => {
@@ -763,6 +766,132 @@ describe("parseVerifyChainArgs", () => {
 
   it("--help skips required-flag validation", () => {
     expect(parseVerifyChainArgs(["--help"]).help).toBe(true);
+  });
+});
+
+describe("parseRekeyArgs", () => {
+  const TENANT = "00000000-0000-4000-8000-000000000001";
+  const OTHER = "00000000-0000-4000-8000-000000000002";
+  const REQUIRED = ["--tenant", TENANT, "--confirm-tenant", TENANT];
+
+  it("parses the required pair, the two schemas and the flags", () => {
+    const opts = parseRekeyArgs([
+      ...REQUIRED,
+      "--plan",
+      "--schema",
+      "custom_meta",
+      "--data-schema",
+      "t_abc",
+      "--allow-live-rekey",
+      "--format",
+      "json",
+    ]);
+    expect(opts.tenantId).toBe(TENANT);
+    expect(opts.confirmTenantId).toBe(TENANT);
+    expect(opts.plan).toBe(true);
+    expect(opts.schema).toBe("custom_meta");
+    expect(opts.dataSchema).toBe("t_abc");
+    expect(opts.allowLiveRekey).toBe(true);
+    expect(opts.format).toBe("json");
+  });
+
+  it("defaults both schemas to null and every flag to off", () => {
+    const opts = parseRekeyArgs(REQUIRED);
+    expect(opts.schema).toBeNull();
+    expect(opts.dataSchema).toBeNull();
+    expect(opts.plan).toBe(false);
+    expect(opts.allowLiveRekey).toBe(false);
+    expect(opts.format).toBe("human");
+    expect(opts.help).toBe(false);
+  });
+
+  it("requires the tenant id twice, including under --plan", () => {
+    expect(() => parseRekeyArgs([])).toThrow(/rekey requires --tenant/);
+    expect(() => parseRekeyArgs(["--tenant", TENANT])).toThrow(/requires --confirm-tenant/);
+    // Required under `--plan` too, so the invocation an operator reviews is the one they then
+    // re-run without the flag.
+    expect(() => parseRekeyArgs(["--tenant", TENANT, "--plan"])).toThrow(
+      /requires --confirm-tenant/,
+    );
+    expect(() => parseRekeyArgs(["--tenant", TENANT, "--confirm-tenant", OTHER])).toThrow(
+      /--confirm-tenant must equal --tenant/,
+    );
+  });
+
+  it("rejects a malformed tenant, a bad format and unknown args", () => {
+    expect(() => parseRekeyArgs(["--tenant", "nope!", "--confirm-tenant", "nope!"])).toThrow(
+      /invalid --tenant/,
+    );
+    expect(() => parseRekeyArgs([...REQUIRED, "--format", "yaml"])).toThrow(/invalid --format/);
+    expect(() => parseRekeyArgs([...REQUIRED, "--yes"])).toThrow(CliUsageError);
+  });
+
+  it("--help skips required-flag validation", () => {
+    expect(parseRekeyArgs(["--help"]).help).toBe(true);
+    expect(parseRekeyArgs(["-h"]).help).toBe(true);
+  });
+});
+
+describe("parseRekeyArgs — --column-key-ttl-ms", () => {
+  const TENANT = "00000000-0000-4000-8000-000000000001";
+  const REQUIRED = ["--tenant", TENANT, "--confirm-tenant", TENANT];
+
+  it("parses the fleet's value, in both flag forms", () => {
+    // The flag this subcommand did not parse at all, while printing the default beside its name —
+    // so the stale-key window read as a measurement and understated the hazard by up to 10x for a
+    // fleet on the ceiling, in the direction where an operator resumes writes too early.
+    expect(parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", "60000"]).columnKeyTtlMs).toBe(
+      60_000,
+    );
+    expect(parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms=60000"]).columnKeyTtlMs).toBe(60_000);
+  });
+
+  it("is null when omitted, so the report can say the figure is a default and unread", () => {
+    // Null and not `DEFAULT_COLUMN_KEY_TTL_MS`: the absence is the fact the stale-key line reports,
+    // and defaulting it here would make "stated" unanswerable downstream.
+    expect(parseRekeyArgs(REQUIRED).columnKeyTtlMs).toBeNull();
+    expect(DEFAULT_COLUMN_KEY_TTL_MS).toBeGreaterThanOrEqual(COLUMN_KEY_TTL_BOUNDS.min);
+  });
+
+  it("accepts both bounds and refuses a value outside them, naming them", () => {
+    const min = COLUMN_KEY_TTL_BOUNDS.min;
+    const max = COLUMN_KEY_TTL_BOUNDS.max;
+    expect(
+      parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", String(min)]).columnKeyTtlMs,
+    ).toBe(min);
+    expect(
+      parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", String(max)]).columnKeyTtlMs,
+    ).toBe(max);
+    for (const bad of [String(min - 1), String(max + 1), "0", "-1"]) {
+      const thrown = (): unknown => parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", bad]);
+      expect(thrown).toThrow(CliUsageError);
+      expect(thrown).toThrow(
+        new RegExp(`must be an integer between ${String(min)} and ${String(max)} ms`),
+      );
+    }
+  });
+
+  it("refuses a non-integer rather than coercing it", () => {
+    for (const bad of ["abc", "1.5", "30s", ""]) {
+      expect(() => parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms", bad])).toThrow(
+        /must be an integer between/,
+      );
+    }
+  });
+
+  it("requires a value", () => {
+    expect(() => parseRekeyArgs([...REQUIRED, "--column-key-ttl-ms"])).toThrow(
+      /--column-key-ttl-ms requires a value/,
+    );
+  });
+
+  it("is documented in the help text, with what it is for", () => {
+    // A flag the report points at has to be a flag the help mentions, or an operator reading
+    // "pass it here" has nowhere to look.
+    expect(rekeyHelpText).toContain("--column-key-ttl-ms");
+    expect(rekeyHelpText).toContain("does not run");
+    expect(rekeyHelpText).toContain("--confirm-tenant");
+    expect(rekeyHelpText).toContain("--data-schema");
   });
 });
 

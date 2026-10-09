@@ -30,6 +30,7 @@ import {
 } from "@crossengin/operate-runtime";
 import { type PgConnection } from "@crossengin/kernel-pg";
 import {
+  COLUMN_STORE_DEFAULT_SCHEMA,
   ColumnMappedEntityStore,
   PostgresEntitlementResolver,
   PostgresEntityStore,
@@ -38,12 +39,14 @@ import {
   PostgresSubscriptionStore,
   TenantColumnStoreRegistry,
   TenantColumnStoreRouter,
+  bootSchemaErasurePlan,
   encryptedEntityNames,
   eraseTenantSchema,
   eraseTenantSchemaWithin,
   ingestStripeWebhook,
   surveyTenantSchemaWithCollateral,
   tenantSchemaName,
+  type BootSchemaErasurePlan,
   type ColumnEncryptionKeySource,
 } from "@crossengin/operate-runtime-pg";
 
@@ -116,6 +119,14 @@ import {
   shreddabilityOf,
 } from "./data-key-envelope.js";
 import { buildTenantCiphertextProbe } from "./tenant-ciphertext-probe.js";
+import {
+  bootErasureCoverageIsSuspect,
+  formatBootErasureCoverage,
+} from "./boot-erasure-report.js";
+import {
+  formatEnvelopeTenantReadiness,
+  surveyEnvelopeTenantReadiness,
+} from "./envelope-tenant-readiness.js";
 import {
   TENANT_WRITE_STATUS_DETAIL,
   probeTenantWriteStatus,
@@ -208,6 +219,7 @@ import {
   PostgresDeletionRequestStore,
   PostgresLifecycleEventStore,
   PostgresTombstoneStore,
+  censusBootSchemaTables,
   deleteTenantAtomically,
   lifecycleTrailGaps,
   probeLifecycleTrail,
@@ -672,8 +684,13 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
       store,
       secret,
       // The boot schema the column store actually writes to, which is `public` when `--schema` is
-      // absent — `ColumnMappedEntityStore`'s own default, and not this module's `undefined`.
-      mayHoldCiphertext: buildTenantCiphertextProbe({ conn, bootSchema: schema ?? "public" }),
+      // absent — `ColumnMappedEntityStore`'s own default, and not this module's `undefined`. Read
+      // from the one exported spelling of that default rather than a third copy of the literal
+      // (ADR-0350: a second copy of this default is how the erasure came to be aimed elsewhere).
+      mayHoldCiphertext: buildTenantCiphertextProbe({
+        conn,
+        bootSchema: schema ?? COLUMN_STORE_DEFAULT_SCHEMA,
+      }),
       ...(options.columnKeyTtlMs !== null ? { ttlMs: options.columnKeyTtlMs } : {}),
       // The first caller `formatShreddability` has ever had. ADR-0347 shipped it as "the one place
       // an operator reads" and `resolveColumnKey` discarded the provenance, so no deployment could
@@ -725,6 +742,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options,
     manifest,
   );
+  if (options.columnKeyMode === "envelope" && conn !== undefined) {
+    // ADR-0349's live finding (a). `meta.tenant_data_keys.tenant_id` references `meta.tenants(id)`,
+    // so a credential naming a tenant with no row there has **every** PHI read and write refused by
+    // that foreign key — surfaced as a 504, a retryable status for a permanent fault. Reported, not
+    // refused: the api-key specs are a lower bound on the tenants this deployment will serve, since
+    // a JWT request carries its own, so a refusal built on this population would refuse deployments
+    // that work and still admit the ones that do not.
+    const readiness = await surveyEnvelopeTenantReadiness(
+      conn,
+      options.apiKeys.map(parseApiKeySpec).map((spec) => spec.tenantId),
+      options.schema !== null ? { schema: options.schema } : {},
+    );
+    const line = formatEnvelopeTenantReadiness(readiness);
+    if (line !== null) console.warn(`[phi] ${line}`);
+  }
   // Who may read and write each sensitive class. One declaration, both directions: the same policy
   // object reaches the response-redaction registry and the write mask, because `privilegedForClass`
   // has a single definition precisely so a role cannot end up able to write a class it may not read
@@ -842,6 +874,75 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   const apiKeys = options.apiKeys.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
+  // ADR-0350. The boot manifest's own typed entity tables, which the shared-table erasure now
+  // reaches and which nothing reached before: the catalogued half is `meta.*`, and the schema
+  // erasure only ever drops the derived `t_<hex>` schema a boot-manifest tenant does not have, so an
+  // Article 17 deletion on `--store pg-columns` signed, anchored and stored a self-verifying proof
+  // over records still on disk.
+  //
+  // Derived **once, at boot** and for two reasons that are not the same one. `blockingCycle` is a
+  // finding about the *manifest* rather than about a request, so it has to be said somewhere an
+  // operator reads, months before an Article 12(3) deadline makes it urgent; and the list is a
+  // function of the manifest alone, so deriving it per deletion would be recomputing a constant at
+  // the worst moment to discover something about it.
+  //
+  // Computed only for `pg-columns`, which is the store that creates those tables. `--store pg` keeps
+  // a tenant's records as JSONB in the catalogued `meta.operate_entity_records`, which the erasure
+  // has reached since ADR-0329 — and asking for a plan there would **throw** for a manifest with a
+  // `duration` field, a manifest the JSONB store serves perfectly well, so a boot refusal for it
+  // would break a deployment that works.
+  const bootErasureSchema = options.schema ?? COLUMN_STORE_DEFAULT_SCHEMA;
+  const bootSchemaErasure: BootSchemaErasurePlan =
+    options.store === "pg-columns"
+      ? bootSchemaErasurePlan(manifest, { schema: bootErasureSchema })
+      : { targets: [], blockingCycle: [], relaxed: [] };
+  {
+    // `memory` names no schema at all, so the resolved one is passed and that arm ignores it.
+    const coverage = {
+      store: options.store,
+      schema: options.store === "pg" ? (options.schema ?? "meta") : bootErasureSchema,
+      targetCount: bootSchemaErasure.targets.length,
+      blockingCycle: bootSchemaErasure.blockingCycle,
+      relaxedCascades: bootSchemaErasure.relaxed
+        .filter((r) => r.onDelete === "cascade")
+        .map((r) => `${r.reference} -> ${r.target}`),
+    };
+    const line = `[deletion] ${formatBootErasureCoverage(coverage)}`;
+    if (bootErasureCoverageIsSuspect(coverage)) console.warn(line);
+    else console.info(line);
+  }
+  if (bootSchemaErasure.targets.length > 0 && conn !== undefined) {
+    // The other direction, asked at boot as well as refused at deletion time, which is this repo's
+    // conversion run both ways rather than one: the erasure refuses
+    // `boot_schema_table_undeclared` because the alternative is signing a proof over live records,
+    // and an operator who meets that refusal meets it under an Article 12(3) deadline. `ensureSchema`
+    // has just run, so the census is exactly as accurate here as it will be then.
+    //
+    // Swallowed rather than fatal. A failed read establishes nothing — the refusal at deletion time
+    // is the fence, and a boot that died because a read-only census could not run would be a strictly
+    // worse deployment than one that boots and refuses one act.
+    try {
+      const declared = new Set(bootSchemaErasure.targets.map((t) => `${t.schema}.${t.table}`));
+      const undeclared = (await censusBootSchemaTables(conn, [bootErasureSchema])).filter(
+        (q) => !declared.has(q),
+      );
+      if (undeclared.length > 0) {
+        console.warn(
+          `[deletion] ${undeclared.length} table(s) in ${bootErasureSchema} were created by the` +
+            ` column store and this manifest does not declare them: ${undeclared.join(", ")}.` +
+            " ensureSchema is additive, so an entity a previous manifest declared keeps its table" +
+            " and its rows; nothing erases them and an Article 17 deletion is refused" +
+            " boot_schema_table_undeclared rather than signing a proof over them. Drop them, or" +
+            " serve a manifest that declares their entities.",
+        );
+      }
+    } catch (err) {
+      console.warn(
+        "[deletion] the boot schema could not be censused for tables this manifest does not" +
+          ` declare, so whether any exist is unknown: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   // Resolved once per request in the auth stage and cached, so the five places that build an
   // `auth.Principal` read one answer instead of each asking its own. Built only alongside an
   // evaluator (see the policy block above), and reading through `PostgresUserStore.membershipFor`,
@@ -1334,6 +1435,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
                 {
                   tenantId: req.tenantId,
                   tombstoneId: req.tombstoneId,
+                  bootSchema: bootSchemaErasure,
                   kind: req.kind,
                   executedBy: req.executedBy,
                   approvedBy: req.approvedBy,
@@ -3123,6 +3225,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
             {
               tenantId: input.tenantId,
               tombstoneId: input.tombstoneId,
+              bootSchema: bootSchemaErasure,
               // Unattended, so always the data subject's erasure — never a commercial wind-down,
               // which is a decision a person makes through the synchronous route.
               kind: "data_subject_erasure",
@@ -4034,6 +4137,8 @@ export interface RekeyReport {
   /** Absent on `--plan`, and on a run the survey refused. */
   readonly result: TenantRekeyResult | null;
   readonly staleKeyWindowMs: number;
+  /** Whether `staleKeyWindowMs` is the operator's stated fleet value or this process's default. */
+  readonly staleKeyWindowStated: boolean;
   readonly ok: boolean;
 }
 
@@ -4091,7 +4196,7 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
       // naming convention of its own.
       alternativeSchemas: [tenantSchemaName(options.tenantId)],
     });
-    const staleKeyWindowMs = DEFAULT_COLUMN_KEY_TTL_MS;
+    const staleKeyWindowMs = options.columnKeyTtlMs ?? DEFAULT_COLUMN_KEY_TTL_MS;
     if (options.plan || survey.refusals.length > 0) {
       return {
         tenantId: options.tenantId,
@@ -4100,13 +4205,16 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
         survey,
         result: null,
         staleKeyWindowMs,
+        staleKeyWindowStated: options.columnKeyTtlMs !== null,
         ok: survey.refusals.length === 0,
       };
     }
     if (writeStatus === "permits_writes" && !options.allowLiveRekey) {
       throw new Error(
         `tenant ${options.tenantId} still accepts writes: ${TENANT_WRITE_STATUS_DETAIL.permits_writes}` +
-          " Suspend it for the duration, or pass --allow-live-rekey if the fleet is already down.",
+          " Suspend it for the duration — which only bites on a fleet running --tenant-status-gate," +
+          " that flag being opt-in and off by default — or stop the serving processes and pass" +
+          " --allow-live-rekey.",
       );
     }
     const result = await rekeyTenant({ conn, store, tenantId: options.tenantId, dataSchema });
@@ -4117,6 +4225,7 @@ export async function runRekey(options: RekeyOptions): Promise<RekeyReport> {
       survey,
       result,
       staleKeyWindowMs,
+      staleKeyWindowStated: options.columnKeyTtlMs !== null,
       ok: true,
     };
   } finally {

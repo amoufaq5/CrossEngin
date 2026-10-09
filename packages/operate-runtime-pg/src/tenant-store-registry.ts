@@ -170,14 +170,21 @@ export class TenantColumnStoreRegistry {
     // An *applied* entry never expires (`validUntil` is Infinity), so nothing re-reads a key
     // source on a cache hit. That bounds what this registry does about rotation, and the bound is
     // worth stating rather than discovering: `encryptionKey` is a function the store calls **per
-    // op**, so a resolver that changes the key it answers with — a rotated per-tenant DEK — is
-    // picked up by the next operation without any cache work. What is pinned at construction is the
-    // *resolver* and the key **generation** it closes over; a deployment that swaps the resolver
-    // itself, or whose resolver memoises internally, needs `forget(tenantId)` for the next `ensure`
-    // to build a store around the new one. There is deliberately no rotation machinery here —
-    // re-encrypting existing ciphertext under a new key is `kernel-pg`'s `KeyRotationMigrator`, and
-    // a registry that silently started serving a new key over old ciphertext would read
-    // "Wrong key or corrupt data" as an ordinary read failure.
+    // op**, so this registry holds no key of its own and pins only the *resolver*.
+    //
+    // What it does **not** buy is the property an earlier version of this comment claimed — that a
+    // rotated per-tenant DEK is "picked up by the next operation without any cache work". That is
+    // true of this registry and false of the deployment, because the resolver the deployment
+    // actually passes (`buildEnvelopeKeySource`) memoises per tenant, so *it* decides when a
+    // rotation bites, for up to its `--column-key-ttl-ms`. And `forget(tenantId)` is not the remedy
+    // either: it drops this registry's schema-application entry and cannot reach that cache. The
+    // only two things that end a stale key are the resolver's TTL lapsing and a process restart
+    // (ADR-0349, which built the rotation this paragraph used to speculate about).
+    //
+    // There is still deliberately no rotation machinery here — re-encrypting existing ciphertext
+    // under a new key is `rekeyTenant`'s, in one transaction per tenant — and a registry that
+    // silently started serving a new key over old ciphertext would read "Wrong key or corrupt data"
+    // as an ordinary read failure.
     this.entries.set(tenantId, {
       manifestHash: hash,
       application,

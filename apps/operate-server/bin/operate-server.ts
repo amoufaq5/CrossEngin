@@ -115,7 +115,7 @@ async function runRekeyCommand(argv: readonly string[]): Promise<number> {
     // the row counts, and a result printed alone would not say what was examined.
     process.stdout.write(`${formatRekeySurvey(report.survey, report.writeStatus)}\n`);
     if (report.result !== null) {
-      process.stdout.write(`\n${formatRekeyResult(report.result, report.staleKeyWindowMs)}\n`);
+      process.stdout.write(`\n${formatRekeyResult(report.result, report.staleKeyWindowMs, report.staleKeyWindowStated)}\n`);
     }
   }
   // A refused survey exits 1 and a clean plan exits 0, following `replay`: a plan that printed

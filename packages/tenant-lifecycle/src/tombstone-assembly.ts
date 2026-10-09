@@ -69,7 +69,26 @@ import {
 export const DELETION_SUBSYSTEMS = [
   /** The tenant's own Postgres schema (ADR-0314, erased by ADR-0316). */
   "tenant_schema",
-  /** Rows in the shared boot schema and `meta.*` — the JSONB entity store, settings, sequences. */
+  /**
+   * The tenant's rows in two named groups: `META_TABLES`' tenant-scoped tables — the JSONB entity
+   * store, settings, sequences — **and** the boot manifest's own typed entity tables, which the
+   * erasure's caller names (ADR-0350).
+   *
+   * The second group is named because until ADR-0350 this comment said "the shared boot schema" and
+   * the implementation reached `meta.*` alone, so on `--store pg-columns` nothing erased the
+   * tenant's records and the proof was signed over them anyway. The remit was always right; the
+   * mechanism was half of it.
+   *
+   * It is deliberately **not** "every schema the deployment owns", which is the overclaim the
+   * mechanism cannot support and which this comment is not going to make twice. Coverage is exactly
+   * the two lists: the catalog, and whatever the caller passed as `bootSchema.targets`. A tenant's
+   * *own* schema under ADR-0314 is `tenant_schema`'s — and that separation is a property of what the
+   * caller passes rather than something this contract enforces, because a `DeletionSubsystem` is a
+   * name in a proof and has no mechanism of its own. What is mechanical is narrower and worth
+   * knowing: the erasure refuses a boot target that collides with a catalogued relation, and refuses
+   * when the boot schema holds a table the target list does not name — so the gap that remains is a
+   * schema nobody declared at all, which nothing here can see.
+   */
   "shared_tables",
   /** `@crossengin/files` object storage. */
   "object_storage",

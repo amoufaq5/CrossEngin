@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 343 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 345 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~17,720 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~17,930 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -492,6 +492,53 @@ type errors.
   looking, which is the clearest evidence it was the right level. Every fix adds only the `create`
   arm; no `read` or `update` list in any of the three changed.
 
+  ADR-0349 closes ADR-0347's own Q1 and the class is **an executor whose only atomic unit was the
+  wrong one**. `KeyRotationMigrator` rotates a whole *schema*, one *column* per transaction, and for
+  a per-tenant key both axes are wrong: `reencryptColumnSql` emitted `WHERE col IS NOT NULL` and
+  `ReencryptColumnInput` had **no field that could carry a predicate**, so under a boot manifest —
+  where every tenant's encrypted columns share one schema with a `tenant_id` column — a rekey for
+  one tenant would re-encrypt every *other* tenant's PHI under this tenant's key pair. The
+  per-column split bought nothing either: a resume ledger makes a half-applied rotation *resumable*
+  while `ColumnEncryptionKeySource` resolves exactly one key per tenant per operation, so a
+  half-rotated tenant is unreadable either way. `ReencryptScope` is required and discriminated,
+  all three statements are built from **one** `scopeWhere`, and `rekeyTenant` is **one transaction**
+  in `crypto-pg`. The subtle part is that `rls_would_confine_this_session` **stays** and for an
+  inverted reason: for a tenant-scoped rotation the confinement *is* the scope for the **rows** and
+  is false of the **count**, since a confined session reports `0 rows re-encrypted`, byte-identical
+  to "this tenant holds no ciphertext" — and the rekey's next act is to delete the generation those
+  rows are under. So the tenant predicate is **not a second belt beside RLS, it is the only
+  confinement**. The sharpest thing review found afterwards: `rotation.rowsReencrypted === 0` used
+  to pass straight through to `rekeyWithin`, so a confirm pass over an empty row set succeeded
+  vacuously and the next statement destroyed the only copy of the key — now `nothing_to_reencrypt`.
+
+  ADR-0350 is the Article 17 counterpart, and the class is **a remit whose mechanism was half of
+  it**. `DELETION_SUBSYSTEMS`' `shared_tables` has said "rows in the shared boot schema and `meta.*`"
+  since Phase 1 and reached `meta.*` alone, because every `META_TABLES` entry declares
+  `schema: "meta"` while `ColumnMappedEntityStore` writes to `<--schema ?? "public">`; and
+  `eraseTenantSchemaWithin` drops only the derived `t_<hex>` schema a **boot**-manifest tenant does
+  not have, so it attested `nothing_to_erase`. On `--store pg-columns` nothing erased the tenant's
+  records. What makes it worse than a gap is that **which of two outcomes a tenant got was an
+  accident**: measured live, a tenant holding *any* erasable platform row (one
+  `meta.operate_tenant_settings` row sufficed) got a signed, anchored `v3` tombstone whose scope
+  named exactly that table while `public.patient` still held the PHI — false by **omission**, which
+  `contentManifestOk`, `tombstoneMatchesAttestations` and the chain all structurally cannot see,
+  since every digest commits to the scope that *was* composed and that scope is correct — while a
+  tenant holding none got `assemble/scope_empty`, *"there is no deletion to attest"*, about a
+  patient's medical record. So a fence existed and fired on the **harmless** case; one unrelated row
+  moved its predicate to the dangerous one, and its existence is why nobody looked.
+  The fix is one subsystem with two named groups, not a seventh subsystem — a seventh key makes
+  `TombstoneCapabilityDeclarationSchema`'s `.strict()` parse fail on **every stored v2/v3 tombstone**
+  and fire ADR-0324's paging `sev1` on honest proofs, needing a `content.v4` tag. And the ordering
+  question turned out to be the real work: `topologicalEntityOrder` orders the **reference** graph
+  and deliberately appends a cycle's members in *insertion order* (ADR-0285), which has no ordering
+  property at all — 18 of `erp-core`'s 51 entities are cycle leftovers and reversing that list puts
+  the parent first on two `RESTRICT` edges. The cycle is contributed entirely by edges that constrain
+  no deletion (`Employee.department_id` is `set_null`), so the plan orders a **weighted** graph:
+  `restrict` non-negotiable, `cascade` honoured where the graph admits it (a relaxed one undercounts
+  the proof's row figure), `set_null` given up first, and a `restrict`-only cycle named for the
+  erasure to refuse by name. The recurring rule held a **seventh** time — the honest fix sits one
+  level up: the pain was a target list, and the fix is the order that list needed and never had.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -758,6 +805,23 @@ packages exist at only one layer, noted below where that is true.
   **tenant's own** manifest via `encryptedEntityNames`, never the deployment's: under per-tenant
   manifests a deployment-wide set taken from the boot pack would be correct only for tenants serving
   that pack and would leave exactly the tenant-declared classified field unguarded.
+  **And names what an Article 17 deletion must empty** (ADR-0350). `bootSchemaErasurePlan(manifest,
+  {schema})` returns every table `ensureSchema` creates — entity tables and m2m join tables — in the
+  order they must be emptied, plus `blockingCycle` and `relaxed`. The order is over the
+  **delete-blocking** graph and not the reference graph, which is the whole content of it:
+  `topologicalEntityOrder` orders references (what `CREATE TABLE` needs) and tolerates a cycle by
+  appending its members in *insertion order* (ADR-0285), and that has no ordering property at all —
+  so reversing it is not a deletion order wherever the reference graph cycles, which is all seven
+  packs. `DELETE_ORDER_WEIGHT` is a total map over `OnDelete` (so a fourth member is a compile error
+  beside `onDeleteClause`'s switch): `restrict` 2, non-negotiable; `cascade` 1, honoured where the
+  graph admits it because a cascaded child is destroyed by its *parent's* statement and the child's
+  own `DELETE` then undercounts the figure a proof commits to; `set_null` 0, given up first since it
+  destroys nothing early. A `restrict`-only cycle is named rather than thrown, because such a
+  manifest *serves* fine and only its deletion cannot run. A **self**-reference is excluded on a
+  measurement: on PG 16.13 with the erasure's own single-statement CTE shape, a self-referencing
+  `ON DELETE RESTRICT` key does not refuse the bulk delete. `COLUMN_STORE_DEFAULT_SCHEMA` is
+  exported here because a second spelling of `"public"` is that defect's own shape — `column-store.ts`
+  spelled it inline twice and `apps/operate-server` held a third copy.
   **And erases it** (ADR-0316), because ADR-0314's schema was never removed and `tenant-lifecycle` then
   signed a GDPR Article 17 tombstone over data that survived. `surveyTenantSchema` measures with
   `count(*)`, not `reltuples`, since a cryptographic proof commits to the figure; `probeCascadeCollateral`
@@ -1573,7 +1637,29 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   **And `eraseSharedTablesWithin` is the second real erasure** (ADR-0329), which until then did not
   exist at all: **112 of the 143 `META_TABLES` carry a `tenant_id`** and nothing erased one of them,
   so every deployment declared `shared_tables: "absent"` and signed an Article 17 proof over a tenant
-  whose rows were still in `meta.operate_entity_records`. Targets are derived from `META_TABLES` minus
+  whose rows were still in `meta.operate_entity_records`.
+  **And since ADR-0350 it erases the boot manifest's own entity tables too** — a required
+  `bootSchema: {targets, blockingCycle}` whose list the *caller* supplies, because
+  `operate-runtime-pg` creates those tables and so is the only thing entitled to name them and this
+  package must not depend on it. The two groups are **one** target list, **one** probe and **one**
+  refusal pass, which is what keeps ADR-0330's *"a returned refusal means nothing was destroyed"*
+  true across both; the boot group is first because it is the tenant's own records, and neither
+  group's order is resorted here. Grouped rather than two parameters (ADR-0342's rule):
+  targets-without-the-cycle-verdict is a list that looks complete and that the database refuses
+  partway through. Five refusals guard it and each converts a mid-transaction raise — which rolls
+  back, and which ADR-0321's runner files `aborted` and strands — into a deterministic `rejected`:
+  `target_collides_with_catalog` (an entity resolving onto a catalogued relation, worst of all a
+  retained one, with a correct-looking `tenant_id = $1`), `boot_schema_target_invalid`,
+  `boot_schema_order_unrunnable`, `target_lacks_tenant_scope` (the probe asks for the column it
+  scopes by now, which every catalogued target carried by construction and a boot target need not)
+  and `boot_schema_table_undeclared`. That last one is `censusBootSchemaTables`, the **other
+  direction** — `pg-record-retention.ts`'s both-ways rule, since a one-way comparison is what the
+  original defect was made of — narrowed to the signature this emitter writes and nothing else does,
+  a policy named `<relname>_tenant_isolation`, because the default boot schema is `public` and a
+  `tenant_id`-keyed census would refuse every deletion in a deployment that shares it. It catches
+  `ensureSchema`'s additive migration leaving a previous manifest's table behind, which is the
+  original defect's own shape one manifest later.
+  Targets are derived from `META_TABLES` minus
   a **compile-time** retention set — a caller-supplied retention list would be ADR-0328's defect in a
   new field — which ADR-0330 split into its **two genuinely different reasons**, because defining one
   of them away was the thing that made statutory retention inexpressible.
@@ -2520,6 +2606,27 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   transaction**, because `RETURNING` answers with the *new* row and `PENDING_DELETION_SOURCES` has
   three members, so the predicate's candidate list does not say which one matched (and there is no
   `RETURNING OLD` before PG 18 against a floor of 14).
+  **The boot line says what this deployment will erase of a tenant's own records** (ADR-0350,
+  `boot-erasure-report.ts`), and says it **either way, including when the figure is zero** — the
+  sharpest evidence for which is ADR-0316's own live notes, which record *"`meta` (144 tables) and
+  `public` are untouched"* as a **success** criterion: it was checking for *collateral* damage, and
+  that is the identical observation this defect produces, so a passing check and a missing erasure
+  were one sentence. `STORE_ANSWER` is a total map over the store kinds (`pg`'s zero is a fact, not a
+  finding: its records are the catalogued `meta.operate_entity_records`), the cycle is answered
+  **before** the count so a `column_tables: 54` line cannot sit beside a deletion that refuses every
+  time, and `bootErasureCoverageIsSuspect` shares the two predicates with the arm so the level and
+  the verdict cannot disagree. The plan is derived **once at boot** and threaded to both
+  `deleteTenantAtomically` call sites — the finding is about the *manifest*, so it belongs where an
+  operator reads months before an Article 12(3) deadline — and only for `pg-columns`, because asking
+  for a plan on `--store pg` would **throw** for a `duration` field the JSONB store serves perfectly
+  well. The boot census of undeclared boot-schema tables runs beside it, swallowed on failure, since
+  a failed read establishes nothing and the deletion-time refusal is the fence.
+  **And `surveyEnvelopeTenantReadiness` names api-key tenants with no `meta.tenants` row** under
+  `--column-key-mode envelope` (ADR-0349's live finding (a)), whose every PHI read and write is
+  otherwise refused by `tenant_data_keys_tenant_id_fkey` and surfaced as an HTTP **504** — a
+  retryable status for a permanent fault. Three-valued (`provisioned`/`missing`/`unknown`), because a
+  zero-row count means either absent or unreadable, and reported rather than refused since a JWT
+  request carries its own tenant and the api-key specs are a lower bound.
   **`operate-server rekey` is the fourth maintenance subcommand** (ADR-0349) and the only one that
   writes: `--tenant <uuid> --confirm-tenant <uuid> [--plan]` moves one tenant's at-rest column key
   to a fresh random data key in a single transaction, re-encrypting their encrypted columns and
@@ -2858,7 +2965,12 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   table's owner bypasses RLS and testing as the owner proves nothing about it.
   A fake that silently ignores a column is worse than no fake: `fakeCertificationPg`
   ignored `tenant_id` entirely, so a store reading one scope and a store reading
-  every scope looked identical to it. **That class had three more members**
+  every scope looked identical to it. **A fake's fallback arm should throw, not
+  answer `{rows: []}`** (ADR-0350): `shared-table-erasure.test.ts`'s fake answers two
+  read-only surveys by shape and raises on anything else, because an empty answer for
+  a statement whose shape later changed would make every assertion about what that
+  statement *found* pass vacuously — and that is this convention's own blind spot
+  applied to the fake itself. **That class had three more members**
   (ADR-0334): `crypto-pg`'s fake modelled `tenant_id` but applied the RLS predicate to
   *writes*, i.e. only ever as a non-owner — so every owner-bypass write defect was
   invisible to it by construction, and it takes `{owner: true}` now and **throws** on a
@@ -3120,6 +3232,26 @@ opened them.
   a partial rekey stays unsafe and the single transaction is the whole defence. **(4)** the rekey is
   a CLI subcommand and not a route, so nothing *schedules* one — a deployment wanting every seeded
   tenant migrated runs it per tenant and reads `shreddabilityOf` to find them.
+- **The boot-schema erasure, and what is left of it** (ADR-0350 closed the Article 17 gap on
+  `--store pg-columns`). What remains, in order: **(1)** ADR-0329's v2 distinction is closed in the
+  *mechanism* and open in the *proof* — a required parameter makes "nobody looked" unrepresentable at
+  compile time, which a `.strict()` seventh capability key could only refuse at run time, but an
+  empty boot group and no boot group still compose **byte-identical scopes**, so a reader of a stored
+  proof cannot tell a `pg` deployment from a `pg-columns` one whose list came out empty. Closing it
+  is a `crossengin.tombstone.content.v4` tag and the migration Option A was rejected for. **(2)**
+  statutory retention over a tenant's **own** records is still inexpressible — both retention sets
+  are constants over `META_TABLES`, so the boot group is subject to neither, and the boot line says
+  so. A per-entity retention declaration is the shape, and ADR-0330's rule says it must not be
+  caller-supplied. **(3)** a deployment that served `pg-columns` and now serves `pg` passes `[]`, so
+  its leftover entity tables are censused by nothing; closing that needs the boot schema declared
+  independently of the targets, which is a deployment declaration rather than something derivable
+  from the manifest. **(4)** a relaxed `cascade` edge undercounts the proof's `rowCount` — vacuous
+  on all seven packs, whose only relaxations are `set_null`, and closing it needs the child's rows
+  counted before the parent's statement. **(5)** a tenant whose per-tenant DDL application was
+  *refused* is served from the JSONB fallback (ADR-0314), and nothing says which tenants are in that
+  state at deletion time. **(6)** `--schema` still feeds two stores with two different defaults
+  (`meta` for JSONB, `public` for columns); `target_collides_with_catalog` refuses the dangerous
+  case, and the flag still means two things.
 
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
@@ -3947,7 +4079,15 @@ opened them.
   **Two of the six subsystems perform a real erasure now** (ADR-0329): `shared_tables` joined
   `tenant_schema`, which closes the worst of what ADR-0328 left — 112 of the 143 `META_TABLES` carry a
   `tenant_id` and nothing erased one of them, so every deployment declared it `absent` and signed a
-  proof over data that was still there. **And a declared absence is inside the signed bytes**, as
+  proof over data that was still there.
+  **And `shared_tables` reaches the boot manifest's own entity tables since ADR-0350**, which it did
+  not, so on `--store pg-columns` nothing erased a tenant's records: the catalogued half is `meta.*`
+  and the schema erasure only drops a `t_<hex>` schema a boot-manifest tenant does not have. Live, the
+  two faces of that — a tenant holding any erasable platform row got a signed anchored `v3` tombstone
+  naming only `meta.operate_tenant_settings` while `public.patient` kept its PHI, and one holding none
+  got `assemble/scope_empty` saying *"there is no deletion to attest"*. Both are closed, and
+  `scope_empty` is now an honest predicate rather than an accidental fence. What that entry leaves is
+  below, under **The boot-schema erasure**. **And a declared absence is inside the signed bytes**, as
   `crossengin.tombstone.content.v2`, so "we have no object storage" is part of the claim rather than a
   note beside it. What remains: the other **four** still cannot attest because their erasures do not
   exist, so a deployment declares them `absent` — honest, and now *in the proof* rather than merely
@@ -4353,7 +4493,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 343 records; 264 Accepted, 79 Proposed (the
+title or status change cannot drift. 345 records; 266 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

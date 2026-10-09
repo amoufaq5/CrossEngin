@@ -409,6 +409,7 @@ interface RotationVisibilityRow {
   readonly bypasses_rls: unknown;
   readonly is_owner: unknown;
   readonly rls_enabled: unknown;
+  readonly rls_forced: unknown;
   readonly has_scope_column: unknown;
 }
 
@@ -583,10 +584,13 @@ export class KeyRotationMigrator {
     oldKeyRef: string,
     newKeyRef: string,
   ): Promise<TenantRotationOutcome> {
-    // First, before anything reads a GUC: both key refs are the raising form, so a statement issued
-    // ahead of these would abort the transaction with `unrecognized configuration parameter` rather
-    // than silently encrypting NULL — loud, but it would also abort the survey, and the survey is
-    // what the refusals are built from.
+    // First, because the `UPDATE` and the confirm are the only statements here that read a key GUC
+    // and neither may run before the keys are claimed: both refs are the raising form, so one
+    // issued ahead of these aborts the transaction with `unrecognized configuration parameter`
+    // rather than silently encrypting NULL. The **survey** reads no key at all — introspection, a
+    // catalog probe and a `count(*)` over the scope predicate — which is also why it is safe to run
+    // on its own connection with no key set, and why ordering it after these settings costs
+    // nothing rather than being required.
     await this.applySessionSettings(tx);
 
     // Inside the transaction, so what is rotated is what was surveyed and every refusal rolls back.
@@ -612,9 +616,11 @@ export class KeyRotationMigrator {
         `${outcome.table}.${outcome.column} confirm`,
       );
       // A disagreement means some row did not come back under the new key, and the transaction must
-      // not commit. pgcrypto raises on a wrong key, so the usual way this fires is a row committed
-      // by another writer between the UPDATE and the confirm — a serving process still holding the
-      // previous key, which is the stale-key hazard, and rolling back is the right answer to it.
+      // not commit. No cause is claimed for it, deliberately: a row committed under the *previous*
+      // key between the UPDATE and the confirm — the stale-key writer, which is the obvious guess —
+      // makes `pgp_sym_decrypt` **raise** rather than count low, so it never reaches this
+      // comparison. This is the backstop for a count that disagrees for some reason pgcrypto does
+      // not raise on, and rolling back is the right answer whether or not we can name it.
       if (readable !== outcome.rowsReencrypted) {
         throw new Error(
           `key rotation confirm failed for ${schema}.${outcome.table}.${outcome.column}: ` +
@@ -735,6 +741,7 @@ export class KeyRotationMigrator {
               COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false) AS bypasses_rls,
               pg_catalog.pg_get_userbyid(c.relowner) = current_user AS is_owner,
               c.relrowsecurity AS rls_enabled,
+              c.relforcerowsecurity AS rls_forced,
               EXISTS (SELECT 1 FROM pg_attribute a
                        WHERE a.attrelid = c.oid
                          AND a.attnum > 0
@@ -773,13 +780,27 @@ export class KeyRotationMigrator {
     // delete the generation those rows are under. And for an **owner** the tenant context is inert,
     // because the owner bypasses RLS — so the bound predicate is not a second belt beside RLS, it is
     // the only confinement there is.
-    if (row.rls_enabled === true && row.is_owner !== true && row.bypasses_rls !== true) {
+    //
+    // `relforcerowsecurity` is read because **it confines the owner too**, which is the one input
+    // the ownership arm would otherwise answer wrongly in the permissive direction. Nothing in this
+    // repo sets `FORCE ROW LEVEL SECURITY` today, so this is latent — but the whole point of this
+    // probe is that a confined session's zero is indistinguishable from an empty tenant, and
+    // reading ownership while ignoring the one flag that overrides ownership would let exactly that
+    // session through.
+    const bypassesPolicies =
+      row.rls_forced === true
+        ? row.bypasses_rls === true
+        : row.is_owner === true || row.bypasses_rls === true;
+    if (row.rls_enabled === true && !bypassesPolicies) {
       refusals.push({
         reason: "rls_would_confine_this_session",
         detail:
-          `row-level security confines '${String(row.role)}' on ${schema}.${table}; the UPDATE would ` +
-          "match the rows this session can see and report only those, so a rotation would look " +
-          "complete while ciphertext under the old key remained",
+          `row-level security confines '${String(row.role)}' on ${schema}.${table}` +
+          (row.rls_forced === true ? " (FORCE ROW LEVEL SECURITY, which confines the owner too)" : "") +
+          "; a session with no tenant context, or another tenant's, counts 0 rows — which is " +
+          "byte-identical to \"this tenant holds no ciphertext\" — and a session confined to " +
+          "exactly this tenant would rotate correctly but cannot be told apart from the first one " +
+          "from here, so the refusal is up front rather than after the count",
       });
     }
     return refusals;

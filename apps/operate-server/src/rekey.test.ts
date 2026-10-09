@@ -160,6 +160,25 @@ describe("TENANT_WRITE_STATUS_DETAIL", () => {
     expect(TENANT_WRITE_STATUS_DETAIL.blocks_writes).toContain("rekey in");
     expect(TENANT_WRITE_STATUS_DETAIL.permits_writes).toContain("--allow-live-rekey");
   });
+
+  it("does not claim blocks_writes is enforced on a deployment that lacks the gate", () => {
+    // This was the one load-bearing safety claim in the subcommand and it was false on the
+    // documented compose path: `meta.tenants.status` is enforced on the request path only by
+    // `--tenant-status-gate`, which is opt-in and off by default, so on a default deployment a
+    // `suspended` tenant goes on accepting writes — and a rekey "safely" performed in that state
+    // is exactly the split-across-two-keys outcome the status was supposed to prevent.
+    const detail = TENANT_WRITE_STATUS_DETAIL.blocks_writes;
+    expect(detail).toContain("--tenant-status-gate");
+    expect(detail).toContain("OPT-IN and off by default");
+    expect(detail).toContain("advisory");
+    // And the remedy that holds whatever the deployment is configured to do, which is the sentence
+    // a conditional enforcement claim has to be paired with.
+    expect(detail).toContain("unconditional remedy");
+    expect(detail).toContain("stop or roll the serving processes");
+    // The two halves are kept apart rather than merged into one reassuring clause.
+    expect(detail).toContain("With the gate");
+    expect(detail).toContain("without it");
+  });
 });
 
 describe("probeTenantWriteStatus", () => {
@@ -390,7 +409,7 @@ describe("formatRekeySurvey", () => {
 
 describe("formatRekeyResult", () => {
   it("leads with the generation and provenance transition", () => {
-    const out = formatRekeyResult(result(), DEFAULT_COLUMN_KEY_TTL_MS);
+    const out = formatRekeyResult(result(), DEFAULT_COLUMN_KEY_TTL_MS, false);
     expect(out.split("\n")[0]).toBe(
       `rekeyed tenant ${TENANT}: generation 1 → 2, provenance seeded_from_derived → random`,
     );
@@ -404,19 +423,24 @@ describe("formatRekeyResult", () => {
         rowsConfirmed: 49,
       }),
       DEFAULT_COLUMN_KEY_TTL_MS,
+      false,
     );
     expect(out).toContain("patient.mrn (phi) — 42 row(s) re-encrypted");
     expect(out).toContain("encounter.note (phi) — 7 row(s) re-encrypted");
   });
 
   it("reports both totals and the generations destroyed", () => {
-    const out = formatRekeyResult(result({ priorGenerationsDestroyed: 2 }), DEFAULT_COLUMN_KEY_TTL_MS);
+    const out = formatRekeyResult(
+      result({ priorGenerationsDestroyed: 2 }),
+      DEFAULT_COLUMN_KEY_TTL_MS,
+      false,
+    );
     expect(out).toContain("42 row(s) re-encrypted, 42 confirmed readable under the new key");
     expect(out).toContain("2 earlier generation(s) destroyed");
   });
 
   it("states the horizon in the corrected words and never overclaims", () => {
-    const out = formatRekeyResult(result(), DEFAULT_COLUMN_KEY_TTL_MS);
+    const out = formatRekeyResult(result(), DEFAULT_COLUMN_KEY_TTL_MS, false);
     const horizon = out.split("\n").find((l) => l.includes("data key shreddability"));
     expect(horizon).toContain("shreddability: shreddable");
     expect(horizon).toContain("bounds the deletion horizon");
@@ -431,49 +455,101 @@ describe("formatRekeyResult", () => {
   });
 
   it("reports the new row as random whatever the previous provenance was", () => {
-    const out = formatRekeyResult(result({ fromProvenance: "random" }), DEFAULT_COLUMN_KEY_TTL_MS);
+    const out = formatRekeyResult(
+      result({ fromProvenance: "random" }),
+      DEFAULT_COLUMN_KEY_TTL_MS,
+      false,
+    );
     expect(out).toContain("provenance random → random");
     expect(out).toContain("shreddability: shreddable");
   });
 
-  it("ends with the stale key window", () => {
-    const out = formatRekeyResult(result(), 45_000);
-    expect(out).toContain(formatStaleKeyWindow(45_000));
+  it("ends with the stale key window, and passes `stated` straight through", () => {
+    // Both arms, because the result line is the only caller of `formatStaleKeyWindow` on the
+    // success path: a report that always printed the default would understate the hazard by up to
+    // 10x for a fleet on the 300000ms ceiling, which is the whole reason the parameter exists.
+    expect(formatRekeyResult(result(), 45_000, true)).toContain(formatStaleKeyWindow(45_000, true));
+    expect(formatRekeyResult(result(), 45_000, false)).toContain(
+      formatStaleKeyWindow(45_000, false),
+    );
+    expect(formatRekeyResult(result(), 45_000, true)).not.toContain("the DEFAULT");
+    expect(formatRekeyResult(result(), 45_000, false)).toContain("the DEFAULT");
   });
 
   it("prints no key-shaped material and no plan SQL", () => {
-    const out = formatRekeyResult(result(), DEFAULT_COLUMN_KEY_TTL_MS);
-    expect(out).not.toMatch(BASE64_KEY_SHAPED);
-    expect(out).not.toContain("pgp_sym_encrypt");
+    for (const stated of [true, false]) {
+      const out = formatRekeyResult(result(), DEFAULT_COLUMN_KEY_TTL_MS, stated);
+      expect(out).not.toMatch(BASE64_KEY_SHAPED);
+      expect(out).not.toContain("pgp_sym_encrypt");
+    }
   });
 });
 
 describe("formatStaleKeyWindow", () => {
   it("names the hazard in both directions and which one is unrecoverable", () => {
-    const out = formatStaleKeyWindow(DEFAULT_COLUMN_KEY_TTL_MS);
-    expect(out).toContain("READS raise");
-    expect(out).toContain("never a wrong answer");
-    expect(out).toContain("WRITES encrypt new values under the previous key");
-    expect(out).toContain("not recoverable");
+    for (const stated of [true, false]) {
+      const out = formatStaleKeyWindow(DEFAULT_COLUMN_KEY_TTL_MS, stated);
+      expect(out).toContain("READS raise");
+      expect(out).toContain("never a wrong answer");
+      expect(out).toContain("WRITES encrypt new values under the previous key");
+      expect(out).toContain("not recoverable");
+    }
   });
 
   it("names the remedy and not only the risk", () => {
-    const out = formatStaleKeyWindow(DEFAULT_COLUMN_KEY_TTL_MS);
-    expect(out).toContain("Remedy");
-    expect(out).toContain("restart or roll the serving processes");
-    expect(out).toContain("refuses writes");
+    for (const stated of [true, false]) {
+      const out = formatStaleKeyWindow(DEFAULT_COLUMN_KEY_TTL_MS, stated);
+      expect(out).toContain("Remedy");
+      expect(out).toContain("restart or roll the serving processes");
+      expect(out).toContain("refuses writes");
+    }
   });
 
   it("says the bound does not close the window, and names the flag that sets it", () => {
-    const out = formatStaleKeyWindow(DEFAULT_COLUMN_KEY_TTL_MS);
-    expect(out).toContain("does not close it");
-    // The flag comes from the module that owns the feature, so this sentence cannot point at one
-    // the CLI does not parse.
-    expect(out).toContain("--column-key-ttl-ms");
+    for (const stated of [true, false]) {
+      const out = formatStaleKeyWindow(DEFAULT_COLUMN_KEY_TTL_MS, stated);
+      expect(out).toContain("does not close it");
+      // The flag comes from the module that owns the feature, so this sentence cannot point at one
+      // the CLI does not parse.
+      expect(out).toContain("--column-key-ttl-ms");
+    }
   });
 
   it("renders whole seconds as seconds and anything else in milliseconds", () => {
-    expect(formatStaleKeyWindow(30_000)).toContain("stale key window: 30s");
-    expect(formatStaleKeyWindow(1_500)).toContain("stale key window: 1500ms");
+    for (const stated of [true, false]) {
+      expect(formatStaleKeyWindow(30_000, stated)).toContain("stale key window: 30s");
+      expect(formatStaleKeyWindow(1_500, stated)).toContain("stale key window: 1500ms");
+    }
+  });
+
+  it("attributes a stated figure to the operator and names the flag they passed", () => {
+    const out = formatStaleKeyWindow(300_000, true);
+    expect(out).toContain("stale key window: 300s (--column-key-ttl-ms, as you stated it)");
+    // Not labelled a default, because it is not one: the operator read their fleet's value and
+    // typed it, and calling it a default would send them looking for a figure they already have.
+    expect(out).not.toContain("the DEFAULT");
+    expect(out).not.toContain("does not run the gateway");
+  });
+
+  it("labels an unstated figure DEFAULT and says this process cannot see the fleet's value", () => {
+    // The defect this parameter closes: the line printed `30s` beside `--column-key-ttl-ms` and so
+    // read as the configured value, while `parseRekeyArgs` did not parse that flag at all — a 10x
+    // understatement for a fleet on the ceiling, in the direction where an operator resumes writes
+    // while a replica still holds the previous key.
+    const out = formatStaleKeyWindow(DEFAULT_COLUMN_KEY_TTL_MS, false);
+    expect(out).toContain("the DEFAULT, not a reading");
+    expect(out).toContain("this process does not run the gateway and cannot see its");
+    expect(out).toContain("pass it here to have this line reflect your fleet");
+    expect(out).not.toContain("as you stated it");
+  });
+
+  it("renders the same figure differently on the two arms, and the figure itself identically", () => {
+    // The two renderings differ in their *claim* and not in their number, which is what makes the
+    // flag a labelling fix rather than an arithmetic one.
+    const stated = formatStaleKeyWindow(60_000, true);
+    const unstated = formatStaleKeyWindow(60_000, false);
+    expect(stated).not.toBe(unstated);
+    expect(stated).toContain("60s");
+    expect(unstated).toContain("60s");
   });
 });

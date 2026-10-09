@@ -15,7 +15,11 @@ import {
   type SchemaEraserWithin,
 } from "./deletion-pipeline.js";
 import { PostgresLifecycleEventStore } from "./lifecycle-event-store.js";
-import { RETAINED_SHARED_TABLES } from "./shared-table-erasure.js";
+import {
+  RETAINED_SHARED_TABLES,
+  type BootSchemaErasureInput,
+  type BootSchemaErasureTarget,
+} from "./shared-table-erasure.js";
 import { PostgresTombstoneStore, type TombstoneAnchorer } from "./tombstone-store.js";
 
 const TENANT = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8";
@@ -56,8 +60,19 @@ function harness(
     readonly eraseThrows?: boolean;
     /** Qualified shared table → rows the tenant holds there. */
     readonly sharedRows?: Readonly<Record<string, number>>;
-    /** Bare names the shared probe reports `row_security_active` for. */
+    /** Qualified names the shared probe reports `row_security_active` for. */
     readonly confined?: readonly string[];
+    /**
+     * Qualified names the probe reports **no** `tenant_id` column for. Everything else answers
+     * `scoped: true`, because the probe reads anything short of an affirmative yes as absent — so a
+     * fake omitting the column refuses every target and asserts nothing about the real statement.
+     */
+    readonly unscoped?: readonly string[];
+    /**
+     * Qualified names the boot-schema census finds in the schemas the targets name — i.e. tables
+     * this emitter plainly created. Anything here the target list does not claim is undeclared.
+     */
+    readonly bootSchemaCensus?: readonly string[];
     /**
      * Qualified table → rows a `count(*)` still sees. Drives both passes: the confirm-absence check
      * over the erasable tables (where a non-zero throws) and the statutory census (where a non-zero
@@ -93,11 +108,22 @@ function harness(
           : { rows: [{ status }], rowCount: 1 };
       }
       if (sql.includes("row_security_active")) {
+        // Keyed on `schema.table`, because the target list spans the platform's schema and the one
+        // the boot manifest's entity tables are served from.
+        const probed = String(params?.[0] ?? "");
         const requested = (params?.[1] ?? []) as readonly string[];
         const rows = requested.map((name) => ({
           table_name: name,
-          confined: (opts.confined ?? []).includes(name),
+          confined: (opts.confined ?? []).includes(`${probed}.${name}`),
+          scoped: !(opts.unscoped ?? []).includes(`${probed}.${name}`),
         }));
+        return { rows, rowCount: rows.length };
+      }
+      if (sql.includes("p.polname = c.relname")) {
+        const schemas = (params?.[0] ?? []) as readonly string[];
+        const rows = (opts.bootSchemaCensus ?? [])
+          .filter((q) => schemas.some((s) => q.startsWith(`${s}.`)))
+          .map((qualified) => ({ qualified }));
         return { rows, rowCount: rows.length };
       }
       if (sql.startsWith("WITH deleted AS (DELETE FROM")) {
@@ -167,11 +193,35 @@ function inputOf(over: Partial<Parameters<typeof deleteTenantAtomically>[3]> = {
     approvedBy: BOB,
     capabilities: CAPABILITIES,
     clock: () => new Date(AT),
+    // Empty by default, so every pre-ADR-0350 assertion below pins exactly what it pinned. Empty is
+    // what a `--store pg` deployment passes: its entity records are the catalogued
+    // `meta.operate_entity_records`, which the shared erasure already reaches.
+    bootSchema: { targets: [], blockingCycle: [] },
     ...over,
   };
 }
 
+/**
+ * The seam as one object, so a call site naming targets does not restate the cycle verdict.
+ *
+ * The two travel together because most of the pairings that can be formed apart are silently wrong,
+ * and a helper defaulting the verdict is the test-side version of that: no call site below can
+ * accidentally omit it and have the pipeline read `undefined` as "an order exists".
+ */
+function bootSchemaOf(
+  targets: readonly BootSchemaErasureTarget[],
+  blockingCycle: readonly string[] = [],
+): BootSchemaErasureInput {
+  return { targets, blockingCycle };
+}
+
 const SHARED_ROWS = { "meta.operate_entity_records": 7, "meta.operate_sequences": 2 } as const;
+
+/** What a `--store pg-columns` boot manifest hands over, join table first. */
+const BOOT_TARGETS = [
+  { schema: "public", table: "encounter" },
+  { schema: "public", table: "patient" },
+] as const;
 
 describe("deleteTenantAtomically", () => {
   it("erases shared rows and the schema, attests, assembles, anchors and stores in ONE transaction", async () => {
@@ -383,7 +433,7 @@ describe("deleteTenantAtomically", () => {
   });
 
   it("returns a shared-table refusal rather than throwing, since nothing was destroyed", async () => {
-    const h = harness({}, { confined: ["operate_entity_records"] });
+    const h = harness({}, { confined: ["meta.operate_entity_records"] });
     const out = await deleteTenantAtomically(h.conn, h.store, h.erase, inputOf());
     expect(out.ok).toBe(false);
     if (out.ok) return;
@@ -598,6 +648,309 @@ describe("deleteTenantAtomically", () => {
 
   it("declares its four stages", () => {
     expect([...PIPELINE_REFUSAL_STAGES]).toEqual(["input", "erase", "assemble", "store"]);
+  });
+});
+
+/**
+ * The boot manifest's own entity tables, which until ADR-0350 nothing erased on
+ * `--store pg-columns` — `shared_tables` reached `meta.*` alone and the schema erasure only ever
+ * drops a `t_<hex>` schema a boot-manifest tenant does not have, so both subsystems attested
+ * truthfully and the proof was signed over records still on disk.
+ */
+describe("the boot-schema target seam", () => {
+  it("erases them and names them in the stored proof's scope", async () => {
+    const h = harness({}, { sharedRows: { ...SHARED_ROWS, "public.patient": 1 } });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.stored.record.scope.tables).toContain("public.patient");
+    expect(out.stored.record.scope.rowCount).toBe(36);
+    // And the proof still verifies over the widened scope, which is the whole point: the figures
+    // the digest commits to are now figures about data that is actually gone.
+    expect(verifyTombstoneHashes(out.stored.record)).toEqual({
+      contentManifestOk: true,
+      proofOk: true,
+    });
+  });
+
+  it("keeps one shared_tables attestation, folding both groups' figures into it", async () => {
+    const h = harness({}, { sharedRows: { ...SHARED_ROWS, "public.patient": 1 } });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // One subsystem doing what its vocabulary always said, so `duplicate_attestation` is never in
+    // play and `ATTESTERS` stays at two keys.
+    const shared = out.stored.attestations.filter((a) => a.subsystem === "shared_tables");
+    expect(shared).toHaveLength(1);
+    expect(shared[0]?.outcome).toBe("erased");
+    expect(shared[0]?.scope).toEqual({
+      tables: ["public.patient", "meta.operate_sequences", "meta.operate_entity_records"],
+      rowCount: 10,
+      storageBytes: 1000,
+    });
+    expect([...PIPELINE_PERFORMED_SUBSYSTEMS]).toEqual(["tenant_schema", "shared_tables"]);
+  });
+
+  it("deletes the tenant's own records before the catalogued rows and before the DROP", async () => {
+    const h = harness({}, { sharedRows: { "public.patient": 1, ...SHARED_ROWS } });
+    await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    const deleted = h.calls
+      .filter((c) => c.sql.startsWith("WITH deleted AS (DELETE FROM"))
+      .map((c) => relationOf(c.sql));
+    expect(deleted.slice(0, 2)).toEqual(["public.encounter", "public.patient"]);
+    const drop = h.sql().findIndex((s) => s.startsWith("DROP SCHEMA"));
+    const lastSharedDelete = h
+      .sql()
+      .reduce((acc, s, i) => (s.startsWith("WITH deleted AS") ? i : acc), -1);
+    expect(drop).toBeGreaterThan(lastSharedDelete);
+  });
+
+  it("completes a deletion whose only data was in the boot manifest's own tables", async () => {
+    // The reproduced defect, from the other side: a `pg-columns` boot-manifest tenant has no
+    // `t_<hex>` schema, so `tenant_schema` attests `nothing_to_erase` and these tables are the only
+    // place the tenant's records ever were.
+    const h = harness(
+      { erased: false, alreadyAbsent: true, erasedRelations: [], rowCount: 0, storageBytes: 0 },
+      { sharedRows: { "public.patient": 42 } },
+    );
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.stored.record.scope).toMatchObject({ tables: ["public.patient"], rowCount: 42 });
+    const tenantSchema = out.stored.attestations.find((a) => a.subsystem === "tenant_schema");
+    expect(tenantSchema?.outcome).toBe("nothing_to_erase");
+  });
+
+  it("returns a refusal — destroying nothing — when a boot target is confined by RLS", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, confined: ["public.patient"] });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual(["rls_would_confine_this_session"]);
+    expect(out.refusals[0]?.detail).toContain("public.patient");
+    // One refusal pass over the merged list, so the catalogued half was not touched either.
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS"))).toBe(false);
+    expect(h.sql().some((s) => s.startsWith("DROP SCHEMA"))).toBe(false);
+    expect(h.sql().some((s) => s.startsWith("INSERT INTO"))).toBe(false);
+  });
+
+  it("returns a refusal when a boot target collides with a catalogued table", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf([{ schema: "meta", table: "audit_log" }]) }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual(["target_collides_with_catalog"]);
+    // Settled before the probe, so not one statement of either erasure ran.
+    expect(h.sql().some((s) => s.includes("row_security_active"))).toBe(false);
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS"))).toBe(false);
+  });
+
+  it("reports the boot targets as coverage beside the catalogued ones", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // 97 catalogued plus the two handed over, in deletion order — the only list in which a boot
+    // target this tenant had no rows in is visible at all.
+    expect(out.erasedSharedTables.examinedTables).toHaveLength(99);
+    expect(out.erasedSharedTables.examinedTables.slice(0, 2)).toEqual([
+      "public.encounter",
+      "public.patient",
+    ]);
+  });
+
+  it("threads the target list through verbatim, in the order the caller handed it over", async () => {
+    // Deliberately neither sorted nor reverse-sorted: the group arrives in the order its own
+    // delete-blocking references require, and nothing between the caller and the DELETE may resort
+    // it — the catalogued half's reverse-catalog order is not a rule this group shares.
+    const targets: readonly BootSchemaErasureTarget[] = [
+      { schema: "public", table: "visit_participant" },
+      { schema: "public", table: "encounter" },
+      { schema: "public", table: "patient" },
+    ];
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(targets) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const deleted = h.calls
+      .filter((c) => c.sql.startsWith("WITH deleted AS (DELETE FROM"))
+      .map((c) => relationOf(c.sql));
+    expect(deleted.slice(0, 3)).toEqual([
+      "public.visit_participant",
+      "public.encounter",
+      "public.patient",
+    ]);
+    // The one statement that sees the whole group before anything is destroyed saw the same list:
+    // a probe over a different set than the DELETEs would be a refusal pass about other rows.
+    const probe = h.calls.find(
+      (c) => c.sql.includes("row_security_active") && c.params[0] === "public",
+    );
+    expect(probe?.params[1]).toEqual(["visit_participant", "encounter", "patient"]);
+    expect(out.erasedSharedTables.examinedTables.slice(0, 3)).toEqual([
+      "public.visit_participant",
+      "public.encounter",
+      "public.patient",
+    ]);
+  });
+
+  it("refuses an unrunnable order without reaching the schema eraser at all", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    let eraserCalls = 0;
+    const erase: SchemaEraserWithin = async (tx, tenantId, authority) => {
+      eraserCalls += 1;
+      return h.erase(tx, tenantId, authority);
+    };
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS, ["Encounter", "Patient"]) }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals).toEqual([
+      {
+        // `erase` and not `input`: the verdict is the erasure's own, about its own target list.
+        stage: "erase",
+        reason: "boot_schema_order_unrunnable",
+        detail: expect.stringContaining("Encounter, Patient") as unknown as string,
+      },
+    ]);
+    // The load-bearing part. The shared erasure runs first and this is one of its cheap refusals,
+    // so the tenant's schema is not dropped even provisionally inside the rollback — the seam was
+    // never called, which is a stronger claim than a `DROP SCHEMA` that was undone.
+    expect(eraserCalls).toBe(0);
+    // And not one statement of either erasure ran: a cheap refusal needs no database, so the
+    // transaction opens, decides, and commits having destroyed nothing. It is a *return* and not a
+    // throw — an exception here would be indistinguishable from an unknown failure, which ADR-0321's
+    // runner files `aborted` and leaves `in_progress`, where a deterministic refusal is `rejected`
+    // with the remedy named.
+    expect(h.sql()).toEqual(["BEGIN", "COMMIT"]);
+  });
+
+  it("returns a refusal — destroying nothing — when a boot target has no tenant_id column", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS, unscoped: ["public.patient"] });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual(["target_lacks_tenant_scope"]);
+    expect(out.refusals[0]?.detail).toContain("public.patient");
+    // Every statement this erasure issues scopes by that column, so the DELETE would have raised
+    // partway through — rolling the data back and stranding the request. Established by the probe
+    // instead, which is why the catalogued half was not touched either.
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS"))).toBe(false);
+    expect(h.sql().some((s) => s.startsWith("DROP SCHEMA"))).toBe(false);
+    expect(h.sql().some((s) => s.startsWith("INSERT INTO"))).toBe(false);
+  });
+
+  it("returns a refusal when the boot schema holds a table the manifest no longer declares", async () => {
+    // The original defect's own shape, one manifest later: a previous manifest's entity table
+    // survives, the derived target list cannot name it, and nothing would examine it. Refused
+    // rather than reported, because the alternative here is signing a proof over live records.
+    const h = harness(
+      {},
+      {
+        sharedRows: SHARED_ROWS,
+        bootSchemaCensus: ["public.encounter", "public.legacy_appointment", "public.patient"],
+      },
+    );
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusals.map((r) => r.reason)).toEqual(["boot_schema_table_undeclared"]);
+    expect(out.refusals[0]?.detail).toContain("public.legacy_appointment");
+    // The two tables the list does claim are not findings.
+    expect(out.refusals[0]?.detail).not.toContain("public.patient");
+    expect(h.sql().some((s) => s.startsWith("WITH deleted AS"))).toBe(false);
+    expect(h.sql().some((s) => s.startsWith("DROP SCHEMA"))).toBe(false);
+  });
+
+  it("changes no outcome when the group is empty, and censuses no schema for it", async () => {
+    const h = harness({}, { sharedRows: SHARED_ROWS });
+    const out = await deleteTenantAtomically(
+      h.conn,
+      h.store,
+      h.erase,
+      inputOf({ bootSchema: bootSchemaOf([]) }),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // Identical to what a deployment with no entity tables of its own always got: 97 catalogued
+    // tables examined and a scope naming only the catalogued rows and the dropped schema's.
+    expect(out.erasedSharedTables.examinedTables).toHaveLength(97);
+    expect(out.stored.record.scope.tables).toEqual([
+      "meta.operate_entity_records",
+      "meta.operate_sequences",
+      "t_abc.account",
+      "t_abc.invoice",
+    ]);
+    expect(verifyTombstoneHashes(out.stored.record)).toEqual({
+      contentManifestOk: true,
+      proofOk: true,
+    });
+    // An empty group names no schema, so the undeclared-table census is not asked rather than
+    // asked and empty — the detector's stated limit: a deployment that moved off `--store
+    // pg-columns` passes `[]` and still has those tables on disk.
+    expect(h.sql().some((s) => s.includes("pg_policy"))).toBe(false);
+    // The negative control, so the assertion above cannot pass because nothing ever censuses.
+    const named = harness({}, { sharedRows: SHARED_ROWS });
+    await deleteTenantAtomically(
+      named.conn,
+      named.store,
+      named.erase,
+      inputOf({ bootSchema: bootSchemaOf(BOOT_TARGETS) }),
+    );
+    expect(named.sql().some((s) => s.includes("pg_policy"))).toBe(true);
   });
 });
 

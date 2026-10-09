@@ -10,9 +10,9 @@ import type { DeletionAttestation, RetentionObligation } from "@crossengin/tenan
  * ADR-0316 erased a tenant's own Postgres schema; ADR-0317 refused a tombstone whose in-scope
  * subsystem had not attested; ADR-0328 took the scope out of the caller's hands. All three left
  * `shared_tables` — "rows in the shared boot schema and `meta.*`" — as a name in the vocabulary that
- * nothing erased. **113 of the 144 `META_TABLES` carry a `tenant_id`**, so a GDPR Article 17 deletion
- * dropped one schema and left the tenant's identity, audit, billing, workflow, notification, lineage
- * and entity-store rows exactly where they were — and a deployment that declared
+ * nothing erased. **113 of the then-144 `META_TABLES` carried a `tenant_id`**, so a GDPR Article 17
+ * deletion dropped one schema and left the tenant's identity, audit, billing, workflow,
+ * notification, lineage and entity-store rows exactly where they were — and a deployment that declared
  * `shared_tables: "erases"` handed in its own attestation and got that claim signed and anchored.
  *
  * Four rules shape this module.
@@ -23,6 +23,21 @@ import type { DeletionAttestation, RetentionObligation } from "@crossengin/tenan
  * each time the list and the thing it was supposed to mirror drifted. A table added tomorrow is
  * covered without anybody remembering, and the only edit a reviewer has to scrutinise is a
  * *retention*.
+ *
+ * **The catalog is not the whole of a tenant's data, and ADR-0350 is what that cost.** This
+ * subsystem's declared remit has always been "rows in the shared boot schema and `meta.*`", and the
+ * implementation reached `meta.*` alone: every `META_TABLES` entry declares `schema: "meta"`, so the
+ * intersection with a boot manifest's own typed entity tables was empty. On `--store pg-columns`
+ * those tables *are* the tenant's records, and `eraseTenantSchemaWithin` cannot reach them either —
+ * it only ever drops the derived `t_<hex>` schema, which a boot-manifest tenant does not have, so
+ * that subsystem took its `alreadyAbsent` path and attested `nothing_to_erase`. Nothing erased the
+ * records, and the pipeline still composed a scope, hashed it, anchored it and stored a
+ * self-verifying proof over them: reproduced live, with `public.patient` still holding the row the
+ * proof said was gone. So the target list is the catalog's tenant-scoped tables **plus** a
+ * `bootSchema.targets` list naming those entity tables, injected rather than derived here because the
+ * function that creates them is the only thing entitled to name them (ADR-0284/0285) and this
+ * package does not depend on it. The figures fold into one `shared_tables` claim, because
+ * `duplicate_attestation` allows a subsystem exactly one.
  *
  * **The retention set is a constant, not configuration.** It is the one list that cannot be derived,
  * so every member is named and individually justified below. It is deliberately not a parameter: a
@@ -210,6 +225,18 @@ export interface SharedTableTarget {
 }
 
 /**
+ * One table the boot manifest's column store created, as this erasure wants it.
+ *
+ * A **structural** shape and not an imported type: `operate-runtime-pg` is what creates these
+ * tables and so is the only thing entitled to name them, and this package does not depend on it and
+ * must not start — the list travels the way `eraseTenantSchemaWithin` does, injected at the seam.
+ */
+export interface BootSchemaErasureTarget {
+  readonly schema: string;
+  readonly table: string;
+}
+
+/**
  * The catalog split into what a deletion empties and what it must leave, plus the two ways that split
  * can be wrong.
  *
@@ -388,8 +415,80 @@ export const SHARED_TABLE_ERASURE_REFUSAL_REASONS = [
    * transaction on a tenant who happened to hold the referencing row.
    */
   "retained_table_blocks_erasure",
-  /** The catalog declares a table the database does not have. */
+  /**
+   * A boot-schema target names a relation the target list already holds.
+   *
+   * `not_a_tenant_schema`'s counterpart, and the reason it exists is that this erasure's whole
+   * predicate is `tenant_id = $1`: an entity called `AuditLog` served with `--schema meta` resolves
+   * to `meta.audit_log`, which is tenant-scoped and **retained**, so the boot target would destroy
+   * the platform's record of this very deletion with an entirely correct-looking statement. An
+   * entity called `Tenants` or `Users` resolves to a catalogued table with no `tenant_id` at all,
+   * where the `DELETE` raises mid-transaction instead — loud, and still worth converting into a
+   * named refusal before anything is destroyed (ADR-0334's conversion).
+   *
+   * A relation named twice is the same refusal for the weaker reason: one `DELETE` issued twice,
+   * and a coverage list that names one relation twice beside a proof it is read with.
+   */
+  "target_collides_with_catalog",
+  /**
+   * A boot-schema target's schema or table name is not a SQL identifier.
+   *
+   * These names come from the emitter that created the tables, so one that is not an identifier is a
+   * programming error upstream rather than a deployment's typo — and it is a **refusal** and not a
+   * throw for a reason that has nothing to do with whose fault it is. A throw raised inside the
+   * pipeline's transaction that is not a `DeletionPipelineAborted` is, by ADR-0321's rule,
+   * indistinguishable from an unknown failure: the runner files it `aborted` and leaves the request
+   * `in_progress` for a human. A returned refusal is deterministic, so the request is `rejected` and
+   * the operator is told what to fix. Nothing is destroyed either way; the difference is whether the
+   * Article 17 request is stranded.
+   */
+  "boot_schema_target_invalid",
+  /**
+   * No order exists for the boot-schema targets, because their delete-blocking references form a
+   * cycle.
+   *
+   * The targets arrive in the order their own foreign keys require, and the function that derives
+   * them says when it could not: a cycle of `ON DELETE RESTRICT` references cannot be emptied by any
+   * sequence of per-table statements, so the first refused `DELETE` would abort the pipeline's
+   * transaction — `aborted`, stranded, with the tenant's schema already dropped inside the rollback.
+   * Converted into a named refusal before anything is destroyed, naming the entities so the remedy
+   * (declare `onDelete` on one relation in the cycle) is actionable. Vacuous across all seven
+   * shipped packs, whose blocking subgraphs are acyclic.
+   */
+  "boot_schema_order_unrunnable",
+  /** A target table — catalogued or boot-schema — the database does not have. */
   "table_missing",
+  /**
+   * A target table the database **does** have, and with no `tenant_id` column to scope by.
+   *
+   * Every statement this module issues carries `WHERE tenant_id = $1`, so such a table raises
+   * `column "tenant_id" does not exist` — mid-transaction, after earlier targets have already been
+   * emptied. The rollback means nothing is destroyed, and the cost is the same stranding
+   * `boot_schema_target_invalid` describes. Reachable from both groups and for different reasons: a
+   * boot target whose entity the column store never created this way, or a catalogued table the
+   * database holds in a shape the catalog has since moved past — ADR-0300's drift, in the one
+   * statement that must not be aimed by guesswork.
+   */
+  "target_lacks_tenant_scope",
+  /**
+   * The boot schema holds a table the column store plainly created and the target list does not
+   * name.
+   *
+   * This is the original defect's own shape, one manifest later: a previous boot manifest's entity
+   * table survives a manifest that no longer declares that entity, the current target list cannot
+   * name it, and nothing would examine it — so the proof would attest `erased` over the tenant's
+   * rows in it. The detector is a census of the boot schema in **both** directions
+   * (`pg-record-retention.ts`'s rule: a one-way comparison is what made ADR-0288's list wrong three
+   * times), narrowed to the signature this emitter writes and nothing else does — a policy named
+   * `<relname>_tenant_isolation` — so an unrelated application's table sharing the schema is not
+   * mistaken for one of ours.
+   *
+   * A refusal rather than a report, which is the opposite of how the undeclared-foreign-key case is
+   * handled one package over, and for the one reason that outranks it: here the alternative to
+   * refusing is signing a proof over live records, and that is exactly what ADR-0350 was opened to
+   * stop. The remedy is a `DROP TABLE` the operator runs once, and the refusal names the tables.
+   */
+  "boot_schema_table_undeclared",
   /**
    * Row-level security is active for this session on a table it is about to empty.
    *
@@ -420,6 +519,10 @@ export interface SharedTableRowsErased {
 
 export interface SharedTableErasure {
   readonly tenantId: string;
+  /**
+   * The schema the **catalogued** half was aimed at. The boot-schema targets carry their own, which
+   * is why every list below is schema-qualified rather than bare.
+   */
   readonly schema: string;
   /** True only when rows were deleted **and** every erasable table was confirmed empty of them. */
   readonly erased: boolean;
@@ -432,7 +535,11 @@ export interface SharedTableErasure {
   readonly refusals: readonly SharedTableErasureRefusal[];
   /** Only the tables that actually lost rows — see `sharedTableErasureScope`. */
   readonly erasedTables: readonly SharedTableRowsErased[];
-  /** Every table examined, schema-qualified. Coverage, which the scope deliberately does not carry. */
+  /**
+   * Every table examined, schema-qualified, both groups, in deletion order. Coverage, which the
+   * scope deliberately does not carry — and the one list in which a boot-schema target the
+   * deployment holds but this tenant had no rows in is visible at all.
+   */
   readonly examinedTables: readonly string[];
   /** Every table deliberately left, schema-qualified, so a reader can see the retention set applied. */
   readonly retainedTables: readonly string[];
@@ -471,10 +578,56 @@ export interface SharedTableErasureAuthority {
   readonly approvedBy: string;
 }
 
+/**
+ * The boot manifest's own entity tables, in the order they must be emptied, and the statement that
+ * such an order exists.
+ *
+ * **One object rather than two parameters**, following `BuildOperateHttpServerOptions.abac`
+ * (ADR-0342): the two come out of one derivation and most of the pairings that can be formed apart
+ * are silently wrong. Targets without the cycle verdict is the dangerous one — the list looks
+ * complete and the database refuses it partway through — and the verdict without the targets is
+ * inert.
+ *
+ * The order inside `targets` is **not** reordered here. Its tables reference each other with
+ * composite `ON DELETE RESTRICT` keys, so the group arrives in the order its own foreign keys
+ * require, exactly as the catalogued half arrives in reverse `META_TABLES` order.
+ */
+export interface BootSchemaErasureInput {
+  readonly targets: readonly BootSchemaErasureTarget[];
+  /**
+   * Entities whose delete-blocking references form a cycle — empty whenever an order exists. A
+   * non-empty list is refused `boot_schema_order_unrunnable` before anything is destroyed.
+   */
+  readonly blockingCycle: readonly string[];
+}
+
 export interface SharedTableErasureOptions {
-  /** Overrides the schema every tenant-scoped table is declared in. All 113 declare `meta`. */
+  /**
+   * The boot manifest's own entity tables — **required, and an empty list is a legitimate value.**
+   *
+   * The requiredness is the whole fence, and it is deliberately chosen over the seventh
+   * `DELETION_SUBSYSTEMS` member that would have declared the same thing. What that member would
+   * have cost is in ADR-0350; what it would have bought is ADR-0329's v2 distinction — "we have no
+   * entity tables" versus "we have them and nobody looked" — and a required parameter buys exactly
+   * one half of that, more cheaply and at a different level. It makes *nobody looked*
+   * **unrepresentable at compile time**, which a `.strict()` seventh key could only refuse at run
+   * time; it does **not** put the distinction in the proof's signed bytes, where a seventh key
+   * would have. An empty boot group and no boot group compose byte-identical scopes, so this
+   * closes the mechanism's hole and leaves ADR-0329's. That gap is stated rather than papered over:
+   * `[]` is what `--store pg` passes (its records being the catalogued
+   * `meta.operate_entity_records`) and what `--store memory` passes, and a reader of the proof
+   * cannot tell either from a `pg-columns` deployment whose list was derived from an empty
+   * manifest.
+   */
+  readonly bootSchema: BootSchemaErasureInput;
+  /**
+   * Overrides the schema the **catalogued** tables are declared in — all of `META_TABLES` declares
+   * `meta`. It does not reach `bootSchema.targets`, which carry their own: that is the whole point
+   * of the second group, and a deployment serving entity tables from `meta` is refused rather than
+   * merged (`target_collides_with_catalog`).
+   */
   readonly schema?: string;
-  /** Injected so a test can pin the catalog rather than assert against the live 144 tables. */
+  /** Injected so a test can pin the catalog rather than assert against the live catalog's size. */
   readonly catalog?: readonly TableDefinition[];
   readonly clock?: () => Date;
 }
@@ -485,36 +638,118 @@ export interface SharedTableErasureOptions {
  * One statement for both questions, because they have one answer: a table absent from `pg_class` is
  * missing, and a table present with `row_security_active` true is one whose `DELETE` would silently
  * match nothing. Read-only, so it is safe to run before anything is destroyed — which is the point.
+ *
+ * **The schema comes from each target, one statement per distinct schema.** Until ADR-0350 it was a
+ * single parameter sitting beside targets that already carried one, which is the shape the
+ * single-schema assumption lived in — and the boot manifest's entity tables are not in `meta`.
+ * Grouping by schema keeps each statement's `nspname = $1` shape, rather than folding the two into
+ * a pairwise join whose `(schema, table)` keying would be a second place to get the attribution
+ * wrong: a bare name present in one schema must not mark the other schema's as present. A
+ * deployment has two schemas here, not many.
+ *
+ * **And whether the column it scopes by exists**, which ADR-0329's version did not ask because every
+ * catalogued target carried `tenant_id` by construction. A boot-schema target need not: every
+ * statement below is `WHERE tenant_id = $1`, so a table without it raises mid-transaction, after
+ * earlier targets have been emptied — the rollback saves the data and strands the request. One extra
+ * column on a statement that already runs (the `relkind IN ('r','p')` filter is why `pg_attribute`
+ * is read through `attrelid` rather than `information_schema`, which would not see a partition).
  */
 export async function probeSharedTableErasability(
   tx: PgConnection,
   targets: readonly SharedTableTarget[],
-  schema: string,
-): Promise<{ readonly missing: readonly string[]; readonly confined: readonly string[] }> {
-  if (targets.length === 0) return { missing: [], confined: [] };
-  const names = targets.map((t) => t.table);
-  const result = await tx.query<{ readonly table_name: unknown; readonly confined: unknown }>(
-    `SELECT c.relname AS table_name, row_security_active(c.oid) AS confined
+): Promise<{
+  readonly missing: readonly string[];
+  readonly confined: readonly string[];
+  readonly unscoped: readonly string[];
+}> {
+  const bySchema = new Map<string, string[]>();
+  for (const target of targets) {
+    const names = bySchema.get(target.schema);
+    if (names === undefined) bySchema.set(target.schema, [target.table]);
+    else names.push(target.table);
+  }
+  const missing: string[] = [];
+  const confined: string[] = [];
+  const unscoped: string[] = [];
+  for (const [schema, names] of bySchema) {
+    const result = await tx.query<{
+      readonly table_name: unknown;
+      readonly confined: unknown;
+      readonly scoped: unknown;
+    }>(
+      `SELECT c.relname AS table_name, row_security_active(c.oid) AS confined,
+              EXISTS (SELECT 1 FROM pg_attribute a
+                       WHERE a.attrelid = c.oid AND a.attname = '${TENANT_SCOPE_COLUMN}'
+                         AND a.attnum > 0 AND NOT a.attisdropped) AS scoped
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND c.relname = ANY($2::text[])
       ORDER BY c.relname`,
-    [schema, names],
-  );
-  const present = new Set<string>();
-  const confined: string[] = [];
-  for (const row of result.rows) {
-    const name = row.table_name === null || row.table_name === undefined ? "" : String(row.table_name);
-    if (name.length === 0) continue;
-    present.add(name);
-    if (row.confined === true || row.confined === "t" || row.confined === "true") {
-      confined.push(`${schema}.${name}`);
+      [schema, names],
+    );
+    const present = new Set<string>();
+    for (const row of result.rows) {
+      const name =
+        row.table_name === null || row.table_name === undefined ? "" : String(row.table_name);
+      if (name.length === 0) continue;
+      present.add(name);
+      if (row.confined === true || row.confined === "t" || row.confined === "true") {
+        confined.push(`${schema}.${name}`);
+      }
+      // Absence is the finding, so anything that is not an affirmative yes reads as unscoped: a
+      // probe that could not establish the column must not license a statement that needs it.
+      if (!(row.scoped === true || row.scoped === "t" || row.scoped === "true")) {
+        unscoped.push(`${schema}.${name}`);
+      }
+    }
+    for (const name of names) {
+      if (!present.has(name)) missing.push(`${schema}.${name}`);
     }
   }
-  return {
-    missing: names.filter((n) => !present.has(n)).map((n) => `${schema}.${n}`),
-    confined,
-  };
+  return { missing, confined, unscoped };
+}
+
+/**
+ * Every table in the given schemas that this emitter plainly created, so the target list can be
+ * compared against the database in **both** directions.
+ *
+ * The one-way comparison is what the original defect was made of, and
+ * `packages/testing/src/strategy/pg-record-retention.ts` is the repo's statement of why: ADR-0288's
+ * hand-maintained list was wrong three times and *location* was never the cause — the absence of a
+ * both-ways comparison was. Here the missing direction is a table a **previous** boot manifest
+ * created: the current manifest no longer declares that entity, so the derived target list cannot
+ * name it, nothing examines it, and the proof attests `erased` over the tenant's rows in it.
+ *
+ * The signature is a policy named `<relname>_tenant_isolation`, which `emitEntityTableDdl` and
+ * `emitJoinTableDdl` both write and which nothing else in this workspace writes into a
+ * deployment-chosen schema. Narrow on purpose: the default boot schema is `public`, which a
+ * deployment may share with tables that are none of our business, and a census keyed on "has a
+ * `tenant_id` column" would refuse every Article 17 deletion in such a deployment. A table of ours
+ * whose policy an operator dropped reads as not ours — under-reporting, which is the direction that
+ * leaves the pre-ADR-0350 behaviour rather than inventing a new refusal.
+ */
+export async function censusBootSchemaTables(
+  tx: PgConnection,
+  schemas: readonly string[],
+): Promise<readonly string[]> {
+  if (schemas.length === 0) return [];
+  const result = await tx.query<{ readonly qualified: unknown }>(
+    `SELECT n.nspname || '.' || c.relname AS qualified
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_policy p ON p.polrelid = c.oid
+      WHERE n.nspname = ANY($1::text[])
+        AND c.relkind IN ('r', 'p')
+        AND p.polname = c.relname || '_tenant_isolation'
+      ORDER BY 1`,
+    [[...schemas]],
+  );
+  const out: string[] = [];
+  for (const row of result.rows) {
+    const name = row.qualified === null || row.qualified === undefined ? "" : String(row.qualified);
+    if (name.length > 0) out.push(name);
+  }
+  return out;
 }
 
 function toInt(value: unknown): number {
@@ -547,7 +782,12 @@ function confirmStatement(target: SharedTableTarget): string {
 }
 
 /**
- * Empties every erasable shared table of one tenant's rows, inside a transaction the caller owns.
+ * Empties one tenant's rows from every erasable catalogued table **and** from every boot-schema
+ * target handed over, inside a transaction the caller owns.
+ *
+ * The two groups are **one** target list rather than two passes, which is the decision rather than a
+ * convenience: it means every refusal is established for every target before the first `DELETE`, so
+ * ADR-0330's "a returned refusal means nothing was destroyed" holds across both — see the probe.
  *
  * `-Within` only, following `eraseTenantSchemaWithin` (ADR-0319): the rows and the tombstone that
  * records their destruction commit together or not at all. It takes no advisory lock of its own
@@ -567,7 +807,7 @@ export async function eraseSharedTablesWithin(
   tx: PgConnection,
   tenantId: string,
   authority: SharedTableErasureAuthority,
-  opts: SharedTableErasureOptions = {},
+  opts: SharedTableErasureOptions,
 ): Promise<SharedTableErasure> {
   const schema = opts.schema ?? "meta";
   if (!IDENT_RE.test(schema)) {
@@ -575,9 +815,28 @@ export async function eraseSharedTablesWithin(
     // matching `PostgresTombstoneStore`, which validates its schema in the constructor.
     throw new Error(`invalid schema identifier: ${JSON.stringify(schema)}`);
   }
-  const partition = partitionSharedTables(opts.catalog ?? META_TABLES, schema);
+  // Identifiers are checked before anything is derived from them, and the ones that fail are kept
+  // out of the target list rather than carried into it: a name that cannot be quoted cannot be
+  // probed either, and `table_missing` for it would name the wrong defect.
+  const bootTargets: SharedTableTarget[] = [];
+  const invalidBootTargets: string[] = [];
+  for (const t of opts.bootSchema.targets) {
+    if (!IDENT_RE.test(t.schema) || !IDENT_RE.test(t.table)) {
+      invalidBootTargets.push(`${t.schema}.${t.table}`);
+      continue;
+    }
+    bootTargets.push({ schema: t.schema, table: t.table, qualified: `${t.schema}.${t.table}` });
+  }
+  const catalog = opts.catalog ?? META_TABLES;
+  const partition = partitionSharedTables(catalog, schema);
   const at = (opts.clock ?? ((): Date => new Date()))().toISOString();
-  const examinedTables = partition.erasable.map((t) => t.qualified);
+  // The tenant's own records first. The order *between* the two groups is free — the emitter writes
+  // an entity table's `tenant_id` with no reference at all, and no catalogued table references an
+  // entity table, so neither group's foreign keys reach the other — and they are first because they
+  // are the tenant's own records, which is the figure an operator answering an Article 17 request
+  // reads first. The order *within* each group is not free and neither is resorted here.
+  const erasableTargets = [...bootTargets, ...partition.erasable];
+  const examinedTables = erasableTargets.map((t) => t.qualified);
   const retainedTables = partition.retained.map((t) => t.qualified);
   const platformRecordTables = partition.platformRecord.map((t) => t.qualified);
   const statutoryTables = partition.statutory.map((t) => t.qualified);
@@ -658,24 +917,89 @@ export async function eraseSharedTablesWithin(
         " in the catalog; a retention entry that matches nothing protects nothing",
     });
   }
+  // Against the **whole** catalog and not only its tenant-scoped half: a collision with a
+  // tenant-scoped table is the severe case (a correct-looking `tenant_id = $1` aimed at the
+  // platform's rows, worst of all at a retained one), and a collision with a table carrying no
+  // `tenant_id` raises mid-transaction instead — which rolls back, so nothing is destroyed either
+  // way, and is still better said here than met as an aborted deletion.
+  const cataloguedRelations = new Set(catalog.map((t) => `${schema}.${t.name}`));
+  const claimed = new Set<string>();
+  for (const target of bootTargets) {
+    if (cataloguedRelations.has(target.qualified)) {
+      cheap.push({
+        reason: "target_collides_with_catalog",
+        detail:
+          `${target.qualified} is a boot-manifest entity table and a catalogued platform table at` +
+          ` once; this erasure's only predicate is ${TENANT_SCOPE_COLUMN} = $1, so it would aim a` +
+          " DELETE at the platform's own relation — and at the record of this very deletion if that" +
+          " relation is one a retention set keeps. Serve the entity tables from a schema the" +
+          " catalog does not use",
+      });
+      continue;
+    }
+    if (claimed.has(target.qualified)) {
+      cheap.push({
+        reason: "target_collides_with_catalog",
+        detail:
+          `${target.qualified} is named twice in the boot-schema target list; one relation would be` +
+          " deleted twice and would be named twice in the coverage this proof is read beside",
+      });
+      continue;
+    }
+    claimed.add(target.qualified);
+  }
+  for (const name of invalidBootTargets) {
+    cheap.push({
+      reason: "boot_schema_target_invalid",
+      detail:
+        `the boot-schema target ${JSON.stringify(name)} is not a schema-qualified SQL identifier;` +
+        " it was dropped from the target list rather than quoted, so this deletion would have been" +
+        " silent about one of the tenant's own tables",
+    });
+  }
+  if (opts.bootSchema.blockingCycle.length > 0) {
+    cheap.push({
+      reason: "boot_schema_order_unrunnable",
+      // "blocked by" rather than "reference each other": the list is every entity a RESTRICT cycle
+      // blocks, which includes the ones merely behind it, so the shorter sentence would be false of
+      // some of the names it prints.
+      detail:
+        `${opts.bootSchema.blockingCycle.length.toString()} of the boot manifest's entities cannot` +
+        " be emptied in any order because a cycle of ON DELETE RESTRICT references blocks them:" +
+        ` ${opts.bootSchema.blockingCycle.join(", ")}. Whichever of their tables goes first, the` +
+        " database refuses it and aborts this transaction. Declare onDelete cascade or set_null on" +
+        " one relation in the cycle",
+    });
+  }
   if (cheap.length > 0) return refused(cheap);
 
+  // **One probe over the merged list**, which is the property this whole design turns on: every
+  // refusal is established for every target in both groups before the first DELETE runs, so
+  // ADR-0330's "a returned refusal means nothing was destroyed" holds across both. Two erasures
+  // would have needed the second's refusals known before the first wrote anything — a
+  // survey-then-erase handshake across two packages, which is a worse version of what broke.
+  //
   // The statutory tables are probed alongside the erasable ones even though nothing writes to them:
   // the census below *reads* them to decide whether a retention is claimed, and a confined session
   // would read 0 and report no retention while the rows were still there — `erased` instead of
   // `erased_and_retained`, which is a proof silent about data it did not destroy.
-  const probe = await probeSharedTableErasability(
-    tx,
-    [...partition.erasable, ...partition.statutory],
-    schema,
-  );
+  const probe = await probeSharedTableErasability(tx, [
+    ...erasableTargets,
+    ...partition.statutory,
+  ]);
   const probed: SharedTableErasureRefusal[] = [];
   if (probe.missing.length > 0) {
     probed.push({
       reason: "table_missing",
+      // Both groups reach this message, so it may not attribute the absence to the catalog: a
+      // missing `meta.*` table means the schema needs reconciling, while a missing boot-schema one
+      // means the entity tables are not where this deletion was told to look, which is a different
+      // single line of configuration.
       detail:
-        `the catalog declares ${probe.missing.length.toString()} table(s) this database does not have:` +
-        ` ${probe.missing.join(", ")}; reconcile the schema before signing a proof over it`,
+        `${probe.missing.length.toString()} target table(s) are declared and this database does not` +
+        ` have them: ${probe.missing.join(", ")}; reconcile the catalogued schema, or point the` +
+        " boot-schema targets at the schema the column store actually wrote to — neither is a table" +
+        " to sign a proof over",
     });
   }
   if (probe.confined.length > 0) {
@@ -686,12 +1010,45 @@ export async function eraseSharedTablesWithin(
         ` ${probe.confined.join(", ")}; the DELETE would match no rows and report none`,
     });
   }
+  if (probe.unscoped.length > 0) {
+    probed.push({
+      reason: "target_lacks_tenant_scope",
+      detail:
+        `${probe.unscoped.length.toString()} target table(s) have no ${TENANT_SCOPE_COLUMN} column:` +
+        ` ${probe.unscoped.join(", ")}; every statement here scopes by it, so the DELETE would raise` +
+        " partway through and strand this request rather than deleting anything",
+    });
+  }
+  // The other direction, which is the one the original defect was made of. Only over the schemas the
+  // boot targets name: the catalogued half's schema is compared by `partitionSharedTables` against
+  // `META_TABLES` already, and censusing `meta` here would report all 146 of them as undeclared.
+  //
+  // A deployment holding **no** boot targets names no schema and so is not censused, which is a
+  // stated limit rather than an oversight: a deployment that served `--store pg-columns` and now
+  // serves `--store pg` has those tables still on disk and passes `[]`, so this detector cannot see
+  // them. Closing that needs the boot schema declared independently of the targets, which is a
+  // deployment declaration and not something derivable from the manifest.
+  const bootSchemas = [...new Set(bootTargets.map((t) => t.schema))];
+  const undeclared = (await censusBootSchemaTables(tx, bootSchemas)).filter(
+    (q) => !claimed.has(q),
+  );
+  if (undeclared.length > 0) {
+    probed.push({
+      reason: "boot_schema_table_undeclared",
+      detail:
+        `${undeclared.length.toString()} table(s) in ${bootSchemas.join(", ")} were created by the` +
+        ` column store and this manifest does not declare them: ${undeclared.join(", ")}. A previous` +
+        " manifest's entity table is the usual cause; nothing would examine it, and the proof would" +
+        " attest that this tenant's rows are gone from the schema it still sits in. Drop it, or" +
+        " serve a manifest that declares its entity",
+    });
+  }
   if (probed.length > 0) return refused(probed);
 
   const erasedTables: SharedTableRowsErased[] = [];
   let rowCount = 0;
   let storageBytes = 0;
-  for (const target of partition.erasable) {
+  for (const target of erasableTargets) {
     const result = await tx.query<{ readonly n: unknown; readonly bytes: unknown }>(
       deleteStatement(target),
       [tenantId],
@@ -704,12 +1061,12 @@ export async function eraseSharedTablesWithin(
     storageBytes += bytes;
   }
 
-  // Every erasable table, not only the ones that lost rows: the claim the proof makes is that no row
-  // of this tenant remains in any shared table, and that is what has to be checked. One statement per
-  // table rather than a 96-branch UNION, for `surveyTenantSchema`'s reason — each statement's shape
-  // stays fixed and auditable.
+  // Every erasable table in both groups, not only the ones that lost rows: the claim the proof makes
+  // is that no row of this tenant remains in any shared table or any of the boot manifest's own, and
+  // that is what has to be checked. One statement per table rather than one long UNION, for
+  // `surveyTenantSchema`'s reason — each statement's shape stays fixed and auditable.
   const survivors: string[] = [];
-  for (const target of partition.erasable) {
+  for (const target of erasableTargets) {
     const result = await tx.query<{ readonly n: unknown }>(confirmStatement(target), [tenantId]);
     const remaining = toInt(result.rows[0]?.n);
     if (remaining > 0) survivors.push(`${target.qualified} (${remaining.toString()} row(s))`);

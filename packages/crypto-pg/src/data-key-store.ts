@@ -218,8 +218,14 @@ export class PostgresDataKeyStore {
    * Reads one stored data key, **the highest generation** unless one is named.
    *
    * Highest by default so a rekey that added generation 2 is picked up without every caller having
-   * to track which generation is current; named explicitly so a rotation can read a specific one
-   * while both exist.
+   * to track which generation is current.
+   *
+   * The `generation` parameter has **no caller**, and the reason to keep it is not the one an
+   * earlier version of this comment gave ("so a rotation can read a specific one while both
+   * exist"): `rekeyWithin` inserts N+1 and deletes every generation `<= N` in one transaction, so
+   * two generations never coexist in any committed state and that window does not exist. What the
+   * `ORDER BY generation DESC` actually defends against is a prior generation the rekey's `DELETE`
+   * failed to retire — which is the condition `rekeyTenant` throws on rather than commits.
    */
   async load(tenantId: string, generation?: number): Promise<StoredDataKey | null> {
     assertScopeTenantId(tenantId);
