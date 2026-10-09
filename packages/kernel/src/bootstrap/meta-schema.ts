@@ -1605,15 +1605,21 @@ export const META_DEPLOYMENTS: TableDefinition = {
       name: "app_kind",
       type: "TEXT",
       notNull: true,
+      // These four CHECKs were authored independently of `DeploymentRecordSchema`, which is the only
+      // record this table stores, and four of its seven enum fields emitted values these constraints
+      // refused (ADR-0353): `app_kind` differed on 6 of 9 members by hyphen-versus-underscore,
+      // `target` was *entirely disjoint*, and `environment` and `strategy` differed by one each way.
+      // So the drift was neither a subset nor a superset in any of the four, which is why no nesting
+      // test could see it. They now spell what `@crossengin/deploy` declares.
       check:
-        "app_kind IN ('web', 'marketing', 'docs_site', 'ops', 'cdc_shipper', 'hl7_listener', 'virus_scanner', 'gpu_inference', 'mobile_shell')",
+        "app_kind IN ('web', 'marketing', 'docs-site', 'ops', 'cdc-shipper', 'hl7-listener', 'virus-scanner', 'gpu-inference', 'mobile-shell')",
     },
     { name: "app_id", type: "TEXT", notNull: true },
     {
       name: "environment",
       type: "TEXT",
       notNull: true,
-      check: "environment IN ('preview', 'staging', 'production', 'sandbox')",
+      check: "environment IN ('local', 'preview', 'staging', 'production')",
     },
     {
       name: "region",
@@ -1627,14 +1633,13 @@ export const META_DEPLOYMENTS: TableDefinition = {
       type: "TEXT",
       notNull: true,
       check:
-        "target IN ('vercel_edge', 'vercel_node', 'fly_machine', 'fly_gpu', 'supabase_functions', 'cloudflare_worker', 'appstore_connect', 'play_console', 'helm_release', 'docs_pages')",
+        "target IN ('vercel', 'fly_machines', 'supabase', 'cloudflare', 'typesense_cloud', 'inngest_cloud', 'clickhouse_cloud', 'ghcr', 'app_store', 'play_store')",
     },
     {
       name: "strategy",
       type: "TEXT",
       notNull: true,
-      check:
-        "strategy IN ('rolling', 'blue_green', 'canary', 'recreate')",
+      check: "strategy IN ('atomic', 'rolling', 'blue_green', 'canary')",
     },
     {
       name: "version",

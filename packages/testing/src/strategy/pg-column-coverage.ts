@@ -45,6 +45,20 @@ export const CatalogColumnSchema = z.object({
    * `notNull && !hasDefault` makes a column required.
    */
   hasDefault: z.boolean(),
+  /**
+   * The column-level `check` expression as the catalog spells it, or `null` for a column that
+   * declares none. Read here rather than by a second parser because `pg-value-set-domains.ts` asks
+   * a different question of the same declaration, and two parsers over one file is how the survey
+   * and the drift check come to disagree about what the catalog says (ADR-0352's reason
+   * `check-admission.ts` imports `CHECK_CONSTRAINT_QUERY` instead of writing its own).
+   */
+  check: z.string().nullable().default(null),
+  /**
+   * The `default` expression as the catalog spells it — SQL text, so a string literal arrives with
+   * its quotes (`"'active'"`). Carried so a default can be checked against the column's own CHECK,
+   * which is the one question in this class that needs no declaration at all.
+   */
+  defaultExpression: z.string().nullable().default(null),
 });
 export type CatalogColumn = z.infer<typeof CatalogColumnSchema>;
 
@@ -73,7 +87,7 @@ export const CatalogTableSchema = z.object({
 export type CatalogTable = z.infer<typeof CatalogTableSchema>;
 
 /** A column is required iff the database will refuse a row that omits it. */
-export function isRequiredColumn(column: CatalogColumn): boolean {
+export function isRequiredColumn(column: Pick<CatalogColumn, "notNull" | "hasDefault">): boolean {
   return column.notNull && !column.hasDefault;
 }
 
@@ -377,7 +391,7 @@ export function foldStringConcatenations(code: string): string {
 }
 
 /** Index just past the `}`/`]`/`)` matching the opener at `start`, or -1. Skips strings. */
-function matchBracket(source: string, start: number): number {
+export function matchBracket(source: string, start: number): number {
   const open = source[start] ?? "";
   const close = open === "{" ? "}" : open === "[" ? "]" : open === "(" ? ")" : "";
   if (close === "") return -1;
@@ -410,7 +424,7 @@ function matchBracket(source: string, start: number): number {
 }
 
 /** Splits a bracket body on top-level commas, respecting nesting and strings. */
-function splitTopLevel(body: string, separator = ","): readonly string[] {
+export function splitTopLevel(body: string, separator = ","): readonly string[] {
   const parts: string[] = [];
   let depth = 0;
   let current = "";
@@ -529,17 +543,26 @@ export function parseCatalogSource(source: string): readonly CatalogTable[] {
       let columnName = "";
       let notNull = false;
       let hasDefault = false;
+      let check: string | null = null;
+      let defaultExpression: string | null = null;
       for (const field of inner) {
         const nameMatch = /^name\s*:\s*"([^"]+)"$/.exec(field);
         if (nameMatch) columnName = nameMatch[1] ?? "";
         if (/^notNull\s*:\s*true$/.test(field)) notNull = true;
         if (/^primaryKey\s*:\s*true$/.test(field)) notNull = true;
-        if (/^default\s*:/.test(field)) hasDefault = true;
+        const defaultMatch = /^default\s*:\s*([\s\S]+)$/.exec(field);
+        if (defaultMatch) {
+          hasDefault = true;
+          defaultExpression = literalBody(defaultMatch[1] ?? "");
+        }
+        const checkMatch = /^check\s*:\s*([\s\S]+)$/.exec(field);
+        if (checkMatch) check = literalBody(checkMatch[1] ?? "");
       }
       // A primary-key member is NOT NULL whether or not it says so: `PRIMARY KEY (…)` implies it,
       // and reading only the column's own flag would let a required column read as optional.
       if (primaryKey.has(columnName)) notNull = true;
-      if (columnName !== "") columns.push({ name: columnName, notNull, hasDefault });
+      if (columnName !== "")
+        columns.push({ name: columnName, notNull, hasDefault, check, defaultExpression });
     }
     if (columns.length === 0) continue;
 
@@ -668,7 +691,7 @@ function initialiserExpression(rest: string): string {
 }
 
 /** `"x"`, `'x'` or a backtick template's body; `null` for anything else. */
-function literalBody(text: string): string | null {
+export function literalBody(text: string): string | null {
   const m = /^(["'`])([\s\S]*)\1$/.exec(text.trim());
   return m ? (m[2] ?? "") : null;
 }

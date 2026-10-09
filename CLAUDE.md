@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 347 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 348 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~18,130 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~18,190 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -620,6 +620,42 @@ type errors.
   that class has been found (ADR-0330's erasure, ADR-0349's rekey), and converging it found that the
   rule had **eight spellings** of which only `KeyRotationMigrator`'s private copy read
   `relforcerowsecurity`, the one input that overrides ownership.
+
+  ADR-0353 closes ADR-0352's Q1 — the **upstream** half — and the class is **a table that could not
+  accept its own record**. Downstream, the catalog is right and the database is behind, which is
+  recoverable by one `ALTER`; upstream, the artifact itself cannot persist its own records and no
+  migration fixes it. It opens by retiring **both** findings ADR-0352 recorded for this class,
+  because the census behind them read only named `as const` arrays: `REPORT_ENGINES`' third member
+  `auto` is a report *definition's* engine preference and the authoritative domain for
+  `meta.report_runs.engine` is `ReportRunRecordSchema.engine`, an inline `z.enum` of the two the
+  column admits; and `DIGEST_FREQUENCIES`' `immediate`/`never` are refused three times on the write
+  path (`DIGEST_WINDOW_MINUTES` answers null, `buildDigestBatch` throws, `delivery-drain` returns
+  early) plus by name in `DigestBatchSchema`'s `superRefine`. Neither was a defect.
+  The real one is `META_DEPLOYMENTS`, whose four CHECKs were authored independently of
+  `DeploymentRecordSchema` — the only record that table stores, field for field — so **four of its
+  seven enum fields emitted values the table refused**: `target` *entirely disjoint* (ten against ten,
+  no overlap), `app_kind` differing on 6 of 9 by hyphen-versus-underscore, `environment` and
+  `strategy` by one each way, while `region`, `trigger` and `status` matched exactly. The table was
+  written in pieces against nothing. Two things about it matter more than the defect: **none of the
+  four is a subset or a superset**, so every nesting test was structurally blind, and the kernel test
+  standing over `target` asserted three values no `DeployTarget` has ever had — a test comparing the
+  catalog with itself, under a title naming the contract.
+  So the link is **declared**, not derived, and both derivations are refused on measurement: a
+  strict-superset rule gives 23 pairs over 15 columns with **0** defects, a field-name rule gives
+  **4,938** pairs over 180 columns, and exact set equality is *unsound* rather than imprecise —
+  `meta.deployments.environment` equalled `@crossengin/feature-flags`' environment enum exactly and so
+  read as accounted for while drifted. Elimination by import (deriving the CHECK from the enum) was the
+  strongest alternative and measured **favourably** on the two counts that looked fatal — every
+  exactly-matched column but one agrees in *order* as well as membership, so the SQL would be
+  byte-identical (`meta.workflow_events.kind` swaps two adjacent members, 280 of 281), and 261 of the
+  domains sit in packages kernel can import without a cycle — and is refused for a third: **it cannot
+  be total**, since the other 20 are in four packages that depend on kernel and twelve of them in an *app*,
+  so the fence is needed for the remainder anyway and a partial elimination plus a fence is more
+  machinery than a fence. So `pg-value-set-domains.ts` is the sixth strategy rule and all 287
+  catalogued value-set CHECKs declare their domain, `mirrors` asserting **equality** in both
+  directions, with the exception surface a measured six — 1 `narrows` carrying the symbol that
+  enforces it, 5 `catalog_only`, every one a table already declared writerless for an independent
+  reason.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -2966,6 +3002,18 @@ the CHECK is handed over as SQL, because ADR-0330 cannot tell a widening CHECK f
 `apps/operate-server/src/proof-version-probe.ts` is the boot fence that makes the gap between them
 survivable; see the `operate-server` entry.
 
+**Every column-level value-set CHECK declares which contract domain governs it** (ADR-0353), in
+`packages/testing/src/strategy/pg-value-set-domains.ts` rather than in the catalog — a ref is a
+string either way, since the kernel cannot import *all* of the packages it would name, so the
+declaration buys nothing by living here and would cost a `ColumnDefinition` field the emitter reads
+nothing from. 287 of them, compared both ways every run. `META_DEPLOYMENTS` is why: its `app_kind`,
+`environment`, `target` and `strategy` CHECKs were written independently of `DeploymentRecordSchema`
+and **refused four of its seven enum fields**, `target` with no overlap at all, so a store for that
+table could never have inserted a row. They now spell what `@crossengin/deploy` declares — not the
+union, because a CHECK refusing every value its only possible writer emits is not a constraint, and
+the catalog's finer `vercel_edge`/`vercel_node` distinction lived in a CHECK nothing reads and no type
+expresses.
+
 Append new tables to the bottom of the array in build order, not alphabetically —
 the expected-names test sorts independently.
 
@@ -2995,11 +3043,13 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **five** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **six** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
-column is named by every `INSERT` — `pg-storeless-tables.ts` (ADR-0334), which declares every
+column is named by every `INSERT` — and whose `parseCatalogSource` carries `check` and
+`defaultExpression` too (ADR-0353), because one catalog parser is what keeps two rules from
+disagreeing about what the catalog says; `pg-storeless-tables.ts` (ADR-0334), which declares every
 catalogued table with **no writer** and why, and `pg-record-retention.ts` (ADR-0335), which reads the
 Article 17 erasure's `PLATFORM_RECORD_TABLES` and the catalog's cascading tenant tables and compares
 them **in both directions** (`protected_table_cascades` / `_not_in_catalog` / `_undeclared_here` /
@@ -3093,15 +3143,44 @@ which over-reported by five of thirteen — resolve with zero unresolvable impor
 reachability**, and here it answers "reached" for precisely the stores the rule exists to report;
 answering it honestly needs symbol-level use analysis through `export *`, a type-aware pass rather
 than a text scan. The flat signal is sound *because* it is conservative — it can only under-report,
-so what it declares is a lower bound. All five read the real workspace from disk rather than
+so what it declares is a lower bound. All six read the real workspace from disk rather than
 importing it, which is what keeps them unconditional: importing `@crossengin/kernel` would make the
 dependency graph cyclic, and reading `kernel/dist` would make the answer depend on whether someone ran
 `pnpm -r build`. A rule that is green only after a build is not a rule.
+The sixth is `pg-value-set-domains.ts` (ADR-0353), and it is the **upstream** half of ADR-0352's
+question: whether the catalog's CHECK admits every value the *contract* can emit, which is a property
+of the artifact and so belongs in a test where the other half belongs at boot. `VALUE_SET_DOMAINS`
+declares, for each of the **287** catalogued value-set CHECKs, which workspace domain governs it —
+**281** `mirrors`, **5** `catalog_only`, **1** `narrows` — and `mirrors` asserts **equality**, which
+is the whole point: `META_DEPLOYMENTS`' four drifted columns were neither subsets nor supersets of
+`DeploymentRecordSchema` (`target` was *entirely disjoint*), so every nesting test was blind to them.
+The link is declared and not derived because both derivations were measured and refused — an
+unconstrained strict-superset rule gives **23 pairs over 15 columns with 0 defects** (`[month,year] ⊂
+TIMESERIES_BUCKETS`; `MAC_ALGORITHMS ⊂ KEY_ALGORITHMS` by spread), and a field-name link gives
+**4,938 pairs over 180 columns** because `status` is a field on 51 schemas. Exact set equality is
+*unsound* rather than imprecise, demonstrated live: `meta.deployments.environment` exactly equalled
+`@crossengin/feature-flags`' environment enum and so read as accounted for while the record that
+table stores emits `@crossengin/deploy`'s. `narrows` carries `except` plus a `guardedBy` whose own
+declaration must name every excluded member (`pg-unreachable-stores.ts`' `substitutedBy` shape), and
+`catalog_only` is contradicted by **exact enumeration and not by overlap**, because containment is
+the coincidence that sank the superset rule. A ref is `<package>:<NAME>` or
+`<package>:<XSchema>.<field>`, the second where a constant is ambiguous or absent —
+`meta.report_runs.engine` refs `ReportRunRecordSchema.engine`, since `REPORT_ENGINES`' third member
+`auto` is a report *definition's* preference. The resolver reads three sites, follows spreads,
+aliases and **imports** (without which `DATA_CLASSES`, declared in three packages, resolves nowhere,
+so `meta.files.data_class` has no nameable domain) and reaches **1,363 domains over 915 files with
+zero unresolved**. **29 of the 287** declarations ref a schema field; the rest ref a constant.
+`auditColumnDefaults` is the one question here needing no declaration — a column's
+`default` against its own `check`, 0 findings today.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
 not, because the statement extractor silently skips a `SELECT` with a join, an alias or an unresolved
 target. That check changed the census's answer three times and is the one that makes it trustworthy.
+`readWorkspaceSources()` is its second product (ADR-0353) — every file's text with its owning
+package, for the rules that reason about symbols rather than SQL, and deliberately **not** filtered
+by `PG_SCAN_EXEMPT_PACKAGE_DIRS`, since a package with no Postgres store can still export the enum a
+catalogued CHECK is about.
 
 Full workspace build + typecheck + test is several minutes; run it backgrounded
 into a log rather than blocking on it — but **run only one at a time** (ADR-0336). Packages resolve
@@ -3182,6 +3261,12 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   store with no caller passes every SQL rule — its statements are well-formed, its columns exist,
   its `INSERT` is complete — and makes its table read as *written*, so the two rules disagree and
   `table_declared_storeless` is what says so.
+  **And a catalogued value-set CHECK with no declared contract domain is a failure too**
+  (`pg-value-set-domains.ts`, ADR-0353), which is the same blindness read a third way: a fake
+  connection never evaluates a CHECK, so a column whose constraint refuses every value its own record
+  schema emits has well-formed SQL, existing columns and a complete `INSERT` — `META_DEPLOYMENTS` was
+  in exactly that state on four columns, and the kernel test over one of them asserted three values
+  the contract has never had.
   **ADR-0335 found two more members and they are the sharpest yet**: a write that sets no tenant
   context. `PostgresLifecycleEventStore` and `PostgresDeletionRequestStore` both issued correct SQL
   that no non-owner database would ever accept — on both tables the isolation policy is the only arm
@@ -3484,17 +3569,17 @@ opened them.
   with `SET TRANSACTION READ ONLY` because a CHECK can call a volatile function, reports rather than
   refuses, and proves a widening safe against the rows present while refusing that claim on a
   confined session. 269 ms at boot, verified live as a non-owner.
-  What remains, in order: **(1)** the **contract → catalog** half is unbuilt and it is the *upstream*
-  one — a value the contract can emit that the catalog's CHECK refuses ships in the artifact rather
-  than being a migration state, which is what ADR-0300 and ADR-0334 each were. The census found two
-  real ones, both latent because their tables are writerless: `REPORT_ENGINES` is
-  `["postgres","clickhouse","auto"]` and `BaseReportSchema` **defaults to `"auto"`**, a value
-  `meta.report_runs.engine`'s CHECK refuses; and `DIGEST_FREQUENCIES` has six members against
-  `meta.notification_digests.frequency`'s four. A static rule needs the link **declared** per column
-  rather than derived, measured: 258 of 287 value sets match a workspace `as const` array exactly,
-  **17** match more than one, and two of the five superset candidates are *deliberate* narrowings
-  (`gateway_idempotency_records.method` is mutating methods only; a digest row cannot carry
-  `immediate` or `never`) indistinguishable from a stale one without one. **(2)** a widening can now
+  What remains, in order: **(1)** ~~the **contract → catalog** half is unbuilt~~ — **closed by
+  ADR-0353**, which also found that **both** of the "two real ones" recorded here were *not* defects,
+  and for two different reasons the census behind them could not see. `REPORT_ENGINES`' `auto` is a
+  report *definition's* engine preference and `meta.report_runs.engine`'s domain is
+  `ReportRunRecordSchema.engine`, an inline `z.enum` of exactly the two the column admits;
+  `DIGEST_FREQUENCIES`' `immediate`/`never` are refused by `DIGEST_WINDOW_MINUTES`,
+  `buildDigestBatch`, `delivery-drain` **and** `DigestBatchSchema`'s `superRefine`. The measurement
+  quoted here was also off — 281 of 287 match exactly once inline `z.enum`s, exported `z.enum`
+  constants, aliases, module-private constants and import-following are read, and **zero** columns
+  match more than one domain once a constant is preferred over a reference to it. The real finding is
+  `META_DEPLOYMENTS`; see *The table that could not accept its own record*. **(2)** a widening can now
   be **proved** safe, so `planSchemaReconciliation` could plan it instead of reporting
   `constraint_needs_validation` — ADR-0330's open end closed rather than merely measured. It needs
   the proof re-checked inside the statement's own transaction (`replace_column_check`'s `DO`-block
@@ -3511,6 +3596,37 @@ opened them.
   the live constraint name in its `ADD`, which is right for SQL an operator pastes and perpetuates a
   hand-rename outside Postgres's naming family; `column-check.ts` solves name prediction for the
   reconciler and this deliberately does not use it.
+- **The table that could not accept its own record, and what is left of it** (ADR-0353 closed
+  ADR-0352's Q1). `META_DEPLOYMENTS`' four CHECKs were authored independently of
+  `DeploymentRecordSchema`, the only record that table stores, so four of its seven enum fields
+  emitted values the table refused — `target` *entirely disjoint*, `app_kind` differing on 6 of 9 by
+  hyphen-versus-underscore, `environment` and `strategy` by one each way — and because none of the
+  four is a subset or a superset, every nesting test was blind. Fixed to what `@crossengin/deploy`
+  declares, and fenced by `pg-value-set-domains.ts`' 287 declarations. Verified live as a non-owner:
+  the same `INSERT` is refused `23514` four times on the old CHECKs and lands on the new ones,
+  `surveyCheckAdmission` reports `refuses` on exactly those four in 351 ms over 777 checks, and
+  `crossengin-pg apply` plans and executes all four as `replace_column_check [guarded]` with the
+  re-plan clean — **no manual SQL**, because a CHECK refusing everything its only writer emits cannot
+  have let a row in, so ADR-0330's emptiness guard always holds.
+  What remains, in order: **(1)** nothing checks that a ref names the domain the store actually
+  **binds**. The 19 ambiguous columns were adjudicated by reading which record each table stores, and
+  a wrong adjudication that happens to enumerate the same set passes — the same wall
+  `pg-column-coverage.ts` stops at, since the parameter-to-field link is invisible to a scan. **(2)**
+  **five spellings of one six-member data classification** (`DATA_CLASSES` in `dr`, `jobs` and
+  `ml-training`, `DATA_CLASSIFICATIONS` in `types` and `data-lineage`) and three of one four-member
+  environment (`deploy`, `feature-flags`, `finops`, the last with five). ADR-0340 found seven
+  spellings of the ABAC concept and left them; this is the same shape, now measured, with four
+  catalogued columns pointing at one of the five by declaration. **(3)** a table-level `constraints`
+  CHECK is not read — all 287 are column-level today, so a value set written as a table constraint
+  would be undeclared *and invisible* rather than undeclared and reported. **(4)**
+  `auditColumnDefaults` reads a literal default only; `now()` and a cast are out of scope because
+  evaluating them means evaluating SQL, which is `check-admission.ts`'s job, and no value-set column
+  carries a non-literal default today. **(5)** `catalog_exceeds_contract` makes `mirrors` stricter
+  than safety requires — a catalog deliberately admitting more than the contract emits must narrow or
+  gain a fourth link kind, and nothing is in that position, which is why there is no `widens`.
+  **(6)** `packages/deploy` still has zero importers (ADR-0336), so `meta.deployments` is writerless
+  and this fix is latent; which of that package's two flag models is real is still the product
+  decision ADR-0336 declined.
 
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
@@ -4754,7 +4870,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 347 records; 268 Accepted, 79 Proposed (the
+title or status change cannot drift. 348 records; 269 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

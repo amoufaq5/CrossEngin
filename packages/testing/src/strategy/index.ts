@@ -10,3 +10,4 @@ export * from "./pg-storeless-tables.js";
 export * from "./workspace-sql-scan.js";
 export * from "./pg-record-retention.js";
 export * from "./pg-unreachable-stores.js";
+export * from "./pg-value-set-domains.js";

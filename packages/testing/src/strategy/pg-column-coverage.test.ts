@@ -119,9 +119,9 @@ describe("the declared shape", () => {
   });
 
   it("a column is required only when NOT NULL and defaultless", () => {
-    expect(isRequiredColumn({ name: "a", notNull: true, hasDefault: false })).toBe(true);
-    expect(isRequiredColumn({ name: "a", notNull: true, hasDefault: true })).toBe(false);
-    expect(isRequiredColumn({ name: "a", notNull: false, hasDefault: false })).toBe(false);
+    expect(isRequiredColumn({ notNull: true, hasDefault: false })).toBe(true);
+    expect(isRequiredColumn({ notNull: true, hasDefault: true })).toBe(false);
+    expect(isRequiredColumn({ notNull: false, hasDefault: false })).toBe(false);
   });
 });
 
@@ -620,7 +620,16 @@ describe("the real workspace", () => {
       name: "kind",
       notNull: true,
       hasDefault: false,
+      check: "kind IN ('absolute_at', 'relative_after', 'cron_schedule', 'business_hours')",
+      defaultExpression: null,
     });
+    // The two fields `pg-value-set-domains.ts` reads, asserted here rather than only there, so one
+    // parser serves both rules and a regression in it fails where the parser lives.
+    expect(
+      catalog
+        .find((t) => t.name === "tenants")
+        ?.columns.find((c) => c.name === "status")?.defaultExpression,
+    ).toBe("'active'");
     // A column with a default is not required; one that is a primary-key member is, said or not.
     const tenants = catalog.find((t) => t.name === "tenants");
     expect(tenants?.columns.find((c) => c.name === "id")?.hasDefault).toBe(true);

@@ -71,6 +71,71 @@ export function workspaceRoots(): WorkspaceRoots {
   return { roots, unhandledGlobs };
 }
 
+export interface WorkspaceSourceFile {
+  /** The owning package's `package.json` `name`, so a declaration can be written against it. */
+  readonly package: string;
+  /** Workspace-relative, POSIX-separated. */
+  readonly file: string;
+  /** Raw text. Each rule normalises it the way it needs to. */
+  readonly text: string;
+}
+
+export interface WorkspaceSources {
+  readonly files: readonly WorkspaceSourceFile[];
+  /** Directories under a workspace root with a `src/` but no readable `package.json` `name`. */
+  readonly unnamedPackages: readonly string[];
+  readonly unhandledGlobs: readonly string[];
+}
+
+/**
+ * Every workspace source file with its owning package, for the rules that reason about *symbols*
+ * rather than about SQL.
+ *
+ * Separate from `scanWorkspaceSql` rather than folded into it because that one returns facts already
+ * extracted and this one returns text: `pg-value-set-domains.ts` needs the raw source of every file
+ * to resolve a named enum through its import, and handing it pre-extracted SQL statements would
+ * answer a different question. One walk either way — the cost is the walk, not the extraction.
+ *
+ * `PG_SCAN_EXEMPT_PACKAGE_DIRS` is deliberately **not** applied: that list exempts packages from the
+ * *SQL* rules, and a package with no Postgres store can still export the enum a catalogued CHECK is
+ * about.
+ */
+export function readWorkspaceSources(): WorkspaceSources {
+  const files: WorkspaceSourceFile[] = [];
+  const unnamedPackages: string[] = [];
+  const { roots, unhandledGlobs } = workspaceRoots();
+  for (const root of roots) {
+    for (const entry of readdirSync(join(REPO_ROOT, root))) {
+      const dir = `${root}/${entry}`;
+      const src = join(REPO_ROOT, dir, "src");
+      if (!existsSync(src) || !statSync(src).isDirectory()) continue;
+      const manifest = join(REPO_ROOT, dir, "package.json");
+      let name = "";
+      if (existsSync(manifest)) {
+        const parsed: unknown = JSON.parse(readFileSync(manifest, "utf8"));
+        if (typeof parsed === "object" && parsed !== null && "name" in parsed) {
+          const candidate = (parsed as { readonly name?: unknown }).name;
+          if (typeof candidate === "string") name = candidate;
+        }
+      }
+      if (name === "") {
+        unnamedPackages.push(dir);
+        continue;
+      }
+      const absolute: string[] = [];
+      sourceFilesUnder(src, absolute);
+      for (const file of absolute) {
+        files.push({
+          package: name,
+          file: file.slice(REPO_ROOT.length + 1),
+          text: readFileSync(file, "utf8"),
+        });
+      }
+    }
+  }
+  return { files, unnamedPackages, unhandledGlobs };
+}
+
 /**
  * Bindings merged across one package's `src/`, used only as a fallback for names a module imports.
  *

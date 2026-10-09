@@ -801,11 +801,25 @@ describe("table column shapes", () => {
     expect(region?.check).toContain("ap-south");
   });
 
-  it("META_DEPLOYMENTS check-constrains target to the ten deploy targets", () => {
-    const target = META_DEPLOYMENTS.columns.find((c) => c.name === "target");
-    expect(target?.check).toContain("'vercel_edge'");
-    expect(target?.check).toContain("'fly_machine'");
-    expect(target?.check).toContain("'helm_release'");
+  it("META_DEPLOYMENTS constrains app_kind, environment, target and strategy to what DeploymentRecordSchema emits", () => {
+    // The values are restated here because `packages/kernel` does not depend on
+    // `@crossengin/deploy`; comparing them to that package's own `APP_KINDS` / `ENVIRONMENTS` /
+    // `DEPLOY_TARGETS` / `DEPLOY_STRATEGIES` is `pg-value-set-domains.ts`'s job (ADR-0353). Until
+    // then these four CHECKs had been authored independently of the only record this table stores,
+    // and the assertion that stood here pinned three `target` values no `DeployTarget` has ever
+    // had — a test comparing the catalog with itself.
+    const check = (name: string): string =>
+      META_DEPLOYMENTS.columns.find((c) => c.name === name)?.check ?? "";
+    expect(check("app_kind")).toBe(
+      "app_kind IN ('web', 'marketing', 'docs-site', 'ops', 'cdc-shipper', 'hl7-listener', 'virus-scanner', 'gpu-inference', 'mobile-shell')",
+    );
+    expect(check("environment")).toBe(
+      "environment IN ('local', 'preview', 'staging', 'production')",
+    );
+    expect(check("target")).toBe(
+      "target IN ('vercel', 'fly_machines', 'supabase', 'cloudflare', 'typesense_cloud', 'inngest_cloud', 'clickhouse_cloud', 'ghcr', 'app_store', 'play_store')",
+    );
+    expect(check("strategy")).toBe("strategy IN ('atomic', 'rolling', 'blue_green', 'canary')");
   });
 
   it("META_DEPLOYMENTS triggered_by FK-references META_USERS with RESTRICT", () => {
