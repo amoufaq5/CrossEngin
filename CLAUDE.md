@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 346 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 347 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~18,090 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~18,130 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -582,6 +582,45 @@ type errors.
   deliberately **not** on a list of the flags that mount a deletion surface, which is ADR-0288's
   maintained list avoided in the place it has already been wrong three times.
 
+  ADR-0352 closes ADR-0351's Q5 and the class is **a probe that was one instance of a class**. The
+  sharp edge is ADR-0330's: a *widening* CHECK cannot be told from a *narrowing* one, so
+  `planSchemaReconciliation` reports `constraint_needs_validation` on a populated table rather than
+  planning it — which means **every enum value the catalog has ever added is refused `23514` on every
+  already-applied deployment until an operator runs an `ALTER` by hand**, with nothing saying so until
+  a write fails. Three increments did exactly that and each was found by hand: ADR-0300 (three flag
+  kinds), ADR-0334 (`pending_deletion`, whose catalog comment spells the whole problem out), and
+  ADR-0351 (`'v4'`, where the refusal lands *inside* the Article 17 transaction after the data is
+  gone). Measured from the built catalog objects rather than the source text — which matters, because
+  a single-line `grep` for `check: "…"` finds **66** value sets against a real **287**, since Prettier
+  wraps a long declaration onto the next line and `check?: string` is a field on `RlsPolicy` too:
+  **777** emitted column CHECKs, **287** value sets over 123 tables, **263** bounded ranges, **213**
+  patterns, 13 compound or cross-column.
+  The design turns on three measurements. It **evaluates the live predicate and never reads it**,
+  because ADR-0351's regex was too narrow inside its own increment — one `CHECK (col IN (…))` deparses
+  `col = ANY (ARRAY[…])` on a `TEXT` column and `(col)::text = ANY ((ARRAY[…])::text[])` on a
+  `VARCHAR` one — and asking Postgres is total over every shape where a per-spelling regex covers 287
+  of 550 probeable checks. `coalesce(E, true)` is load-bearing, since a CHECK passes when its
+  expression is NULL, which also makes `col IS NULL OR col IN (…)` *equivalent as a constraint* to
+  `col IN (…)` and so the prefix on 29 catalogued checks redundant. A candidate is cast to the
+  **declared** type through an allow-list, because `$1::character varying(8)` with a 12-character
+  value whose first 8 are in the list answers `admits = true` while the real `INSERT` raises `22001` —
+  and dropping a modifier is not uniformly safe either, since `character(3)` → `character` *narrows to
+  one character*. And the evaluations run inside `SET TRANSACTION READ ONLY` with a savepoint each,
+  because a CHECK can call a volatile function and **evaluating it fires the side effect**
+  (demonstrated: a CHECK whose function inserts a row inserted the row), while the fence blocks it
+  `25006` and costs the legitimate cases nothing.
+  Two decisions are departures. It **reports and never refuses** — a narrowed CHECK on a column
+  nothing writes is harmless and refusing would refuse a deployment that works (ADR-0334's reason
+  `--tenant-status-gate` is opt-in), so a surface that knows its own write is load-bearing names its
+  column through `admissionBlocks`, and **ADR-0351's probe is deleted** rather than kept beside it.
+  And `proveWideningSafe` answers ADR-0330's open end by asking the *data* rather than the
+  expressions — with the trap that **the count is RLS-confined**: with one violating row the owner
+  counts 1 and a non-owner counts 0 while the `ALTER` genuinely raises, so the confinement is asked of
+  the catalog and a confined session gets `unknown_session_confined` rather than a claim. Third place
+  that class has been found (ADR-0330's erasure, ADR-0349's rekey), and converging it found that the
+  rule had **eight spellings** of which only `KeyRotationMigrator`'s private copy read
+  `relforcerowsecurity`, the one input that overrides ownership.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -738,8 +777,8 @@ packages exist at only one layer, noted below where that is true.
   `replace_column_check` on an empty table — safe because **neither identifier in the statement is
   inferred** — and reported `constraint_needs_validation` with the SQL on a populated one. A name the
   plan would have to *predict*, `ChooseConstraintName`'s numeric suffix inside a shared family, is
-  never written and reads `column_check_name_unavailable`. Costs +765 probes (~850 ms, flat in row
-  count).
+  never written and reads `column_check_name_unavailable`. Costs one probe per declared column
+  check (**777** as of ADR-0352, ~850 ms, flat in row count).
   **Index and policy definitions are compared too** (ADR-0292) — columns, order, uniqueness and
   access method structurally; predicates and policy clauses by **asking Postgres to deparse the
   declared text** (`expression-render.ts` attaches it as a `CHECK … NOT VALID` constraint inside a
@@ -762,6 +801,32 @@ packages exist at only one layer, noted below where that is true.
   `format_type`'s spelling, strips the casts Postgres adds to a default, and treats an omitted
   `ON DELETE` as the RESTRICT the emitter writes — because comparing the raw text called 138 of 139
   tables drifted on a schema that was exactly correct.
+  **`check-admission.ts` asks whether a live database admits the values the catalog declares**
+  (ADR-0352), over every catalogued CHECK rather than the one column ADR-0351 probed. It **evaluates
+  the live predicate** — `coalesce((<pg_get_expr>), true)` against candidates bound into a `VALUES`
+  list aliased to the column name — and never reads the deparsed text, because one declaration has
+  two renderings and a regex over them was already too narrow once. `CHECK_SHAPE_COVERAGE` is a total
+  map over five shapes whose content is the **complete / probe / none** distinction: a value set's
+  declared list is the whole domain so a pass is a *proof*, while a range's declared boundary is one
+  candidate so a refusal is conclusive and a pass is not. `admissionCastType` casts to the
+  **declared** type through an allow-list — a modifier-bearing cast truncates (`varchar(8)` answers
+  `admits` for a value the `INSERT` refuses `22001`) and dropping one is only safe where the
+  unmodified form constrains nothing, which `character(3)` → `character` is not. Evaluations run
+  inside `SET TRANSACTION READ ONLY` with a savepoint each, because a CHECK can call a volatile
+  function and evaluating it fires the side effect, while a type-drifted column raises `42883` and
+  must read `unevaluated` rather than abort the batch. It issues **no new catalog SQL**: it imports
+  `CHECK_CONSTRAINT_QUERY` and `COLUMN_QUERY`, so the survey and the drift check cannot disagree
+  about what the database holds. It **reports and never refuses** — a surface names its own column
+  through `admissionBlocks`, which is the derived condition a list of fatal columns would be. 777
+  checks surveyed in **269 ms**, verified live as a non-owner.
+  `proveWideningSafe` is the separate half, and separate because it reads tenant data where the survey
+  reads only the catalog: it answers ADR-0330's open end by counting the rows that violate the
+  declared expression, and **refuses the claim on a confined session** rather than reading 0 as safe —
+  measured, the owner counts 1 and a non-owner 0 while the `ALTER` genuinely raises.
+  `sessionWouldBeConfined` in `introspection.ts` is the rule that decides it, extracted because it had
+  **eight spellings** and only `KeyRotationMigrator`'s private copy read `relforcerowsecurity`, the
+  one input that overrides ownership. Only the *rule* is shared; each call site keeps its own query,
+  since `commonRefusals` wants `has_scope_column` in the same round trip.
 - **`types`** — deliberately tiny: branded primitive id types (`TenantId`, `UserId`,
   `RequestId`, `ManifestId`). One file.
 - **`config`** — shared TypeScript / ESLint / Prettier config bases. No `src/`.
@@ -2729,6 +2794,14 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   — and since `unreadable` **mounts**, a drifted column would have left the `23514` exactly where it
   was behind a warning. The catalog declares TEXT, so the live verification could only ever exercise
   the first; the fake asked for the second is what found it.
+  **ADR-0352 replaced that probe with the general survey and deleted it**, because it was one instance
+  of a class: `surveyCheckAdmission` runs **unconditionally under a Postgres store** (not behind a
+  flag — the fact it reports is true whether or not a surface is mounted to meet it) and prints a
+  `[catalog] catalog admission: …` census, reporting and never refusing. The deletion pipeline's
+  refusal survives as seven lines over `admissionBlocks`, naming
+  `meta.tenant_tombstones.proof_version` where the write is, with `admissionRemedy`'s `ALTER` pair
+  printed — the same SQL `reconcile.ts` hands over, produced independently. Keeping both the probe and
+  the survey would have been two mechanisms for one question.
   **And `surveyEnvelopeTenantReadiness` names api-key tenants with no `meta.tenants` row** under
   `--column-key-mode envelope` (ADR-0349's live finding (a)), whose every PHI read and write is
   otherwise refused by `tenant_data_keys_tenant_id_fkey` and surfaced as an HTTP **504** — a
@@ -3396,12 +3469,48 @@ opened them.
   cannot prevent: a `document_rows` declaration beside a non-empty target list derives a non-zero
   count, so `assembleTombstone` refuses `record_storage_invalid` and the pipeline aborts — correct,
   and a boot-time check would be better than a deletion-time one, since the mismatch is decided by
-  `--store` and the manifest. **(5)** the probe reads **one** CHECK on one column, and every other
-  catalogued CHECK the contract widens has the same sharp edge with no probe at all; a general "does
-  the live catalog admit what this binary emits" boot survey is the shape, and this is one instance
-  of that class. **(6)** `no_durable_store` is unreachable from a stored proof, because the deletion
-  routes do not mount on `--store memory` — it exists to keep the map total, and is pinned rather
-  than served.
+  `--store` and the manifest. **(5)** ~~the probe reads **one** CHECK on one column~~ — **closed by
+  ADR-0352**, which built the general survey and **deleted** that probe rather than keeping it
+  beside one. See the next entry. **(6)** `no_durable_store` is unreachable from a stored proof,
+  because the deletion routes do not mount on `--store memory` — it exists to keep the map total,
+  and is pinned rather than served.
+- **The live catalog's admission of what this binary emits is surveyed, and what is left of it**
+  (ADR-0352 closed ADR-0351's Q5). The class: ADR-0330 cannot tell a widening CHECK from a narrowing
+  one, so every enum value the catalog adds is refused `23514` on every already-applied deployment
+  until an operator runs an `ALTER` by hand — found by hand three times (ADR-0300, ADR-0334,
+  ADR-0351) and now detected, over **777** emitted column CHECKs of which **287** are value sets,
+  **263** bounded ranges and **213** patterns. It evaluates the live predicate rather than reading
+  it, casts through an allow-list because a modifier-bearing cast truncates, fences the evaluations
+  with `SET TRANSACTION READ ONLY` because a CHECK can call a volatile function, reports rather than
+  refuses, and proves a widening safe against the rows present while refusing that claim on a
+  confined session. 269 ms at boot, verified live as a non-owner.
+  What remains, in order: **(1)** the **contract → catalog** half is unbuilt and it is the *upstream*
+  one — a value the contract can emit that the catalog's CHECK refuses ships in the artifact rather
+  than being a migration state, which is what ADR-0300 and ADR-0334 each were. The census found two
+  real ones, both latent because their tables are writerless: `REPORT_ENGINES` is
+  `["postgres","clickhouse","auto"]` and `BaseReportSchema` **defaults to `"auto"`**, a value
+  `meta.report_runs.engine`'s CHECK refuses; and `DIGEST_FREQUENCIES` has six members against
+  `meta.notification_digests.frequency`'s four. A static rule needs the link **declared** per column
+  rather than derived, measured: 258 of 287 value sets match a workspace `as const` array exactly,
+  **17** match more than one, and two of the five superset candidates are *deliberate* narrowings
+  (`gateway_idempotency_records.method` is mutating methods only; a digest row cannot carry
+  `immediate` or `never`) indistinguishable from a stale one without one. **(2)** a widening can now
+  be **proved** safe, so `planSchemaReconciliation` could plan it instead of reporting
+  `constraint_needs_validation` — ADR-0330's open end closed rather than merely measured. It needs
+  the proof re-checked inside the statement's own transaction (`replace_column_check`'s `DO`-block
+  pattern) and must refuse on a confined session. **(3)** `meta.job_runs.status` is reported and not
+  refused, and whether that is right depends on `--workflow-workers` being mounted — which `node.ts`
+  knows and the survey does not; a second `admissionBlocks` caller there would close it, and the
+  question applies to every surface writing a value-set column. **(4)** 11 strict `> N` bounds and
+  213 patterns yield no candidate and read `not_probeable` with `diffColumnChecks` named as their
+  cover; a generator for an integer `> N` would close the first group cheaply. **(5)**
+  `sessionWouldBeConfined` converged **two of eight** call sites — the other six infer confinement
+  from ownership without reading `relforcerowsecurity`, which is mechanical and latent until
+  something sets that flag. **(6)** the headline count does not separate a proof from a probe, so
+  `540 admitted` reads stronger than it is for the 253 range checks. **(7)** `admissionRemedy` reuses
+  the live constraint name in its `ADD`, which is right for SQL an operator pastes and perpetuates a
+  hand-rename outside Postgres's naming family; `column-check.ts` solves name prediction for the
+  reconciler and this deliberately does not use it.
 
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
@@ -4617,7 +4726,8 @@ opened them.
 - **A column-level `check` expression is compared now** (ADR-0330), which closes ADR-0329's hole and
   removes the two table-level workarounds it needed. The naming ambiguity that made it look like a
   parser problem is answered by `pg_constraint.conkey` on the probe's own row — Postgres's own parser,
-  asked rather than imitated. What it leaves: **+765 probes on every `apply` and drift check**
+  asked rather than imitated. What it leaves: **one probe per declared column check on every
+  `apply` and drift check** (777 as of ADR-0352)
   (~850 ms, flat in row count, not cacheable across runs); `conkey` cannot express a whole-row `Var`,
   so `CHECK (t IS NOT NULL)` reads as an empty column set and gets the right spelling for the wrong
   reason (nothing in the catalog has one); an unrenderable declared expression marks the pass
@@ -4644,7 +4754,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 346 records; 267 Accepted, 79 Proposed (the
+title or status change cannot drift. 347 records; 268 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

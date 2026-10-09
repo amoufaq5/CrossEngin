@@ -11,7 +11,16 @@ import {
   surveyRoutePolicies,
 } from "@crossengin/api-gateway-pg";
 import { StripeClient } from "@crossengin/billing-stripe";
-import { createNodePgConnection, parsePgEnvConfig } from "@crossengin/kernel-pg";
+import {
+  admissionBlocks,
+  admissionRemedy,
+  createNodePgConnection,
+  formatCheckAdmissionSurvey,
+  parsePgEnvConfig,
+  surveyCheckAdmission,
+  type CheckAdmissionSurvey,
+} from "@crossengin/kernel-pg";
+import { META_TABLES } from "@crossengin/kernel/bootstrap";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import {
   InMemoryEntityStore,
@@ -128,11 +137,6 @@ import {
   formatEnvelopeTenantReadiness,
   surveyEnvelopeTenantReadiness,
 } from "./envelope-tenant-readiness.js";
-import {
-  formatProofVersionCheck,
-  probeProofVersionCheck,
-  proofVersionCheckBlocksDeletion,
-} from "./proof-version-probe.js";
 import {
   TENANT_WRITE_STATUS_DETAIL,
   probeTenantWriteStatus,
@@ -1218,31 +1222,62 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       JSON.parse(await readFile(options.deletionCapabilities, "utf8")) as unknown,
     );
   }
-  // ADR-0351. Whether this database will accept the proof version this binary emits, asked once at
-  // boot rather than by the `INSERT` at the end of a deletion pipeline.
+  // ADR-0352. Whether this database admits the values the catalog declares — every catalogued CHECK
+  // rather than the one column ADR-0351 probed, which was never special.
   //
-  // Gated on `deletionCapabilities` and **not** on a list of the flags that mount a deletion
-  // surface: ADR-0328 made that declaration required by both of them, so it is the one derived
-  // condition that cannot fall behind the flags — which is the whole of ADR-0288's lesson, found
-  // wrong three times as a hand-maintained list.
-  if (deletionCapabilities !== null && conn !== undefined) {
-    // Resolved once, and resolved the way `PostgresTombstoneStore` resolves it (`opts.schema ??
-    // "meta"`), so the probe cannot ask about a different relation from the one the `INSERT` will
-    // name. A second spelling of a default is this repo's recurring defect, and here the two
-    // spellings would disagree silently.
-    const tombstoneSchema = options.schema ?? "meta";
-    const probe = await probeProofVersionCheck(conn, tombstoneSchema);
-    const line = `[deletion] ${formatProofVersionCheck(probe, tombstoneSchema)}`;
-    if (proofVersionCheckBlocksDeletion(probe.state)) {
+  // It runs **unconditionally under a Postgres store** rather than behind a flag: ADR-0330 means
+  // every enum value the catalog has ever added is refused `23514` on an existing deployment until
+  // an operator runs an `ALTER` by hand, and that is a fact about the deployment whether or not any
+  // surface is mounted to meet it. A flag would let a deployment turn the census off and still be
+  // refused at the first write.
+  //
+  // It **reports and never refuses**, which is the departure from ADR-0351's probe and the reason
+  // that probe is gone rather than kept: the survey cannot know which values a surface emits, so
+  // refusing for a column nothing writes would refuse a deployment that works (ADR-0334's reason
+  // `--tenant-status-gate` is opt-in). A surface that knows its own write is load-bearing names its
+  // column through `admissionBlocks`, next to the code that needs it, which is the derived condition
+  // a hand-maintained list of fatal columns would be.
+  // Resolved **once**, and the way `PostgresTombstoneStore` resolves it (`opts.schema ?? "meta"`),
+  // so the survey cannot ask about a different relation from the one a store's `INSERT` will name.
+  // A second spelling of a default is this repo's recurring defect, and here the two would disagree
+  // silently — which is why this sits outside both blocks that want it.
+  const metaSchema = options.schema ?? "meta";
+  let admission: CheckAdmissionSurvey | null = null;
+  if (conn !== undefined) {
+    try {
+      admission = await surveyCheckAdmission(conn, { schema: metaSchema, tables: META_TABLES });
+      const line = `[catalog] ${formatCheckAdmissionSurvey(admission)}`;
+      if (admission.refusing.length > 0 || !admission.complete) console.warn(line);
+      else console.info(line);
+    } catch (err) {
+      // Swallowed, for `censusBootSchemaTables`' reason: a failed read establishes nothing, and the
+      // thing this survey exists to replace was a write failing at request time — which still
+      // fails, loudly, if the census could not run.
+      console.warn(
+        `[catalog] catalog admission: unreadable — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  // ADR-0351's refusal, re-expressed over the general survey. The deletion pipeline writes
+  // `proof_version` on every Article 17 erasure and the refusal lands *inside* its transaction,
+  // after the tenant's data is gone — so this is the one column whose refusal is known fatal, and it
+  // names itself here rather than the survey carrying a list.
+  if (deletionCapabilities !== null && admission !== null) {
+    const blocking = admissionBlocks(admission, [
+      { table: `${metaSchema}.tenant_tombstones`, column: "proof_version" },
+    ]);
+    for (const finding of blocking) {
+      const remedy = `\n${admissionRemedy(metaSchema, finding)}`;
       // Refused rather than mounted-loudly, which is where this departs from
       // `decision-schema-probe.ts`: that probe guards a *projection* of an enforcement that happens
       // either way, and here there is no degraded behaviour to protect. A deletion that cannot store
       // its proof does not happen, so the only question is whether the operator learns it now or
       // from a request stranded under an Article 12(3) deadline.
-      throw new Error(line);
+      throw new Error(
+        `[deletion] ${finding.detail} — the Article 17 pipeline writes this column inside the` +
+          ` transaction that erases the tenant, so the refusal lands after the data is gone${remedy}`,
+      );
     }
-    if (probe.state === "admits") console.info(line);
-    else console.warn(line);
   }
   // `--read-state-routes` is in this list because it needs the notice source and the recipient
   // resolver, and nothing else here. Left out, it mounted nothing and warned that it "requires a

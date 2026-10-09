@@ -8,9 +8,14 @@ import {
   FOREIGN_KEY_QUERY,
   INDEX_QUERY,
   POLICY_QUERY,
+  SESSION_POLICY_VISIBILITY_COLUMNS,
+  SESSION_POLICY_VISIBILITY_QUERY,
   TABLE_QUERY,
   introspectSchema,
   parseLiveSchema,
+  parseSessionPolicyVisibility,
+  probeSessionPolicyVisibility,
+  sessionWouldBeConfined,
   type CheckConstraintRow,
   type ColumnRow,
   type ForeignKeyRow,
@@ -18,8 +23,24 @@ import {
   type LiveForeignKey,
   type LivePolicy,
   type PolicyRow,
+  type SessionPolicyVisibility,
   type TableRow,
 } from "./introspection.js";
+
+/** One-shot connection answering a queued result, for the single-statement probes below. */
+function fakeConn(results: readonly { rows: readonly unknown[]; rowCount: number }[]): PgConnection {
+  const queue = [...results];
+  return {
+    query: vi.fn(async <T,>(): Promise<PgQueryResult<T>> => {
+      const next = queue.shift();
+      if (next === undefined) throw new Error("fake asked for a result it was not given");
+      return { rows: next.rows as readonly T[], rowCount: next.rowCount };
+    }) as PgConnection["query"],
+    transaction: async <T,>(fn: (tx: PgConnection) => Promise<T>): Promise<T> => fn(fakeConn([])),
+    withAdvisoryLock: async <T,>(_k: bigint, fn: () => Promise<T>): Promise<T> => fn(),
+    close: async (): Promise<void> => undefined,
+  };
+}
 
 describe("query constants", () => {
   it("declare a parameterized schema filter", () => {
@@ -427,5 +448,140 @@ describe("parseLiveSchema — check constraints", () => {
   it("defaults to no checks when the caller does not pass them, so older callers still parse", () => {
     const live = parseLiveSchema("meta", tables, [], [], []);
     expect(live.tables[0]?.checkConstraints).toEqual([]);
+  });
+});
+
+describe("sessionWouldBeConfined", () => {
+  const facts = (over: Partial<SessionPolicyVisibility> = {}): SessionPolicyVisibility => ({
+    role: "r",
+    rlsEnabled: false,
+    rlsForced: false,
+    isOwner: false,
+    bypassesRls: false,
+    ...over,
+  });
+
+  it("is false whenever row-level security is off, whatever else holds", () => {
+    // RLS off is the only input that settles it on its own: no policy can hide a row.
+    for (const rlsForced of [false, true]) {
+      for (const isOwner of [false, true]) {
+        for (const bypassesRls of [false, true]) {
+          expect(
+            sessionWouldBeConfined(facts({ rlsEnabled: false, rlsForced, isOwner, bypassesRls })),
+          ).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("pins the whole truth table with RLS on, so the rule cannot drift unnoticed", () => {
+    // Exhaustive rather than sampled, because this rule's failure mode is invisible: a session
+    // wrongly called unconfined counts 0 rows, which is byte-identical to an empty table. Eight
+    // combinations, written out.
+    const table: readonly [boolean, boolean, boolean, boolean][] = [
+      // rlsForced, isOwner, bypassesRls, confined
+      [false, false, false, true],
+      [false, false, true, false],
+      [false, true, false, false],
+      [false, true, true, false],
+      [true, false, false, true],
+      [true, false, true, false],
+      // FORCE ROW LEVEL SECURITY confines the owner too — the one row an ownership-only rule gets
+      // wrong, and it gets it wrong in the permissive direction.
+      [true, true, false, true],
+      [true, true, true, false],
+    ];
+    for (const [rlsForced, isOwner, bypassesRls, confined] of table) {
+      expect(
+        sessionWouldBeConfined(facts({ rlsEnabled: true, rlsForced, isOwner, bypassesRls })),
+        `rlsForced=${rlsForced} isOwner=${isOwner} bypassesRls=${bypassesRls}`,
+      ).toBe(confined);
+    }
+  });
+
+  it("differs from an ownership-only rule on exactly one input", () => {
+    // The reason the rule was worth extracting: seven of the eight rows agree with "owner or
+    // bypasser is unconfined", and the eighth is the one every other copy in the workspace gets
+    // wrong. Derived rather than restated, so it cannot pass by agreeing with itself.
+    const ownershipOnly = (v: SessionPolicyVisibility) =>
+      v.rlsEnabled && !(v.isOwner || v.bypassesRls);
+    const disagreements: string[] = [];
+    for (const rlsForced of [false, true]) {
+      for (const isOwner of [false, true]) {
+        for (const bypassesRls of [false, true]) {
+          const v = facts({ rlsEnabled: true, rlsForced, isOwner, bypassesRls });
+          if (sessionWouldBeConfined(v) !== ownershipOnly(v)) {
+            disagreements.push(`forced=${rlsForced} owner=${isOwner} bypass=${bypassesRls}`);
+          }
+        }
+      }
+    }
+    expect(disagreements).toEqual(["forced=true owner=true bypass=false"]);
+  });
+});
+
+describe("parseSessionPolicyVisibility", () => {
+  it("reads only strict `true` as true, so an absent or odd value is not permissive", () => {
+    expect(
+      parseSessionPolicyVisibility({
+        role: "serving",
+        rls_enabled: true,
+        rls_forced: "f",
+        is_owner: null,
+        bypasses_rls: undefined,
+      }),
+    ).toEqual({
+      role: "serving",
+      rlsEnabled: true,
+      rlsForced: false,
+      isOwner: false,
+      bypassesRls: false,
+    });
+  });
+
+  it("stringifies the role rather than asserting it", () => {
+    expect(
+      parseSessionPolicyVisibility({
+        role: 42,
+        rls_enabled: false,
+        rls_forced: false,
+        is_owner: false,
+        bypasses_rls: false,
+      }).role,
+    ).toBe("42");
+  });
+});
+
+describe("SESSION_POLICY_VISIBILITY_QUERY", () => {
+  it("binds the schema and the table, and reads the four catalog flags", () => {
+    expect(SESSION_POLICY_VISIBILITY_QUERY).toContain("n.nspname = $1 AND c.relname = $2");
+    for (const column of ["rolbypassrls", "pg_get_userbyid", "relrowsecurity", "relforcerowsecurity"]) {
+      expect(SESSION_POLICY_VISIBILITY_QUERY).toContain(column);
+    }
+  });
+
+  it("shares its select list, so a caller wanting extras asks in one round trip", () => {
+    // `KeyRotationMigrator.commonRefusals` wants `has_scope_column` beside these, and its comment
+    // says why one statement matters. The columns are shared; the query is not.
+    expect(SESSION_POLICY_VISIBILITY_QUERY).toContain(SESSION_POLICY_VISIBILITY_COLUMNS);
+  });
+
+  it("answers null for a relation that is not there", async () => {
+    const conn = fakeConn([{ rows: [], rowCount: 0 }]);
+    await expect(probeSessionPolicyVisibility(conn, "meta", "nope")).resolves.toBeNull();
+  });
+
+  it("parses the row it gets back", async () => {
+    const conn = fakeConn([
+      {
+        rows: [
+          { role: "serving", rls_enabled: true, rls_forced: false, is_owner: false, bypasses_rls: false },
+        ],
+        rowCount: 1,
+      },
+    ]);
+    const v = await probeSessionPolicyVisibility(conn, "meta", "t");
+    expect(v?.role).toBe("serving");
+    expect(sessionWouldBeConfined(v as SessionPolicyVisibility)).toBe(true);
   });
 });

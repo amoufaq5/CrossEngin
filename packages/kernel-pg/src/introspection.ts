@@ -81,6 +81,95 @@ export interface LiveCheckConstraint {
   readonly columns: readonly string[];
 }
 
+/**
+ * Whether this session's reads of one table are confined by its policies — the five catalog facts
+ * that decide it, and the rule over them.
+ *
+ * It is extracted because the **rule** had eight spellings in this workspace and the one that got it
+ * right was private: `KeyRotationMigrator.commonRefusals` is the only copy that reads
+ * `relforcerowsecurity`, which is the single input that overrides ownership, and it reasons the case
+ * out in place. Every other copy infers confinement from ownership alone and would let a
+ * `FORCE ROW LEVEL SECURITY` owner through. Nothing in the catalog sets that flag today, so the
+ * divergence is latent rather than live — which is exactly when it is cheap to converge.
+ *
+ * The *query* is deliberately **not** shared, only the rule. Each call site asks the catalog for its
+ * own extras in one statement (`commonRefusals` wants the scope column in the same round trip, and
+ * its comment says why), so a shared query would either carry every caller's columns or cost a
+ * second statement. What must have one definition is the boolean, because getting it wrong is
+ * invisible: a confined session's `0 rows` is byte-identical to an empty table.
+ */
+export interface SessionPolicyVisibility {
+  readonly role: string;
+  /** `relrowsecurity`. */
+  readonly rlsEnabled: boolean;
+  /** `relforcerowsecurity`, which confines the table's owner too. */
+  readonly rlsForced: boolean;
+  readonly isOwner: boolean;
+  /** `rolbypassrls` on the session role. */
+  readonly bypassesRls: boolean;
+}
+
+/** The select list the probe below reads, exposed so a caller wanting extras asks once. */
+export const SESSION_POLICY_VISIBILITY_COLUMNS = `
+         current_user AS role,
+         COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false) AS bypasses_rls,
+         pg_catalog.pg_get_userbyid(c.relowner) = current_user AS is_owner,
+         c.relrowsecurity AS rls_enabled,
+         c.relforcerowsecurity AS rls_forced`;
+
+export const SESSION_POLICY_VISIBILITY_QUERY = `
+  SELECT ${SESSION_POLICY_VISIBILITY_COLUMNS}
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = $1 AND c.relname = $2
+`;
+
+export interface SessionPolicyVisibilityRow {
+  readonly role: unknown;
+  readonly bypasses_rls: unknown;
+  readonly is_owner: unknown;
+  readonly rls_enabled: unknown;
+  readonly rls_forced: unknown;
+}
+
+export function parseSessionPolicyVisibility(
+  row: SessionPolicyVisibilityRow,
+): SessionPolicyVisibility {
+  return {
+    role: String(row.role),
+    rlsEnabled: row.rls_enabled === true,
+    rlsForced: row.rls_forced === true,
+    isOwner: row.is_owner === true,
+    bypassesRls: row.bypasses_rls === true,
+  };
+}
+
+/**
+ * Whether the session's policies would hide rows from it.
+ *
+ * `rlsForced` is read *instead of* ownership rather than beside it: `FORCE ROW LEVEL SECURITY`
+ * confines the owner, so an ownership arm that ignored it would answer "not confined" for precisely
+ * the session the flag exists to confine — the permissive direction, and the one a count of zero
+ * cannot distinguish from an empty table.
+ */
+export function sessionWouldBeConfined(v: SessionPolicyVisibility): boolean {
+  const bypassesPolicies = v.rlsForced ? v.bypassesRls : v.isOwner || v.bypassesRls;
+  return v.rlsEnabled && !bypassesPolicies;
+}
+
+export async function probeSessionPolicyVisibility(
+  conn: PgConnection,
+  schema: string,
+  table: string,
+): Promise<SessionPolicyVisibility | null> {
+  const result = await conn.query<SessionPolicyVisibilityRow>(SESSION_POLICY_VISIBILITY_QUERY, [
+    schema,
+    table,
+  ]);
+  const row = result.rows[0];
+  return row === undefined ? null : parseSessionPolicyVisibility(row);
+}
+
 export interface LivePolicy {
   readonly name: string;
   readonly using: string | null;

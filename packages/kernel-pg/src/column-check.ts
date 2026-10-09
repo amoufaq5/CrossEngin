@@ -5,7 +5,12 @@ import { expressionKey, type RenderedExpressions } from "./expression-render.js"
 import type { LiveCheckConstraint, LiveTable } from "./introspection.js";
 
 /**
- * A `CHECK` declared on a `ColumnDefinition`, which the catalog has 761 of and nothing compared.
+ * A `CHECK` declared on a `ColumnDefinition`, which nothing compared before ADR-0330.
+ *
+ * The catalog emits 777 of them as of ADR-0352, and the figure moves every time a table lands — so
+ * count the objects rather than reading this sentence, and note that a source-text `grep` for
+ * `check: "…"` undercounts badly: Prettier wraps a long declaration onto the line after `check:`,
+ * and `check?: string` is a field on `RlsPolicy` too.
  *
  * The difficulty is entirely in the name. A table-level check declares one, so ADR-0299 matches it
  * directly; a column-level one is named by Postgres, and *which* name it picks depends on the

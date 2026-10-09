@@ -6,6 +6,11 @@ import {
   pgpSymEncryptExpr,
   type EncryptedColumn,
 } from "./encryption.js";
+import {
+  parseSessionPolicyVisibility,
+  sessionWouldBeConfined,
+  type SessionPolicyVisibilityRow,
+} from "./introspection.js";
 
 const IDENT_RE = /^[a-z_][a-z0-9_]*$/i;
 
@@ -404,12 +409,14 @@ export interface TenantRotationOutcome {
   readonly rowsConfirmed: number;
 }
 
-interface RotationVisibilityRow {
-  readonly role: unknown;
-  readonly bypasses_rls: unknown;
-  readonly is_owner: unknown;
-  readonly rls_enabled: unknown;
-  readonly rls_forced: unknown;
+/**
+ * The shared five facts plus the one extra this call site wants in the same round trip.
+ *
+ * `has_scope_column` is why the *query* is still local: it belongs in this statement, not in a
+ * shared one every caller would then carry. The confinement *rule* is `sessionWouldBeConfined`,
+ * which this module's own reasoning is the source of — see `SessionPolicyVisibility`.
+ */
+interface RotationVisibilityRow extends SessionPolicyVisibilityRow {
   readonly has_scope_column: unknown;
 }
 
@@ -787,16 +794,17 @@ export class KeyRotationMigrator {
     // probe is that a confined session's zero is indistinguishable from an empty tenant, and
     // reading ownership while ignoring the one flag that overrides ownership would let exactly that
     // session through.
-    const bypassesPolicies =
-      row.rls_forced === true
-        ? row.bypasses_rls === true
-        : row.is_owner === true || row.bypasses_rls === true;
-    if (row.rls_enabled === true && !bypassesPolicies) {
+    //
+    // The rule lives in `sessionWouldBeConfined` since the admission survey needed the same one,
+    // and it was the only correct copy of eight. Only the rule moved: the query above stays here,
+    // because `has_scope_column` belongs in this round trip.
+    const visibility = parseSessionPolicyVisibility(row);
+    if (sessionWouldBeConfined(visibility)) {
       refusals.push({
         reason: "rls_would_confine_this_session",
         detail:
-          `row-level security confines '${String(row.role)}' on ${schema}.${table}` +
-          (row.rls_forced === true ? " (FORCE ROW LEVEL SECURITY, which confines the owner too)" : "") +
+          `row-level security confines '${visibility.role}' on ${schema}.${table}` +
+          (visibility.rlsForced ? " (FORCE ROW LEVEL SECURITY, which confines the owner too)" : "") +
           "; a session with no tenant context, or another tenant's, counts 0 rows — which is " +
           "byte-identical to \"this tenant holds no ciphertext\" — and a session confined to " +
           "exactly this tenant would rotate correctly but cannot be told apart from the first one " +
