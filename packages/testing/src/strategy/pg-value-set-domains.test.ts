@@ -60,6 +60,7 @@ function domain(over: Partial<WorkspaceDomain> = {}): WorkspaceDomain {
     file: "packages/widgets/src/widgets.ts",
     line: 3,
     members: ["open", "closed"],
+    typedBy: null,
     ...over,
   };
 }
@@ -264,6 +265,7 @@ describe("collectWorkspaceDomains", () => {
         file: "packages/widgets/src/a.ts",
         line: 1,
         members: ["open", "closed"],
+        typedBy: null,
       },
     ]);
   });
@@ -333,6 +335,7 @@ describe("collectWorkspaceDomains", () => {
         file: "packages/widgets/src/a.ts",
         line: 1,
         members: ["timeout", "cancelled"],
+        typedBy: null,
       },
     ]);
   });
@@ -353,6 +356,49 @@ describe("collectWorkspaceDomains", () => {
       "postgres",
       "clickhouse",
     ]);
+  });
+
+  it("records which constant a reference names, and nothing for an inline list", () => {
+    // `typedBy` is what lets the two legal spellings of one domain compare equal (ADR-0354): a
+    // declaration may ref the constant or the field, and the binding audit derives whichever the
+    // writer's own schema happens to use. An inline list has nothing else to name.
+    const { domains } = collectWorkspaceDomains([
+      source(
+        "packages/widgets/src/a.ts",
+        `export const KINDS = ["a", "b"] as const;\n` +
+          `export const WidgetSchema = z.object({\n` +
+          `  kind: z.enum(KINDS),\n` +
+          `  engine: z.enum(["postgres"]),\n` +
+          `});`,
+      ),
+    ]);
+    expect(domains.find((d) => d.name === "WidgetSchema.kind")?.typedBy).toBe(
+      "@crossengin/widgets:KINDS",
+    );
+    expect(domains.find((d) => d.name === "WidgetSchema.engine")?.typedBy).toBeNull();
+    expect(domains.find((d) => d.name === "KINDS")?.typedBy).toBeNull();
+  });
+
+  it("records an alias's target, so a deliberate re-export is not a second spelling", () => {
+    // ADR-0334 made `operate-server` re-export the tenant lifecycle enum rather than restate it.
+    // Without the alias recorded, the two names compare unequal and that re-export reads as the
+    // defect it was written to avoid.
+    const { domains } = collectWorkspaceDomains([
+      source(
+        "packages/lifecycle/src/a.ts",
+        `export const TENANT_LIFECYCLE_STATES = ["active", "deleted"] as const;`,
+        "@crossengin/tenant-lifecycle",
+      ),
+      source(
+        "apps/operate-server/src/b.ts",
+        `import { TENANT_LIFECYCLE_STATES } from "@crossengin/tenant-lifecycle";\n` +
+          `export const TENANT_STATUSES = TENANT_LIFECYCLE_STATES;`,
+        "@crossengin/operate-server",
+      ),
+    ]);
+    const alias = domains.find((d) => d.name === "TENANT_STATUSES");
+    expect(alias?.members).toEqual(["active", "deleted"]);
+    expect(alias?.typedBy).toBe("@crossengin/tenant-lifecycle:TENANT_LIFECYCLE_STATES");
   });
 
   it("resolves a module-private constant for a field without offering it as a ref", () => {

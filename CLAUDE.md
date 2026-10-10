@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 348 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 349 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~18,190 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~18,250 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -656,6 +656,47 @@ type errors.
   directions, with the exception surface a measured six — 1 `narrows` carrying the symbol that
   enforces it, 5 `catalog_only`, every one a table already declared writerless for an independent
   reason.
+
+  ADR-0354 closes ADR-0353's Q1 and the class is **a declaration adjudicated by reading, and a
+  writer that reads differently**. `mirrors` compares *members*, so two constants spelling one
+  domain are interchangeable to it, and a declaration naming the wrong one passes — ADR-0353 had
+  the live evidence (`meta.deployments.environment` exactly equalled `@crossengin/feature-flags`'
+  enum while the record emits `@crossengin/deploy`'s) and refused exact set equality as *unsound
+  rather than imprecise* for that reason, then closed no loop. **And it declared the premise
+  wrong**: the parameter-to-field link is *not* invisible to a scan, and measuring it is most of the
+  increment. `pg-column-bindings.ts` derives, per catalogued value-set column, the **symbol** the
+  SQL binds into it: column *i* ↔ `VALUES` expression *i*, `$n` → `params[n-1]`, and the receiver's
+  type → the domain over the four idioms this repo uses to type an enum field. Three plausible
+  readings are refused on measurement: a **zip** of the column list against the parameter array
+  (`platform-users.ts` writes `VALUES ($4::uuid, $1, $2, $3, 'active')` — column order is not
+  parameter order and `status` comes from a literal, so 28 of 73 inserts misalign *silently*); "the
+  **next** query call" for the parameter array (`tx.query(\`INSERT …\`, […])` opens *before* its own
+  statement, so 56 positions resolved against another method's array — it is the **enclosing** call,
+  or the next one that passes the `const` the SQL was assigned to); and position past a **spread**,
+  which shifts everything downstream and nothing upstream, so the split is exact and without it
+  `access_review_evidence.status` resolved to `evidence.acceptedAt`.
+  The load-bearing decision is that **name resolution is the same four steps on both sides** — same
+  file, same package, the package the file imports it from, workspace-unique — because **five of the
+  first six "contradictions" were the measurement's own fault**: four an imported constant
+  attributed to the importing package, and one a bare-name map holding whichever `SeveritySchema`
+  was scanned last, `incident-response`'s sev1–sev5 against `observability`'s P0–P3, which would
+  have made the most alarming finding of the run an artefact.
+  One finding survived and it is the open end's exact predicate: `apps/operate-server` spelled one
+  two-member domain twice — `MANIFEST_PROPOSAL_SOURCES`, **module-private** in the module that owns
+  the table, and `AI_MANIFEST_SOURCES`, exported elsewhere — the writer binds the private one, and a
+  ref can only name what a package exports, so the declaration named the other and equal members let
+  it pass. Reported as `binding_domain_unexported` rather than a contradiction, and firing *instead*
+  of it, on ADR-0334's rule: while the bound constant is private no declaration can be right, so
+  "re-adjudicate the declaration" is a remedy that does not exist. Converged, both pairs (the
+  statuses were the same duplication one column across), and `AiManifestRecordLike` stays a
+  structural seam because **a value set is not a structure**. Three checks need no declaration at
+  all — a SQL literal against its CHECK (23, all admitted), an inline literal union as a **subset**
+  (one write path need not cover the domain: `job-engine.ts` binds `"failed" | "dead-lettered"` into
+  a six-member column and is right to), and a `string`-typed field as `unconstrained` (4, all on
+  `meta.notification_dispatches`, declared with their consequence). **66 of 287** columns are checked
+  against the symbol their writer binds (83 bindings, since a column written twice is checked twice),
+  and **164 of 287 sit on tables already declared writerless**, which is the bound and is asserted in
+  both directions.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -3043,7 +3084,7 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **six** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **seven** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -3172,6 +3213,34 @@ so `meta.files.data_class` has no nameable domain) and reaches **1,363 domains o
 zero unresolved**. **29 of the 287** declarations ref a schema field; the rest ref a constant.
 `auditColumnDefaults` is the one question here needing no declaration — a column's
 `default` against its own `check`, 0 findings today.
+The seventh is `pg-column-bindings.ts` (ADR-0354), which asks whether a declaration names the domain
+the store actually **binds**: the sixth rule compares *members*, so two constants spelling one domain
+are interchangeable to it and a wrong adjudication passes. It derives the symbol instead — column *i*
+↔ `VALUES` expression *i*, `$n` → `params[n-1]` out of the **enclosing** `query(…)` call (or the next
+one passing the `const` the SQL was assigned to), then the receiver's type → the domain over the four
+idioms this repo uses to type an enum field, with `type X = z.infer<typeof XSchema>` as a hop. The
+`field: z.enum(…)` form is answered from `collectWorkspaceDomains`' own output rather than re-parsed,
+so there is **one reader** of that declaration, and `WorkspaceDomain.typedBy` is what makes the two
+legal spellings of a domain (`CONST` and `XSchema.field`) and a deliberate re-export alias
+(ADR-0334's `TENANT_STATUSES`) compare equal. Three readings are refused on measurement and each
+produced a *confident wrong answer* first: a zip of the column list against the parameter array
+(28 of 73 inserts misalign — `platform-users.ts` writes `VALUES ($4::uuid, $1, $2, $3, 'active')`),
+"the next query call" for the parameter array (56 positions resolved against another method's), and
+a position past a **spread**, which refuses everything at or after it and nothing before. **Name
+resolution is the same four steps on both sides**, because five of the first six "contradictions"
+were the resolver's own — an imported constant attributed to the importing package, and a bare-name
+map holding whichever `SeveritySchema` was scanned last. Findings: `ref_contradicts_binding`,
+`binding_domain_unexported` (which fires *instead* of it when the bound constant is module-private,
+on ADR-0334's rule that a remedy which cannot work is worse than none), plus three needing **no
+declaration** — a SQL literal against its CHECK, an inline literal union as a **subset**, and a
+`string`-typed field as `unconstrained`. `BINDING_GAPS` (28, at `PG_SCAN_GAPS`' `(file, table, kind)`
+grain) and `UNCONSTRAINED_BINDINGS` (4) are compared both ways, and the floor is on the **checked**
+side for `pg-unreachable-stores.ts`' reason. 164 columns are unreachable because their table
+is declared writerless — asserted both ways, so this rule's silence there is the fifth rule's finding
+and not a second one. 66 of 287 columns checked, 83 bindings confirmed. Its type index and the sixth
+rule's domain scan are **cross-checked rather than shared**: they answer different questions about one declaration (its members, and which symbol it
+names), so for every `schema_field` with a nameable `typedBy` the target is asserted to resolve to
+the same member set — 400+ comparisons.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
@@ -3267,6 +3336,13 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   schema emits has well-formed SQL, existing columns and a complete `INSERT` — `META_DEPLOYMENTS` was
   in exactly that state on four columns, and the kernel test over one of them asserted three values
   the contract has never had.
+  **And a declaration naming a domain the writer does not bind is a failure too**
+  (`pg-column-bindings.ts`, ADR-0354), which is the same blindness read a *fourth* way and one level
+  past the third: a fake connection cannot see which **symbol** a parameter carries, so a declaration
+  naming a coincidentally-equal domain passes every rule above it — the SQL is well-formed, the
+  columns exist, the `INSERT` is complete and the member sets match. The one live member was a
+  module-private constant typing the schema the writer binds, which made the exported second spelling
+  beside it the only thing a ref could name.
   **ADR-0335 found two more members and they are the sharpest yet**: a write that sets no tenant
   context. `PostgresLifecycleEventStore` and `PostgresDeletionRequestStore` both issued correct SQL
   that no non-owner database would ever accept — on both tables the isolation policy is the only arm
@@ -3608,10 +3684,10 @@ opened them.
   `crossengin-pg apply` plans and executes all four as `replace_column_check [guarded]` with the
   re-plan clean — **no manual SQL**, because a CHECK refusing everything its only writer emits cannot
   have let a row in, so ADR-0330's emptiness guard always holds.
-  What remains, in order: **(1)** nothing checks that a ref names the domain the store actually
-  **binds**. The 19 ambiguous columns were adjudicated by reading which record each table stores, and
-  a wrong adjudication that happens to enumerate the same set passes — the same wall
-  `pg-column-coverage.ts` stops at, since the parameter-to-field link is invisible to a scan. **(2)**
+  What remains, in order: **(1)** ~~nothing checks that a ref names the domain the store actually
+  **binds**~~ — **closed by ADR-0354**, which also found the stated reason wrong: the
+  parameter-to-field link is **not** invisible to a scan, and reading it is what the whole increment
+  turned on. See the next entry. **(2)**
   **five spellings of one six-member data classification** (`DATA_CLASSES` in `dr`, `jobs` and
   `ml-training`, `DATA_CLASSIFICATIONS` in `types` and `data-lineage`) and three of one four-member
   environment (`deploy`, `feature-flags`, `finops`, the last with five). ADR-0340 found seven
@@ -3627,6 +3703,38 @@ opened them.
   **(6)** `packages/deploy` still has zero importers (ADR-0336), so `meta.deployments` is writerless
   and this fix is latent; which of that package's two flag models is real is still the product
   decision ADR-0336 declined.
+- **A declaration is checked against the symbol its writer binds, and what is left of it** (ADR-0354
+  closed ADR-0353's Q1). The class is **a declaration adjudicated by reading, and a writer that
+  reads differently**: `mirrors` compares members, so two constants spelling one domain are
+  interchangeable to it. `pg-column-bindings.ts` derives the symbol — `VALUES`-positional, `$n` →
+  `params[n-1]` out of the enclosing `query(…)` call, the receiver's type → the domain over four
+  idioms — and compares it, canonicalising `XSchema.field` and a re-export alias so the two legal
+  spellings agree. **66 of 287** columns checked (83 bindings), **164** unreachable because their
+  table has no writer.
+  The one finding: `MANIFEST_PROPOSAL_SOURCES` was module-private in the module that owns the table
+  while `AI_MANIFEST_SOURCES` was exported elsewhere, so the writer bound one and the declaration
+  could only name the other. Converged, both pairs. Verified live as a non-owner on PG 16.13: both
+  values written through the real `PostgresTenantManifestStore`, read back in tenant context, a third
+  refused `23514 operate_tenant_manifests_source_check`, the boot survey reporting
+  `catalog admission: admits — 540 admitted, 0 refusing`, and `GET /v1/ai/manifests` returning 200
+  with both `source` values through the real route.
+  What remains, in order: **(1)** **15 bindings whose receiver the module annotates nowhere**
+  (`p.status` in an arrow, `att.kind` from a destructure) are unresolvable without local inference,
+  which is the compiler-API option ADR-0337 measured and refused, now for the second time.
+  **(2)** the comparison is against the **symbol** and nothing compares it against the parameter
+  *position*: a store writing `record.kind` into the `status` column passes this rule and
+  `pg-column-coverage.ts` both. Column-to-property name agreement is measurable and legitimately
+  violated often enough (`tenant_id` ← `scope`, `created_by` ← `actor`) that the threshold needs
+  deciding before it can be a rule. **(3)** each of the 164 unreachable columns becomes checkable the
+  moment a store lands and nothing says so at the time — the inverse of `table_declared_storeless`.
+  **(4)** `UNCONSTRAINED_BINDINGS` describes a real weakness and the rule only reports it: typing
+  `DispatchInput`'s four `string` fields against `@crossengin/notifications` is the fix, and it is a
+  decision about whether `apps/operate-server`'s own persistence shape may depend on that contract.
+  **(5)** `collectStoreTypes` and `collectWorkspaceDomains` both walk every source; one
+  `workspace-symbol-index.ts`, as `workspace-sql-scan.ts` is for SQL, would halve that and remove the
+  need for the cross-check. **(6)** a `DO UPDATE SET` assignment that is neither `$n` nor
+  `EXCLUDED.col` — `status = CASE WHEN …` in `digest-store.ts` — is a value the *database* decides
+  from the row, a third provenance beside a parameter and a literal, reported as neither.
 
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
@@ -4870,7 +4978,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 348 records; 269 Accepted, 79 Proposed (the
+title or status change cannot drift. 349 records; 270 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

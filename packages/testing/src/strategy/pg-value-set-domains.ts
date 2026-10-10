@@ -172,6 +172,21 @@ export const WorkspaceDomainSchema = z.object({
   file: z.string().min(1),
   line: z.number().int().positive(),
   members: z.array(z.string()).min(1),
+  /**
+   * The ref of the constant this domain is a *reference* to, where it is one — so
+   * `ReportRunRecordSchema.engine` typed `z.enum(REPORT_ENGINES)` carries
+   * `@crossengin/reporting:REPORT_ENGINES`, and one typed `z.enum([…])` inline carries `null`
+   * because there is nothing else to name.
+   *
+   * It exists so that the **two legal spellings of one domain compare equal** (ADR-0354): a
+   * declaration may ref the constant or the field, and the binding audit derives whichever the
+   * writer's own schema happens to use. Resolved through the same four steps as a spread member,
+   * and recorded even when the target is *not* exported — a private constant is unnameable as a
+   * ref, which is a finding the audit reports rather than a fact to hide here.
+   *
+   * `null` for a `constant`: a constant is not a reference to anything, it is the thing.
+   */
+  typedBy: z.string().min(1).nullable().default(null),
 });
 export type WorkspaceDomain = z.infer<typeof WorkspaceDomainSchema>;
 
@@ -448,6 +463,14 @@ export function collectWorkspaceDomains(
       });
       continue;
     }
+    // An alias — `export const TENANT_STATUSES = TENANT_LIFECYCLE_STATES` — *is* a reference, so it
+    // carries the ref of what it aliases while a constant with members of its own carries `null`.
+    // Without that, `operate-server:TENANT_STATUSES` and `tenant-lifecycle:TENANT_LIFECYCLE_STATES`
+    // compare unequal and ADR-0334's deliberate re-export reads as a second spelling.
+    const aliased =
+      decl.alias && decl.spreads.length === 1
+        ? lookup(decl.spreads[0] ?? "", decl.file, decl.package)
+        : undefined;
     domains.push({
       package: decl.package,
       name: decl.name,
@@ -455,22 +478,33 @@ export function collectWorkspaceDomains(
       file: decl.file,
       line: decl.line,
       members,
+      typedBy: aliased === undefined ? null : `${aliased.package}:${aliased.name}`,
     });
   }
 
-  /** The members of a `z.enum(…)` whose argument list starts at `after`, or `null`. */
-  const enumMembers = (after: string, file: string, pkg: string): readonly string[] | null => {
+  /**
+   * The members of a `z.enum(…)` whose argument list starts at `after`, and the ref of the constant
+   * it names where it names one rather than listing its members inline.
+   */
+  const enumMembers = (
+    after: string,
+    file: string,
+    pkg: string,
+  ): { readonly members: readonly string[] | null; readonly typedBy: string | null } => {
     if (after.startsWith("[")) {
       const end = matchBracket(after, 0);
-      if (end <= 0) return null;
+      if (end <= 0) return { members: null, typedBy: null };
       const values = splitTopLevel(after.slice(1, end - 1)).map((e) => literalBody(e));
-      if (values.length === 0 || !values.every((v): v is string => v !== null)) return null;
-      return values;
+      if (values.length === 0 || !values.every((v): v is string => v !== null)) {
+        return { members: null, typedBy: null };
+      }
+      return { members: values, typedBy: null };
     }
     const reference = /^([A-Za-z_$][\w$]*)/.exec(after);
-    if (reference === null) return null;
+    if (reference === null) return { members: null, typedBy: null };
     const target = lookup(reference[1] ?? "", file, pkg);
-    return target === undefined ? null : resolve(target, new Set());
+    if (target === undefined) return { members: null, typedBy: null };
+    return { members: resolve(target, new Set()), typedBy: `${target.package}:${target.name}` };
   };
 
   for (const source of stripped) {
@@ -481,7 +515,7 @@ export function collectWorkspaceDomains(
       /\bexport\s+const\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=\s*z\s*\.\s*enum\s*\(\s*/g,
     )) {
       const after = source.code.slice(m.index + m[0].length);
-      const members = enumMembers(after, source.file, source.package);
+      const { members, typedBy } = enumMembers(after, source.file, source.package);
       const line = lineOf(source.code, m.index);
       if (members === null || members.length === 0) {
         unresolved.push({
@@ -500,6 +534,7 @@ export function collectWorkspaceDomains(
         file: source.file,
         line,
         members: [...members],
+        typedBy,
       });
     }
 
@@ -511,7 +546,7 @@ export function collectWorkspaceDomains(
       for (const field of span.matchAll(/([A-Za-z_$][\w$]*)\s*:\s*z\s*\.\s*enum\s*\(\s*/g)) {
         const after = span.slice(field.index + field[0].length);
         const line = lineOf(source.code, m.index + field.index);
-        const members = enumMembers(after, source.file, source.package);
+        const { members, typedBy } = enumMembers(after, source.file, source.package);
         if (members === null || members.length === 0) {
           unresolved.push({
             package: source.package,
@@ -529,6 +564,7 @@ export function collectWorkspaceDomains(
           file: source.file,
           line,
           members: [...members],
+          typedBy,
         });
       }
     }
@@ -879,7 +915,7 @@ export const VALUE_SET_DOMAINS: readonly ValueSetDomainDeclaration[] = [
   { table: "operate_design_jobs", column: "phase", link: "mirrors", ref: "@crossengin/operate-server:DESIGN_JOB_PHASES" },
   { table: "operate_design_jobs", column: "status", link: "mirrors", ref: "@crossengin/operate-server:DESIGN_JOB_STATUSES" },
   { table: "operate_tenant_manifests", column: "review_status", link: "mirrors", ref: "@crossengin/operate-server:REVIEW_STATUSES" },
-  { table: "operate_tenant_manifests", column: "source", link: "mirrors", ref: "@crossengin/operate-server:AI_MANIFEST_SOURCES" },
+  { table: "operate_tenant_manifests", column: "source", link: "mirrors", ref: "@crossengin/operate-server:MANIFEST_PROPOSAL_SOURCES" },
   { table: "operate_tenant_manifests", column: "status", link: "mirrors", ref: "@crossengin/operate-server:TenantManifestRecordSchema.status" },
   { table: "pack_installations", column: "status", link: "mirrors", ref: "@crossengin/marketplace:INSTALLATION_STATUSES" },
   { table: "pack_installations", column: "update_policy", link: "mirrors", ref: "@crossengin/marketplace:UPDATE_POLICIES" },

@@ -9,11 +9,11 @@ import {
   type AiManifestCreateInput,
   type AiManifestListQuery,
   type AiManifestRecordLike,
-  type AiManifestStatus,
   type AiManifestStore,
   type DesignResultLike,
   type ManifestDesignerLike,
 } from "./ai-design-routes.js";
+import type { ManifestProposalStatus } from "./tenant-manifests.js";
 import type {
   ActiveManifestSourceLike,
   ManifestDiffViewLike,
@@ -84,7 +84,7 @@ class FakeStore implements AiManifestStore {
   async setStatus(
     tenantId: string,
     id: string,
-    status: AiManifestStatus,
+    status: ManifestProposalStatus,
   ): Promise<AiManifestRecordLike | null> {
     const record = await this.getById(tenantId, id);
     if (record === null) return null;
