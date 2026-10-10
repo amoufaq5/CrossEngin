@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 349 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 350 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~18,250 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~18,290 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -697,6 +697,52 @@ type errors.
   against the symbol their writer binds (83 bindings, since a column written twice is checked twice),
   and **164 of 287 sit on tables already declared writerless**, which is the bound and is asserted in
   both directions.
+
+  ADR-0355 closes ADR-0354's Q2 and the class is **a value bound into the wrong column of the right
+  type** — the one question none of the seven rules before it asks, because every one of them asks
+  whether the column exists, whether the `INSERT` is complete, whether a live database admits the
+  value, whether the CHECK and the contract enumerate the same members, or whether a declaration
+  names the bound symbol, and **a transposition inside one `VALUES` list satisfies all seven**. It
+  satisfies them for a reason worth stating: the two columns' domain is frequently the *same*
+  domain, so no constraint, no type comparison and no member comparison can separate them —
+  `meta.job_runs.input_data_class` and `output_data_class` are both TEXT under one six-value CHECK,
+  which is the live demonstration and the increment's own control. The remaining signal is the
+  **names**, and a rule over them exists only because agreement is this repo's norm: **682 of 764**
+  bindings match exactly under `snake_case` ⟷ `camelCase`, so a divergence is exceptional enough to
+  be made to carry a reason.
+  The threshold ADR-0354 asked to have decided is **not a similarity score**, and the measurements
+  are what refuse one: a shared four-character leading token admits **138** properties into more
+  than one column of their own table, and a camel-boundary suffix admits `id` into 11 columns of
+  `meta.workflow_events` — so every cutoff is not merely arbitrary but *unsound*, because a
+  transposition is precisely a pair of similar names. What shipped is exact agreement plus **two
+  derivations** that are rules plus **28 declarations**, with the four refused generalisations kept
+  beside their counts. The sharper half of the derivations is that their tightness is **re-asked
+  against the catalog on every run**: a measurement taken once goes stale silently, so a second
+  admissible column makes `derivation_ambiguous` say the rule has stopped being an explanation
+  rather than let it widen.
+  Three things came out of it beyond the rule. The vocabulary was **settled from the adjudications
+  and not before them** — 28 divergences read against the store, the column and the contract field,
+  the convention named in the reader's own words, **17 distinct names** collapsing onto five — and
+  an earlier draft's six invented kinds had **four with no member**, which a test now makes
+  impossible. **None of the 28 was a defect**, and the two that read as suspicious were dismissed by
+  an independent refuter on facts the first reading had not established: `rate_limit_decisions.route`
+  because `RouteDefinition` has **no path string at all** (it carries `pathSegments` of objects, the
+  sole consumer compiles them to a `RegExp`, and no path renderer exists in the workspace, so the
+  operationId is the only route identity that exists as a string), and `job_runs.started_at` because
+  `JobRunRecordSchema` is a **dead contract** nothing constructs and no `SELECT` names the column
+  outside the claim predicate. And **the rule's own soundness measurement first came back clean for
+  the wrong reason**: `parseCatalogSource` carried no `references`, so the `business_key`
+  derivation's *"references nothing"* predicate was vacuously true for every foreign key in the
+  workspace — 196 of the catalog's 233 references are shared `ColumnReference` constants rather than
+  inline objects — and fixing the parser is what showed the derivation is genuinely unsound without
+  the column-level UNIQUE beside it.
+  The two load-bearing declarations cost something checkable, which is the design's whole defence
+  against becoming an escape hatch: a declaration resolving a sibling collision must **name the
+  sibling**, and `column_overloaded` — the one kind admitting a column's name is *wrong* rather than
+  vaguer — requires the catalogued column to carry a source comment **naming itself**, so the fact
+  lands where the next reader is. That is also the remedy both verifiers independently named, and it
+  is free: `ColumnDefinition` has no comment field, so the two comments ADR-0355 adds emit no SQL
+  and the re-plan after a live apply is clean.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -3084,13 +3130,25 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **seven** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **eight** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
 column is named by every `INSERT` — and whose `parseCatalogSource` carries `check` and
-`defaultExpression` too (ADR-0353), because one catalog parser is what keeps two rules from
-disagreeing about what the catalog says; `pg-storeless-tables.ts` (ADR-0334), which declares every
+`defaultExpression` too (ADR-0353) and `type`, `references`, `unique` and `comment` (ADR-0354,
+ADR-0355), because one catalog parser is what keeps two rules from
+disagreeing about what the catalog says. `references` is the one of those that mattered: **196 of
+the catalog's 233** references are written as one of three shared `ColumnReference` constants rather
+than inline, so a parser reading only the inline form answers `null` for 84% of them and any rule
+whose predicate is *"this column references nothing"* is vacuously true for every foreign key in
+the workspace — which is how ADR-0355's first measurement of its own soundness came back clean for
+the wrong reason. `comment` is the `//` prose above a column's `name:`, read from the **unstripped**
+source against line numbers (`stripComments` preserves newlines and not offsets) and covering both
+spellings the catalog uses in one rule, since the prose sits immediately above `name:` whether it is
+outside the literal or inside it. It is the catalog's **only** semantic signal about a column —
+`ColumnDefinition` has no comment field, so no `COMMENT` is emitted on any column of any of the 146
+tables — which is exactly what makes ADR-0355 requiring one a real cost. 49 columns carry one.
+Then `pg-storeless-tables.ts` (ADR-0334), which declares every
 catalogued table with **no writer** and why, and `pg-record-retention.ts` (ADR-0335), which reads the
 Article 17 erasure's `PLATFORM_RECORD_TABLES` and the catalog's cascading tenant tables and compares
 them **in both directions** (`protected_table_cascades` / `_not_in_catalog` / `_undeclared_here` /
@@ -3241,6 +3299,54 @@ and not a second one. 66 of 287 columns checked, 83 bindings confirmed. Its type
 rule's domain scan are **cross-checked rather than shared**: they answer different questions about one declaration (its members, and which symbol it
 names), so for every `schema_field` with a nameable `typedBy` the target is asserted to resolve to
 the same member set — 400+ comparisons.
+The eighth is `pg-binding-names.ts` (ADR-0355), which closes ADR-0354's own Q2 and asks the one
+question none of the seven above it does: **is the value the one the column is for?** All of them
+ask whether the column exists, whether the `INSERT` is complete, whether a live database admits the
+values, whether the CHECK and the contract enumerate the same members and whether a declaration
+names the bound symbol — and **a transposition inside one `VALUES` list satisfies all seven**,
+because the symbol is the *same* domain on both sides. The remaining signal is the names, and this
+repo's `snake_case` ⟷ `camelCase` transform is a rule: **682 of 764** bindings agree exactly, which
+is what makes a divergence exceptional enough to carry a reason. It consumes
+`pg-column-bindings.ts`' extraction rather than scanning again (one extractor, two questions), and
+accounts for every binding four ways — agreement, a **derivation** (2, 25 bindings), a
+**declaration** (28, 32 bindings), or a literal (25) / uncatalogued column (**0**).
+The two derivations are `business_key` (`property === "id"` ∧ the column ends `_id` ∧ a
+**column-level UNIQUE** ∧ **no FK** — the house two-identifier shape, measured tight at 72 tables
+with exactly one such column, 74 with none and **none with two**) and `resolved_surrogate`
+(`<noun>_id ← <noun>Uuid`, the noun on both sides). **Four generalisations were refused on
+measurement** and each keeps its count beside it: `*_id ← id` without the UNIQUE (72 tables have
+more than one non-FK `*_id` column, one has eight), a camel-boundary suffix (`id` is a suffix of 11
+columns of `meta.workflow_events`), a shared four-character leading token (**138** properties
+admitted into more than one column of their table), and "the property names a different column" as
+a bare detector (17 hits, **16** of them the business-key convention — **the declared type is what
+separates them**, which is why `property_names_sibling_column` requires the types to match).
+`derivation_ambiguous` is the piece worth copying: a derivation's tightness is a measurement over
+the catalog, and one taken once goes stale silently, so `derivationTargets` **re-asks it on every
+run** and a second admissible column makes the rule say it has stopped being an explanation rather
+than widen.
+The five divergence kinds were **settled from the adjudications and not before them** — each
+divergence was read against the store, the column and the contract field and the convention named
+in the reader's own words, **17 distinct names** came back, and these five are what they collapse
+onto: `nested_record` (6), `act_parameter` (10), `qualifier_differs` (10), `statement_local` (1),
+`column_overloaded` (1). An earlier draft shipped six kinds invented first and **four had no
+member**; a test now asserts every kind has one. `act_parameter` and `qualifier_differs` are
+separate on the axis *what a reader must check*: for the first the two names denote different things
+(`tenants.status ← to`) and for the second the same thing under a qualifier (`delivered_count ←
+delivered`). **None of the 28 was a defect** — the two that read as suspicious went to an
+independent refuter and both were dismissed on facts the first reading had not established.
+Two findings exist because two declarations are dangerous. `sibling_unaddressed`: a declaration may
+resolve a `property_names_sibling_column` (there is a live correct one,
+`access_review_decisions.attestation_kind ← decision.attestation.kind` beside a top-level `kind` of
+the same type) and its note must **name the sibling**, because an adjudication that never looked at
+the column the value could have belonged in cannot have ruled the confusion out.
+`overload_uncommented`: `column_overloaded` is the one kind admitting the column's **name is wrong**
+rather than merely vaguer, so declaring it requires the catalogued column to carry a source comment
+**naming itself** — prose attributed from the line above cannot satisfy it — so the next person,
+reading the catalog rather than this directory, is told. `transposed_pair` is the only finding no
+declaration can resolve. Two **live controls** on the real tree rather than fixtures: pointing
+`meta.job_runs.claim_expires_at`'s real binding at `completedAt` yields exactly one sibling finding,
+and transposing the real `input_data_class`/`output_data_class` bindings in one `INSERT` yields
+`transposed_pair` — a pair no constraint could catch, both being TEXT under one six-value CHECK.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
@@ -3343,6 +3449,15 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   columns exist, the `INSERT` is complete and the member sets match. The one live member was a
   module-private constant typing the schema the writer binds, which made the exported second spelling
   beside it the only thing a ref could name.
+  **And a value bound into the wrong column of the right type is a failure too**
+  (`pg-binding-names.ts`, ADR-0355), the same blindness read a **fifth** way and the sharpest,
+  because a fake connection cannot see it *and neither can a real one*: a transposition inside one
+  `VALUES` list is well-formed SQL naming existing columns with a complete `INSERT`, and every value
+  is admitted by its CHECK and carries the declared domain — since the two columns' domain is
+  frequently the *same* domain. The real `input_data_class`/`output_data_class` pair is the
+  demonstration: both TEXT under one six-value CHECK, so no constraint, no type comparison and no
+  member comparison could ever separate them. The only remaining signal is the **names**, and a rule
+  over them is possible only because agreement is this repo's norm (682 of 764).
   **ADR-0335 found two more members and they are the sharpest yet**: a write that sets no tenant
   context. `PostgresLifecycleEventStore` and `PostgresDeletionRequestStore` both issued correct SQL
   that no non-owner database would ever accept — on both tables the isolation policy is the only arm
@@ -3721,11 +3836,13 @@ opened them.
   What remains, in order: **(1)** **15 bindings whose receiver the module annotates nowhere**
   (`p.status` in an arrow, `att.kind` from a destructure) are unresolvable without local inference,
   which is the compiler-API option ADR-0337 measured and refused, now for the second time.
-  **(2)** the comparison is against the **symbol** and nothing compares it against the parameter
-  *position*: a store writing `record.kind` into the `status` column passes this rule and
-  `pg-column-coverage.ts` both. Column-to-property name agreement is measurable and legitimately
-  violated often enough (`tenant_id` ← `scope`, `created_by` ← `actor`) that the threshold needs
-  deciding before it can be a rule. **(3)** each of the 164 unreachable columns becomes checkable the
+  **(2)** ~~the comparison is against the **symbol** and nothing compares it against the parameter
+  *position*~~ — **closed by ADR-0355**, which also found that the threshold this entry asked to
+  have decided cannot be a similarity score at all: every cutoff is *unsound* and not merely
+  arbitrary, since a transposition is precisely a pair of similar names. The two examples it offered
+  were also both wrong about this repo — `tenant_id ← scope` and `created_by ← actor` appear
+  nowhere; **682 of 764** bindings agree exactly and the real divergences are 28, each now carrying
+  what was read to clear it. See the next entry. **(3)** each of the 164 unreachable columns becomes checkable the
   moment a store lands and nothing says so at the time — the inverse of `table_declared_storeless`.
   **(4)** `UNCONSTRAINED_BINDINGS` describes a real weakness and the rule only reports it: typing
   `DispatchInput`'s four `string` fields against `@crossengin/notifications` is the fix, and it is a
@@ -3735,6 +3852,40 @@ opened them.
   need for the cross-check. **(6)** a `DO UPDATE SET` assignment that is neither `$n` nor
   `EXCLUDED.col` — `status = CASE WHEN …` in `digest-store.ts` — is a value the *database* decides
   from the row, a third provenance beside a parameter and a literal, reported as neither.
+- **A value bound into the wrong column of the right type is a failure, and what is left of it**
+  (ADR-0355 closed ADR-0354's Q2). `pg-binding-names.ts` is the eighth rule: **682 of 764** bindings
+  agree exactly, **25** are explained by two derivations whose tightness is re-asked every run,
+  **28** declarations carry what was read to clear them, 25 are literals and **0** are uncatalogued.
+  Two findings cost the two dangerous declarations something checkable — a sibling collision's note
+  must name the sibling, and `column_overloaded` requires a catalog source comment naming the
+  column — and `transposed_pair` is resolvable by no declaration. Verified live as a non-owner on
+  PG 16.13: 964/964 statements applied with a clean re-plan (so the two new source comments emit no
+  SQL), and `enqueueScheduledJobs` at a 09:17 clock against `0 3 * * *` wrote
+  `started_at = 03:00:00.000Z` — the cron tick, not `now`, six hours before any handler — which
+  `claimDueJobs` then claimed, and did not once it was pushed forward.
+  What remains, in order: **(1)** the rule covers the **write** path only. A row → record mapping can
+  name a field as wrongly as a parameter can, and the verification itself turned up a live member:
+  `ClaimedJob.jobId` is the **run** id (`run_id`) while `jobDefinitionId` is `job_id` — consistent
+  across every consumer and so not a defect, but exactly the divergence this rule catches on the
+  other side, where nothing looks. **(2)** `meta.job_runs` wants a `due_at`/`visible_at` column,
+  which would retire the one `column_overloaded` member; it changes the claim predicate, the
+  `ORDER BY`, `idx_job_runs_due` and the retry path of a fleet `--workflow-workers` mounts live, and
+  leaves `started_at` with nothing to hold since no code records when a handler began — a subsystem
+  change wearing a column's clothes, declared with its evidence in the meantime (ADR-0307's
+  treatment). **(3)** nothing compares the bound property against the column's *meaning*, only its
+  name, so a store writing `record.kind` into `status` passes if the property happens to be called
+  `status`. **(4)** `BINDING_NAME_DIVERGENCES` is the first list in that directory whose entries are
+  **judgements about correctness** rather than structural facts, and whether a declared reason is
+  true is unverifiable by machine — as it is for all seven siblings, but here the reasons are the
+  whole content. **(5)** the reverse transform is lossy on four catalogued names
+  (`minimum_k_anonymity` ×3, `request_count_30d`), asserted **by name** rather than fixed, because a
+  general digit rule would turn `fingerprintSha256` into `fingerprint_sha_256` and break a column
+  that exists; the forward transform is total and is what decides agreement, and the reverse only
+  *finds* a sibling, where a miss is permissive. **(6)** `CatalogColumn` has gained five fields in
+  three increments (`check`, `defaultExpression`, `type`, `references`, `unique`, `comment`) and now
+  carries most of a `ColumnDefinition`; whether `parseCatalogSource` wants extracting from the
+  coverage rule it lives in is undecided, and the reason it has not been is the one that keeps it
+  there — one parser is what stops two rules disagreeing about the catalog.
 
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
@@ -4978,7 +5129,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 349 records; 270 Accepted, 79 Proposed (the
+title or status change cannot drift. 350 records; 271 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

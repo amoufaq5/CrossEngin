@@ -85,6 +85,48 @@ describe("the declared shape", () => {
     expect([...PG_SCAN_EXEMPT_PACKAGE_DIRS]).toEqual(["packages/testing"]);
   });
 
+  it("resolves a reference whether it is written inline or through a shared constant", () => {
+    // The shared-constant arm is the one that matters: without it the catalog's 196 constant-form
+    // references read as `null`, and any rule whose predicate is "this column references nothing"
+    // passes for every foreign key in the workspace.
+    const [table] = parseCatalogSource(
+      `const TENANT_FK: ColumnReference = {\n` +
+        `  schema: "meta",\n  table: "tenants",\n  column: "id",\n  onDelete: "CASCADE",\n};\n` +
+        `export const META_WIDGETS: TableDefinition = {\n` +
+        `  schema: "meta",\n  name: "widgets",\n  columns: [\n` +
+        `    { name: "id", type: "UUID", primaryKey: true },\n` +
+        `    { name: "tenant_id", type: "UUID", notNull: true, references: TENANT_FK },\n` +
+        `    { name: "widget_id", type: "TEXT", notNull: true, unique: { constraintName: "w_key" } },\n` +
+        `    { name: "owner_id", type: "UUID", references: { schema: "meta", table: "users", column: "id", onDelete: "RESTRICT" } },\n` +
+        `  ],\n};\n` +
+        `export const META_TABLES: readonly TableDefinition[] = [META_WIDGETS];\n`,
+    );
+    expect(
+      table?.columns.map((c) => ({
+        name: c.name,
+        type: c.type,
+        references: c.references,
+        unique: c.unique,
+      })),
+    ).toEqual([
+      { name: "id", type: "UUID", references: null, unique: false },
+      { name: "tenant_id", type: "UUID", references: "meta.tenants.id", unique: false },
+      { name: "widget_id", type: "TEXT", references: null, unique: true },
+      { name: "owner_id", type: "UUID", references: "meta.users.id", unique: false },
+    ]);
+  });
+
+  it("does not read a table-level unique constraint as a column-level one", () => {
+    const [table] = parseCatalogSource(
+      `export const META_RUNS: TableDefinition = {\n` +
+        `  schema: "meta",\n  name: "runs",\n  columns: [\n` +
+        `    { name: "run_id", type: "TEXT", notNull: true },\n  ],\n` +
+        `  uniqueConstraints: [{ name: "runs_run_id_key", columns: ["tenant_id", "run_id"] }],\n};\n` +
+        `export const META_TABLES: readonly TableDefinition[] = [META_RUNS];\n`,
+    );
+    expect(table?.columns.find((c) => c.name === "run_id")?.unique).toBe(false);
+  });
+
   it("judges every statement it can read", () => {
     // An empty statement-exemption list is the claim; a line added here needs a reason in the diff.
     expect(PG_STATEMENT_EXEMPTIONS).toEqual([]);
@@ -622,6 +664,10 @@ describe("the real workspace", () => {
       hasDefault: false,
       check: "kind IN ('absolute_at', 'relative_after', 'cron_schedule', 'business_hours')",
       defaultExpression: null,
+      type: "TEXT",
+      references: null,
+      unique: false,
+      comment: null,
     });
     // The two fields `pg-value-set-domains.ts` reads, asserted here rather than only there, so one
     // parser serves both rules and a regression in it fails where the parser lives.
@@ -630,6 +676,28 @@ describe("the real workspace", () => {
         .find((t) => t.name === "tenants")
         ?.columns.find((c) => c.name === "status")?.defaultExpression,
     ).toBe("'active'");
+    // And the three `pg-binding-names.ts` reads. `references` matters most: 196 of the catalog's
+    // 233 references are one of three shared `ColumnReference` constants, so a parser reading only
+    // the inline object form answers `null` for 84% of them — and the business-key derivation's
+    // "references nothing" predicate would then be vacuously true for a foreign key.
+    const byTarget = new Map<string, number>();
+    for (const table of catalog) {
+      for (const column of table.columns) {
+        if (column.references === null) continue;
+        byTarget.set(column.references, (byTarget.get(column.references) ?? 0) + 1);
+      }
+    }
+    expect(byTarget.get("meta.tenants.id")).toBe(99);
+    expect(byTarget.get("meta.users.id")).toBe(97);
+    expect(byTarget.get("meta.sso_providers.id")).toBe(4);
+    expect(catalog.every((t) => t.columns.every((c) => c.type !== null))).toBe(true);
+    // A column-level `unique` is how this catalog marks a row's own business key; a table-level
+    // `uniqueConstraints` entry is deliberately not read as one, which `job_runs` is the case for.
+    const campaigns = catalog.find((t) => t.name === "access_review_campaigns");
+    expect(campaigns?.columns.find((c) => c.name === "campaign_id")?.unique).toBe(true);
+    expect(campaigns?.columns.find((c) => c.name === "id")?.unique).toBe(false);
+    const jobRuns = catalog.find((t) => t.name === "job_runs");
+    expect(jobRuns?.columns.find((c) => c.name === "run_id")?.unique).toBe(false);
     // A column with a default is not required; one that is a primary-key member is, said or not.
     const tenants = catalog.find((t) => t.name === "tenants");
     expect(tenants?.columns.find((c) => c.name === "id")?.hasDefault).toBe(true);
@@ -640,6 +708,24 @@ describe("the real workspace", () => {
     // optional in an INSERT, which is the distinction a restated list keeps getting wrong.
     expect(required).not.toContain("id");
     expect(required).not.toContain("status");
+    // And the column's own source prose, read from the *unstripped* source because
+    // `stripComments` preserves newlines and not offsets. Both spellings the catalog uses are one
+    // rule: `// …` above the literal, and `{` then `// …` then `name:` inside it.
+    expect(jobRuns?.columns.find((c) => c.name === "cancel_requested_at")?.comment).toContain(
+      "`cancel_requested_at` *is* the cancellation",
+    );
+    expect(jobRuns?.columns.find((c) => c.name === "cancelled_at_checkpoint")?.comment).toContain(
+      "Which guarantee was actually met",
+    );
+    // A column with nothing above it reads `null`, not the prose of the column before it.
+    expect(jobRuns?.columns.find((c) => c.name === "cancel_reason")?.comment).toBeNull();
+    expect(jobRuns?.columns.find((c) => c.name === "job_id")?.comment).toBeNull();
+    // It is not read from `/** … */`, which in this catalog documents the table and not a column.
+    const commented = catalog.flatMap((t) =>
+      t.columns.filter((c) => c.comment !== null).map((c) => `${t.name}.${c.name}`),
+    );
+    expect(commented.length).toBeGreaterThanOrEqual(40);
+    expect(commented).toContain("job_runs.started_at");
   });
 
   it("scanned the workspace, rather than silently finding nothing", () => {

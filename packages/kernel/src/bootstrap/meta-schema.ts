@@ -649,6 +649,12 @@ export const META_JOB_RUNS: TableDefinition = {
     },
     { name: "run_id", type: "UUID", notNull: true },
     { name: "trigger", type: "JSONB", notNull: true },
+    // `started_at` is the queue's **visibility** column and not a start time, which the name does
+    // not say (ADR-0355): the enqueuer writes the cron tick, `claimDueJobs` filters
+    // `started_at <= now` and orders by it, and a retry pushes it *forward* to `now + backoff` — a
+    // future instant relative to any start. Nothing records when a handler actually began;
+    // `duration_ms` comes from an in-process `execStart`, and the tick is preserved under its own
+    // name inside `trigger`. `idx_job_runs_due` on `(status, started_at)` is the due reading.
     { name: "started_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "completed_at", type: "TIMESTAMPTZ" },
     { name: "duration_ms", type: "INTEGER", check: "duration_ms IS NULL OR duration_ms >= 0" },
@@ -8861,6 +8867,12 @@ export const META_RATE_LIMIT_DECISIONS: TableDefinition = {
       check:
         "api_key_prefix IS NULL OR api_key_prefix ~ '^ce_(live|test)_[A-Za-z0-9]{8}$'",
     },
+    // `route` holds the route's **operationId**, which its sibling
+    // `meta.gateway_pipeline_executions.route_operation_id` says outright and this name does not
+    // (ADR-0355). It is not a path and cannot be: `RouteDefinition` carries `pathSegments` of
+    // literal/parameter/wildcard objects, the only consumer of that array compiles them to a
+    // `RegExp`, and no path renderer exists in the workspace — so a `per_route` policy written as
+    // `/v1/invoices/*` could never match a stored `invoice.list`.
     { name: "route", type: "TEXT" },
     { name: "decided_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     {

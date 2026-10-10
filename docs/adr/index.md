@@ -1,10 +1,10 @@
 # ADR index
 
-349 records. Generated from the ADR files themselves — regenerate rather than
+350 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 270  **Proposed:** 79
+- **Accepted:** 271  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -361,3 +361,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0352](0352-the-probe-that-was-one-instance-of-a-class.md) | The probe that was one instance of a class | — | Accepted | 2026-10-09 |
 | [0353](0353-the-table-that-could-not-accept-its-own-record.md) | The table that could not accept its own record | — | Accepted | 2026-10-09 |
 | [0354](0354-a-declaration-adjudicated-by-reading.md) | A declaration adjudicated by reading, and a writer that reads differently | — | Accepted | 2026-10-10 |
+| [0355](0355-the-name-that-was-the-only-signal.md) | The name that was the only signal | — | Accepted | 2026-10-10 |

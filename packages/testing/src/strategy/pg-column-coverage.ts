@@ -59,6 +59,42 @@ export const CatalogColumnSchema = z.object({
    * which is the one question in this class that needs no declaration at all.
    */
   defaultExpression: z.string().nullable().default(null),
+  /**
+   * The declared Postgres type as the catalog spells it (`UUID`, `TEXT`, `NUMERIC(12,4)`), or
+   * `null` for a column whose `type` this parser could not read.
+   */
+  type: z.string().min(1).nullable().default(null),
+  /**
+   * `<schema>.<table>.<column>` the column references, or `null` for a column that references
+   * nothing — which is the fact that separates a row's own business key from a key naming another
+   * row (ADR-0355). Resolved through the catalog's three shared `ColumnReference` constants as well
+   * as the 37 inline objects, because reading only the inline form would answer `null` for 196 of
+   * the 233 references and make every rule over this field vacuously true.
+   */
+  references: z.string().min(1).nullable().default(null),
+  /**
+   * Whether the column carries a **column-level** `unique` declaration — a single-column UNIQUE,
+   * which is how this catalog marks a row's own business key (ADR-0355). Deliberately not conflated
+   * with a table-level `uniqueConstraints` entry: `job_runs` declares
+   * `UNIQUE (tenant_id, run_id)`, which identifies a row only together with the tenant and so is
+   * not the single-column identity this field answers for.
+   */
+  unique: z.boolean().default(false),
+  /**
+   * The `//` prose immediately above the column's `name:`, joined, or `null` where there is none.
+   *
+   * This is the **only** semantic signal the catalog carries about a column: `ColumnDefinition` has
+   * `name`, `type`, `notNull`, `primaryKey`, `default`, `unique`, `references`, `check` and
+   * `renamedFrom` and no comment field, so nothing here is ever emitted as a SQL `COMMENT` and no
+   * `COMMENT` exists on any column of any of the 146 tables. A column whose name does not say what
+   * it holds can therefore only be explained in source — which is what makes requiring it a real
+   * cost (ADR-0355's `column_overloaded`).
+   *
+   * Read from the **unstripped** source against line numbers, because `stripComments` preserves
+   * newlines and not offsets; one rule covers both spellings the catalog uses, since the `//` lines
+   * sit immediately above `name:` whether they are outside the literal or inside it.
+   */
+  comment: z.string().min(1).nullable().default(null),
 });
 export type CatalogColumn = z.infer<typeof CatalogColumnSchema>;
 
@@ -476,8 +512,97 @@ export function splitTopLevel(body: string, separator = ","): readonly string[] 
  * exports a few that the catalog does not include, and a table the array omits is emitted into no
  * database. Only members are returned.
  */
+/** `<schema>.<table>.<column>` out of a `ColumnReference` object literal's body. */
+function referenceTarget(body: string): string | null {
+  const read = (key: string): string | null => {
+    const field = splitTopLevel(body).find((f) => new RegExp(`^${key}\\s*:`).test(f));
+    if (field === undefined) return null;
+    const literal = /:\s*"([^"]+)"\s*$/.exec(field);
+    return literal === null ? null : (literal[1] ?? null);
+  };
+  const schema = read("schema");
+  const table = read("table");
+  const column = read("column");
+  if (schema === null || table === null || column === null) return null;
+  return `${schema}.${table}.${column}`;
+}
+
+/**
+ * The catalog's shared `ColumnReference` constants, by name.
+ *
+ * 196 of the 233 references in `META_TABLES` are one of three such constants (`TENANT_FK`,
+ * `USER_FK`, `USER_OWNED_FK`), so a parser reading only the inline object form answers `null` for
+ * 84% of them — and a rule whose predicate is "this column references nothing" would then be
+ * vacuously true, which is how ADR-0355's first measurement of its own soundness came back clean
+ * for the wrong reason.
+ */
+function sharedReferences(code: string): ReadonlyMap<string, string> {
+  const out = new Map<string, string>();
+  for (const m of code.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*:\s*ColumnReference\s*=\s*\{/g)) {
+    const open = m.index + m[0].length - 1;
+    const end = matchBracket(code, open);
+    if (end < 0) continue;
+    const target = referenceTarget(code.slice(open + 1, end - 1));
+    if (target !== null) out.set(m[1] ?? "", target);
+  }
+  return out;
+}
+
+/**
+ * `offset` → 1-based line, in one pass rather than by slicing per lookup.
+ *
+ * 146 tables against 11.6k lines makes the naive `slice(0, offset).split("\n")` quadratic in the
+ * file; this is what keeps the parser's cost flat.
+ */
+function lineIndex(code: string): (offset: number) => number {
+  const newlines: number[] = [];
+  for (let i = 0; i < code.length; i += 1) if (code[i] === "\n") newlines.push(i);
+  return (offset) => {
+    let lo = 0;
+    let hi = newlines.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((newlines[mid] ?? 0) < offset) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo + 1;
+  };
+}
+
+/**
+ * The `//` prose above `name: "<column>"`, searched within one table's line range.
+ *
+ * Reading upward from the `name:` line is deliberately one rule for both spellings — the catalog
+ * writes the comment outside the literal (`// …` then `{ name: "cancel_requested_at", … }`) and
+ * inside it (`{` then `// …` then `name: "cancelled_at_checkpoint"`) — and a lone `{` between them
+ * is skipped so the inside form is not cut short.
+ */
+function columnComment(
+  rawLines: readonly string[],
+  from: number,
+  to: number,
+  column: string,
+): string | null {
+  const declares = new RegExp(`(^|\\{)\\s*name\\s*:\\s*"${column}"\\s*,`);
+  for (let i = from; i <= to && i < rawLines.length; i += 1) {
+    if (!declares.test(rawLines[i] ?? "")) continue;
+    const prose: string[] = [];
+    for (let j = i - 1; j >= from - 1 && j >= 0; j -= 1) {
+      const line = (rawLines[j] ?? "").trim();
+      if (line === "{") continue;
+      if (!line.startsWith("//")) break;
+      prose.unshift(line.replace(/^\/\/\s?/, ""));
+    }
+    return prose.length === 0 ? null : prose.join(" ");
+  }
+  return null;
+}
+
 export function parseCatalogSource(source: string): readonly CatalogTable[] {
   const code = stripComments(source);
+  const shared = sharedReferences(code);
+  const rawLines = source.split("\n");
+  const lineAt = lineIndex(code);
 
   const membership = new Set<string>();
   const arrayDecl = code.indexOf("export const META_TABLES");
@@ -545,6 +670,9 @@ export function parseCatalogSource(source: string): readonly CatalogTable[] {
       let hasDefault = false;
       let check: string | null = null;
       let defaultExpression: string | null = null;
+      let type: string | null = null;
+      let references: string | null = null;
+      let unique = false;
       for (const field of inner) {
         const nameMatch = /^name\s*:\s*"([^"]+)"$/.exec(field);
         if (nameMatch) columnName = nameMatch[1] ?? "";
@@ -557,12 +685,32 @@ export function parseCatalogSource(source: string): readonly CatalogTable[] {
         }
         const checkMatch = /^check\s*:\s*([\s\S]+)$/.exec(field);
         if (checkMatch) check = literalBody(checkMatch[1] ?? "");
+        const typeMatch = /^type\s*:\s*"([^"]+)"$/.exec(field);
+        if (typeMatch) type = typeMatch[1] ?? null;
+        if (/^unique\s*:\s*\{/.test(field)) unique = true;
+        const referenceMatch = /^references\s*:\s*([\s\S]+)$/.exec(field);
+        if (referenceMatch) {
+          const rhs = (referenceMatch[1] ?? "").trim();
+          references = rhs.startsWith("{")
+            ? referenceTarget(rhs.slice(1, -1))
+            : (shared.get(rhs) ?? null);
+        }
       }
       // A primary-key member is NOT NULL whether or not it says so: `PRIMARY KEY (…)` implies it,
       // and reading only the column's own flag would let a required column read as optional.
       if (primaryKey.has(columnName)) notNull = true;
       if (columnName !== "")
-        columns.push({ name: columnName, notNull, hasDefault, check, defaultExpression });
+        columns.push({
+          name: columnName,
+          notNull,
+          hasDefault,
+          check,
+          defaultExpression,
+          type,
+          references,
+          unique,
+          comment: columnComment(rawLines, lineAt(open) - 1, lineAt(end) - 1, columnName),
+        });
     }
     if (columns.length === 0) continue;
 
