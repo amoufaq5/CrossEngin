@@ -13,3 +13,4 @@ export * from "./pg-unreachable-stores.js";
 export * from "./pg-value-set-domains.js";
 export * from "./pg-column-bindings.js";
 export * from "./pg-binding-names.js";
+export * from "./pg-record-reads.js";

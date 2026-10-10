@@ -312,11 +312,40 @@ export function formatUnresolvedStatements(unresolved: readonly UnresolvedStatem
 /* ------------------------------------------------------- catalog extraction */
 
 /**
- * Removes `//` and block comments without touching string or template contents.
+ * Whether the `/` at `at` opens a regex literal rather than being a division operator.
+ *
+ * The standard heuristic and the only one available without parsing: a regex may begin wherever an
+ * *expression* may begin — after an operator, an opening bracket, a comma, a colon, a semicolon or
+ * `return` — while division may only follow a value.
+ *
+ * Exported because `blankStringBodies` needs the identical question (ADR-0356) and two copies of
+ * this heuristic would be two things to keep in step — the shape this directory has found wrong
+ * four times. Measured: **19** of the scanned files put a quote inside a pattern, so both scanners
+ * are reachable by the defect and only one of them had it.
+ */
+export function opensRegexLiteral(source: string, at: number): boolean {
+  let i = at - 1;
+  while (i >= 0 && /\s/.test(source[i] ?? "")) i -= 1;
+  if (i < 0) return true;
+  const ch = source[i] ?? "";
+  if ("=(,:[!&|?{};+-*%^~<>".includes(ch)) return true;
+  return /\breturn$/.test(source.slice(Math.max(0, i - 7), i + 1));
+}
+
+/**
+ * Removes `//` and block comments without touching string, template or regex contents.
  *
  * Needed by both scanners and the reason neither can be a bare regex: `meta-schema.ts` is 11.6k
  * lines of which a large fraction is prose explaining a column, and that prose contains the words
  * `name:` and `notNull` and whole SQL statements.
+ *
+ * **Regex literals are skipped as a unit, and that is not tidiness** (ADR-0356). A pattern may
+ * contain a quote, and `"([^"]+)"` carries *three* of them — so pairing them as string delimiters
+ * closes the first two and leaves the third opening a string that runs to the next quote anywhere
+ * in the file, swallowing whatever lies between. `pg-record-reads.ts` is the first module in this
+ * directory to put a quote inside a pattern, and the symptom was a doc comment surviving the strip
+ * 120 lines later and three phantom domains in a sibling rule. A pattern may also contain `//`,
+ * which the line-comment arm would otherwise read as the start of a comment.
  */
 export function stripComments(source: string): string {
   let out = "";
@@ -325,6 +354,27 @@ export function stripComments(source: string): string {
   while (i < n) {
     const ch = source[i] ?? "";
     const next = source[i + 1] ?? "";
+    if (ch === "/" && next !== "/" && next !== "*" && opensRegexLiteral(source, i)) {
+      // Copied verbatim: a pattern is code, and the callers that count brackets need to see it.
+      out += ch;
+      i += 1;
+      let inClass = false;
+      while (i < n) {
+        const c = source[i] ?? "";
+        if (c === "\n") break;
+        out += c;
+        i += 1;
+        if (c === "\\") {
+          out += source[i] ?? "";
+          i += 1;
+          continue;
+        }
+        if (c === "[") inClass = true;
+        else if (c === "]") inClass = false;
+        else if (c === "/" && !inClass) break;
+      }
+      continue;
+    }
     if (ch === "/" && next === "/") {
       while (i < n && source[i] !== "\n") i += 1;
       continue;

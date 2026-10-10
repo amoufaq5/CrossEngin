@@ -4,6 +4,11 @@
  * dependency between the pure worker loop and the Postgres binding.
  */
 export interface ClaimedJob {
+  /**
+   * `jobId` is the **run** id, not the job's — the twin in `workflow-runtime-pg` reads it from
+   * `meta.job_runs.run_id` and every consumer here uses it as one (`observeJobCancellation`
+   * takes `{runId: job.jobId}`, `renewWhile` leases it). The job's own id is `jobDefinitionId`.
+   */
   readonly jobId: string;
   readonly tenantId: string;
   readonly jobDefinitionId: string;

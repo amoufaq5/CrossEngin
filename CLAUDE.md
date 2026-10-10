@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 350 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 351 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~18,290 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, ~18,330 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -743,6 +743,36 @@ type errors.
   lands where the next reader is. That is also the remedy both verifiers independently named, and it
   is free: `ColumnDefinition` has no comment field, so the two comments ADR-0355 adds emit no SQL
   and the re-plan after a live apply is clean.
+
+  ADR-0356 closes that rule's own Q1 and the class is **the other direction the value moves**. The
+  eighth rule covered the write path only, and a row → record mapping can name a field as wrongly
+  as a parameter can — a fake `PgConnection` is at its most useless there, since it hands back the
+  rows the test author wrote, so a mapper reading the wrong column returns the author's own fixture
+  and every assertion passes. What makes it a different problem rather than the same one mirrored:
+  **the write path knows its table from the statement and this one has to find it.** `records.ts`
+  holds five mappers while the SQL sits in the three stores beside it, and one store issues
+  `SELECT *` — so the SELECT-as-anchor version was built, measured per-module wrong, and abandoned
+  for the **catalog**, which is safe on a measurement rather than by assumption: every non-column
+  `snake_case` property in the workspace is absent from the catalog, so there is zero collision
+  between a column access and any other property access. The table then comes from the declared
+  `interface \w*Row` by **column-set containment** (40 interfaces, 26 resolved, 0 ambiguous, a table
+  for 313 of 336 reads), because the column name alone is ambiguous exactly where it matters —
+  `campaign_id` is one table's business key and three tables' foreign key. The vocabulary is
+  imported unchanged, since `admits(column, property, table)` does not care which way the value
+  moves. **305 of 336 reads agree exactly, 7 derive, 23 are declared, 0 are unexplained.**
+  Three defects in the scan were each caught by a count moving rather than by anybody looking, and
+  the sharpest is that **I reproduced ADR-0354's own bare-name-map defect**: the shape index was
+  keyed by interface name alone while four stores name their interface plainly `Row`, so a read was
+  handed another table's column list — found because the read count went *down*, 349 → 290. The two
+  adjudications that survived adversarial refutation are **naming divergences, not defects**, and
+  the live run is the whole finding in two lines: `EnqueuedJobRun.jobId` binds `job_id` =
+  `close-period` while `ClaimedJob.jobId` reads `run_id` = a UUID — one property name, two columns,
+  two interfaces, one package — and `WHERE run_id = claimed.jobDefinitionId` answers
+  `22P02 invalid input syntax for type uuid`, which is **why it is not the transposition
+  signature**: the declared types separate the two and the database refuses the swap. One fix landed
+  two files away from the new rule: `stripComments`, shared by all nine, paired quotes without
+  skipping regex literals, and `"([^"]+)"` carries three — so the third opened a string that ran to
+  the next quote anywhere in the file.
 
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
@@ -3130,7 +3160,7 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **eight** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **nine** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -3148,6 +3178,20 @@ spellings the catalog uses in one rule, since the prose sits immediately above `
 outside the literal or inside it. It is the catalog's **only** semantic signal about a column —
 `ColumnDefinition` has no comment field, so no `COMMENT` is emitted on any column of any of the 146
 tables — which is exactly what makes ADR-0355 requiring one a real cost. 49 columns carry one.
+**Its `stripComments` is shared by all nine rules, and it was wrong about regex literals for four
+increments** (ADR-0356): it paired quotes as string delimiters without skipping a regex, and a
+pattern may contain one — `"([^"]+)"` carries three quotes, so pairing them closed the first two and
+left the third opening a string that ran to the next quote **anywhere in the file**. The symptom was
+phantom domains in `pg-value-set-domains.ts` once a ninth rule landed, and the cause was two files
+away; `statementSpan` there needed the same skip, since a `{` inside `[{,]` increments its brace
+depth and is never balanced. `opensRegexLiteral` is **exported and has three readers** —
+`stripComments`, `statementSpan` and `pg-record-reads.ts`' `blankStringBodies`, which had the
+identical hole in the *conservative* direction (a blanked region loses a read rather than inventing
+one) and reached **19** of the scanned files; fixing it changed no count, which is worth knowing
+before someone reads the fix as having recovered something.
+One parser is what keeps two rules from disagreeing about the catalog
+and is also one place for a defect to reach all nine, and nothing fences the shared scanner against
+its own output.
 Then `pg-storeless-tables.ts` (ADR-0334), which declares every
 catalogued table with **no writer** and why, and `pg-record-retention.ts` (ADR-0335), which reads the
 Article 17 erasure's `PLATFORM_RECORD_TABLES` and the catalog's cascading tenant tables and compares
@@ -3347,6 +3391,39 @@ declaration can resolve. Two **live controls** on the real tree rather than fixt
 `meta.job_runs.claim_expires_at`'s real binding at `completedAt` yields exactly one sibling finding,
 and transposing the real `input_data_class`/`output_data_class` bindings in one `INSERT` yields
 `transposed_pair` — a pair no constraint could catch, both being TEXT under one six-value CHECK.
+The ninth is `pg-record-reads.ts` (ADR-0356), which closes ADR-0355's own Q1 and is the eighth rule
+read in **the other direction the value moves**: a row → record mapping can name a field as wrongly
+as a parameter can, and the write half is the half that had a rule. What makes it a different
+problem rather than the same one mirrored is that **the write path knows its table from the
+statement and this one has to find it** — `records.ts` holds five mappers while the SQL is in the
+three stores beside it, and `installation-store.ts:92` issues `SELECT *`. So the anchor is the
+**catalog** (a read is `<receiver>.<property>` where the property is a catalogued column name, the
+`SELECT` never consulted — safe on a measurement: every non-column `snake_case` property in the
+workspace, an Anthropic `stop_reason`, an OpenAI `prompt_tokens`, a `pg_catalog` `rls_enabled`, is
+absent from the catalog, so there is **zero collision**), and the table comes from the declared
+`interface \w*Row` by **column-set containment** — 40 interfaces, **26** resolved, **0** ambiguous,
+a table for **313 of 336** reads. The name alone would not do and is ambiguous exactly where it
+matters (`campaign_id` is one business key and three foreign keys, `instance_id` one and four), and
+a field the catalog has no column of is **tolerated** rather than disqualifying, because that is
+what a SQL alias looks like from here. `DERIVATION_RULES`, `NAME_DERIVATIONS`, `camelOfColumn` and
+`columnOfCamel` are **imported unchanged**, because `admits(column, property, table)` does not care
+which direction the value is moving — so `jobId <- run_id` falls out as a declaration rather than a
+derivation precisely because `job_runs.run_id` carries only a *table-level* `UNIQUE (tenant_id,
+run_id)`, the distinction ADR-0355 added `CatalogColumn.unique` for, inherited for free.
+Accounting: **305 of 336 agree exactly** (90.8%), 7 derive, **23** are declared, 1 is an alias, 2
+are read from several columns and compared to none, **0** unexplained. `ROW_FIELD_ALIASES` is the
+three-way provenance settled by reading the SELECTs — `joined_column` (`c.campaign_id AS
+campaign_natural_id`), `parameter_echo` (the SELECT handing back its own argument) and
+`introspection` (a `pg_catalog` row, which has no catalogued table and so no field with a column to
+compare) — and **declaring an alias puts the read under the rule rather than taking it out**: with
+`campaign_natural_id` declared, `campaignId <- campaign_natural_id` is compared against `campaignId`
+and *agrees*. The six divergence kinds were **settled from 35 adjudications and not before them**
+(the conventions came back under 22 distinct names), and `field_overloaded` — the one admitting a
+**field's** name is wrong rather than merely vaguer — charges a source comment on the interface, for
+`overload_uncommented`'s reason one side across: the declaration lives in this directory and the
+next person reads the interface. `reversed_pair` is the only finding no declaration resolves, keyed
+on the **enclosing literal's offset** and never on proximity, since two sibling records in one
+function are not a transposition.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
@@ -3458,6 +3535,13 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   demonstration: both TEXT under one six-value CHECK, so no constraint, no type comparison and no
   member comparison could ever separate them. The only remaining signal is the **names**, and a rule
   over them is possible only because agreement is this repo's norm (682 of 764).
+  **And a record field read from the wrong column is a failure too** (`pg-record-reads.ts`,
+  ADR-0356), the same blindness read a **sixth** way and the one where a fake is at its most
+  useless: a fake hands back the rows the test author wrote, so a mapper reading the wrong column
+  returns the author's own fixture value and every assertion passes. It is the fifth reading's own
+  question asked in the other direction the value moves, and the write half was the half that had a
+  rule. Measured: **305 of 336** reads agree exactly, 7 derive through the same imported
+  `DERIVATION_RULES`, 23 are declared, 1 is an alias, **0** unexplained.
   **ADR-0335 found two more members and they are the sharpest yet**: a write that sets no tenant
   context. `PostgresLifecycleEventStore` and `PostgresDeletionRequestStore` both issued correct SQL
   that no non-owner database would ever accept — on both tables the isolation policy is the only arm
@@ -3863,11 +3947,11 @@ opened them.
   SQL), and `enqueueScheduledJobs` at a 09:17 clock against `0 3 * * *` wrote
   `started_at = 03:00:00.000Z` — the cron tick, not `now`, six hours before any handler — which
   `claimDueJobs` then claimed, and did not once it was pushed forward.
-  What remains, in order: **(1)** the rule covers the **write** path only. A row → record mapping can
-  name a field as wrongly as a parameter can, and the verification itself turned up a live member:
-  `ClaimedJob.jobId` is the **run** id (`run_id`) while `jobDefinitionId` is `job_id` — consistent
-  across every consumer and so not a defect, but exactly the divergence this rule catches on the
-  other side, where nothing looks. **(2)** `meta.job_runs` wants a `due_at`/`visible_at` column,
+  What remains, in order: **(1)** ~~the rule covers the **write** path only~~ — **closed by
+  ADR-0356**, whose `pg-record-reads.ts` asks the same question of a row → record mapping, and which
+  found that the live member this open end named is genuinely a divergence rather than a defect:
+  `ClaimedJob.jobId` reads `run_id` and every consumer uses it as a run id, so the round trip closes
+  on the **value** and not on the name. See the next entry. **(2)** `meta.job_runs` wants a `due_at`/`visible_at` column,
   which would retire the one `column_overloaded` member; it changes the claim predicate, the
   `ORDER BY`, `idx_job_runs_due` and the retry path of a fleet `--workflow-workers` mounts live, and
   leaves `started_at` with nothing to hold since no code records when a handler began — a subsystem
@@ -3886,6 +3970,38 @@ opened them.
   carries most of a `ColumnDefinition`; whether `parseCatalogSource` wants extracting from the
   coverage rule it lives in is undecided, and the reason it has not been is the one that keeps it
   there — one parser is what stops two rules disagreeing about the catalog.
+- **A record field read from the wrong column is a failure too, and what is left of it** (ADR-0356
+  closed ADR-0355's Q1). `pg-record-reads.ts` is the ninth rule and the eighth read in the other
+  direction: **305 of 336** reads agree exactly, 7 derive through the *same imported*
+  `DERIVATION_RULES`, **23** are declared across six kinds settled from 35 adjudications, 1 is an
+  alias, 2 are read from several columns and compared to none, **0** are unexplained. The anchor is
+  the catalog rather than the `SELECT` (measured: zero collision between a column access and any
+  other `snake_case` property access in the workspace) and the table comes from the declared row
+  interface by containment, 26 of 40 resolving and none ambiguous. Verified live as a non-owner on
+  PG 16.13: `claimed.jobId` is a UUID resolving 1 row by `WHERE run_id = $1`,
+  `claimed.jobDefinitionId` is `close-period`, and passing the second where the first belongs is
+  refused `22P02` — so the declared types catch the swap the names do not.
+  What remains, in order: **(1)** `attestation.attestedAt` has a producer and **no enforcement** —
+  `AccessReviewDecisionSchema.superRefine` fixes `decidedByUserId === attestation.attestedByUserId`
+  and says nothing about `attestedAt`, while `decision-store.ts` binds neither it nor
+  `attestationPhrase` (23 columns, 23 params) and no construction site in the workspace varies the
+  two, so a refinement pinning it to `decidedAt` would break nothing today and is the cheapest
+  moment it will ever have. **(2)** `ClaimedJob.jobId` could simply be renamed `runId`: it is the
+  sole holdout against its own package's vocabulary, `jobDefinitionId` beside it has **no consumer
+  at all**, and nothing serializes the handle — a mechanical rename across two interfaces and their
+  consumers, which would retire the one `field_overloaded` member. **(3)** 21 reads carry no row
+  type and 2 carry one no interface was found for, so 23 of 336 reach no derivation; closing that is
+  ADR-0337's refused compiler-API answer for the third time. 14 of the 40 interfaces pin no table
+  and **all 14 carry two or fewer catalogued columns** — seven are `pg_catalog` introspection rows —
+  so they sit *below* `row_table_ambiguous`' three-column floor rather than tripping it, which means
+  a row that lost columns until it fell under that floor would be dropped silently. **(4)** nothing
+  compares a field against the column's *meaning*, only its name —
+  the same gap as the write path's, inherited with the vocabulary. **(5)** `RECORD_READ_DIVERGENCES`
+  is the **second** list in that directory whose entries are judgements about correctness rather
+  than structural facts, so whether a declared reason is true is unverifiable by machine. **(6)**
+  `stripComments` is shared by all nine rules and was wrong about regex literals for four
+  increments; nothing fences the shared scanner against its own output, and the symptom surfaced two
+  files away in a sibling rule.
 
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
@@ -5129,7 +5245,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 350 records; 271 Accepted, 79 Proposed (the
+title or status change cannot drift. 351 records; 272 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   literalBody,
   matchBracket,
+  opensRegexLiteral,
   splitTopLevel,
   stripComments,
   type CatalogTable,
@@ -236,6 +237,29 @@ function statementSpan(code: string, from: number): string {
           continue;
         }
         if (c === quote) break;
+      }
+      continue;
+    }
+    // A regex literal, skipped for the same reason strings are: a `{` inside a character class
+    // such as `[{,]` increments the depth and is never balanced, so the `;` is never seen at depth
+    // zero and the span runs to the end of the file. `pg-record-reads.ts` is the first module to
+    // carry one, and the symptom was three phantom `schema_field` domains attributed to the schema
+    // *before* the regex — which is ADR-0337's rule ("strip comments and strings before you believe
+    // a match") with a third thing to strip.
+    if (ch === "/" && opensRegexLiteral(code, i)) {
+      i += 1;
+      let inClass = false;
+      while (i < code.length) {
+        const c = code[i] ?? "";
+        i += 1;
+        if (c === "\\") {
+          i += 1;
+          continue;
+        }
+        if (c === "[") inClass = true;
+        else if (c === "]") inClass = false;
+        else if (c === "/" && !inClass) break;
+        else if (c === "\n") break;
       }
       continue;
     }

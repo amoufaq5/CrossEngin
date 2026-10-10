@@ -7,6 +7,15 @@ const DEFAULT_LIMIT = 20;
 
 /** A pending job run claimed by a worker for execution — what a worker needs to run the job. */
 export interface ClaimedJob {
+  /**
+   * `jobId` is the **run** id (`meta.job_runs.run_id`), not the job's. The name is wrong and the
+   * value is right: every consumer uses it as a run id — `executeJobRun` filters
+   * `WHERE run_id = $1`, `renewJobClaim` and `releaseJobClaim` likewise, and
+   * `observeJobCancellation` takes it as `{runId}`. The job's own id is `jobDefinitionId` beside
+   * it. Note the asymmetry across the two paths in this one package: `EnqueuedJobRun.jobId` is
+   * `job_id`, so the same property name means two different columns depending on which direction
+   * the row is moving.
+   */
   readonly jobId: string;
   readonly tenantId: string;
   readonly jobDefinitionId: string;

@@ -8,7 +8,7 @@
 | **Reviewers** | Platform |
 | **Supersedes** | _N/A_ |
 | **Superseded by** | _N/A_ |
-| **Related** | ADR-0354, ADR-0353, ADR-0352, ADR-0337, ADR-0336, ADR-0335, ADR-0334, ADR-0333, ADR-0330, ADR-0307, ADR-0288 |
+| **Related** | ADR-0356, ADR-0354, ADR-0353, ADR-0352, ADR-0337, ADR-0336, ADR-0335, ADR-0334, ADR-0333, ADR-0330, ADR-0307, ADR-0288 |
 
 ## Context
 
@@ -336,7 +336,7 @@ path, where nothing looks — see the open questions.
 
 | Question | Owner | Deadline |
 |---|---|---|
-| The rule covers the **write** path only. A row → record mapping can name a field as wrongly as a parameter can, and `ClaimedJob.jobId` ← `run_id` is a live (consistent, non-defect) member found while verifying this one | Platform | _unscheduled_ |
+| ~~The rule covers the **write** path only. A row → record mapping can name a field as wrongly as a parameter can, and `ClaimedJob.jobId` ← `run_id` is a live (consistent, non-defect) member found while verifying this one~~ — **closed by ADR-0356** | Platform | _closed_ |
 | Should `meta.job_runs` gain a `due_at`/`visible_at` column, retiring the one overload? | Platform | _unscheduled_ |
 | Nothing compares the bound property against the column's *meaning*, only its name — a store writing `record.kind` into `status` passes if the property is called `status` | Platform | _unscheduled_ |
 | `BINDING_NAME_DIVERGENCES` notes are judgements; no machine checks that a reason is true | Platform | _unscheduled_ |
