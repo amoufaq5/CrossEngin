@@ -181,26 +181,178 @@ export function scopeFilterWithPlatform(
   };
 }
 
+/**
+ * The modes `PGSSLMODE` is written with, in **ascending order of what they promise** — which is
+ * libpq's own order and is the only reason not to alphabetise this.
+ *
+ * All six of libpq's names are listed and one of them, `verify-ca`, is **refused at parse**. It
+ * stays in the union deliberately: the maps below have to answer for it, because *this binding
+ * cannot honour it* is a fact about the mode and not an absence of one, and deleting the name would
+ * leave the refusal with nothing to name.
+ */
+export const PG_SSL_MODES = [
+  "disable",
+  "allow",
+  "prefer",
+  "require",
+  "verify-ca",
+  "verify-full",
+] as const;
+
+export type PgSslMode = (typeof PG_SSL_MODES)[number];
+
+const PG_SSL_MODE_NAMES: ReadonlySet<string> = new Set(PG_SSL_MODES);
+
+/**
+ * Whether a string is one of the six, compared **case-sensitively** as libpq compares it — so
+ * `Require` is unrecognised rather than quietly accepted as something it is not spelled as.
+ */
+export function isPgSslMode(value: string): value is PgSslMode {
+  return PG_SSL_MODE_NAMES.has(value);
+}
+
+/**
+ * What a mode actually buys on the wire, as three facts rather than a boolean.
+ *
+ * This matters more here than it would for most connections: **this channel carries
+ * `app.current_tenant_id`**, which is the whole tenant-isolation boundary, and on the column store
+ * it carries `app.column_encryption_key` as a bound parameter — so under `--store pg-columns` the
+ * at-rest PHI key crosses this wire on every write. The repo's own managed-cloud guide prescribes
+ * `require` for an internet hop to Supabase, which is the middle fact and not the last one.
+ *
+ * - `plaintext_possible` — the connection may proceed with no TLS at all. `disable` never offers
+ *   it, `allow` and `prefer` let the **server** decide, and all three share one answer because the
+ *   fact a boot line needs is *can this channel carry the tenant id and the column key in the
+ *   clear*, which is true of every one of them; they differ only in who declines.
+ * - `encrypted_unauthenticated` — encrypted against a passive observer, and nothing against an
+ *   active one: the peer is whoever answered, and a man in the middle offering any certificate is
+ *   accepted.
+ * - `authenticated` — the server's certificate chain is validated.
+ *
+ * Three rather than a boolean because "not validated" collapses two different **remedies**: a
+ * `prefer` deployment has to arrange TLS, while a `require` deployment already has it and needs the
+ * trust decision. Reporting both as unvalidated sends the first operator to the trust store and the
+ * second to the port.
+ */
+export const PG_CHANNEL_ASSURANCES = [
+  "plaintext_possible",
+  "encrypted_unauthenticated",
+  "authenticated",
+] as const;
+
+export type PgChannelAssurance = (typeof PG_CHANNEL_ASSURANCES)[number];
+
+/**
+ * A **total map**, so a seventh mode is a compile error here rather than a member inheriting
+ * whichever answer an `if`-chain ended on — and the answer it would inherit from the chain
+ * `node-pg.ts` writes is the one that overstates the channel.
+ *
+ * `verify-ca` is the member that proves the point, and its value is **measured rather than
+ * principled**: `createNodePgConnection` builds `{ rejectUnauthorized: config.ssl ===
+ * "verify-full" }`, so under `verify-ca` node accepts any certificate the server offers. A mode
+ * whose entire purpose is to validate the CA validates nothing, which is why this says
+ * `encrypted_unauthenticated` — the honest description of what that code does — while
+ * `parsePgEnvConfig` refuses the mode outright.
+ */
+const SSL_MODE_CHANNEL_ASSURANCE: Readonly<Record<PgSslMode, PgChannelAssurance>> = {
+  disable: "plaintext_possible",
+  allow: "plaintext_possible",
+  prefer: "plaintext_possible",
+  require: "encrypted_unauthenticated",
+  "verify-ca": "encrypted_unauthenticated",
+  "verify-full": "authenticated",
+};
+
+export function pgChannelAssurance(mode: PgSslMode): PgChannelAssurance {
+  return SSL_MODE_CHANNEL_ASSURANCE[mode];
+}
+
+/**
+ * The sentence a boot line or a survey prints, keyed per **assurance** and not per mode — three
+ * strings rather than six, because the mode's name carries nothing the assurance does not and two
+ * modes with one assurance have one thing to say.
+ */
+export const PG_CHANNEL_ASSURANCE_DESCRIPTIONS: Readonly<Record<PgChannelAssurance, string>> = {
+  plaintext_possible:
+    "the server may decline TLS and the connection proceeds in the clear, carrying the tenant " +
+    "context and any column encryption key with it",
+  encrypted_unauthenticated:
+    "encrypted against a passive observer, but the server's identity is unverified, so an active " +
+    "man in the middle offering any certificate is accepted",
+  authenticated:
+    "encrypted, and the server's certificate chain is validated against node's own trust store — " +
+    "this binding accepts no CA material (there is no `ca` field and PGSSLROOTCERT is never read), " +
+    "so a server presenting a privately-signed certificate is refused rather than trusted",
+};
+
+const ASSURANCE_VALIDATES_CERTIFICATE: Readonly<Record<PgChannelAssurance, boolean>> = {
+  plaintext_possible: false,
+  encrypted_unauthenticated: false,
+  authenticated: true,
+};
+
+/**
+ * Whether this mode validates the server's certificate — `verify-full` and nothing else.
+ *
+ * **Derived through the assurance rather than written as a second per-mode map**, because two maps
+ * carrying one judgement can disagree about one mode and the disagreement would be invisible: this
+ * predicate gates a refusal and `pgChannelAssurance` gates what an operator is told, so a mode
+ * reported `authenticated` while this answered `false` would refuse a working deployment with a
+ * message contradicting its own boot line. Composing two total maps writes the judgement once and
+ * still makes a seventh mode — or a fourth assurance — a compile error.
+ */
+export function sslModeValidatesCertificate(mode: PgSslMode): boolean {
+  return ASSURANCE_VALIDATES_CERTIFICATE[SSL_MODE_CHANNEL_ASSURANCE[mode]];
+}
+
+/**
+ * Whether this mode makes TLS **mandatory** — `require`, `verify-ca` and `verify-full`.
+ *
+ * A second question about the same six modes, and a different one from
+ * {@link sslModeValidatesCertificate}: *must there be TLS at all* versus *is the peer checked*.
+ * `require` answers yes and no.
+ *
+ * Derived through the assurance for its sibling's reason, and it is exactly the complement of
+ * `plaintext_possible` — so `node-pg.ts` can stop listing the three mode names, which was a second
+ * spelling of this set. The one name comparison that survives there is `disable`, which this
+ * predicate deliberately cannot answer: `disable`, `allow` and `prefer` share one assurance and
+ * differ only in *who declines*, so `disable` must pass `ssl: false` where the other two pass
+ * nothing and let the server decide.
+ */
+export function sslModeRequiresTls(mode: PgSslMode): boolean {
+  return SSL_MODE_CHANNEL_ASSURANCE[mode] !== "plaintext_possible";
+}
+
 export interface PgConfig {
   readonly host: string;
   readonly port: number;
   readonly user: string;
   readonly password: string;
   readonly database: string;
-  readonly ssl: "disable" | "require" | "prefer" | "allow" | "verify-ca" | "verify-full";
+  readonly ssl: PgSslMode;
   readonly applicationName: string;
 }
 
 const DEFAULT_PORT = 5432;
 const DEFAULT_APPLICATION_NAME = "crossengin-pg";
-const VALID_SSL_MODES = new Set([
-  "disable",
-  "require",
-  "prefer",
-  "allow",
-  "verify-ca",
-  "verify-full",
-]);
+
+/**
+ * Why a recognised mode is refused, and why a refusal rather than a warning.
+ *
+ * **A mode that claims to verify and does not is worse than one that makes no claim**: an operator
+ * who sets `verify-ca` has made the trust decision and believes it took effect, so a warning they
+ * scroll past leaves them with `require`'s guarantees under `verify-full`'s name. Nothing can repair
+ * it by configuration either — `PgConfig` has no `ca` field, nothing anywhere reads `PGSSLROOTCERT`,
+ * and the one mode that sets `rejectUnauthorized` is `verify-full` — so the only honest outcomes are
+ * to implement it or to decline it, and this declines it.
+ */
+const VERIFY_CA_REFUSAL =
+  "PGSSLMODE=verify-ca is refused: certificate verification is not implemented for it. No CA " +
+  "material is accepted anywhere in this binding — PgConfig carries no `ca` field and " +
+  "PGSSLROOTCERT is never read — so the connection would validate nothing while naming the mode " +
+  "whose purpose is to validate. Use PGSSLMODE=verify-full, the one mode that validates the " +
+  "server's certificate, or PGSSLMODE=require to state plainly that the channel is encrypted and " +
+  "unauthenticated.";
 
 export function parsePgEnvConfig(env: NodeJS.ProcessEnv = process.env): PgConfig {
   const host = env["PGHOST"];
@@ -224,9 +376,17 @@ export function parsePgEnvConfig(env: NodeJS.ProcessEnv = process.env): PgConfig
     }
     port = parsed;
   }
+  // The default is `prefer`, which is `plaintext_possible`: an absent PGSSLMODE is not a statement
+  // about the channel, and nothing here upgrades it to one.
   const sslModeRaw = env["PGSSLMODE"] ?? "prefer";
-  if (!VALID_SSL_MODES.has(sslModeRaw)) {
+  // Recognised first, then refused, and the two messages stay distinguishable: an unrecognised
+  // value is a typo and a recognised one this binding will not serve is a decision, so they send an
+  // operator to different places.
+  if (!isPgSslMode(sslModeRaw)) {
     throw new Error(`PGSSLMODE is not recognized: ${sslModeRaw}`);
+  }
+  if (sslModeRaw === "verify-ca") {
+    throw new Error(VERIFY_CA_REFUSAL);
   }
   return {
     host,
@@ -234,7 +394,7 @@ export function parsePgEnvConfig(env: NodeJS.ProcessEnv = process.env): PgConfig
     user,
     password: env["PGPASSWORD"] ?? "",
     database,
-    ssl: sslModeRaw as PgConfig["ssl"],
+    ssl: sslModeRaw,
     applicationName: env["PGAPPNAME"] ?? DEFAULT_APPLICATION_NAME,
   };
 }

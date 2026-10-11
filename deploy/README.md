@@ -134,7 +134,7 @@ time, so there is no set to check at boot.
 
 ## Going to production (auth)
 
-The `--api-key` above is a simple shared secret — fine to bootstrap, but for real
+The api-key above is a simple shared secret — fine to bootstrap, but for real
 end-users switch `operate-server` to JWT/JWKS by adding these args to the `api`
 service `command` in `docker-compose.yml`:
 
@@ -146,6 +146,40 @@ service `command` in `docker-compose.yml`:
 Keep a single `platform_admin` API key only for the console. See
 `operate-server --help` for the full flag surface (SLO enforcement, audit chain,
 checkpoints, billing, marketplace, etc.) — add the flags you want to the `api` command.
+
+Three things the boot log tells you about this deployment's exposure, which are worth
+reading once after the first `up`:
+
+- **`[auth] api-key specs: …`** — where the specs came from. A spec's token *is* a
+  credential and argv is readable by anyone who can run `ps`, so the compose file passes
+  them as `OPERATE_API_KEY_SPECS` in the `environment:` block. If this line names argv,
+  something is still passing `--api-key`. Both sources are read and concatenated, so
+  moving one does not lose the other.
+- **`[pg] database channel: PGSSLMODE=…`** — what the database wire promises. It carries
+  `app.current_tenant_id`, which is the whole tenant-isolation boundary, on every query.
+  Inside this compose stack the hop is a private Docker network and the default `prefer`
+  is reasonable; the moment the database is anywhere else, `PGSSLMODE=verify-full` is the
+  only mode that validates its certificate. `require` encrypts and authenticates nothing.
+- **`[cursor] cursor disclosure: …`** — whether a caller can read a classified field's
+  value out of an entity-list cursor. The keyset cursor carries the plaintext of every
+  declared sort key, and the response body's redaction is a different code path that does
+  consult the caller's grants — so `?sort=<classified field>` returns in `nextCursor` what
+  the same response just withheld. `erp-core` has one such field
+  (`Employee.work_email`, `pii`), so this line says `plaintext_disclosing` until
+  `CURSOR_ENCRYPTION_SECRET` is set, and names the field either way.
+
+### The UI has no login
+
+`operate-web` authenticates nobody. Its server-side proxy sends one fixed
+`OPERATE_WEB_API_KEY` for every request, so **every browser that can reach `$DOMAIN` is
+served as that principal** — on the shipped compose, a `platform_admin` who can provision
+and delete tenants. Caddy terminates TLS and forwards; it checks no credential.
+
+So this stack is safe on a host nobody else can reach, and is not an internet-facing
+product. Before exposing it, put something that authenticates in front of the `web`
+service — an identity-aware proxy, Caddy's own `basic_auth`, a VPN or a tunnel with access
+control — or switch the API to JWT/JWKS above and have the UI forward the user's own
+token instead of the shared one.
 
 ## Rate limiting
 

@@ -45,7 +45,8 @@ The three tiers and where they live:
    export PGUSER=postgres
    export PGPASSWORD='<your-db-password>'
    export PGDATABASE=postgres
-   export PGSSLMODE=require            # Supabase requires TLS
+   export PGSSLMODE=verify-full        # TLS + certificate validation; see §2's note
+                                       # if your project's cert is not publicly trusted
 
    node apps/architect-cli/dist/bin/crossengin.js apply --confirm
    ```
@@ -76,14 +77,28 @@ The three tiers and where they live:
 The repo already ships a production image, [`deploy/Dockerfile`](./Dockerfile),
 that builds the whole workspace. Deploy it and set the API's command + env.
 
-**Command** (args in list form so the API key is never shell-split):
+**Command:**
 
 ```
 node apps/operate-server/dist/bin/operate-server.js \
   --pack erp-core --store pg --port 8787 --scheme https --platform-admin \
   --platform-user-routes --platform-user-role platform_admin \
-  --api-key <STRONG_TOKEN>:platform_admin:<TENANT_ID>:<USER_ID>
+  --idempotency-store pg
 ```
+
+The api-key spec goes in the **environment**, not here:
+
+```
+OPERATE_API_KEY_SPECS=<STRONG_TOKEN>:platform_admin:<TENANT_ID>:<USER_ID>
+```
+
+> **Not `--api-key`.** The `<STRONG_TOKEN>` *is* a credential, and a process's
+> argv is readable by anyone who can run `ps` on the host — which on a shared
+> PaaS is not only you. `OPERATE_API_KEY_SPECS` takes several specs separated by
+> newlines or commas, so a second operator is another line rather than another
+> flag. Both sources are still read and concatenated, so nothing breaks if a
+> flag is left behind; the API reports which it got on every boot (`[auth]
+> api-key specs: …`) and names argv when a spec came that way.
 
 > **Both ids must name rows that exist.** The third field is a
 > `meta.tenants.id` and the fourth is a `meta.users.id`, and nothing creates
@@ -122,9 +137,45 @@ PGPORT=5432                # session-mode pooler
 PGUSER=postgres.<project-ref>
 PGPASSWORD=<your-db-password>
 PGDATABASE=postgres
-PGSSLMODE=require
+PGSSLMODE=verify-full
 NODE_ENV=production
+OPERATE_API_KEY_SPECS=<STRONG_TOKEN>:platform_admin:<TENANT_ID>:<USER_ID>
+CURSOR_ENCRYPTION_SECRET=<32+ random bytes>
 ```
+
+`CURSOR_ENCRYPTION_SECRET` seals the entity-list keyset cursor with a per-tenant
+key derived from it. Set it: `erp-core` has classified fields a list view can
+sort by, and unsealed, a cursor is reversible base64url JSON carrying the
+plaintext of every sort key — so `?sort=<classified field>` hands back in
+`nextCursor` what the response body redacted from the same caller. The boot log
+names the fields. (`COLUMN_ENCRYPTION_SECRET` is the separate at-rest one, needed
+only by a pack declaring `phi`/`regulated` fields on `--store pg-columns`.)
+
+> **Try `verify-full`, and know what `require` costs you.** This connection
+> crosses the public internet and carries `app.current_tenant_id` — the whole
+> tenant-isolation boundary — on every query, plus `app.column_encryption_key`
+> on every PHI write under `--store pg-columns`. `require` encrypts against a
+> passive observer and authenticates **nothing**: the peer is whoever answered,
+> so an active man in the middle offering any certificate is accepted.
+> `verify-full` is the only mode this binding validates a certificate under, and
+> the API says which it got on every boot (`[pg] database channel: …`).
+>
+> **But it may not be reachable here, and that is this binding's limitation
+> rather than yours.** `PgConfig` carries no `ca` field and nothing reads
+> `PGSSLROOTCERT`, so `verify-full` validates against Node's own trust store and
+> nothing else — while [Supabase's documented path for
+> `verify-full`](https://supabase.com/docs/guides/database/psql) is to download
+> the project's **server root certificate** from the dashboard and pass it as
+> `sslrootcert`, which this binding cannot accept. So set `verify-full` and look
+> at the first boot: if the connection is refused for an untrusted certificate,
+> your options today are `require` — encrypted and unauthenticated, and now you
+> know it — or terminating TLS at something that can be given the CA. Adding CA
+> support is a named open end (ADR-0357), and this is the deployment it is for.
+>
+> `verify-ca` is **refused** rather than served, for the same reason: with no CA
+> material it would validate nothing while naming the mode whose whole purpose
+> is to validate. It also would not be equivalent to `verify-full` if it were
+> implemented — it checks the chain and deliberately not the hostname.
 
 - **Railway:** New Project → Deploy from repo → set the Dockerfile path to
   `deploy/Dockerfile`, the start command above, and the env vars. Railway gives
@@ -248,11 +299,23 @@ deployment.
 
 - **`crossengin apply` says the `pg_uuidv7` extension is missing** → you skipped
   §1.2. Run `deploy/supabase/00-uuidv7.sql` in the SQL Editor first.
-- **API 500s with a connection error** → check `PGSSLMODE=require` and that
-  you're using the **pooler** host/user for the long-lived API (§2), not the
-  direct connection.
+- **API 500s with a connection error** → check `PGSSLMODE` and that you're using
+  the **pooler** host/user for the long-lived API (§2), not the direct
+  connection. If the error names a self-signed or untrusted certificate, that is
+  `verify-full` working: this binding accepts no CA material, so see §2's note.
+- **API refuses to start, naming `PGSSLMODE=verify-ca`** → that mode is refused
+  rather than served: no CA material is read anywhere in this binding, so it
+  would validate nothing under the name of the mode whose purpose is to
+  validate. Use `verify-full`, or `require` to say plainly that the channel is
+  encrypted and unauthenticated.
 - **UI shows `upstream_unreachable`** → `OPERATE_API_URL` is wrong or the API
   isn't public. It must be the API's external HTTPS URL, reachable from Vercel.
 - **UI 401 / empty lists** → `OPERATE_API_KEY` on Vercel must be only the token
   part (before the first `:`), matching the `<STRONG_TOKEN>` in the API's
-  `--api-key`.
+  `OPERATE_API_KEY_SPECS`.
+- **Boot log says `cursor disclosure: plaintext_disclosing`** → this manifest has
+  a classified field a list view can sort by, and `CURSOR_ENCRYPTION_SECRET` is
+  unset, so a caller naming that field in `?sort` gets its plaintext back in
+  `nextCursor` while the response body redacts it. Set the secret (32+ random
+  bytes) to seal every cursor with a per-tenant key. `erp-core` has a member, so
+  this line is not hypothetical on the default pack.

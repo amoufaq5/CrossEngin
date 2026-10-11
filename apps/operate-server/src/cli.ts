@@ -2149,7 +2149,9 @@ Options:
   --schema <name>      Postgres schema for the entity store (default meta;
                        public for pg-columns)
   --scheme <proto>     Default request scheme: http | https (default http)
-  --api-key <spec>     API key binding key:role:tenant[:principalId] (repeatable)
+  --api-key <spec>     API key binding key:role:tenant[:principalId] (repeatable;
+                       the token IS a credential and argv is readable via ps, so
+                       prefer OPERATE_API_KEY_SPECS — newline/comma-separated)
   --jwks-key <spec>    JWKS public key kid:base64-ed25519-pubkey (repeatable)
   --jwks-file <file>   JSON [{kid, publicKeyBase64}, ...] of the IdP's keys
   --jwks-url <url>     Remote JWKS endpoint (cached, refetched on kid rotation)
@@ -2509,9 +2511,11 @@ Options:
   --help, -h           Show this help
   --version, -v        Print version
 
-Auth: --api-key for dev opaque tokens; --jwks-* + --jwt-* to verify Bearer JWTs
-(EdDSA) against an IdP's public keys — the verified claims (sub/scope/tenant_id)
-become the principal. Postgres (--store pg): standard PG* env vars.
+Auth: OPERATE_API_KEY_SPECS (or --api-key) for opaque tokens; --jwks-* + --jwt-*
+to verify Bearer JWTs (EdDSA) against an IdP's public keys — the verified claims
+(sub/scope/tenant_id) become the principal. Both api-key sources are read and
+concatenated; a spec on argv is reported at boot because \`ps\` discloses it.
+Postgres (--store pg): standard PG* env vars.
 `;
 
 /**

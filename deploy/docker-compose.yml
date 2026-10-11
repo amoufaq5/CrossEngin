@@ -82,7 +82,22 @@ services:
       # on --store pg-columns; see the OPERATE_PACK note below. In the environment and never in
       # `command:` below, because argv is readable via ps.
       COLUMN_ENCRYPTION_SECRET: ${COLUMN_ENCRYPTION_SECRET:-}
-    # Args in list form so the api-key (token:role:tenant) is never shell-split.
+      # Seals the entity-list keyset cursor (AES-256-GCM under a per-tenant HKDF key). Set this on
+      # ANY deployment whose manifest classifies a sortable field: the cursor carries the plaintext
+      # of every declared sort key, so `?sort=<classified field>` hands back in `nextCursor` what
+      # the response body redacts from the same caller. That includes THIS deployment --
+      # erp-core's `Employee.work_email` is `pii` and sortable, reproduced live as a caller holding
+      # the list grant and not the field's read grant -- so the boot log says
+      # `cursor disclosure: plaintext_disclosing` until this is set. Unset, a cursor is reversible
+      # base64url JSON. 32+ random bytes; changing it only costs cursors in flight (one 400 and a
+      # restarted page walk).
+      CURSOR_ENCRYPTION_SECRET: ${CURSOR_ENCRYPTION_SECRET:-}
+      # The api-key specs (`token:role:tenant[:principal]`), newline- or comma-separated. A spec's
+      # token IS the credential, so it belongs here and not in `command:` below — argv is readable
+      # via `ps` by any user on the host. Until this variable existed the flag was the only route,
+      # which is why the comment two lines above said one thing and the command said another.
+      OPERATE_API_KEY_SPECS: ${OPERATE_ADMIN_API_KEY}
+    # Args in list form so no value is ever shell-split.
     command:
       - node
       - apps/operate-server/dist/bin/operate-server.js
@@ -101,7 +116,9 @@ services:
       # rather than the destruction itself. A tenant that already holds ciphertext written under
       # the derived key is SEEDED from it (so their data stays readable) and its row records
       # `seeded_from_derived`, which is still recomputable from the secret -- so destroying it
-      # destroys nothing until that tenant is rekeyed, and there is no rekey executor yet.
+      # destroys nothing until that tenant is rekeyed. `operate-server rekey --tenant <id>
+      # --confirm-tenant <id>` is that executor: it mints a random key, re-encrypts that tenant's
+      # columns under it and retires the old generation, in one transaction.
       - --pack
       - ${OPERATE_PACK:-erp-core}
       - --store
@@ -111,17 +128,43 @@ services:
       - --scheme
       - https
       - --platform-admin
-      - --api-key
-      - ${OPERATE_ADMIN_API_KEY}
+      # The replay guard defaults to a Map in one process, so a retried mutation re-executes after
+      # a restart and on a second replica — including on the deletion route, the one route that
+      # *requires* an Idempotency-Key. Durable here (ADR-0336, which measured a retry after a
+      # restart reading `replay_hit_match` with this flag and `first_seen` without it); the reaper
+      # is mounted by the store and needs no second flag. The guarantee is bounded and stated:
+      # there is no reserve step, so two *concurrent* retries of one key both execute and only the
+      # sequential case is closed, which is what clients actually produce.
+      - --idempotency-store
+      - pg
     expose:
       - "8787"
+    # `/readyz`, not `/health`: this check's job is to decide whether `web` and `caddy` may be
+    # pointed at the API, which is a readiness question. The API's boot is full of deliberate
+    # refusals (a classified pack with no COLUMN_ENCRYPTION_SECRET, an undischargeable ABAC
+    # obligation, `envelope` on a deployment that encrypts nothing) and every one exits the
+    # process — and without this, compose reported the container `started` the moment it was
+    # spawned, Caddy was pointed at it regardless, and the public domain served 502 while nothing
+    # in the stack held the opinion that anything was wrong.
+    #
+    # `start_period` covers a cold boot: the catalog admission survey and the per-tenant key
+    # provisioning both run before the listener binds.
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8787/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
     restart: unless-stopped
 
   web:
     build: *app-build
     depends_on:
       api:
-        condition: service_started
+        # `service_healthy` and not `service_started`: the UI's every page is a proxy call to the
+        # API, so starting it against an API that is still booting — or that refused to boot — just
+        # moves the 502 one hop.
+        condition: service_healthy
     environment:
       NODE_ENV: production
       # The web app's server-side proxy calls the API over the internal network.

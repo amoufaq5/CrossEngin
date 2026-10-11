@@ -17,6 +17,9 @@ import {
   createNodePgConnection,
   formatCheckAdmissionSurvey,
   parsePgEnvConfig,
+  pgChannelAssurance,
+  PG_CHANNEL_ASSURANCE_DESCRIPTIONS,
+  sslModeValidatesCertificate,
   surveyCheckAdmission,
   type CheckAdmissionSurvey,
 } from "@crossengin/kernel-pg";
@@ -116,8 +119,11 @@ import {
 import {
   ALLOW_CURSOR_DISCLOSURE_FLAG,
   CURSOR_ENCRYPTION_SECRET_VAR,
+  decideCursorDisclosure,
+  formatCursorDisclosure,
   formatCursorSealing,
   resolveCursorSealing,
+  surveySortableClassifiedFields,
 } from "./cursor-encryption.js";
 import {
   COLUMN_KEY_MODE_FLAG,
@@ -206,6 +212,16 @@ import {
   type JwksKeySpec,
   type JwtVerifyConfig,
 } from "./principals.js";
+import {
+  formatApiKeySpecSource,
+  resolveApiKeySpecs,
+  SOURCE_EXPOSES_ARGV,
+} from "./api-key-source.js";
+import {
+  buildHealthInterceptor,
+  buildPostgresReadinessCheck,
+  HEALTH_PATHS,
+} from "./health.js";
 import {
   PersistentMarketplaceInstallEngine,
   PostgresInstallationStore,
@@ -669,7 +685,20 @@ async function resolveStore(options: ServeOptions, manifest: Manifest): Promise<
         `${COLUMN_ENCRYPTION_SECRET_VAR} set, or drop the flag.`,
     );
   }
-  const conn = createNodePgConnection(parsePgEnvConfig());
+  const pgConfig = parsePgEnvConfig();
+  // What the database channel actually promises, said out loud because this wire carries the whole
+  // tenant-isolation boundary — `app.current_tenant_id` crosses it on every query — and on
+  // `--store pg-columns` it carries `app.column_encryption_key` on every PHI write. The default is
+  // `prefer`, which lets the *server* decide whether there is any TLS at all, and `require`, which
+  // this repo's own managed-cloud guide prescribes, authenticates nothing: the peer is whoever
+  // answered. Three facts rather than a boolean, because "not validated" collapses two different
+  // remedies — a `prefer` deployment has to arrange TLS, a `require` one already has it and needs
+  // the trust decision.
+  const channel = pgChannelAssurance(pgConfig.ssl);
+  const channelLine = `database channel: PGSSLMODE=${pgConfig.ssl} — ${PG_CHANNEL_ASSURANCE_DESCRIPTIONS[channel]}`;
+  if (sslModeValidatesCertificate(pgConfig.ssl)) console.info(`[pg] ${channelLine}`);
+  else console.warn(`[pg] ${channelLine}; PGSSLMODE=verify-full validates it`);
+  const conn = createNodePgConnection(pgConfig);
   const schema = options.schema ?? undefined;
   // The envelope is built here and not beside the derivation, because it needs the connection the
   // derivation does not. The derived source stays live either way: in envelope mode it is the
@@ -748,6 +777,24 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     options.manifestPath !== null
       ? loadManifestFromJson(await readFile(options.manifestPath, "utf8"))
       : await loadBuiltinPack(options.pack ?? "");
+  // Where the api-key specs came from, resolved **once** and before anything reads them, because
+  // two readers taking two different answers is the shape this repo keeps finding. ADR-0301's rule
+  // is that a secret arrives by environment and never argv — a spec is `token:role:tenant` and the
+  // token *is* the credential — and `--api-key` was the only route until `OPERATE_API_KEY_SPECS`
+  // existed, which is why `deploy/docker-compose.yml` published the platform-admin key on the
+  // command line beside a comment saying credentials do not travel that way. Both sources are read
+  // and concatenated, so no deployment loses a credential to a precedence rule; argv is warned
+  // about rather than refused, which is the opposite of ADR-0338's choice and for its stated
+  // reason — nothing served PHI correctly before that refusal, while every deployment today passes
+  // `--api-key` and works.
+  const apiKeySource = resolveApiKeySpecs(options.apiKeys, process.env);
+  // Warning level read off `SOURCE_EXPOSES_ARGV` rather than compared against a source name, so a
+  // fifth source has to say which side of ADR-0301 it falls on before it can choose a log level.
+  if (SOURCE_EXPOSES_ARGV[apiKeySource.source]) {
+    console.warn(`[auth] ${formatApiKeySpecSource(apiKeySource)}`);
+  } else {
+    console.info(`[auth] ${formatApiKeySpecSource(apiKeySource)}`);
+  }
   const { store, allocator, settingsStore, conn, columnKey } = await resolveStore(
     options,
     manifest,
@@ -761,7 +808,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // that work and still admit the ones that do not.
     const readiness = await surveyEnvelopeTenantReadiness(
       conn,
-      options.apiKeys.map(parseApiKeySpec).map((spec) => spec.tenantId),
+      apiKeySource.specs.map(parseApiKeySpec).map((spec) => spec.tenantId),
       options.schema !== null ? { schema: options.schema } : {},
     );
     const line = formatEnvelopeTenantReadiness(readiness);
@@ -815,6 +862,29 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // Said on every boot, not only when a list filters rows: a deployment that set the secret should
   // see that its cursors are sealed, and one that accepted the disclosure should see that it did.
   console.info(`[cursor] ${formatCursorSealing(cursorSealing.mode)}`);
+  // The second question, and the one that is live on the shipped default. The refusal above is
+  // about a *withheld row's position* and fires only where a grant filters rows, of which the
+  // measured count across the seven packs is zero — so it is vacuously silent on every deployment
+  // there is. What is not vacuous is a *classified field's value*: `keysetOf` maps over the whole
+  // declared sort and renders `String(row[field])` from the record, so a caller naming a classified
+  // field in `?sort` is handed its plaintext in the `nextCursor` of a response whose body redacted
+  // it. The redaction and the cursor are two code paths and only the first consults the caller's
+  // grants. Reported and never refused — `erp-core`, the compose default, has a member, so a
+  // refusal would refuse every deployment that works today (ADR-0334's reason for leaving
+  // `--tenant-status-gate` opt-in) and would drive an operator to a flag that also disarms the
+  // sharper row check beside it.
+  const cursorDisclosure = decideCursorDisclosure({
+    mode: cursorSealing.mode,
+    fields: surveySortableClassifiedFields(manifest),
+  });
+  // Said either way — "we checked and found nothing" cannot be claimed from the absence of a log
+  // line — and at warning level for the one verdict that describes a live disclosure, which is the
+  // state of every shipped deployment until the secret is set.
+  if (cursorDisclosure.verdict === "plaintext_disclosing") {
+    console.warn(`[cursor] ${formatCursorDisclosure(cursorDisclosure)}`);
+  } else {
+    console.info(`[cursor] ${formatCursorDisclosure(cursorDisclosure)}`);
+  }
   // `--allow-plaintext-phi`'s "set and unused" shape rather than its CLI refusal: the refusal there
   // can be decided from argv alone (`--store pg-columns` cannot produce plaintext), while whether
   // this flag is redundant depends on an environment variable `parseServeArgs` deliberately cannot
@@ -881,7 +951,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     // from the outside — total redaction looks exactly like classification working.
     console.info(`[sensitive] ${formatSensitiveFieldSurvey(sensitiveSurvey)}`);
   }
-  const apiKeys = options.apiKeys.map(parseApiKeySpec);
+  const apiKeys = apiKeySource.specs.map(parseApiKeySpec);
   const { config: jwt, poller } = await resolveJwtConfig(options);
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
   // ADR-0350. The boot manifest's own typed entity tables, which the shared-table erasure now
@@ -3874,6 +3944,45 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
           `{${BOUNCE_WEBHOOK_SOURCES.join("|")}}`,
       );
     }
+  }
+
+  // `/health` and `/readyz`, wrapped **outermost** and in front of the gateway. A probe carries no
+  // credential — a compose healthcheck is a `curl` in the container and a load balancer's check is a
+  // bare GET — so a gateway route would be 401'd by the auth stage; the bounce webhook wraps here
+  // for the mirror-image reason (the gateway never sees the raw body).
+  //
+  // Why it matters on this binary in particular: every refusal above this line exits the process,
+  // and with no probe declared Docker reports the container `started` the moment it is spawned and
+  // Caddy is pointed at it regardless — so a considered boot refusal became a public 502 with
+  // nothing in the stack holding the opinion that anything was wrong.
+  //
+  // The readiness check list is **required and may be empty**, and `--store memory` is the honest
+  // empty case: its records are in the heap, so there is no dependency whose absence would stop it
+  // serving. `[]` is an assertion rather than a silence (ADR-0331), which is why `checks` is not
+  // optional — a forgotten optional list would make every probe answer 200 for a process whose
+  // database is gone.
+  {
+    const probeHealth = buildHealthInterceptor({
+      checks: conn !== undefined ? [buildPostgresReadinessCheck(conn)] : [],
+      // Server-side only, which is the whole of why the response body carries a check's declared
+      // name and an enumerated outcome and nothing else: a `pg` failure names the host, the database
+      // and the role, and this surface is unauthenticated.
+      onNotReady: (info) =>
+        console.warn(
+          `[health] ${info.name} ${info.outcome} after ${info.durationMs.toString()}ms`,
+          info.error ?? "",
+        ),
+    });
+    const inner = dispatchTarget;
+    dispatchTarget = {
+      dispatch: async (raw, body): Promise<RawHttpResponse> =>
+        (await probeHealth(raw, body)) ?? (await inner.dispatch(raw, body)),
+    };
+    console.info(
+      `[health] serving ${HEALTH_PATHS.liveness} (liveness, touches nothing) and ` +
+        `${HEALTH_PATHS.readiness} (readiness, ` +
+        `${conn !== undefined ? "checks postgres" : "no declared dependency"})`,
+    );
   }
 
   poller?.start();

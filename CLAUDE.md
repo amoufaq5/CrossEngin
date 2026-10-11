@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 351 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 352 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -774,6 +774,54 @@ type errors.
   skipping regex literals, and `"([^"]+)"` carries three — so the third opened a string that ran to
   the next quote anywhere in the file.
 
+  ADR-0357 turns the question **outward**. Every increment from ADR-0330 asked something about the
+  *artifact* — does this store write the columns it names, does this CHECK admit what the contract
+  emits, does this property name the column it is read from — and the nine rules in
+  `packages/testing/src/strategy/` are that question asked nine ways. This one reads `deploy/`
+  against the code, and the class is **a claim about the deployment that the deployment does not
+  make**: four protections stated in one place and absent from the place that would enforce them.
+  The sharpest is a **disclosure and not a gap**. ADR-0346's boot refusal
+  (`cursor_discloses_withheld_rows`) is correct and **vacuously silent on every deployment there
+  is**, because no pack declares a row-filtering grant — and the disclosure one layer in is not
+  vacuous: `keysetOf` maps over the **whole declared sort** and renders `String(row[field])` from
+  the record, so a caller naming a **classified** field in `?sort` is handed its plaintext in
+  `nextCursor` inside a response whose body the gateway just redacted on that caller's own grants.
+  **This is a different disclosure from the one ADR-0345 and ADR-0346 reasoned about**, and the
+  difference is what makes it live: both of those argue about a *withheld row's* value, gated on a
+  record policy nothing declares, while here the row is one the caller **is** shown and the *value*
+  is one they are not. Measured against the real resolved packs: **14 (entity, sortable classified
+  field) pairs across the seven, 8 distinct, at least one in every pack** — `Employee.work_email`
+  (`pii`) rides in from `erp-core`, which is the shipped compose default, and healthcare adds
+  `Patient.mrn`, the `phi` field ADR-0338 made `bytea` ciphertext at rest and ADR-0339 found
+  `front_desk` blind-overwriting. The column store is **worse than the document store**, which is
+  the opposite of how one comment reads: `columnExpr` answers `null` for an `encryptAtRest` column
+  so `?sort=mrn` is dropped from `ORDER BY`, while the value is in the record either way —
+  `selectList` emits `pgp_sym_decrypt(…) AS mrn` and selects it with no `?fields`, and *with* one
+  `projectionColumns` adds every sort field's column back with no `encryptAtRest` filter *because
+  the cursor needs it* — and `keysetOf` reads the record. So the cursor carries the decrypted
+  plaintext of an ordering that was never applied, which is a soundness bug in the keyset beside
+  the disclosure, and a store-narrowed survey would have dropped the one `phi` member. It **reports and never refuses**, argued from the same
+  measurement: ADR-0338's refusal rests on *nothing served PHI correctly today*, which is false
+  here since `erp-core` has a member, and the hatch an operator would reach for also disarms the
+  sharper row check beside it — ADR-0334's *a remedy that cannot work is worse than none*, one
+  notch out.
+  The other three are the shape stated plainly. `deploy/docker-compose.yml` carried the comment
+  *"Credentials reach the API through the environment, not through `command`, because argv is
+  readable by anyone who can run `ps` (ADR-0301)"* and nine lines later passed `--api-key
+  ${OPERATE_ADMIN_API_KEY}` in `command:` — the one credential on the stack that can provision and
+  delete tenants — because the flag was the **only route**: `cli.ts` reads `process.env` nowhere by
+  design and no module owned a variable. `PGSSLMODE=verify-ca`, the mode whose entire purpose is to
+  validate a certificate, mapped to `{rejectUnauthorized: false}` and validated nothing, with no
+  configuration that could repair it (`PgConfig` has no `ca` field, nothing reads `PGSSLROOTCERT`)
+  — on the wire that carries `app.current_tenant_id`, which **is** the tenant-isolation boundary.
+  And there was no `/health`, no `/readyz` and no `healthcheck:` anywhere, so every one of this
+  binary's **deliberate** boot refusals — ADR-0338's, ADR-0340's, ADR-0345's, ADR-0349's, each one
+  a considered design decision that exits the process — became a public 502 with nothing in the
+  stack holding the opinion that anything was wrong. Each fix exposed one second spelling of its
+  own judgement and converged it: `createNodePgConnection`'s inline `config.ssl === "verify-full"`
+  became `sslModeValidatesCertificate`, and the health module's serving set became a per-member
+  map the `NonServingOutcome` type is derived from.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -980,6 +1028,33 @@ packages exist at only one layer, noted below where that is true.
   **eight spellings** and only `KeyRotationMigrator`'s private copy read `relforcerowsecurity`, the
   one input that overrides ownership. Only the *rule* is shared; each call site keeps its own query,
   since `commonRefusals` wants `has_scope_column` in the same round trip.
+  **`PGSSLMODE` says what the channel actually promises, and `verify-ca` is refused** (ADR-0357).
+  That wire carries `app.current_tenant_id` on every query — it **is** the tenant-isolation
+  boundary — and on the column store `app.column_encryption_key` on every PHI write, while the
+  default is `prefer`, which lets the *server* decide whether there is any TLS at all.
+  `PG_CHANNEL_ASSURANCES` is **three** facts over the six modes rather than a boolean, because *not
+  validated* collapses two different remedies: `plaintext_possible` (`disable`/`allow`/`prefer`,
+  which share one answer and differ only in *who declines*) has to arrange TLS, while
+  `encrypted_unauthenticated` (`require`) already has it and needs the trust decision.
+  `sslModeValidatesCertificate` is **composed from two total maps** and not written as a second
+  per-mode one, because the predicate gates a refusal while the assurance gates what an operator is
+  told, so a mode reported `authenticated` while the predicate answered `false` would refuse a
+  working deployment with a message contradicting its own boot line — and `node-pg.ts` now *calls*
+  it where it compared `config.ssl === "verify-full"` inline, with a test reading that file as text
+  to pin both the call and the absence of the literal. **That test then found a third judgement in
+  the same ternary**, which is this increment's own class landing on its own fix: the outer arm
+  still listed `require || verify-ca || verify-full` to decide *which modes get a TLS object at
+  all*, a different question from *is the peer checked* (`require` answers yes and no) and exactly
+  the complement of `plaintext_possible` — so `sslModeRequiresTls` is the second predicate and the
+  ternary names no mode but `disable`. Had the test only pinned the call, that list would have
+  stayed. `verify-ca` **stays in the union** and is
+  refused at parse: both maps have to answer for it, since *this binding cannot honour this mode* is
+  a fact about the mode rather than an absence of one, and deleting the name would leave the refusal
+  with nothing to name. Refused rather than warned, which is ADR-0340's shape and not ADR-0338's —
+  an operator who set it has *made* the trust decision and would otherwise hold `require`'s
+  guarantees under `verify-full`'s name, nothing can repair it by configuration, and the measured
+  count of `verify-ca` anywhere in the repo is **zero**. The one remaining mode comparison is
+  `disable`, which the assurance deliberately cannot answer.
 - **`types`** — deliberately tiny: branded primitive id types (`TenantId`, `UserId`,
   `RequestId`, `ManifestId`). One file.
 - **`config`** — shared TypeScript / ESLint / Prettier config bases. No `src/`.
@@ -3009,12 +3084,70 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   findings. That is the **inverse** of ADR-0336's open end ("every decision row exists and nothing
   names it"), so both halves of that join are now known, and a boot warning says it before the sweep
   does.
+  **`OPERATE_API_KEY_SPECS` is the environment route `--api-key` never had** (ADR-0357), owned by
+  `api-key-source.ts` beside its own variable name and decision, the way `column-encryption.ts`
+  owns `COLUMN_ENCRYPTION_SECRET_VAR` — `cli.ts` reads `process.env` nowhere by design, which is
+  why the flag was the only route and why the shipped compose published the `platform_admin`
+  credential on the host's process list beside a comment saying credentials do not travel that way.
+  `resolveApiKeySpecs` is called **once** in `serve()`, before anything reads the specs, so the
+  envelope tenant-readiness survey and the principal wiring take one answer. Both sources are
+  **concatenated** rather than one overriding the other, because precedence means a deployment that
+  set the variable and forgot the flag silently serves one set and which set depends on a rule
+  nobody reads; the `both` verdict says so out loud. Split on newline **and** comma (a compose
+  `environment:` block takes a multi-line value cleanly and a `.env` file does not, and neither
+  character can occur in a `token:role:tenant[:principal]` spec), named `_SPECS` rather than
+  `_KEYS` because `deploy/` already carries two variables holding bare tokens a *client* sends, and
+  **warned rather than refused** — ADR-0338's rule read the other way, since every deployment today
+  passes `--api-key` and works. The boot line is affirmative in both directions and never prints a
+  spec.
+  **A classified field's value reaching a caller through a cursor is surveyed at boot**
+  (`decideCursorDisclosure`, ADR-0357) — the second cursor question, and the one that is live where
+  ADR-0346's refusal is vacuous. Four verdicts, `CURSOR_DISCLOSURE_MAY_SERVE` every member `true`,
+  the `plaintext_disclosing` line at **warning** level and the rest at info. The survey is the
+  **sortable** set and not the default sort, which is the difference from `listSortConflicts`: that
+  one walks `defaultSort`, which no caller can decline, and so earns a refusal with no hatch, while
+  this asks what a caller can *choose* — and surveying the default would have missed `Patient.mrn`
+  entirely. It borrows `listConfigForEntity`, `resolvedFields` and `entityClassifiedFields` rather
+  than restating any of them, so it reads the set `parseListQuery` will accept and a classified
+  **trait** field is in scope. Said after `checkAbacObligations`, because that check can refuse on
+  the same secret and printing a second cursor finding first would hand an operator two when the
+  first is the one that stops the boot.
+  **`/health` and `/readyz` exist** (`health.ts`, ADR-0357), wrapped **outermost in front of the
+  gateway** — a probe carries no credential, so a gateway route would be 401'd by the auth stage,
+  which is the bounce webhook's argument read the other way round. The split is the whole design
+  and getting it backwards is invisible until the first outage: **liveness touches nothing** and a
+  failed one gets the container *killed*, so a liveness probe that checked Postgres would fail on
+  every replica during a database outage and the orchestrator would restart all of them repeatedly;
+  **readiness checks Postgres** and a failed one takes the instance *out of rotation* and leaves it
+  running, which is the correct response to a dependency it cannot reach. `SELECT 1` and not a table
+  read, because a probe selecting from `meta.tenants` would be answered by RLS, ownership and a
+  grant as much as by the database's health. Both unauthenticated, so the body is a **closed
+  vocabulary** — a check's declared lowercase name and one of three enumerated outcomes, no version,
+  no uptime, no dependency error text, and `durationMs` on the report and *not* in the response,
+  since a timing an anonymous caller can poll measures the database's load from outside the
+  perimeter. Cost is bounded by **in-flight collapse** and deliberately **no success cache**, because
+  a cache asserts reachability on the evidence of a round trip already finished; the slot is released
+  **inside** the settle handlers, so its lifetime is exactly "the probe is in flight" and a joining
+  request cannot be served a stale `ready`. The timeout is a **race, not a cancellation**
+  (`PgConnection` cannot cancel a statement), so releasing at the budget would leak one connection
+  per probe against a wedged database — the pool exhaustion the collapse exists to prevent, caused
+  by the surface meant to report it. The check list is **required and may be empty**: `[]` is a
+  signed assertion that `--store memory` needs nothing to serve, where an optional field could be
+  forgotten with the type still valid and every probe would answer 200 for a process whose database
+  is gone.
 - **`apps/operate-web`** — **long-running process** (Next.js app router + Tailwind, `next
   dev`/`next start` on :3000). The generic manifest-driven UI: a catch-all `/api/[...path]`
   proxy to operate-server, dynamic entity list/record/form pages under `/e/[slug]` rendered
   from the server's `UiSchema`, an inbox, reports (aging, WHT, period close), tenant admin
   (settings, billing), a setup wizard, and a platform console for tenant provisioning and
   design reviews. No package `bin`; deployed as a web server, not a CLI.
+  **It authenticates nobody.** `app/api/[...path]/route.ts` sends one fixed `OPERATE_API_KEY` as
+  `x-api-key` on every request, with no cookie, session or JWT anywhere in the app — so every
+  browser that can reach the domain is served as that principal, which on the shipped compose is a
+  `platform_admin` who can provision and delete tenants, and Caddy terminates TLS and forwards
+  without checking a credential. ADR-0357 says it in `deploy/README.md` under *The UI has no
+  login*; saying it is not fixing it, and the fix is a session layer plus the API's existing
+  JWT/JWKS path.
 
 ## Cross-cutting invariants
 
@@ -3621,6 +3754,39 @@ Two constraints worth knowing before suggesting a host:
   `COLUMN_ENCRYPTION_SECRET` is in the compose `environment:` block and **never** in `command:`,
   because argv is readable via `ps`; the compose file also says what switching `OPERATE_PACK` to
   `erp-healthcare` or `erp-government` requires, since that is where an operator meets the refusal.
+- **The compose file no longer contradicts its own comment** (ADR-0357). It carried that `ps`
+  sentence and then passed `--api-key ${OPERATE_ADMIN_API_KEY}` in `command:` nine lines down —
+  the one credential on the stack that can provision and delete tenants — because the flag was the
+  only route there was. It now passes `OPERATE_API_KEY_SPECS: ${OPERATE_ADMIN_API_KEY}` in the
+  `environment:` block, which needs **no `.env` change**: the variable it reads is the one that was
+  already there. `CURSOR_ENCRYPTION_SECRET` is beside it and `.env.example` names both it and
+  `COLUMN_ENCRYPTION_SECRET`, which the compose file had always passed and the example had never
+  mentioned. `--idempotency-store pg` is on the command, so the replay guard is durable rather
+  than a `Map` in one process.
+- **The `api` service has a healthcheck and `web` waits on it** (ADR-0357). `/readyz`, not
+  `/health`: the question compose is asking is whether `web` and Caddy may be pointed at the API,
+  which is readiness. Before it, `web` was `condition: service_started`, so every deliberate boot
+  refusal became a public 502 — the stack reported the container `started` the moment it was
+  spawned and nothing in it held the opinion that anything was wrong. `start_period: 40s` covers
+  the catalog admission survey and per-tenant key provisioning, which both run before the listener
+  binds.
+- **The stack is safe on a host nobody else can reach, and is not an internet-facing product**
+  (ADR-0357). `operate-web` authenticates nobody — one fixed `OPERATE_API_KEY` for every request,
+  no session layer — so every browser that reaches the domain is served as that principal, and
+  Caddy forwards without checking a credential. `deploy/README.md` says so under *The UI has no
+  login*, with the three boot lines an operator should read after the first `up`
+  (`[auth]` / `[pg]` / `[cursor]`) and the remedies beside them.
+- **The managed-cloud guide says to *try* `PGSSLMODE=verify-full` and names what `require` costs**
+  (ADR-0357), where it used to prescribe `require` with the comment *"Supabase requires TLS"*.
+  That hop crosses the public internet carrying `app.current_tenant_id`, and `require`
+  authenticates nothing — the peer is whoever answered. It is *try* rather than *set* because
+  **`verify-full` may not be reachable there**: `PgConfig` has no `ca` field and nothing reads
+  `PGSSLROOTCERT`, so it validates against Node's trust store alone, while Supabase's own
+  documented path for `verify-full` is to download the project's server root certificate and pass
+  it as `sslrootcert`. So accepting CA material is the top follow-up for that member — not for
+  `verify-ca`'s sake but because it decides whether the mode the increment prescribes can be used
+  at all. Inside the compose stack the hop is a private Docker network, so the `prefer` default
+  there is reasonable and the boot line says which was got either way.
 
 ## What's actually left
 
@@ -4313,7 +4479,70 @@ opened them.
   counted and there is no switch to retire the legacy path — which is also the only way to close the
   sort-mismatch hole on that path. **(5)** a wrong-length key would be a 500 rather than a 400, right
   in direction and unreachable today because the one key source derives exactly `AEAD_KEY_BYTES`,
-  pinned.
+  pinned. **(6)** ADR-0357 found that **the refusal this entry describes is vacuously silent on
+  every deployment there is** — it fires only on a row-filtering grant, of which the measured count
+  across the seven packs is zero — while the live disclosure is one layer in and about a
+  *classified field's value* rather than a withheld row's. See the next entry.
+- **A classified field's value in an entity-list cursor, and what is left of it** (ADR-0357). The
+  class is **a claim about the deployment that the deployment does not make**, and this is its
+  sharpest member: `keysetOf` maps over the whole declared sort and renders `String(row[field])`
+  from the record, so `?sort=<classified field>` hands that field's plaintext back in `nextCursor`
+  inside a response whose body the gateway redacted on the same caller's grants — the redaction and
+  the cursor being two code paths and only the first consulting a grant. **Different from the
+  disclosure ADR-0345 and ADR-0346 reasoned about**: those are about a *withheld row's* value and
+  are gated on a record policy nothing declares, while here the row is one the caller is shown.
+  **14 pairs across the seven packs, 8 distinct, one in every pack**, `Employee.work_email` (`pii`)
+  from the compose default and `Patient.mrn` (`phi`) in healthcare. Reported, never refused, and the
+  argument is measured rather than preferred — `erp-core` has a member so a refusal would refuse
+  every deployment there is, and the hatch an operator would reach for also disarms the sharper row
+  check beside it. Verified live as a non-owner: one request, two deployments,
+  `{"k":["a1-secret@example.test"],…}` and `s1.-sdvu8Oxt…`, with the body omitting the field in
+  both.
+  What remains, in order: **(1)** the survey is **boot-time**, so a *per-tenant* activated manifest
+  (ADR-0314) that classifies a sortable field is surveyed by nothing. `buildOperateHttpServer` is
+  where ADR-0340 put the obligation check for exactly this reason and the same call belongs beside
+  it; the only open question is what a per-tenant *report* (not refusal) does when the tenant is not
+  the operator reading the log. Same shape as ADR-0339's Q5, which is still open and is the blocker
+  for both. **(2)** `--allow-cursor-disclosure` now acknowledges **two** findings — withheld rows
+  and a classified field's value — so an operator accepting the second necessarily accepts the
+  first; splitting it is one flag and a decision about whether a second hatch earns its surface.
+  **(3)** whether sorting by a field you cannot read should be refused **generally** rather than
+  only while rows are being withheld (ADR-0345's `withheldAddressing`) is unexamined: today the 14
+  members are addressable and the ordering they reveal is a pre-existing channel neither increment
+  widened. **(4)** on `--store pg-columns` the cursor carries the **decrypted plaintext of an
+  ordering that was never applied** — `columnExpr` answers `null` for an `encryptAtRest` column so
+  `?sort=mrn` is dropped from `ORDER BY` while `selectList` decrypts it and `keysetOf` reads the
+  record — which is a soundness bug in the keyset beside the disclosure, and sealing hides it rather
+  than fixing it.
+- **The database channel, the credential route and the probes** (ADR-0357's other three members).
+  What remains, in order: **(1)** **nothing accepts CA material**, and that is sharper than it
+  looks: `PgConfig` has no `ca` field and nothing reads `PGSSLROOTCERT`, so `verify-full`
+  validates against Node's trust store alone — while Supabase's own documented path for
+  `verify-full` is to pass the project's downloaded server root certificate as `sslrootcert`. So
+  the mode this increment prescribes **may be unreachable on the managed-cloud path the repo
+  documents**, which is why the guide says *try it* and names `require` with its cost. Adding CA
+  support also makes `verify-ca` implementable, and *that* wants a **fourth** assurance member
+  rather than a reclassification of the three — it validates the chain and deliberately does
+  **not** check the hostname, so it sits between `encrypted_unauthenticated` and `authenticated`
+  (`chain_validated_hostname_unchecked`) — with the composed-map shape making it a compile error
+  to add and the text-reading test sending its author to the refusal that must then be deleted.
+  **(2)** the
+  channel line is printed once, in `resolveStore`; the four maintenance subcommands (`rekey`,
+  `replay` and the two survey paths) each build their own connection and say nothing about it.
+  **(3)** the probes are wired in `serve()` and so are absent from the Fetch/Workers edge adapter,
+  which builds its dispatch target separately — `buildHealthInterceptor` is transport-pure and takes
+  a `RawHttpRequest`, so this is a wiring line rather than a design question. **(4)**
+  `operate-web`'s own `/api/[...path]` proxy has no probe at all, so compose's `web` service still
+  has no healthcheck; the UI's readiness is "can it reach the API", which is the probe it would
+  declare. **(5)** nothing fences a *new* credential-bearing flag against ADR-0301: the rule is
+  stated in three ADRs and in `deploy/`'s comments, and `--api-key` was the counterexample for four
+  phases. A name-based rule over `cli.ts`' flag table is the tenth rule's shape, and measured it
+  matches **five** names of which three are real: `--stripe-api-key` and
+  `--stripe-webhook-secret` are secrets read straight from argv with no environment route, and
+  `--license-key` is a bearer artifact; `--jwks-key` is a **public** key and belongs on argv; and
+  `--allow-live-rekey` is a boolean that merely has "key" in its name. So the rule would need
+  declarations with reasons like its eight siblings rather than a flat refusal — which is the
+  argument for building it rather than against.
 - **`packages/workflow-signal-bridge` has zero importers** (ADR-0337), the `api-gateway-pg`
   condition before ADR-0335, invisible until the member predicate stopped being `*-pg`-restricted.
   This file says the package "ships as a registered gateway handler" — it ships the handler and
@@ -5245,7 +5474,7 @@ compose file or guide.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 351 records; 272 Accepted, 79 Proposed (the
+title or status change cannot drift. 352 records; 273 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 
