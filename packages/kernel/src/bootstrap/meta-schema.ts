@@ -390,7 +390,11 @@ export const META_AUDIT_LOG: TableDefinition = {
     // incident's timeline instead and why "it cannot be recorded" was stated as a constraint in
     // four places rather than fixed in one.
     //
-    // The foreign key stays: a NULL satisfies it, and a non-NULL still has to name a real tenant.
+    // There is **no foreign key**, and the line that used to sit here said the opposite. It read
+    // "the foreign key stays: a NULL satisfies it" — written when ADR-0331 made the column nullable
+    // and left standing when ADR-0335 removed `TENANT_FK` from every table in the deletion path, so
+    // for two increments the comment directly above the column contradicted the comment on it.
+    // The removal is the load-bearing fact: the cascade destroyed the record of the deletion.
     { name: "tenant_id", type: "UUID" },  // platform record: deliberately no TENANT_FK (ADR-0335) — the cascade destroyed the record of the deletion; see TENANT_FK's note
     { name: "occurred_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "actor", type: "JSONB", notNull: true },

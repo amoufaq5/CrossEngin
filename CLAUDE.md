@@ -1457,8 +1457,10 @@ packages exist at only one layer, noted below where that is true.
   callerless and the policy parameterising them had no producer, so the read side refused everyone
   and the write side refused nobody. `validateClassifiedWriteMask` is reached from
   `operate-runtime`'s create and update handlers now, with the **same policy object** the redaction
-  registry gets. `computeFieldRedaction` and `validateWriteMask` — the classification-unaware
-  originals — are still callerless and superseded by the classified pair.
+  registry gets. Of the two classification-unaware originals, **only `computeFieldRedaction` is
+  callerless**: `validateWriteMask` is imported by `operate-server`'s `sensitive-field-policy.ts`
+  and is what the handlers fall back to when no classified rule applies, so deleting it would
+  break the boot survey. This file called both dead from the increment that wired the second.
   **A field grant has three arms since ADR-0348** — `read`, `update` and `create` — because the
   first two were *one list consulted at two moments*, so a grant could not say **set once at
   registration, never changed** and narrowing who may change a `required` field necessarily narrowed
@@ -1552,7 +1554,7 @@ packages exist at only one layer, noted below where that is true.
   `never` was three and `never` plus `sometimes` four, and a figure here breaks again on the next
   flip. That contrasts with the `abacAttributes === null` arm, where
   the seam *always* claims to carry the input, so absence is unambiguously a gap.
-  **Availability is part of the contract**: `ABAC_RECORD_AVAILABILITY` over the eight
+  **Availability is part of the contract**: `ABAC_RECORD_AVAILABILITY` over the nine
   `ABAC_GRANT_POSITIONS` answers `always` / `sometimes` / `never`, with
   `ABAC_RECORD_AVAILABILITY_REASONS` carrying the sentence the boot refusal prints — so the position
   a record can reach, the handler that reaches it and the message explaining why it cannot have one
@@ -1575,7 +1577,7 @@ packages exist at only one layer, noted below where that is true.
   request**. ADR-0343's `field_read`-vs-`entity_list` distinction survives but **moves axis** — both
   have the record and both always did; what separates them is what a denial *does*, and reading that
   as an availability difference is what kept both refused at boot longer than the facts warranted.
-  **`ABAC_DENIAL_EFFECT` is that second axis** (ADR-0345), a total map over the eight positions to
+  **`ABAC_DENIAL_EFFECT` is that second axis** (ADR-0345), a total map over the nine positions to
   `refuses_request` / `withholds_field` / `filters_rows`, with descriptions keyed per **effect** —
   three strings, not eight, since the effect's name already carries the position-specific part.
   Availability answers *can this position be asked*; until row filtering existed that was the only
@@ -2519,8 +2521,14 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   the erasure's (erasing a schema is a step this contains), four-eyes at three layers, and the **only**
   route here that *requires* an idempotency key, because a retried delete generates a new tombstone id,
   erases nothing the second time and would 409 `scope_empty` for a request that had already succeeded.
-  The tenant row is retired **after** the pipeline commits (ADR-0316's ordering: the anchor references
-  `meta.tenants`), so a failed retire is `tenantRetired: false` on a **200** rather than an error that
+  The tenant row is retired **after** the pipeline commits — ADR-0316's ordering, whose stated reason
+  (*the anchor references `meta.tenants`*) **no longer holds**: ADR-0335 removed `TENANT_FK` from
+  `meta.audit_log` and from every other table in that path, and the catalog still carries a stale
+  comment above that column claiming *"the foreign key stays"* one line above the inline comment
+  saying it was deliberately removed. So inverting the order is now *available*, and it is what
+  would close the write window between the confirm-absence pass and the commit; the ordering is
+  kept for now rather than defended. A failed retire is `tenantRetired: false` on a **200** rather
+  than an error that
   implies the deletion did not happen, and the body carries the tombstone receipt — digests, anchors,
   chain coordinates — since a bare "deleted" would be ADR-0317's defect in response form (ADR-0320);
   the **asynchronous half of that flow** (`--deletion-request-routes`, `--deletion-runner-ms`) — submit /
@@ -3360,8 +3368,9 @@ where the fix is deleting the declaration rather than weakening the check.
 **ADR-0337 widened it, because four of the five blind spots had live members.** The candidate set is
 now **every exported class in every member including `apps/*`** — 324 candidates, **289 reachable**,
 3 exempt as `diagnostic_type`, 17 as `test_surface` (never granted to a `*-pg` member, since
-persistence is not a test double), **15 callerless classes declared** plus one callerless *member*,
-so 16 declarations. (ADR-0337's own text records 285 / 19 / 21: that was measured before the same
+persistence is not a test double), **14 callerless classes declared** plus one callerless *member*,
+so **15** declarations (counted from the array: 15 `scope:` entries, 14 of them carrying a
+`symbol:` — this file said 15 + 1 = 16 and the arithmetic was the error, not the measurement). (ADR-0337's own text records 285 / 19 / 21: that was measured before the same
 increment's wiring made five of them `overtaken`, and the fix for an overtaken declaration is
 deleting the line. Measure the census, do not read the figure.) Members are candidates too,
 with three mechanical exemptions read from `package.json` and the class scan rather than from names
@@ -3578,7 +3587,7 @@ alone, before *or* after the change. So: reproduce a sweep failure in isolation 
 and check `pgrep -af "pnpm -r"` is empty before starting one. This is ADR-0307's lesson in a third
 form — running vitest is not running the type checker, running vitest is not running the build, and
 running two sweeps is not running one.
-There is **no top-level lint script** —
+There **is** a top-level `lint` script (`turbo run lint`) and it passes **vacuously** —
 ESLint has not been migrated to v9 flat config. Ignore lint unless asked.
 
 **Run `pnpm -r build` before trusting a consumer's tests after a contract change.**
@@ -3837,7 +3846,9 @@ opened them.
   wrapped DEK does *not* make PHI "unrecoverable including from backups", because the wrapped key and
   the ciphertext live in one database and one backup holds both. What it buys is a **bounded deletion
   horizon**, and only for a `random` key. See the next entry. **(2)** rotation has **no executor**
-  — `KeyRotationMigrator` is still callerless, which is exactly why the `generation` parameter is
+  — `KeyRotationMigrator` has had two callers in `crypto-pg`'s `data-key-rekey.ts` since ADR-0349
+  (this file said "still callerless" for two increments after the ADR that wired it), and the
+  `generation` parameter is still exposed by no flag or env var because
   exposed by no flag or env var: a deployment that bumped it would make every existing ciphertext
   undecryptable with no way back. **(3)** `unique: true` is unenforced on the column store
   (**zero** UNIQUE constraints across all 54 tables — it is simply not plumbed into the entity DDL, so
@@ -4209,7 +4220,7 @@ opened them.
   that they could not be authored as this entry described: one role list answered both write
   moments, so narrowing who may *change* a required field necessarily narrowed who may *create* the
   record. The fix is a third `create` arm plus three kernel coherence rules, and then the 39. See
-  the entry after next. **(2)** `computeFieldRedaction` and `validateWriteMask`,
+  the entry after next. **(2)** `computeFieldRedaction`,
   the classification-unaware originals, still have no callers and are probably deletable —
   a mechanical increment, and `pg-unreachable-stores.ts` does not fence *functions* (ADR-0337
   measured why). **(3)** ~~an ABAC-qualified grant grants unconditionally~~ — **closed by
@@ -4250,8 +4261,8 @@ opened them.
   refused by name rather than served, which is correct and worth knowing before someone "wires" it.
   **(5)** the `read` narrowing is a judgement per field (drop the general-purpose observer roles),
   not a derivable rule, so a pack author adding a classified field gets the three refusals and no
-  guidance. **(6)** `computeFieldRedaction` and `validateWriteMask` are now *further* from the live
-  pair, since neither knows about the third arm, and still callerless.
+  guidance. **(6)** `computeFieldRedaction` is now *further* from the live pair, since it does not
+  know about the third arm, and is the one of the two that really has no caller.
 - **The ABAC obligation is enforced now, and what is left of it** (ADR-0340 closed ADR-0339's Q3).
   An ABAC-qualified grant granted unconditionally in **five** functions — `rbacCheck` plus all four
   in `fields.ts`, each reading `rule.roles` and never `rule.abac` — and two of those four are the
@@ -4550,7 +4561,12 @@ opened them.
   deployment, and its two driver classes (`WorkflowSignalBridge`, `StaticSecretResolver`) are
   callerless with it. A wiring increment of its own: it needs the HMAC secret resolver decided, since
   `StaticSecretResolver` is the offline one. `RegionRouter` in `residency-runtime` is the same shape
-  one notch smaller — a residency profile is stored and never enforced.
+  one notch smaller, and **the reason this file gave for it was false**: a residency profile *is*
+  enforced, pre-auth on every request, because `buildOperateHttpServer`'s region guard calls the
+  free `decideRegionRouting` and answers 421 or 403. What has no caller is the `RegionRouter`
+  **class** — the stateful half that caches a directory and answers per request — so the gap is a
+  cache, not an enforcement; two of the three facts in that store's own `UNREACHABLE_STORES`
+  declaration say otherwise and are wrong.
 - **Four stores in `workflow-runtime-pg` set no tenant context** (ADR-0337), so as a non-owner
   `ProjectingEventLog.append` raises `42501` on the first child write and the instance upsert writes
   **nothing, silently** (an `UPDATE` matching zero rows). That makes the workflow engine itself
@@ -5337,8 +5353,9 @@ opened them.
   no scope at all; the loose mirror survives on the **read** side only, where a stored row that no
   longer satisfies its contract is a finding for the audit path rather than something a display route
   should refuse. `.prettierrc.cjs` at the root re-exports the workspace config, so a bare
-  `npx prettier --write` no longer reformats at width 80 — but **882** of `packages/*/src` are not
-  Prettier-clean (the config existed since Phase 1 and was never applied), so there is deliberately no
+  `npx prettier --write` no longer reformats at width 80 — but **983** of `packages/*/src` (and
+  **1687** repo-wide) are not Prettier-clean (the config existed since Phase 1 and was never
+  applied), so there is deliberately no
   `format:check` script. `FCM_TOKEN_ENDPOINT` and `FCM_BASE_URL` are in `FCM_VARS` since ADR-0330, so
   an endpoint override with no `FCM_PROJECT_ID` warns like every other half-configuration instead of
   skipping push in silence.
@@ -5467,8 +5484,378 @@ opened them.
 **Cosmetic** — per-field grant display, data-volume estimates on destructive
 diffs, dark theme, per-tenant branding (ADR-0265, 0266, 0271, 0272).
 
-`web-ui/` (a separate static app) has **no deployment story** and is not in any
-compose file or guide.
+`web-ui/` is three files whose own README calls it a development demo, it sits **outside** the
+pnpm workspace, and it has no deployment story. The honest action is deletion, not a guide.
+`pnpm-workspace.yaml` also declares `manifests/*` and `tools/*`, neither of which exists.
+
+## The register: what is actually left, ranked
+
+Everything above this line is a follow-up **named by the ADR that opened it**, which means it is
+scoped by what the last increment happened to be about. In October 2026 a separate audit asked the
+other question — *what is left, ranked by harm, regardless of which ADR would own it* — across nine
+domains against the committed tree, with each finding verified before it was ranked and the
+over-stated ones demoted with their refuting measurement. **158 raw findings, deduplicated to the
+48 ranked items and 13 demotions below.** (The figure first reported for this was 145, which was
+the eight-domain subtotal before the cross-domain pass added thirteen — carried forward once
+already, which is the subject of P3 item 1 and the reason it is corrected here rather than quietly.)
+The conclusion is one sentence:
+
+> **The engine is genuinely complete and hardened. The deployment that ships is not, and breadth is
+> the third thing: 14 packages (15,006 source lines) that no deployment can execute, and 8 of 20
+> manifest sections that are validated, hashed, and read by nothing.**
+
+What the audit confirmed as genuinely complete, having run the real functions rather than read
+about them: the kernel meta-schema and deterministic DDL emit; reconciliation-not-replay migration;
+the manifest compiler and `meta.extends` lineage; the 17-stage gateway pipeline; the per-field
+grant layer (`surveySensitiveFields` + `checkClassifiedWriteMask` over all seven packs returns
+`uncreatable=0, unreadable=0, unwritable=0, asymmetric=0`, so ADR-0348 really did close ADR-0339's
+39); the ABAC stack, which is built, wired and fail-closed and simply has no declarations to
+enforce; both entity stores, with `ColumnMappedEntityStore` carrying an explicit `tenant_id = $1`
+on every read and write, so **tenant isolation does not depend on RLS** and the owner-run compose
+does not breach it; at-rest PHI with per-tenant HKDF, the DEK envelope and the single-transaction
+rekey; the hash-chained audit and forensic chains; the Article 17 *mechanism* for whole-tenant
+erasure with four signed proof versions; the nine catalog rules; and the Architect's
+design-to-activation flow.
+
+**This section is a ranking, not a plan.** Nothing below is scheduled, and two entries conflict
+with decisions argued in ADRs — where they do, the ADR's reasoning is named so the disagreement is
+visible rather than silently overridden.
+
+### P0 — present and wrong on a deployment serving tenants today
+
+Each is reachable on a running deployment and produces a wrong answer, a disclosure, destroyed data
+or an authorization bypass. The test against P1 is that **no new capability is needed to be harmed
+by it**.
+
+1. **`operate-web` authenticates nobody, and the shipped stack publishes a `platform_admin` key.**
+   No `middleware.ts`, no login surface, the proxy stamps `x-api-key` on all five verbs with no
+   caller check, `.env.example` makes `OPERATE_WEB_API_KEY` the token half of the admin key, and
+   `deploy/Caddyfile` reverse-proxies `web:3000` on 80/443 with no auth directive. Anyone who
+   resolves the domain *is* `platform_admin`. **ADR-0357 documented it** (`deploy/README.md`, *The
+   UI has no login*) and fixed nothing; it is a subsystem — a session layer plus the API's existing
+   JWT path. **Still the top item.**
+2. **The keyset cursor returns a classified field's plaintext to a caller who cannot read it.**
+   ~~Undetected~~ — **ADR-0357 surveys and reports it at boot**, naming each field, and
+   `CURSOR_ENCRYPTION_SECRET` is in the compose and `.env.example`. It is *mitigated by one
+   variable and still open by default*: the compose passes `${CURSOR_ENCRYPTION_SECRET:-}`, so an
+   operator who does not read the boot line still discloses. Making it refuse was argued and
+   rejected in ADR-0357 (it would refuse every deployment there is, and the hatch disarms the
+   sharper row check beside it).
+3. **The shipped compose passes six flags, so nearly every subsystem built since Phase 3 is off.**
+   No scheduler, no workflow workers, no notification drain, no audit-chain config, no integrity
+   proof or checkpoint, no `--deletion-capabilities` (so neither Article 17 surface can mount), no
+   tenant-status gate, no rate-limit policy, no platform-user routes. ADR-0357 added
+   `--idempotency-store pg` and the healthcheck; the rest stands. One increment, and the only
+   question is which flags a reference deployment should default to.
+4. **An Article 17 request naming one data subject erases the whole tenant.** `subjectIdentifier`
+   is required on the submit body and the stored record, `DeletionRunnerOptions.run` has no field
+   that could carry it, and `node.ts` calls `deleteTenantAtomically` with
+   `kind: "data_subject_erasure"` over a tenant-wide `DELETE` plus `DROP SCHEMA` — while
+   `TombstoneRecordSchema` requires no subject for that kind, so the proof parses with none. A
+   verified request for one person destroys every person's data. Subsystem, and its honest
+   prerequisite is P1 item 4.
+5. **An upgraded deployment owes an undocumented `ALTER`, and until it runs the verify route
+   silently fails to make the tenant read-only.** `meta.tenants.status` gained `pending_deletion`
+   and `reconcile.ts` reports a changed CHECK on a populated table rather than planning it — so
+   verify returns 202, the `UPDATE` raises `23514`, the route catches and logs, and the response
+   carries `tenantReadOnly: false` while the tenant keeps writing into data about to be destroyed.
+   ADR-0352's `surveyCheckAdmission` now **reports** this at boot (`refusing` on that column);
+   the `ALTER` is still owed and P2 item 3 is the general fix.
+6. **`Currency.decimal_places` has zero readers while the accounting core hardcodes two.** One hit
+   in the whole workspace — its own declaration — against nine `Math.round(x*100)/100` sites in
+   `write-effects.ts` and a `0.005` balance tolerance in `write-guards.ts`. Reproduced: 7.5% of a
+   13.40 net computes `1.00` against an exact `1.005` that should post `1.01`. A 3-decimal currency
+   (KWD, BHD, JOD) loses a minor unit per line. Multi-increment, and it is the one P0 that is
+   arithmetic rather than wiring.
+7. **`unique: true` emits no constraint on any entity table while the UI says the field is unique.**
+   Neither `entity-ddl.ts` nor `column-plan.ts` reads the declaration — zero UNIQUE constraints
+   across all 54 tables — and `ui-schema.ts` copies `unique: true` onto the `UiSchema` the client
+   renders. 47 declarations across the packs (34 in `erp-core`), so two employees can share an
+   `employee_number`, two patients an `mrn`. Whoever plumbs it must **refuse** the encrypted case:
+   `pgp_sym_encrypt` is non-deterministic, so a UNIQUE on ciphertext never fires (see the PHI
+   entry's Q3).
+8. **`compliancePacks` is a counted string.** `resolveCompliancePacks` has zero non-test callers
+   and `resolveManifest` ignores the field, so healthcare's `["hipaa"]` contributes nothing — and
+   `hipaa`'s definition on disk declares the `PhiAccessLog` and `BreachIncident` entities that
+   §164.312(b) audit controls require. One increment.
+9. **No automated backup, no tested restore.** ~~and no healthcheck on `api` or `web`~~ — ADR-0357
+   added the `api` healthcheck and made `web` wait on it. Backup is still prose only
+   (`README:181`, a manual `pg_dump` with no cron, no retention, no restore drill) on a platform
+   that models DR tiers with RPO/RTO targets.
+
+### P1 — the product claims it and no deployment can execute it
+
+Advertised capability with no reachable code path, or delivered at a cost that makes it unusable.
+Nothing here gives a wrong answer, which is why it sits below P0. Ordered by leverage — the first
+three make the rest honest, cheap or verifiable.
+
+1. **Every list search is an unindexed table scan and a comment asserts the opposite.**
+   `list-sql.ts` emits `unaccent(<col>::text) ILIKE …` while `entity-ddl.ts` indexes the bare
+   column; the predicate's comment claims a plain-column GIN index still accelerates it and the DDL
+   comment two files away notes `unaccent` is not IMMUTABLE. Measured on PG 16.13 at 60k rows:
+   **129.6 ms sequential vs 1.95 ms** without the wrapper — 66×, so ~2 s per request at 1M rows,
+   issued per keystroke from the shipped search box, over an index no query reads. Days, and the
+   evidence is already taken.
+2. **Eight of twenty manifest sections are authored, validated, hashed and read by nothing** —
+   `integrations`, `files`, `reports`, `dashboards`, `customWidgets`, `theme`, `i18n`, `search`.
+   They are cross-validated, merged across lineage and committed to `manifestHash`, and no runtime
+   reads them: a reviewer approves eight sections that are discarded at serving time. A boot or
+   validation census naming each declared-but-unserved section is one increment in a shape this
+   repo has built twice, and it converts the tier from silence into a stated limitation.
+3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
+   triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
+   `core.hooksPath`, so the nine rules and 18,470 tests run only when a human types `pnpm -r test`,
+   and this file's instruction never to use `--no-verify` describes a guardrail that does not
+   exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
+   serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
+4. **GDPR Article 15 access and Article 20 portability have no code path at all**, against fifteen
+   increments of Article 17. `@crossengin/data-lineage` has zero importers, its six tables are
+   declared `unbuilt_subsystem`, there is no SAR route, store, scheduler or flag, and
+   `meta.tenant_data_exports` has no writer. Prerequisite for doing per-subject erasure honestly
+   (P0 item 4).
+5. **No object storage anywhere**, so no tenant can attach a document to anything.
+   `@crossengin/files` is path builders and schemas; no S3/GCS/Azure/MinIO client in any
+   `package.json`, no upload route among `operate-server`'s 137 flags. Shared prerequisite for the
+   Article 15 export bundle, the marketplace pack bundle, and the `object_storage` deletion
+   subsystem every deployment must therefore declare `absent`.
+6. **All 25 declared jobs do nothing**, and the blocker is a contract gap rather than wiring:
+   `JobDeclaration` carries id, trigger, retry, concurrency, data classes and prose and **no field
+   naming the work**. So invoices never go overdue, inventory is never decremented, depreciation is
+   never posted, month-end never closes. 17 need an entity-store runtime layer the packs lack; 8
+   are third-party integrations with no client here.
+7. **No incident route exists**, so `human_owned` is unreachable and every auto-declared incident
+   is permanently uncloseable — `declared → cancelled` is the whole reachable lifecycle. Covered in
+   detail above; three coupled gaps sit under it (no `Runbook` table, no tenant-scoped comms read
+   path, the status-page presumption).
+8. **Nothing detects an Article 12(3) deadline breach, and no route lists pending requests.**
+   `isOverdue` and `daysUntilDeadline` have zero callers outside their tests, the store has three
+   status-filtered queries and none on `deadline_at`, and there is no
+   `GET /v1/platform/deletion-requests`. A stalled sweep escalates a `sev2` and a tampered proof a
+   paging `sev1`, so **the one condition that is an actual regulatory breach is the one with no
+   detector** — and the schema refuses a completed record past its deadline, so a late completion
+   cannot even be recorded.
+9. **SAML, OIDC and SCIM are contracts-only**: `@crossengin/sso` has zero importers, no runtime or
+   pg sibling, five tables declared `unbuilt_subsystem`, and the gateway's auth schemes do not
+   include `saml` or `oidc`, so there is no pipeline position for one. Normally a procurement gate.
+10. **No outbound webhook delivery**, so a tenant cannot subscribe to any platform event — and with
+    the signal bridge unregistered the platform has neither event ingress nor egress. Cheapest item
+    in the tier: the HMAC primitive exists and the drain loop is the mechanism.
+11. **Five of eight declared auth schemes are denied at runtime**, including both strong schemes
+    other than JWT. `bearer_opaque`, `api_key_query`, `basic`, `mtls` and `hmac_signature` all fall
+    through to `scheme_unsupported_*`. The refusal is honest and named; `hmac_signature` is cheap.
+12. **Reporting and search do not execute**: both packages are imported by manifest validation
+    alone, the three shipped reports are hand-built pages, and across 51+ entities the only
+    find-a-record mechanism is the ILIKE whose cost is item 1.
+13. **Data onboarding is contracts-only** — `@crossengin/migration`, zero importers, 18 callerless
+    exports, no parser for any of its 12 declared source kinds. In practice this decides whether
+    the product can be sold to anyone who is not greenfield.
+14. **14 of 18 notification providers have no client, and credentials are one platform-wide set.**
+    Independently of the missing clients, `delivery-senders-env.ts` reads flat process-wide names
+    with **no tenant parameter anywhere in resolution**, so every tenant's mail leaves one domain
+    and every SMS one number — a commercial blocker on its own.
+15. **Nothing evaluates a feature flag** and the only `evaluateFlag()` is in a package with zero
+    importers under six colliding names. Blocked on the product decision ADR-0336 declined. Sharp
+    edge for later: the two use different bucketing (`hash*31` vs FNV-1a), so wiring the wrong one
+    silently re-randomises every in-flight rollout.
+16. **The UI is entity CRUD, three reports and a tenant console** — 15 files, no auth UI, no user or
+    role management, no workflow view, no report builder, no incident surface, no deletion-request
+    surface, no preferences. Correctly blocked on P0 item 1: per-user surfaces are meaningless
+    while the proxy presents one shared key.
+17. **14 packages, 15,006 source lines, zero importers**: `active-active`, `compliance`,
+    `data-lineage`, `deploy`, `edge`, `finops`, `migration`, `ml-training`, `pwa`, `rate-limiting`,
+    `sdk-clients`, `security`, `sso`, `workflow-signal-bridge` — ~17% of the package count, built,
+    typechecked and tested on every sweep for code no deployment reaches. Also: **no OpenAPI
+    document exists at all** (the cheapest high-leverage piece, derivable from
+    `CompiledOperateServer.routeSpecs`), `finops` means per-tenant gross margin is unknowable while
+    revenue is metered, `security`'s zero importers take the CSP builder with them (the shipped
+    header is one hardcoded string), and one of eight view kinds is rendered while every list view
+    advertises an `xlsx` export nothing can produce.
+
+### P2 — wrong the moment a configuration or an unbuilt path opens
+
+Genuine defects gated on a store flavour, a flag, a pack or a subsystem that does not exist, so no
+tenant is harmed today — but closing the gate does not fix them, and the ones under a P1 item must
+land with or before it.
+
+1. **A filter on an encrypted column is dropped from the `WHERE` clause, so the query answers with
+   every row.** `columnExpr` returns null, `filterPredicate` returns null, and the predicate is
+   never pushed — so on `pg-columns` + healthcare, `GET /v1/patients?mrn=MRN-1` returns the first
+   page of **all** patients with a 200, which the caller and the UI read as a search result. This
+   file records it as "dropped from `?sort` and filters silently", which understates it: the drop
+   is in the **widening** direction, so it is a wrong answer and not a missing capability. A 400
+   naming the column is what `withheldAddressing` already does for the row case. Hours.
+2. **No path surveys an activated per-tenant manifest's classified fields**, so ADR-0339's
+   write-open/read-closed asymmetry is still live there — `node.ts` admits it in a comment. Rises
+   to **P0 for any deployment serving activated manifests**, which is the headline Architect
+   feature. Its cheap companion is a kernel rule requiring a sensitive-classified field to carry a
+   grant at all, which would refuse zero fields today.
+3. **`proveWideningSafe` is complete, tested and wired to nothing**, so every catalog enum value
+   stays standing manual SQL — the class found by hand three times, whose live member is P0 item 5.
+   Giving it its first caller converts the class into a planned step; the proof must be re-checked
+   inside the statement's own transaction.
+4. **The 12 event-triggered jobs can never match the only event producer's names.**
+   `entity-events.ts` builds a three-part name (`retail.salesorder.placed`, pinned by its own test)
+   while every declared trigger is two-part (`retail.order_placed`), matched with `===`. So even
+   after handlers are registered not one of the 12 fires, and `JOB_KIND_PRODUCERS` answers
+   `event_emitter`, so the survey tells the operator to register a handler — the exact failure its
+   own doc comment says the map exists to prevent. Must land with or before P1 item 6.
+5. **`meta.users` keeps every user's email, display name and phone after a completed tenant
+   erasure, and the proof is silent about it.** `partitionSharedTables` skips any catalogued table
+   with no `tenant_id`, and of those 31 `meta.users` is the only one holding a natural person's
+   direct contact details — while `meta.user_tenant_membership` *is* erased in the same
+   transaction, so the rows survive **un-attributable**. Neither erased, nor declared retained with
+   an obligation, nor listed in `examinedTables`. The decision is erase, cascade with the last
+   membership, or declare retained with a reason.
+6. **The only deletion disposition that lets a deletion run signs a claim most deployments cannot
+   honestly make.** `ATTESTERS` has two keys; `object_storage`, `backups`, `search_indexes` and
+   `caches` have no producer for any scope field, and `CONSERVATIVE_DELETION_CAPABILITIES` declares
+   all six `erases`, so the exported starting point refuses every deletion. A real deployment does
+   take Postgres backups, so `backups: "absent"` — signed into the v2+ bytes as *this deployment
+   does not have this subsystem* — is false for essentially every production install and is the
+   only value that lets a deletion proceed. A fourth disposition (`present_not_erased`, carrying
+   its reason and horizon) is hours, where the four erasures are each a subsystem.
+7. **Every encryption-path exception is served as a retryable 504 with up to 480 characters of
+   internal error echoed to the client.** The dispatch stage turns every thrown value into
+   `gatewayTimeout({reason: err.message.slice(0,480)})`, so a `tenant_data_keys_tenant_id_fkey`
+   violation, a refused weak key or `PlaintextFallbackRefused` — all permanent — get a status
+   clients retry by convention, while entity/field names with their classification, tenant ids and
+   schema-application state reach any caller who can trigger the throw. Two defects in one mapping.
+8. **The rekey leaves a stale-key window nothing can evict, no row records which key wrote it, and
+   nothing enumerates which tenants still need rekeying.** The cache is a bare `Map` with a 30s TTL
+   and no exported eviction, so after a rekey commits out of process a replica *reads* with a loud
+   raise (correct) and *writes* under the destroyed generation — rows then unreadable under either
+   key, unrecoverable because no entity table carries a `key_generation` column.
+   `PostgresDataKeyStore` has no list, scan or provenance query, so an operator switching to
+   envelope mode has every tenant seeded and shreddable-in-name-only with no query telling them
+   which. Together: the bounded horizon the envelope exists to buy cannot be verified fleet-wide.
+9. **A per-tenant gateway that refuses to build is served the deployment's gateway, not no
+   gateway** — and the permanent refusal is retried every request. `server.ts` claims the
+   fail-closed answer is "no gateway"; `tenant-gateway-cache.ts` catches, reports, returns `null`
+   without caching (reasoning the failure is "usually transient") and falls back to
+   `defaultDispatch`. So the tenant is served the boot manifest's entities, roles and permissions
+   instead of their own — a wrong answer rather than a refusal — logged under an `[ai-design]`
+   prefix an operator hunting an authorization failure would not search.
+10. **Five workflow stores carry neither tenant context nor a scope predicate**, and the replayer
+    that would detect the resulting drift has no caller. Not a cross-tenant HTTP answer today, so
+    the live cost is the missing second belt plus the blocked detector — and note **five of six
+    replayers are wired, not six**, with `REPLAY_SCOPE_SUPPORT` declaring a `workflow` arm no
+    runner serves. Two consecutive increments bug-fixed that detector while nothing called it.
+11. **Five residuals in the Article 17 proof**: own-record statutory retention inexpressible; a
+    write window between the confirm-absence pass and the commit — **which inverting the retirement
+    order would now close, because the foreign key that blocked it is gone**; which tables were
+    examined is in no digest, so "we looked at all 97" and "we looked at 12" hash identically; a
+    deployment that moved from `pg-columns` to `pg` has leftover entity tables nothing censuses;
+    and a tampered tombstone can never be put right, so its paging `sev1` re-declares every tick
+    with hand-written SQL against an append-only table as the only exit.
+12. **The sealed cursor has no rotation path and a sealed deployment still accepts a forged
+    plaintext cursor.** `buildCursorKeySource` takes a generation and its only caller passes none,
+    and `SEALED_CURSOR_PREFIX` is a fixed `"s1."` with no generation field — so rotating the
+    secret 400s every walk in flight at the page boundary. Both downstream of P0 item 2.
+13. **Four contracts admit or assert something structurally false**, each in a subsystem whose job
+    is to be checkable: a **late GDPR 72-hour breach notification is unrepresentable** (the
+    refinement and the CHECK both refuse `publishedAt` past the deadline, so
+    `isBreachNotificationTimely` can never answer false for a record that parsed — the first fact a
+    regulator asks for cannot be stored); a forensic checkpoint may claim `sha512` or `blake3` over
+    a `rootHash` pinned to sha256's shape, neither computable anywhere, in the sole witness for
+    truncation detection; `meta.workflow_timers` accepts a `cron_schedule` row with a NULL
+    expression; and `meta.job_runs.status` admission is reported and never refused, so a fleet that
+    cannot dead-letter boots quietly.
+14. **Three authorization defects reachable only from an authored manifest.** The write mask,
+    response redaction and audit trail read `entity.fields` **raw** while the boot survey and the
+    obligation check resolve traits — so a classified field on a custom trait is served unredacted
+    and writable by anybody while two surfaces report it as classified, and the emitted table has
+    the column, so the value is really stored and really disclosed. `maskWrite` re-derives its
+    refusal reason from the update key rather than `fieldWriteGrant`, so a create-only grant's 403
+    reports `classification_default` with no classification. And a view's permission override and a
+    report's two ABAC fields are validated and discarded, outside `surveyAbacObligations` and so
+    outside ADR-0340's by-name boot refusal.
+15. **Six confinement fences infer RLS confinement from ownership without reading
+    `relforcerowsecurity`.** `sessionWouldBeConfined` has two callers while the
+    `rls_would_confine_this_session` refusal appears in eight non-test modules. Latent while
+    nothing runs `ALTER TABLE … FORCE ROW LEVEL SECURITY` — and the moment a hardened deployment
+    sets it, all six answer "not confined" for a session that is. One column in six queries.
+
+### P3 — debt and stale documentation
+
+None of it produces a wrong answer and most is a trade-off already argued in an ADR. It earns a
+place for one reason: several entries **actively misdirect the next reader**, and this file's own
+method is that a stale figure misleads.
+
+1. **Eight documented claims were false in the direction that wastes an increment. All eight are
+   corrected above as of this register**, and they are listed here because the *pattern* is the
+   finding: `KeyRotationMigrator` called callerless two increments after the ADR that wired it;
+   `validateWriteMask` called callerless from the commit that gave it a caller; residency called
+   unenforced when it answers 421/403 pre-auth; the tenant-retirement order defended by a foreign
+   key ADR-0335 removed, with a **stale comment in the catalog contradicting the line below it**;
+   `ABAC_GRANT_POSITIONS` counted at eight when it is nine; the callerless declarations counted at
+   16 when the array holds 15; "no top-level lint script" when one exists and passes vacuously; and
+   the compose telling an operator "there is no rekey executor yet" after ADR-0349 shipped one.
+   Six further items were **already closed** and listed as open: ADR-0307's `failed`-is-both-
+   terminal-and-compensatable (resolved by deriving `CLOSED_INSTANCE_STATUSES` from the transition
+   map), the composite foreign key (reconciled, including on a populated table), per-tenant data-key
+   provenance (read by the serving process and by `rekey --plan`), the sev1–5/P0–P3 severity
+   collision (a frozen total translation map), `PostgresKillSwitchStore` (wired), and the
+   29-foreign-key drift plus the `DROP COLUMN` (documented end to end in `deploy/README.md:193-251`).
+2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
+   classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
+   two members**, so the moment anything bridges the kernel's classification into the lineage graph
+   a hand-written mapping decides whether `pii` becomes `pii_personal`. Environment has three
+   non-nesting sets, so you cannot record a flag evaluation in `local` or a deployment to `sandbox`.
+   ABAC has nine declarations across six packages with four attribute value types, two honoured by
+   nothing — **including the surviving name of the field ADR-0340 deleted on the stated rule that
+   such a field must not survive under its old name**. Plus two flag vocabularies sharing six
+   names, two runbook contracts joined by a thrice-duplicated regex, and two `Accept-Language`
+   parsers.
+3. **The nine catalog rules have six self-blind spots, including a silent skip in the newest.**
+   `pg-record-reads.ts` drops a row interface with fewer than three catalogued columns with a bare
+   `continue` and no finding — the same shape as that increment's own defect, caught only because a
+   count moved. `stripComments` is shared by all nine and was wrong about regex literals for four
+   increments, and **nothing relates the shared scanner's output to its consumers' counts**. Also:
+   no `renamedFrom` for a policy or constraint; table-level value-set CHECKs unread; 11 strict
+   bounds and 213 patterns not probeable, so the boot census overstates its own coverage.
+4. **Three job record contracts, a scope constant and four fields are constructed or read by
+   nothing.** `JobRunRecordSchema`, `DeadLetterRecordSchema` and `JobCostRecordSchema` have no
+   construction site anywhere, yet three catalogued CHECKs are adjudicated against them — so
+   ADR-0353's `mirrors` compares the catalog against a type no deployment exercises, which is the
+   vacuity that rule exists to end. The cost vocabulary also names a serverless platform the repo
+   has no client for. Alongside: `PLATFORM_COLUMN_KEY_SCOPE` has no non-test reader,
+   `PostgresDataKeyStore.destroy` has no caller, and `ColumnSecretRefused` is narrower than its
+   32 uses.
+5. **`meta.job_runs` has no `due_at` column**, so `started_at` carries the due time and nothing
+   records when a handler began — verified by ADR-0355's live run, where a 09:17 clock against a 3am
+   cron wrote `started_at = 03:00:00Z`. A subsystem change wearing a column's clothes: the claim
+   predicate, the `ORDER BY`, `idx_job_runs_due` and the retry path move together against a live
+   fleet.
+6. **The four-eyes attestation enforces identity and not time.** `AccessReviewDecisionSchema` fixes
+   `decidedByUserId === attestation.attestedByUserId` and says nothing about `attestedAt`, while
+   `decision-store.ts` binds neither it nor `attestationPhrase` and no construction site varies the
+   two. The identity half of an attestation a SOC 2 or HIPAA auditor reads is enforced and the
+   temporal half is not; one `superRefine` clause breaks nothing today and gets dearer with every
+   construction site.
+7. **983 files under `packages/*/src` are unformatted**, not the 882 on record — and re-measuring
+   it found the figure was also *scoped* without saying so: repo-wide it is **1687**. Both measured
+   just now (`npx prettier --check "packages/*/src/**/*.ts"` and `npx prettier --check .`), which
+   is the point of the entry rather than the numbers: a figure carried forward without its scope
+   drifts in two directions at once.
+
+### Demoted, with the measurement that demoted them
+
+Kept so nobody re-raises them. A **relaxed `cascade` undercount** is vacuous — all seven packs relax
+exactly two `set_null` edges and zero cascades, and the boot warning filters to cascades. A
+**`relationCount` vs `model` contradiction** is unformable from the shipped wiring, since `node.ts`
+derives both from the same inputs and sets `targets: []` for every store but `pg-columns`. A
+**JSONB-fallback tenant's erasure** is not a data-loss risk: such a tenant has no schema, so the
+attestation takes the honest `nothing_to_erase` arm and their records sit in one of the 97 erasable
+tables. A **permuted ABAC batch** is unreachable: the only producer is a positional map over the
+single evaluator, structurally incapable of permuting. The whole **ABAC residual family** is latent
+*by construction* — `surveyAbacObligations` over all seven packs returns **0 obligations in all
+nine grant positions**, there are **0 `many_to_many` relations**, and `--abac-policy` appears
+nowhere in `deploy/`. The **factory blind spot** (ten stores behind a factory) is census hygiene,
+not dead capability: all ten factories have real callers, and the compiler-API answer was measured
+and refused twice. **v1–v3 proofs being permanently unprotected** is irreducible and correctly so —
+re-signing them under v4 would forge the one alarm the chain cannot raise. And **extracting the
+catalog parser** is debt with a defensible reason to stay: one parser is what keeps nine rules
+agreeing about the catalog.
 
 ## ADRs
 
