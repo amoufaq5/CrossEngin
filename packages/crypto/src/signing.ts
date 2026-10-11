@@ -147,3 +147,42 @@ export function isEd25519PublicKeyBase64(value: string): boolean {
     return false;
   }
 }
+
+export function isEd25519PrivateSeedBase64(value: string): boolean {
+  try {
+    decodeBase64Strict(value, RAW_PRIVATE_SEED_LENGTH, "private seed");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * RFC 8410 PKCS#8 prefix for a raw Ed25519 seed: SEQUENCE { INTEGER 0,
+ * AlgorithmIdentifier { 1.3.101.112 }, OCTET STRING { OCTET STRING[32] } }.
+ * Fixed-length, so the seed is simply appended.
+ */
+const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
+
+/**
+ * Derives the public half of an Ed25519 key from its 32-byte seed alone.
+ *
+ * This exists so a deployment that signs its own tokens needs **one** secret and no second
+ * declaration: `signEd25519` wants both halves and `privateKeyFromRawSeed` cannot be reached
+ * without an `x`, so without this a signer would have to be configured with a public key beside
+ * its private one -- and a pair that can be stated twice can be stated inconsistently, which is
+ * the class this repository keeps finding. Derived, the two cannot disagree.
+ *
+ * The seed must go in through PKCS#8 rather than the JWK route the rest of this module uses,
+ * because an OKP JWK private key requires `x` as well as `d` -- i.e. the JWK form already assumes
+ * the answer this function computes.
+ */
+export function ed25519PublicKeyFromSeed(privateKeyBase64: string): string {
+  const seed = decodeBase64Strict(privateKeyBase64, RAW_PRIVATE_SEED_LENGTH, "private seed");
+  const priv = createPrivateKey({
+    key: Buffer.concat([ED25519_PKCS8_PREFIX, Buffer.from(seed)]),
+    format: "der",
+    type: "pkcs8",
+  });
+  return Buffer.from(exportRawPublicKey(createPublicKey(priv))).toString("base64");
+}

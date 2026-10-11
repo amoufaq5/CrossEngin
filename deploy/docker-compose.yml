@@ -97,6 +97,18 @@ services:
       # via `ps` by any user on the host. Until this variable existed the flag was the only route,
       # which is why the comment two lines above said one thing and the command said another.
       OPERATE_API_KEY_SPECS: ${OPERATE_ADMIN_API_KEY}
+      # The pepper HMAC'd into a password before scrypt stretches it, and the Ed25519 seed this
+      # deployment signs session tokens with. Both here and never in `command:` for the reason
+      # above. `meta.users` carries no tenant_id and so no RLS, which means the password hashes are
+      # readable by anything holding the serving role's grant -- the pepper is what makes reading
+      # that table insufficient, because it is not in the database.
+      #
+      # The signing key is ONE variable: the public half is DERIVED from the seed and registered in
+      # the gateway's own JWKS, so there is no second value to keep in step. 32 bytes of base64
+      # (`node -e 'console.log(require("node:crypto").randomBytes(32).toString("base64"))'`).
+      # Changing it invalidates every session in flight -- one 401 and a re-login.
+      CREDENTIAL_PEPPER: ${CREDENTIAL_PEPPER:-}
+      OPERATE_TOKEN_SIGNING_KEY: ${OPERATE_TOKEN_SIGNING_KEY:-}
     # Args in list form so no value is ever shell-split.
     command:
       - node
@@ -137,6 +149,30 @@ services:
       # sequential case is closed, which is what clients actually produce.
       - --idempotency-store
       - pg
+      # Mounts POST /v1/auth/token, which is what makes the UI's login work. Needs CREDENTIAL_PEPPER
+      # and OPERATE_TOKEN_SIGNING_KEY above, and the issuer/audience below -- the minted token
+      # asserts both and the gateway beside it verifies both, so they are one declaration.
+      #
+      # The first password is not set from here. There is no mail channel in a fresh deployment, so
+      # an operator with shell access is the only principal that exists before the first password
+      # does:
+      #
+      #   docker compose exec -e OPERATE_NEW_PASSWORD='<password>' api \
+      #     node apps/operate-server/dist/bin/operate-server.js set-credential \
+      #     --user <meta.users id> --confirm-user <the same id>
+      #
+      # and the user itself comes from POST /v1/platform/users under --platform-user-routes. The
+      # password is read from the environment and never from argv, for the `ps` reason above; the
+      # subcommand refuses `--password` by name and says so.
+      - --credential-login
+      # The issuer and audience the token asserts and the gateway checks. They are this
+      # deployment's own names -- nothing external resolves them -- but they must agree, and
+      # without them the runtime falls back to `https://crossengin.io` and refuses a token minted
+      # under any other issuer.
+      - --jwt-issuer
+      - https://${DOMAIN:-localhost}/
+      - --jwt-audience
+      - crossengin-operate
     expose:
       - "8787"
     # `/readyz`, not `/health`: this check's job is to decide whether `web` and `caddy` may be
@@ -168,8 +204,15 @@ services:
     environment:
       NODE_ENV: production
       # The web app's server-side proxy calls the API over the internal network.
+      #
+      # There is no OPERATE_API_KEY here any more, and that is the point of this increment. The
+      # proxy used to stamp one shared `platform_admin` key on every request, so every browser that
+      # resolved the domain WAS that principal -- it could provision and delete tenants, and Caddy
+      # forwards without checking a credential. It now reads the viewer's own session cookie and
+      # sends their token, and with no cookie it answers 401 without calling the API at all. The
+      # variable is gone rather than defaulted, because `?? "devkey"` meant deleting it did not
+      # fail closed.
       OPERATE_API_URL: http://api:8787
-      OPERATE_API_KEY: ${OPERATE_WEB_API_KEY}
     # next start binds 0.0.0.0:3000 by default; Caddy reaches it as web:3000.
     command: ["pnpm", "--filter", "@crossengin/operate-web", "start"]
     expose:

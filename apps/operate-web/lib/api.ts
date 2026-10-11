@@ -4,6 +4,7 @@
 import type { AgingResponse } from "@/lib/aging";
 import type { TenantEntitlement, TenantUsage } from "@/lib/entitlement";
 import { reportSubscriptionProblem } from "@/lib/subscription";
+import { handleUnauthorized } from "@/lib/unauthorized";
 import type { WhtReconciliation } from "@/lib/wht";
 
 export interface ListResult {
@@ -18,11 +19,15 @@ function apiPath(slug: string, suffix = ""): string {
 // Detect the serving API's subscription-entitlement gate. A 402 carries a
 // problem+json body { subscriptionStatus, reason, detail }; surface it via the
 // pub/sub so the global banner can explain it. Clear the banner on any success.
+//
+// A 401 is handled first, and the order matters: the session is over, so there is nothing
+// for a banner on this document to explain and no point reading a body for it.
 async function checkResponse(res: Response): Promise<void> {
   if (res.ok) {
     reportSubscriptionProblem(null);
     return;
   }
+  if (handleUnauthorized(res)) return;
   if (res.status === 402) {
     try {
       const body = (await res.clone().json()) as {

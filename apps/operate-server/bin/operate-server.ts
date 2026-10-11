@@ -12,12 +12,15 @@ import {
   replayHelpText,
   parseRekeyArgs,
   rekeyHelpText,
+  parseSetCredentialArgs,
+  setCredentialCliHelpText,
 } from "../src/cli.js";
 import { formatMultiTenantReport } from "../src/link-sweep.js";
 import { formatChainVerification } from "../src/chain-verify.js";
 import { runPruneLinks, runRekey, runReplay, runVerifyChain, serve } from "../src/node.js";
 import { formatReplayReport } from "../src/replay.js";
 import { formatRekeyResult, formatRekeySurvey } from "../src/rekey.js";
+import { formatSetCredentialReport, runSetCredential } from "../src/set-credential.js";
 
 const CLI_VERSION = "0.0.0";
 
@@ -123,6 +126,30 @@ async function runRekeyCommand(argv: readonly string[]): Promise<number> {
   return report.ok ? 0 : 1;
 }
 
+async function runSetCredentialCommand(argv: readonly string[]): Promise<number> {
+  let options;
+  try {
+    options = parseSetCredentialArgs(argv);
+  } catch (err) {
+    if (err instanceof CliUsageError) {
+      process.stderr.write(`error: ${err.message}\n\n${setCredentialCliHelpText}`);
+      return 2;
+    }
+    throw err;
+  }
+  if (options.help) {
+    process.stdout.write(setCredentialCliHelpText);
+    return 0;
+  }
+  const report = await runSetCredential(options);
+  process.stdout.write(
+    options.format === "json"
+      ? `${JSON.stringify(report, null, 2)}\n`
+      : `${formatSetCredentialReport(report)}\n`,
+  );
+  return report.ok ? 0 : 1;
+}
+
 async function main(): Promise<number> {
 
   const argv = process.argv.slice(2);
@@ -137,6 +164,9 @@ async function main(): Promise<number> {
   }
   if (argv[0] === "replay") {
     return runReplayCommand(argv.slice(1));
+  }
+  if (argv[0] === "set-credential") {
+    return runSetCredentialCommand(argv.slice(1));
   }
 
   let options;

@@ -223,6 +223,17 @@ import {
   HEALTH_PATHS,
 } from "./health.js";
 import {
+  AUTH_TOKEN_PATH,
+  buildAuthTokenInterceptor,
+  DEFAULT_LOGIN_LOCKOUT_ATTEMPTS,
+  DEFAULT_LOGIN_LOCKOUT_SECONDS,
+  parseLoginLockout,
+  verifyLogin,
+} from "./auth-token-route.js";
+import { formatCredentialAuth, resolveCredentialAuth } from "./credential-auth-env.js";
+import { PostgresCredentialStore } from "./credential-store.js";
+import { DEFAULT_SESSION_TOKEN_SECONDS, mintSessionToken } from "./token-mint.js";
+import {
   PersistentMarketplaceInstallEngine,
   PostgresInstallationStore,
   PostgresPackVersionStore,
@@ -252,7 +263,10 @@ import {
 } from "@crossengin/tenant-lifecycle-pg";
 import {
   DeletionCapabilitiesSchema,
+  TENANT_LIFECYCLE_STATES,
+  blocksReads,
   type DeletionCapabilities,
+  type TenantLifecycleState,
 } from "@crossengin/tenant-lifecycle";
 import type { ExtraGatewayRoute, WriteMaskMode } from "@crossengin/operate-runtime";
 import { buildMarketplaceAdminRoutes, loadPackCatalog } from "./marketplace-admin.js";
@@ -578,8 +592,21 @@ export function createNodeRequestListener(
 
 async function resolveJwtConfig(
   options: ServeOptions,
+  /**
+   * The public half of this deployment's own signing key, when `--credential-login` is on.
+   *
+   * Registered here rather than asked of the operator, which is the whole of why
+   * `ed25519PublicKeyFromSeed` exists: the alternative is a private key in the environment beside
+   * a matching `--jwks-key <kid>:<pub>` on argv, and a pair that can be stated twice can be stated
+   * inconsistently -- a typo'd public key boots cleanly and turns every login into an
+   * `invalid_signature` 401 whose body says nothing an operator could act on.
+   */
+  ownSigningKey: { readonly kid: string; readonly publicKeyBase64: string } | null,
 ): Promise<{ config: JwtVerifyConfig | null; poller: JwksRefreshPoller | null }> {
   const specs: JwksKeySpec[] = options.jwksKeys.map(parseJwksKeySpec);
+  if (ownSigningKey !== null) {
+    specs.push({ kid: ownSigningKey.kid, publicKeyBase64: ownSigningKey.publicKeyBase64 });
+  }
   if (options.jwksFile !== null) {
     const parsed = JSON.parse(await readFile(options.jwksFile, "utf8")) as unknown;
     if (!Array.isArray(parsed)) throw new Error(`--jwks-file must be a JSON array of {kid, publicKeyBase64}`);
@@ -952,7 +979,35 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.info(`[sensitive] ${formatSensitiveFieldSurvey(sensitiveSurvey)}`);
   }
   const apiKeys = apiKeySource.specs.map(parseApiKeySpec);
-  const { config: jwt, poller } = await resolveJwtConfig(options);
+  // ADR-0358. Resolved *before* the JWKS, because the public half of this deployment's own signing
+  // key is one of the JWKS entries and is derived from the seed rather than configured beside it.
+  // `--credential-login` already refused `--jwks-url` at parse, so there is no case where this key
+  // is resolved and then discarded.
+  const credentialAuth = options.credentialLogin
+    ? resolveCredentialAuth({ env: process.env, jwksUrlConfigured: options.jwksUrl !== null })
+    : null;
+  if (credentialAuth !== null && !credentialAuth.ok) {
+    // Refused and not warned, which is ADR-0340's shape rather than ADR-0338's: an operator who
+    // passed `--credential-login` asked for a login surface, and mounting one that cannot mint a
+    // usable token is worse than not mounting it -- the browser's login form would answer 401 for
+    // every correct password, which reads as "wrong password" to every user at once.
+    console.error(`[auth] ${formatCredentialAuth(credentialAuth)}`);
+    throw new Error(
+      `--credential-login cannot be served: ${credentialAuth.refusal} — ${credentialAuth.detail}`,
+    );
+  }
+  const { config: jwt, poller } = await resolveJwtConfig(
+    options,
+    credentialAuth?.ok === true
+      ? {
+          kid: credentialAuth.material.kid,
+          publicKeyBase64: credentialAuth.material.publicKeyBase64,
+        }
+      : null,
+  );
+  if (credentialAuth !== null) {
+    console.info(`[auth] ${formatCredentialAuth(credentialAuth)}`);
+  }
   const schemaOpt = options.schema !== null ? { schema: options.schema } : {};
   // ADR-0350. The boot manifest's own typed entity tables, which the shared-table erasure now
   // reaches and which nothing reached before: the catalogued half is `meta.*`, and the schema
@@ -2240,7 +2295,7 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     }
   }
   // The platform user registry (ADR-0335). Neither `meta.users` nor `meta.user_tenant_membership`
-  // had a writer, while 50 catalogued columns reference the former NOT NULL ON DELETE RESTRICT —
+  // had a writer, while 42 catalogued columns reference the former NOT NULL ON DELETE RESTRICT —
   // ten on tables with a live writer — and every notification audience resolved to the empty set.
   if (options.platformUserRoutes) {
     if (conn === undefined) {
@@ -3961,6 +4016,100 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // serving. `[]` is an assertion rather than a silence (ADR-0331), which is why `checks` is not
   // optional — a forgotten optional list would make every probe answer 200 for a process whose
   // database is gone.
+  // ADR-0358. `POST /v1/auth/token`, in front of the gateway for the same reason the bounce
+  // webhook and the health probes are: `authenticate` runs before `match_route`, so every gateway
+  // route is behind a credential and a login carries none -- and a browser holding a stale session
+  // token that hit the login route to re-authenticate would be 401'd before the handler ran.
+  //
+  // Wrapped *before* the health block so the probes end up outermost. Order matters only in that
+  // an unauthenticated probe must not be able to reach anything slower than itself; both return
+  // null for a path that is not theirs, so neither can shadow the other.
+  if (credentialAuth?.ok === true && conn !== undefined) {
+    const material = credentialAuth.material;
+    const credentialStore = new PostgresCredentialStore(conn, schemaOpt);
+    // The membership read is `PostgresUserStore.membershipFor`, which already carries the
+    // `withTenantContext` and the strict `scopeFilter` that table's single `ALL`-scope policy
+    // requires. A second spelling of a scoped read is how two of them drift.
+    const userStore = new PostgresUserStore(conn, schemaOpt);
+    const lockout = parseLoginLockout(
+      options.loginLockoutAttempts ?? DEFAULT_LOGIN_LOCKOUT_ATTEMPTS,
+      options.loginLockoutSeconds ?? DEFAULT_LOGIN_LOCKOUT_SECONDS,
+    );
+    const ttl = options.sessionTokenTtl ?? DEFAULT_SESSION_TOKEN_SECONDS;
+    const login = buildAuthTokenInterceptor({
+      verify: (request) =>
+        verifyLogin({
+          request,
+          store: credentialStore,
+          pepper: material.pepper,
+          roleFor: async (tenantId, userId) => {
+            const membership = await userStore.membershipFor(tenantId, userId);
+            if (membership === null || membership.status !== "active") return null;
+            return membership.primaryRole;
+          },
+          lockout,
+          now: new Date(),
+          // `blocksReads` called, not restated: one vocabulary of five tenant states
+          // (ADR-0334), and a login into a tenant whose data cannot be read is not a login.
+          // A status this build does not know answers **true** — the column's CHECK can be wider
+          // than the contract on a database the catalog has not caught up with, and an unknown
+          // state must not admit a session.
+          tenantBlocksAccess: (status) =>
+            (TENANT_LIFECYCLE_STATES as readonly string[]).includes(status)
+              ? blocksReads(status as TenantLifecycleState)
+              : true,
+        }),
+      mint: (outcome) =>
+        mintSessionToken({
+          issuer: options.jwtIssuer ?? "",
+          audience: options.jwtAudience ?? "",
+          userId: outcome.userId,
+          tenantId: outcome.tenantId,
+          role: outcome.role,
+          now: new Date(),
+          lifetimeSeconds: ttl,
+          kid: material.kid,
+          signingSeedBase64: material.signingSeedBase64,
+          publicKeyBase64: material.publicKeyBase64,
+        }),
+      onSuccess: async (userId, rehashTo) => {
+        await credentialStore.recordSuccess(userId);
+        if (rehashTo !== null) {
+          // Ordered after the success record and in its own statement, because an upgrade that
+          // failed must not cost the user their login or their counter reset. A hash left at the
+          // old parameters is the state we were already in.
+          await credentialStore.setCredential(userId, rehashTo);
+          console.info(`[auth] user ${userId} credential re-hashed at current scrypt parameters`);
+        }
+      },
+      onFailure: (userId) =>
+        credentialStore
+          .recordFailure(userId, lockout.attempts, lockout.seconds)
+          .then((r) => {
+            if (r.lockedUntil !== null) {
+              console.warn(
+                `[auth] user ${userId} locked until ${r.lockedUntil}` +
+                  ` after ${r.failedAttempts.toString()} consecutive failures`,
+              );
+            }
+          }),
+      // Neither the password nor the minted token may reach a log line. The refusal reason is what
+      // separates a misconfigured deployment from a wrong password, and it is the only thing an
+      // operator can act on -- the caller gets one body for all ten.
+      onRefusal: (info) => console.info(`[auth] login refused ${info.refusal}: ${info.detail}`),
+      onError: (err) => console.error("[auth] login store failure", err),
+    });
+    const inner = dispatchTarget;
+    dispatchTarget = {
+      dispatch: async (raw, body): Promise<RawHttpResponse> =>
+        (await login(raw, body)) ?? (await inner.dispatch(raw, body)),
+    };
+    console.info(
+      `[auth] serving ${AUTH_TOKEN_PATH} (session ttl ${ttl.toString()}s, lockout after` +
+        ` ${lockout.attempts.toString()} failures for ${lockout.seconds.toString()}s)`,
+    );
+  }
+
   {
     const probeHealth = buildHealthInterceptor({
       checks: conn !== undefined ? [buildPostgresReadinessCheck(conn)] : [],

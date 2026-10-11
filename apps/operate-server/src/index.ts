@@ -94,3 +94,8 @@ export * from "./envelope-tenant-readiness.js";
 export * from "./boot-erasure-report.js";
 export * from "./api-key-source.js";
 export * from "./health.js";
+export * from "./auth-token-route.js";
+export * from "./credential-auth-env.js";
+export * from "./credential-store.js";
+export * from "./set-credential.js";
+export * from "./token-mint.js";

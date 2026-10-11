@@ -539,6 +539,38 @@ describe("table column shapes", () => {
     expect(cols).toContain("status");
   });
 
+  // Adding a column to this table touches no other assertion in this file -- the count and the
+  // sorted-names list only move for a new *table* -- so the credential columns would otherwise
+  // land with no fence at all. Each of the three properties below is one the login path depends
+  // on and a well-meaning edit could take away.
+  it("META_USERS credential columns are nullable except the counter, which defaults", () => {
+    const byName = new Map(META_USERS.columns.map((c) => [c.name, c]));
+    // Nullable: a provisioned user holds no credential until one is set, and `provision`'s two
+    // literal INSERTs name neither -- a notNull-with-no-default column fails both and the
+    // `missing_required_column` rule with it.
+    for (const name of ["credential_hash", "credential_updated_at", "credential_locked_until"]) {
+      const col = byName.get(name);
+      expect(col, name).toBeDefined();
+      expect(col?.notNull ?? false, name).toBe(false);
+    }
+    // The counter is the one that may be notNull, *because* it has a default: absent and zero are
+    // the same fact for an attempt count, which is not true of the hash beside it.
+    const attempts = byName.get("credential_failed_attempts");
+    expect(attempts?.notNull).toBe(true);
+    expect(attempts?.default).toBe("0");
+  });
+
+  it("META_USERS.credential_hash constrains the KDF that produced it", () => {
+    const check = META_USERS.columns.find((c) => c.name === "credential_hash")?.check ?? "";
+    // The parameters are in the string, so the constraint has to name the KDF. A bare sha256 of a
+    // password is not a password hash, and this is what refuses one.
+    expect(check).toContain("scrypt");
+    expect(check).toContain("credential_hash IS NULL OR");
+    // A value-set CHECK would need a pg-value-set-domains.ts declaration; a pattern does not.
+    expect(check).toContain("~");
+    expect(check).not.toMatch(/\bIN\s*\(/);
+  });
+
   it("META_USER_TENANT_MEMBERSHIP enforces (user_id, tenant_id) uniqueness", () => {
     expect(META_USER_TENANT_MEMBERSHIP.uniqueConstraints).toEqual([
       {

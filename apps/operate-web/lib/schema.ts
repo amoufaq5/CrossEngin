@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { handleUnauthorized } from "@/lib/unauthorized";
+
 export type UiInputType =
   | "text"
   | "textarea"
@@ -125,6 +127,9 @@ export async function fetchSchema(): Promise<UiSchema> {
   if (inflight !== null) return inflight;
   inflight = (async () => {
     const res = await fetch("/api/v1/meta/schema", { headers: { accept: "application/json" } });
+    // This module's only request, and the one the whole app waits on — so a 401 here is the
+    // first thing an expired session hits, and the redirect has to start from here too.
+    handleUnauthorized(res);
     if (!res.ok) throw new Error(`schema ${res.status}: ${await res.text().catch(() => res.statusText)}`);
     const schema = (await res.json()) as UiSchema;
     cache = schema;

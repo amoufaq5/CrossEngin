@@ -1,3 +1,4 @@
+import { generateEd25519Keypair } from "@crossengin/crypto";
 import { describe, expect, it } from "vitest";
 
 import { COLUMN_KEY_TTL_BOUNDS, DEFAULT_COLUMN_KEY_TTL_MS } from "./data-key-envelope.js";
@@ -7,9 +8,13 @@ import {
   parsePruneArgs,
   parseRekeyArgs,
   parseServeArgs,
+  parseSetCredentialArgs,
   parseVerifyChainArgs,
   rekeyHelpText,
+  setCredentialCliHelpText,
 } from "./cli.js";
+
+const JWKS_PUB = generateEd25519Keypair().publicKeyBase64;
 
 describe("parseServeArgs", () => {
   it("parses a pack + port + repeated api-keys", () => {
@@ -121,19 +126,21 @@ describe("parseServeArgs", () => {
       "--pack",
       "erp-core",
       "--jwks-key",
-      "key-1:AAAbase64",
+      `key-1:${JWKS_PUB}`,
       "--jwt-issuer",
       "https://idp/",
       "--jwt-audience",
       "https://api/",
     ]);
-    expect(opts.jwksKeys).toEqual(["key-1:AAAbase64"]);
+    expect(opts.jwksKeys).toEqual([`key-1:${JWKS_PUB}`]);
     expect(opts.jwtIssuer).toBe("https://idp/");
     expect(opts.jwtAudience).toBe("https://api/");
   });
 
   it("requires issuer + audience when a JWKS is configured", () => {
-    expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-key", "k:v"])).toThrow(/issuer.*audience/);
+    expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-key", `k:${JWKS_PUB}`])).toThrow(
+      /issuer.*audience/,
+    );
     expect(() => parseServeArgs(["--pack", "erp-core", "--jwks-url", "https://idp/jwks"])).toThrow(/issuer.*audience/);
   });
 
@@ -1898,5 +1905,211 @@ describe("--gateway-execution-capture", () => {
     }
     expect(message).toContain("requires a Postgres store");
     expect(message).toContain("meta.gateway_pipeline_executions");
+  });
+});
+
+describe("--credential-login", () => {
+  const base = ["--pack", "erp-core", "--store", "pg", "--jwt-issuer", "https://i.test", "--jwt-audience", "a"];
+
+  it("parses with its three companion flags", () => {
+    const opts = parseServeArgs([
+      ...base,
+      "--credential-login",
+      "--session-token-ttl",
+      "1800",
+      "--login-lockout-attempts",
+      "5",
+      "--login-lockout-seconds",
+      "600",
+    ]);
+    expect(opts.credentialLogin).toBe(true);
+    expect(opts.sessionTokenTtl).toBe(1800);
+    expect(opts.loginLockoutAttempts).toBe(5);
+    expect(opts.loginLockoutSeconds).toBe(600);
+  });
+
+  it("defaults to off, with every companion null", () => {
+    const opts = parseServeArgs(["--pack", "erp-core"]);
+    expect(opts.credentialLogin).toBe(false);
+    expect(opts.sessionTokenTtl).toBeNull();
+    expect(opts.loginLockoutAttempts).toBeNull();
+    expect(opts.loginLockoutSeconds).toBeNull();
+  });
+
+  it("requires --jwt-issuer and --jwt-audience, because the token asserts both", () => {
+    // The minted token carries `iss` and `aud` and the verifier beside it checks both. Without
+    // them the runtime falls back to `https://crossengin.io`, so a minter using any other issuer
+    // answers `issuer_mismatch` for a token it had just signed.
+    expect(() =>
+      parseServeArgs(["--pack", "erp-core", "--store", "pg", "--credential-login"]),
+    ).toThrow(CliUsageError);
+    expect(() =>
+      parseServeArgs([
+        "--pack",
+        "erp-core",
+        "--store",
+        "pg",
+        "--credential-login",
+        "--jwt-issuer",
+        "https://i.test",
+      ]),
+    ).toThrow(/requires --jwt-issuer and --jwt-audience/);
+  });
+
+  it("requires a Postgres store", () => {
+    expect(() =>
+      parseServeArgs([
+        "--pack",
+        "erp-core",
+        "--credential-login",
+        "--jwt-issuer",
+        "https://i.test",
+        "--jwt-audience",
+        "a",
+      ]),
+    ).toThrow(/requires a Postgres store/);
+  });
+
+  it("is mutually exclusive with --jwks-url", () => {
+    // `node.ts` branches on the URL and DISCARDS the static key specs, so the key derived from the
+    // signing seed would never be registered and every minted token would come back
+    // `invalid_signature` -- at the gateway, not at the mint, so the mint looks fine in testing.
+    expect(() =>
+      parseServeArgs([...base, "--credential-login", "--jwks-url", "https://idp.test/jwks"]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("refuses a lockout threshold below the floor rather than raising it", () => {
+    // ADR-0332's rule: a threshold of 1 locks a real user out on one typo, and silently clamping
+    // would leave the deployment believing it configured something it did not.
+    for (const bad of ["0", "1", "2", "-1", "1.5", "x"]) {
+      expect(() =>
+        parseServeArgs([...base, "--credential-login", "--login-lockout-attempts", bad]),
+        bad,
+      ).toThrow(/invalid --login-lockout-attempts/);
+    }
+    expect(() =>
+      parseServeArgs([...base, "--credential-login", "--login-lockout-attempts", "3"]),
+    ).not.toThrow();
+  });
+
+  it("refuses a session ttl outside the bounds", () => {
+    for (const bad of ["0", "59", "86401", "1.5", "x"]) {
+      expect(() =>
+        parseServeArgs([...base, "--credential-login", "--session-token-ttl", bad]),
+        bad,
+      ).toThrow(/invalid --session-token-ttl/);
+    }
+  });
+
+  it("refuses each companion flag without --credential-login", () => {
+    // A flag that silently does nothing is worse than one that refuses: an operator who set a
+    // 5-minute session and got an hour would have no way to tell.
+    for (const [flag, value] of [
+      ["--session-token-ttl", "600"],
+      ["--login-lockout-attempts", "5"],
+      ["--login-lockout-seconds", "60"],
+    ] as const) {
+      expect(() => parseServeArgs([...base, flag, value]), flag).toThrow(
+        /requires --credential-login/,
+      );
+    }
+  });
+});
+
+describe("parseSetCredentialArgs", () => {
+  const USER = "22222222-2222-4222-8222-222222222222";
+
+  it("parses a matching pair", () => {
+    const opts = parseSetCredentialArgs(["--user", USER, "--confirm-user", USER]);
+    expect(opts).toEqual({
+      userId: USER,
+      confirmUserId: USER,
+      schema: null,
+      format: "human",
+      help: false,
+    });
+  });
+
+  it("requires --confirm-user and refuses a mismatch", () => {
+    // `rekey`'s `--confirm-tenant` rule: this overwrites a credential, so naming the wrong user
+    // both locks that person out and hands their account to whoever typed the password.
+    expect(() => parseSetCredentialArgs(["--user", USER])).toThrow(/requires --confirm-user/);
+    expect(() =>
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", "22222222-2222-4222-8222-222222222223"]),
+    ).toThrow(/differ/);
+  });
+
+  it("requires --user", () => {
+    expect(() => parseSetCredentialArgs(["--confirm-user", USER])).toThrow(/requires --user/);
+  });
+
+  it("refuses --password by name, and says where the password goes instead", () => {
+    // Named explicitly rather than falling through to "unknown option", so an operator is told why
+    // rather than left thinking they mistyped it.
+    expect(() =>
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", USER, "--password", "hunter2"]),
+    ).toThrow(/readable by anyone who can run 'ps'/);
+    expect(() =>
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", USER, "--password=hunter2"]),
+    ).toThrow(/OPERATE_NEW_PASSWORD/);
+  });
+
+  it("has no --yes", () => {
+    expect(() =>
+      parseSetCredentialArgs(["--user", USER, "--confirm-user", USER, "--yes"]),
+    ).toThrow(/unknown option/);
+  });
+
+  it("answers --help without requiring the ids", () => {
+    expect(parseSetCredentialArgs(["--help"]).help).toBe(true);
+  });
+
+  it("is named in the subcommand list and documents both variables", () => {
+    expect(helpText).toContain("set-credential");
+    expect(setCredentialCliHelpText).toContain("OPERATE_NEW_PASSWORD");
+    expect(setCredentialCliHelpText).toContain("CREDENTIAL_PEPPER");
+    expect(setCredentialCliHelpText).toContain("never from argv");
+  });
+});
+
+describe("--jwks-key validation", () => {
+  it("refuses a value that is not a 32-byte Ed25519 public key, as a USAGE error", () => {
+    // Exit 2 with the help text, rather than a boot stack trace. Until this increment nothing
+    // validated the value at all: `isEd25519PublicKeyBase64` existed with zero callers while
+    // `parseJwksKeySpec` checked only for a colon, so a typo'd key booted cleanly and turned every
+    // Bearer request into an `invalid_signature` 401 whose body names nothing an operator can act
+    // on. Both ends are closed now -- here for argv, and in `resolveJwtConfig` for a programmatic
+    // `ServeOptions` that bypassed this parser.
+    for (const bad of ["key-1:AAAbase64", "key-1:AAAxyz==", "key-1:not!base64!"]) {
+      expect(
+        () =>
+          parseServeArgs([
+            "--pack",
+            "erp-core",
+            "--jwks-key",
+            bad,
+            "--jwt-issuer",
+            "https://i.test",
+            "--jwt-audience",
+            "a",
+          ]),
+        bad,
+      ).toThrow(CliUsageError);
+    }
+  });
+
+  it("accepts a real key", () => {
+    const opts = parseServeArgs([
+      "--pack",
+      "erp-core",
+      "--jwks-key",
+      `k:${JWKS_PUB}`,
+      "--jwt-issuer",
+      "https://i.test",
+      "--jwt-audience",
+      "a",
+    ]);
+    expect(opts.jwksKeys).toEqual([`k:${JWKS_PUB}`]);
   });
 });

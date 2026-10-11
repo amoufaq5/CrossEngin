@@ -6,7 +6,7 @@ import type { PgConnection } from "@crossengin/kernel-pg";
  *
  * ## The failure this exists to make legible
  *
- * **50 of the catalog's columns carry a `NOT NULL` foreign key into `meta.users`**, every one of
+ * **42 of the catalog's columns carry a `NOT NULL` foreign key into `meta.users`**, every one of
  * them `ON DELETE RESTRICT`, and nine sit on tables with a live writer. Nothing writes `meta.users`
  * (verified: every reference to it in the workspace is a comment or a read), so those nine stores
  * cannot insert a row at all. Measured live as a non-owner role against a fresh cluster: eight of
@@ -51,7 +51,7 @@ export const USER_REGISTRY_STATES = [
   "readable",
   /** The table exists and this role may not `SELECT` it: every principal answers `unknown`. */
   "unreadable",
-  /** No `meta.users` in this schema. Nothing can satisfy any of the 50 references. */
+  /** No `meta.users` in this schema. Nothing can satisfy any of the 42 references. */
   "absent",
   /** The catalog query itself failed — at boot the database may simply not be up yet. */
   "unreachable",

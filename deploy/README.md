@@ -21,8 +21,10 @@ and **Caddy** for automatic HTTPS.
 git clone <your-fork-url> crossengin && cd crossengin/deploy
 
 cp .env.example .env
-# Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, and a strong token in
-# OPERATE_ADMIN_API_KEY + OPERATE_WEB_API_KEY (same token in both).
+# Edit .env: set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, a strong token in
+# OPERATE_ADMIN_API_KEY, and the two login secrets (CREDENTIAL_PEPPER and
+# OPERATE_TOKEN_SIGNING_KEY). The UI has a login now, so the first user is a
+# shell step -- see "The UI has a login" below.
 
 docker compose up -d --build          # build images + start everything
 docker compose logs -f migrate        # watch the schema apply, then exit 0
@@ -39,12 +41,15 @@ When `migrate` has exited successfully and `caddy` has obtained certificates
 
 ## Create your first tenant
 
-Once up, use the platform console you just launched. In the UI go to **Platform →
-New tenant**, or via the API:
+Once up, use the platform console you just launched — which now needs a login, so do
+**The UI has a login** below first. Via the API instead:
 
 ```bash
+# The token half of OPERATE_ADMIN_API_KEY, i.e. everything before the first colon.
+ADMIN_TOKEN=${OPERATE_ADMIN_API_KEY%%:*}
+
 curl -sS -X POST https://api.erp.example.com/v1/platform/tenants \
-  -H "x-api-key: $OPERATE_WEB_API_KEY" -H 'content-type: application/json' \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"slug":"acme","name":"Acme Inc.","tier":"small","region":"eu"}'
 ```
 
@@ -77,7 +82,7 @@ below use the bootstrap key, so they assume `--platform-user-role platform_admin
 # the point — because the id that needs a row is one the deployment has already committed
 # to in an --api-key spec.
 curl -sS -X POST https://api.erp.example.com/v1/platform/users \
-  -H "x-api-key: $OPERATE_WEB_API_KEY" -H 'content-type: application/json' \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"user":{"id":"<user-uuid>","email":"ana@acme.example","displayName":"Ana"},
        "membership":{"tenantId":"<tenant-uuid>","primaryRole":"cashier","status":"active"}}'
 
@@ -85,7 +90,7 @@ curl -sS -X POST https://api.erp.example.com/v1/platform/users \
 # the body). `status` has no default: "active" grants access now, "invited" only promises
 # it, and only an active membership resolves as a notification recipient.
 curl -sS -X POST https://api.erp.example.com/v1/platform/tenants/<tenant-uuid>/members \
-  -H "x-api-key: $OPERATE_WEB_API_KEY" -H 'content-type: application/json' \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"userId":"<user-uuid>","primaryRole":"cashier","status":"active"}'
 ```
 
@@ -168,18 +173,46 @@ reading once after the first `up`:
   (`Employee.work_email`, `pii`), so this line says `plaintext_disclosing` until
   `CURSOR_ENCRYPTION_SECRET` is set, and names the field either way.
 
-### The UI has no login
+### The UI has a login
 
-`operate-web` authenticates nobody. Its server-side proxy sends one fixed
-`OPERATE_WEB_API_KEY` for every request, so **every browser that can reach `$DOMAIN` is
-served as that principal** — on the shipped compose, a `platform_admin` who can provision
-and delete tenants. Caddy terminates TLS and forwards; it checks no credential.
+It did not until ADR-0358. `operate-web`'s proxy sent one fixed `OPERATE_WEB_API_KEY` on
+every request, so **every browser that could reach `$DOMAIN` was that principal** — on the
+shipped compose, a `platform_admin` who can provision and delete tenants — and Caddy
+terminates TLS and forwards without checking a credential. That variable no longer exists.
 
-So this stack is safe on a host nobody else can reach, and is not an internet-facing
-product. Before exposing it, put something that authenticates in front of the `web`
-service — an identity-aware proxy, Caddy's own `basic_auth`, a VPN or a tunnel with access
-control — or switch the API to JWT/JWKS above and have the UI forward the user's own
-token instead of the shared one.
+What is there now: a `/login` form, an `httpOnly; Secure; SameSite=strict` session cookie,
+a `middleware.ts` that redirects a cookie-less page request and answers a cookie-less
+`/api/*` request with a 401, and a proxy that forwards **the viewer's own** token. The
+cookie is only a hint — the API verifies the token on every request, so a forged or expired
+one is a 401 from the API rather than something the browser layer decides.
+
+Three things to know before you expose it.
+
+**Set the two secrets.** `CREDENTIAL_PEPPER` and `OPERATE_TOKEN_SIGNING_KEY` are required,
+and `.env.example` says what each is for and how to generate it. The boot line is
+`[auth] credential login: enabled (kid login-v1, public key …)`; if it says `refused`,
+nobody can log in and the reason names the variable.
+
+**Create the first user by hand.** There is no mail channel in a fresh deployment, so there
+is no "forgot password" and no self-service sign-up. `.env.example` has the three commands:
+provision a user, grant it a membership in a tenant — which is what decides the role every
+session of theirs carries — then `set-credential`. The password comes from the environment
+and never from argv; the subcommand refuses `--password` by name and says why.
+
+**A session's role is frozen until it expires.** The role is read from the membership at
+login and stamped into the token, and nothing re-reads the directory per request. So
+revoking or downgrading a membership takes effect at the next login, within
+`--session-token-ttl` (one hour by default; lower it if that window matters to you). The
+same is true of suspending a user. If you need a session cut off now, rotate
+`OPERATE_TOKEN_SIGNING_KEY` — that invalidates every session at once.
+
+A wrong password locks the account after `--login-lockout-attempts` tries (10 by default)
+for `--login-lockout-seconds` (15 minutes). That bounds guessing against one account and
+deliberately does **not** address credential stuffing — one password tried across many
+accounts — for which there is no per-IP limit available here: behind Caddy every request
+arrives from the same container address. It also means anyone who knows an email address can
+lock that user out for the window, which is why the window lapses rather than being
+permanent and why `set-credential` clears a lock.
 
 ## Rate limiting
 

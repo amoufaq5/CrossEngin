@@ -28,8 +28,11 @@ export function Sidebar() {
   const searching = q.trim() !== "";
   const primaryRole = schema?.viewer?.primaryRole;
   const viewerRoleList = schema?.viewer?.roles;
-  // No viewer (dev) → show; otherwise gate on holding a finance role.
-  const showReports = viewerRoleList === undefined || viewerRoleList.some((r) => FINANCE_ROLES.includes(r));
+  // Gate on holding a finance role, and an *unresolved* viewer is not a pass. The old
+  // `viewerRoleList === undefined ||` arm was labelled "no viewer (dev) → show", but
+  // `roles === undefined` is exactly the unauthenticated state — so the one browser holding no
+  // session at all was the one shown the finance navigation. Absent roles hide.
+  const showReports = viewerRoleList !== undefined && viewerRoleList.some((r) => FINANCE_ROLES.includes(r));
   const hasWht = entityByName(schema, "WhtCertificate") !== undefined;
   const inboxEnabled = featureEnabled(schema, "approvals_inbox", true);
   const { items: inboxItems } = useInbox(inboxEnabled ? schema : null);

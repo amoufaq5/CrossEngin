@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 352 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 353 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, ~18,330 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 18,603 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -822,6 +822,52 @@ type errors.
   became `sslModeValidatesCertificate`, and the health module's serving set became a per-member
   map the `NonServingOutcome` type is derived from.
 
+  ADR-0358 closes the register's own P0 item 1, and the class is **a perimeter the deployment
+  asserted and nothing enforced**. `operate-web` authenticated nobody: its proxy stamped one fixed
+  `OPERATE_API_KEY` as `x-api-key` on every request of all five verbs, defaulting to the literal
+  `"devkey"` when unset, so **every browser that could resolve the domain was that principal** — on
+  the shipped compose a `platform_admin` who can provision and delete tenants — with no
+  `middleware.ts`, no cookie and no login surface anywhere, behind a Caddy that forwards without
+  checking a credential. ADR-0357 documented it and fixed nothing.
+  The increment was scoped by a measurement taken before designing: a JWT minted **entirely
+  in-repo** — fresh Ed25519 key, `sub` = a real `meta.users.id`, `tenant_id`, `scope` = a role — is
+  accepted by the existing gateway **with no verifier change**, and three tokens differing only in
+  `scope` returned exactly `erp-core`'s declared read grant on `Employee.work_email` (present for
+  `erp_admin` and `hr_manager`, absent for `erp_viewer`). So this was never a six-package
+  subsystem; the API side worked and what was missing was a credential, a mint and a browser
+  session.
+  Four decisions carry it. The credential is **four nullable-or-defaulted columns on `meta.users`
+  and never in `USER_COLUMNS`**, because that one constant feeds seven statements over a
+  `.strict()` schema — adding the hash there either throws on every registry read or puts it in six
+  200 bodies. The hash is **scrypt over a peppered password**, and the pepper's whole justification
+  is a live measurement: `meta.users` carries no `tenant_id` and so **no RLS**, so the hashes are
+  readable by anything holding the serving role's grant and a secret the database does not hold is
+  what makes reading that table insufficient — `parseCredentialPepper` is a *third* parser over the
+  one `refuseWeakSecret`, on that function's own stated intent. **One environment variable**, with
+  the public half **derived** from the seed and registered in the gateway's own JWKS, which closes
+  a class by construction rather than by a check — and the measurement is sharper than convenience:
+  `signEd25519(seedA, pubB, m)` **does not throw**, node builds the key from `d` and silently
+  discards an inconsistent `x`, so a configured pair can be stated inconsistently and the only
+  symptom is `invalid_signature` on every login. And **the login names its tenant**, because
+  `membershipFor` requires one and `platform-users.ts` deliberately refuses a by-user membership
+  read, so respecting that refusal beat adding the read it declined.
+  Three things were sharper than the feature. **`maxmem` is mandatory and the documented formula is
+  wrong for the purpose**: the real requirement is `128·r·(N+p+2)`, exactly 3,072 bytes more than
+  the documented `128·N·r` — and `128·N·r` at the default N=2^15, r=8 is *precisely* node's 32 MiB
+  ceiling, so the default parameters sit just above it and scrypt throws. **The async form is a
+  correctness decision**, measured: 8 concurrent derivations at N=2^15 finish in 415 ms with a
+  10 ms timer still firing 39 times, where `scryptSync` blocks the loop flat. And
+  **`spendPasswordWork` forced the re-hash**: it must derive under the deployment's *current*
+  parameters or a fixed dummy cost equalises today and diverges the moment the floor rises, so a
+  hash still under weaker parameters costs measurably less than an unknown email — re-opening the
+  enumeration oracle silently, in a deployment that had already tested this.
+  `isEd25519PublicKeyBase64` had existed since `principals.ts` did with **zero callers** while
+  `parseJwksKeySpec` checked only for a colon, so a typo'd key booted cleanly and turned every
+  Bearer request into an `invalid_signature` 401 naming nothing; validating it caught two in-repo
+  fixtures using fake keys. And `components/Sidebar.tsx` **failed open** —
+  `viewerRoleList === undefined || …` with the comment *"No viewer (dev) → show"*, where
+  `undefined` is exactly the unauthenticated state.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1617,6 +1663,37 @@ packages exist at only one layer, noted below where that is true.
 - **`crypto`** — real cryptography over `node:crypto`: SHA-256/BLAKE2b-512 hashing and hash
   chains, HMAC-SHA256 webhook signing with replay windows, Ed25519 sign/verify/keypair,
   opaque tenant-scoped `KeyHandle`s behind a `KeyStore`, and auto-audit of key management.
+  **`password.ts` is the password KDF since ADR-0358, and the three pins stay for `aead.ts`'
+  reason**: they describe the key *registry*, and a password hash registers no key, holds no
+  material in `meta.crypto_keys` and has no lifecycle, so scrypt is not a `KeyAlgorithm` and must
+  not become one. `scrypt(hmacSha256(pepper, password), salt, 64, {N: 2^15, r: 8, p: 1, maxmem})`,
+  encoded `scrypt$<N>$<r>$<p>$<saltHex>$<hashHex>` — the parameters travel **in the string**,
+  because a hash that does not record them cannot be verified once the defaults move, and that is
+  also why there is no sibling `algorithm` column to disagree with the bytes.
+  Three things are load-bearing and each is a measurement. **`maxmem` must be passed above
+  N=2^14**: the real requirement is `128·r·(N+p+2)`, exactly 3,072 bytes more than the documented
+  `128·N·r`, and `128·N·r` at the defaults is *precisely* node's 32 MiB ceiling — so the default
+  parameters sit just above it and scrypt throws `memory limit exceeded`, making an omitted
+  `maxmem` a silent ceiling at 2^14 nobody declared. **The async form is mandatory**: 8 concurrent
+  derivations at N=2^15 finish in 415 ms with a 10 ms timer still firing 39 times, where
+  `scryptSync` blocks the loop flat, so on a single-process server the sync form stalls every
+  request behind one login (the libuv pool is 4 and shared with fs and dns, which is why the caller
+  also needs a lockout rather than treating the KDF as its limiter). And **`spendPasswordWork`
+  derives under the parameters it is given**, which is what makes it a timing equaliser that tracks
+  the deployment rather than one that goes stale: a fixed dummy cost equalises today and diverges
+  the moment the floor rises. `PASSWORD_OUTCOME_ADMITS` is a map so a fourth outcome is a compile
+  error at the one place that decides, and `unreadable_hash` is kept apart from `mismatched`
+  because a corrupt row must not be counted as a failed attempt — it would lock a user out of an
+  account whose password they typed correctly. No floor on a user's password, deliberately: the
+  floor is on the **deployment's** pepper, through `parseCredentialPepper`.
+  `ed25519PublicKeyFromSeed` is the other ADR-0358 addition, in `signing.ts`, and it exists so a
+  deployment that signs its own tokens holds **one** secret. The reason is sharper than
+  convenience: `signEd25519(seedA, pubB, m)` **does not throw** — node builds the key from `d` and
+  silently discards an inconsistent `x`, so the signature verifies under A and not under B. A
+  configured pair can therefore be stated inconsistently with no symptom but every login failing
+  at the gateway. The primitive is left unchecked on a measurement (deriving costs 0.099 ms against
+  a 0.133 ms signature, a 75% overhead on a function the forensic chain calls per audit append) and
+  a test pins the silent-ignore instead.
   **There is a symmetric cipher since ADR-0346 — `aead.ts`, AES-256-GCM — and the three pins stay
   exactly as they are**, because they never asserted what this file used to say they did. They
   describe the key *registry*: `KEY_ALGORITHMS` is `MAC_ALGORITHMS ∪ SIGNATURE_ALGORITHMS`, the
@@ -3149,13 +3226,25 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   from the server's `UiSchema`, an inbox, reports (aging, WHT, period close), tenant admin
   (settings, billing), a setup wizard, and a platform console for tenant provisioning and
   design reviews. No package `bin`; deployed as a web server, not a CLI.
-  **It authenticates nobody.** `app/api/[...path]/route.ts` sends one fixed `OPERATE_API_KEY` as
-  `x-api-key` on every request, with no cookie, session or JWT anywhere in the app — so every
-  browser that can reach the domain is served as that principal, which on the shipped compose is a
-  `platform_admin` who can provision and delete tenants, and Caddy terminates TLS and forwards
-  without checking a credential. ADR-0357 says it in `deploy/README.md` under *The UI has no
-  login*; saying it is not fixing it, and the fix is a session layer plus the API's existing
-  JWT/JWKS path.
+  **It authenticates people since ADR-0358, and until then it authenticated nobody** — one fixed
+  `OPERATE_API_KEY` as `x-api-key` on every request, defaulting to the literal `"devkey"` when
+  unset, so every browser that could reach the domain was that principal. What is there now:
+  `middleware.ts` (the only gate available, since all 15 pages are `"use client"` and 11 are
+  statically prerendered, so a server-side `cookies()` check in a page body is impossible),
+  `/login`, two auth route handlers, an `httpOnly; Secure; SameSite=strict` session cookie whose
+  lifetime is derived from the API's own `expiresAt`, and a proxy that forwards **the viewer's**
+  token and 401s without calling upstream when there is no cookie. `OPERATE_API_KEY` and its
+  `?? "devkey"` default are **deleted** rather than left unset, because that default meant removing
+  the variable did not fail closed.
+  Two shapes are worth knowing. The authenticated chrome moved into one `AppChrome` client
+  component keyed on `usePathname()` rather than 15 pages into a route group — a route group does
+  not escape the root layout, and this kept all 11 static pages static. And the proxy answers
+  `/api/*` with a **JSON 401** rather than a redirect, because `fetch` follows redirects by
+  default, so a redirect would hand every caller a 200 carrying the login page's HTML with
+  `res.ok` true. The cookie is only a hint: the API verifies the token on every request, so a
+  forged one is a 401 **from the API**.
+  It still has **zero tests**, so it is outside the 18,603-test sweep and all nine strategy rules,
+  and the login flow is verified by `tsc`, `next build` and a live run.
 
 ## Cross-cutting invariants
 
@@ -3246,6 +3335,22 @@ read and write for an unprovisioned api-key tenant with `tenant_data_keys_tenant
 as a 504. A boot survey names them. It carries **no platform
 arm**: a data key is never platform-scoped, `tenant_id` is NOT NULL, and a platform read arm would
 let any tenant's gateway session read every tenant's wrapped key.
+
+**`meta.users` carries the login credential in four columns, and the upgrade is free** (ADR-0358).
+`credential_hash` / `credential_updated_at` / `credential_locked_until` are nullable and
+`credential_failed_attempts` is `NOT NULL DEFAULT 0`, which is the split rather than an
+inconsistency: a provisioned user holds no credential until one is set and *no credential* must stay
+distinguishable from *a credential nobody matched* (ADR-0331), while absent and zero are the same
+fact for an attempt count. Nullability is also what keeps `provision`'s two literal `INSERT`s valid
+against `missing_required_column`. The hash's CHECK is a **regex** naming the KDF
+(`^scrypt\$…\$[0-9a-f]{32}\$[0-9a-f]{128}$`) rather than a value set, so it needs no
+`pg-value-set-domains.ts` declaration — `check-admission.ts` classifies `~` as `pattern` — and the
+parameters live *in* the string so there is no sibling `algorithm` column to disagree with the
+bytes. Measured on a **populated** table with the columns dropped to reproduce an un-upgraded
+deployment: **4 planned, 0 unreconciled, 4 executed, re-plan clean**, with both CHECKs riding along
+on their `ADD COLUMN`. That last part is why ADR-0330's widening-versus-narrowing problem cannot
+bite here and does for `proof_version`: a CHECK on a column the plan is *adding* has no existing
+rows to validate against.
 
 **`meta.tenant_tombstones.record_storage` is nullable with no default, and that is the whole
 decision** (ADR-0351) — `retained_obligations`' choice for a sharper reason. NULL means *this
@@ -3684,6 +3789,20 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   question asked in the other direction the value moves, and the write half was the half that had a
   rule. Measured: **305 of 336** reads agree exactly, 7 derive through the same imported
   `DERIVATION_RULES`, 23 are declared, 1 is an alias, **0** unexplained.
+  **And a store can opt itself out of all of them by how it names its table** (ADR-0358). The
+  scanner resolves `this.x = `${ident}.tbl`` by chasing `ident` back to a literal, and it reads
+  `options.schema ?? "meta"` and a `const` but **not a parameter default** — so
+  `constructor(conn, schema = "meta")`, which is the obvious shape and perfectly clear to a human,
+  leaves every statement in that file an `unresolved_target` and none of its SQL compared against
+  the catalog. `PostgresCredentialStore` was written that way and the rule caught it; the fix is the
+  options object `PostgresUserStore` already uses, and the thing to know is that **the only symptom
+  is a declared scan gap, which looks like an admission rather than a loss of coverage.** Declaring
+  the gap would have been the wrong move: it is for genuinely unparseable SQL, not for a resolvable
+  name a construction choice made opaque. And making it resolvable immediately bought a **second**
+  finding, which is the whole argument: `pg-binding-names.ts` then reported `setCredential`'s
+  `encodedHash` parameter as an `undeclared_divergence` against `credential_hash` — renamed to agree
+  rather than declared, since agreement is the norm and a declaration is a judgement the next reader
+  must re-verify. Neither finding existed while the file was opting itself out.
   **ADR-0335 found two more members and they are the sharpest yet**: a write that sets no tenant
   context. `PostgresLifecycleEventStore` and `PostgresDeletionRequestStore` both issued correct SQL
   that no non-owner database would ever accept — on both tables the isolation policy is the only arm
@@ -3779,12 +3898,24 @@ Two constraints worth knowing before suggesting a host:
   spawned and nothing in it held the opinion that anything was wrong. `start_period: 40s` covers
   the catalog admission survey and per-tenant key provisioning, which both run before the listener
   binds.
-- **The stack is safe on a host nobody else can reach, and is not an internet-facing product**
-  (ADR-0357). `operate-web` authenticates nobody — one fixed `OPERATE_API_KEY` for every request,
-  no session layer — so every browser that reaches the domain is served as that principal, and
-  Caddy forwards without checking a credential. `deploy/README.md` says so under *The UI has no
-  login*, with the three boot lines an operator should read after the first `up`
-  (`[auth]` / `[pg]` / `[cursor]`) and the remedies beside them.
+- **The UI has a login, and it did not until ADR-0358.** The compose stack no longer carries
+  `OPERATE_WEB_API_KEY` — the variable is gone, not unset — and the `web` service passes no API
+  key at all; `api` gains `--credential-login` plus `--jwt-issuer` / `--jwt-audience`, and two
+  required secrets in the `environment:` block (`CREDENTIAL_PEPPER`, `OPERATE_TOKEN_SIGNING_KEY`,
+  never in `command:` — ADR-0301). `deploy/README.md`'s section is retitled *The UI has a login*
+  and carries the three things an operator has to know: set the two secrets (the boot line says
+  `credential login: enabled (kid login-v1, public key …)`, or `refused` naming the variable);
+  **create the first user by hand**, because there is no mail channel so there is no forgot-password
+  and no sign-up — `.env.example` has the three commands, ending in `set-credential` with the
+  password in the environment; and **a session's role is frozen until it expires**, so revoking a
+  membership or suspending a user bites at the next login within `--session-token-ttl`, with
+  rotating the signing key as the way to cut every session off at once. The lockout's limits are
+  stated rather than overclaimed: it bounds guessing against *one* account and deliberately does
+  not address credential stuffing, because behind Caddy every request arrives from the same
+  container address so no per-IP limit is available — and it means anyone who knows an email can
+  lock that user out for the window, which is why the window lapses and why `set-credential`
+  clears a lock. The boot lines an operator should read after the first `up` are now four:
+  `[auth]` (twice — api-key specs and credential login), `[pg]` and `[cursor]`.
 - **The managed-cloud guide says to *try* `PGSSLMODE=verify-full` and names what `require` costs**
   (ADR-0357), where it used to prescribe `require` with the comment *"Supabase requires TLS"*.
   That hop crosses the public internet carrying `app.current_tenant_id`, and `require`
@@ -5527,13 +5658,16 @@ Each is reachable on a running deployment and produces a wrong answer, a disclos
 or an authorization bypass. The test against P1 is that **no new capability is needed to be harmed
 by it**.
 
-1. **`operate-web` authenticates nobody, and the shipped stack publishes a `platform_admin` key.**
-   No `middleware.ts`, no login surface, the proxy stamps `x-api-key` on all five verbs with no
-   caller check, `.env.example` makes `OPERATE_WEB_API_KEY` the token half of the admin key, and
-   `deploy/Caddyfile` reverse-proxies `web:3000` on 80/443 with no auth directive. Anyone who
-   resolves the domain *is* `platform_admin`. **ADR-0357 documented it** (`deploy/README.md`, *The
-   UI has no login*) and fixed nothing; it is a subsystem — a session layer plus the API's existing
-   JWT path. **Still the top item.**
+1. ~~**`operate-web` authenticates nobody**~~ — **closed by ADR-0358**, and the scoping claim this
+   entry made ("it is a subsystem") was **wrong in the direction that deters the work**: a
+   self-minted JWT is accepted by the existing gateway with no verifier change at all, so the API
+   side already worked and the increment was a credential, a mint and a browser session. There is a
+   `/login`, an httpOnly session cookie and a proxy forwarding the viewer's own token;
+   `OPERATE_WEB_API_KEY` is gone from `.env.example` and `OPERATE_API_KEY` from the proxy.
+   `deploy/Caddyfile` still has no auth directive and does not need one. What remains is
+   **revocation**: the role is read from the membership at mint time and frozen in the token, so
+   revoking a membership or suspending a user takes effect at the next login, within
+   `--session-token-ttl`. The precedent for closing it is ADR-0334's tenant-status directory.
 2. **The keyset cursor returns a classified field's plaintext to a caller who cannot read it.**
    ~~Undetected~~ — **ADR-0357 surveys and reports it at boot**, naming each field, and
    `CURSOR_ENCRYPTION_SECRET` is in the compose and `.env.example`. It is *mitigated by one
@@ -5604,7 +5738,7 @@ three make the rest honest, cheap or verifiable.
    repo has built twice, and it converts the tier from silence into a stated limitation.
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the nine rules and 18,470 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the nine rules and 18,603 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -5657,10 +5791,16 @@ three make the rest honest, cheap or verifiable.
     importers under six colliding names. Blocked on the product decision ADR-0336 declined. Sharp
     edge for later: the two use different bucketing (`hash*31` vs FNV-1a), so wiring the wrong one
     silently re-randomises every in-flight rollout.
-16. **The UI is entity CRUD, three reports and a tenant console** — 15 files, no auth UI, no user or
-    role management, no workflow view, no report builder, no incident surface, no deletion-request
-    surface, no preferences. Correctly blocked on P0 item 1: per-user surfaces are meaningless
-    while the proxy presents one shared key.
+16. **The UI is entity CRUD, three reports, a tenant console and now a login** — 17 files, no user
+    or role management, no workflow view, no report builder, no incident surface, no
+    deletion-request surface, no preferences, and no self-service password change. **Unblocked by
+    ADR-0358**: this entry read "correctly blocked on P0 item 1, per-user surfaces are meaningless
+    while the proxy presents one shared key", and that premise is gone — the proxy forwards the
+    viewer's own token, so a per-user surface now has a viewer to be about. What it does *not* yet
+    have is the viewer's identity: `UiViewer` carries `primaryRole` and `roles` and no user id,
+    display name or email, so the shell's "Signed in as {role}" and the avatar initial taken from
+    the role name are still showing a role where a person now exists. That is the first thing to
+    build on top, and it is a server-side `UiSchema` change rather than a UI one.
 17. **14 packages, 15,006 source lines, zero importers**: `active-active`, `compliance`,
     `data-lineage`, `deploy`, `edge`, `finops`, `migration`, `ml-training`, `pwa`, `rate-limiting`,
     `sdk-clients`, `security`, `sso`, `workflow-signal-bridge` — ~17% of the package count, built,
@@ -5861,7 +6001,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 352 records; 273 Accepted, 79 Proposed (the
+title or status change cannot drift. 353 records; 274 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

@@ -1,10 +1,11 @@
 // PLATFORM design-review API helpers. Like lib/platform.ts, every request goes
-// to this Next app's /api proxy, which forwards to operate-server with the
-// server's x-api-key — so the browser never holds a platform credential and
+// to this Next app's /api proxy, which turns the caller's session cookie into the
+// API's bearer token — so the browser never holds a readable credential and
 // there are no CORS concerns. All paths hit /api/v1/platform/design-reviews...
 
 import type { ManifestDiffView } from "@/components/DiffView";
 import type { ManifestView } from "@/components/SchemaView";
+import { handleUnauthorized } from "@/lib/unauthorized";
 
 export type { ManifestDiffView, ManifestView };
 
@@ -134,6 +135,8 @@ function apiPath(suffix = ""): string {
  * ReviewError carrying the status.
  */
 async function throwProblem(res: Response): Promise<never> {
+  // The single error path of this module's two requests, so one call covers both.
+  handleUnauthorized(res);
   let message = res.statusText || `Request failed (${res.status})`;
   let code: string | null = null;
   try {

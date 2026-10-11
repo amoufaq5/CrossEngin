@@ -10,6 +10,7 @@ import {
   type PrincipalResolverInput,
   type PrincipalRoles,
 } from "@crossengin/api-gateway-runtime";
+import { isEd25519PublicKeyBase64 } from "@crossengin/crypto";
 
 /** One API key → (role, tenant) binding the server authenticates against. */
 export interface ApiKeySpec {
@@ -178,7 +179,20 @@ export function parseJwksKeySpec(raw: string): JwksKeySpec {
   if (idx <= 0 || idx === raw.length - 1) {
     throw new Error(`invalid --jwks-key (expected kid:base64): ${JSON.stringify(raw)}`);
   }
-  return { kid: raw.slice(0, idx), publicKeyBase64: raw.slice(idx + 1) };
+  const publicKeyBase64 = raw.slice(idx + 1);
+  // `isEd25519PublicKeyBase64` has existed since this module did and had **zero callers**, while
+  // this parser validated nothing past the colon. So a typo'd or truncated key booted cleanly and
+  // turned every Bearer request into an `invalid_signature` 401 whose body says only
+  // "jwt verification failed" -- a deployment-wide auth outage whose cause is a boot-time
+  // measurement nobody took. The key is public, so naming its length in the refusal discloses
+  // nothing.
+  if (!isEd25519PublicKeyBase64(publicKeyBase64)) {
+    throw new Error(
+      `invalid --jwks-key: the value after '${raw.slice(0, idx)}:' is not 32 bytes of standard` +
+        " base64 (a raw Ed25519 public key)",
+    );
+  }
+  return { kid: raw.slice(0, idx), publicKeyBase64 };
 }
 
 /** Builds an in-memory `JwksProvider` from a set of public keys (the IdP's signing keys). */

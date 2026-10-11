@@ -21,6 +21,7 @@ import {
   deriveTenantKek,
   isColumnSecretRefusalReason,
   parseColumnEncryptionSecret,
+  parseCredentialPepper,
   parseCursorEncryptionSecret,
 } from "./key-derivation.js";
 
@@ -277,6 +278,45 @@ describe("deriveTenantColumnKey", () => {
     } catch (err) {
       expect((err as ColumnSecretRefused).reason).toBe("too_uniform");
     }
+  });
+});
+
+describe("parseCredentialPepper", () => {
+  it("accepts a varied secret and returns its bytes", () => {
+    const bytes = parseCredentialPepper(SECRET_TEXT);
+    expect(bytes.length).toBe(SECRET_TEXT.length);
+    expect(Buffer.from(bytes).toString("utf8")).toBe(SECRET_TEXT);
+  });
+
+  it("applies the same floors through the same validator", () => {
+    // Third parser, one floor. `refuseWeakSecret`'s own comment states the intent: a secret good
+    // enough for a PHI column is good enough here, so the only thing that differs is the label.
+    expect(parseCredentialPepper("crossengin-credential-pepper-012").length).toBe(32);
+    expect(() => parseCredentialPepper("crossengin-credential-pepper-01")).toThrow(
+      ColumnSecretRefused,
+    );
+    expect(() => parseCredentialPepper("ABCDEFGHIJKLMNO".repeat(3))).toThrow(ColumnSecretRefused);
+  });
+
+  it("names the credential pepper rather than either sibling in both refusals", () => {
+    for (const weak of ["tiny!", "ABCDEFGHIJKLMNO".repeat(3)]) {
+      try {
+        parseCredentialPepper(weak);
+        expect.unreachable("expected a refusal");
+      } catch (err) {
+        const message = (err as Error).message;
+        expect(message).toContain("credential pepper refused");
+        expect(message).not.toContain("column encryption secret");
+        expect(message).not.toContain("list-cursor encryption secret");
+      }
+    }
+  });
+
+  it("refuses without padding, stretching or hashing the pepper up to length", () => {
+    // The floor is on the DEPLOYMENT's secret and deliberately not on a user's password, which
+    // `password.ts` leaves unconstrained -- 32 bytes with 16 distinct values is a sane rule for a
+    // secret an operator generates and a hostile one for a person to type.
+    expect(() => parseCredentialPepper("short")).toThrow(/minimum is 32/);
   });
 });
 

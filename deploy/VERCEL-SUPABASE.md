@@ -223,7 +223,7 @@ Open the Vercel UI → **Platform → New tenant**, or via the API directly:
 
 ```bash
 curl -sS -X POST https://<your-api-host>/v1/platform/tenants \
-  -H "x-api-key: $OPERATE_WEB_API_KEY" -H 'content-type: application/json' \
+  -H "x-api-key: $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"slug":"acme","name":"Acme Inc.","tier":"small","region":"eu"}'
 ```
 

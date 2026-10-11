@@ -15,7 +15,7 @@ import { z } from "zod";
  * does not exist either. `deploy/README.md` tells an operator to put a real `meta.users.id` into an
  * `--api-key` spec, and there is no documented way to make one.
  *
- * The cost is not that the registry is empty. It is that **50 of the catalog's columns carry a
+ * The cost is not that the registry is empty. It is that **42 of the catalog's columns carry a
  * `NOT NULL` foreign key into `meta.users`**, nine of them on tables with a live writer — so nine
  * stores cannot insert a single row, and the failure mode is a 23503 at the first write rather than
  * anything a boot check would catch. Verified live as a non-owner role against a fresh cluster:
@@ -50,7 +50,7 @@ import { z } from "zod";
  * ## Retirement is a status, and that is forced
  *
  * `users_status_check` admits `active` / `suspended` / `deleted`, and `deleted` is a *status* rather
- * than a `DELETE`. It has to be: 50 `ON DELETE RESTRICT` references mean a user who has done
+ * than a `DELETE`. It has to be: 42 `NOT NULL` references mean a user who has done
  * anything at all cannot be removed from the table, which is the very property ADR-0318 and
  * ADR-0321 called wrong for a *historical* column and which is correct for a membership. So
  * `retire` sets the status and the row stays.
@@ -65,7 +65,7 @@ export type UserStatus = (typeof USER_STATUSES)[number];
 /**
  * `deleted` is terminal and `suspended` is not, which is the one asymmetry worth stating: a
  * suspension is an operational hold and a retirement is the end of a principal's life. Nothing
- * deletes the row (the 50 `RESTRICT` references forbid it), so `deleted` with no outbound edge is
+ * deletes the row (those references forbid it), so `deleted` with no outbound edge is
  * the only way to say "this identity is spent" without lying about the row's existence.
  */
 export const USER_STATUS_TRANSITIONS: Readonly<Record<UserStatus, readonly UserStatus[]>> =
@@ -341,7 +341,7 @@ export interface PostgresUserStoreOptions {
  * Every row is re-parsed through its zod schema (ADR-0289). A row edited into a state the contract
  * forbids but the CHECK permits — an email that is not an address, a `phone_e164` that drifted past
  * the pattern a later migration widened — **raises** rather than being served, because this registry
- * is what every one of the 50 foreign keys resolves against and a principal served wrong is a
+ * is what every one of those foreign keys resolves against and a principal served wrong is a
  * principal acted on wrong.
  */
 export class PostgresUserStore {

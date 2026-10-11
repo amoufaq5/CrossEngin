@@ -30,6 +30,21 @@ import {
   DEFAULT_DELETION_APPROVED_BY,
   DEFAULT_DELETION_EXECUTED_BY,
 } from "./deletion-scheduler.js";
+import {
+  MIN_LOGIN_LOCKOUT_ATTEMPTS,
+  MIN_LOGIN_LOCKOUT_SECONDS,
+  DEFAULT_LOGIN_LOCKOUT_ATTEMPTS,
+  DEFAULT_LOGIN_LOCKOUT_SECONDS,
+} from "./auth-token-route.js";
+import {
+  MAX_SESSION_TOKEN_SECONDS,
+  MIN_SESSION_TOKEN_SECONDS,
+  DEFAULT_SESSION_TOKEN_SECONDS,
+} from "./token-mint.js";
+import { CREDENTIAL_PEPPER_VAR, TOKEN_SIGNING_KEY_VAR } from "./credential-auth-env.js";
+import type { SetCredentialOptions } from "./set-credential.js";
+import { NEW_PASSWORD_VAR } from "./set-credential.js";
+import { parseJwksKeySpec } from "./principals.js";
 import { BUILTIN_PACK_NAMES } from "./manifest-source.js";
 import { DEFAULT_ADMIN_ROLES } from "./recipient-resolver.js";
 import { MIN_FAX_SUPPRESSION_THRESHOLD } from "@crossengin/notification-providers";
@@ -107,6 +122,18 @@ export interface ServeOptions {
   readonly jwksRefreshMs: number | null;
   readonly jwtIssuer: string | null;
   readonly jwtAudience: string | null;
+  /**
+   * Mounts `POST /v1/auth/token`, which turns a password into a session token the gateway's own
+   * JWKS stage verifies. Needs a Postgres store, `CREDENTIAL_PEPPER` and
+   * `OPERATE_TOKEN_SIGNING_KEY` in the environment, and `--jwt-issuer` / `--jwt-audience` -- the
+   * minted token has to assert exactly what the verifier beside it expects.
+   */
+  readonly credentialLogin: boolean;
+  /** Session token lifetime in seconds. Also how long a revoked membership keeps its role. */
+  readonly sessionTokenTtl: number | null;
+  /** Consecutive failed passwords before an account locks. Refused below the floor, not clamped. */
+  readonly loginLockoutAttempts: number | null;
+  readonly loginLockoutSeconds: number | null;
   /** Path to an offline Ed25519 license token file (on-prem subscription entitlement). */
   readonly licenseFile: string | null;
   /** The licensor's Ed25519 public key (base64) used to verify the license. */
@@ -516,6 +543,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
   let jwksRefreshMs: number | null = null;
   let jwtIssuer: string | null = null;
   let jwtAudience: string | null = null;
+  let credentialLogin = false;
+  let sessionTokenTtl: number | null = null;
+  let loginLockoutAttempts: number | null = null;
+  let loginLockoutSeconds: number | null = null;
   let licenseFile: string | null = null;
   let licenseKey: string | null = null;
   let stripeWebhookSecret: string | null = null;
@@ -673,7 +704,20 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       apiKeys.push(takeValue(arg, next, "--api-key"));
       i += consumed();
     } else if (arg === "--jwks-key" || arg.startsWith("--jwks-key=")) {
-      jwksKeys.push(takeValue(arg, next, "--jwks-key"));
+      {
+        // Validated here as well as at boot, and that is not redundancy: the parser can answer
+        // with a usage error and the help text (exit 2), where `resolveJwtConfig` can only throw.
+        // `parseJwksKeySpec` is pure, so there is no reason to defer it -- and until this
+        // increment nothing validated the value at all, so a typo'd key booted cleanly and turned
+        // every Bearer request into an `invalid_signature` 401 that names nothing.
+        const spec = takeValue(arg, next, "--jwks-key");
+        try {
+          parseJwksKeySpec(spec);
+        } catch (err) {
+          throw new CliUsageError((err as Error).message);
+        }
+        jwksKeys.push(spec);
+      }
       i += consumed();
     } else if (arg === "--jwks-file" || arg.startsWith("--jwks-file=")) {
       jwksFile = takeValue(arg, next, "--jwks-file");
@@ -692,6 +736,49 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
       i += consumed();
     } else if (arg === "--jwt-audience" || arg.startsWith("--jwt-audience=")) {
       jwtAudience = takeValue(arg, next, "--jwt-audience");
+      i += consumed();
+    } else if (arg === "--credential-login") {
+      credentialLogin = true;
+    } else if (arg === "--session-token-ttl" || arg.startsWith("--session-token-ttl=")) {
+      const raw = takeValue(arg, next, "--session-token-ttl");
+      const n = Number(raw);
+      if (
+        !Number.isInteger(n) ||
+        n < MIN_SESSION_TOKEN_SECONDS ||
+        n > MAX_SESSION_TOKEN_SECONDS
+      ) {
+        throw new CliUsageError(
+          `invalid --session-token-ttl: ${raw} (${MIN_SESSION_TOKEN_SECONDS.toString()}..` +
+            `${MAX_SESSION_TOKEN_SECONDS.toString()} seconds)`,
+        );
+      }
+      sessionTokenTtl = n;
+      i += consumed();
+    } else if (arg === "--login-lockout-attempts" || arg.startsWith("--login-lockout-attempts=")) {
+      const raw = takeValue(arg, next, "--login-lockout-attempts");
+      const n = Number(raw);
+      // Refused and never clamped, which is ADR-0332's rule: a threshold of 1 locks a real user
+      // out on one typo, and silently raising it to the floor would leave the deployment believing
+      // it had configured something it had not.
+      if (!Number.isInteger(n) || n < MIN_LOGIN_LOCKOUT_ATTEMPTS) {
+        throw new CliUsageError(
+          `invalid --login-lockout-attempts: ${raw} (integer >= ` +
+            `${MIN_LOGIN_LOCKOUT_ATTEMPTS.toString()}; a lower threshold locks a real user out on` +
+            " a typo, so it is refused rather than raised for you)",
+        );
+      }
+      loginLockoutAttempts = n;
+      i += consumed();
+    } else if (arg === "--login-lockout-seconds" || arg.startsWith("--login-lockout-seconds=")) {
+      const raw = takeValue(arg, next, "--login-lockout-seconds");
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < MIN_LOGIN_LOCKOUT_SECONDS) {
+        throw new CliUsageError(
+          `invalid --login-lockout-seconds: ${raw} (integer >= ` +
+            `${MIN_LOGIN_LOCKOUT_SECONDS.toString()})`,
+        );
+      }
+      loginLockoutSeconds = n;
       i += consumed();
     } else if (arg === "--license" || arg.startsWith("--license=")) {
       licenseFile = takeValue(arg, next, "--license");
@@ -1729,6 +1816,47 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     throw new CliUsageError("--jwt-issuer and --jwt-audience are required when a JWKS is configured");
   }
 
+  if (credentialLogin) {
+    // The minted token asserts `iss` and `aud`, and the verifier beside it checks both. Without
+    // them the runtime falls back to `https://crossengin.io` / `https://api.crossengin.io`, so a
+    // minter using any other issuer would answer `issuer_mismatch` for a token it had just
+    // signed -- a login that succeeds and whose token is refused on the next request.
+    if (jwtIssuer === null || jwtAudience === null) {
+      throw new CliUsageError(
+        "--credential-login requires --jwt-issuer and --jwt-audience: the minted token asserts" +
+          " both and the gateway verifies both, so they are one declaration",
+      );
+    }
+    if (store === "memory") {
+      throw new CliUsageError(
+        "--credential-login requires a Postgres store (--store pg or pg-columns): the credential" +
+          " lives in meta.users and there is no such table under --store memory",
+      );
+    }
+    // `node.ts` branches on the URL and *discards* the static key specs, so the key derived from
+    // OPERATE_TOKEN_SIGNING_KEY would never be registered and every minted token would come back
+    // `invalid_signature`. Refused rather than warned: there is no degraded behaviour to protect,
+    // and the failure lands at the gateway rather than at the mint, so the mint looks fine in
+    // testing.
+    if (jwksUrl !== null) {
+      throw new CliUsageError(
+        "--credential-login and --jwks-url are mutually exclusive: --jwks-url replaces the static" +
+          " JWKS, so the key this deployment signs with would not be registered and every login's" +
+          " token would be refused invalid_signature",
+      );
+    }
+  } else {
+    for (const [flag, value] of [
+      ["--session-token-ttl", sessionTokenTtl],
+      ["--login-lockout-attempts", loginLockoutAttempts],
+      ["--login-lockout-seconds", loginLockoutSeconds],
+    ] as const) {
+      if (value !== null) {
+        throw new CliUsageError(`${flag} requires --credential-login`);
+      }
+    }
+  }
+
   if (!help && !version) {
     if (pack === null && manifestPath === null) {
       throw new CliUsageError("one of --pack or --manifest is required");
@@ -1751,6 +1879,10 @@ export function parseServeArgs(argv: readonly string[]): ServeOptions {
     jwksRefreshMs,
     jwtIssuer,
     jwtAudience,
+    credentialLogin,
+    sessionTokenTtl,
+    loginLockoutAttempts,
+    loginLockoutSeconds,
     licenseFile,
     licenseKey,
     stripeWebhookSecret,
@@ -2097,6 +2229,7 @@ Subcommands (each takes --help):
   verify-chain         Verify the audit chain's links, signatures and anchors
   replay               Re-derive each subsystem's projections from its log and report drift
   rekey                Move one tenant's at-rest column key to a fresh random data key
+  set-credential       Set a user's login password (the bootstrap path; no mail channel)
 
 Manifest source (exactly one):
   --pack <name>        Built-in vertical pack: ${BUILTIN_PACK_NAMES.join(", ")}
@@ -2158,6 +2291,24 @@ Options:
   --jwks-refresh-ms <n> Background JWKS refresh interval (with --jwks-url; >=1000)
   --jwt-issuer <iss>   Expected JWT issuer (required with a JWKS)
   --jwt-audience <aud> Expected JWT audience (required with a JWKS)
+  --credential-login   Mount POST /v1/auth/token, which turns a password into a session
+                       token the gateway's own JWKS stage verifies. Needs a Postgres
+                       store, --jwt-issuer, --jwt-audience, and ${CREDENTIAL_PEPPER_VAR}
+                       plus ${TOKEN_SIGNING_KEY_VAR} in the environment (never argv --
+                       ADR-0301). The token's public key is DERIVED from the signing
+                       seed, so there is no second declaration to keep in step, which
+                       is also why this is mutually exclusive with --jwks-url
+  --session-token-ttl <n>
+                       Session token lifetime in seconds (${MIN_SESSION_TOKEN_SECONDS.toString()}..${MAX_SESSION_TOKEN_SECONDS.toString()},
+                       default ${DEFAULT_SESSION_TOKEN_SECONDS.toString()}). Also how long a revoked or downgraded
+                       membership keeps its old role: the role is read at mint time and
+                       frozen in the token, so this is the staleness window
+  --login-lockout-attempts <n>
+                       Consecutive wrong passwords before an account locks (>= ${MIN_LOGIN_LOCKOUT_ATTEMPTS.toString()},
+                       default ${DEFAULT_LOGIN_LOCKOUT_ATTEMPTS.toString()}). A lower value is REFUSED rather than raised
+                       for you: a threshold of 1 locks a real user out on one typo
+  --login-lockout-seconds <n>
+                       How long that lock lasts (>= ${MIN_LOGIN_LOCKOUT_SECONDS.toString()}, default ${DEFAULT_LOGIN_LOCKOUT_SECONDS.toString()})
   --license <file>     Offline Ed25519 license token file (on-prem entitlement)
   --license-key <b64>  Licensor Ed25519 public key, base64 (required with --license)
   --stripe-webhook-secret <s>  Enable POST /v1/webhooks/stripe → billing_subscriptions
@@ -2263,7 +2414,7 @@ Options:
                        (repeatable). Requires --gateway-execution-capture
   --platform-user-routes  Mount the platform user registry under /v1/platform/users — provision a
                        principal, grant it a membership in a tenant, retire it. NOTHING wrote
-                       meta.users before this, while 50 catalogued columns reference it NOT NULL
+                       meta.users before this, while 42 catalogued columns reference it NOT NULL
                        ON DELETE RESTRICT (ten on tables with a live writer), and every notification
                        audience resolved to the empty set. Needs --store pg|pg-columns
   --platform-user-role <role>  Role permitted to administer the registry (repeatable, fail-closed).
@@ -2772,6 +2923,97 @@ export function parseRekeyArgs(argv: readonly string[]): RekeyOptions {
     help,
   };
 }
+
+/**
+ * Parses the argv *after* the `set-credential` token.
+ *
+ * `--confirm-user` is required and must equal `--user`, following `rekey`'s `--confirm-tenant`:
+ * this overwrites a credential, so naming the wrong user locks a real person out *and* hands their
+ * account to whoever typed the password. The password itself is never an argument — it comes from
+ * `OPERATE_NEW_PASSWORD` in the environment, because argv is readable by anyone who can run `ps`
+ * (ADR-0301).
+ */
+export function parseSetCredentialArgs(argv: readonly string[]): SetCredentialOptions {
+  let userId: string | null = null;
+  let confirmUserId: string | null = null;
+  let schema: string | null = null;
+  let format: "human" | "json" = "human";
+  let help = false;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === undefined) continue;
+    const next = argv[i + 1];
+    const consumed = (): number => (isInline(arg) ? 0 : 1);
+    if (arg === "--help" || arg === "-h") {
+      help = true;
+    } else if (arg === "--user" || arg.startsWith("--user=")) {
+      userId = takeValue(arg, next, "--user");
+      i += consumed();
+    } else if (arg === "--confirm-user" || arg.startsWith("--confirm-user=")) {
+      confirmUserId = takeValue(arg, next, "--confirm-user");
+      i += consumed();
+    } else if (arg === "--schema" || arg.startsWith("--schema=")) {
+      schema = takeValue(arg, next, "--schema");
+      i += consumed();
+    } else if (arg === "--format" || arg.startsWith("--format=")) {
+      const raw = takeValue(arg, next, "--format");
+      if (raw !== "human" && raw !== "json") {
+        throw new CliUsageError(`invalid --format: ${raw} (human|json)`);
+      }
+      format = raw;
+      i += consumed();
+    } else if (arg === "--password" || arg.startsWith("--password=")) {
+      // Named explicitly so the refusal can say why, rather than falling through to "unknown
+      // option" and leaving an operator to think they mistyped it.
+      throw new CliUsageError(
+        `--password is deliberately not an option: a password on argv is readable by anyone who` +
+          ` can run 'ps'. Set ${NEW_PASSWORD_VAR} in the environment instead.`,
+      );
+    } else {
+      throw new CliUsageError(`unknown option for set-credential: ${arg}`);
+    }
+  }
+
+  if (help) return { userId, confirmUserId, schema, format, help: true };
+  if (userId === null) {
+    throw new CliUsageError("set-credential requires --user <uuid>");
+  }
+  if (confirmUserId === null) {
+    throw new CliUsageError(
+      "set-credential requires --confirm-user <uuid>: the user id is typed twice because this" +
+        " overwrites a credential, so naming the wrong user both locks that person out and hands" +
+        " their account to whoever typed the password",
+    );
+  }
+  if (userId !== confirmUserId) {
+    throw new CliUsageError(
+      `--user and --confirm-user differ (${userId} vs ${confirmUserId})`,
+    );
+  }
+  return { userId, confirmUserId, schema, format, help: false };
+}
+
+export const setCredentialCliHelpText = `operate-server set-credential — set a user's login password
+
+Usage:
+  operate-server set-credential --user <uuid> --confirm-user <uuid> [options]
+
+The password is read from ${NEW_PASSWORD_VAR} in the environment and never from argv, because argv
+is readable by anyone who can run 'ps' (ADR-0301). $${CREDENTIAL_PEPPER_VAR} must be set to the same
+value the server runs with, or the credential will not verify.
+
+This is the bootstrap path: there is no mail channel in a fresh deployment, so an operator with
+shell access is the only principal that exists before the first password does.
+
+Options:
+  --user <uuid>          The meta.users row to set a password on
+  --confirm-user <uuid>  The same id again (required; there is no --yes)
+  --schema <name>        Meta-schema name (default meta)
+  --format human|json    Output format (default human)
+
+Exit: 0 when the credential was set; 1 when refused; 2 on a usage error.
+`;
 
 export const rekeyHelpText = `operate-server rekey — move one tenant's at-rest column key to a fresh random data key
 

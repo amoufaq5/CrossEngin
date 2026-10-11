@@ -57,6 +57,7 @@ export const KEK_KEY_DERIVATION_INFO = "crossengin.key-encryption.v1";
  */
 const COLUMN_SECRET_LABEL = "column encryption secret";
 const CURSOR_SECRET_LABEL = "list-cursor encryption secret";
+const CREDENTIAL_PEPPER_LABEL = "credential pepper";
 // Names the variable as well as the role, unlike its two siblings, and the asymmetry is the point:
 // those two each have an environment variable of their own, so naming the role points at it. The KEK
 // has none — it reads `COLUMN_ENCRYPTION_SECRET`, which is what makes the envelope a mode switch
@@ -188,6 +189,28 @@ export function parseColumnEncryptionSecret(raw: string): Uint8Array {
 export function parseCursorEncryptionSecret(raw: string): Uint8Array {
   const bytes = new TextEncoder().encode(raw);
   refuseWeakSecret(bytes, CURSOR_SECRET_LABEL);
+  return bytes;
+}
+
+/**
+ * The same validation for the credential pepper -- the deployment secret HMAC'd into a password
+ * before scrypt stretches it, so that reading `meta.users` is not enough to attack the hashes.
+ *
+ * A third parser rather than a second floor, which is `refuseWeakSecret`'s own stated intent: a
+ * secret good enough for a PHI column is good enough here, and only the variable an operator is
+ * told to fix differs. The floor applies to the **deployment's** secret and explicitly not to a
+ * user's password -- a 32-byte, 16-distinct-byte minimum would be a hostile password rule, and
+ * `password.ts` deliberately imposes none.
+ *
+ * Returns bytes for the other two parsers' symmetry, though `hashPassword` takes the pepper as a
+ * string: the HMAC key is the raw UTF-8 either way, so a caller validating here and passing the
+ * original string is keying on exactly these bytes.
+ *
+ * @throws ColumnSecretRefused `too_short` or `too_uniform`.
+ */
+export function parseCredentialPepper(raw: string): Uint8Array {
+  const bytes = new TextEncoder().encode(raw);
+  refuseWeakSecret(bytes, CREDENTIAL_PEPPER_LABEL);
   return bytes;
 }
 

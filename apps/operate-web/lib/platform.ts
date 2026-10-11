@@ -1,7 +1,9 @@
 // PLATFORM (super-admin) API helpers. Like lib/api.ts, every request goes to
-// this Next app's /api proxy, which forwards to operate-server with the server's
-// x-api-key — so the browser never holds a platform credential and there are no
-// CORS concerns. All paths hit /api/v1/platform/...
+// this Next app's /api proxy, which turns the caller's session cookie into the
+// API's bearer token — so the browser never holds a readable credential and there
+// are no CORS concerns. All paths hit /api/v1/platform/...
+
+import { handleUnauthorized } from "@/lib/unauthorized";
 
 export type TenantStatus = "active" | "suspended" | "archived" | "deleted";
 
@@ -64,6 +66,8 @@ function apiPath(suffix = ""): string {
  * raw text or status line. Throws a PlatformError carrying the status.
  */
 async function throwProblem(res: Response): Promise<never> {
+  // The single error path of this module's three requests, so one call covers all of them.
+  handleUnauthorized(res);
   let message = res.statusText || `Request failed (${res.status})`;
   try {
     const text = await res.text();

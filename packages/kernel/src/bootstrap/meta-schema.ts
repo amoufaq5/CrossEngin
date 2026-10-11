@@ -191,6 +191,57 @@ export const META_USERS: TableDefinition = {
     { name: "created_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "updated_at", type: "TIMESTAMPTZ", notNull: true, default: "now()" },
     { name: "last_login_at", type: "TIMESTAMPTZ" },
+    {
+      // What `POST /v1/auth/token` verifies a password against. Nullable, and the null means *this
+      // user has no password*, which is not the same fact as a password nobody has matched — a
+      // provisioned user holds no credential until one is set, and the two must stay
+      // distinguishable (ADR-0331). It is also what keeps `provision`'s two literal INSERTs valid:
+      // a `notNull` column with no default would fail `missing_required_column` against both.
+      //
+      // Deliberately NOT the house `<name>_sha256 CHAR(64)` digest shape, because a password hash
+      // must carry the parameters it was produced under or it cannot be verified after they change,
+      // and a bare sha256 of a password is not a password hash at all. The parameters live *in* the
+      // string rather than in sibling columns, so there is one spelling of which KDF produced this
+      // value instead of a column that can disagree with the bytes beside it.
+      //
+      // A regex and not a value set: `check-admission.ts` classifies `~` as `pattern`, so this
+      // needs no `pg-value-set-domains.ts` declaration, while an `algorithm` column would have
+      // needed one for a fact this string already states.
+      name: "credential_hash",
+      type: "TEXT",
+      check:
+        "credential_hash IS NULL OR credential_hash ~" +
+        " '^scrypt\\$[0-9]+\\$[0-9]+\\$[0-9]+\\$[0-9a-f]{32}\\$[0-9a-f]{128}$'",
+    },
+    {
+      // When the password was last set. Read by nothing yet; it is the only record that would let
+      // an access review ask how old a credential is, which is the question `last_login_at`
+      // answers for sessions and nothing answers for secrets.
+      name: "credential_updated_at",
+      type: "TIMESTAMPTZ",
+    },
+    {
+      // Consecutive failed verifications since the last success. `NOT NULL DEFAULT 0` so both
+      // `provision` INSERTs stay complete and so an existing row backfills without a decision —
+      // and because *absent* and *zero* are the same fact here, unlike `credential_hash` above.
+      //
+      // Advanced in one UPDATE rather than read-modify-write: the losing side of that race is the
+      // one that *admits* an attempt, which is `meta.notification_fax_observations`' reasoning
+      // (ADR-0332) about a counter whose whole job is to stop something.
+      name: "credential_failed_attempts",
+      type: "INTEGER",
+      notNull: true,
+      default: "0",
+      check: "credential_failed_attempts >= 0",
+    },
+    {
+      // Set when the attempt counter crosses the deployment's threshold; a login is refused while
+      // it is in the future. Nullable, and null means *not locked* — there is no sentinel date,
+      // because a past timestamp and a null would then both mean unlocked and only one of them
+      // would record that a lock ever happened.
+      name: "credential_locked_until",
+      type: "TIMESTAMPTZ",
+    },
   ],
   primaryKey: ["id"],
   indexes: [{ name: "idx_users_status", columns: ["status"] }],

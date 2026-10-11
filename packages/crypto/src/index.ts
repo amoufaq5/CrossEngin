@@ -7,4 +7,5 @@ export * from "./hmac.js";
 export * from "./key-derivation.js";
 export * from "./key-handles.js";
 export * from "./key-store.js";
+export * from "./password.js";
 export * from "./signing.js";
