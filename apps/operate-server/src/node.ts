@@ -24,7 +24,7 @@ import {
   type CheckAdmissionSurvey,
 } from "@crossengin/kernel-pg";
 import { META_TABLES } from "@crossengin/kernel/bootstrap";
-import type { Manifest } from "@crossengin/kernel/manifest";
+import { producibleEntityEventNames, type Manifest } from "@crossengin/kernel/manifest";
 import {
   InMemoryEntityStore,
   InMemorySequenceAllocator,
@@ -3392,9 +3392,30 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   // done nothing is exactly the surface-reports-success-and-records-nothing class ADR-0332 and
   // ADR-0333 exist to end.
   const JOB_HANDLER_PROVIDERS: readonly JobHandlerProvider[] = [];
+  // The names this deployment's emitter can actually produce, for `event_unproducible` (ADR-0362).
+  // Computed from the same `--event-prefix` `entityEventEffect` is given above, because a prefix on
+  // one side and not the other makes every produced name three-segment and every enumerated one
+  // two-segment — so every event declaration would survey as unproducible and neither function
+  // could tell, each being individually correct.
+  //
+  // `[]` when the emitter is off is the claim and not a gap: with `--emit-entity-events` absent
+  // nothing turns a write into an event, so no event-triggered declaration can fire, and saying so
+  // is the point. Enumerating the names anyway would report every one of them *producible* on a
+  // deployment where none can be produced — the reassuring direction, which is the whole class this
+  // increment closes.
+  const producibleEventNames: Iterable<string> = options.emitEntityEvents
+    ? producibleEntityEventNames(
+        manifest,
+        options.eventPrefix !== null ? { eventPrefix: options.eventPrefix } : {},
+      )
+    : [];
   const jobHandlers =
     conn !== undefined && (options.scheduleMs !== null || options.workflowWorkers)
-      ? buildJobHandlerRegistry({ jobs: manifestJobs, providers: JOB_HANDLER_PROVIDERS })
+      ? buildJobHandlerRegistry({
+          jobs: manifestJobs,
+          providers: JOB_HANDLER_PROVIDERS,
+          producibleEventNames,
+        })
       : null;
   if (jobHandlers !== null) {
     // ADR-0331's rule applied to jobs: a declaration that will never run is named with the reason,

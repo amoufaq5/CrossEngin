@@ -6,3 +6,4 @@ export * from "./extends.js";
 export * from "./hash.js";
 export * from "./patch.js";
 export * from "./try-validate.js";
+export * from "./event-names.js";

@@ -38,6 +38,24 @@ const sweep = job("sweep-invoices", CRON, {
 const reorder = job("reorder-stock", CRON, { retry: { maxAttempts: 7 } });
 const onPayment = job("on-payment", EVENT);
 
+/**
+ * `buildJobHandlerRegistry` with the emitter declared off.
+ *
+ * `producibleEventNames` is required on the real input (ADR-0362) so no deployment can forget to
+ * say what its emitter can produce, and defaulting it here does not weaken that: `[]` is the
+ * *claim* a deployment without `--emit-entity-events` makes, and it is the right fixture default
+ * because none of these fixtures mounts an emitter. A default of "assume producible" would be the
+ * pre-ADR-0362 answer reintroduced in the one place that would never notice.
+ */
+function buildWith(
+  input: Omit<Parameters<typeof buildJobHandlerRegistry>[0], "producibleEventNames"> & {
+    readonly producibleEventNames?: Iterable<string>;
+  },
+): ReturnType<typeof buildJobHandlerRegistry> {
+  return buildJobHandlerRegistry({ producibleEventNames: [], ...input });
+}
+
+
 describe("JOB_HANDLER_BUILD_REFUSALS", () => {
   it("has no duplicates", () => {
     expect(new Set(JOB_HANDLER_BUILD_REFUSALS).size).toBe(JOB_HANDLER_BUILD_REFUSALS.length);
@@ -64,7 +82,7 @@ describe("JOB_HANDLER_BUILD_REFUSALS", () => {
     ];
     for (const attempt of attempts) {
       try {
-        buildJobHandlerRegistry(attempt);
+        buildWith(attempt);
       } catch (err) {
         if (err instanceof JobHandlerBuildError) reached.add(err.code);
       }
@@ -75,7 +93,7 @@ describe("JOB_HANDLER_BUILD_REFUSALS", () => {
 
 describe("buildJobHandlerRegistry", () => {
   it("registers a job provider and resolves it by job id", () => {
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [sweep, onPayment],
       providers: [{ serves: "job", jobId: "sweep-invoices", handler }],
     });
@@ -84,7 +102,7 @@ describe("buildJobHandlerRegistry", () => {
   });
 
   it("takes the attempt ceiling from the declaration, never from the provider", () => {
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [reorder],
       providers: [{ serves: "job", jobId: "reorder-stock", handler }],
     });
@@ -94,7 +112,7 @@ describe("buildJobHandlerRegistry", () => {
   });
 
   it("sets maxAttempts 1 for a declaration with no retry policy, rather than leaving it implicit", () => {
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [onPayment],
       providers: [{ serves: "job", jobId: "on-payment", handler }],
     });
@@ -105,7 +123,7 @@ describe("buildJobHandlerRegistry", () => {
 
   it("carries the declaration's onFailure onto the registration", () => {
     const swallowing = job("quiet", CRON, { onFailure: { strategy: "swallow-and-log" }, idempotent: true });
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [swallowing],
       providers: [{ serves: "job", jobId: "quiet", handler }],
     });
@@ -114,7 +132,7 @@ describe("buildJobHandlerRegistry", () => {
 
   it("attaches a jitter sampler only when the declared backoff asks for jitter", () => {
     const rng = (): number => 0.5;
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [sweep, reorder],
       providers: [{ serves: "kind", jobKind: "scheduled", handler }],
       jitterRng: rng,
@@ -125,7 +143,7 @@ describe("buildJobHandlerRegistry", () => {
   });
 
   it("expands a kind provider into one registration per matching declaration", () => {
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [sweep, reorder, onPayment],
       providers: [{ serves: "kind", jobKind: "scheduled", handler }],
     });
@@ -137,7 +155,7 @@ describe("buildJobHandlerRegistry", () => {
   });
 
   it("leaves the registry's kind map empty, so an undeclared job id resolves to nothing", () => {
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [sweep],
       providers: [{ serves: "kind", jobKind: "scheduled", handler }],
     });
@@ -147,7 +165,7 @@ describe("buildJobHandlerRegistry", () => {
   });
 
   it("lets a job provider win over a kind provider covering the same job", () => {
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [sweep, reorder],
       providers: [
         { serves: "kind", jobKind: "scheduled", handler },
@@ -160,7 +178,7 @@ describe("buildJobHandlerRegistry", () => {
 
   it("does not cover a deprecated declaration with a kind provider", () => {
     const old = job("retired", CRON, { deprecated: true });
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [sweep, old],
       providers: [{ serves: "kind", jobKind: "scheduled", handler }],
     });
@@ -170,10 +188,10 @@ describe("buildJobHandlerRegistry", () => {
 
   it("refuses a provider for an undeclared job, naming what is declared", () => {
     expect(() =>
-      buildJobHandlerRegistry({ jobs: [sweep], providers: [{ serves: "job", jobId: "sweap-invoices", handler }] }),
+      buildWith({ jobs: [sweep], providers: [{ serves: "job", jobId: "sweap-invoices", handler }] }),
     ).toThrow(/undeclared|no job declaration holds/);
     try {
-      buildJobHandlerRegistry({ jobs: [sweep], providers: [{ serves: "job", jobId: "typo", handler }] });
+      buildWith({ jobs: [sweep], providers: [{ serves: "job", jobId: "typo", handler }] });
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(JobHandlerBuildError);
@@ -184,7 +202,7 @@ describe("buildJobHandlerRegistry", () => {
 
   it("refuses two job providers for one job id rather than silently picking one", () => {
     try {
-      buildJobHandlerRegistry({
+      buildWith({
         jobs: [sweep],
         providers: [
           { serves: "job", jobId: "sweep-invoices", handler },
@@ -199,7 +217,7 @@ describe("buildJobHandlerRegistry", () => {
 
   it("refuses two kind providers for one kind", () => {
     try {
-      buildJobHandlerRegistry({
+      buildWith({
         jobs: [sweep],
         providers: [
           { serves: "kind", jobKind: "scheduled", handler },
@@ -214,7 +232,7 @@ describe("buildJobHandlerRegistry", () => {
 
   it("refuses a kind provider that covers no declaration", () => {
     try {
-      buildJobHandlerRegistry({ jobs: [sweep], providers: [{ serves: "kind", jobKind: "event", handler }] });
+      buildWith({ jobs: [sweep], providers: [{ serves: "kind", jobKind: "event", handler }] });
       expect.unreachable();
     } catch (err) {
       expect((err as JobHandlerBuildError).code).toBe("kind_serves_nothing");
@@ -224,7 +242,7 @@ describe("buildJobHandlerRegistry", () => {
   it("refuses a kind provider covering only deprecated declarations", () => {
     const old = job("retired", EVENT, { deprecated: true });
     try {
-      buildJobHandlerRegistry({ jobs: [old], providers: [{ serves: "kind", jobKind: "event", handler }] });
+      buildWith({ jobs: [old], providers: [{ serves: "kind", jobKind: "event", handler }] });
       expect.unreachable();
     } catch (err) {
       expect((err as JobHandlerBuildError).code).toBe("kind_serves_nothing");
@@ -234,7 +252,7 @@ describe("buildJobHandlerRegistry", () => {
   it("refuses a provider that restates the retry policy", () => {
     const sneaky = { serves: "job", jobId: "sweep-invoices", handler, retry: { maxAttempts: 99 } };
     try {
-      buildJobHandlerRegistry({ jobs: [sweep], providers: [sneaky as unknown as JobHandlerProvider] });
+      buildWith({ jobs: [sweep], providers: [sneaky as unknown as JobHandlerProvider] });
       expect.unreachable();
     } catch (err) {
       expect((err as JobHandlerBuildError).code).toBe("provider_overrides_declared_retry");
@@ -244,29 +262,50 @@ describe("buildJobHandlerRegistry", () => {
   it("refuses a provider that restates maxAttempts", () => {
     const sneaky = { serves: "job", jobId: "sweep-invoices", handler, maxAttempts: 99 };
     try {
-      buildJobHandlerRegistry({ jobs: [sweep], providers: [sneaky as unknown as JobHandlerProvider] });
+      buildWith({ jobs: [sweep], providers: [sneaky as unknown as JobHandlerProvider] });
       expect.unreachable();
     } catch (err) {
       expect((err as JobHandlerBuildError).code).toBe("provider_overrides_declared_retry");
     }
   });
 
-  it("builds from no providers at all, and the survey says every job is unservable", () => {
-    const build = buildJobHandlerRegistry({ jobs: [sweep, onPayment], providers: [] });
+  it("builds from no providers at all, and names a different reason per job", () => {
+    const build = buildWith({ jobs: [sweep, onPayment], providers: [] });
     expect(build.servedJobIds).toEqual([]);
     expect(build.survey.unservable).toEqual(["sweep-invoices", "on-payment"]);
-    expect(build.survey.findings.map((f) => f.verdict)).toEqual(["handler_missing", "handler_missing"]);
+    // Both unservable, for reasons with different remedies (ADR-0362). The cron job really is
+    // enqueued and really needs a handler; the event job's name can be emitted by nothing, so a
+    // handler would change nothing — which is what this pair used to claim by calling both
+    // `handler_missing`.
+    expect(build.survey.findings.map((f) => f.verdict)).toEqual([
+      "handler_missing",
+      "event_unproducible",
+    ]);
+  });
+
+  it("distinguishes the two unservable reasons on the SAME job by what the emitter can produce", () => {
+    // The sharpest statement that the verdict is about the deployment and not the declaration:
+    // one fixture, two emitter configurations, two reasons. With the name producible the remedy is
+    // a handler; without it, the remedy is the declaration.
+    const off = buildWith({ jobs: [onPayment], providers: [] });
+    const on = buildWith({
+      jobs: [onPayment],
+      providers: [],
+      producibleEventNames: ["billing.payment_received"],
+    });
+    expect(off.survey.findings.map((f) => f.verdict)).toEqual(["event_unproducible"]);
+    expect(on.survey.findings.map((f) => f.verdict)).toEqual(["handler_missing"]);
   });
 
   it("builds from no declarations at all", () => {
-    const build = buildJobHandlerRegistry({ jobs: [], providers: [] });
+    const build = buildWith({ jobs: [], providers: [] });
     expect(build.servedJobIds).toEqual([]);
     expect(build.survey.findings).toEqual([]);
   });
 
   it("reports a served job whose kind no producer enqueues as no_producer, not as served", () => {
     const cdc = job("on-row", { kind: "cdc", table: "invoices", operation: "any" });
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [cdc],
       providers: [{ serves: "job", jobId: "on-row", handler }],
     });
@@ -277,7 +316,7 @@ describe("buildJobHandlerRegistry", () => {
   });
 
   it("servedJobIds and survey.served are one list, not two", () => {
-    const build = buildJobHandlerRegistry({
+    const build = buildWith({
       jobs: [sweep, reorder],
       providers: [{ serves: "job", jobId: "reorder-stock", handler }],
     });
@@ -289,7 +328,28 @@ describe("buildJobHandlerRegistry", () => {
       { serves: "job", jobId: "on-payment", handler },
       { serves: "job", jobId: "sweep-invoices", handler },
     ];
-    const build = buildJobHandlerRegistry({ jobs: [sweep, onPayment], providers });
+    // Declaration order, not provider order — the providers are listed reversed on purpose. The
+    // emitter is declared on here because the point of the test is the ordering, and with it off
+    // `on-payment` would drop out of the list for an unrelated reason and the assertion would pass
+    // vacuously on a single element.
+    const build = buildWith({
+      jobs: [sweep, onPayment],
+      providers,
+      producibleEventNames: ["billing.payment_received"],
+    });
     expect(build.servedJobIds).toEqual(["sweep-invoices", "on-payment"]);
+  });
+
+  it("drops a handled job from servedJobIds when nothing can emit its event", () => {
+    // `servedJobIds` feeds `claimDueJobs`' `serves` filter and means "has both a handler and a
+    // producer" — so a declaration whose event name no emitter produces belongs out of it even
+    // with a handler registered. Harmless by measurement rather than by argument: 0 of the 55
+    // (resolved pack, declaration) instances across the seven packs has ever matched, so no
+    // enqueued run exists that this would strand, and `runKey` carries the event name, so a run
+    // enqueued after a rename is a different row.
+    const providers: readonly JobHandlerProvider[] = [{ serves: "job", jobId: "on-payment", handler }];
+    const build = buildWith({ jobs: [onPayment], providers });
+    expect(build.servedJobIds).toEqual([]);
+    expect(build.survey.findings.map((f) => f.verdict)).toEqual(["event_unproducible"]);
   });
 });

@@ -1,3 +1,9 @@
+import {
+  ENTITY_EVENT_VERBS,
+  entityEventName,
+  eventNameSegment,
+} from "@crossengin/kernel/manifest";
+
 import type { WriteEffect, WriteEffectInput } from "./write-effects.js";
 
 /**
@@ -30,19 +36,13 @@ export interface EntityEventEffectConfig {
   readonly onError?: (err: unknown) => void;
 }
 
-const VERB_BY_OP = { create: "created", update: "updated", delete: "deleted" } as const;
-
-/** A dotted event-name segment: lowercased, non-alphanumerics → `_`, leading digit prefixed. */
-function segment(value: string): string {
-  const s = value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-  return /^[a-z]/.test(s) ? s : `x_${s}`;
-}
-
 function verbFor(input: WriteEffectInput): string {
   if (input.operation === "transition") {
-    return segment(input.transitionTo ?? "transitioned");
+    return eventNameSegment(input.transitionTo ?? "transitioned");
   }
-  return VERB_BY_OP[input.operation];
+  // After the early return `operation` is exactly `ENTITY_EVENT_VERBS`' key type, so a fifth
+  // `WriteGuardInput` operation is a compile error here rather than an `undefined` verb.
+  return ENTITY_EVENT_VERBS[input.operation];
 }
 
 function recordIdOf(input: WriteEffectInput): string | null {
@@ -53,19 +53,21 @@ function recordIdOf(input: WriteEffectInput): string | null {
 
 /**
  * A `WriteEffect` that turns each persisted write into an `EntityEvent` and hands it to the sink —
- * the producer bridge from a served mutation to event-triggered jobs. The event name is
- * `<prefix?>.<entity>.<verb>` (verb = created/updated/deleted, or the transition's target state), and
- * the `idempotencyKey` is `<entity>:<operation>:<recordId>:<updated_at|verb>` so a re-delivery of the
- * same write collapses to one run while distinct writes do not. **Best-effort:** a sink failure is
- * routed to `onError` and swallowed — emitting an event must never fail the user's write (unlike the
- * financial effects, which throw by design).
+ * the producer bridge from a served mutation to event-triggered jobs. The name — still
+ * `<prefix?>.<entity>.<verb>`, verb = created/updated/deleted or the transition's target state — is
+ * built by the kernel's `entityEventName`, which is also what `producibleEntityEventNames`
+ * enumerates with, so a survey of what this deployment can emit and what it does emit cannot
+ * disagree about the grammar. The `idempotencyKey` is
+ * `<entity>:<operation>:<recordId>:<updated_at|verb>` so a re-delivery of the same write collapses
+ * to one run while distinct writes do not. **Best-effort:** a sink failure is routed to `onError`
+ * and swallowed — emitting an event must never fail the user's write (unlike the financial effects,
+ * which throw by design).
  */
 export function entityEventEffect(config: EntityEventEffectConfig): WriteEffect {
-  const prefix = config.eventPrefix !== undefined ? segment(config.eventPrefix) : undefined;
   return async (input: WriteEffectInput): Promise<void> => {
     try {
       const verb = verbFor(input);
-      const name = [prefix, segment(input.entity), verb].filter((p) => p !== undefined && p.length > 0).join(".");
+      const name = entityEventName({ prefix: config.eventPrefix, entity: input.entity, verb });
       const recordId = recordIdOf(input);
       const updatedAt = typeof input.after["updated_at"] === "string" ? (input.after["updated_at"] as string) : "";
       const idempotencyKey = `${input.entity}:${input.operation}:${recordId ?? "new"}:${updatedAt.length > 0 ? updatedAt : verb}`;

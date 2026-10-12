@@ -76,6 +76,21 @@ export interface BuildJobHandlerRegistryInput {
   /** What this deployment knows how to run. Empty is a valid answer, and the survey says so. */
   readonly providers: readonly JobHandlerProvider[];
   /**
+   * Every entity-event name this deployment's emitter can produce, for the survey's
+   * `event_unproducible` verdict (ADR-0362).
+   *
+   * **Required, and `[]` is the claim** rather than the absence of one: it says this deployment
+   * emits no entity events, which is literally true with `--emit-entity-events` off. The
+   * alternative — optional, defaulting to "assume producible" — is the wrong answer this increment
+   * removed, kept as the default and reachable by any caller who forgets the argument.
+   *
+   * The caller must compute it with the SAME `--event-prefix` it gives `entityEventEffect`. A
+   * prefix on one side and not the other makes every produced name three-segment and every
+   * enumerated one two-segment, so every declaration surveys as unproducible — and neither
+   * function can detect that, because each is individually correct.
+   */
+  readonly producibleEventNames: Iterable<string>;
+  /**
    * The `[0,1)` sampler backing a declared `retry.backoff.jitter`. Injected for determinism in
    * tests; `Math.random` by default, because `retryDelayMs` skips jitter entirely when no sampler is
    * supplied — so every deployment up to now declared `jitter: true` on all of its jobs and got
@@ -189,7 +204,11 @@ export function buildJobHandlerRegistry(
     handled.push(jobId);
   }
 
-  const survey = surveyManifestJobs({ jobs: input.jobs, handledJobIds: handled });
+  const survey = surveyManifestJobs({
+    jobs: input.jobs,
+    handledJobIds: handled,
+    producibleEventNames: input.producibleEventNames,
+  });
   return { registry, survey, servedJobIds: survey.served };
 }
 
