@@ -82,6 +82,23 @@ export const DecisionAttestationSchema = z
         message: `${a.kind} requires signatureSha256 and signingKeyFingerprint`,
       });
     }
+    // The only evidence this kind carries: there is no signature, no co-attestor and no second
+    // factor, so an attestation of this kind with no phrase records that somebody clicked — which
+    // is `click_through_acknowledgement` under a name asserting more. Coupled to the
+    // `attestation_phrase` column landing in the same increment: the phrase had nowhere to live,
+    // and with the clause but not the column a `typed_attestation_phrase` row would be writable
+    // and not readable — the authored record carries the phrase, the stored row drops it, so
+    // `rowToDecision` would hand back a record this clause refuses. Neither half ships alone.
+    if (
+      a.kind === "typed_attestation_phrase" &&
+      (a.attestationPhrase === undefined || a.attestationPhrase.trim() === "")
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["attestationPhrase"],
+        message: "typed_attestation_phrase requires a non-empty attestationPhrase",
+      });
+    }
     if (
       a.kind === "two_person_attestation" &&
       (a.coAttestingUserId === null || a.coAttestedAt === null)
@@ -97,6 +114,33 @@ export const DecisionAttestationSchema = z
         code: z.ZodIssueCode.custom,
         path: ["coAttestingUserId"],
         message: "co-attestor must differ from primary attestor",
+      });
+    }
+    // This one binds *stored* rows, which is what earns it a place where an
+    // `attestedAt`-vs-`decidedAt` clause would not: `co_attested_at` is a real column that
+    // `PostgresAccessReviewDecisionStore.record` binds and `rowToDecision` reads back, so a
+    // four-eyes record whose co-attestation predates the primary one is refused on the way in
+    // *and* reported on the way out. `attestedAt` has no column — the mapper fills it from
+    // `decided_at` — so a clause over that pair could never fire for a stored decision; see the
+    // note in `AccessReviewDecisionSchema` below.
+    //
+    // Not a CHECK constraint instead, for two reasons: which fields a kind requires is
+    // `attestation_kind`-dependent, so this family is not expressible column by column; and the
+    // right-hand side of this very comparison has no column, so the nearest CHECK
+    // (`co_attested_at >= decided_at`) is a different predicate that only agrees with this one
+    // because the mapper collapses the two instants.
+    //
+    // Guarded by shape and not by `=== null`, because `Date.parse(undefined)` is NaN and every
+    // comparison against NaN is false — so a later `.optional()` here would turn the refusal into
+    // a silent accept, which is this increment's own class.
+    if (
+      typeof a.coAttestedAt === "string" &&
+      Date.parse(a.coAttestedAt) < Date.parse(a.attestedAt)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["coAttestedAt"],
+        message: "coAttestedAt cannot precede attestedAt",
       });
     }
   });
@@ -184,6 +228,16 @@ export const AccessReviewDecisionSchema = z
         message: "appliedAt cannot precede decidedAt",
       });
     }
+    // `attestation.attestedAt` is deliberately *not* ordered against `decidedAt`, and it is the
+    // one member of this family that must stay out of it. `rowToDecision` fills `decidedAt` and
+    // `attestation.attestedAt` from the same column, `decided_at`, so the equality holds by
+    // construction on every read: a clause here could never fire for a stored decision, and
+    // asserting it would declare the unstored field equal to the stored one — making a silent
+    // rewrite of the attestation instant legal *by definition* rather than detecting it. A control
+    // that cannot fail is worse than none, because a report citing it claims an examination that
+    // never happened (ADR-0337). Closing it means giving `attested_at` a column of its own, and
+    // the measured argument against that is in `meta-schema.ts` beside `attestation_phrase`, which
+    // got one for the opposite reason: a phrase duplicates nothing.
     if (d.applicationFailedAt !== null && d.applicationFailureReason === null) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

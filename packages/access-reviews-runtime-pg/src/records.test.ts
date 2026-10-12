@@ -156,6 +156,7 @@ const decisionRow: DecisionRow = {
   time_bound_extend_until: null,
   modified_grant_attributes: null,
   attestation_kind: "click_through_acknowledgement",
+  attestation_phrase: null,
   attestation_signature_sha256: null,
   attestation_signing_key_fingerprint: null,
   co_attesting_user_id: null,
@@ -177,6 +178,120 @@ describe("rowToDecision", () => {
     expect(d.attestation.attestedByUserId).toBe(UUIDS.system);
     expect(d.attestation.attestedAt).toBe("2026-02-01T00:00:00.000Z");
     expect(d.attestation.ipAddress).toBe("127.0.0.1");
+  });
+
+  it("omits attestationPhrase when the column is NULL, rather than carrying undefined", () => {
+    const d = rowToDecision(decisionRow);
+    // `canonicalAttestationBytes` hashes `attestationPhrase` and `canonicalStringify` skips
+    // `undefined`, so an absent key and a present-but-undefined one are the same bytes — but only
+    // the absent form survives a JSON hop, which is what an evidence pack is.
+    expect("attestationPhrase" in d.attestation).toBe(false);
+  });
+
+  it("reads a typed attestation phrase back from its own column", () => {
+    const d = rowToDecision({
+      ...decisionRow,
+      attestation_kind: "typed_attestation_phrase",
+      attestation_phrase: "I attest this access is appropriate.",
+    });
+    expect(d.attestation.attestationPhrase).toBe("I attest this access is appropriate.");
+  });
+
+  it("refuses a typed_attestation_phrase row whose phrase column is NULL", () => {
+    // The two halves of this increment interlocking, and the reason neither ships alone: the
+    // contract now requires a non-empty phrase for this kind, and that clause is only reachable
+    // from a read because the column exists. Without the column every such row would read back as
+    // a record the contract refuses; without the clause a lost phrase would read back clean.
+    expect(() =>
+      rowToDecision({ ...decisionRow, attestation_kind: "typed_attestation_phrase" }),
+    ).toThrow(/attestationPhrase/);
+  });
+
+  it("refuses a stored phrase past the contract's 500-character bound", () => {
+    expect(() =>
+      rowToDecision({ ...decisionRow, attestation_phrase: "x".repeat(501) }),
+    ).toThrow();
+    // The bound itself, derived rather than restated: one character fewer parses.
+    expect(
+      rowToDecision({ ...decisionRow, attestation_phrase: "x".repeat(500) }).attestation
+        .attestationPhrase,
+    ).toHaveLength(500);
+  });
+
+  /*
+   * Every case below returned a happily-wrong record before this mapper gained its `.parse`: the
+   * function was a bare object literal *typed* as `AccessReviewDecision`, so all eleven of the
+   * schema's `superRefine` clauses were checked on the write path and on no read.
+   */
+  it("now throws on a co-attestor equal to the attestor — the first read-side four-eyes check", () => {
+    expect(() =>
+      rowToDecision({
+        ...decisionRow,
+        attestation_kind: "two_person_attestation",
+        co_attesting_user_id: UUIDS.system, // === decided_by_user_id, so === attestedByUserId
+        co_attested_at: "2026-02-01T00:00:00.000Z",
+      }),
+    ).toThrow(/co-attestor must differ/);
+  });
+
+  it("cannot be made to violate the OTHER four-eyes clause, because it reconstructs it", () => {
+    // `decidedByUserId === attestation.attestedByUserId` is unviolatable from a row by
+    // construction: both sides are read from `decided_by_user_id`, since no `attestation_*` actor
+    // column exists. So the parse enforces it vacuously here and non-vacuously on everything the
+    // writer round-trips — which is the reason the derivation is sound, not a reason to drop it.
+    const d = rowToDecision({ ...decisionRow, decided_by_user_id: UUIDS.reviewer });
+    expect(d.attestation.attestedByUserId).toBe(d.decidedByUserId);
+  });
+
+  it("now throws on two_person_attestation with no co-attestor", () => {
+    expect(() =>
+      rowToDecision({ ...decisionRow, attestation_kind: "two_person_attestation" }),
+    ).toThrow(/two_person_attestation requires/);
+  });
+
+  it("now throws on e_signature_digital with no signature", () => {
+    expect(() =>
+      rowToDecision({ ...decisionRow, attestation_kind: "e_signature_digital" }),
+    ).toThrow(/signatureSha256/);
+  });
+
+  it("now throws on a kind/reason pair the contract calls inconsistent", () => {
+    expect(() =>
+      rowToDecision({ ...decisionRow, kind: "keep", reason: "security_concern_revoked" }),
+    ).toThrow(/inconsistent/);
+  });
+
+  it("now throws on time_bound_extend with no extension date", () => {
+    expect(() => rowToDecision({ ...decisionRow, kind: "time_bound_extend" })).toThrow(
+      /timeBoundExtendUntil/,
+    );
+  });
+
+  it("now throws on an extension that does not outlast the decision", () => {
+    expect(() =>
+      rowToDecision({
+        ...decisionRow,
+        kind: "time_bound_extend",
+        reason: "business_justification_attested",
+        time_bound_extend_until: decisionRow.decided_at,
+      }),
+    ).toThrow(/must be after decidedAt/);
+  });
+
+  it("now throws on an application that precedes its own decision", () => {
+    expect(() =>
+      rowToDecision({ ...decisionRow, applied_at: "2026-01-01T00:00:00.000Z" }),
+    ).toThrow(/cannot precede decidedAt/);
+  });
+
+  it("now throws on a recorded application failure with no reason", () => {
+    expect(() =>
+      rowToDecision({ ...decisionRow, application_failed_at: "2026-02-02T00:00:00.000Z" }),
+    ).toThrow(/applicationFailureReason/);
+  });
+
+  it("still accepts the row the writer actually produces", () => {
+    expect(() => rowToDecision(decisionRow)).not.toThrow();
   });
 });
 

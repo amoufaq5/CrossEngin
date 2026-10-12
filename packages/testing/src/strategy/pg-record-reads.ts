@@ -696,16 +696,18 @@ export const RECORD_READ_DIVERGENCES: readonly RecordReadDivergence[] = Object.f
     note:
       "The same borrowing one field across and the weaker of the two: there is no " +
       "`attestation_attested_at` column — the attestation columns are `attestation_kind`, " +
-      "`_signature_sha256`, `_signing_key_fingerprint`, `co_attesting_user_id` and " +
+      "`_phrase`, `_signature_sha256`, `_signing_key_fingerprint`, `co_attesting_user_id` and " +
       "`co_attested_at` — so `decided_at` is the only source the row carries, and the writer binds " +
-      "neither `att.attestedAt` nor `att.attestationPhrase` (23 columns, 23 params, both absent). " +
-      "What makes it weaker than its neighbour is that nothing *enforces* the equality: the " +
-      "contract constrains `timeBoundExtendUntil` and `appliedAt` against `decidedAt` and says " +
-      "nothing about `attestedAt`, so this rests on producer behaviour — `buildRevokeDecision` " +
-      "sets both from one `nowIso`, and every construction site in the workspace does the same. " +
-      "The gap is therefore in `decision-store.ts` (an unbound field with no column) and " +
-      "`decisions.ts` (a missing refinement) rather than in this read, which is the only read " +
-      "available. See *What's actually left*.",
+      "no `att.attestedAt` (24 columns, 24 params, absent from both). ADR-0362 split the pair this " +
+      "note used to report together: `att.attestationPhrase` was unbound for the same reason and " +
+      "is now bound, because a phrase duplicates no other column while an attestation instant " +
+      "duplicates `decided_at`. What makes this one weaker than its neighbour is that nothing " +
+      "*enforces* the equality: the contract constrains `timeBoundExtendUntil`, `appliedAt` and " +
+      "`coAttestedAt` and deliberately says nothing about `attestedAt`, so this rests on producer " +
+      "behaviour — `buildRevokeDecision` sets both from one `nowIso`, and every construction site " +
+      "in the workspace does the same. The remaining gap is a column rather than a refinement: a " +
+      "clause over a field the mapper fills from the column it is compared against could never " +
+      "fire, which `AccessReviewDecisionSchema` now argues in place. See *What's actually left*.",
   },
 
   /* --------------------------------------------- qualifier_differs (5) */

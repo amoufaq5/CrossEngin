@@ -13,7 +13,8 @@ const SELECT_JOINED = `
     d.decision_id, i.item_id AS item_natural_id, c.campaign_id AS campaign_natural_id,
     d.tenant_id, d.decided_by_user_id, d.decided_at, d.kind, d.reason, d.comment,
     d.time_bound_extend_until, d.modified_grant_attributes, d.attestation_kind,
-    d.attestation_signature_sha256, d.attestation_signing_key_fingerprint,
+    d.attestation_phrase, d.attestation_signature_sha256,
+    d.attestation_signing_key_fingerprint,
     d.co_attesting_user_id, d.co_attested_at, d.ip_address, d.user_agent,
     d.supersedes_decision_id, d.related_exception_id, d.applied_at,
     d.application_failed_at, d.application_failure_reason
@@ -37,7 +38,8 @@ export class PostgresAccessReviewDecisionStore {
         `INSERT INTO ${SCHEMA}.${TABLE} (
            decision_id, item_id, campaign_id, tenant_id, decided_by_user_id, decided_at,
            kind, reason, comment, time_bound_extend_until, modified_grant_attributes,
-           attestation_kind, attestation_signature_sha256, attestation_signing_key_fingerprint,
+           attestation_kind, attestation_phrase, attestation_signature_sha256,
+           attestation_signing_key_fingerprint,
            co_attesting_user_id, co_attested_at, ip_address, user_agent,
            supersedes_decision_id, related_exception_id, applied_at, application_failed_at,
            application_failure_reason
@@ -45,10 +47,10 @@ export class PostgresAccessReviewDecisionStore {
          VALUES (
            $1, $2, $3, $4, $5, $6,
            $7, $8, $9, $10, $11::jsonb,
-           $12, $13, $14,
-           $15, $16, $17::inet, $18,
-           $19, $20, $21, $22,
-           $23
+           $12, $13, $14, $15,
+           $16, $17, $18::inet, $19,
+           $20, $21, $22, $23,
+           $24
          )
          ON CONFLICT (decision_id) DO NOTHING`,
         [
@@ -66,6 +68,14 @@ export class PostgresAccessReviewDecisionStore {
             ? null
             : JSON.stringify(decision.modifiedGrantAttributes),
           att.kind,
+          // Bound because it duplicates no other column, and because the signed bytes commit to it
+          // independently: `canonicalAttestationBytes` hashes `attestationPhrase`, and
+          // `canonicalStringify` skips `undefined`, so losing it removes the **key** from the
+          // payload rather than nulling it. So a signed attestation that carried a phrase could
+          // never have its `signatureSha256` recomputed from the stored row — and for
+          // `typed_attestation_phrase`, which requires no signature at all, the phrase *is* the
+          // whole evidence, which is why the contract now refuses one without it.
+          att.attestationPhrase ?? null,
           att.signatureSha256,
           att.signingKeyFingerprint,
           att.coAttestingUserId,

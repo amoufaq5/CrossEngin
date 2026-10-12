@@ -1,4 +1,5 @@
 import {
+  AccessReviewDecisionSchema,
   AccessReviewEvidenceSchema,
   type AccessReviewCampaign,
   type AccessReviewDecision,
@@ -169,6 +170,7 @@ export interface DecisionRow {
   readonly time_bound_extend_until: Timestampish;
   readonly modified_grant_attributes: Record<string, string> | null;
   readonly attestation_kind: AccessReviewDecision["attestation"]["kind"];
+  readonly attestation_phrase: string | null;
   readonly attestation_signature_sha256: string | null;
   readonly attestation_signing_key_fingerprint: string | null;
   readonly co_attesting_user_id: string | null;
@@ -182,8 +184,19 @@ export interface DecisionRow {
   readonly application_failure_reason: string | null;
 }
 
+/**
+ * Re-parses a stored decision row through `AccessReviewDecisionSchema`.
+ *
+ * `rowToEvidence`'s rule below, which this function used to be the standing violation of: it
+ * returned a bare object literal *typed* as the contract, so every one of the schema's
+ * `superRefine` clauses — the four-eyes pair among them — was checked on the write path and on no
+ * read. None of them is expressible as a CHECK, which is what makes this the only place a row
+ * edited into a shape the contract forbids is caught. Deliberately no count of the clauses here:
+ * two more landed in the increment that added this `parse`, which is how fast such a figure goes
+ * stale.
+ */
 export function rowToDecision(row: DecisionRow): AccessReviewDecision {
-  return {
+  return AccessReviewDecisionSchema.parse({
     id: row.decision_id,
     itemId: row.item_natural_id,
     campaignId: row.campaign_natural_id,
@@ -197,8 +210,24 @@ export function rowToDecision(row: DecisionRow): AccessReviewDecision {
     modifiedGrantAttributes: row.modified_grant_attributes,
     attestation: {
       kind: row.attestation_kind,
+      // There is no `attested_at` column, deliberately: three independent things treat the
+      // attestation and the decision as **one instant**, and this mapper is one of them. The only
+      // live producer (`buildRevokeDecision` in `access-reviews-runtime`'s `enforcement.ts`)
+      // computes one `nowIso` and uses it for both, and `EvidenceBundleDecisionRow` carries
+      // `decidedAt` and no `attestedAt` at all — so the sealed, hash-committed pack an auditor
+      // receives already names the field the row holds. Said rather than hidden: nothing here can
+      // recover a differing authored value, because the row carries none, so a signature over one
+      // cannot be recomputed from the row. Why that is *not* closed by a contract clause either is
+      // argued where such a clause would go, in `AccessReviewDecisionSchema`. Contrast
+      // `attestationPhrase` below, which duplicates no column and therefore gets one.
       attestedAt: requireIso(row.decided_at, "decided_at"),
+      // Borrowed from the same column and sound for a different reason, which is the distinction
+      // worth keeping: the schema's first clause *pins*
+      // `decidedByUserId === attestation.attestedByUserId`, so this reconstructs a value the
+      // contract guarantees rather than one it is silent about — and the `parse` above turns that
+      // guarantee from an assumption into a check.
       attestedByUserId: row.decided_by_user_id,
+      ...(row.attestation_phrase === null ? {} : { attestationPhrase: row.attestation_phrase }),
       signatureSha256: row.attestation_signature_sha256,
       signingKeyFingerprint: row.attestation_signing_key_fingerprint,
       coAttestingUserId: row.co_attesting_user_id,
@@ -211,7 +240,7 @@ export function rowToDecision(row: DecisionRow): AccessReviewDecision {
     appliedAt: toIso(row.applied_at),
     applicationFailedAt: toIso(row.application_failed_at),
     applicationFailureReason: row.application_failure_reason,
-  };
+  });
 }
 
 /**
