@@ -1,3 +1,4 @@
+import { MAX_ABAC_POLICY_KEY_LENGTH } from "@crossengin/auth";
 import { describe, expect, it } from "vitest";
 import {
   AGGREGATION_KINDS,
@@ -99,13 +100,45 @@ describe("ReportDeclarationSchema — tabular", () => {
       ],
       sort: [{ field: "count", direction: "desc" }],
       limit: 100,
-      permissions: { roles: ["pharmacist", "manager", "auditor"] },
-      abac: "data.report.access.weekly_dispensing",
+      permissions: {
+        roles: ["pharmacist", "manager", "auditor"],
+        abac: "data.report.access.weekly_dispensing",
+      },
     });
     if (r.kind === "tabular") {
       expect(r.groupBy).toHaveLength(2);
       expect(r.aggregations).toHaveLength(2);
     }
+    // The obligation rides on the grant, which is where `surveyAbacObligations` reads one.
+    expect(r.permissions?.abac).toBe("data.report.access.weekly_dispensing");
+  });
+
+  // A top-level `abac` used to sit beside `permissions`, duplicating the grant's own key with no
+  // rule for which wins, unbounded where the grant's is capped at 200, and read by nothing. This
+  // schema is not `.strict()`, so a manifest still carrying one parses — the key is dropped, which
+  // is the behaviour worth pinning: it cannot become a live obligation that no survey sees.
+  it("drops a top-level abac key rather than carrying an obligation nothing surveys", () => {
+    const r = ReportDeclarationSchema.parse({
+      kind: "tabular",
+      entity: "prescription",
+      groupBy: ["status"],
+      aggregations: [{ name: "count", kind: "count" }],
+      abac: "data.report.access.weekly_dispensing",
+    });
+    expect("abac" in r).toBe(false);
+  });
+
+  it("bounds the obligation it does carry, where the deleted one was unbounded", () => {
+    const tooLong = "k".repeat(MAX_ABAC_POLICY_KEY_LENGTH + 1);
+    expect(() =>
+      ReportDeclarationSchema.parse({
+        kind: "tabular",
+        entity: "prescription",
+        groupBy: ["status"],
+        aggregations: [{ name: "count", kind: "count" }],
+        permissions: { roles: ["pharmacist"], abac: tooLong },
+      }),
+    ).toThrow();
   });
 });
 

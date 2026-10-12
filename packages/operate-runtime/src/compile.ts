@@ -704,6 +704,12 @@ export function compileOperateServer(
     ),
     temporalFieldIndexFromManifest(manifest),
   );
+  // Built once and read by both halves of ADR-0329 — the write mask on the handler context below,
+  // and the response-redaction registry's `classifiedFieldsForEntity`. The gateway cannot derive
+  // it: `api-gateway-runtime` does not depend on `@crossengin/kernel`, so it cannot resolve a
+  // trait, which is exactly why its resolver is a required option rather than a read it performs
+  // itself. One value, two readers, no second resolution to drift.
+  const classifiedFieldIndex = buildClassifiedFieldIndex(manifest);
   const ctx: HandlerContext = {
     store,
     permissions: manifest.permissions ?? {},
@@ -716,9 +722,15 @@ export function compileOperateServer(
     // Field-level write authorization. Keyed by **entity**, deliberately not off
     // `entityOperationIndex` below: that index is a *response* mapping keyed by operationId, and
     // a write mask answers "may this principal write this field of this entity" — reusing it
-    // would be a category error. The classifications come from `entityClassifiedFields`, the same
-    // function the redaction registry reads, so one declaration drives both halves of ADR-0329.
-    classifiedFields: buildClassifiedFieldIndex(manifest),
+    // would be a category error.
+    //
+    // This is `classifiedFieldIndex`, the **same value** the redaction registry below is given.
+    // It used to say "the same *function* the redaction registry reads, so one declaration drives
+    // both halves of ADR-0329" — which was true and bought nothing, because both read the
+    // entity's own fields and so agreed *in being wrong*: a trait-contributed classified field was
+    // invisible to the mask and to the redaction alike. One index read twice is the property that
+    // comment wanted; the same narrow function called twice was not.
+    classifiedFields: classifiedFieldIndex,
     writeMaskMode: options.writeMaskMode ?? "explicit_only",
     writeGuards: options.writeGuards ?? defaultWriteGuards(manifest),
     writeEffects: [
@@ -930,6 +942,12 @@ export function compileOperateServer(
   ]);
   const redactionRegistry = redactionRegistryFromManifest(manifest, {
     rolesForPrincipal: options.principalRoles,
+    // The same index the write mask holds, so the read half and the write half of ADR-0329 cannot
+    // answer differently about which fields of an entity are classified. `?? []` is the honest
+    // answer for an entity the index omits — `buildClassifiedFieldIndex` omits entities with no
+    // classified field, and an empty set is the same statement as an absent one here, which is why
+    // `redactionSpecForEntity` still correctly returns `null` for it.
+    classifiedFieldsForEntity: (name) => classifiedFieldIndex.get(name) ?? [],
     operationsForEntity: (name) => operationIdsByEntity.get(name) ?? fallbackOperationIds(name),
     ...(options.policyForEntity !== undefined ? { policyForEntity: options.policyForEntity } : {}),
     ...(options.abacEvaluator !== undefined ? { abacEvaluator: options.abacEvaluator } : {}),

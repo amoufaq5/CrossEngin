@@ -1,5 +1,6 @@
 import {
   fieldWriteGrant,
+  fieldWriteGrantArm,
   validateClassifiedWriteMask,
   type AbacEvaluator,
   type AbacOutcome,
@@ -11,27 +12,39 @@ import {
   type RoleName,
   type SensitiveFieldPolicy,
 } from "@crossengin/auth";
+import { resolvedClassifiedFields } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { entityClassifiedFields, type DataClassification } from "@crossengin/types/meta-schema";
+import type { DataClassification } from "@crossengin/types/meta-schema";
 
 /**
  * Entity name → its classified fields, in `@crossengin/auth`'s `ClassifiedField`
- * shape. Built from `entityClassifiedFields`, which is the same source
- * `redactionSpecForEntity` reads, so what a role may *write* and what it may
- * *read* are derived from one declaration and cannot drift apart.
+ * shape, resolved **as the served table has them**: a classification a trait
+ * contributes is a real column and is in the index.
+ *
+ * Built from `resolvedClassifiedFields`, and `compileOperateServer` hands *this
+ * index* to the response-redaction registry as `classifiedFieldsForEntity`, so
+ * what a role may write and what it may read are not merely derived alike — they
+ * read one object. This comment used to claim that invariant over
+ * `entityClassifiedFields`, and it was true and worthless: the read half resolved
+ * nothing either, so the two agreed *in being wrong* — a trait-contributed `phi`
+ * field was writable by anybody holding the entity's write grant while two other
+ * surfaces reported it as classified. **Two readers agreeing is not either being
+ * right when they share the narrowing**, which is why the agreement is now a
+ * shared index rather than a shared habit.
  *
  * Entities with no classified field are omitted; a caller reads `?? []` for
- * them, and the absence is not load-bearing — an explicit per-field `update`
- * grant on an unclassified field is still enforced, because {@link maskWrite}
- * takes its candidate set from the grants *and* the classifications rather than
- * from the classifications alone.
+ * them, and the absence is not load-bearing — an explicit per-field write grant
+ * on an unclassified field is still enforced, because {@link maskWrite} takes its
+ * candidate set from the grants *and* the classifications rather than from the
+ * classifications alone.
  */
 export function buildClassifiedFieldIndex(
   manifest: Manifest,
 ): ReadonlyMap<string, readonly ClassifiedField[]> {
   const index = new Map<string, readonly ClassifiedField[]>();
+  const traits = manifest.traits ?? [];
   for (const entity of manifest.entities ?? []) {
-    const classified = entityClassifiedFields(entity);
+    const classified = resolvedClassifiedFields(entity, traits);
     if (classified.length === 0) continue;
     index.set(
       entity.name,
@@ -54,8 +67,23 @@ export interface WriteMaskRefusal {
    * exists and the class is privileged (declare a grant or a privileged role), and
    * `abac_obligation` means the role *was* granted and a declared attribute policy was not
    * discharged — which on an `undischargeable` outcome is a deployment gap and not a permission.
+   *
+   * `explicit_create_grant` is the fourth on that same argument: its remedy is to widen the
+   * field's `create` list — or to **delete** that list, so the field inherits `update` — which is
+   * a different edit from widening `update`, and not one an operator told `explicit_update_grant`
+   * would ever make. A fourth member and not a rename of the third, because a member is additive
+   * on the wire where a rename is not.
+   *
+   * Which of the two the refusal names comes from {@link fieldWriteGrantArm}, the arm
+   * `fieldWriteGrant` actually took, and never from `input.writeOp`: an **inherited** create (no
+   * `create` key, falling back to `update`) refuses as `explicit_update_grant`, because the update
+   * grant genuinely is what decided and widening `create` would not clear it.
    */
-  readonly rule: "explicit_update_grant" | "classification_default" | "abac_obligation";
+  readonly rule:
+    | "explicit_create_grant"
+    | "explicit_update_grant"
+    | "classification_default"
+    | "abac_obligation";
   /** The grant's opaque policy key, set iff `rule === "abac_obligation"`. */
   readonly abacPolicyKey?: string;
   /**
@@ -67,6 +95,21 @@ export interface WriteMaskRefusal {
    */
   readonly abacOutcome?: AbacOutcome;
 }
+
+/**
+ * Which write arm refused → the rule that names it.
+ *
+ * A total map over `FIELD_WRITE_OPERATIONS` and not a ternary, so a third arm on
+ * `FieldPermission` is a compile error at the one place that turns an arm into a label, rather
+ * than a third refusal silently carrying one of these two names.
+ */
+const GRANT_ARM_RULE: Record<
+  FieldWriteOperation,
+  "explicit_create_grant" | "explicit_update_grant"
+> = {
+  create: "explicit_create_grant",
+  update: "explicit_update_grant",
+};
 
 /**
  * `validateClassifiedWriteMask` sets `rejectedField` on every refusal, but
@@ -219,12 +262,14 @@ export function maskWrite(input: WriteMaskInput): WriteMaskRefusal | null {
       ...(classification !== undefined ? { classification } : {}),
     };
   }
-  // Which rule refused is re-derived from the same two inputs the rule itself read, in the same
-  // order of precedence: an explicit grant wins, so a field that has one was refused by it.
-  const rule =
-    fieldPerms?.[field]?.update !== undefined
-      ? ("explicit_update_grant" as const)
-      : ("classification_default" as const);
+  // Which rule refused is read from the **arm** the decision itself took, through the same
+  // function: this derivation used to read `perm.update` while the rule read
+  // `fieldWriteGrant(perm, writeOp)`, so a create refused by a field's own `create` arm reported
+  // the *update* grant — sending an operator to widen a list that already named them. The same
+  // mistake an undischarged obligation is reported as itself to avoid, one branch up.
+  const arm = fieldWriteGrantArm(fieldPerms?.[field], input.writeOp);
+  const rule: WriteMaskRefusal["rule"] =
+    arm === undefined ? "classification_default" : GRANT_ARM_RULE[arm];
   return {
     field,
     rule,

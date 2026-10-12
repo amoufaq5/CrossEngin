@@ -43,12 +43,8 @@ import {
   type RoleName,
   type SensitiveFieldPolicy,
 } from "@crossengin/auth";
-import { resolvedFields, type Manifest } from "@crossengin/kernel";
-import {
-  entityClassifiedFields,
-  isSensitiveDataClass,
-  type DataClassification,
-} from "@crossengin/types/meta-schema";
+import { resolvedClassifiedFields, resolvedFields, type Manifest } from "@crossengin/kernel";
+import { isSensitiveDataClass, type DataClassification } from "@crossengin/types/meta-schema";
 
 /**
  * The wholesale grant: a role named here is privileged for every sensitive class that
@@ -297,9 +293,9 @@ function entityIsCreatable(
  *     (field, role). A second copy of a rule is this repo's recurring defect, and the survey's
  *     whole value is that it answers with the same code the request path runs — a survey that
  *     agreed with a restatement and disagreed with the handler would be worse than none.
- *   - **Fields come from `resolvedFields`**, the function `validateManifest` uses, so a
- *     classified field arriving through a **trait** is found. Surveying `entity.fields` alone
- *     would be a blind spot of exactly the shape the fence exists to close: a field the
+ *   - **Classification comes from `resolvedClassifiedFields`**, the kernel's one answer for it,
+ *     so a classified field arriving through a **trait** is found. Surveying `entity.fields`
+ *     alone would be a blind spot of exactly the shape the fence exists to close: a field the
  *     validator sees, the emitted table has, and the survey does not.
  *   - **`uncreatable` is always measured with the write mask on**, whatever `classifiedWriteMask`
  *     says. It is what gates mounting the flag, and a refusal computed under the regime the
@@ -335,13 +331,20 @@ export function surveySensitiveFields(input: {
   const uncreatable: SensitiveFieldFinding[] = [];
 
   for (const entity of manifest.entities ?? []) {
-    const resolved = resolvedFields(entity, traits);
-    const requiredByName = new Map(resolved.map((f) => [f.name, f.required === true]));
-    // `entityClassifiedFields` is the one reader of a field's classification, asked over the
-    // **resolved** field list rather than `entity.fields`. Synthesising the entity keeps both
-    // halves borrowed: the kernel resolves which fields exist, and that function says which of
-    // them are classified, so neither rule is spelled a second time here.
-    const classified = entityClassifiedFields({ ...entity, fields: [...resolved] });
+    // Two questions, two readers, and the field list is held only because of the second. The
+    // classified set comes from the kernel's one answer for it, which resolves traits itself —
+    // asked rather than composed here from `resolved`, because composing it is how the narrow
+    // reading stayed invisible: a call site that assembles the wide answer by hand is a call site
+    // that could have assembled the narrow one instead, and three did.
+    const classified = resolvedClassifiedFields(entity, traits);
+    // `required` is a property of the field and not of its classification, so this one genuinely
+    // wants the field list. A classified field a trait contributes is `required` iff the *trait*
+    // declared it so, which is why this map is built over the resolved fields too — reading
+    // `entity.fields` here would report a trait-contributed required field as optional and let
+    // `uncreatable` miss the entity it makes uncreatable.
+    const requiredByName = new Map(
+      resolvedFields(entity, traits).map((f) => [f.name, f.required === true]),
+    );
     const perms: EntityPermissions = manifest.permissions?.[entity.name] ?? {};
     let creatable: boolean | null = null;
 

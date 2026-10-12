@@ -55,6 +55,48 @@ function manifest(opts: {
   } as unknown as Manifest;
 }
 
+/** `Patient.mrn` (`phi`) arriving through a trait, under a view that declares a column over it. */
+function traitManifest(): Manifest {
+  return {
+    manifestVersion: "1.0",
+    meta: { slug: "t/trait", name: "Trait", version: "1.0.0" },
+    traits: [
+      {
+        name: "identified",
+        fields: [{ name: "mrn", type: { kind: "text" }, classification: "phi" }],
+      },
+    ],
+    entities: [{ name: "Patient", traits: ["identified"], fields: [] }],
+    views: { "patient.list": traitListView() },
+  } as unknown as Manifest;
+}
+
+/**
+ * The same served table reached the other way: `mrn` declared on the entity, no trait. Everything
+ * else is byte-identical, so a difference in the survey's answer can only come from which field
+ * list was read.
+ */
+function inlineManifest(): Manifest {
+  return {
+    manifestVersion: "1.0",
+    meta: { slug: "t/trait", name: "Trait", version: "1.0.0" },
+    entities: [
+      { name: "Patient", fields: [{ name: "mrn", type: { kind: "text" }, classification: "phi" }] },
+    ],
+    views: { "patient.list": traitListView() },
+  } as unknown as Manifest;
+}
+
+function traitListView(): Record<string, unknown> {
+  return {
+    kind: "list",
+    entity: "Patient",
+    label: { en: "Patients" },
+    permissions: "inherit",
+    columns: [{ field: "mrn", label: { en: "MRN" } }],
+  };
+}
+
 describe("LIST_SURFACE_MAY_SERVE", () => {
   it("covers every verdict", () => {
     expect(Object.keys(LIST_SURFACE_MAY_SERVE).sort()).toEqual([...LIST_SURFACE_VERDICTS].sort());
@@ -135,23 +177,47 @@ describe("surveyListSurfaces — verdicts", () => {
   });
 
   it("covers a classified field contributed by a trait", () => {
-    // `resolvedFields` and not `entityClassifiedFields`, which reads the entity's own fields only.
-    const m = {
-      manifestVersion: "1.0",
-      meta: { slug: "t/trait", name: "Trait", version: "1.0.0" },
-      traits: [{ name: "identified", fields: [{ name: "mrn", type: { kind: "text" }, classification: "phi" }] }],
-      entities: [{ name: "Patient", traits: ["identified"], fields: [] }],
-      views: {
-        "patient.list": {
-          kind: "list",
-          entity: "Patient",
-          label: { en: "Patients" },
-          permissions: "inherit",
-          columns: [{ field: "mrn", label: { en: "MRN" } }],
-        },
-      },
-    } as unknown as Manifest;
-    expect(surveyListSurfaces(m, "pg-columns").gaps[0]?.field).toBe("mrn");
+    // `resolvedClassifiedFields`, which resolves traits, and not a reader over the entity's own
+    // fields. A trait-contributed `phi` field is a real `bytea` column, so a survey that misses it
+    // reports a filter as serveable while the store refuses the request.
+    expect(surveyListSurfaces(traitManifest(), "pg-columns").gaps).toEqual([
+      { entity: "Patient", field: "mrn", surfaces: ["filter", "sort", "search"] },
+    ]);
+  });
+
+  it("identifies the same field whether it is declared on the entity or on a trait", () => {
+    // The classified set is what this module reads, and the equivalence is the property a narrowed
+    // reader breaks: over `entity.fields` the trait form has no classified field at all, so `gaps`
+    // comes back empty and the verdict flips to `all_surfaces_serveable` — a boot line telling an
+    // operator this deployment can serve a surface its store refuses.
+    const viaTrait = surveyListSurfaces(traitManifest(), "pg-columns");
+    const viaEntity = surveyListSurfaces(inlineManifest(), "pg-columns");
+    expect(viaTrait.gaps.map((g) => `${g.entity}.${g.field}`)).toEqual(
+      viaEntity.gaps.map((g) => `${g.entity}.${g.field}`),
+    );
+    expect(viaTrait.verdict).toBe(viaEntity.verdict);
+    expect(viaTrait.verdict).toBe("surfaces_refused");
+  });
+
+  it("answers identically for a trait-contributed field and an inline one, on every surface", () => {
+    // This assertion arrived as its own opposite, and the history is the point. It was written one
+    // step earlier as `pins the one surface the two forms disagree on`, asserting
+    // `["filter","sort"]` for the trait form against `["filter","sort","search"]` for the inline
+    // one — because `listConfigForEntity` resolved traits for `config.fields` and read the
+    // entity's **own** fields for `searchableFields` and `filterableFields`: two readings of one
+    // entity's field list inside one function. Converging them onto one `resolvedFieldsOf` made
+    // this test fail and name the new answer, which is what a pinned divergence is for.
+    //
+    // So `search` is now reportable for the trait form too, and the consequence is worth knowing:
+    // on the column store a searchable encrypted field means `?q` can collapse the whole OR group,
+    // and `UNSERVEABLE_SURFACE_REFUSES.search` is `true`, so the store refuses the request rather
+    // than answering it with every row. Measured as behaviour-identical on all seven shipped packs
+    // — no built-in trait field is a searchable kind or a reference, and no pack declares a custom
+    // trait — so only an authored manifest reaches it.
+    const surfaces = (m: Manifest): readonly string[] =>
+      surveyListSurfaces(m, "pg-columns").gaps.flatMap((g) => g.surfaces);
+    expect(surfaces(traitManifest())).toEqual(["filter", "sort", "search"]);
+    expect(surfaces(traitManifest())).toEqual(surfaces(inlineManifest()));
   });
 });
 

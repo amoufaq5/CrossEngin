@@ -1,10 +1,10 @@
 # ADR index
 
-355 records. Generated from the ADR files themselves — regenerate rather than
+356 records. Generated from the ADR files themselves — regenerate rather than
 hand-edit, so a title or status change in an ADR cannot silently drift from this table:
 `python3 docs/adr/generate-index.py`.
 
-- **Accepted:** 276  **Proposed:** 79
+- **Accepted:** 277  **Proposed:** 79
 - ADRs **0080–0085** were reserved by ADR-0077 for Phase 3 P3–P8 and never written;
   those milestones landed under other numbers. The gap is permanent and intentional.
 - ADR-0046 is the Phase 2 plan; **ADR-0077 is the Phase 3 plan (P1–P8)**. Phase 4 has no
@@ -367,3 +367,4 @@ hand-edit, so a title or status change in an ADR cannot silently drift from this
 | [0358](0358-a-perimeter-nothing-enforced.md) | A perimeter the deployment asserted and nothing enforced | — | Accepted | 2026-10-11 |
 | [0359](0359-a-surface-that-cannot-be-served.md) | A surface that cannot be served is ignored rather than refused | — | Accepted | 2026-10-12 |
 | [0360](0360-a-declaration-read-by-nobody-at-either-end.md) | A declaration read by nobody at either end | — | Accepted | 2026-10-12 |
+| [0361](0361-a-reader-whose-aperture-is-narrower-than-the-writers.md) | A reader whose aperture is narrower than the writer's | — | Accepted | 2026-10-12 |

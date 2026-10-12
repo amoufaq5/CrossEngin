@@ -4,7 +4,7 @@ import {
   buildIncomingRequest,
   type OpaqueTokenLookup,
 } from "@crossengin/api-gateway-runtime";
-import { entityClassifiedFields } from "@crossengin/types/meta-schema";
+import { resolvedClassifiedFields } from "@crossengin/kernel/ddl";
 import { resolveManifest, type Manifest, type ManifestRegistry } from "@crossengin/kernel/manifest";
 import { ERP_CORE_PACK_SLUG, buildErpCorePack } from "@crossengin/pack-erp-core";
 import { buildErpRetailPack } from "@crossengin/pack-erp-retail";
@@ -259,7 +259,7 @@ describe("compileOperateServer — the redaction index is derived from the route
     // the same defect one level up — the test agreeing with the code about an incomplete set.
     const classified = new Set(
       (CLINIC.entities ?? [])
-        .filter((e) => entityClassifiedFields(e).length > 0)
+        .filter((e) => resolvedClassifiedFields(e, CLINIC.traits ?? []).length > 0)
         .map((e) => e.name),
     );
     expect(classified.size).toBeGreaterThan(0);
@@ -366,7 +366,9 @@ describe("compileOperateServer — coverage over a real pack", () => {
   });
 
   it("covers every derived operation of every classified entity in retail + core", () => {
-    const classified = (resolved.entities ?? []).filter((e) => entityClassifiedFields(e).length > 0);
+    const classified = (resolved.entities ?? []).filter(
+      (e) => resolvedClassifiedFields(e, resolved.traits ?? []).length > 0,
+    );
     expect(classified.length).toBeGreaterThan(0);
     const names = new Set(classified.map((e) => e.name));
     const missing = compiled.routeSpecs
@@ -546,13 +548,16 @@ describe("compileOperateServer — the write mask is reached through the real ga
 describe("buildClassifiedFieldIndex — over the real packs", () => {
   const index = buildClassifiedFieldIndex(resolved);
 
-  it("agrees with entityClassifiedFields in both directions", () => {
-    // The same source the redaction registry reads, so what a role may write and what it may read
-    // are derived from one declaration. Compared against the manifest rather than a list here: a
-    // list would be the test agreeing with the code about an incomplete set.
+  it("agrees with resolvedClassifiedFields in both directions", () => {
+    // `resolvedClassifiedFields` and not `classifiedFields(entity.fields)`, which is the whole
+    // point: the index is read by the write mask AND, through `classifiedFieldsForEntity`, by the
+    // response-redaction registry, so a field a **trait** contributes has to be in it or the two
+    // halves of ADR-0329 disagree. Asking the raw entity here would make this test agree with the
+    // narrow read instead of with the served table. Compared against the manifest rather than a
+    // list: a list would be the test agreeing with the code about an incomplete set.
     const expected = new Map<string, readonly string[]>();
     for (const entity of resolved.entities ?? []) {
-      const classified = entityClassifiedFields(entity);
+      const classified = resolvedClassifiedFields(entity, resolved.traits ?? []);
       if (classified.length > 0) expected.set(entity.name, classified.map((c) => c.field));
     }
     expect(expected.size).toBeGreaterThan(0);

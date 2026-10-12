@@ -174,8 +174,10 @@ describe("surveyPhiFields", () => {
   });
 
   it("takes the entity's own field when a trait declares the same name", () => {
-    // `resolvedFields` emits a name once and the entity wins, so the survey must not
-    // report two rows for one column.
+    // The resolution `resolvedClassifiedFields` is built on emits a name once and lets the
+    // entity's own field win, so the survey must not report two rows for one column — and the
+    // winner here is `internal`, which is not an encrypt-at-rest class, so the answer is empty
+    // rather than one row.
     const m = manifest({
       traits: [
         {

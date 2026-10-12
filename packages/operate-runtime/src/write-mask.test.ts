@@ -128,6 +128,83 @@ describe("buildClassifiedFieldIndex", () => {
   });
 });
 
+describe("buildClassifiedFieldIndex — a trait contributes a real column, so it is in the index", () => {
+  // The whole defect, as a fixture: `contact_email` is `pii` and arrives from a **custom trait**,
+  // so the served table has a `contact_email` column carrying pii and the index built from
+  // `entity.fields` did not know it existed — leaving it writable by anybody holding the entity's
+  // write grant while the boot survey and the obligation check both reported it as classified.
+  const manifest = {
+    meta: { name: "ix", version: "1.0.0" },
+    traits: [
+      {
+        name: "contactable",
+        fields: [
+          { name: "contact_email", type: { kind: "text", maxLength: 120 }, classification: "pii" },
+          { name: "contact_note", type: { kind: "text", maxLength: 200 } },
+        ],
+      },
+      { name: "unapplied", fields: [{ name: "secret", type: { kind: "text", maxLength: 8 }, classification: "phi" }] },
+    ],
+    entities: [
+      {
+        name: "Patient",
+        traits: ["contactable", "auditable"],
+        fields: [{ name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" }],
+      },
+      {
+        name: "Widget",
+        traits: ["auditable", "versioned", "soft_deletable", "gxp_signed"],
+        fields: [{ name: "label", type: { kind: "text", maxLength: 20 } }],
+      },
+    ],
+  } as unknown as Manifest;
+
+  it("includes a custom trait's classified field beside the entity's own", () => {
+    // The order is `resolvedFields`' — own fields, then traits in declared order — and is asserted
+    // because an exact array is the only assertion a transposition fails. It is not load-bearing
+    // for authorization: `maskWrite` reads this as a map keyed by name.
+    expect(buildClassifiedFieldIndex(manifest).get("Patient")).toEqual([
+      { name: "mrn", classification: "phi" },
+      { name: "contact_email", classification: "pii" },
+    ]);
+  });
+
+  it("omits the trait's unclassified field, and a trait the entity does not apply", () => {
+    // `contact_note` and `unapplied.secret` are both absent from the array above — stated as its
+    // own test so the reason is on the record rather than implied by a `toEqual` passing.
+    const names = (buildClassifiedFieldIndex(manifest).get("Patient") ?? []).map((f) => f.name);
+    expect(names).toEqual(["mrn", "contact_email"]);
+  });
+
+  it("omits an entity whose only trait fields are the built-ins, which carry no classification", () => {
+    // All four field-bearing built-in traits at once — 8 fields, `created_at` through
+    // `e_signature_required` — and not one is classified, which is why the trait gap has zero
+    // members on every shipped pack and is reachable only from an authored manifest. If a built-in
+    // ever gains a classification this fails here rather than silently widening every entity.
+    const index = buildClassifiedFieldIndex(manifest);
+    expect(index.has("Widget")).toBe(false);
+    expect([...index.keys()]).toEqual(["Patient"]);
+  });
+
+  it("resolves a built-in trait with no `manifest.traits` declared at all", () => {
+    // The `?? []` is for the custom traits only: a built-in resolves from the kernel's own map, so
+    // an entity applying one must not throw or come back empty-handed.
+    const builtinOnly = {
+      meta: { name: "b", version: "1.0.0" },
+      entities: [
+        {
+          name: "Patient",
+          traits: ["auditable"],
+          fields: [{ name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "phi" }],
+        },
+      ],
+    } as unknown as Manifest;
+    expect(buildClassifiedFieldIndex(builtinOnly).get("Patient")).toEqual([
+      { name: "mrn", classification: "phi" },
+    ]);
+  });
+});
+
 describe("maskWrite — explicit_only (the default, always on)", () => {
   it("refuses a declared-update field for an ungranted role", () => {
     expect(mask("explicit_only", "clerk", ["mrn"])).toEqual({
@@ -609,5 +686,158 @@ describe("maskWrite — the create arm selects a different grant from the update
     // `nickname` is unclassified and has no `update` arm, so on an update there is no rule at all
     // and nothing refuses — the fallback finding nothing is not the same as finding an empty grant.
     expect(only("clerk", "update")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The refusal names the grant that refused.
+//
+// The rule was re-derived from `fieldPerms?.[field]?.update !== undefined` while the decision read
+// `fieldWriteGrant(perm, writeOp)` — so a **create** refused by a field's own `create` arm reported
+// `explicit_update_grant`, live on the 12 fields across the seven packs that declare both arms. The
+// label goes straight into the 403 body, so an operator was told the update grant refused their
+// create and would widen a list that already named them. The arm is read now, through
+// `fieldWriteGrantArm`, mapped by `GRANT_ARM_RULE`.
+// ---------------------------------------------------------------------------
+
+describe("maskWrite — the refusal names which arm refused", () => {
+  // The shipped shape: **both** arms declared, with different role lists, so the two refusals are
+  // distinguishable at all. `clerk` holds neither field arm; `clinician` may create, `compliance`
+  // may change.
+  const BOTH_ARMS: EntityPermissions = {
+    create: { roles: ["clerk", "clinician", "compliance"] },
+    update: { roles: ["clerk", "clinician", "compliance"] },
+    fields: {
+      mrn: {
+        read: { roles: ["clinician"] },
+        create: { roles: ["clinician"] },
+        update: { roles: ["compliance"] },
+      },
+    },
+  };
+
+  const bothArms = (role: RoleName, writeOp: FieldWriteOperation) =>
+    maskWrite({
+      mode: "classified",
+      entity: ENTITY,
+      principal: principal(role),
+      entityPerms: BOTH_ARMS,
+      roles: ROLES,
+      classifiedFields: CLASSIFIED,
+      writtenKeys: ["mrn"],
+      writeOp,
+    });
+
+  it("a create refused by the field's own create arm reports explicit_create_grant", () => {
+    // The live defect. `mrn` declares both arms, so the old derivation saw `perm.update !== undefined`
+    // and named the update grant for a refusal the create grant made.
+    expect(bothArms("clerk", "create")).toEqual({
+      field: "mrn",
+      rule: "explicit_create_grant",
+      classification: "phi",
+    });
+  });
+
+  it("an update refused by the update arm reports explicit_update_grant", () => {
+    expect(bothArms("clerk", "update")).toEqual({
+      field: "mrn",
+      rule: "explicit_update_grant",
+      classification: "phi",
+    });
+  });
+
+  it("the two arms refuse different roles, and each refusal names its own arm", () => {
+    // Both directions over one field, which is what makes the pair of labels meaningful rather
+    // than one of them merely appearing somewhere: the role the create arm admits is refused by the
+    // update arm and vice versa, and the names follow the arm and not the role.
+    expect(bothArms("clinician", "create")).toBeNull();
+    expect(bothArms("clinician", "update")).toEqual({
+      field: "mrn",
+      rule: "explicit_update_grant",
+      classification: "phi",
+    });
+    expect(bothArms("compliance", "update")).toBeNull();
+    expect(bothArms("compliance", "create")).toEqual({
+      field: "mrn",
+      rule: "explicit_create_grant",
+      classification: "phi",
+    });
+  });
+
+  it("an INHERITED create — no create arm, falling back to update — reports explicit_update_grant", () => {
+    // The test that proves the **arm** is read and not the write op. `PERMS.mrn` declares only
+    // `update`, so on a create `fieldWriteGrant` falls back to it and the update grant genuinely is
+    // what decided: naming `explicit_create_grant` here would send an operator to widen a `create`
+    // list that does not exist, and creating one would *narrow* nothing and change nothing.
+    expect(mask("classified", "clerk", ["mrn"], undefined, "create")).toEqual({
+      field: "mrn",
+      rule: "explicit_update_grant",
+      classification: "phi",
+    });
+  });
+
+  it("no grant at all reports classification_default, with the class that refused", () => {
+    // `given_name` is pii with a `read` grant and no write arm, so `fieldWriteGrantArm` answers
+    // undefined on both moments and the symmetric rule is what refused.
+    for (const op of ["create", "update"] as const) {
+      expect(mask("classified", "clerk", ["given_name"], undefined, op)).toEqual({
+        field: "given_name",
+        rule: "classification_default",
+        classification: "pii",
+      });
+    }
+  });
+
+  it("a create-only grant on an unclassified field reports explicit_create_grant and no classification", () => {
+    // The case that had no shipped member and was labelled worst of all: with only a `create` arm
+    // declared, the old derivation found no `update` and fell through to `classification_default`
+    // — on a field with no classification, so the 403 named a rule whose own name says
+    // "classification" and carried no `classification` key for it to be about.
+    const createOnly: EntityPermissions = {
+      create: { roles: ["clerk", "clinician"] },
+      update: { roles: ["clerk", "clinician"] },
+      fields: { nickname: { read: { roles: ["clerk", "clinician"] }, create: { roles: ["clinician"] } } },
+    };
+    const refusal = maskWrite({
+      mode: "classified",
+      entity: ENTITY,
+      principal: principal("clerk"),
+      entityPerms: createOnly,
+      roles: ROLES,
+      classifiedFields: CLASSIFIED,
+      writtenKeys: ["nickname"],
+      writeOp: "create",
+    });
+    expect(refusal).toEqual({ field: "nickname", rule: "explicit_create_grant" });
+    expect(refusal).not.toHaveProperty("classification");
+  });
+
+  it("an undischarged obligation on a create still reports itself, not either grant", () => {
+    // The precedence the arm derivation sits below: the role check passed, so re-deriving from the
+    // grant at all would name a list that already reaches this caller. Asserted on a **create**,
+    // because that is the moment the arm derivation is newly reachable on.
+    const obligated: EntityPermissions = {
+      create: { roles: ["clerk", "clinician"] },
+      update: { roles: ["clerk", "clinician"] },
+      fields: { mrn: { read: { roles: ["clinician"] }, create: { roles: ["clinician"], abac: ABAC_KEY } } },
+    };
+    expect(
+      maskWrite({
+        mode: "classified",
+        entity: ENTITY,
+        principal: principal("clinician"),
+        entityPerms: obligated,
+        roles: ROLES,
+        classifiedFields: CLASSIFIED,
+        writtenKeys: ["mrn"],
+        writeOp: "create",
+      }),
+    ).toEqual({
+      field: "mrn",
+      rule: "abac_obligation",
+      abacPolicyKey: ABAC_KEY,
+      abacOutcome: "undischargeable",
+      classification: "phi",
+    });
   });
 });

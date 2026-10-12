@@ -35,6 +35,119 @@ describe("validateManifest — data classification", () => {
     expect(() => validateManifest(m)).toThrow(/auditable/);
   });
 
+  // The whole invariant was bypassable by moving the declaration one level out: the identical
+  // field was refused on `entity.fields` and accepted on a trait, while the served table carried
+  // the same column either way. A validation rule whose predicate is narrower than the artifact it
+  // constrains is a spelling convention, not a rule.
+  it("rejects a phi field a TRAIT contributes to a non-auditable entity", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [
+        {
+          name: "clinical",
+          fields: [{ name: "value_text", type: { kind: "long_text" }, classification: "phi" }],
+        },
+      ],
+      entities: [
+        { name: "Observation", traits: ["clinical"], fields: [{ name: "label", type: { kind: "text" } }] },
+      ],
+    };
+    expect(() => validateManifest(m)).toThrow(/auditable/);
+  });
+
+  it("names the trait path and both remedies, because a trait is shared and this entity is not", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [
+        {
+          name: "clinical",
+          fields: [{ name: "mrn", type: { kind: "text", maxLength: 32 }, classification: "regulated" }],
+        },
+      ],
+      entities: [
+        { name: "Chart", traits: ["clinical"], fields: [{ name: "label", type: { kind: "text" } }] },
+      ],
+    };
+    try {
+      validateManifest(m);
+      throw new Error("expected a refusal");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ManifestValidationError);
+      const e = err as ManifestValidationError;
+      expect(e.path).toBe("entities[0].traits");
+      // Ordered, so a message that merely contains the words in another arrangement fails.
+      expect(e.message).toMatch(
+        /'Chart\.mrn' arrives from a trait.*'regulated'.*add 'auditable'.*or drop the classification from the trait.*changes every entity carrying it/s,
+      );
+    }
+  });
+
+  it("accepts a trait-contributed phi field once the entity carries 'auditable'", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [
+        {
+          name: "clinical",
+          fields: [{ name: "value_text", type: { kind: "long_text" }, classification: "phi" }],
+        },
+      ],
+      entities: [
+        {
+          name: "Observation",
+          traits: ["clinical", "auditable"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("allows a trait-contributed pii field on a non-auditable entity, as for an own field", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [
+        {
+          name: "contact_bearing",
+          fields: [{ name: "personal_email", type: { kind: "email" }, classification: "pii" }],
+        },
+      ],
+      entities: [
+        { name: "Contact", traits: ["contact_bearing"], fields: [{ name: "label", type: { kind: "text" } }] },
+      ],
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  // The own-field arm must still win for an own field, so the two loops cannot be collapsed into
+  // the trait one: the path and the remedy differ by where the declaration is.
+  it("still reports an own field at its fields[] index rather than at the trait path", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMetaC,
+      traits: [{ name: "clinical", fields: [{ name: "note", type: { kind: "long_text" } }] }],
+      entities: [
+        {
+          name: "Observation",
+          traits: ["clinical"],
+          fields: [
+            { name: "label", type: { kind: "text" } },
+            { name: "value_text", type: { kind: "long_text" }, classification: "phi" },
+          ],
+        },
+      ],
+    };
+    try {
+      validateManifest(m);
+      throw new Error("expected a refusal");
+    } catch (err) {
+      expect((err as ManifestValidationError).path).toBe("entities[0].fields[1].classification");
+    }
+  });
+
   it("allows a pii field on a non-auditable entity (no audit requirement)", () => {
     const m: Manifest = {
       manifestVersion: "1.0",

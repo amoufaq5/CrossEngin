@@ -43,7 +43,7 @@
  * the reason given on `ABAC_OBLIGATION_REFUSALS`.
  */
 
-import { resolvedFields, type Manifest } from "@crossengin/kernel";
+import { resolvedClassifiedFields, type Manifest } from "@crossengin/kernel";
 import {
   abacGrantPosition,
   abacRecordAvailabilityFor,
@@ -55,7 +55,7 @@ import {
   type AbacObligation,
 } from "@crossengin/auth";
 import { listConfigForEntity } from "@crossengin/operate-runtime";
-import { entityClassifiedFields, type DataClassification } from "@crossengin/types/meta-schema";
+import type { DataClassification } from "@crossengin/types/meta-schema";
 
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
 import {
@@ -229,16 +229,80 @@ export interface AbacObligationCheck {
   readonly cursorDisclosing: readonly AbacObligation[];
   /** Echoed from the input, so one `AbacObligationCheck` is enough to render the boot line. */
   readonly cursorSealing: CursorSealingMode;
+  /**
+   * ABAC policy keys declared at a manifest position `surveyAbacObligations` does not walk, so
+   * they are outside every refusal above and outside `obligations`.
+   *
+   * This exists because the affirmative line lied. `surveyAbacObligations` takes a `PermissionMap`
+   * and so is total over `manifest.permissions` and nothing else, while an `RbacGrant` — which
+   * carries `abac` — also hangs off a report and a dashboard. A manifest whose only obligations sat
+   * there booted cleanly and printed *"abac obligations: none declared, so no grant depends on an
+   * ABAC evaluator"*, which is the one sentence added so that "we checked and found nothing" could
+   * not be claimed from silence. It was claiming it from a narrower survey instead.
+   *
+   * **Reported and never refused**, and the distinction is ADR-0340's own: its refusal has no
+   * escape hatch because *serving a grant with its qualifier removed is the opposite of what the
+   * manifest declares*. Nothing serves a report or a dashboard — `@crossengin/reporting` is
+   * imported only by manifest validation — so there is no partially-honoured grant here, and the
+   * remedy for an author who wants one enforced does not exist (ADR-0334: a remedy that cannot work
+   * is worse than none). The two positions that *were* deletable were deleted instead, at a
+   * measured cost of zero: `PermissionRefSchema.abac` on a view, and the redundant unbounded
+   * top-level `abac` on a report.
+   */
+  readonly unservedPositions: readonly UnservedAbacObligation[];
   readonly refusal: AbacObligationRefusal | null;
+}
+
+/**
+ * An ABAC policy key at a position nothing serves and no survey walks.
+ *
+ * `where` is a rendered location (`reports.weekly_dispensing.permissions`) and not a structured
+ * position, deliberately: `ABAC_GRANT_POSITIONS` is a closed vocabulary that
+ * `ABAC_RECORD_AVAILABILITY` and `ABAC_DENIAL_EFFECT` are total over, and adding a member for a
+ * surface no handler reaches would oblige both maps to answer availability and denial-effect
+ * questions about a request that cannot happen. A string an operator can grep for is the whole
+ * requirement here.
+ */
+export interface UnservedAbacObligation {
+  readonly where: string;
+  readonly policyKey: string;
+}
+
+/**
+ * Every ABAC policy key the manifest carries outside `manifest.permissions`.
+ *
+ * Both positions are an `RbacGrant`'s own `abac`, so neither can be deleted the way the two
+ * duplicate spellings were — `RbacGrantSchema` is the authoritative grant type and its `abac` is
+ * the one the entity path enforces. Written as a walk over the two records rather than a generic
+ * deep search for the key: a deep search would also find the keys that *are* surveyed and would
+ * silently start reporting a position the moment one became served, which is the direction that
+ * makes a boot line wrong again.
+ */
+function surveyUnservedAbacPositions(manifest: Manifest): readonly UnservedAbacObligation[] {
+  const out: UnservedAbacObligation[] = [];
+  for (const [id, report] of Object.entries(manifest.reports ?? {}).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  )) {
+    const key = report.permissions?.abac;
+    if (key !== undefined) out.push({ where: `reports.${id}.permissions`, policyKey: key });
+  }
+  for (const [id, dashboard] of Object.entries(manifest.dashboards ?? {}).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  )) {
+    const key = dashboard.permissions?.abac;
+    if (key !== undefined) out.push({ where: `dashboards.${id}.permissions`, policyKey: key });
+  }
+  return out;
 }
 
 /**
  * The classified fields of one manifest entity, keyed by field name.
  *
- * Asked over the **resolved** field list rather than `entity.fields`, so a classified field a
- * trait contributes is in scope — `sensitive-field-policy.ts` synthesises the entity the same way,
- * and for the same reason: the kernel resolves which fields exist and `entityClassifiedFields`
- * says which of them are classified, so neither rule is spelled a second time here.
+ * Asked of `resolvedClassifiedFields`, the kernel's one answer for "classified **as the served
+ * table has them**", so a classified field a trait contributes is in scope — the same reader
+ * `sensitive-field-policy.ts`, `cursor-encryption.ts` and `column-encryption.ts` use, which is what
+ * keeps the refusal this feeds from disagreeing with the surveys printed beside it about which
+ * fields are classified.
  *
  * An entity a permission map names and the manifest does not declare answers empty rather than
  * throwing. That is the conservative direction for a *refusal*: an entity with no declared fields
@@ -250,12 +314,8 @@ function classifiedFieldsOf(
 ): ReadonlyMap<string, DataClassification> {
   const entity = (manifest.entities ?? []).find((e) => e.name === entityName);
   if (entity === undefined) return new Map();
-  const resolved = resolvedFields(entity, manifest.traits ?? []);
   return new Map(
-    entityClassifiedFields({ ...entity, fields: [...resolved] }).map((c) => [
-      c.field,
-      c.classification,
-    ]),
+    resolvedClassifiedFields(entity, manifest.traits ?? []).map((c) => [c.field, c.classification]),
   );
 }
 
@@ -307,6 +367,7 @@ function listSortConflicts(
  */
 export function checkAbacObligations(input: AbacObligationCheckInput): AbacObligationCheck {
   const obligations = surveyAbacObligations(input.manifest.permissions ?? {});
+  const unservedPositions = surveyUnservedAbacPositions(input.manifest);
   const evaluatorDeclared = input.answerableKeys.size > 0;
   const unanswerable = evaluatorDeclared
     ? obligations.filter((o) => !input.answerableKeys.has(o.policyKey))
@@ -356,6 +417,7 @@ export function checkAbacObligations(input: AbacObligationCheckInput): AbacOblig
   }
 
   return {
+    unservedPositions,
     obligations,
     evaluatorDeclared,
     unanswerable,
@@ -656,7 +718,14 @@ function cursorPlaintextNote(rowFiltered: readonly AbacObligation[]): string {
  */
 export function formatAbacObligationCheck(check: AbacObligationCheck): string {
   if (check.obligations.length === 0) {
-    return "abac obligations: none declared, so no grant depends on an ABAC evaluator";
+    // The affirmative sentence is gated on BOTH sets, because it is a claim about the manifest and
+    // `obligations` is a claim about one section of it. Saying "none declared" while an obligation
+    // sits on a report's grant is the falsely-true report this field exists to end — and it is
+    // worse than silence, since this line was added precisely so that "we checked and found
+    // nothing" could not be inferred from the absence of one.
+    return check.unservedPositions.length === 0
+      ? "abac obligations: none declared, so no grant depends on an ABAC evaluator"
+      : `abac obligations: none on an entity grant, but ${unservedNote(check.unservedPositions)}`;
   }
   if (check.refusal !== null) {
     return `abac obligations: ${refusalMessage(check)}`;
@@ -668,7 +737,25 @@ export function formatAbacObligationCheck(check: AbacObligationCheck): string {
     (check.rowFiltered.length > 0 ? rowFilteredNote(check.rowFiltered) : "") +
     (check.rowFiltered.length > 0 && check.cursorSealing === "plaintext_accepted"
       ? cursorPlaintextNote(check.rowFiltered)
+      : "") +
+    (check.unservedPositions.length > 0
+      ? `; and ${unservedNote(check.unservedPositions)}`
       : "")
+  );
+}
+
+/**
+ * The sentence for an obligation nothing serves. It names the position and the key, says plainly
+ * that it is not enforced, and gives the only two true remedies — because the thing an author will
+ * otherwise assume is that declaring it did something.
+ */
+function unservedNote(unserved: readonly UnservedAbacObligation[]): string {
+  const rendered = unserved.map((u) => `${u.where} -> '${u.policyKey}'`).join(", ");
+  return (
+    `${unserved.length.toString()} at a position nothing serves and no survey walks, so ` +
+    `${unserved.length === 1 ? "it is" : "they are"} NOT enforced and NOT refused at boot: ` +
+    `${rendered} — nothing in this binary serves a report or a dashboard, so move the obligation ` +
+    `to the entity's own grant in manifest.permissions, or drop it`
   );
 }
 

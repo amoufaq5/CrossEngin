@@ -2,6 +2,7 @@ import type { Entity } from "@crossengin/types/meta-schema";
 import type {
   AbacBatchEvaluator,
   AbacEvaluator,
+  ClassifiedField,
   EntityPermissions,
   RoleDefinition,
 } from "@crossengin/auth";
@@ -53,6 +54,29 @@ const rolesForPrincipal = (p: ResolvedPrincipal | null) => ({
 
 const policyForEntity = () => ({ privilegedRoles: ["clinician"] });
 
+/**
+ * Plays the part `resolvedClassifiedFields` plays in production. It answers from the entity's own
+ * `fields` here only because no fixture gives a *trait* a classified field — which is also true of
+ * all seven shipped packs, and is precisely why reading `entity.fields` directly went unnoticed. A
+ * test that means to exercise a trait-contributed field therefore says so by returning one the
+ * entity does not declare.
+ */
+function classifiedFieldsOf(
+  ...entities: readonly Entity[]
+): (entityName: string) => readonly ClassifiedField[] {
+  return (entityName) => {
+    const entity = entities.find((e) => e.name === entityName);
+    const out: ClassifiedField[] = [];
+    for (const field of entity?.fields ?? []) {
+      if (field.classification !== undefined) {
+        out.push({ name: field.name, classification: field.classification });
+      }
+    }
+    return out;
+  };
+}
+const classifiedFieldsForEntity = classifiedFieldsOf(PATIENT, WIDGET);
+
 // `operationsForEntity` is required and has no default: a mapping computed from the entity name
 // cannot name a lifecycle transition (its id comes from the manifest's workflow), so every default
 // is wrong for exactly the write operations whose responses carry the record. This fixture plays
@@ -99,13 +123,19 @@ function principal(role: string): ResolvedPrincipal {
 
 describe("redactionSpecForEntity", () => {
   it("returns null for an entity with no classified fields", () => {
-    expect(redactionSpecForEntity(WIDGET, new Map(), { rolesForPrincipal })).toBeNull();
+    expect(
+      redactionSpecForEntity(WIDGET, new Map(), {
+        rolesForPrincipal,
+        classifiedFieldsForEntity,
+      }),
+    ).toBeNull();
   });
 
   it("builds a spec from the entity's classified fields", () => {
     const spec = redactionSpecForEntity(PATIENT, new Map(Object.entries(ROLES)), {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
     });
     expect(spec?.classifiedFields).toEqual([
       { name: "mrn", classification: "phi" },
@@ -114,11 +144,133 @@ describe("redactionSpecForEntity", () => {
   });
 });
 
+/**
+ * The resolver is the **only** source of the classification set, which is what closes the trait
+ * gap. An entity whose own `fields` carry no classification and whose served table does — the shape
+ * a custom trait produces, so reachable from an authored manifest and from no shipped pack — used to
+ * yield `null` here, register no spec against any operation, and serve the classified field in the
+ * clear on every response carrying its records.
+ */
+describe("the classified-field resolver is authoritative", () => {
+  /** Declares no classification of its own; its trait contributes one. */
+  const TRACKED: Entity = {
+    name: "Tracked",
+    traits: ["patient_scoped"],
+    fields: [
+      { name: "id", type: { kind: "uuid" } },
+      { name: "label", type: { kind: "text", maxLength: 20 } },
+    ],
+  };
+  /** The trait's own column: in the served table, never in `TRACKED.fields`. */
+  const TRAIT_FIELDS: readonly ClassifiedField[] = [{ name: "patient_mrn", classification: "phi" }];
+  const TRACKED_MANIFEST: RedactionManifestInput = {
+    entities: [TRACKED],
+    permissions: { Tracked: { read: { roles: ["clinician", "front_desk"] } } },
+    roles: ROLES,
+  };
+  const trackedOperations = (name: string): readonly RedactedOperation[] =>
+    name === "Tracked" ? crudOperations("tracked") : [];
+
+  it("registers a spec for an entity whose classified fields come only from the resolver", () => {
+    const registry = redactionRegistryFromManifest(TRACKED_MANIFEST, {
+      rolesForPrincipal,
+      policyForEntity,
+      classifiedFieldsForEntity: () => TRAIT_FIELDS,
+      operationsForEntity: trackedOperations,
+    });
+    const spec = registry.specFor("tracked.read");
+    if (spec === null) throw new Error("expected a spec: the served table has a phi column");
+    expect(spec.classifiedFields).toEqual([{ name: "patient_mrn", classification: "phi" }]);
+    // The consequence, not the shape: the field the raw read could not see is withheld from a
+    // non-privileged role and returned to a privileged one.
+    expect(computeRedactedFields(spec, principal("front_desk"))).toEqual(["patient_mrn"]);
+    expect(computeRedactedFields(spec, principal("clinician"))).toEqual([]);
+  });
+
+  it("takes the resolver's set and never the entity's own, when the two differ", () => {
+    // The fence proper. `own_note` is classified on the entity and absent from the resolver's
+    // answer, so a re-read of `entity.fields` yields `own_note` and a merge of the two yields both
+    // — each a different array from the one asserted here.
+    const DIVERGENT: Entity = {
+      name: "Divergent",
+      fields: [
+        { name: "id", type: { kind: "uuid" } },
+        { name: "own_note", type: { kind: "text", maxLength: 20 }, classification: "pii" },
+      ],
+    };
+    const spec = redactionSpecForEntity(DIVERGENT, new Map(Object.entries(ROLES)), {
+      rolesForPrincipal,
+      classifiedFieldsForEntity: () => TRAIT_FIELDS,
+    });
+    expect(spec?.classifiedFields).toEqual([{ name: "patient_mrn", classification: "phi" }]);
+  });
+
+  it("yields null for a resolver answering `[]`, even for an entity declaring a classification", () => {
+    // The mirror of the test above: authoritative in both directions is what makes it *the* answer
+    // rather than one of two. A real `resolvedClassifiedFields` cannot answer `[]` for `PATIENT`,
+    // since the resolved field list is a superset of the entity's own — so this pins the read and
+    // not a reachable production state. `[]` is an answer and not an absence; the option is
+    // required, so nobody-looked is not expressible.
+    expect(
+      redactionSpecForEntity(PATIENT, new Map(Object.entries(ROLES)), {
+        rolesForPrincipal,
+        policyForEntity,
+        classifiedFieldsForEntity: () => [],
+      }),
+    ).toBeNull();
+  });
+
+  it("registers nothing for an entity the resolver says has no classified field", () => {
+    const registry = redactionRegistryFromManifest(TRACKED_MANIFEST, {
+      rolesForPrincipal,
+      policyForEntity,
+      classifiedFieldsForEntity: () => [],
+      operationsForEntity: trackedOperations,
+    });
+    for (const op of crudOperations("tracked")) {
+      expect(registry.specFor(op.operationId), op.operationId).toBeNull();
+    }
+  });
+
+  it("consults the resolver by entity name, once per entity", () => {
+    // `toEqual` on the whole list, so it pins all three facts at once: the argument is the entity's
+    // declared name and not a slug or an operationId, every entity is asked, and each is asked once
+    // — Patient has six operations and Widget five, so a per-operation call would lengthen this.
+    const asked: string[] = [];
+    redactionRegistryFromManifest(MANIFEST, {
+      rolesForPrincipal,
+      policyForEntity,
+      classifiedFieldsForEntity: (entityName) => {
+        asked.push(entityName);
+        return classifiedFieldsForEntity(entityName);
+      },
+      operationsForEntity,
+    });
+    expect(asked).toEqual(["Patient", "Widget"]);
+  });
+
+  it("refuses when the resolver classifies an entity no operation serves", () => {
+    // The coverage fence reaches the trait case now, which it structurally could not before: such
+    // an entity returned `null` and was skipped, so "no operation names it" and "it has nothing to
+    // redact" were one silent outcome.
+    const build = (): unknown =>
+      redactionRegistryFromManifest(TRACKED_MANIFEST, {
+        rolesForPrincipal,
+        policyForEntity,
+        classifiedFieldsForEntity: () => TRAIT_FIELDS,
+        operationsForEntity: () => [],
+      });
+    expect(build).toThrow(RedactionCoverageError);
+    expect(build).toThrow(/Tracked/);
+  });
+});
+
 describe("redactionRegistryFromManifest", () => {
   it("registers the spec against every operation the caller names, writes and transitions included", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
       operationsForEntity,
     });
     for (const op of OPS["Patient"] ?? []) {
@@ -130,6 +282,7 @@ describe("redactionRegistryFromManifest", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
       operationsForEntity,
     });
     expect(registry.specFor("patient.list")?.recordShape).toBe("page");
@@ -144,6 +297,7 @@ describe("redactionRegistryFromManifest", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
       operationsForEntity,
     });
     expect(registry.specFor("patient.get")).toBeNull();
@@ -154,6 +308,7 @@ describe("redactionRegistryFromManifest", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
       operationsForEntity,
     });
     expect(registry.specFor("widget.read")).toBeNull();
@@ -167,6 +322,7 @@ describe("redactionRegistryFromManifest", () => {
       redactionRegistryFromManifest(MANIFEST, {
         rolesForPrincipal,
         policyForEntity,
+        classifiedFieldsForEntity,
         operationsForEntity: () => [],
       }),
     ).toThrow(RedactionCoverageError);
@@ -174,6 +330,7 @@ describe("redactionRegistryFromManifest", () => {
       redactionRegistryFromManifest(MANIFEST, {
         rolesForPrincipal,
         policyForEntity,
+        classifiedFieldsForEntity,
         operationsForEntity: () => [],
       }),
     ).toThrow(/Patient/);
@@ -183,6 +340,7 @@ describe("redactionRegistryFromManifest", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
       operationsForEntity,
     });
     const spec = registry.specFor("patient.update");
@@ -199,6 +357,7 @@ describe("redactionRegistryFromManifest", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
       operationsForEntity,
     });
     expect(registry.specFor("patient.read")?.entityPermissions).toBe(PATIENT_PERMS);
@@ -213,6 +372,7 @@ describe("redactionRegistryFromManifest", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
       operationsForEntity,
     });
     const read = registry.specFor("patient.read");
@@ -238,6 +398,7 @@ describe("redactionRegistryFromManifest", () => {
     const registry = redactionRegistryFromManifest(MANIFEST, {
       rolesForPrincipal,
       policyForEntity,
+      classifiedFieldsForEntity,
       operationsForEntity: (name) =>
         name === "Patient" ? [{ operationId: "v1.patients.search", recordShape: "page" }] : [],
     });
@@ -246,7 +407,11 @@ describe("redactionRegistryFromManifest", () => {
   });
 
   it("omits a policy when none is supplied (fail-closed for everyone)", () => {
-    const registry = redactionRegistryFromManifest(MANIFEST, { rolesForPrincipal, operationsForEntity });
+    const registry = redactionRegistryFromManifest(MANIFEST, {
+      rolesForPrincipal,
+      classifiedFieldsForEntity,
+      operationsForEntity,
+    });
     const spec = registry.specFor("patient.read");
     if (spec === null) throw new Error("expected spec");
     // no privileged roles -> sensitive fields redacted even for clinician
@@ -271,6 +436,7 @@ describe("redactionRegistryFromManifest", () => {
     const specOf = (input: RedactionManifestInput, evaluator?: AbacEvaluator) =>
       redactionRegistryFromManifest(input, {
         rolesForPrincipal,
+        classifiedFieldsForEntity,
         operationsForEntity,
         ...(evaluator !== undefined ? { abacEvaluator: evaluator } : {}),
       }).specFor("patient.read");
@@ -345,6 +511,7 @@ describe("redactionRegistryFromManifest", () => {
       }) =>
         redactionRegistryFromManifest(OBLIGATED, {
           rolesForPrincipal,
+          classifiedFieldsForEntity,
           operationsForEntity,
           ...options,
         }).specFor("patient.read");

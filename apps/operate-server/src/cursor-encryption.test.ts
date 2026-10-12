@@ -439,9 +439,9 @@ describe("surveySortableClassifiedFields", () => {
   });
 
   it("finds a classified field contributed by a trait", () => {
-    // `resolvedFields` is what the validator uses, so a trait field is a real column the view can
-    // sort by. Surveying `entity.fields` alone would be a blind spot of the shape this fence
-    // exists to close.
+    // `resolvedClassifiedFields` resolves traits, so a trait field is a real column the view can
+    // sort by. Reading `entity.fields` alone would be a blind spot of the shape this fence exists
+    // to close.
     const manifest = {
       manifestVersion: "1.0",
       meta: { name: "Fixture", slug: "fixture/pack", version: "1.0.0" },

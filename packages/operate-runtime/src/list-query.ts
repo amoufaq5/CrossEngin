@@ -96,16 +96,41 @@ interface FieldLike {
   readonly name: string;
   readonly type?: { readonly kind?: string };
 }
-interface EntityLike {
-  readonly name: string;
-  readonly fields?: readonly FieldLike[];
+// `EntityLike` lived here: a structural `{name, fields?}` that omitted `traits`, which is what made
+// the narrow read the only read this module had. It is gone — `resolvedFieldsOf` takes the real
+// `Entity` out of `manifest.entities` and asks the kernel, so there is no entity-shaped local that
+// cannot see a trait.
+
+/**
+ * Every field the entity resolves to — its own and whatever its traits contribute — which is the
+ * list the served table has columns for.
+ *
+ * One private resolution read by all three field-derived outputs of this module, because they used
+ * to disagree: `entityFieldNames` resolved traits while `textFieldsOf` and `referenceFieldsOf`
+ * read `ent.fields`, so one function answered about the served table and two about the entity
+ * declaration, inside `listConfigForEntity`. `ListConfig.fields` therefore held a trait field that
+ * `searchableFields` and `filterableFields` could not — and since ADR-0359 `fields` is what decides
+ * whether an unknown query parameter is ignored or refused, so the split had become
+ * authorization-adjacent: a trait-contributed field was *declared* and *unserveable* at once.
+ *
+ * Behaviour-identical on every shipped pack, measured rather than assumed: not one of the eight
+ * built-in trait fields is a `SEARCHABLE_KINDS` member or a `reference` (they are `datetime`,
+ * `uuid`, `integer` and `boolean`), and no pack declares a custom trait. So only a custom trait can
+ * change an answer here — and when one does, a trait-contributed text field becomes searchable,
+ * which on the column store means `?q` can collapse the whole OR group and
+ * `UNSERVEABLE_SURFACE_REFUSES.search` refuses the request rather than widening it.
+ */
+function resolvedFieldsOf(manifest: Manifest, entity: string): readonly FieldLike[] {
+  const ent = (manifest.entities ?? []).find((e) => e.name === entity);
+  if (ent === undefined) return [];
+  return resolvedFields(ent, manifest.traits ?? []);
 }
 
-/** The entity's text-like field names (searchable), in declaration order. */
+/** The entity's text-like field names (searchable), in resolved declaration order. */
 function textFieldsOf(manifest: Manifest, entity: string): readonly string[] {
-  const ent = ((manifest.entities ?? []) as ReadonlyArray<EntityLike>).find((e) => e.name === entity);
-  if (ent === undefined) return [];
-  return (ent.fields ?? []).filter((f) => SEARCHABLE_KINDS.has(f.type?.kind ?? "")).map((f) => f.name);
+  return resolvedFieldsOf(manifest, entity)
+    .filter((f) => SEARCHABLE_KINDS.has(f.type?.kind ?? ""))
+    .map((f) => f.name);
 }
 
 /**
@@ -143,11 +168,11 @@ function withLifecycleStateFilter(
   return [...filterableFields, sf];
 }
 
-/** The entity's reference (foreign-key) field names, in declaration order. */
+/** The entity's reference (foreign-key) field names, in resolved declaration order. */
 function referenceFieldsOf(manifest: Manifest, entity: string): readonly string[] {
-  const ent = ((manifest.entities ?? []) as ReadonlyArray<EntityLike>).find((e) => e.name === entity);
-  if (ent === undefined) return [];
-  return (ent.fields ?? []).filter((f) => f.type?.kind === "reference").map((f) => f.name);
+  return resolvedFieldsOf(manifest, entity)
+    .filter((f) => f.type?.kind === "reference")
+    .map((f) => f.name);
 }
 
 /**
@@ -216,9 +241,11 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
  * it plainly exists.
  */
 function entityFieldNames(manifest: Manifest, entity: string): readonly string[] {
-  const ent = (manifest.entities ?? []).find((e) => e.name === entity);
-  if (ent === undefined) return ["id"];
-  return ["id", ...resolvedFields(ent, manifest.traits ?? []).map((f) => f.name)];
+  // Through the same `resolvedFieldsOf` as the searchable and reference sets, so the three cannot
+  // disagree about an entity's fields again. An unknown entity answers `["id"]` here rather than
+  // `[]`, which is the one place the three differ and is deliberate: for an existence question `id`
+  // plainly exists, while an unknown entity has no searchable or reference field to name.
+  return ["id", ...resolvedFieldsOf(manifest, entity).map((f) => f.name)];
 }
 
 function firstValue(v: string | readonly string[] | undefined): string | undefined {

@@ -1,4 +1,4 @@
-import { resolvedFields } from "@crossengin/kernel/ddl";
+import { resolvedClassifiedFields } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 import { listConfigForEntity } from "@crossengin/operate-runtime";
 
@@ -93,8 +93,8 @@ export interface ListSurfaceReport {
  * Surveys every entity's declared list surfaces against what the chosen store can express.
  *
  * Through `listConfigForEntity` — the same function the handler uses — so this reads the set
- * `parseListQuery` will accept rather than a second derivation of it, and through `resolvedFields`
- * so a classified **trait** field is in scope.
+ * `parseListQuery` will accept rather than a second derivation of it, and through
+ * `resolvedClassifiedFields` so a classified **trait** field is in scope.
  */
 export function surveyListSurfaces(manifest: Manifest, storeKind: StoreKind): ListSurfaceReport {
   const gaps: EntitySurfaceGap[] = [];
@@ -106,13 +106,17 @@ export function surveyListSurfaces(manifest: Manifest, storeKind: StoreKind): Li
   if (storeKind === "pg-columns") {
     const traits = manifest.traits ?? [];
     for (const entity of manifest.entities ?? []) {
-      // `resolvedFields` and not `entityClassifiedFields`: that helper reads the entity's **own**
-      // fields only, so a classified field contributed by a trait would be invisible to it while
-      // being a real encrypted column on the served table.
+      // `resolvedClassifiedFields` and not a walk over `entity.fields`: a classified field
+      // contributed by a trait is a real encrypted column on the served table, so a reader that
+      // sees only the entity's own fields reports a surface as serveable while the store refuses
+      // it. This used to spell the resolution and the classification separately, because the
+      // helper that answered the second took an *entity* and so could only ever answer the narrow
+      // question — which is the defect itself, one level up: the wide answer needed a workaround
+      // and the narrow one did not.
       const classified = new Set(
-        resolvedFields(entity, traits)
-          .filter((f) => f.classification !== undefined && CIPHERTEXT_CLASSIFICATIONS.has(f.classification))
-          .map((f) => f.name),
+        resolvedClassifiedFields(entity, traits)
+          .filter((c) => CIPHERTEXT_CLASSIFICATIONS.has(c.classification))
+          .map((c) => c.field),
       );
       if (classified.size === 0) continue;
       const config = listConfigForEntity(manifest, entity.name);

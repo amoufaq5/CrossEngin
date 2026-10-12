@@ -79,6 +79,30 @@ export function fieldWriteGrant(
   return writeOp === "create" ? (perm.create ?? perm.update) : perm.update;
 }
 
+/**
+ * **Which arm** {@link fieldWriteGrant} took, or undefined when it found no grant.
+ *
+ * It exists because the sentence above — "so no reader re-derives it" — was not enough. A refusal
+ * has to name the grant that refused, and `write-mask.ts` derived that from `perm.update` while the
+ * decision was made through `fieldWriteGrant(perm, writeOp)`: so a create refused by a field's own
+ * `create` arm reported the *update* grant, sending an operator to widen a list that already named
+ * them. That is the same mistake `dischargeAbac`'s refusal is reported as itself to avoid, one
+ * branch across.
+ *
+ * Written immediately beside the function it describes and over the same `??`, because the hazard
+ * is not that someone reads the wrong field — it is that the answer lives somewhere the fallback's
+ * author cannot see. A third arm on `FieldPermission` has to be answered here or the arm is
+ * unreportable, which is a compile error at the one reader that maps arms to names.
+ */
+export function fieldWriteGrantArm(
+  perm: FieldPermission | undefined,
+  writeOp: FieldWriteOperation,
+): FieldWriteOperation | undefined {
+  if (perm === undefined) return undefined;
+  if (writeOp === "create" && perm.create !== undefined) return "create";
+  return perm.update !== undefined ? "update" : undefined;
+}
+
 export const FIELD_WRITE_OPERATIONS = ["create", "update"] as const;
 export type FieldWriteOperation = (typeof FIELD_WRITE_OPERATIONS)[number];
 

@@ -377,3 +377,102 @@ describe("withheldAddressing", () => {
     expect(withheldAddressing(all, new Set())).toBeNull();
   });
 });
+
+describe("listConfigForEntity — one resolution, three outputs", () => {
+  /** A manifest whose searchable text field and reference field BOTH arrive from a trait. */
+  const viaTrait = (): Manifest =>
+    ({
+      manifestVersion: "1.0",
+      meta: { name: "T", slug: "t/t", version: "1.0.0" },
+      traits: [
+        {
+          name: "contact_bearing",
+          fields: [
+            { name: "note", type: { kind: "long_text" } },
+            { name: "owner_id", type: { kind: "reference", entity: "Thing" } },
+          ],
+        },
+      ],
+      entities: [
+        {
+          name: "Thing",
+          traits: ["contact_bearing"],
+          fields: [{ name: "label", type: { kind: "text", maxLength: 40 } }],
+        },
+      ],
+    }) as unknown as Manifest;
+
+  /** The same two fields declared inline instead. The two must answer identically. */
+  const viaEntity = (): Manifest =>
+    ({
+      manifestVersion: "1.0",
+      meta: { name: "T", slug: "t/t", version: "1.0.0" },
+      entities: [
+        {
+          name: "Thing",
+          fields: [
+            { name: "label", type: { kind: "text", maxLength: 40 } },
+            { name: "note", type: { kind: "long_text" } },
+            { name: "owner_id", type: { kind: "reference", entity: "Thing" } },
+          ],
+        },
+      ],
+    }) as unknown as Manifest;
+
+  // The defect: `entityFieldNames` resolved traits while `textFieldsOf` and `referenceFieldsOf` read
+  // `ent.fields`, so `fields` held a trait field that `searchableFields` and `filterableFields` could
+  // not — two readings of one entity's field list inside one function. Since ADR-0359 `fields` is
+  // what decides whether an unknown query parameter is ignored or refused, so a trait-contributed
+  // field was *declared* and *unserveable* at once.
+  it("answers identically whether a field arrives from a trait or inline", () => {
+    const t = listConfigForEntity(viaTrait(), "Thing");
+    const e = listConfigForEntity(viaEntity(), "Thing");
+    expect([...t.fields].sort()).toEqual([...e.fields].sort());
+    expect([...t.searchableFields].sort()).toEqual([...e.searchableFields].sort());
+    expect([...t.filterableFields].sort()).toEqual([...e.filterableFields].sort());
+  });
+
+  it("includes a trait-contributed text field in searchableFields", () => {
+    expect(listConfigForEntity(viaTrait(), "Thing").searchableFields).toContain("note");
+  });
+
+  it("includes a trait-contributed reference field in filterableFields", () => {
+    expect(listConfigForEntity(viaTrait(), "Thing").filterableFields).toContain("owner_id");
+  });
+
+  // `fields` is the superset the other two are drawn from, so the containment is the invariant that
+  // breaks the moment one of the three reads a different list again.
+  it("keeps every searchable and filterable field inside `fields`", () => {
+    const c = listConfigForEntity(viaTrait(), "Thing");
+    const all = new Set(c.fields);
+    for (const f of [...c.searchableFields, ...c.filterableFields]) expect(all.has(f)).toBe(true);
+  });
+
+  it("still answers ['id'] for an entity the manifest does not declare", () => {
+    // The one place the three outputs differ, and deliberately: for an existence question `id`
+    // plainly exists, while an unknown entity has no searchable or reference field to name.
+    const c = listConfigForEntity(viaTrait(), "Missing");
+    expect(c.fields).toEqual(["id"]);
+    expect(c.searchableFields).toEqual([]);
+  });
+
+  it("omits built-in trait fields from the searchable and reference sets", () => {
+    // Measured, and it is why converging the three was behaviour-identical on every shipped pack:
+    // `auditable`'s fields are `datetime` and `uuid`, neither a SEARCHABLE_KIND nor a reference.
+    const m = {
+      manifestVersion: "1.0",
+      meta: { name: "T", slug: "t/t", version: "1.0.0" },
+      entities: [
+        {
+          name: "Thing",
+          traits: ["auditable"],
+          fields: [{ name: "label", type: { kind: "text", maxLength: 40 } }],
+        },
+      ],
+    } as unknown as Manifest;
+    const c = listConfigForEntity(m, "Thing");
+    expect(c.fields).toContain("created_at");
+    expect(c.searchableFields).toEqual(["label"]);
+    expect(c.filterableFields).toEqual([]);
+  });
+});

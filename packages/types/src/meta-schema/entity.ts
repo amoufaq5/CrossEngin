@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { FieldSchema, type DataClassification } from "./field.js";
+import { FieldSchema, type DataClassification, type Field } from "./field.js";
 import { IndexDefinitionSchema } from "./index-def.js";
 
 const ENTITY_NAME_REGEX = /^[A-Z][A-Za-z0-9]*$/;
@@ -46,9 +46,23 @@ export interface ClassifiedField {
   readonly classification: DataClassification;
 }
 
-export function entityClassifiedFields(entity: Entity): readonly ClassifiedField[] {
+/**
+ * Which of the given fields carry a classification.
+ *
+ * It takes a **field list and not an `Entity`**, and that is the whole point of the signature. An
+ * entity's own `fields` are not the fields its served table has: a trait contributes more, which is
+ * why `resolvedFields` exists and why `validateManifest`, the column plan, the DDL emitter and
+ * `listConfigForEntity` all read it rather than `entity.fields`. An entity-shaped signature here
+ * made the narrow answer the easy one — three readers took it, two of them failing *open* — while
+ * five call sites worked around it by passing `{...entity, fields: [...resolved]}`, a fabricated
+ * entity whose only purpose was to widen the aperture of a function that should never have narrowed
+ * it. A field list cannot be called wrongly: the caller must say which fields it means, and
+ * `resolvedClassifiedFields` in `@crossengin/kernel/ddl` is the one answer for "as the served table
+ * has them".
+ */
+export function classifiedFields(fields: readonly Field[]): readonly ClassifiedField[] {
   const out: ClassifiedField[] = [];
-  for (const f of entity.fields) {
+  for (const f of fields) {
     if (f.classification !== undefined) {
       out.push({ field: f.name, classification: f.classification });
     }

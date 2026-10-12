@@ -49,14 +49,14 @@
  */
 
 import { deriveTenantCursorKey, parseCursorEncryptionSecret } from "@crossengin/crypto";
-import { resolvedFields, type Manifest } from "@crossengin/kernel";
+import { resolvedClassifiedFields, type Manifest } from "@crossengin/kernel";
 import {
   buildCursorSealer,
   listConfigForEntity,
   type CursorKeySource,
   type CursorSealer,
 } from "@crossengin/operate-runtime";
-import { entityClassifiedFields, type DataClassification } from "@crossengin/types/meta-schema";
+import type { DataClassification } from "@crossengin/types/meta-schema";
 
 /**
  * The deployment secret every tenant's cursor key is derived from.
@@ -225,17 +225,17 @@ export interface SortableClassifiedField {
  * sort key (`family_name`) and **five** classified sortable fields, so a default-sort survey
  * misses `Patient.mrn` — the `phi` member — entirely.
  *
- * Three borrowings rather than three restatements, each the function the request path itself uses:
+ * Two borrowings rather than two restatements, each the function the request path itself uses:
  *
  *   - **`listConfigForEntity`** derives the sortable set, so this reads the set
  *     `parseListQuery` will actually accept — including that a hidden column is not sortable, that
  *     `sortable: false` opts out, and that an entity with no list view exposes no sort surface at
  *     all (an empty set, and therefore never a finding).
- *   - **`resolvedFields`** supplies the field list, so a classified field arriving through a
- *     **trait** is in scope. Surveying `entity.fields` would be a blind spot of exactly the shape
- *     this repo keeps finding — a field `validateManifest` sees, the emitted table has, the view
- *     can sort by, and the survey does not.
- *   - **`entityClassifiedFields`** says which of them are classified.
+ *   - **`resolvedClassifiedFields`** says which fields are classified **as the served table has
+ *     them**, so a classified field arriving through a **trait** is in scope. Reading
+ *     `entity.fields` would be a blind spot of exactly the shape this repo keeps finding — a field
+ *     `validateManifest` sees, the emitted table has, the view can sort by, and the survey does
+ *     not.
  *
  * The predicate is **classified** and deliberately *not* narrowed by `isSensitiveDataClass`,
  * which is ADR-0345's stated reason at a second surface: narrowing it would let a boot pass still
@@ -246,10 +246,10 @@ export interface SortableClassifiedField {
  * same function and nothing stops it classifying a field `internal`.
  *
  * Order is entity declaration order, then resolved field order — `surveyPhiFields`' order, so the
- * detail a boot prints is stable across boots and diffable between two manifests. Iterating the
- * resolved fields rather than `sortableFields` also makes the result naturally free of duplicates,
- * since `resolvedFields` emits each name once while a view may legitimately declare one field as
- * two columns.
+ * detail a boot prints is stable across boots and diffable between two manifests. Driving the loop
+ * from the classified fields rather than from `sortableFields` also makes the result naturally free
+ * of duplicates, since the resolution emits each name once while a view may legitimately declare
+ * one field as two columns.
  */
 export function surveySortableClassifiedFields(
   manifest: Manifest,
@@ -259,11 +259,7 @@ export function surveySortableClassifiedFields(
   for (const entity of manifest.entities ?? []) {
     const sortable = new Set(listConfigForEntity(manifest, entity.name).sortableFields);
     if (sortable.size === 0) continue;
-    const resolved = resolvedFields(entity, traits);
-    for (const { field, classification } of entityClassifiedFields({
-      ...entity,
-      fields: [...resolved],
-    })) {
+    for (const { field, classification } of resolvedClassifiedFields(entity, traits)) {
       if (!sortable.has(field)) continue;
       out.push({ entity: entity.name, field, classification });
     }

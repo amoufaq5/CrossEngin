@@ -145,6 +145,11 @@ import {
 } from "./envelope-tenant-readiness.js";
 import { formatListSurfaceReport, surveyListSurfaces } from "./list-surface-survey.js";
 import {
+  formatViewPermissionSurvey,
+  surveyViewPermissionOverrides,
+  viewPermissionsAreSuspect,
+} from "./view-permission-survey.js";
+import {
   formatUniqueEnforcementReport,
   surveyUniqueEnforcement,
   uniqueEnforcementIsSuspect,
@@ -930,6 +935,26 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     console.info(surfaceLine);
   } else {
     console.warn(surfaceLine);
+  }
+  // Whether any view declares its own role list instead of inheriting the entity's — because
+  // nothing reads one. `validateManifest` checks those names against `manifest.roles`, and its
+  // comment used to claim an undeclared role "fails closed at serve time", which is false in the
+  // direction that made the gap look handled: `listConfigForEntity` is the only serve-time reader
+  // of `manifest.views` and takes `columns`, `sort` and `pageSize` from it, while `UiSchema` carries
+  // no view at all — so there is not even a client that could honour the declaration. An override
+  // is therefore strictly *wider* in effect than it reads: the view is presented per the entity's
+  // grants.
+  //
+  // A pure function of the manifest and so said once here, not per store: unlike the surface survey
+  // above, the answer does not depend on `--store`. Reports and never refuses, and said either way
+  // including when the count is zero — which it is on all seven packs, 132 views every one of them
+  // `"inherit"`, and that is precisely when it costs nothing to start saying.
+  const viewPermissions = surveyViewPermissionOverrides(manifest);
+  const viewPermissionLine = formatViewPermissionSurvey(viewPermissions);
+  if (viewPermissionsAreSuspect(viewPermissions)) {
+    console.warn(viewPermissionLine);
+  } else {
+    console.info(viewPermissionLine);
   }
   // Who may read and write each sensitive class. One declaration, both directions: the same policy
   // object reaches the response-redaction registry and the write mask, because `privilegedForClass`

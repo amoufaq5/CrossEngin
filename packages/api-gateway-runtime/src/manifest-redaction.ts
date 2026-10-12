@@ -1,4 +1,4 @@
-import { entityClassifiedFields, type Entity } from "@crossengin/types/meta-schema";
+import type { Entity } from "@crossengin/types/meta-schema";
 import type {
   AbacBatchEvaluator,
   AbacEvaluator,
@@ -31,6 +31,32 @@ export interface RedactionManifestInput {
 export interface RedactionSpecOptions {
   readonly rolesForPrincipal: (principal: ResolvedPrincipal | null) => PrincipalRoles;
   readonly policyForEntity?: (entityName: string) => SensitiveFieldPolicy | undefined;
+  /**
+   * The entity's classified fields **as the served table has them**, by entity name.
+   *
+   * Required, and deliberately with no fallback to `entity.fields` — that fallback *was* the
+   * defect. A trait contributes real columns, which is why `validateManifest`, the column plan, the
+   * DDL emitter and `listConfigForEntity` all read `resolvedFields` rather than `entity.fields`; so
+   * an entity whose only classified field arrives from a trait carries that field in its served
+   * table and not in its own list. Reading the raw list here answered "no classified fields",
+   * returned `null`, and registered **no spec at all** — so every response carrying that entity's
+   * records went out with the classified field in the clear. It failed *open*, and reported success.
+   *
+   * The gateway cannot derive the answer itself. Merging a trait's fields needs
+   * `BUILT_IN_TRAIT_FIELDS`, which lives in `@crossengin/kernel`, and this package deliberately does
+   * not depend on it: `RedactionManifestInput` is a structural seam declaring `entities`,
+   * `permissions` and `roles` and **not** `traits`, which is the shape of the defect rather than an
+   * oversight in it. So the caller that already holds the kernel's answer
+   * (`resolvedClassifiedFields`) supplies it, and the compiler asks rather than a default guessing
+   * — ADR-0338's rule, which this interface's sibling `operationsForEntity` already follows: a
+   * default that cannot possibly be correct fails silently in the unsafe direction.
+   *
+   * An entity that resolves to no classified field still yields `null` and registers nothing, and
+   * that is correct rather than a gap: `[]` is the resolver's **answer** — the same answer the raw
+   * read used to give for a genuinely unclassified entity — and because the option is required it
+   * can never be confused with nobody having looked.
+   */
+  readonly classifiedFieldsForEntity: (entityName: string) => readonly ClassifiedField[];
   /**
    * Discharges an ABAC obligation on a field `read` grant. One evaluator for
    * the whole manifest, not one per entity: the obligation's evaluation input
@@ -99,7 +125,7 @@ export interface ManifestRedactionOptions extends RedactionSpecOptions {
 export type EntityRedactionSpec = Omit<ResponseRedactionSpec, "recordShape">;
 
 /**
- * An entity declares a classified field and the caller's index names no
+ * An entity resolves to a classified field and the caller's index names no
  * operation for it — so the spec has nowhere to be registered and every
  * response carrying that entity's records would go out unredacted. A refusal,
  * because the alternative is a server that serves PHI in the clear and reports
@@ -124,12 +150,11 @@ export function redactionSpecForEntity(
   options: RedactionSpecOptions,
   entityPermissions?: EntityPermissions,
 ): EntityRedactionSpec | null {
-  const classified = entityClassifiedFields(entity);
-  if (classified.length === 0) return null;
-  const classifiedFields: ClassifiedField[] = classified.map((c) => ({
-    name: c.field,
-    classification: c.classification,
-  }));
+  // The resolver and never `entity.fields`: the entity is here to be *named*, not to be measured.
+  // A trait's columns are in the served table and not in that list, so reading it is exactly the
+  // open failure `classifiedFieldsForEntity` exists to close.
+  const classifiedFields = options.classifiedFieldsForEntity(entity.name);
+  if (classifiedFields.length === 0) return null;
   const policy = options.policyForEntity?.(entity.name);
   return {
     classifiedFields,
@@ -150,12 +175,16 @@ export function redactionSpecForEntity(
 }
 
 /**
- * Builds a `RedactionRegistry` from a manifest: every entity that declares a
+ * Builds a `RedactionRegistry` from a manifest: every entity that *resolves to* a
  * classified field contributes a `ResponseRedactionSpec`, registered against
  * every operation `operationsForEntity` names for it — which the caller
  * derives from the routes it actually registered, since nothing here can know
  * them. Entities with no classified fields are skipped; an entity that has them
  * and no operation is a `RedactionCoverageError` rather than a silent omission.
+ *
+ * "Resolves to" is load-bearing and is the one thing `manifest.entities` cannot answer: the
+ * classification set comes from `classifiedFieldsForEntity`, because a trait-contributed column is
+ * served and is not in `entity.fields`.
  *
  * One spec per operation now, because `recordShape` is per operation; the shared members stay
  * shared by reference, so the per-operation object is a spread of one base and a string.

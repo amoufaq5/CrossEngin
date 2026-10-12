@@ -6,7 +6,7 @@ import {
   type AbacGrantPosition,
   type AbacObligation,
 } from "@crossengin/auth";
-import type { Manifest } from "@crossengin/kernel";
+import { ManifestSchema, type Manifest } from "@crossengin/kernel";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -16,6 +16,7 @@ import {
   checkAbacObligations,
   formatAbacObligationCheck,
   type AbacObligationCheck,
+  type UnservedAbacObligation,
 } from "./abac-obligations.js";
 import { ABAC_POLICY_FLAG } from "./abac-policy.js";
 import {
@@ -80,6 +81,7 @@ function check(parts: Partial<AbacObligationCheck> = {}): AbacObligationCheck {
     listSortConflicts: [],
     cursorDisclosing: [],
     cursorSealing: "sealed",
+    unservedPositions: [],
     refusal: null,
     ...parts,
   };
@@ -436,6 +438,53 @@ describe("formatAbacObligationCheck", () => {
     expect(formatAbacObligationCheck(check())).toBe(
       "abac obligations: none declared, so no grant depends on an ABAC evaluator",
     );
+  });
+
+  // The affirmative line is a claim about the MANIFEST, and `obligations` is a claim about one
+  // section of it. `surveyAbacObligations` takes a `PermissionMap`, while an `RbacGrant` — which
+  // carries `abac` — also hangs off a report and a dashboard, so a manifest whose only obligation
+  // sat there printed "none declared" and booted. That is the falsely-true report in the one
+  // sentence added so a clean survey could not be inferred from silence.
+  it("does NOT say none were declared when an obligation sits at an unserved position", () => {
+    const line = formatAbacObligationCheck(
+      check({
+        unservedPositions: [
+          { where: "reports.weekly_dispensing.permissions", policyKey: "same_facility" },
+        ],
+      }),
+    );
+    expect(line).not.toContain("none declared");
+    expect(line).toMatch(
+      /^abac obligations: none on an entity grant, but 1 at a position nothing serves and no survey walks, so it is NOT enforced and NOT refused at boot: reports\.weekly_dispensing\.permissions -> 'same_facility' — nothing in this binary serves a report or a dashboard, so move the obligation to the entity's own grant in manifest\.permissions, or drop it$/,
+    );
+  });
+
+  it("appends the unserved note to the ordinary line too, so one does not hide the other", () => {
+    const line = formatAbacObligationCheck(
+      check({
+        obligations: [
+          { entity: "Patient", operation: "read", field: null, policyKey: "same_facility" },
+        ],
+        evaluatorDeclared: true,
+        unservedPositions: [
+          { where: "dashboards.ops.permissions", policyKey: "same_region" },
+        ],
+      }),
+    );
+    expect(line).toContain("1 declared and an evaluator is declared");
+    expect(line).toContain("; and 1 at a position nothing serves");
+    expect(line).toContain("dashboards.ops.permissions -> 'same_region'");
+  });
+
+  it("pluralises the unserved note and keeps declaration order", () => {
+    const unserved: readonly UnservedAbacObligation[] = [
+      { where: "dashboards.ops.permissions", policyKey: "a" },
+      { where: "reports.r.permissions", policyKey: "b" },
+    ];
+    const line = formatAbacObligationCheck(check({ unservedPositions: unserved }));
+    expect(line).toContain("2 at a position nothing serves");
+    expect(line).toContain("they are NOT enforced");
+    expect(line.indexOf("dashboards.ops")).toBeLessThan(line.indexOf("reports.r"));
   });
 
   it("says the same affirmative line whether or not an evaluator is declared", () => {
@@ -944,6 +993,32 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
     });
   }
 
+  /**
+   * The same served table as `sortManifest({sortField: "note", obligationOn: "list"})`, reached the
+   * other way: `note` arrives from a trait rather than from the entity. Everything the refusal
+   * reads is otherwise identical, so a difference in the verdict can only come from which field
+   * list the classification was looked up in.
+   */
+  function traitSortManifest(): Manifest {
+    return manifest({
+      traits: [
+        {
+          name: "annotated",
+          fields: [{ name: "note", type: { kind: "text" }, classification: "phi" }],
+        },
+      ],
+      entities: [
+        {
+          name: "Chart",
+          traits: ["annotated"],
+          fields: [{ name: "label", type: { kind: "text" } }],
+        },
+      ],
+      views: chartListView("note"),
+      permissions: { Chart: { list: { roles: ["clinician"], abac: "rec" } } },
+    });
+  }
+
   const declared = (m: Manifest): AbacObligationCheck =>
     checkAbacObligations({
       manifest: m,
@@ -958,6 +1033,32 @@ describe("the list_sort_addresses_withheld_field refusal", () => {
     expect(result.listSortConflicts).toEqual([
       { entity: "Chart", field: "note", classification: "phi", policyKey: "rec" },
     ]);
+  });
+
+  it("refuses when the classified field arrives through a trait", () => {
+    // The only test in this file that exercises trait resolution, and this refusal is where it
+    // matters most of the five surveys that read a classification: the other four *report*, so a
+    // narrowed read costs them a line, while here it disarms the fence. Read over `entity.fields`,
+    // `Chart` has no classified field at all, `listSortConflicts` is empty, no refusal fires — and
+    // the deployment boots serving a list whose manifest-chosen default sort puts a trait-
+    // contributed `phi` value for a withheld row into every `nextCursor`, which is the exact
+    // disclosure this refusal exists to prevent and which no caller can opt out of.
+    const result = declared(traitSortManifest());
+    expect(result.refusal).toBe("list_sort_addresses_withheld_field");
+    expect(result.listSortConflicts).toEqual([
+      { entity: "Chart", field: "note", classification: "phi", policyKey: "rec" },
+    ]);
+  });
+
+  it("answers identically whether the classified field is on the entity or on a trait", () => {
+    // The equivalence is the property, asserted as equality rather than as two expectations so
+    // the two manifests cannot drift into agreeing for different reasons. It is exact here:
+    // `defaultSort` is read off the view's own `sort` and so does not depend on the field list,
+    // leaving the classification lookup as the only thing that differs between the two shapes.
+    const viaTrait = declared(traitSortManifest());
+    const viaEntity = declared(sortManifest({ sortField: "note", obligationOn: "list" }));
+    expect(viaTrait.listSortConflicts).toEqual(viaEntity.listSortConflicts);
+    expect(viaTrait.refusal).toBe(viaEntity.refusal);
   });
 
   it("does not refuse when the default sort names an unclassified field", () => {
@@ -1447,6 +1548,84 @@ describe("the cursor_discloses_withheld_rows refusal", () => {
       });
       expect(result.cursorDisclosing, name).toEqual([]);
       expect(result.refusal, name).toBeNull();
+    }
+  });
+});
+
+describe("checkAbacObligations — obligations outside manifest.permissions", () => {
+  /** One grid cell, the minimum a `DashboardDeclaration` accepts. */
+  function dashboardCell(): unknown {
+    // A divider, which references no report — so the fixture needs no `reports` section and
+    // `validateDashboards`' widget-reference check has nothing to resolve.
+    return { x: 0, y: 0, w: 1, h: 1, widget: { kind: "divider" } };
+  }
+
+  /**
+   * A manifest whose only grant sits on a **report**, parsed through `ManifestSchema` rather than
+   * cast: the point of these tests is that such a manifest is one a reviewer could approve and a
+   * deployment could boot, so a cast past the schema would prove nothing.
+   */
+  function reportManifest(permissions: { roles: string[]; abac?: string }): Manifest {
+    return ManifestSchema.parse({
+      manifestVersion: "1.0",
+      meta: { name: "Fixture", slug: "fixture/pack", version: "1.0.0" },
+      entities: [{ name: "Patient", fields: [{ name: "label", type: { kind: "text" } }] }],
+      reports: {
+        weekly: {
+          kind: "tabular",
+          entity: "Patient",
+          groupBy: ["label"],
+          aggregations: [{ name: "count", kind: "count" }],
+          permissions,
+        },
+      },
+    });
+  }
+
+  const SURVEY_INPUT = {
+    answerableKeys: new Set<string>(),
+    recordBearingKeys: new Set<string>(),
+    cursorSealing: "sealed" as const,
+  };
+
+  it("reports a report's grant obligation, which surveyAbacObligations cannot see", () => {
+    const m = reportManifest({ roles: ["clinician"], abac: "same_facility" });
+    const result = checkAbacObligations({ manifest: m, ...SURVEY_INPUT });
+    expect(result.obligations).toEqual([]);
+    expect(result.unservedPositions).toEqual([
+      { where: "reports.weekly.permissions", policyKey: "same_facility" },
+    ]);
+    // Reported, never refused: nothing serves a report, so no grant is served with its qualifier
+    // removed, which is the condition ADR-0340's no-hatch refusal is about.
+    expect(result.refusal).toBeNull();
+  });
+
+  it("reports a dashboard's, and sorts within each section by id", () => {
+    const m = ManifestSchema.parse({
+      manifestVersion: "1.0",
+      meta: { name: "Fixture", slug: "fixture/pack", version: "1.0.0" },
+      dashboards: {
+        zeta: { cells: [dashboardCell()], permissions: { roles: ["ops"], abac: "z" } },
+        alpha: { cells: [dashboardCell()], permissions: { roles: ["ops"], abac: "a" } },
+      },
+    });
+    const result = checkAbacObligations({ manifest: m, ...SURVEY_INPUT });
+    expect(result.unservedPositions.map((u) => u.where)).toEqual([
+      "dashboards.alpha.permissions",
+      "dashboards.zeta.permissions",
+    ]);
+  });
+
+  it("answers empty for a grant with roles and no abac, so the survey is about the key alone", () => {
+    const m = reportManifest({ roles: ["clinician"] });
+    expect(checkAbacObligations({ manifest: m, ...SURVEY_INPUT }).unservedPositions).toEqual([]);
+  });
+
+  it("is empty for every builtin pack, which is why the lie went unnoticed", async () => {
+    for (const name of BUILTIN_PACK_NAMES) {
+      const resolved = await loadBuiltinPack(name);
+      const result = checkAbacObligations({ manifest: resolved, ...SURVEY_INPUT });
+      expect(result.unservedPositions, name).toEqual([]);
     }
   });
 });

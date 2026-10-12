@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 355 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 356 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 18,787 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 18,929 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -776,7 +776,7 @@ type errors.
 
   ADR-0357 turns the question **outward**. Every increment from ADR-0330 asked something about the
   *artifact* — does this store write the columns it names, does this CHECK admit what the contract
-  emits, does this property name the column it is read from — and the nine rules in
+  emits, does this property name the column it is read from — and the ten rules in
   `packages/testing/src/strategy/` are that question asked nine ways. This one reads `deploy/`
   against the code, and the class is **a claim about the deployment that the deployment does not
   make**: four protections stated in one place and absent from the place that would enforce them.
@@ -959,6 +959,47 @@ type errors.
   consumers"* was the inverse: wrong cause, right conclusion — it *is* wired and `return`ed early on
   `applied: true`, which is exactly the arm a withheld index arrives on.
 
+  ADR-0361 is the mirror of ADR-0360 and the class is **a reader whose aperture is narrower than the
+  writer's**. `entityClassifiedFields(entity)` read `entity.fields`, which is not the set the served
+  table has — a trait contributes more — so the narrow answer needed no workaround and the wide one
+  did: **five** call sites spelled the wide form by hand as
+  `entityClassifiedFields({...entity, fields: [...resolved]})`, a fabricated entity whose only purpose
+  was to widen the aperture of a function that should never have narrowed it, and **three** took the
+  narrow one. Three of eight readers wrong is a convention failing, not three typos. And in every
+  instance of the class **the comment beside the narrow read asserts the property the narrow read
+  breaks** — one of them *true and worthless* (`write-mask.ts` claimed the mask and the redaction
+  "cannot drift apart" because they read the same source; both read the raw entity, so they agreed
+  **in being wrong**), the rest simply false: the rule re-derivation "from the same two inputs the
+  rule itself read", a view's undeclared role that "fails closed at serve time", and ADR-0340's
+  affirmative *"abac obligations: none declared"*. **An invariant two readers agree on is not an
+  invariant either is right about**; agreement is cheap when both read the same narrow source.
+  Live on both stores as a non-owner, the boot line and the request path contradicted each other about
+  one field in one process **and the boot line was the wrong one**, in the reassuring direction:
+  `[fields] writable by no declared role: 2 — Contact.declared_email, Contact.personal_email`, and
+  seconds later a 201 for `personal_email` with the plaintext handed back in the create response, a
+  `GET` redacting the declared field and returning the trait one **in full**, and a `PATCH`
+  overwriting it. ADR-0337's falsely-true-control direction in a new place and worse than silence: the
+  surface built to make classification legible is the thing that concealed the gap. After, the two
+  fields are an exact complement in every direction — both 403 for the unprivileged role, both 201
+  and both visible for the privileged one under `--sensitive-field-class pii=boss`.
+  The same narrow read **fails in opposite directions** depending on the consumer's drop set: the
+  gateway drops `redacted` alone so an undescribed key passes through, while `redactAuditPayloads`
+  drops `redacted ∪ undescribed` so it is withheld — even from a reader privileged for `pii`. So one
+  of the three is a capability gap and not a disclosure, which is a decision rather than a patch; its
+  *remedy comment* was the trap, since taking its advice for the field list alone makes every trait
+  field a described, unclassified one and converts a fail-closed omission into a fail-open disclosure.
+  Two omissions outranked all three of the register's claims: `validateClassifications` read raw, so
+  the `phi`-requires-`auditable` **invariant was bypassable by moving the declaration into a trait**;
+  and `assessManifestRisk` and `manifest-diff.ts`'s `classificationLayer` read raw, so **the reviewer's
+  approval gate is on the narrow side of the split** — a trait-carried PHI manifest reports
+  `level: "low", sensitiveFields: 0`, and weakening `phi` → `internal` on a trait field is approved
+  unseen. The recurring rule held an **eighth** time: the honest fix sits one level up. The pain was
+  three readers that forgot; one level up is a signature in which forgetting is not expressible
+  (`classifiedFields` takes a field list, so there is no entity-shaped call to get wrong) plus
+  `resolvedClassifiedFields` as the one answer, plus a **tenth** workspace rule over the whole class —
+  which found 12 raw readers where this increment's own grep had found 8, three of them `fails_open`,
+  and refused four broader anchors on measurement.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -1088,6 +1129,34 @@ packages exist at only one layer, noted below where that is true.
   declaration (which `entity.fields` would miss entirely). A validation error on the same split as
   the three above, and vacuous today — 0 of the 47 source declarations use the scoped form, which is
   precisely why it costs nothing to refuse the incoherent case now.
+  **And `validateClassifications` resolves traits, where the whole invariant was bypassable by moving
+  the declaration one level out** (ADR-0361): the identical `phi` field was *refused* on
+  `entity.fields` and *accepted* on a trait, with the served table carrying the same column either
+  way. A validation rule whose predicate is narrower than the artifact it constrains is a spelling
+  convention, not a rule. Two loops rather than one over the resolved set, because the path and the
+  remedy differ by where the declaration is: an own field indexes `fields[j]` and its remedy is
+  local, while a trait's field has no index in this entity at all, so the path names the trait and
+  the message carries the warning the own-field case does not need — a trait is shared, so dropping
+  the classification there changes every entity carrying it, and adding `auditable` to *this* entity
+  is the change whose blast radius is one entity.
+  **And `validateReports`/`validateDashboards` check their grants' role names** (ADR-0361), which
+  nothing did: a report's and a dashboard's `permissions` is an `RbacGrant` whose roles were validated
+  by no one, so a manifest granting a report to `ghost_report_role` passed — while a *view's* were
+  checked, which made "a declaration is validated" true of one surface and false of two that look
+  identical from the manifest. `validateReports`' former `reportIds.has(key)` duplicate check is
+  **deleted** rather than kept: `reports` is a `z.record`, so `Object.entries` cannot yield one key
+  twice and the condition was unreachable — a check that cannot fire reads as coverage it does not
+  provide, which is the same vacuity this file already records for `validateFiles`. Validation errors
+  on ADR-0348's split, and vacuous today (0 reports and 0 dashboards in any pack), which is exactly
+  when they cost nothing.
+  `resolvedClassifiedFields(entity, customTraits)` joins `resolvedFields` and `resolvedFieldNames` in
+  `ddl/resolution.ts` as **the one answer to "which of this entity's fields are classified, as the
+  served table has them"** (ADR-0361) — the reason `resolvedFields` is the one answer to "which fields
+  become columns?". Five call sites were spelling it by hand as
+  `entityClassifiedFields({...entity, fields: [...resolved]})`, a fabricated entity whose only purpose
+  was to widen the aperture of a function that should never have narrowed it, while three read
+  `entity.fields` directly — and the three were invisible precisely *because* the helper took an
+  entity: the narrow answer needed no workaround and the wide one did.
 - **`kernel-pg`** — the impure applier. `PgConnection` + `parsePgEnvConfig` + node-postgres
   binding, advisory-lock-gated per-statement migration application with `_meta_migrations`
   hash bookkeeping, preconditions, and the pgcrypto at-rest encryption stack (coverage report,
@@ -1216,7 +1285,14 @@ packages exist at only one layer, noted below where that is true.
   count of `verify-ca` anywhere in the repo is **zero**. The one remaining mode comparison is
   `disable`, which the assurance deliberately cannot answer.
 - **`types`** — deliberately tiny: branded primitive id types (`TenantId`, `UserId`,
-  `RequestId`, `ManifestId`). One file.
+  `RequestId`, `ManifestId`) plus the `meta-schema` record shapes.
+  **`classifiedFields(fields)` takes a field list and not an `Entity`** (ADR-0361), and the signature
+  is the whole fence. It was `entityClassifiedFields(entity)` reading `entity.fields`, which is not
+  the set the served table has — a trait contributes more — so the narrow answer was the only one
+  reachable without fabricating an entity. Three of its eight readers took it and two of those failed
+  **open**. A field list cannot be called wrongly: the caller must say which fields it means, and
+  `resolvedClassifiedFields` in `@crossengin/kernel/ddl` is the one answer for "as the served table
+  has them".
 - **`config`** — shared TypeScript / ESLint / Prettier config bases. No `src/`.
 - **`testing`** — the shared `vitestPreset`. One file.
 
@@ -1240,6 +1316,21 @@ packages exist at only one layer, noted below where that is true.
   beside `EntityStore` because the handler that turns it into a 400 cannot import
   `operate-runtime-pg` — caught in the list arm and answered with its own sentence, since a caller
   told "not filterable" would ask for the column to be exposed and on that path it already is.
+  **`listConfigForEntity`'s three field-derived outputs read one private `resolvedFieldsOf`** since
+  ADR-0361, where `entityFieldNames` resolved traits and `textFieldsOf`/`referenceFieldsOf` read
+  `ent.fields` through a module-local `EntityLike` — two readings of one entity's field list inside
+  one function. `ListConfig.fields` therefore held a trait field that `searchableFields` and
+  `filterableFields` could not, and since ADR-0359 `fields` is what decides whether an unknown query
+  parameter is ignored or refused, so the split had become authorization-adjacent: a trait-contributed
+  field was *declared* and *unserveable* at once. `EntityLike` is **deleted** — a structural
+  `{name, fields?}` omitting `traits` is what made the narrow read the only read this module had.
+  Behaviour-identical on every shipped pack, measured: not one of the eight built-in trait fields is a
+  `SEARCHABLE_KINDS` member or a `reference` (they are `datetime`, `uuid`, `integer` and `boolean`),
+  and the only trait any pack declares is `auditable`. When a custom trait does reach it a
+  trait-contributed text field becomes searchable, which on the column store means `?q` can collapse
+  the whole OR group and `UNSERVEABLE_SURFACE_REFUSES.search` refuses the request rather than widening
+  it — a consequence a pinned test in `list-surface-survey.test.ts` named by failing when the
+  convergence landed.
   `writeTxn` no longer puts `e.message` in its 500 body — which **filter rows** since ADR-0345, when a
   record-bearing obligation sits on an entity's `list` grant: the arm asks `rbacCheckForRecords`
   once for the page it loaded and drops the refused rows, passing the store's `nextCursor` through
@@ -1444,6 +1535,21 @@ packages exist at only one layer, noted below where that is true.
   import the pg or crypto packages, no error class declares a disposition, and keying on `err.name`
   is ADR-0288's maintained list — wrong three times here. `gatewayTimeout` now has no non-test
   caller on the request path and stays, with a comment saying why.
+  **Which fields are classified is supplied, never derived** (ADR-0361): `RedactionSpecOptions`
+  carries a **required** `classifiedFieldsForEntity` resolver and `redactionSpecForEntity` reads only
+  that, with the `entityClassifiedFields(entity)` import deleted — because that read *was* the defect.
+  A trait-contributed classified field yielded no classification, so for an entity whose only
+  classified fields come from a trait the function returned `null`, **no spec was registered at all**,
+  and every response carrying that entity's records went out in the clear. `RedactionManifestInput` is
+  a deliberate structural seam — a full `Manifest` is assignable to it so this package need not depend
+  on `@crossengin/kernel` — and it declares `entities`, `permissions` and `roles` and **not `traits`**,
+  which is the shape of the defect. Required rather than optional-with-a-fallback on ADR-0338's
+  argument, which this file already followed once for `operationsForEntity`: a default that cannot
+  possibly be correct fails silently in the unsafe direction, so the compiler asks instead. Adding
+  kernel here was measured **acyclic** and refused anyway — it contradicts the seam's own stated
+  reason and would drag kernel's `files`/`i18n`/`integrations`/`jobs`/`reporting`/`search`/`views`
+  closure into the request edge. `compile.ts` supplies the **same index** the write mask holds, so the
+  two halves of ADR-0329 read one object rather than two derivations of one fact.
   **Redaction covers writes since ADR-0338, and until then it did not.** The stage itself was always
   fine — it is operation-keyed off `route.operationId` and redacts any JSON response with a spec —
   but the registry was populated from `[list, read]` while the routes emit
@@ -1729,7 +1835,16 @@ packages exist at only one layer, noted below where that is true.
   registration, never changed** and narrowing who may change a `required` field necessarily narrowed
   who may create the record. `create` **absent falls back to `update`**, which is what let the arm
   land without changing the meaning of a single shipped declaration, and `fieldWriteGrant(perm,
-  writeOp)` is the one spelling of that fallback so no reader re-derives it. `update ⊆ read` is
+  writeOp)` is the one spelling of that fallback so no reader re-derives it.
+  **That sentence was not enough, so `fieldWriteGrantArm` sits beside it** (ADR-0361), answering
+  *which arm* `fieldWriteGrant` took. A refusal has to name the grant that refused, and
+  `write-mask.ts` derived that from `perm.update` while the decision was made through
+  `fieldWriteGrant(perm, writeOp)` — so a create refused by a field's own `create` arm reported the
+  **update** grant, sending an operator to widen a list that already named them. Measured live on
+  `erp-core`: `ap_clerk` POSTing `contact_phone` got `explicit_update_grant` and PATCHing the same
+  field returned **200**, so the remedy the 403 pointed at was already satisfied. Written immediately
+  beside the function it describes and over the same `??`, because the hazard was never that someone
+  reads the wrong field — it is that the answer lived somewhere the fallback's author could not see. `update ⊆ read` is
   enforced by the kernel and **`create` is deliberately not**: a principal supplying a value already
   knows it, so writing it discloses nothing, while changing a value you cannot read destroys one you
   cannot see. `validateClassifiedWriteMask` takes a trailing `writeOp` defaulted to `"update"` — a
@@ -2627,6 +2742,16 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`views`** — frontend renderer contracts: 8 view kinds (list, record, form, kanban,
   calendar, map, dashboard, pivot), columns with render hints, filter operators,
   permissions, theme, widgets.
+  **`PermissionRefSchema` carries no `abac` key** (ADR-0361). An obligation is a qualifier something
+  has to *discharge*, and the only surface that discharges one is the entity grant path —
+  `surveyAbacObligations` walks `manifest.permissions` and nothing else, which is what ADR-0340's boot
+  refusal is built from. A key here would be an obligation no deployment could discharge *and* no boot
+  check could see: approved by a reviewer, hashed into `manifestHash`, and served with its qualifier
+  silently removed. Deleted rather than surveyed because the measured count of views declaring one is
+  **zero**, and because a view's permission declaration is served by nothing at all today — modelling
+  an obligation on an unserved surface is a trap for an author rather than a capability. The `roles`
+  half stays: it is validated against `manifest.roles` and a boot survey reports that this deployment
+  does not read it.
 - **`i18n`** — locales (11 on the roadmap, incl. RTL Arabic variants), ICU MessageFormat
   parsing, CLDR plural categories, bundles, resolution chains, calendar/numbering systems,
   per-tenant config.
@@ -2635,6 +2760,14 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
 - **`reporting`** — 7 report kinds (tabular, pivot, timeseries, kpi, funnel, cohort,
   custom), aggregations, dashboards on a grid layout, schedules and exports, ClickHouse
   audit sink, CDC pipeline health.
+  **`BaseReportSchema` has no second `abac` field** (ADR-0361). There was one beside `permissions`,
+  and it was three things at once: a **duplicate** of `permissions.abac` with no rule for which wins,
+  **unbounded** where the authoritative spelling is `max(MAX_ABAC_POLICY_KEY_LENGTH)`, and read by
+  **nothing** — zero readers in the workspace, zero reports declared in any pack. Deleted on
+  `PermissionRefSchema`'s argument at the same cost of zero. The obligation a report *can* still carry
+  is its `permissions: RbacGrant`'s own, which no survey walks and which `checkAbacObligations` now
+  reports rather than claiming absent — as it does for `DashboardDeclaration.permissions`, the
+  position nobody had named.
 - **`notifications`** — 6 channels × 18 providers (email/SMS/push/voice), templates with
   typed variables, audiences and on-call rotations, preferences and suppression reasons,
   and dispatch/delivery audit with retry, throttle, digest and quiet-hours decisions. Also the
@@ -3460,6 +3593,35 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   it `return`ed early, which is exactly the arm one arrives on, so the fact reached nobody — the same
   defect `onUniqueIndexRefused` exists to prevent, one path over, in the file whose comment argues
   against it.
+  **And whether any view declares its own role list** (`view-permission-survey.ts`, ADR-0361), which
+  nothing reads. `validateManifest` checks those names against `manifest.roles` and its comment
+  claimed an undeclared role *"fails closed at serve time"* — false in the direction that made the
+  gap look handled: `listConfigForEntity` is the only serve-time reader of `manifest.views` and takes
+  `columns`, `sort` and `pageSize` from it, through a structural `ListViewLike` that has **no
+  `permissions` member at all**, while `UiSchema` carries no view either — so there is not even a
+  client that *could* honour the declaration. An override is therefore strictly *wider* in effect than
+  it reads: the view is presented per the entity's grants. A **pure function of the manifest** and so
+  said once rather than per store, unlike the surface survey beside it. Reports and never refuses, and
+  the argument is not ADR-0338's: the measured count of overriding views across all seven packs is
+  **zero** (132 views, every one `"inherit"`, all of kind `list`), so a refusal would break nothing —
+  what stops it is that the declaration is **not served at any layer**, so nothing is partially
+  honoured and the remedy an author wants does not exist (ADR-0334). Said either way including when
+  the count is zero, which it is everywhere, and that is exactly when it costs nothing to start.
+  **And `checkAbacObligations` no longer claims "none declared" when an obligation sits somewhere it
+  does not walk** (ADR-0361). `surveyAbacObligations` takes a `PermissionMap`, so it is total over
+  `manifest.permissions` and nothing else — while an `RbacGrant`, which carries `abac`, also hangs off
+  a **report** and a **dashboard**. A manifest whose only obligation sat there booted cleanly and
+  printed *"abac obligations: none declared, so no grant depends on an ABAC evaluator"*, the one
+  sentence added so that "we checked and found nothing" could not be claimed from silence — it was
+  claiming it from a narrower survey. `unservedPositions` is **reported, never refused**, and the
+  distinction is ADR-0340's own: its refusal has no hatch because *serving a grant with its qualifier
+  removed is the opposite of what the manifest declares*, and nothing serves a report or a dashboard,
+  so there is no partially-honoured grant. The two positions that *were* deletable were deleted
+  instead at a measured cost of zero — `PermissionRefSchema.abac` on a view and the redundant
+  unbounded top-level `abac` on a report. `where` is a rendered location rather than a structured
+  position, deliberately: `ABAC_GRANT_POSITIONS` is a closed vocabulary that two total maps answer
+  over, and adding a member for a surface no handler reaches would oblige both to answer availability
+  and denial-effect questions about a request that cannot happen.
   **`/health` and `/readyz` exist** (`health.ts`, ADR-0357), wrapped **outermost in front of the
   gateway** — a probe carries no credential, so a gateway route would be 401'd by the auth stage,
   which is the bounce webhook's argument read the other way round. The split is the whole design
@@ -3506,7 +3668,11 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   default, so a redirect would hand every caller a 200 carrying the login page's HTML with
   `res.ok` true. The cookie is only a hint: the API verifies the token on every request, so a
   forged one is a 401 **from the API**.
-  It still has **zero tests**, so it is outside the 18,787-test sweep and all nine strategy rules,
+  It still has **zero tests**, so it is outside the sweep — though no longer outside every strategy
+  rule: `entity-field-aperture.ts` (ADR-0361) walks it through a local fs walk, because that member
+  has no `src/` and is therefore invisible to the other nine, and it is where 25 of the class's
+  `.fields` reads live (all on the `UiEntitySchema` that `ui-schema.ts` produces, and so all
+  downstream of the one raw reader that decides what the client sees at all),
   and the login flow is verified by `tsc`, `next build` and a live run.
 
 ## Cross-cutting invariants
@@ -3669,7 +3835,7 @@ typechecks *something*, which is the dangerous outcome) and runs the one script.
 (`packages/config`, which is JSON only, and `apps/operate-web`, a Next app that already includes every
 `.ts`/`.tsx`) are spelled out as lines, so adding a third is visible in a diff.
 
-**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **nine** now:
+**`packages/testing/src/strategy/` holds the workspace-level rules**, and there are **ten** now:
 `typecheck-config.ts` (ADR-0307), `pg-column-coverage.ts` (ADR-0333), which reads `META_TABLES`
 and every store's SQL *as text* and asserts the two things a fake `PgConnection` structurally
 cannot — that every column a statement names exists, and that every `notNull`-with-no-default
@@ -3687,7 +3853,7 @@ spellings the catalog uses in one rule, since the prose sits immediately above `
 outside the literal or inside it. It is the catalog's **only** semantic signal about a column —
 `ColumnDefinition` has no comment field, so no `COMMENT` is emitted on any column of any of the 146
 tables — which is exactly what makes ADR-0355 requiring one a real cost. 49 columns carry one.
-**Its `stripComments` is shared by all nine rules, and it was wrong about regex literals for four
+**Its `stripComments` is shared by all ten rules, and it was wrong about regex literals for four
 increments** (ADR-0356): it paired quotes as string delimiters without skipping a regex, and a
 pattern may contain one — `"([^"]+)"` carries three quotes, so pairing them closed the first two and
 left the third opening a string that ran to the next quote **anywhere in the file**. The symptom was
@@ -3699,7 +3865,7 @@ identical hole in the *conservative* direction (a blanked region loses a read ra
 one) and reached **19** of the scanned files; fixing it changed no count, which is worth knowing
 before someone reads the fix as having recovered something.
 One parser is what keeps two rules from disagreeing about the catalog
-and is also one place for a defect to reach all nine, and nothing fences the shared scanner against
+and is also one place for a defect to reach all ten, and nothing fences the shared scanner against
 its own output.
 Then `pg-storeless-tables.ts` (ADR-0334), which declares every
 catalogued table with **no writer** and why, and `pg-record-retention.ts` (ADR-0335), which reads the
@@ -3934,6 +4100,37 @@ and *agrees*. The six divergence kinds were **settled from 35 adjudications and 
 next person reads the interface. `reversed_pair` is the only finding no declaration resolves, keyed
 on the **enclosing literal's offset** and never on proximity, since two sibling records in one
 function are not a transposition.
+The tenth is `entity-field-aperture.ts` (ADR-0361), and it is the first of the ten that is not about
+SQL. It asks **whether a reader of an entity's fields asks over the set the served table has**: an
+entity's own `fields` are not that set, a trait contributes more, and `resolvedFields` is the one
+answer — so a function taking an `Entity` and reading `entity.fields` is asking a narrower question
+than the artifact answers. Sometimes that is correct and deliberate; usually it was a blind spot
+nobody declared, and the rule makes every instance say which. The **direction** is the field worth
+having — `fails_open` (something is disclosed or writable that should not be), `fails_closed` (the
+field is omitted, so nothing unsafe happens) or `incomplete` — because it is what decides whether a
+member is a defect or a declaration, and the same narrow read produced *both* of the first two: the
+gateway redactor drops `redacted` alone so an undescribed key passes through, while
+`redactAuditPayloads` drops `redacted ∪ undescribed` so it is dropped. **One narrow read, two
+opposite failure directions, decided by the consumer's drop set.**
+Measured over 982 files: **84** reads of the `.fields` shape survive comment-stripping and
+string-blanking, **19** on an `Entity`-typed binding — 23% precision for a bare scan, **100% for the
+type anchor** on a population checked by hand — which is **16** readers grouped per `(file, symbol)`:
+**12 raw** (fails_open 3, fails_closed 1, incomplete 8), 3 calling a resolver, 1 `trait_aware`. Twelve
+declarations, matching in both directions, 0 findings. It walks `apps/operate-web` through a local
+walk as well, because that member has no `src/` and is therefore invisible to the other nine rules.
+**Four generalisations refused on measurement**, each with its count: any `<receiver>.fields` read is
+23% precise (`.fields` is a property on `EntityPermissions`, `UiEntitySchema`, `ListQuery`,
+`ListConfig`, `ListSearch`, an index definition, a drift record and a PHI decision); a receiver
+*named* `entity`/`ent`/`e` fails because `operate-web` reads `entity.fields` eleven times on a
+`UiEntitySchema`, so the name is identical on both sides of the question; a file-wide
+first-annotation lookup **reproduced ADR-0354's bare-name defect in the rule's own prototype**, so
+the lookup is scoped to the enclosing function; and iterating `<x>.entities` type-blind is wrong in
+the direction that *invents* members. Three `apps/operate-server` modules project a manifest from
+`Record<string, unknown>` and read `entity["fields"]` by bracket access: they hold no `Entity` and no
+`Trait[]`, so they **cannot** call the resolver — blocked by *shape* and not by wiring, which is
+`pg-unreachable-stores.ts`' distinction, and they are declared as such.
+What it **cannot** see is a reader that receives its fields through a structural local type, which
+is exactly what `EntityLike` was in `list-query.ts` until this increment deleted it.
 `workspace-sql-scan.ts` is the fs walk extracted out of the column-coverage test so one scan feeds
 both SQL rules, and it gained a **reference collector** (`from`/`join`/`into`/`update`/`delete`/
 `truncate`, 312 references across 862 files) — without which three tables read as writerless that are
@@ -4052,7 +4249,20 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   question asked in the other direction the value moves, and the write half was the half that had a
   rule. Measured: **305 of 336** reads agree exactly, 7 derive through the same imported
   `DERIVATION_RULES`, 23 are declared, 1 is an alias, **0** unexplained.
-  **And a query that is missing a predicate satisfies all nine** (ADR-0359), which is the blind
+  **And a reader of an entity's fields asking the entity instead of the resolution is a failure too**
+  (`entity-field-aperture.ts`, ADR-0361), the **seventh** reading and the first that is not about SQL.
+  A fake connection is irrelevant here: the defect is upstream of any statement, in which *set of
+  fields* the question was asked about. `entity.fields` is not what the served table has, so a reader
+  over it is answering a narrower question than the artifact — and because the narrow answer needed no
+  workaround while the wide one did (a fabricated `{...entity, fields: resolved}`), three of eight
+  classification readers took it. The rule records each reader's **direction**, because the same
+  narrow read produced a disclosure in the gateway (whose drop set is `redacted` alone, so an
+  undescribed key passes through) and a withholding in the audit trail (whose drop set is
+  `redacted ∪ undescribed`). Twelve raw readers declared, `fails_open 3 / fails_closed 1 /
+  incomplete 8`, 0 findings — and the one thing it cannot see is a reader that receives its fields
+  through a structural local type, which is exactly what `EntityLike` was in `list-query.ts` until
+  this increment deleted it.
+  **And a query that is missing a predicate satisfies all of them** (ADR-0359), which is the blind
   spot the rules share rather than a seventh reading. Every one of them asks whether a column
   exists, whether an `INSERT` is complete, whether a live database admits a value, whether a CHECK
   and a contract enumerate the same members, whether a declaration names the bound symbol, or
@@ -4140,6 +4350,22 @@ Two constraints worth knowing before suggesting a host:
 - **Managed Postgres usually forbids C extensions**, so `pg_uuidv7` is
   unavailable; `deploy/supabase/00-uuidv7.sql` defines a pure-SQL
   `uuid_generate_v7()` and the migration applier accepts either.
+- **The extension file runs on every `up`, not only on first initdb.** `/docker-entrypoint-initdb.d`
+  fires **only** on the first initialisation of an empty data directory, so a `db-data` volume that
+  already holds a cluster never sees `postgres/init/00-extension.sql` again — and the arm64 defect
+  guaranteed a population of such volumes, because the previous image installed `pg_uuidv7` from a
+  release whose only prebuilt `.so` is x86_64, so `CREATE EXTENSION` failed under `ON_ERROR_STOP=1`
+  *after* initdb had written `PG_VERSION`. Fixing the image does not repair that volume: initdb is
+  skipped, `db` reports healthy, and `crossengin apply --confirm` exits **1** with
+  `PRECONDITIONS FAILED — no statements were executed … [MISSING_EXTENSION]` on every `up`, forever.
+  **A precondition the migrate step needs on every run cannot live only in a hook that runs once.**
+  So a one-shot `extensions` service runs the **same file** before `migrate`, which depends on its
+  successful completion — the same file rather than a second copy of the SQL, so the two extensions
+  keep their deliberate asymmetry. Built from `./postgres` because that image carries `psql`; the
+  `.so` has to be on the *server*, so this container only issues the statement. Reproduced and
+  verified on PG 16.13: without the function, exit 1 having executed nothing; with it, 964 executed,
+  0 failed. `deploy/README.md`'s *If `migrate` exits 1* names the error text, the self-healing path,
+  the by-hand form, the destructive `down -v` form and the two other reasons that exit is reached.
 - **`pgcrypto` is created at init now, and guarded where `pg_uuidv7` is not** (ADR-0338).
   `deploy/postgres/init/00-extension.sql` created only `pg_uuidv7`, so the self-hosted stack had no
   pgcrypto at all and nothing in `deploy/` ever ran `crossengin-pg encrypt --provision`. The
@@ -4610,10 +4836,49 @@ opened them.
   the same gap as the write path's, inherited with the vocabulary. **(5)** `RECORD_READ_DIVERGENCES`
   is the **second** list in that directory whose entries are judgements about correctness rather
   than structural facts, so whether a declared reason is true is unverifiable by machine. **(6)**
-  `stripComments` is shared by all nine rules and was wrong about regex literals for four
+  `stripComments` is shared by all ten rules and was wrong about regex literals for four
   increments; nothing fences the shared scanner against its own output, and the symptom surfaced two
   files away in a sibling rule.
 
+- **A reader of an entity's fields asks over the resolution, and what is left of it** (ADR-0361
+  closed the register's own P2 item 14, correcting all three of its claims). The class is **a reader
+  whose aperture is narrower than the writer's**, and the signature made the narrow read the easy
+  one: `entityClassifiedFields(entity)` read `entity.fields`, which is not the set the served table
+  has, so five call sites fabricated an entity to widen it and three did not. It takes a **field
+  list** now, so there is no entity-shaped call to get wrong, and `resolvedClassifiedFields` in
+  `kernel/ddl` is the one answer; the gateway gets a **required** resolver because it cannot depend on
+  kernel, and `compile.ts` hands both halves of ADR-0329 **one index** rather than the same narrow
+  function twice. Verified live on both stores as a non-owner: the trait-contributed `pii` field and
+  the entity-declared control are now an **exact complement** in every direction.
+  What remains, in order: **(1)** `manifest-diff.ts`'s `classificationLayer` is `fails_open` **on the
+  path a reviewer approves from** — a classification change on a trait field is absent from the
+  `ManifestDiffView`, so weakening `phi` → `internal` is approved unseen — and `assessManifestRisk`
+  reads raw beside it, answering `level: "low", findings: [], sensitiveFields: 0` for a manifest whose
+  only PHI is trait-carried where the entity spelling answers `level: "high"`. **The Architect's
+  approval gate is on the narrow side of the split**, which is the sharpest remaining member and
+  arguably its own increment. **(2)** `refusal.ts`'s `detectEncryptionWeakening` gates the
+  `weaken_encryption_below_pack_minimum` hard refusal and reads raw, and `classifyManifestEditRefusal`
+  has no caller outside its own test — so wiring that gate must widen the read in the same change or
+  it ships the hole. **(3)** `ui-schema.ts` is the widest `incomplete` member: no trait field reaches
+  the web client at all, so `created_at`/`updated_at` are absent from every list, record and form
+  view on all **68** `auditable` entities in every deployment, and all 25 of `operate-web`'s own reads
+  sit downstream of it. **(4)** `validation.ts`, `defaults.ts`, `sequences.ts` and
+  `settings-defaults.ts` read raw, so a trait field is unvalidated, gets no literal default and no
+  allocator — each a behaviour change with its own argument (`auditable.created_at` is `required`
+  with a `now()` default, so pulling trait fields into the validation plans could make a create demand
+  a field the server fills), and **no member on any shipped pack**: the only trait any of the seven
+  declares is `auditable`, whose four fields are `datetime`/`uuid` and server-stamped. **(5)** the
+  audit trail keeps withholding a trait field, which is a capability decision about what an audit
+  payload shows rather than a defect — and must be fixed in **both halves or neither**, since widening
+  the key list alone makes every trait field a described, unclassified one and converts a fail-closed
+  omission into a fail-open disclosure. **(6)** `@crossengin/auth`'s `ClassifiedField.classification`
+  is **optional** and the optionality is load-bearing (it is how `maskWrite` expresses `explicit_only`
+  by stripping the classification), so a deployment-supplied resolver may legally return `{name}` with
+  none and `planClassifiedRead` then *serves* that field — fail-open, reachable only from a
+  hand-written resolver, and the fix is a second type rather than a tightening. **(7)** the whole class
+  is **one wiring step from non-zero**: `packages/compliance`'s four packs declare custom traits and
+  `resolveCompliancePacks` merges `contributions.traits` into `result.traits`, so wiring the
+  compliance-pack resolver is precisely what puts the first custom trait into a shipped manifest.
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
   sensitive-classified fields across the seven packs, **39 were unreadable by every role in every
@@ -5948,7 +6213,7 @@ enforce; both entity stores, with `ColumnMappedEntityStore` carrying an explicit
 on every read and write, so **tenant isolation does not depend on RLS** and the owner-run compose
 does not breach it; at-rest PHI with per-tenant HKDF, the DEK envelope and the single-transaction
 rekey; the hash-chained audit and forensic chains; the Article 17 *mechanism* for whole-tenant
-erasure with four signed proof versions; the nine catalog rules; and the Architect's
+erasure with four signed proof versions; the ten workspace rules; and the Architect's
 design-to-activation flow.
 
 **This section is a ranking, not a plan.** Nothing below is scheduled, and two entries conflict
@@ -6086,7 +6351,7 @@ three make the rest honest, cheap or verifiable.
    P2 item 14's third clause, from the other end.)
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the nine rules and 18,787 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the ten rules and 18,929 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -6268,15 +6533,33 @@ land with or before it.
     truncation detection; `meta.workflow_timers` accepts a `cron_schedule` row with a NULL
     expression; and `meta.job_runs.status` admission is reported and never refused, so a fleet that
     cannot dead-letter boots quietly.
-14. **Three authorization defects reachable only from an authored manifest.** The write mask,
-    response redaction and audit trail read `entity.fields` **raw** while the boot survey and the
-    obligation check resolve traits — so a classified field on a custom trait is served unredacted
-    and writable by anybody while two surfaces report it as classified, and the emitted table has
-    the column, so the value is really stored and really disclosed. `maskWrite` re-derives its
-    refusal reason from the update key rather than `fieldWriteGrant`, so a create-only grant's 403
-    reports `classification_default` with no classification. And a view's permission override and a
-    report's two ABAC fields are validated and discarded, outside `surveyAbacObligations` and so
-    outside ADR-0340's by-name boot refusal.
+14. ~~**Three authorization defects reachable only from an authored manifest.**~~ — **closed by
+    ADR-0361**, which corrected every one of the three and found two omissions that outranked them
+    all. The asymmetry was real and reproduced live on both stores: a trait-contributed `pii` field
+    was writable *and* readable by a role the boot line in the same process said could do neither,
+    with the create response handing the plaintext back. But it is **seven** raw readers of a field's
+    classification and seven resolving, not three and two; the **audit trail does the opposite of
+    what the entry says** and fails *closed* (`redactAuditPayloads` drops `redacted ∪ undescribed`,
+    so the field is withheld even from a `pii`-privileged reader — a capability gap, not a
+    disclosure); "two surfaces report it as classified" was **one** in the measured deployment and is
+    a property of the manifest rather than a constant; and the `maskWrite` claim describes a shape
+    with **zero shipped members** (12 fields carry a `create` arm, all 12 declare `update`, none is
+    create-only) while **missing the half that is live on all 12** — a create refused by the *create*
+    arm reported `explicit_update_grant`, so an operator was sent to widen a list that already named
+    them, verified live where `ap_clerk` PATCHing the same field returns 200. The two omissions:
+    `validateClassifications` read raw, so the `phi`-requires-`auditable` invariant was **bypassable
+    by moving the declaration into a trait**; and `assessManifestRisk` plus `manifest-diff.ts`'s
+    `classificationLayer` read raw, so **the reviewer's approval gate is on the narrow side of the
+    split** — trait-carried PHI reports `level: "low", sensitiveFields: 0`, and weakening
+    `phi` → `internal` on a trait field is approved unseen. On the third clause: **zero** views carry
+    an override (132, every one `"inherit"`, which ADR-0282's own text already recorded), a report's
+    and a dashboard's `permissions` are validated by **nothing** rather than being "in the same
+    state" as a view's, and the hole is **13 positions of which the survey sees 9** — the entry missed
+    `DashboardDeclaration.permissions.abac`. What is left of it is ADR-0361's own open ends: the
+    reviewer's diff and `refusal.ts`'s unwired encryption-weakening gate are the sharpest remaining
+    members and arguably their own increment, and `ui-schema.ts` is the widest — no trait field
+    reaches the web client at all, so `created_at`/`updated_at` are absent from every view on all 68
+    `auditable` entities in every deployment.
 15. **Six confinement fences infer RLS confinement from ownership without reading
     `relforcerowsecurity`.** `sessionWouldBeConfined` has two callers while the
     `rls_would_confine_this_session` refusal appears in eight non-test modules. Latent while
@@ -6289,7 +6572,7 @@ None of it produces a wrong answer and most is a trade-off already argued in an 
 place for one reason: several entries **actively misdirect the next reader**, and this file's own
 method is that a stale figure misleads.
 
-1. **Eight documented claims were false in the direction that wastes an increment. All eight are
+1. **Thirteen documented claims were false in the direction that wastes an increment. All are
    corrected above as of this register**, and they are listed here because the *pattern* is the
    finding: `KeyRotationMigrator` called callerless two increments after the ADR that wired it;
    `validateWriteMask` called callerless from the commit that gave it a caller; residency called
@@ -6304,6 +6587,21 @@ method is that a stale figure misleads.
    provenance (read by the serving process and by `rekey --plan`), the sev1–5/P0–P3 severity
    collision (a frozen total translation map), `PostgresKillSwitchStore` (wired), and the
    29-foreign-key drift plus the `DROP COLUMN` (documented end to end in `deploy/README.md:193-251`).
+   ADR-0361 adds **five comments** to the pattern, and they are the most instructive kind because each
+   asserted the correctness of the narrow read it sat on: `write-mask.ts`' *"the same source
+   `redactionSpecForEntity` reads, so … cannot drift apart"* was **true and worthless** (both read the
+   raw entity, so they agreed *in being wrong*); its *"re-derived from the same two inputs the rule
+   itself read"* was false, 57 lines below a `fieldWriteGrant` whose own comment reads *"so no reader
+   re-derives it"*; `validate.ts`' *"fails closed at serve time"* was false in the direction that made
+   the gap look handled; `searchableFieldsFor`'s *"all text-like fields are searchable"* was false for
+   a trait's; and `checkAbacObligations`' affirmative *"none declared"* — the line added so a clean
+   survey could not be inferred from silence — was inferring it from a narrower survey. The lesson is
+   one sentence: **an invariant two readers agree on is not an invariant either is right about.**
+   Two further figures were corrected against measurement: the register's "28 views carry a
+   `permissions` override" is 132 views with **zero** overrides (28 is the count of distinct authored
+   view *declarations*, and `permissions: "inherit"` is an explicit opt-out written by `erp-core`'s
+   own `listView` factory — ADR-0282's text already said so), and the rule's own two `fails_open`
+   notes claimed "live" for traits **no pack declares**.
 2. **Six concepts are modelled several times over, two with non-nesting member sets.** Data
    classification has five declarations — four identical and one, in `data-lineage`, **disjoint past
    two members**, so the moment anything bridges the kernel's classification into the lineage graph
@@ -6314,13 +6612,16 @@ method is that a stale figure misleads.
    such a field must not survive under its old name**. Plus two flag vocabularies sharing six
    names, two runbook contracts joined by a thrice-duplicated regex, and two `Accept-Language`
    parsers.
-3. **The nine catalog rules have six self-blind spots, including a silent skip in the newest.**
+3. **The ten rules have seven self-blind spots, including a silent skip and a structural anchor.**
    `pg-record-reads.ts` drops a row interface with fewer than three catalogued columns with a bare
    `continue` and no finding — the same shape as that increment's own defect, caught only because a
-   count moved. `stripComments` is shared by all nine and was wrong about regex literals for four
+   count moved. `stripComments` is shared by all ten and was wrong about regex literals for four
    increments, and **nothing relates the shared scanner's output to its consumers' counts**. Also:
    no `renamedFrom` for a policy or constraint; table-level value-set CHECKs unread; 11 strict
-   bounds and 213 patterns not probeable, so the boot census overstates its own coverage.
+   bounds and 213 patterns not probeable, so the boot census overstates its own coverage; and the
+   tenth rule's anchor is an `Entity`-typed binding, so a reader that receives its fields through a
+   **structural local type** is invisible to it — which is exactly what `EntityLike` was in
+   `list-query.ts` until ADR-0361 deleted it, and is the same shape as this entry's other members.
 4. **Three job record contracts, a scope constant and four fields are constructed or read by
    nothing.** `JobRunRecordSchema`, `DeadLetterRecordSchema` and `JobCostRecordSchema` have no
    construction site anywhere, yet three catalogued CHECKs are adjudicated against them — so
@@ -6362,14 +6663,14 @@ nowhere in `deploy/`. The **factory blind spot** (ten stores behind a factory) i
 not dead capability: all ten factories have real callers, and the compiler-API answer was measured
 and refused twice. **v1–v3 proofs being permanently unprotected** is irreducible and correctly so —
 re-signing them under v4 would forge the one alarm the chain cannot raise. And **extracting the
-catalog parser** is debt with a defensible reason to stay: one parser is what keeps nine rules
+catalog parser** is debt with a defensible reason to stay: one parser is what keeps ten rules
 agreeing about the catalog.
 
 ## ADRs
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 355 records; 276 Accepted, 79 Proposed (the
+title or status change cannot drift. 356 records; 277 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

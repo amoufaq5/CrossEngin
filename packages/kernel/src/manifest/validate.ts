@@ -55,8 +55,8 @@ export function validateManifest(manifest: Manifest): void {
   validateIntegrations(manifest);
   validateJobs(manifest, rolesMap);
   validateFiles(manifest);
-  const reportIds = validateReports(manifest, entityNames);
-  const dashboardIds = validateDashboards(manifest, reportIds);
+  const reportIds = validateReports(manifest, entityNames, rolesMap);
+  const dashboardIds = validateDashboards(manifest, reportIds, rolesMap);
   validateViews(manifest, {
     entityNames,
     fieldsByEntity,
@@ -106,15 +106,46 @@ export function manifestClassifiedFields(manifest: Manifest): readonly Classifie
   return out;
 }
 
+/**
+ * A `phi`/`regulated` field requires its entity to carry the `auditable` trait.
+ *
+ * Asked over `resolvedFields` and **not** `entity.fields`, because the narrow read made the whole
+ * invariant bypassable by moving the declaration one level out: the identical field was *refused*
+ * on `entity.fields` and *accepted* on a trait, with the served table carrying the same column
+ * either way. A validation rule whose predicate is narrower than the artifact it constrains is not
+ * a rule, it is a spelling convention.
+ *
+ * The path and the remedy differ by where the field is declared, which is why the two loops are
+ * written out rather than merged. An own field's path indexes `fields[j]` and its remedy is local.
+ * A trait's field has no index in this entity at all, so the path names the trait, and the remedy
+ * carries a warning the own-field case does not need: a trait is shared, so dropping the
+ * classification there changes every entity that carries it, and adding `auditable` to *this*
+ * entity is the change whose blast radius is one entity.
+ */
 function validateClassifications(manifest: Manifest): void {
+  const traits = manifest.traits ?? [];
   for (const [i, entity] of (manifest.entities ?? []).entries()) {
     const isAuditable = (entity.traits ?? []).includes(AUDITABLE_TRAIT);
+    if (isAuditable) continue;
+    const own = new Set(entity.fields.map((f) => f.name));
     for (const [j, field] of entity.fields.entries()) {
       if (field.classification === undefined) continue;
-      if (requiresAuditTrail(field.classification) && !isAuditable) {
+      if (requiresAuditTrail(field.classification)) {
         throw new ManifestValidationError(
           `entities[${i}].fields[${j}].classification`,
           `field '${entity.name}.${field.name}' is classified '${field.classification}', which requires the entity to carry the 'auditable' trait`,
+        );
+      }
+    }
+    for (const field of resolvedFields(entity, traits)) {
+      if (field.classification === undefined || own.has(field.name)) continue;
+      if (requiresAuditTrail(field.classification)) {
+        throw new ManifestValidationError(
+          `entities[${i}].traits`,
+          `field '${entity.name}.${field.name}' arrives from a trait and is classified ` +
+            `'${field.classification}', which requires the entity to carry the 'auditable' trait; ` +
+            `add 'auditable' to this entity's traits, or drop the classification from the trait — ` +
+            `which changes every entity carrying it`,
         );
       }
     }
@@ -557,16 +588,32 @@ function validateFiles(manifest: Manifest): void {
   }
 }
 
+/**
+ * A report names an entity that exists and grants roles that exist.
+ *
+ * The role check is the addition, and the gap it closes is the same shape as `validateViews`': a
+ * report's `permissions` is an `RbacGrant` whose role names were checked by nothing, so a manifest
+ * granting a report to `ghost_report_role` validated cleanly. A view's were checked; a report's and
+ * a dashboard's were not, which made "a declaration is validated" true of one surface and false of
+ * two that look identical from the manifest.
+ *
+ * It is a validation error and not a boot refusal on ADR-0348's split: whether a role exists is a
+ * property of the manifest alone, so it is decidable by a pack author, by `crossengin validate`,
+ * and by the reviewer approving what the Architect designed. Vacuous today — no pack declares a
+ * report at all — which is exactly when it costs nothing to add.
+ *
+ * The former `reportIds.has(key)` duplicate check is gone rather than kept: `reports` is a
+ * `z.record`, so `Object.entries` cannot yield one key twice and the condition was unreachable. A
+ * check that cannot fire reads as coverage it does not provide.
+ */
 function validateReports(
   manifest: Manifest,
   entityNames: ReadonlySet<string>,
+  rolesMap: ReadonlyMap<string, RoleDefinition>,
 ): Set<string> {
   const reports: Record<string, ReportDeclaration> = manifest.reports ?? {};
   const reportIds = new Set<string>();
   for (const [key, report] of Object.entries(reports)) {
-    if (reportIds.has(key)) {
-      throw new ManifestValidationError(`reports.${key}`, `duplicate report id '${key}'`);
-    }
     reportIds.add(key);
     if (!entityNames.has(report.entity)) {
       throw new ManifestValidationError(
@@ -574,24 +621,36 @@ function validateReports(
         `report entity '${report.entity}' is not declared in manifest.entities`,
       );
     }
+    for (const roleName of report.permissions?.roles ?? []) {
+      if (!rolesMap.has(roleName)) {
+        throw new ManifestValidationError(
+          `reports.${key}.permissions.roles`,
+          `report grants role '${roleName}' which is not declared in manifest.roles`,
+        );
+      }
+    }
   }
   return reportIds;
 }
 
+/** `validateReports`' rule for the surface beside it; same split, same vacuity, same reason. */
 function validateDashboards(
   manifest: Manifest,
   reportIds: ReadonlySet<string>,
+  rolesMap: ReadonlyMap<string, RoleDefinition>,
 ): Set<string> {
   const dashboards: Record<string, DashboardDeclaration> = manifest.dashboards ?? {};
   const ids = new Set<string>();
   for (const [key, dashboard] of Object.entries(dashboards)) {
-    if (ids.has(key)) {
-      throw new ManifestValidationError(
-        `dashboards.${key}`,
-        `duplicate dashboard id '${key}'`,
-      );
-    }
     ids.add(key);
+    for (const roleName of dashboard.permissions?.roles ?? []) {
+      if (!rolesMap.has(roleName)) {
+        throw new ManifestValidationError(
+          `dashboards.${key}.permissions.roles`,
+          `dashboard grants role '${roleName}' which is not declared in manifest.roles`,
+        );
+      }
+    }
     for (const referenced of widgetReferencedReports(dashboard)) {
       if (!reportIds.has(referenced)) {
         throw new ManifestValidationError(
@@ -685,9 +744,18 @@ function validateViews(manifest: Manifest, ctx: ViewContext): void {
       }
     }
 
-    // A view may override the entity's permissions with its own role list; `manifest.permissions`
-    // grants are checked against manifest.roles and these were not, so a view could grant a role
-    // that does not exist — which fails closed at serve time and looks like a missing grant.
+    // A view may declare its own role list instead of inheriting the entity's permissions, and
+    // those names are checked here because `manifest.permissions` grants are.
+    //
+    // This comment used to add "which fails closed at serve time and looks like a missing grant",
+    // and that was false in the direction that made the gap look handled: **nothing reads a view's
+    // `permissions` at serve time**. `listConfigForEntity` is the only serve-time reader of
+    // `manifest.views` and takes `columns`, `sort` and `pageSize` from it; every authorization
+    // decision reads `manifest.permissions[entity]`. So an undeclared role does not fail closed —
+    // the view is presented per the entity's grants, which is strictly *wider* than what it
+    // declares. The check is still worth keeping (a typo'd role is a manifest defect whether or not
+    // anything serves it today), but what it buys is a correct declaration and not an enforced one.
+    // `surveyViewPermissionOverrides` in `apps/operate-server` reports the inertness at boot.
     for (const roleName of viewReferencedRoles(view)) {
       if (!rolesMap.has(roleName)) {
         throw new ManifestValidationError(

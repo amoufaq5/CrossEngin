@@ -26,7 +26,7 @@
  */
 
 import { deriveTenantColumnKey, parseColumnEncryptionSecret } from "@crossengin/crypto";
-import { resolvedFields, type Manifest } from "@crossengin/kernel";
+import { resolvedClassifiedFields, type Manifest } from "@crossengin/kernel";
 import type { ColumnEncryptionKeySource } from "@crossengin/operate-runtime-pg";
 import { requiresEncryptionAtRest } from "@crossengin/types/meta-schema";
 
@@ -62,13 +62,16 @@ export interface PhiField {
 /**
  * Every `phi`/`regulated` field in the manifest, including trait fields.
  *
- * Two things make this the survey rather than a loop over `entity.fields`:
+ * Two things make this the survey rather than a loop over `entity.fields`, and both are
+ * borrowed rather than restated:
  *
- *   - **`resolvedFields` is what the validator uses.** A classified field arriving through a
- *     trait is a real column, so surveying only `entity.fields` would be a blind spot of
- *     exactly the shape this repo keeps finding — a field `validateManifest` sees and the
- *     survey does not. The resolution rule is the kernel's: an entity's own field of the same
- *     name wins over a trait's, and a name is emitted once.
+ *   - **`resolvedClassifiedFields` is the kernel's one answer** to "which fields of this entity
+ *     are classified, as the served table has them". A classified field arriving through a trait
+ *     is a real column, so surveying only `entity.fields` would be a blind spot of exactly the
+ *     shape this repo keeps finding — a field `validateManifest` sees and the survey does not.
+ *     The resolution rule is the kernel's: an entity's own field of the same name wins over a
+ *     trait's, and a name is emitted once. This module asks nothing of a field but its name and
+ *     its classification, so there is no reason to hold the field list at all.
  *   - **`requiresEncryptionAtRest` is called, not restated.** The set lives in
  *     `ENCRYPT_AT_REST_DATA_CLASSIFICATIONS`; a second copy of it here would be a third
  *     spelling of one rule, and the divergence would be silent in the direction that stores
@@ -81,11 +84,9 @@ export function surveyPhiFields(manifest: Manifest): readonly PhiField[] {
   const traits = manifest.traits ?? [];
   const out: PhiField[] = [];
   for (const entity of manifest.entities ?? []) {
-    for (const field of resolvedFields(entity, traits)) {
-      const classification = field.classification;
-      if (classification === undefined) continue;
+    for (const { field, classification } of resolvedClassifiedFields(entity, traits)) {
       if (!requiresEncryptionAtRest(classification)) continue;
-      out.push({ entity: entity.name, field: field.name, classification });
+      out.push({ entity: entity.name, field, classification });
     }
   }
   return out;
