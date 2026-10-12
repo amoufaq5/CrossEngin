@@ -15,6 +15,9 @@ export const PROBLEM_TYPES = {
     "https://crossengin.io/errors/unprocessable-entity",
   too_many_requests: "https://crossengin.io/errors/too-many-requests",
   quota_exceeded: "https://crossengin.io/errors/quota-exceeded",
+  // 500 has always been in PROBLEM_STATUS_CODES and had no type, so the one outcome with nothing
+  // to classify it — an uncaught throw — was answered with `gateway_timeout`'s 504 instead.
+  internal_server_error: "https://crossengin.io/errors/internal-server-error",
   service_unavailable: "https://crossengin.io/errors/service-unavailable",
   gateway_timeout: "https://crossengin.io/errors/gateway-timeout",
   sunset_endpoint: "https://crossengin.io/errors/sunset-endpoint",

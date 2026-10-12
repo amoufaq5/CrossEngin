@@ -94,6 +94,45 @@ export interface ListPage {
   readonly nextCursor: string | null;
 }
 
+/** Which surface of a list query a store could not express, and the field that made it so. */
+export interface UnserveableSurfaceRef {
+  readonly surface: "filter" | "sort" | "search";
+  readonly field: string;
+  readonly reason: string;
+}
+
+/**
+ * A list query named a surface this store cannot express in SQL.
+ *
+ * Thrown by a store rather than returned, because `listPage` answers a `ListPage` and there is no
+ * page to answer with: the alternative was to run the query without the part it could not express,
+ * which is what every store did and is the defect — a filter on a ciphertext column was dropped
+ * and the caller was handed the rows they asked to exclude, under a 200.
+ *
+ * It lives here, in the package that owns `EntityStore`, and not beside the Postgres stores that
+ * throw it. That is a layering requirement rather than a preference: the handler that turns it
+ * into a 400 is in this package and cannot import `operate-runtime-pg`, so an error class declared
+ * there could only be caught by name.
+ *
+ * The distinction from `list-query.ts`'s `UnservedListSurface` is which declaration was broken.
+ * That one is a *manifest* fact — the view does not expose this column as filterable — and is
+ * decidable from the request alone. This one is a *store* fact: the manifest says the surface is
+ * served and this store cannot serve it, which is a deployment inconsistency the caller cannot fix
+ * and an operator can.
+ */
+export class ListSurfaceUnserveable extends Error {
+  readonly entity: string;
+  readonly surfaces: readonly UnserveableSurfaceRef[];
+
+  constructor(entity: string, surfaces: readonly UnserveableSurfaceRef[]) {
+    const named = surfaces.map((s) => `${s.surface} on '${s.field}' (${s.reason})`).join(", ");
+    super(`store cannot serve this list query on '${entity}': ${named}`);
+    this.name = "ListSurfaceUnserveable";
+    this.entity = entity;
+    this.surfaces = surfaces;
+  }
+}
+
 export interface EntityStore {
   list(tenantId: string, entity: string): Promise<readonly EntityRecord[]>;
   listPage(tenantId: string, entity: string, query: ListQuery): Promise<ListPage>;

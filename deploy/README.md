@@ -445,6 +445,7 @@ those never fire. Vercel and friends can host `operate-web`, never the API.
 
 | Path | Provider | Best when |
 |---|---|---|
+| One VM, everything, **free** | **Oracle Cloud** Always Free (Ampere A1) | You want the whole stack running at zero cost. See [On Oracle Cloud](#on-oracle-cloud-always-free) |
 | One VM, everything | **Hetzner Cloud** (CCX + volume) | Pre-revenue, cost matters. Runs this compose file unchanged |
 | Managed database, less ops | **Railway** / **Render** | You would rather not run Postgres yourself |
 | Room to grow | **Fly.io** (apps + Managed Postgres + GPU machines) | Multi-region later — see the `residency` package |
@@ -459,3 +460,150 @@ Two notes that matter more than price:
 - **Managed Postgres usually forbids C extensions**, so `pg_uuidv7` is unavailable.
   That is already handled: run `supabase/00-uuidv7.sql` once to define the pure-SQL
   `uuid_generate_v7()`. The migration applier accepts either.
+
+## On Oracle Cloud (Always Free)
+
+Of the free options this is the only one that can host the **whole** stack, and the
+reason is the sentence above: the API needs a long-running process, and Always Free
+gives you a real VM rather than a function. Vercel's free tier cannot host
+`operate-server` at any price point — not a quota problem, a runtime-model one — so a
+"free" Vercel deployment is always a partial one. Here nothing is split.
+
+What the tier gives you, with one caveat worth checking before you plan around it:
+
+| | Always Free |
+|---|---|
+| Compute | **Ampere A1 (arm64)**, 1–4 instances sharing the quota |
+| | Oracle cut that quota from 4 OCPU / 24 GB to **2 OCPU / 12 GB** in June 2026 with no announcement, and reports of enforcement are inconsistent — check Oracle's [Always Free Resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/resourceref.htm) page, not this table |
+| | Also 2× AMD `E2.1.Micro` (1 OCPU / 1 GB). **Ignore these**: `pnpm -r build` across 87 packages plus `next build` will not complete in 1 GB |
+| Block storage | 200 GB total, boot volumes included; 47 GB is the per-instance minimum |
+| Egress | 10 TB/month |
+
+**2 OCPU / 12 GB runs this comfortably.** The heaviest moment is the image build, not
+serving.
+
+### The one thing that is different on Oracle
+
+Always Free compute is **arm64**, and until this commit `deploy/postgres/Dockerfile`
+could not produce a working database image on it. It installed `pg_uuidv7` from the
+project's GitHub release, which ships a single prebuilt `.so` built for x86_64 only —
+and because installing it is a file copy, the build *succeeded* and produced an image
+whose `CREATE EXTENSION` then failed at `initdb` time with a wrong-ELF-class error.
+`ON_ERROR_STOP=1` turns that into an aborted initialisation, so the `db` container
+never came up and nothing in the output pointed at the architecture.
+
+It now installs `postgresql-$PG_MAJOR-pg-uuidv7` from the PGDG apt repository, which
+publishes amd64 and arm64 and which the official `postgres` image already leaves
+configured. No architecture is named anywhere, so the same Dockerfile builds on your
+laptop and on the A1. The other three images (`node:20-bookworm-slim`, `caddy:2`,
+`postgres:16-bookworm`) are already multi-arch.
+
+### Step by step
+
+**1 — Account and region.** Sign up at `cloud.oracle.com`. A card is required for
+identity verification and Always Free resources are not billed against it. Pick your
+home region carefully: it cannot be changed, and A1 capacity varies by region.
+
+**2 — Network.** *Networking → Virtual Cloud Networks → Start VCN Wizard → VCN with
+Internet Connectivity.* Accept the defaults. This gives you a public subnet, an
+internet gateway and a route table, which is all this needs.
+
+**3 — Instance.** *Compute → Instances → Create instance.*
+
+- Image: **Canonical Ubuntu 24.04** — make sure you pick the **aarch64** build.
+- Shape: *Change shape → Ampere → `VM.Standard.A1.Flex`* → 2 OCPU, 12 GB.
+- Networking: the VCN and public subnet from step 2, **assign a public IPv4 address**.
+- Boot volume: raise it to **50 GB** (the 47 GB default leaves little room for images).
+- Add your SSH public key.
+
+If you get **"Out of host capacity"** you have not done anything wrong — A1 is heavily
+subscribed. Try another availability domain, then retry on a loop; capacity is released
+continuously.
+
+**4 — Open 80 and 443, in both places.** This is the step that catches everyone,
+because Oracle filters twice and fixing one half looks like the fix having failed.
+
+*Networking:* open the subnet's security list and add two ingress rules — source
+`0.0.0.0/0`, protocol TCP, destination port 80, then the same for 443.
+
+*On the instance:* Oracle's Ubuntu images ship with `iptables` rules that reject
+everything else, and they persist across reboots:
+
+```bash
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80  -j ACCEPT
+sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+sudo netfilter-persistent save
+```
+
+**5 — Docker.**
+
+```bash
+sudo apt-get update && sudo apt-get install -y ca-certificates curl git
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker "$USER" && exec sg docker newgrp
+```
+
+**6 — Swap, if you took the 12 GB shape and want the build to be dull.** The image
+build is the only memory-hungry step; 4 GB of swap means it cannot be the thing that
+fails.
+
+```bash
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+**7 — DNS.** Point two A records at the instance's public IP: `yourdomain.com` and
+`api.yourdomain.com`. Both are needed — the `Caddyfile` serves the UI on the apex and
+the API on `api.`, and Let's Encrypt will not issue until they resolve.
+
+**8 — Bring it up.** Exactly the [First launch](#first-launch) steps above; nothing
+here is Oracle-specific.
+
+```bash
+git clone <your fork> crossengin && cd crossengin/deploy
+cp .env.example .env    # then set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL,
+                        # OPERATE_ADMIN_API_KEY, CREDENTIAL_PEPPER,
+                        # OPERATE_TOKEN_SIGNING_KEY and CURSOR_ENCRYPTION_SECRET
+docker compose up -d --build
+docker compose logs -f api
+```
+
+The first build takes 10–20 minutes on 2 A1 cores. Then read the boot lines the
+[Going to production (auth)](#going-to-production-auth) section lists — `[auth]` twice,
+`[pg]` and `[cursor]` — and create your first tenant and user with
+[Create your first tenant](#create-your-first-tenant) and
+[Create your first user](#create-your-first-user). There is no sign-up page and no
+forgot-password, so the first user is a shell step; that is deliberate and
+[The UI has a login](#the-ui-has-a-login) explains why.
+
+**9 — Backups.** *Block Volume → your boot volume → Create Backup Policy.* Always Free
+includes 5 volume backups, which is a snapshot story and not a PITR one. A volume
+snapshot of a running Postgres is crash-consistent rather than transaction-consistent,
+so pair it with a logical dump:
+
+```bash
+docker compose exec -T db pg_dump -U crossengin crossengin | gzip > dump-$(date +%F).sql.gz
+```
+
+This repository models DR tiers with RPO/RTO targets and does not yet ship a backup
+scheduler, so until it does, that cron line is the deployment's real recovery point.
+
+### Should the UI go on Vercel instead?
+
+You can: `operate-web` is a Next.js app and Vercel hosts it happily. On Oracle there is
+little reason to, and two reasons not to.
+
+What splitting costs you: the browser → UI → API hop stops being a private Docker
+network and crosses the public internet, so it needs its own TLS and its own thinking
+about who may reach `api.yourdomain.com`; and you lose the compose dependency that
+makes `web` wait for the API's `/readyz`, which is what currently stops Caddy serving
+502s from a UI pointed at an API that refused to boot.
+
+What it buys you: a CDN edge and preview deployments. The UI is 15 pages of which 11
+are statically prerendered, so the edge wins little, and every page is a proxy call to
+the API on the Oracle box regardless.
+
+So: **all on Oracle.** Put the UI on Vercel only if you want preview deployments for
+UI work, and then set `OPERATE_API_URL` to `https://api.yourdomain.com` and keep the
+API where it is.

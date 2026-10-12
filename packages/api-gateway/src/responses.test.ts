@@ -14,11 +14,33 @@ import {
 } from "./responses.js";
 
 describe("constants", () => {
-  it("PROBLEM_TYPES has 14 entries", () => {
-    expect(Object.keys(PROBLEM_TYPES)).toHaveLength(14);
+  it("PROBLEM_TYPES has 15 entries", () => {
+    expect(Object.keys(PROBLEM_TYPES)).toHaveLength(15);
   });
   it("has 15 problem status codes", () => {
     expect(PROBLEM_STATUS_CODES).toHaveLength(15);
+  });
+  it("carries a type for 500, which was in PROBLEM_STATUS_CODES with nothing to name it", () => {
+    expect(PROBLEM_TYPES.internal_server_error).toBe(
+      "https://crossengin.io/errors/internal-server-error",
+    );
+    expect((PROBLEM_STATUS_CODES as readonly number[]).includes(500)).toBe(true);
+  });
+  it("accepts a 500 problem, which needs no extension", () => {
+    // 429/401/410 each carry a required extension; 500 deliberately carries none, because an
+    // unclassified fault has nothing to add that does not come from the fault.
+    const parsed = ProblemDetailsResponseSchema.parse({
+      type: PROBLEM_TYPES.internal_server_error,
+      title: "Internal server error",
+      status: 500,
+      detail: "the request could not be completed",
+    });
+    expect(parsed.extensions).toEqual({});
+  });
+  it("every PROBLEM_TYPES value is a distinct https url", () => {
+    const values = Object.values(PROBLEM_TYPES);
+    expect(new Set(values).size).toBe(values.length);
+    for (const value of values) expect(value.startsWith("https://")).toBe(true);
   });
   it("has 6 security header names", () => {
     expect(SECURITY_HEADER_NAMES).toHaveLength(6);

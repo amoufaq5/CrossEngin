@@ -3,7 +3,11 @@ import {
   generateEd25519Keypair,
   signEd25519,
 } from "@crossengin/crypto";
-import type { IncomingRequest, RouteDefinition } from "@crossengin/api-gateway";
+import {
+  PipelineExecutionSchema,
+  type IncomingRequest,
+  type RouteDefinition,
+} from "@crossengin/api-gateway";
 import { describe, expect, it } from "vitest";
 
 import { buildIncomingRequest } from "./adapters.js";
@@ -411,6 +415,151 @@ describe("GatewayRuntime — weak TLS rejected", () => {
     expect(execution.finalStage).toBe("validate_tls");
     const body = JSON.parse(new TextDecoder().decode(response.bodyBytes!)) as Record<string, unknown>;
     expect(body["type"]).toContain("weak-tls-rejected");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An uncaught handler throw.
+//
+// The two destinations used to be the wrong way round: the exception's message was sliced into the
+// response body, where it is the RFC 9457 `detail` an anonymous caller reads, while the recorded
+// stage reason was the bare constant `handler_threw`. So the operator's own execution row said
+// nothing about why and the caller got everything. These cases pin the inversion in both
+// directions, which is what makes the 504 -> 500 change safe to have made.
+// ---------------------------------------------------------------------------
+
+/** Long enough to exercise the slice, and shaped like the real ones: an entity and a tenant uuid. */
+const THROWN_MESSAGE =
+  `insert or update on table "tenant_data_keys" violates foreign key constraint ` +
+  `"tenant_data_keys_tenant_id_fkey" for tenant ${TENANT} serving entity Patient`;
+
+async function throwingHandlerResult(opts: { readonly thrown?: unknown; readonly correlationId?: string } = {}) {
+  const kp = generateEd25519Keypair();
+  const kid = ed25519PublicKeyFingerprint(kp.publicKeyBase64).slice(0, 16);
+  const jwks = new InMemoryJwksProvider({ keys: [{ kid, publicKeyBase64: kp.publicKeyBase64 }] });
+  const handlers = new HandlerRegistry().register("tenants.create", () => {
+    throw opts.thrown ?? new Error(THROWN_MESSAGE);
+  });
+  const { runtime } = buildRuntime({ jwks, handlers });
+  const token = buildJwt({
+    privateKeyBase64: kp.privateKeyBase64,
+    publicKeyBase64: kp.publicKeyBase64,
+    kid,
+    sub: USER,
+    exp: Math.floor(Date.parse("2026-05-16T12:00:00.000Z") / 1000) + 3_600,
+    tenantId: TENANT,
+    scope: "tenants:write",
+  });
+  const { response, execution } = await runtime.handleRequest(
+    fixtureRequest({
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(opts.correlationId !== undefined ? { "x-correlation-id": opts.correlationId } : {}),
+      },
+    }),
+  );
+  const bodyText = new TextDecoder().decode(response.bodyBytes!);
+  const dispatch = execution.stages.find((s) => s.stage === "dispatch_handler");
+  return { response, execution, bodyText, dispatch };
+}
+
+describe("GatewayRuntime — uncaught handler throw", () => {
+  it("answers 500 and not 504", async () => {
+    const { response, execution } = await throwingHandlerResult();
+    expect(response.status).toBe(500);
+    expect(execution.finalResponseStatus).toBe(500);
+    expect(execution.finalStage).toBe("dispatch_handler");
+    expect(execution.finalOutcome).toBe("error");
+  });
+
+  it("emits the internal_server_error problem type, not gateway_timeout", async () => {
+    const { bodyText, dispatch } = await throwingHandlerResult();
+    const body = JSON.parse(bodyText) as Record<string, unknown>;
+    expect(body["type"]).toContain("internal-server-error");
+    expect(body["type"]).not.toContain("gateway-timeout");
+    expect(body["status"]).toBe(500);
+    expect(dispatch?.problemTypeUri).toContain("internal-server-error");
+    expect(dispatch?.responseStatus).toBe(500);
+  });
+
+  it("discloses no substring of the thrown message in the response body", async () => {
+    const { bodyText } = await throwingHandlerResult();
+    // Property-shaped rather than a list of forbidden words: every window of the message long
+    // enough to be a real token must be absent. A literal `toContain` check on the whole message
+    // would pass against a body carrying the first half of it.
+    const windows: string[] = [];
+    for (let start = 0; start + 12 <= THROWN_MESSAGE.length; start += 1) {
+      windows.push(THROWN_MESSAGE.slice(start, start + 12));
+    }
+    expect(windows.filter((w) => bodyText.includes(w))).toEqual([]);
+  });
+
+  it("names neither the tenant id nor the entity, the two things these messages carry", async () => {
+    const { bodyText } = await throwingHandlerResult();
+    expect(bodyText).not.toContain(TENANT);
+    expect(bodyText).not.toContain("Patient");
+    expect(bodyText).not.toContain("tenant_data_keys");
+    expect(bodyText).not.toContain("foreign key");
+  });
+
+  it("records the thrown message in the stage reason, where it used not to go at all", async () => {
+    const { dispatch } = await throwingHandlerResult();
+    expect(dispatch?.reason).toContain(THROWN_MESSAGE);
+    expect(dispatch?.reason).toContain(TENANT);
+    expect(dispatch?.reason).toContain("tenant_data_keys_tenant_id_fkey");
+  });
+
+  it("keeps the handler_threw marker in the reason, which is what an operator greps", async () => {
+    const { dispatch } = await throwingHandlerResult();
+    expect(dispatch?.reason.startsWith("handler_threw:")).toBe(true);
+  });
+
+  it("keeps the recorded reason inside StageResultSchema's 500-character cap", async () => {
+    // The message is deliberately far longer than the budget: the row must still parse, because a
+    // reason over the cap would make the whole PipelineExecution unstorable and lose the capture.
+    const { dispatch, execution } = await throwingHandlerResult({
+      thrown: new Error("E".repeat(4_000)),
+    });
+    expect(dispatch!.reason.length).toBeLessThanOrEqual(500);
+    expect(() => PipelineExecutionSchema.parse(execution)).not.toThrow();
+  });
+
+  it("answers a non-Error throw with a fixed reason rather than coercing the value", async () => {
+    // `String(value)` on a thrown object is how an unexpected shape leaks: the throw here is a
+    // plain object whose own field would be disclosed by a stringify.
+    const { dispatch, bodyText } = await throwingHandlerResult({
+      thrown: { mrn: "MRN-1", tenant: TENANT },
+    });
+    expect(dispatch?.reason).toBe("handler_threw_unknown");
+    expect(bodyText).not.toContain("MRN-1");
+    expect(bodyText).not.toContain(TENANT);
+  });
+
+  it("gives the caller the fixed sentence and nothing else", async () => {
+    const { bodyText } = await throwingHandlerResult();
+    const body = JSON.parse(bodyText) as Record<string, unknown>;
+    expect(body["detail"]).toBe(
+      "the request could not be completed; the failure has been recorded against this request's correlation id",
+    );
+  });
+
+  it("threads the caller's correlation id into the body, which is their handle on the record", async () => {
+    const { bodyText } = await throwingHandlerResult({ correlationId: "corr-7f3a" });
+    const body = JSON.parse(bodyText) as Record<string, unknown>;
+    expect(body["correlationId"]).toBe("corr-7f3a");
+  });
+
+  it("omits correlationId when the caller sent none, rather than inventing one", async () => {
+    const { bodyText } = await throwingHandlerResult();
+    expect(Object.keys(JSON.parse(bodyText) as Record<string, unknown>)).not.toContain(
+      "correlationId",
+    );
+  });
+
+  it("produces a schema-valid execution whose dispatch stage is an error", async () => {
+    const { execution, dispatch } = await throwingHandlerResult();
+    expect(dispatch?.outcome).toBe("error");
+    expect(() => PipelineExecutionSchema.parse(execution)).not.toThrow();
   });
 });
 

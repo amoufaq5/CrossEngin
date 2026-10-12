@@ -1,5 +1,5 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
-import type { EntityRecord, ListValueType } from "@crossengin/operate-runtime";
+import { ListSurfaceUnserveable, type EntityRecord, type ListValueType } from "@crossengin/operate-runtime";
 import { describe, expect, it } from "vitest";
 
 import { PostgresEntityStore } from "./entity-store.js";
@@ -204,9 +204,13 @@ describe("PostgresEntityStore — configuration", () => {
 function capturePg(rows: EntityRecord[]): {
   conn: PgConnection;
   last: { sql: string; params: readonly unknown[] };
+  /** Every statement, for a case asserting that something was NOT issued. */
+  calls: Array<{ sql: string; params: readonly unknown[] }>;
 } {
   const last = { sql: "", params: [] as readonly unknown[] };
+  const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
   const query = (async (sql: string, params?: readonly unknown[]) => {
+    calls.push({ sql, params: params ?? [] });
     if (sql.includes("set_config")) return { rows: [], rowCount: 0 };
     last.sql = sql;
     last.params = params ?? [];
@@ -218,7 +222,7 @@ function capturePg(rows: EntityRecord[]): {
     withAdvisoryLock: (async <T>(_k: bigint, fn: () => Promise<T>) => fn()) as PgConnection["withAdvisoryLock"],
     close: (async () => undefined) as PgConnection["close"],
   };
-  return { conn, last };
+  return { conn, last, calls };
 }
 
 interface LinkRow {
@@ -431,18 +435,50 @@ describe("PostgresEntityStore.listPage — pushdown", () => {
     expect(last.params).toEqual([TENANT, "Product", "active", 11]);
   });
 
-  it("ignores a filter/sort field that isn't a safe identifier", async () => {
+  it("refuses a filter/sort field that isn't a safe identifier, and interpolates nothing", async () => {
+    // The interpolation guard is unchanged and still the thing that matters — neither word reaches
+    // any SQL. What changed is that the surface is no longer *dropped*: the old assertion was
+    // `last.params` equalling the base parameters, i.e. a statement issued with the filter gone,
+    // which answers with every row of the entity.
+    const { conn, calls } = capturePg([]);
+    const store = new PostgresEntityStore(conn);
+    const err = await store
+      .listPage(TENANT, "Product", {
+        limit: 10,
+        cursor: null,
+        sort: [{ field: "name; DROP", direction: "asc" }],
+        filters: [{ field: "x'; DELETE", value: "v" }],
+      })
+      .then(
+        () => null,
+        (e: unknown) => e as ListSurfaceUnserveable,
+      );
+    expect(err).toBeInstanceOf(ListSurfaceUnserveable);
+    // The filter alone; the unsafe sort name degrades, and the interpolation guard is what keeps
+    // it out of the SQL either way.
+    expect(err!.surfaces.map((x) => x.reason)).toEqual(["unsafe_field_name"]);
+    for (const c of calls) {
+      expect(c.sql).not.toContain("DROP");
+      expect(c.sql).not.toContain("DELETE");
+    }
+  });
+
+  it("serves a filter on a field the entity does not declare, which is a real JSON path", async () => {
+    // The document store's arm, and deliberately NOT a refusal: `document ->> 'nope'` is a valid
+    // path over a real document that yields NULL, so the predicate is honest and matches nothing.
+    // That is the opposite of what the column store answers for the same request — it has no
+    // column at all — and the disagreement is why the kernel now refuses a manifest that declares
+    // a surface over a field no entity has.
     const { conn, last } = capturePg([]);
     const store = new PostgresEntityStore(conn);
     await store.listPage(TENANT, "Product", {
       limit: 10,
       cursor: null,
-      sort: [{ field: "name; DROP", direction: "asc" }],
-      filters: [{ field: "x'; DELETE", value: "v" }],
+      sort: [],
+      filters: [{ field: "nope", value: "v" }],
     });
-    expect(last.sql).not.toContain("DROP");
-    expect(last.sql).not.toContain("DELETE");
-    expect(last.params).toEqual([TENANT, "Product", 11]);
+    expect(last.sql).toContain("document ->> 'nope'");
+    expect(last.params).toEqual([TENANT, "Product", "v", 11]);
   });
 });
 
@@ -522,10 +558,13 @@ describe("PostgresEntityStore.listPage — declared numeric fields", () => {
   });
 
   it("keeps the guarded expression away from the field name interpolation guard", async () => {
-    // The numeric path builds three copies of `document ->> 'field'`, so the identifier check
-    // has to hold for all of them: an unsafe name is still dropped entirely.
-    const { conn, last } = capturePg([]);
+    // The numeric path builds three copies of `document ->> 'field'`, so the identifier check has
+    // to hold for all of them — and the name now REFUSES rather than being dropped, so the three
+    // copies are never built at all. The guard is still what this pins: no statement contains it.
+    const { conn, calls } = capturePg([]);
     const store = new PostgresEntityStore(conn);
+    // A sort-only unsafe name degrades rather than refusing, so the statement IS issued — and the
+    // guard is what this pins: none of it reaches any SQL.
     await store.listPage(TENANT, "Product", {
       limit: 10,
       cursor: null,
@@ -533,8 +572,8 @@ describe("PostgresEntityStore.listPage — declared numeric fields", () => {
       filters: [],
       valueTypes: new Map<string, ListValueType>([["price'; DROP TABLE x; --", "numeric"]]),
     });
-    expect(last.sql).not.toContain("DROP");
-    expect(last.sql).toContain("ORDER BY record_id ASC");
+    for (const c of calls) expect(c.sql).not.toContain("DROP");
+    expect(calls.some((c) => c.sql.includes("ORDER BY record_id ASC"))).toBe(true);
   });
 });
 

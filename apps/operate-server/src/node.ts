@@ -143,6 +143,7 @@ import {
   formatEnvelopeTenantReadiness,
   surveyEnvelopeTenantReadiness,
 } from "./envelope-tenant-readiness.js";
+import { formatListSurfaceReport, surveyListSurfaces } from "./list-surface-survey.js";
 import {
   TENANT_WRITE_STATUS_DETAIL,
   probeTenantWriteStatus,
@@ -829,7 +830,8 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
   if (options.columnKeyMode === "envelope" && conn !== undefined) {
     // ADR-0349's live finding (a). `meta.tenant_data_keys.tenant_id` references `meta.tenants(id)`,
     // so a credential naming a tenant with no row there has **every** PHI read and write refused by
-    // that foreign key — surfaced as a 504, a retryable status for a permanent fault. Reported, not
+    // that foreign key — surfaced as a 500 naming nothing, with the constraint in the recorded
+    // stage reason (it was a 504 carrying the message until the mapping was inverted). Reported, not
     // refused: the api-key specs are a lower bound on the tenants this deployment will serve, since
     // a JWT request carries its own, so a refusal built on this population would refuse deployments
     // that work and still admit the ones that do not.
@@ -840,6 +842,19 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
     );
     const line = formatEnvelopeTenantReadiness(readiness);
     if (line !== null) console.warn(`[phi] ${line}`);
+  }
+  // Which of the manifest's declared list surfaces this store can express. Said at boot because
+  // every input is knowable here — the view's columns, the field classifications and `--store` —
+  // and the alternative is an operator meeting the refusal through a user: a filter on a column
+  // held as ciphertext is now a 400 rather than a page of every row, which is the correct answer
+  // and a surprising one if nothing said it was coming. Reports and never refuses; the verdict's
+  // own map says why.
+  const listSurfaces = surveyListSurfaces(manifest, options.store);
+  const surfaceLine = formatListSurfaceReport(listSurfaces);
+  if (listSurfaces.verdict === "all_surfaces_serveable") {
+    console.info(surfaceLine);
+  } else {
+    console.warn(surfaceLine);
   }
   // Who may read and write each sensitive class. One declaration, both directions: the same policy
   // object reaches the response-redaction registry and the write mask, because `privilegedForClass`
@@ -3883,6 +3898,21 @@ export async function serve(options: ServeOptions): Promise<RunningServer> {
       },
       onInvalidManifest: (tenantId, issues) =>
         console.error(`[ai-design] tenant ${tenantId} stored manifest invalid: ${issues.slice(0, 3).join("; ")}`),
+      // A second callback and not a second message through the first, because the first one's
+      // sentence is **false** here: a build refusal means the manifest passed both
+      // `ManifestSchema.safeParse` and `tryValidateManifest`, so "stored manifest invalid" names
+      // the wrong thing and its implied remedy — edit the manifest — is the wrong remedy. What
+      // needs configuring is the deployment. "A remedy that cannot work is worse than none."
+      //
+      // `[tenant-gateway]` rather than `[ai-design]`: an operator hunting a per-tenant serving
+      // problem greps the subsystem, and the sibling 95 lines up already logs `[tenant-schema]`.
+      // The detail is log-only — the 503 names the tenant and the refusal kind and nothing else,
+      // because these messages enumerate entities, fields and policy keys.
+      onBuildRefused: (tenantId, kind, detail) =>
+        console.error(
+          `[tenant-gateway] tenant ${tenantId} manifest is valid and its gateway could not be ` +
+            `built (${kind}); their requests get 503 until this is resolved: ${detail}`,
+        ),
     });
     // Cross-replica invalidation: activation on replica A is invisible to B/C until their TTL
     // expires. One aggregate query per interval (independent of tenant count) detects changed

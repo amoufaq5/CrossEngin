@@ -36,8 +36,8 @@ import { PipelineRecorder } from "./pipeline-runner.js";
 import {
   authenticationRequired,
   forbidden,
-  gatewayTimeout,
   idempotencyMismatch,
+  internalServerError,
   notFound,
   serviceUnavailable,
   tooManyRequests,
@@ -86,6 +86,26 @@ export interface HandleResult {
 const HANDLER_ERROR_PROBLEM_TYPE = "https://crossengin.io/problems/handler-error";
 const HEADER_API_VERSION = "x-api-version";
 const HEADER_IDEMPOTENCY_KEY = "idempotency-key";
+
+/**
+ * What an uncaught handler throw tells the caller: that it failed and that somebody else can find
+ * out why. A constant and not an interpolation, so no future edit can reintroduce a value from the
+ * exception by editing one argument.
+ *
+ * It names the correlation id because that is the caller's handle for a support request — supplied
+ * by the caller through `x-correlation-id`, so a caller who sends none has no handle and this
+ * sentence is the whole of what they get. That is the intended end state: the diagnosis is the
+ * operator's, and a caller who wants to be able to quote one sends the header.
+ */
+const HANDLER_THREW_CLIENT_DETAIL =
+  "the request could not be completed; the failure has been recorded against this request's correlation id";
+
+/**
+ * `StageResultSchema.reason` is `z.string().max(500)`, which is what this budget plus the marker
+ * below is sized for. The marker stays because it is the string an operator greps for, and it was
+ * the *whole* of what the row used to say.
+ */
+const HANDLER_THREW_REASON_BUDGET = 480;
 
 export class GatewayRuntime {
   private readonly routes: RouteRegistry;
@@ -817,8 +837,23 @@ export class GatewayRuntime {
         parsedBody: ctx.parsedBody,
       });
     } catch (err) {
-      const env = gatewayTimeout({
-        reason: err instanceof Error ? err.message.slice(0, 480) : "handler_threw_unknown",
+      // The two destinations are the opposite way round from how this read until ADR-0359, and that
+      // single move is both the disclosure fix and what makes the status change safe. The exception
+      // message went to the response body, where it is the RFC 9457 `detail`; measured on the
+      // at-rest-encryption paths at 190, 391 and 438 characters, all under the slice, so each
+      // reached an anonymous caller in full carrying entity names and tenant UUIDs. Meanwhile the
+      // recorded reason was the bare constant `handler_threw`, so the row an operator reads — what
+      // `--gateway-execution-capture` persists and `GatewayReplayer` reads — said nothing at all
+      // about why. The diagnosis belongs to the operator and the fact of failure to the caller.
+      //
+      // 500 and not 504: an uncaught throw is by definition unclassified, and 500 is the one status
+      // claiming neither "retry this" nor "your request was wrong", where 504 invites the retry a
+      // permanent fault cannot survive. Deliberately *not* a permanent/transient map keyed on error
+      // classes: no error thrown through here declares a disposition, and recognising one by name
+      // would mean the gateway importing the pg or crypto packages. Such a map can only be built
+      // from the other end — by the throwers declaring what they are — so do not attempt it here.
+      const env = internalServerError({
+        reason: HANDLER_THREW_CLIENT_DETAIL,
         correlationId: ctx.request.correlationId ?? undefined,
       });
       rec.record({
@@ -826,7 +861,10 @@ export class GatewayRuntime {
         outcome: "error",
         startedAt,
         completedAt: this.now(),
-        reason: "handler_threw",
+        reason:
+          err instanceof Error
+            ? `handler_threw: ${err.message.slice(0, HANDLER_THREW_REASON_BUDGET)}`
+            : "handler_threw_unknown",
         problemTypeUri: env.body.type,
         responseStatus: env.body.status,
       });

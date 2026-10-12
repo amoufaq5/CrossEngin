@@ -17,6 +17,7 @@ const PROBLEM_TITLES: Record<keyof typeof PROBLEM_TYPES, string> = {
   unprocessable_entity: "Unprocessable entity",
   too_many_requests: "Too many requests",
   quota_exceeded: "Quota exceeded",
+  internal_server_error: "Internal server error",
   service_unavailable: "Service unavailable",
   gateway_timeout: "Gateway timeout",
   sunset_endpoint: "Endpoint sunset",
@@ -171,6 +172,26 @@ export function tooManyRequests(input: {
   });
 }
 
+/**
+ * The answer to a fault this process could not classify.
+ *
+ * `reason` becomes the RFC 9457 `detail`, so a caller reads it — which is why the one call site
+ * that catches an arbitrary throw passes a fixed sentence rather than the exception's message, and
+ * records the message instead. Nothing here enforces that; the helper cannot tell a fixed sentence
+ * from an interpolated one, so the rule lives at the call site with its reasoning.
+ */
+export function internalServerError(input: {
+  readonly reason: string;
+  readonly correlationId?: string;
+}): ProblemEnvelope {
+  return buildEnvelope({
+    key: "internal_server_error",
+    status: 500,
+    detail: input.reason,
+    correlationId: input.correlationId,
+  });
+}
+
 export function serviceUnavailable(input: {
   readonly reason: string;
   readonly correlationId?: string;
@@ -183,6 +204,12 @@ export function serviceUnavailable(input: {
   });
 }
 
+/**
+ * A real upstream timeout, and only that. It has no caller on the request path: the dispatch stage
+ * used it for every uncaught handler throw, which is `internalServerError`'s job — 504 invites the
+ * retry a permanent fault cannot survive. Kept rather than deleted because an upstream the gateway
+ * genuinely waited on is a legitimate outcome and this is the helper for it.
+ */
 export function gatewayTimeout(input: {
   readonly reason: string;
   readonly correlationId?: string;

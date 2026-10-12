@@ -296,11 +296,16 @@ describe("formatEnvelopeTenantReadiness", () => {
     const { conn } = fakeDb({ present: [] });
     const line = formatEnvelopeTenantReadiness(await surveyEnvelopeTenantReadiness(conn, [A])) ?? "";
     expect(line).toContain(DATA_KEY_TENANT_FK);
-    // The consequence, in the three parts an operator cannot guess: reads as well as writes, the
-    // status they will actually see, and why retrying is futile.
+    // The consequence, in the four parts an operator cannot guess: reads as well as writes, the
+    // status they will actually see, where the constraint name is (the recorded stage reason, since
+    // ADR-0359 moved it out of the response body) and why retrying is futile.
     expect(line).toMatch(/every PHI read and write/);
-    expect(line).toMatch(/504/);
+    expect(line).toMatch(/500/);
+    expect(line).toMatch(/recorded stage reason/);
     expect(line).toMatch(/retrying can never succeed/);
+    // Not 504. The old text promised a status this binary no longer emits for this fault, which is
+    // the kind of claim that survives a fix by being prose rather than code.
+    expect(line).not.toMatch(/504/);
     // Both remedies, each nameable: provision the tenant, or stop needing a row at all.
     expect(line).toMatch(/POST \/v1\/platform\/tenants/);
     expect(line).toMatch(/--column-key-mode derived/);

@@ -1,3 +1,4 @@
+import { resolvedFields } from "@crossengin/kernel/ddl";
 import type { Manifest } from "@crossengin/kernel/manifest";
 
 import type { FilterOp, ListFilter, ListQuery, ListSearch, ListSort } from "./store.js";
@@ -17,6 +18,48 @@ export interface ListConfig {
   readonly filterableFields: readonly string[];
   /** Text-like fields the `?q` free-text search matches against (OR of contains). */
   readonly searchableFields: readonly string[];
+  /**
+   * Every field name the entity resolves to, plus `id`.
+   *
+   * It exists for exactly one question, and it is the question that separates a refusal from a
+   * shrug: `?tax_id=X` on an entity that *has* a `tax_id` and declines to filter it is a caller
+   * asking for something this deployment chose not to serve, while `?utm_source=x` names nothing
+   * and is an ordinary unknown query parameter that every HTTP surface ignores. Only the first may
+   * be refused, and without this list the two are indistinguishable.
+   *
+   * Required rather than optional, because an optional field can be forgotten with the type still
+   * valid and the consequence of forgetting it is that every refusal silently stops firing — the
+   * permissive direction. There are two construction sites in the workspace.
+   */
+  readonly fields: readonly string[];
+}
+
+/**
+ * A query surface the caller asked for that this entity does not serve.
+ *
+ * Both reasons are *manifest* facts rather than store ones: the field exists and is not in
+ * `filterableFields`, or `?q` arrived at an entity with no searchable field at all. A surface the
+ * manifest declares and the **store** cannot serve is a different fact with a different remedy —
+ * see `ListSurfaceUnserveable` in `store.ts`.
+ *
+ * There is deliberately no `not_sortable` member, and `parseListQuery` says why: an unhonoured sort
+ * returns the right rows in the wrong order, which is not the same kind of wrong as a page holding
+ * rows the caller asked to exclude.
+ */
+export const UNSERVED_LIST_REASONS = ["not_filterable", "not_searchable"] as const;
+export type UnservedListReason = (typeof UNSERVED_LIST_REASONS)[number];
+
+export interface UnservedListSurface {
+  readonly surface: "filter" | "search";
+  readonly reason: UnservedListReason;
+  /** The field asked for; `null` for `?q`, which names no single field. */
+  readonly field: string | null;
+}
+
+/** The resolved query, plus every surface the caller asked for that the entity does not serve. */
+export interface ParsedListQuery {
+  readonly query: ListQuery;
+  readonly unserved: readonly UnservedListSurface[];
 }
 
 const RESERVED_PARAMS = new Set(["limit", "cursor", "sort", "order", "fields", "q"]);
@@ -133,6 +176,7 @@ function withReferenceFilters(
  * filter is pushed into SQL rather than scanned client-side.
  */
 export function listConfigForEntity(manifest: Manifest, entity: string): ListConfig {
+  const fields = entityFieldNames(manifest, entity);
   const views = Object.values(manifest.views ?? {}) as ReadonlyArray<ListViewLike>;
   const view = views.find((v) => v.kind === "list" && v.entity === entity);
   if (view === undefined) {
@@ -143,6 +187,7 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
       sortableFields: [],
       filterableFields: withReferenceFilters(manifest, entity, withLifecycleStateFilter(manifest, entity, [])),
       searchableFields: searchableFieldsFor(manifest, entity, null),
+      fields,
     };
   }
   const columns = view.columns ?? [];
@@ -157,7 +202,23 @@ export function listConfigForEntity(manifest: Manifest, entity: string): ListCon
     sortableFields,
     filterableFields: withReferenceFilters(manifest, entity, withLifecycleStateFilter(manifest, entity, filterableFields)),
     searchableFields: searchableFieldsFor(manifest, entity, visibleColumns),
+    fields,
   };
+}
+
+/**
+ * Every field name the entity resolves to, plus `id`.
+ *
+ * Through the kernel's `resolvedFields` — the same function `validateManifest`, the column plan and
+ * the three sibling decorators in this package use — so a field a **trait** contributes counts,
+ * and this list cannot disagree with the set the served table has columns for. `id` is added for
+ * the reason `resolvedFieldNames` adds it: it is not a domain field, and for an existence question
+ * it plainly exists.
+ */
+function entityFieldNames(manifest: Manifest, entity: string): readonly string[] {
+  const ent = (manifest.entities ?? []).find((e) => e.name === entity);
+  if (ent === undefined) return ["id"];
+  return ["id", ...resolvedFields(ent, manifest.traits ?? []).map((f) => f.name)];
 }
 
 function firstValue(v: string | readonly string[] | undefined): string | undefined {
@@ -173,33 +234,70 @@ function clampLimit(raw: string | undefined, config: ListConfig): number {
 }
 
 /**
- * Parses a request query into a resolved `ListQuery`, honoring the entity's
- * `ListConfig`: `?limit` (clamped to the view's max), `?cursor` (opaque),
- * `?sort=<field>&order=asc|desc` (only when the field is sortable, else the
- * view's default sort), and equality filters on any non-reserved param whose
- * key is a filterable column. Unknown / non-filterable params are ignored, so
- * an arbitrary query can't widen the result set.
+ * Parses a request query into a resolved `ListQuery`, honoring the entity's `ListConfig`:
+ * `?limit` (clamped to the view's max), `?cursor` (opaque), `?sort=<field>&order=asc|desc`, and
+ * equality filters on any non-reserved param whose key is a filterable column.
+ *
+ * It also reports, in `unserved`, every surface the caller asked for that this entity does not
+ * serve — and that half is the point. This function used to drop those silently, under a comment
+ * that read *"Unknown / non-filterable params are ignored, so an arbitrary query can't widen the
+ * result set"*, which is **exactly backwards about the dangerous half**. It is true of the surface:
+ * a caller cannot filter on a column the manifest did not expose. It is false of the answer:
+ * ignoring `?tax_id=X` returns every vendor, which is the rows the caller asked to *exclude*.
+ * Two readings of "widen", and the response was indistinguishable from one where the filter had
+ * been applied — so a client that believes it filtered acts on the whole table. `?sort=` was the
+ * same shape one axis over: an unsortable value fell back to the view's default, so a caller was
+ * handed a different order under a 200.
+ *
+ * It reports rather than throws, because the status and the sentence belong to the handler and this
+ * module is pure. The empty array is the normal case.
  */
 export function parseListQuery(
   query: Readonly<Record<string, string | readonly string[]>>,
   config: ListConfig,
-): ListQuery {
+): ParsedListQuery {
   const limit = clampLimit(firstValue(query["limit"]), config);
   const cursor = firstValue(query["cursor"]) ?? null;
+  const unserved: UnservedListSurface[] = [];
 
   const sortField = firstValue(query["sort"]);
   const orderRaw = firstValue(query["order"]);
   const direction: "asc" | "desc" = orderRaw === "desc" ? "desc" : "asc";
-  const sort: readonly ListSort[] =
-    sortField !== undefined && config.sortableFields.includes(sortField)
-      ? [{ field: sortField, direction }]
-      : config.defaultSort;
+  // An unsortable `?sort` still falls back to the view's default, and that is a deliberate
+  // asymmetry with the filter below rather than an oversight.
+  //
+  // The question the two answer differently is **whether the answer is wrong or merely not the one
+  // asked for**. A dropped filter puts rows in the page that are not answers to the caller's
+  // question — they asked to exclude them — so the response is false. An unhonoured sort returns
+  // exactly the right rows under the default ordering: correct data, in an order the caller did not
+  // choose, which they can see by looking at it and which discloses nothing.
+  //
+  // And the costs are not symmetric either, measured across the seven resolved packs: 243 of 375
+  // entities have no list view and so declare **no sortable field at all**, so refusing here would
+  // turn `?sort=` into a 400 on nearly two thirds of every pack's collections — where the rows were
+  // never wrong. ADR-0338's rule is to refuse where nothing worked before and to leave alone what
+  // did. The sharper half of this surface — a sortable field whose *value* rides out in the cursor
+  // — is ADR-0357's survey and is reported at boot rather than per request.
+  const sortAsked = sortField !== undefined && config.sortableFields.includes(sortField);
+  const sort: readonly ListSort[] = sortAsked
+    ? [{ field: sortField, direction }]
+    : config.defaultSort;
 
+  const fields = new Set(config.fields);
+  const filterable = new Set(config.filterableFields);
   const filters: ListFilter[] = [];
   for (const [key, value] of Object.entries(query)) {
     if (RESERVED_PARAMS.has(key)) continue;
     const parsed = parseFilterKey(key);
-    if (parsed === null || !config.filterableFields.includes(parsed.field)) continue;
+    if (parsed === null) continue;
+    if (!filterable.has(parsed.field)) {
+      // Only when it names a real field of the entity. `?utm_source=x` names nothing and is left
+      // alone; `?tax_id=X` on an entity that has `tax_id` and declines to filter it is refused.
+      if (fields.has(parsed.field)) {
+        unserved.push({ surface: "filter", reason: "not_filterable", field: parsed.field });
+      }
+      continue;
+    }
     if (parsed.op === "in") {
       const values = inValues(value);
       if (values.length > 0) filters.push({ field: parsed.field, op: "in", value: values });
@@ -209,15 +307,23 @@ export function parseListQuery(
     if (v !== undefined) filters.push({ field: parsed.field, op: parsed.op, value: v });
   }
 
-  // Cross-field free-text search: `?q=term` matches ANY searchable field. Ignored when the
-  // entity has no searchable fields, so an arbitrary `?q` can't widen the result set.
+  // Cross-field free-text search: `?q=term` matches ANY searchable field. An entity with no
+  // searchable field cannot serve it at all, and dropping it there is the widest drop of the three
+  // — `?q=anything` matched every row — so it is reported rather than ignored.
   const q = firstValue(query["q"]);
+  const wants = q !== undefined && q.trim() !== "";
+  if (wants && config.searchableFields.length === 0) {
+    unserved.push({ surface: "search", reason: "not_searchable", field: null });
+  }
   const search: ListSearch | undefined =
-    q !== undefined && q.trim() !== "" && config.searchableFields.length > 0
-      ? { term: q.trim(), fields: config.searchableFields }
+    wants && config.searchableFields.length > 0
+      ? { term: q!.trim(), fields: config.searchableFields }
       : undefined;
 
-  return { limit, cursor, sort, filters, ...(search !== undefined ? { search } : {}) };
+  return {
+    query: { limit, cursor, sort, filters, ...(search !== undefined ? { search } : {}) },
+    unserved,
+  };
 }
 
 const FILTER_KEY_RE = /^([a-z][a-z0-9_]*)(?:\[(eq|ne|gt|gte|lt|lte|in|contains)\])?$/;

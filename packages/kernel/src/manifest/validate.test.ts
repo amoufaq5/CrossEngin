@@ -358,7 +358,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -376,7 +382,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -391,7 +403,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -406,7 +424,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -433,7 +457,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -471,7 +501,13 @@ describe("validateManifest — permissions", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       roles: baseRoles,
       permissions: {
@@ -490,7 +526,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -527,7 +569,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -548,7 +596,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -569,7 +623,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -598,7 +658,13 @@ describe("validateManifest — workflows", () => {
       manifestVersion: "1.0",
       meta: baseMeta,
       entities: [
-        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+        {
+          name: "Prescription",
+          fields: [
+            { name: "qty", type: { kind: "integer" } },
+            { name: "status", type: { kind: "text" } },
+          ],
+        },
       ],
       workflows: {
         lifecycle: {
@@ -612,6 +678,85 @@ describe("validateManifest — workflows", () => {
       },
     };
     expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  // The state field has to exist, and until this check it did not have to: `stateField` was
+  // `z.string().min(1)` and the only test on an `entityLifecycle` was that its *entity* resolves.
+  // One live member, in `erp-construction`, whose `WorkOrder` replaced core's with one whose column
+  // is `status` while core's inherited lifecycle still named `state` — and the damage landed on the
+  // list surface, where `withLifecycleStateFilter` turns the state field into a filterable column
+  // unconditionally.
+  it("throws when a lifecycle names a state field the entity does not have", () => {
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [
+        { name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "state",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/state field 'state' is not a field of entity/);
+  });
+
+  it("accepts a state field contributed by a trait", () => {
+    // Through `fieldsByEntity`, which is `resolvedFields` + `id` — so a trait-supplied state field
+    // is accepted, because the served table really does have a column for it. A name check against
+    // `entity.fields` alone would have refused this.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      traits: [
+        { name: "stateful", fields: [{ name: "state", type: { kind: "text" } }] },
+      ],
+      entities: [
+        {
+          name: "Prescription",
+          traits: ["stateful"],
+          fields: [{ name: "qty", type: { kind: "integer" } }],
+        },
+      ],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Prescription",
+          stateField: "state",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).not.toThrow();
+  });
+
+  it("does not reach the state-field check for an unknown entity", () => {
+    // Ordering: the entity check fires first, so an operator is told the entity does not exist
+    // rather than being told its state field is missing — which would be true and useless.
+    const m: Manifest = {
+      manifestVersion: "1.0",
+      meta: baseMeta,
+      entities: [{ name: "Prescription", fields: [{ name: "qty", type: { kind: "integer" } }] }],
+      workflows: {
+        lifecycle: {
+          kind: "entityLifecycle",
+          entity: "Ghost",
+          stateField: "state",
+          states: [{ name: "pending" }, { name: "done", category: "terminal" }],
+          initialState: "pending",
+          transitions: [{ name: "complete", from: "pending", to: "done" }],
+        },
+      },
+    };
+    expect(() => validateManifest(m)).toThrow(/references unknown entity 'Ghost'/);
   });
 });
 
@@ -860,7 +1005,10 @@ describe("validateManifest — jobs", () => {
 describe("validateManifest — reports + dashboards", () => {
   const entityFixture = {
     name: "Prescription",
-    fields: [{ name: "qty", type: { kind: "integer" as const } }],
+    fields: [
+      { name: "qty", type: { kind: "integer" as const } },
+      { name: "status", type: { kind: "text" as const } },
+    ],
   };
 
   it("accepts a manifest with valid reports + dashboards", () => {
@@ -936,7 +1084,10 @@ describe("validateManifest — reports + dashboards", () => {
 describe("validateManifest — views", () => {
   const entityFixture = {
     name: "Prescription",
-    fields: [{ name: "qty", type: { kind: "integer" as const } }],
+    fields: [
+      { name: "qty", type: { kind: "integer" as const } },
+      { name: "status", type: { kind: "text" as const } },
+    ],
   };
 
   it("accepts a list view referencing a record view + workflow transition", () => {

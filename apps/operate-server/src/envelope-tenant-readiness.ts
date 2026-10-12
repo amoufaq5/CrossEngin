@@ -24,9 +24,15 @@ import { COLUMN_KEY_MODE_FLAG } from "./data-key-envelope.js";
  * "tenant_data_keys_tenant_id_fkey"
  * ```
  *
- * surfaced to the client as an HTTP **504** — a retryable status for a permanent configuration
- * fault, so a client's own retry can never succeed and the deployment reads as a slow database
- * rather than a misconfigured one. `--api-key 'key:role:tenant'` names an arbitrary UUID that
+ * surfaced to the client as an HTTP **500** whose body says only that the request could not be
+ * completed, the constraint name reaching the *recorded stage reason* instead (ADR-0359; it was a
+ * **504** carrying this exact text in the response body, which was both a disclosure and a status
+ * inviting a retry that cannot succeed). So the symptom an operator now meets is a 500 and a
+ * `handler_threw:` line in the execution row, neither of which says *configuration* — the
+ * diagnosis is legible and still only to whoever reads the row, which is why this survey is said
+ * at boot rather than left to be inferred from one.
+ *
+ * `--api-key 'key:role:tenant'` names an arbitrary UUID that
  * nothing requires to exist, and ADR-0334's own boot survey established that such tenants have no
  * `meta.tenants` row in any dev deployment. So the unusability is silent until the first PHI
  * request, which is the shape `surveyUserFkReadiness` exists to end one table across.
@@ -246,7 +252,7 @@ async function loadPresent(
  * `null` when every named tenant is provisioned, so a caller logs only a finding. The message names
  * the **consequence** and the **remedy** rather than the condition: a line reading "tenant X has no
  * meta.tenants row" is true and tells an operator neither what will break nor what to do, and this
- * failure's symptom — a 504 — actively points away from configuration.
+ * failure's symptom — a 500 whose body names nothing — points nowhere at all.
  */
 export function formatEnvelopeTenantReadiness(report: EnvelopeTenantReadiness): string | null {
   if (report.unreadableReason === null && report.missing.length === 0) return null;
@@ -269,12 +275,14 @@ export function formatEnvelopeTenantReadiness(report: EnvelopeTenantReadiness): 
   for (const tenantId of report.unknown) lines.push(`  undetermined tenant: ${tenantId}`);
   // The consequence, stated once and in full, because every part of it is counter-intuitive: the
   // failure is on a key-management table the request never names, it reaches reads as well as
-  // writes, and the status invites the one response that cannot work.
+  // writes, and nothing the caller is shown names the cause. Naming the constraint here is the
+  // point of the line: since ADR-0359 the constraint's name is in the recorded stage reason and
+  // not in the client's body, so an operator who has only the caller's report has nothing to go on.
   lines.push(
     `  consequence: under ${COLUMN_KEY_MODE_FLAG} envelope every PHI read and write for such a ` +
       `tenant is refused by ${DATA_KEY_TENANT_FK}, because the wrapped data key is a row whose ` +
-      `tenant_id references meta.tenants(id) — the client sees an HTTP 504, a retryable status for ` +
-      `a permanent fault, so retrying can never succeed`,
+      `tenant_id references meta.tenants(id) — the client sees an HTTP 500 naming nothing, and the ` +
+      `constraint appears only in the request's recorded stage reason, so retrying can never succeed`,
   );
   lines.push(
     `  remedy: point the credential at a tenant provisioned through POST /v1/platform/tenants ` +

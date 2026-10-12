@@ -11,6 +11,7 @@ import {
 import {
   encodeKeyset,
   keysetOf,
+  ListSurfaceUnserveable,
   toDateWire,
   toDecimalWire,
   toTimeWire,
@@ -27,7 +28,14 @@ import {
 
 import type { OnDelete } from "@crossengin/types/meta-schema";
 
-import { buildListSql, isSqlSafeNumericText, type ListSqlAdapter } from "./list-sql.js";
+import {
+  buildListSql,
+  columnUnavailable,
+  isSqlSafeNumericText,
+  refusableSurfaces,
+  sqlColumn,
+  type ListSqlAdapter,
+} from "./list-sql.js";
 import { isDatetimeComparable } from "./temporal-sql.js";
 import {
   columnIndex,
@@ -280,7 +288,22 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
     const adapter: ListSqlAdapter = {
       columnExpr: (field) => {
         const m = idx.get(field);
-        return m === undefined || m.encryptAtRest ? null : quoteIdent(m.column);
+        // Two different facts, and collapsing them to one `null` is what let both be dropped
+        // silently. `encrypted_at_rest` is the live member: `pgp_sym_encrypt` is non-deterministic,
+        // so no comparison can be pushed into SQL against the stored bytes. `not_a_column` means
+        // the manifest declared a surface over a field this entity does not have — one measured
+        // member before the kernel started refusing it, where the *other* store answered the same
+        // request with zero rows while this one answered with every row.
+        // `id` first, because the column plan indexes the entity's *domain* fields and `id` is a
+        // system column this store types for itself. It used to resolve to nothing and be dropped,
+        // and the drop was invisible because `buildListSql` appends the id tiebreaker to every
+        // ORDER BY anyway — so `?sort=id` produced the right order for the wrong reason, and
+        // `?id=<value>` was a filter that silently matched every row. The JSONB store has always
+        // answered `document ->> 'id'` for it.
+        if (field === "id") return sqlColumn(quoteIdent("id"));
+        if (m === undefined) return columnUnavailable("not_a_column");
+        if (m.encryptAtRest) return columnUnavailable("encrypted_at_rest");
+        return sqlColumn(quoteIdent(m.column));
       },
       castSuffix: (field) => {
         const m = idx.get(field);
@@ -298,7 +321,17 @@ export class ColumnMappedEntityStore implements TransactionalEntityStore {
       comparableValue: (field, text) => columnComparableValue(idx.get(field), text),
       idExpr: quoteIdent("id"),
     };
-    const { where, orderBy } = buildListSql(query, adapter, [`${quoteIdent("tenant_id")} = $1`], params);
+    const { where, orderBy, unserveable } = buildListSql(
+      query,
+      adapter,
+      [`${quoteIdent("tenant_id")} = $1`],
+      params,
+    );
+    // Before the statement, because `where` is the query minus whatever could not be expressed and
+    // running it is the whole defect: a dropped filter leaves `tenant_id = $1` alone and the page
+    // comes back holding every row the caller asked to exclude, under a 200.
+    const refusable = refusableSurfaces(unserveable);
+    if (refusable.length > 0) throw new ListSurfaceUnserveable(entity, refusable);
     const limitParam = `$${(params.push(query.limit + 1), params.length).toString()}`;
     // ?fields pushdown: SELECT only the requested columns + the sort columns
     // (needed to build the keyset cursor). The handler re-projects to the

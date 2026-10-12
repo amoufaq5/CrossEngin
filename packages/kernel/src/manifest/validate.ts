@@ -39,7 +39,11 @@ export function validateManifest(manifest: Manifest): void {
   const { entityNames, fieldsByEntity, requiredFieldsByEntity } =
     validateEntitiesTraitsRelations(manifest);
   const rolesMap = validateRoles(manifest);
-  const { entityTransitions, entityStates } = validateWorkflows(manifest, entityNames);
+  const { entityTransitions, entityStates } = validateWorkflows(
+    manifest,
+    entityNames,
+    fieldsByEntity,
+  );
   validatePermissions(
     manifest,
     entityNames,
@@ -301,7 +305,11 @@ interface WorkflowIndex {
   readonly entityStates: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
-function validateWorkflows(manifest: Manifest, entityNames: ReadonlySet<string>): WorkflowIndex {
+function validateWorkflows(
+  manifest: Manifest,
+  entityNames: ReadonlySet<string>,
+  fieldsByEntity: FieldsByEntity,
+): WorkflowIndex {
   const workflows = manifest.workflows ?? {};
   const entityTransitions = new Map<string, Set<string>>();
   const entityStates = new Map<string, Set<string>>();
@@ -321,6 +329,28 @@ function validateWorkflows(manifest: Manifest, entityNames: ReadonlySet<string>)
         throw new ManifestValidationError(
           `workflows.${name}.entity`,
           `workflow references unknown entity '${workflow.entity}'`,
+        );
+      }
+
+      // The state field has to be a field of the entity, and until now nothing said so: its whole
+      // declaration was `z.string().min(1)`, so a lifecycle could name a column that does not
+      // exist and the manifest cross-validated. One live member, and the damage was not in the
+      // workflow at all but in the **list surface**: `withLifecycleStateFilter` adds the state
+      // field to `filterableFields` unconditionally, so a phantom name became a filter the stores
+      // answer with *opposite* wrong answers — the column store has no column for it and drops the
+      // predicate (every row), the document store compares `document ->> 'state'` and gets NULL
+      // (no rows). Measured on resolved `erp-construction`, whose `WorkOrder` replaces core's with
+      // one whose field is `status` while core's `work_order_lifecycle` still names `state`.
+      //
+      // Checked against `fieldsByEntity`, which is `resolvedFields` + `id`, so a state field
+      // contributed by a **trait** is accepted — the served table has a column for it.
+      const fields = fieldsByEntity.get(workflow.entity);
+      if (fields !== undefined && !fields.has(workflow.stateField)) {
+        throw new ManifestValidationError(
+          `workflows.${name}.stateField`,
+          `workflow lifecycle state field '${workflow.stateField}' is not a field of entity ` +
+            `'${workflow.entity}'; a state field that does not exist is served as a filterable ` +
+            `column no store can answer`,
         );
       }
 

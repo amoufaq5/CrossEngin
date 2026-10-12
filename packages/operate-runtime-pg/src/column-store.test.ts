@@ -1,6 +1,6 @@
 import type { PgConnection } from "@crossengin/kernel-pg";
 import type { Manifest } from "@crossengin/kernel/manifest";
-import { encodeKeyset } from "@crossengin/operate-runtime";
+import { encodeKeyset, ListSurfaceUnserveable } from "@crossengin/operate-runtime";
 import type { Entity } from "@crossengin/types/meta-schema";
 import { describe, expect, it } from "vitest";
 
@@ -199,17 +199,43 @@ describe("ColumnMappedEntityStore.listPage — typed sort + safe filter", () => 
     expect(page.nextCursor).not.toBeNull();
   });
 
-  it("ignores a filter/sort field not in the entity's column plan", async () => {
+  // This test used to be titled "ignores a filter/sort field not in the entity's column plan" and
+  // asserted that the statement came back as `ORDER BY "id" ASC` with the filter gone. It was
+  // pinning the defect: a dropped filter leaves `tenant_id = $1` as the whole predicate, so the
+  // page carried every row the caller asked to exclude, under a 200.
+  it("refuses a filter/sort field not in the entity's column plan rather than dropping it", async () => {
     const cap = capturePg([]);
-    await store(cap).listPage(TENANT, "Widget", {
-      limit: 5,
-      cursor: null,
-      sort: [{ field: "nope", direction: "asc" }],
-      filters: [{ field: "ghost", value: "x" }],
-    });
-    const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
-    expect(sel.sql).toContain('ORDER BY "id" ASC');
-    expect(sel.params).toEqual([TENANT, 6]);
+    await expect(
+      store(cap).listPage(TENANT, "Widget", {
+        limit: 5,
+        cursor: null,
+        sort: [{ field: "nope", direction: "asc" }],
+        filters: [{ field: "ghost", value: "x" }],
+      }),
+    ).rejects.toThrow(ListSurfaceUnserveable);
+    // And nothing was issued: the refusal lands before the statement, so no query runs with a
+    // predicate the caller did not ask for.
+    expect(cap.calls.some((c) => c.sql.includes("SELECT"))).toBe(false);
+  });
+
+  it("names every unserveable surface and its reason on the refusal", async () => {
+    const cap = capturePg([]);
+    const err = await store(cap)
+      .listPage(TENANT, "Widget", {
+        limit: 5,
+        cursor: null,
+        sort: [{ field: "nope", direction: "asc" }],
+        filters: [{ field: "ghost", value: "x" }],
+      })
+      .then(
+        () => null,
+        (e: unknown) => e as ListSurfaceUnserveable,
+      );
+    expect(err).toBeInstanceOf(ListSurfaceUnserveable);
+    expect(err!.entity).toBe("Widget");
+    // The filter only: `UNSERVEABLE_SURFACE_REFUSES` says a dropped sort changes the order and
+    // not which rows come back, so it degrades and the boot survey names it.
+    expect(err!.surfaces).toEqual([{ surface: "filter", field: "ghost", reason: "not_a_column" }]);
   });
 
   it("pushes a typed comparison operator with a value cast to the column type", async () => {
@@ -312,18 +338,60 @@ describe("ColumnMappedEntityStore — at-rest encryption of phi columns", () => 
     expect(upd.params).toEqual([TENANT, "w1", "new"]);
   });
 
-  it("excludes encrypted columns from filter + sort (can't order ciphertext)", async () => {
+  // The sharpest of the four tests this increment rewrote, and the one whose old title read as a
+  // feature: "excludes encrypted columns from filter + sort (can't order ciphertext)". The premise
+  // is true — `pgp_sym_encrypt` is non-deterministic, so there is nothing to compare in SQL — and
+  // the conclusion was wrong. Excluding a *filter* does not narrow the answer, it widens it: on the
+  // real `erp-healthcare` pack `mrn` is a filterable column of the Patient list view, so
+  // `GET /v1/patients?mrn=MRN-1` came back as the first page of EVERY patient under a 200, which a
+  // caller and the UI alike read as a search result.
+  it("refuses a filter on an encrypted column rather than excluding it", async () => {
+    const cap = capturePg([]);
+    const err = await store(cap)
+      .listPage(TENANT, "Widget", {
+        limit: 5,
+        cursor: null,
+        sort: [{ field: "mrn", direction: "asc" }],
+        filters: [{ field: "mrn", value: "x" }],
+      })
+      .then(
+        () => null,
+        (e: unknown) => e as ListSurfaceUnserveable,
+      );
+    expect(err).toBeInstanceOf(ListSurfaceUnserveable);
+    expect(err!.surfaces).toEqual([
+      { surface: "filter", field: "mrn", reason: "encrypted_at_rest" },
+    ]);
+    expect(cap.calls.some((c) => c.sql.includes("SELECT"))).toBe(false);
+  });
+
+  it("serves a sort on an encrypted column, degraded rather than refused", async () => {
+    // The other half of the rule. The rows are right and the order is the id tiebreaker's; what
+    // this does NOT fix is the value riding out in the cursor, which is ADR-0357's survey.
     const cap = capturePg([]);
     await store(cap).listPage(TENANT, "Widget", {
       limit: 5,
       cursor: null,
       sort: [{ field: "mrn", direction: "asc" }],
-      filters: [{ field: "mrn", value: "x" }],
+      filters: [],
     });
     const sel = cap.calls.find((c) => c.sql.includes("SELECT"))!;
-    expect(sel.sql).not.toContain('"mrn" DESC');
     expect(sel.sql).toContain('ORDER BY "id" ASC');
-    expect(sel.params).toEqual([TENANT, 6]); // no filter bound for mrn
+    expect(sel.sql).not.toContain('"mrn" ASC');
+  });
+
+  it("serves a query that names no encrypted column, so the refusal is not a blanket one", async () => {
+    // The negative control. The entity HAS an encrypted column and the query does not address it,
+    // so the page is served exactly as before — which is what keeps the refusal about the surface
+    // the caller named rather than about the entity.
+    const cap = capturePg([]);
+    await store(cap).listPage(TENANT, "Widget", {
+      limit: 5,
+      cursor: null,
+      sort: [{ field: "id", direction: "asc" }],
+      filters: [],
+    });
+    expect(cap.calls.some((c) => c.sql.includes("SELECT"))).toBe(true);
   });
 
   it("honors a custom encryptionKeyRef", async () => {

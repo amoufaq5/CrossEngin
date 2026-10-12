@@ -21,7 +21,13 @@ import { compileOperateServer, type CompiledOperateServer } from "./compile.js";
 import { buildSpecHandler, type HandlerContext } from "./handlers.js";
 import { manifestRouteSpecs, routeFromSpec } from "./operations.js";
 import { SEALED_CURSOR_PREFIX, buildCursorSealer } from "./cursor-seal.js";
-import { InMemoryEntityStore, decodeKeyset, type ListPage } from "./store.js";
+import {
+  InMemoryEntityStore,
+  ListSurfaceUnserveable,
+  decodeKeyset,
+  type ListPage,
+  type UnserveableSurfaceRef,
+} from "./store.js";
 import { buildValidationPlans } from "./validation.js";
 import { buildClassifiedFieldIndex } from "./write-mask.js";
 
@@ -232,14 +238,15 @@ describe("operate handlers — lifecycle transitions", () => {
 });
 
 describe("operate handlers — transactional effects", () => {
-  it("rolls back the primary write when a post-write effect fails (transactional store)", async () => {
+  /** A `product.create` whose post-write effect throws the supplied value. */
+  async function failingCreate(thrown: unknown) {
     const store = new InMemoryEntityStore();
     const failing = compileOperateServer(resolved, {
       store,
       principalRoles,
       writeEffects: [
         async () => {
-          throw new Error("effect boom");
+          throw thrown;
         },
       ],
     });
@@ -261,9 +268,54 @@ describe("operate handlers — transactional effects", () => {
       params: {},
       parsedBody: { sku: "ROLL", name: "RolledBack", unit_price: 1, unit_cost: 1 },
     });
+    return { out, store };
+  }
+
+  it("rolls back the primary write when a post-write effect fails (transactional store)", async () => {
+    const { out, store } = await failingCreate(new Error("effect boom"));
     expect(out.status).toBe(500);
     // The create was rolled back: nothing persisted for Product.
     expect((await store.list(TENANT, "Product")).length).toBe(0);
+  });
+
+  // `writeTxn` used to put `e.message` straight into the 500 body with no slice at all, which on a
+  // real deployment handed a client the database's own error text. The body carries a fixed
+  // sentence now; the diagnosis is lost rather than moved, because this layer has no recorder.
+  it("carries a fixed sentence and no part of the thrown message", async () => {
+    const message =
+      `insert or update on table "tenant_data_keys" violates foreign key constraint ` +
+      `"tenant_data_keys_tenant_id_fkey" for tenant ${TENANT}`;
+    const { out } = await failingCreate(new Error(message));
+    const body = bodyOf(out);
+    expect(body["error"]).toBe("write_failed");
+    expect(body["detail"]).toBe("the write could not be completed");
+    // Property-shaped: no window of the message long enough to be a token survives anywhere in
+    // the serialized body, so a partial interpolation fails here too.
+    const serialized = JSON.stringify(body);
+    const windows: string[] = [];
+    for (let start = 0; start + 12 <= message.length; start += 1) {
+      windows.push(message.slice(start, start + 12));
+    }
+    expect(windows.filter((w) => serialized.includes(w))).toEqual([]);
+    expect(serialized).not.toContain(TENANT);
+  });
+
+  it("does not coerce a non-Error throw into the body", async () => {
+    // The old arm fell back to `String(e)`, so a thrown object's own fields were disclosed.
+    const { out } = await failingCreate({ mrn: "MRN-1", tenant: TENANT });
+    const serialized = JSON.stringify(bodyOf(out));
+    expect(out.status).toBe(500);
+    expect(serialized).not.toContain("MRN-1");
+    expect(serialized).not.toContain(TENANT);
+    expect(bodyOf(out)["detail"]).toBe("the write could not be completed");
+  });
+
+  it("keeps the 500, which is what makes the rollback legible as a server fault", async () => {
+    // Not a 503: a failed write unit is not a statement that the store is unreachable, and the
+    // gateway's dispatch stage records `handler_returned_500` either way.
+    const { out } = await failingCreate(new Error("effect boom"));
+    expect(out.status).toBe(500);
+    expect(out.kind).toBe("json");
   });
 });
 
@@ -1790,5 +1842,103 @@ describe("operate handlers — the keyset cursor is sealed at the handler bounda
     const { nextCursor } = page(out);
     expect(nextCursor).toBe(store.lastPage?.nextCursor);
     expect(decodeKeyset(nextCursor)).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A surface the caller asked for that cannot be served.
+//
+// Two different facts with one old answer: drop it and serve the query without it. The manifest
+// half is decidable from the request — the view does not expose this column as filterable — and the
+// store half is not: only the store knows that its column holds pgcrypto ciphertext no comparison
+// can be pushed at. Both are a 400 now, with different sentences, because the remedies differ.
+// ---------------------------------------------------------------------------
+
+/** A store whose `listPage` refuses the way a real Postgres store does. */
+class RefusingStore extends CapturingStore {
+  calls = 0;
+  constructor(private readonly surfaces: UnserveableSurfaceRef[]) {
+    super();
+  }
+  override async listPage(): Promise<ListPage> {
+    this.calls += 1;
+    throw new ListSurfaceUnserveable("Patient", this.surfaces);
+  }
+}
+
+describe("operate handlers — an unserveable list surface is refused, not dropped", () => {
+  it("refuses a filter the manifest does not expose, naming the field", async () => {
+    // `id` is a declared field of Roster and is not one of the view's columns, so it is in
+    // `config.fields` and not in `filterableFields` — the exact pair the refusal turns on. Every
+    // view column (`name`, `ward`, `handle`) IS filterable here.
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, evaluator("satisfied")), "roster.list", {
+      role: "clinician",
+      query: { id: "r1" },
+    });
+    expect(out.status).toBe(400);
+    expect(bodyOf(out)["error"]).toBe("filter_not_served");
+    expect(bodyOf(out)["field"]).toBe("id");
+    // And nothing was read: the refusal is decidable from the request alone, so the store is not
+    // asked a question whose answer would be thrown away.
+    expect(store.pageCalls).toBe(0);
+  });
+
+  it("ignores a parameter naming nothing, which is an ordinary unknown query parameter", async () => {
+    const store = await withRoster();
+    const out = await hit(clinicCtx(store, evaluator("satisfied")), "roster.list", {
+      role: "clinician",
+      query: { utm_source: "ad" },
+    });
+    expect(out.status).toBe(200);
+    expect(store.pageCalls).toBe(1);
+  });
+
+  it("turns a store's refusal into a 400 rather than letting it escape as a 500", async () => {
+    // Uncaught, this would reach the dispatch stage's catch and become a 500 naming nothing — a
+    // correct status for an unclassified throw and the wrong one for a query that cannot be
+    // answered.
+    const store = new RefusingStore([
+      { surface: "filter", field: "mrn", reason: "encrypted_at_rest" },
+    ]);
+    const out = await hit(clinicCtx(store, evaluator("satisfied")), "roster.list", { role: "clinician" });
+    expect(out.status).toBe(400);
+    expect(bodyOf(out)["error"]).toBe("filter_not_served_by_store");
+    expect(bodyOf(out)["field"]).toBe("mrn");
+    expect(store.calls).toBe(1);
+  });
+
+  it("names the store's reason and NOT the error's own message", async () => {
+    // `err.message` names every unserveable surface at once and the fields it names are the
+    // classified ones, so the body is built from this module's own strings.
+    const store = new RefusingStore([
+      { surface: "filter", field: "mrn", reason: "encrypted_at_rest" },
+      { surface: "search", field: "chief_complaint", reason: "encrypted_at_rest" },
+    ]);
+    const out = await hit(clinicCtx(store, evaluator("satisfied")), "roster.list", { role: "clinician" });
+    const detail = String(bodyOf(out)["detail"]);
+    expect(detail).toContain("mrn");
+    expect(detail).toContain("encrypted_at_rest");
+    // The second surface is not enumerated to the caller; the boot log is where the pairs are.
+    expect(detail).not.toContain("chief_complaint");
+  });
+
+  it("answers rather than throwing for an empty surface list, which a store cannot produce", async () => {
+    const out = await hit(clinicCtx(new RefusingStore([]), evaluator("satisfied")), "roster.list", {
+      role: "clinician",
+    });
+    expect(out.status).toBe(400);
+    expect(bodyOf(out)["error"]).toBe("query_not_served");
+  });
+
+  it("lets an unrelated store error escape, so only this class is converted", async () => {
+    class Boom extends CapturingStore {
+      override async listPage(): Promise<ListPage> {
+        throw new Error("connection terminated");
+      }
+    }
+    await expect(
+      hit(clinicCtx(new Boom(), evaluator("satisfied")), "roster.list", { role: "clinician" }),
+    ).rejects.toThrow(/connection terminated/);
   });
 });

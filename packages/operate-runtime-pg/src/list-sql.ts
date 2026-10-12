@@ -15,9 +15,87 @@ import { isDatetimeComparable } from "./temporal-sql.js";
  * column store (`"col"`, typed compares + casts). `columnExpr` returns
  * `null` to drop a field (unknown / unsupported, e.g. an encrypted column).
  */
+/**
+ * Why a store cannot express a field as SQL.
+ *
+ * It exists because the answer used to be `null` and `null` had **two** meanings on one store and a
+ * third on the other, all of which were handled identically: the predicate was dropped and the
+ * response carried every row under a 200. A reason makes the three separable, and `COLUMN_STORE`'s
+ * member is the one that is live.
+ */
+export const COLUMN_UNAVAILABLE_REASONS = [
+  /** The column is pgcrypto ciphertext at rest, so no comparison can be pushed into SQL. */
+  "encrypted_at_rest",
+  /** The entity has no such field, so there is no column and no JSON key to compare. */
+  "not_a_column",
+  /** The name cannot be interpolated into a JSON path safely. */
+  "unsafe_field_name",
+] as const;
+export type ColumnUnavailableReason = (typeof COLUMN_UNAVAILABLE_REASONS)[number];
+
+/** A field resolved to SQL, or the reason it could not be. */
+export type ColumnExpr =
+  | { readonly kind: "sql"; readonly sql: string }
+  | { readonly kind: "unavailable"; readonly reason: ColumnUnavailableReason };
+
+export function sqlColumn(sql: string): ColumnExpr {
+  return { kind: "sql", sql };
+}
+
+export function columnUnavailable(reason: ColumnUnavailableReason): ColumnExpr {
+  return { kind: "unavailable", reason };
+}
+
+/** A surface of the query this store could not express, and which field made it so. */
+export interface UnserveableListSurface {
+  readonly surface: "filter" | "sort" | "search";
+  readonly field: string;
+  readonly reason: ColumnUnavailableReason;
+}
+
+/**
+ * Whether dropping each surface is a **refusal** or a reported degradation, as a total map so a
+ * fourth surface is a compile error rather than inheriting whichever answer a condition gave it.
+ *
+ * One rule decides all three, and it is the rule this whole increment turns on: **a surface whose
+ * drop changes WHICH rows come back is refused; one whose drop changes only their ORDER is
+ * reported.** A dropped filter puts rows in the page that are not answers to the caller's question.
+ * A dropped sort returns exactly the right rows under the remaining keys and the id tiebreaker:
+ * correct data in an order the caller did not choose, which they can see by looking at it.
+ *
+ * `search` is `true` and that is not an exception to the rule — `buildListSql` only records a
+ * search surface when the OR group collapsed **entirely**, which matches every row. A *partial*
+ * collapse narrows, so it is recorded nowhere here and named per pair by the boot survey instead.
+ *
+ * The same split is made one layer up for the same reason: `parseListQuery` refuses a filter on a
+ * non-filterable field and leaves an unsortable `?sort` falling back to the view's default. Two
+ * layers, two mechanisms, one rule.
+ */
+export const UNSERVEABLE_SURFACE_REFUSES: Readonly<
+  Record<UnserveableListSurface["surface"], boolean>
+> = {
+  filter: true,
+  search: true,
+  sort: false,
+};
+
+/** The subset of `unserveable` a store must refuse rather than serve degraded. */
+export function refusableSurfaces(
+  unserveable: readonly UnserveableListSurface[],
+): readonly UnserveableListSurface[] {
+  return unserveable.filter((u) => UNSERVEABLE_SURFACE_REFUSES[u.surface]);
+}
+
 export interface ListSqlAdapter {
-  /** SQL expression yielding the field's value, or null to skip it. */
-  columnExpr(field: string): string | null;
+  /**
+   * SQL expression yielding the field's value, or the reason this store cannot express it.
+   *
+   * It used to answer `string | null` with the doc comment *"or null to skip it"*, and skipping is
+   * precisely what made it dangerous: `buildListSql` dropped the predicate and nothing recorded
+   * that it had, so a filter the caller asked for silently became no filter and the page came back
+   * holding the rows they asked to exclude.
+   */
+  columnExpr(field: string): ColumnExpr;
   /** Cast suffix for a bound comparison value (e.g. `"::numeric(12,2)"`), or `""`. */
   castSuffix(field: string): string;
   /**
@@ -154,6 +232,15 @@ export interface ListSqlParts {
   readonly where: string;
   readonly orderBy: string;
   readonly params: unknown[];
+  /**
+   * Every surface of the query this store could not express. Empty in the normal case.
+   *
+   * It is returned rather than thrown because this module is the SQL *builder* and the status and
+   * the sentence belong to the handler — but a caller that ignores it is back to the defect, so
+   * both stores check it before issuing the statement. The `where` and `params` it is returned
+   * beside are **not** safe to run: they are the query minus whatever could not be expressed.
+   */
+  readonly unserveable: readonly UnserveableListSurface[];
 }
 
 /** Builds a `$n` placeholder for a value, appending it to `params`. */
@@ -162,9 +249,22 @@ function bind(params: unknown[], value: unknown): string {
   return `$${params.length.toString()}`;
 }
 
-function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: unknown[]): string | null {
-  const expr = adapter.columnExpr(filter.field);
-  if (expr === null) return null;
+/**
+ * The SQL for one filter, or the reason this store cannot express it.
+ *
+ * Note which way the two outcomes point. An **unavailable column** is reported, because dropping
+ * the predicate widens the answer to every row. An **uncomparable value** on an available column
+ * still returns SQL — the constant `FALSE` (or `TRUE` for `ne`) — because no typed value compares
+ * to a word, so `?amount[gt]=n/a` matching nothing is the right answer and not a refusal.
+ */
+function filterPredicate(
+  filter: ListFilter,
+  adapter: ListSqlAdapter,
+  params: unknown[],
+): { readonly sql: string } | { readonly reason: ColumnUnavailableReason } {
+  const resolved = adapter.columnExpr(filter.field);
+  if (resolved.kind === "unavailable") return { reason: resolved.reason };
+  const expr = resolved.sql;
   const op = filter.op ?? "eq";
   const typed = adapter.valueType(filter.field) !== "text";
   if (op === "in") {
@@ -176,11 +276,11 @@ function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: un
       // Uncomparable members are dropped rather than bound: `'n/a'::numeric[]` raises, and a typed
       // field holds no row equal to a word, so dropping narrows the set rather than widening it.
       const members = arr.map((v) => String(v)).filter((v) => comparableValue(adapter, filter.field, v));
-      if (members.length === 0) return "FALSE";
-      return `${expr} = ANY(${bind(params, members)}${adapter.castSuffix(filter.field)}[])`;
+      if (members.length === 0) return { sql: "FALSE" };
+      return { sql: `${expr} = ANY(${bind(params, members)}${adapter.castSuffix(filter.field)}[])` };
     }
     // membership compares as text (always valid); cast the column to text
-    return `${expr}::text = ANY(${bind(params, [...arr])}::text[])`;
+    return { sql: `${expr}::text = ANY(${bind(params, [...arr])}::text[])` };
   }
   const value = Array.isArray(filter.value) ? (filter.value[0] ?? "") : (filter.value as string);
   if (op === "contains") {
@@ -188,7 +288,7 @@ function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: un
     // with unaccent() so "jose" matches "José"; ILIKE handles case. The value is
     // bound (never interpolated); its LIKE metacharacters act as wildcards (fine
     // for search). A plain-column pg_trgm GIN index still accelerates this.
-    return `unaccent(${expr}::text) ILIKE ('%' || unaccent(${bind(params, value)}) || '%')`;
+    return { sql: `unaccent(${expr}::text) ILIKE ('%' || unaccent(${bind(params, value)}) || '%')` };
   }
   if (!comparableValue(adapter, filter.field, String(value))) {
     // A constant, because no typed value compares to a word: `?amount[gt]=n/a` and
@@ -197,9 +297,9 @@ function filterPredicate(filter: ListFilter, adapter: ListSqlAdapter, params: un
     // already does today: a garbage query parameter returns a 500 where it should return a page.
     // Keyed on `comparableValue` rather than on the value type, so a `DATE`/`TIME` column (whose
     // value type is `text`) is covered too — `'soon'::DATE` raises just as `'n/a'::numeric` does.
-    return op === "ne" ? "TRUE" : "FALSE";
+    return { sql: op === "ne" ? "TRUE" : "FALSE" };
   }
-  return `${expr} ${SQL_OP[op]} ${bind(params, value)}${adapter.castSuffix(filter.field)}`;
+  return { sql: `${expr} ${SQL_OP[op]} ${bind(params, value)}${adapter.castSuffix(filter.field)}` };
 }
 
 /** Whether `text` can be bound and compared against this key — the adapter's say, or its type's. */
@@ -299,29 +399,41 @@ function seekPredicate(
   adapter: ListSqlAdapter,
   params: unknown[],
 ): string | null {
-  const usable = sort.filter((s) => adapter.columnExpr(s.field) !== null);
+  // A cursor component belongs to its key by **declared** position, because that is what
+  // `keysetOf` renders: one component per key of `query.sort`, in order, whether or not this store
+  // can express the key. So a usable key keeps the index it was declared at, and a key this store
+  // cannot express is dropped *with* its component rather than shifting the ones after it.
+  //
+  // It used to filter first and then index the filtered list, which read a *different* key's value
+  // for every position after a dropped one — so with `?sort=mrn,family_name` on the column store,
+  // where `mrn` is ciphertext, the seek compared the cursor's mrn value against `family_name` and
+  // page two returned rows from an arbitrary position. Unreachable through a route today (`?sort`
+  // takes one key and no shipped view declares a multi-key default) and wrong independently of who
+  // calls it, which is why it is fixed here rather than fenced at the caller.
+  const usable: ReadonlyArray<{ readonly sort: ListSort; readonly sql: string; readonly at: number }> =
+    sort.flatMap((s, at) => {
+      const resolved = adapter.columnExpr(s.field);
+      return resolved.kind === "sql" ? [{ sort: s, sql: resolved.sql, at }] : [];
+    });
   const clauses: string[] = [];
   for (let i = 0; i < usable.length; i += 1) {
-    const s = usable[i]!;
-    const component = cursor.k[i];
-    if (nothingSortsAfter(adapter, s.field, component)) continue;
+    const key = usable[i]!;
+    const component = cursor.k[key.at];
+    if (nothingSortsAfter(adapter, key.sort.field, component)) continue;
     const eqs: string[] = [];
     for (let j = 0; j < i; j += 1) {
       const prior = usable[j]!;
-      eqs.push(
-        equalToCursor(adapter.columnExpr(prior.field)!, prior.field, cursor.k[j], adapter, params),
-      );
+      eqs.push(equalToCursor(prior.sql, prior.sort.field, cursor.k[prior.at], adapter, params));
     }
     // Safe: `nothingSortsAfter` already returned false, which for a null or uncomparable component
     // it never does, so this is a comparable string.
-    eqs.push(strictlyAfterCursor(adapter.columnExpr(s.field)!, s, component!, adapter, params));
+    eqs.push(strictlyAfterCursor(key.sql, key.sort, component!, adapter, params));
     clauses.push(`(${eqs.join(" AND ")})`);
   }
   // tiebreaker: all sort keys equal, id strictly greater
   const tie: string[] = [];
-  for (let j = 0; j < usable.length; j += 1) {
-    const s = usable[j]!;
-    tie.push(equalToCursor(adapter.columnExpr(s.field)!, s.field, cursor.k[j], adapter, params));
+  for (const key of usable) {
+    tie.push(equalToCursor(key.sql, key.sort.field, cursor.k[key.at], adapter, params));
   }
   tie.push(`${adapter.idExpr} > ${bind(params, cursor.id)}`);
   clauses.push(`(${tie.join(" AND ")})`);
@@ -340,20 +452,37 @@ export function buildListSql(
   params: unknown[],
 ): ListSqlParts {
   const where = [...baseWhere];
+  const unserveable: UnserveableListSurface[] = [];
   for (const filter of query.filters) {
     const pred = filterPredicate(filter, adapter, params);
-    if (pred !== null) where.push(pred);
+    if ("sql" in pred) {
+      where.push(pred.sql);
+    } else {
+      unserveable.push({ surface: "filter", field: filter.field, reason: pred.reason });
+    }
   }
-  // Cross-field free-text search: an OR group of accent-insensitive ILIKE, one bound value
-  // shared across every searchable column (unresolved/encrypted columns are skipped).
+  // Cross-field free-text search: an OR group of accent-insensitive ILIKE, one bound value shared
+  // across every searchable column.
+  //
+  // The two drops here point **opposite ways**, which is why only one of them is reported. Dropping
+  // *some* disjuncts from an OR narrows the answer: every row that comes back genuinely matches,
+  // the caller is shown nothing they asked to exclude, and the cost is a missed match on a field
+  // that is ciphertext at rest — ADR-0091's documented limitation, named per pair by the boot
+  // survey. Dropping the group *entirely* widens it to every row, which is the defect, so that one
+  // is reported and the store refuses.
   if (query.search !== undefined && query.search.term.trim() !== "") {
-    const exprs = query.search.fields
-      .map((f) => adapter.columnExpr(f))
-      .filter((e): e is string => e !== null);
+    const resolved = query.search.fields.map((f) => ({ field: f, expr: adapter.columnExpr(f) }));
+    const exprs = resolved.flatMap((r) => (r.expr.kind === "sql" ? [r.expr.sql] : []));
     if (exprs.length > 0) {
       const p = bind(params, query.search.term);
       const ors = exprs.map((expr) => `unaccent(${expr}::text) ILIKE ('%' || unaccent(${p}) || '%')`);
       where.push(`(${ors.join(" OR ")})`);
+    } else {
+      for (const r of resolved) {
+        if (r.expr.kind === "unavailable") {
+          unserveable.push({ surface: "search", field: r.field, reason: r.expr.reason });
+        }
+      }
     }
   }
   const cursor = decodeKeyset(query.cursor);
@@ -363,8 +492,17 @@ export function buildListSql(
   }
   const orderParts: string[] = [];
   for (const s of query.sort) {
-    const expr = adapter.columnExpr(s.field);
-    if (expr === null) continue;
+    const resolved = adapter.columnExpr(s.field);
+    if (resolved.kind === "unavailable") {
+      // A dropped sort key is reported for a different reason than a dropped filter: the rows are
+      // right and the *order* is not, so the page comes back in whatever order the remaining keys
+      // and the id tiebreaker give while the caller believes it is ordered by what they asked for.
+      // `keysetOf` then renders that key's value into the cursor from the record regardless, which
+      // is the disclosure ADR-0357 measured.
+      unserveable.push({ surface: "sort", field: s.field, reason: resolved.reason });
+      continue;
+    }
+    const expr = resolved.sql;
     // `NULLS LAST` in *both* directions, for every key, and that is the decision the keyset
     // depends on: Postgres's default places them last ascending and first descending, so the tail
     // would move with the direction while one cursor component has to mean one thing. One
@@ -374,5 +512,5 @@ export function buildListSql(
     orderParts.push(`${expr} ${s.direction === "desc" ? "DESC" : "ASC"} NULLS LAST`);
   }
   orderParts.push(`${adapter.idExpr} ASC`);
-  return { where: where.join(" AND "), orderBy: orderParts.join(", "), params };
+  return { where: where.join(" AND "), orderBy: orderParts.join(", "), params, unserveable };
 }

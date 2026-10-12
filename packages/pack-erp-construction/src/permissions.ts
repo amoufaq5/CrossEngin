@@ -60,6 +60,18 @@ export const WORK_ORDER_PERMISSIONS: EntityPermissions = {
   create: { roles: FIELD_CREW },
   update: { roles: FIELD_CREW },
   delete: { roles: MANAGERS },
+  // Grants for this pack's own `work_order_lifecycle`. There were none before, because the
+  // inherited workflow named a state field this entity does not have — so its transitions were
+  // unreachable and granting them would have made a route that could not work. The crew moves the
+  // order through the site; cancelling one is a commercial decision, so it sits with the managers,
+  // matching `PROJECT_PERMISSIONS.cancel` one grade down (ADMIN_ONLY there, because cancelling a
+  // whole project is not the same act as cancelling one order on it).
+  transitions: {
+    schedule: { roles: FIELD_CREW },
+    start: { roles: FIELD_CREW },
+    complete: { roles: FIELD_CREW },
+    cancel: { roles: MANAGERS },
+  },
   fields: {
     cost_estimate: {
       read: { roles: COST_READERS },

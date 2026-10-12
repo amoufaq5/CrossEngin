@@ -4,7 +4,7 @@ Project state for AI assistants resuming work on this codebase. Read top to
 bottom once, then keep nearby.
 
 **This file describes the shape of the system, not its history.** History lives
-in `docs/adr/index.md` (generated — 353 records). Earlier versions of this file
+in `docs/adr/index.md` (generated — 354 records). Earlier versions of this file
 tried to narrate every shipped milestone and went ~170 PRs stale as a result.
 When you land something, update the *shape* here if it changed and write an ADR
 for the *decision*; do not append to a running log.
@@ -22,7 +22,7 @@ served through the same gateway as everything else.
 
 ## Where we are
 
-**87 packages + 3 apps, 146 meta-schema tables, 18,603 tests**, all green, no
+**87 packages + 3 apps, 146 meta-schema tables, 18,695 tests**, all green, no
 type errors.
 
 - **Phase 1** (contracts) and **Phase 2** (M1–M8, runtime pillars) are complete.
@@ -868,6 +868,52 @@ type errors.
   `viewerRoleList === undefined || …` with the comment *"No viewer (dev) → show"*, where
   `undefined` is exactly the unauthenticated state.
 
+  ADR-0359 takes three of the register's P2 items and finds they are **one class with six members**,
+  and the class is written down in this repository's own prose: `parseListQuery`'s doc comment reads
+  *"Unknown / non-filterable params are ignored, so an arbitrary query can't widen the result
+  set"*, which is true of the **surface** and exactly backwards about the **answer** — ignoring
+  `?tax_id=X` returns every vendor, which is the rows the caller asked to *exclude*, under a 200
+  indistinguishable from one where the filter applied. Two readings of "widen", and the response is
+  wrong in the one the comment does not address.
+  Two members are live on a shipped pack. On `--store pg-columns` + `erp-healthcare`,
+  `GET /v1/patients?mrn=MRN-1` was the first page of **every patient**: `columnExpr` answers `null`
+  for an `encryptAtRest` column, `buildListSql` dropped the predicate with no record of having done
+  so, and the `WHERE` was `tenant_id = $1` alone — measured as **2 of 2** (entity, encrypted field)
+  pairs reachable through a declared surface across the seven packs (`Patient.mrn` filterable,
+  sortable *and* searchable; `Observation.value_text` searchable). The repo's own test pinned it as
+  a feature, titled *"excludes encrypted columns from filter + sort (can't order ciphertext)"* with
+  `expect(sel.params).toEqual([TENANT, 6]); // no filter bound for mrn` — a true premise and a
+  wrong conclusion, because excluding a filter does not narrow the answer, it widens it.
+  The sharper member needs no encryption at all. The same `null` also meant *not a column*, and
+  `erp-construction` replaced core's `WorkOrder` with one whose state column is `status` while
+  core's inherited `work_order_lifecycle` still named `state` — unchecked, because `stateField` was
+  `z.string().min(1)` and the only test on an `entityLifecycle` was that its *entity* resolves.
+  `withLifecycleStateFilter` then makes the state field filterable unconditionally, so **the two
+  Postgres stores answered one request oppositely**: `pg-columns` dropped the predicate and returned
+  every row, the JSONB store compared `document ->> 'state'` against NULL and returned none, and
+  neither is an error. `store-parity.test.ts` declares no encrypted field, which is why neither was
+  ever compared.
+  **One rule decides all six**: *a surface whose drop changes WHICH rows come back is refused; one
+  whose drop changes only their ORDER is reported* — `UNSERVEABLE_SURFACE_REFUSES` in the store and
+  the same split one layer up in `parseListQuery`. The sort asymmetry is argued from measurement:
+  **243 of 375** entities across the seven packs have no list view and so declare no sortable field,
+  so refusing an unsortable `?sort` would 400 two thirds of every pack's collections over an answer
+  that was never wrong (ADR-0338's rule read the other way). `ListConfig.fields` is what makes the
+  refusal shippable, for exactly one question — `?utm_source=ad` names nothing and is an ordinary
+  unknown parameter, `?tax_id=X` on an entity that *has* `tax_id` is a caller asking for something
+  this deployment declined to serve.
+  Beside it, the two mappings that answered a wrong thing one layer out. The dispatch stage's catch
+  was **inverted**: the detailed message went to the client in a **504** that clients retry, while
+  the recorded `StageResult.reason` was the bare constant `"handler_threw"` — and the 480-character
+  slice is sized for `StageResultSchema.reason`'s `max(500)`, so it was applied to the one string
+  that never reached the record. The honest fix **moves one string**, which is simultaneously the
+  disclosure fix and what makes 504 → 500 safe. And a per-tenant gateway that cannot be built was
+  served **the deployment's** gateway — on `--store pg` over the *same store object*, so the tenant
+  got their own data under someone else's rules, with their field grants, classification and the
+  very ABAC obligation that caused the refusal all absent. The repo carried both words for it:
+  `server.ts` calls it *"the fail-closed answer"* and `tenant-gateway-cache.ts:81`, in the defective
+  file, calls it *"(fail open to the default server)"*.
+
 There is no roadmap document for Phase 4 by design; the user directs the next
 increment. See **What's actually left** at the bottom for the current open ends.
 
@@ -974,6 +1020,21 @@ packages exist at only one layer, noted below where that is true.
   `crossengin validate`, by the pack's own test suite and by the reviewer approving what the
   Architect designed. A rule that can be checked earlier should be — and activation validates, so a
   per-tenant manifest is covered with no second check to forget.
+  **And `validateWorkflows` checks that an `entityLifecycle`'s `stateField` is a field of its
+  entity** (ADR-0359), where its whole declaration had been `z.string().min(1)` and the only test
+  on a lifecycle was that its *entity* resolves. One live member, and the damage was not in the
+  workflow: `withLifecycleStateFilter` adds the state field to `filterableFields` unconditionally,
+  so a name no entity has became a filterable column the two stores answer **oppositely** —
+  `pg-columns` has no column and dropped the predicate (every row), the document store compared
+  `document ->> 'state'` against NULL (no rows). Measured on resolved `erp-construction`, whose
+  `WorkOrder` replaces core's with one whose column is `status` while core's inherited
+  `work_order_lifecycle` still named `state`. Checked against `fieldsByEntity`, which is
+  `resolvedFields` + `id`, so a state field contributed by a **trait** is accepted — the served
+  table really does have a column for it — and the entity check fires first, so an operator is told
+  the entity does not exist rather than being told its state field is missing, which would be true
+  and useless. Eight in-repo fixtures declared a phantom `stateField` and were corrected; the pack
+  now declares its own lifecycle over `status` with its own transition grants, which `overrides:
+  true` always implied.
 - **`kernel-pg`** — the impure applier. `PgConnection` + `parsePgEnvConfig` + node-postgres
   binding, advisory-lock-gated per-statement migration application with `_meta_migrations`
   hash bookkeeping, preconditions, and the pgcrypto at-rest encryption stack (coverage report,
@@ -1111,7 +1172,22 @@ packages exist at only one layer, noted below where that is true.
 - **`operate-runtime`** — the largest package and the heart of the product: it compiles a
   resolved manifest into a live multi-tenant API. Route/operation derivation and slugs,
   an `EntityStore` interface with typed list filters + keyset pagination + projection,
-  RBAC-enforcing CRUD/lifecycle handlers — which **filter rows** since ADR-0345, when a
+  RBAC-enforcing CRUD/lifecycle handlers — which **refuse a list surface they cannot serve** since
+  ADR-0359, where `parseListQuery`'s own comment claimed the opposite (*"Unknown / non-filterable
+  params are ignored, so an arbitrary query can't widen the result set"* — true of the surface,
+  backwards about the answer, since ignoring `?tax_id=X` returns the rows the caller asked to
+  exclude). `parseListQuery` returns a `ParsedListQuery {query, unserved}` and the handler answers
+  **400** on the first entry; `ListConfig.fields` (required) is what makes that shippable, for
+  exactly one question — `?utm_source=ad` names nothing and is an ordinary unknown parameter, while
+  `?tax_id=X` on an entity that *has* `tax_id` is a caller asking for something this deployment
+  declined to serve. There are two reasons and deliberately **no `not_sortable`**: an unhonoured
+  sort returns the right rows in the wrong order, and 243 of 375 pack entities declare no sortable
+  field at all, so refusing would 400 two thirds of every pack's collections over an answer that
+  was never wrong. The store's half arrives as `ListSurfaceUnserveable` — declared in `store.ts`
+  beside `EntityStore` because the handler that turns it into a 400 cannot import
+  `operate-runtime-pg` — caught in the list arm and answered with its own sentence, since a caller
+  told "not filterable" would ask for the column to be exposed and on that path it already is.
+  `writeTxn` no longer puts `e.message` in its 500 body — which **filter rows** since ADR-0345, when a
   record-bearing obligation sits on an entity's `list` grant: the arm asks `rbacCheckForRecords`
   once for the page it loaded and drops the refused rows, passing the store's `nextCursor` through
   **untouched**, so a page may be short or empty with a non-null cursor and termination is
@@ -1141,7 +1217,22 @@ packages exist at only one layer, noted below where that is true.
   journal reversal. Also entitlements, signed offline licences, plan catalog, AR/AP aging
   and WHT reconciliation reports.
 - **`operate-runtime-pg`** — Postgres `EntityStore` implementations plus the serving-side
-  stores. Two store flavours behind one contract: `PostgresEntityStore` (tenant-scoped
+  stores. **`ListSqlAdapter.columnExpr` answers a `ColumnExpr` and no longer `string | null`**
+  (ADR-0359), because `null` meant *encrypted at rest*, *not a column* and *unsafe field name* and
+  all three were handled identically: `buildListSql` dropped the predicate and the `WHERE` became
+  `tenant_id = $1` alone. `buildListSql` returns `unserveable` beside the SQL and the two stores
+  refuse before issuing the statement, through one total map —
+  `UNSERVEABLE_SURFACE_REFUSES` (`filter: true`, `search: true`, `sort: false`) — whose content is
+  the increment's whole rule: *a surface whose drop changes WHICH rows come back is refused; one
+  whose drop changes only their ORDER is reported*. `search` is `true` and is not an exception,
+  because a surface is recorded only when the OR group collapsed **entirely** (which matches every
+  row); a *partial* collapse narrows and is named per pair by the boot survey instead. `id`
+  resolves explicitly on the column store, where it had resolved to nothing and been dropped — so
+  `?sort=id` produced the right order for the wrong reason (the id tiebreaker is appended to every
+  ORDER BY) and `?id=<value>` was a filter that matched every row. And `seekPredicate` indexes
+  `cursor.k` by the **declared** sort position, where it filtered the sort list and then indexed
+  the filtered one — so with `?sort=mrn,family_name` on the column store it compared the cursor's
+  `mrn` value against `family_name`. Two store flavours behind one contract: `PostgresEntityStore` (tenant-scoped
   JSONB document table) and `ColumnMappedEntityStore` (real per-entity typed tables with
   DDL derived from the manifest — topological create order, composite tenant-scoped FKs
   with per-relation `ON DELETE`, m2m join tables, pgcrypto-encrypted PHI columns, SQL-level
@@ -1227,6 +1318,20 @@ packages exist at only one layer, noted below where that is true.
   parsing, handler dispatch, handler 4xx/5xx → deny/error mapping, classification-driven
   response redaction (including a registry derived straight from a manifest), security
   headers, and a schema-valid `PipelineExecution` per request.
+  **A thrown handler is a 500 whose body names nothing, with the message in the recorded stage
+  reason** (ADR-0359), where the mapping was **inverted**: `gatewayTimeout({reason:
+  err.message.slice(0, 480)})` put the detail in the client's RFC 9457 `detail` under a **504** —
+  a status clients retry by convention, for faults that are permanent — while the recorded
+  `StageResult.reason` was the bare constant `"handler_threw"`. The 480 is the tell:
+  `StageResultSchema.reason` is `z.string().max(500)`, so the slice was sized for the one string
+  that never reached the record, which is strong evidence the author meant the detail for the
+  operator and wired it to the body. The honest fix **moves one string**, and that single move is
+  simultaneously the disclosure fix and what makes 504 → 500 safe; `PROBLEM_TYPES` gained
+  `internal_server_error`, 500 having been in `PROBLEM_STATUS_CODES` with nothing to name it.
+  There is deliberately **no** permanent/transient map keyed on error classes: the gateway must not
+  import the pg or crypto packages, no error class declares a disposition, and keying on `err.name`
+  is ADR-0288's maintained list — wrong three times here. `gatewayTimeout` now has no non-test
+  caller on the request path and stays, with a comment saying why.
   **Redaction covers writes since ADR-0338, and until then it did not.** The stage itself was always
   fine — it is operation-keyed off `route.operationId` and redacts any JSON response with a spec —
   but the registry was populated from `[list, read]` while the routes emit
@@ -3197,6 +3302,24 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   **trait** field is in scope. Said after `checkAbacObligations`, because that check can refuse on
   the same secret and printing a second cursor finding first would hand an operator two when the
   first is the one that stops the boot.
+  **Which declared list surfaces this store can express is surveyed at boot too**
+  (`list-surface-survey.ts`, ADR-0359), with `LIST_SURFACE_MAY_SERVE` every member `true`: it
+  reports and never refuses. ADR-0338's argument *does* hold — nothing served `?mrn=` correctly, so
+  a refusal would break nothing that worked — and what stops it is the **remedy**, since the
+  surface is declared by a *builtin pack's* view and an operator meeting the refusal could not
+  clear it without editing this repository ("a remedy that cannot work is worse than none"). The
+  honest reason a report suffices is that **the wrong answer is already gone**: the store refuses
+  the request before the statement, so a boot refusal would buy no correctness and cost a
+  deployment its boot. It is a fact about a **store choice** and not about a manifest — the same
+  manifest has members on `pg-columns` and none on `pg`, which is why it cannot be a kernel rule
+  and why `erp-healthcare` is not wrong to declare `mrn` filterable. Three verdicts, with
+  `surfaces_refused` ranked above `search_narrowed` because reporting the milder of the two when
+  both hold understates what an operator will meet. And **a per-tenant gateway that cannot be
+  built now gets a 503** rather than the deployment's gateway: `serverFor` answers
+  `{server} / {none} / {refused}`, `none` still falls back (that is the feature), and
+  `onBuildRefused` logs under `[tenant-gateway]` — split from `onInvalidManifest` because that
+  callback's sentence is *false* for a build failure, the manifest having passed both gates, and
+  its implied remedy is therefore the wrong one.
   **`/health` and `/readyz` exist** (`health.ts`, ADR-0357), wrapped **outermost in front of the
   gateway** — a probe carries no credential, so a gateway route would be 401'd by the auth stage,
   which is the bounce webhook's argument read the other way round. The split is the whole design
@@ -3243,7 +3366,7 @@ shape — `entities` / `relations` / `roles` / `permissions` / `workflows` / `jo
   default, so a redirect would hand every caller a 200 carrying the login page's HTML with
   `res.ok` true. The cookie is only a hint: the API verifies the token on every request, so a
   forged one is a 401 **from the API**.
-  It still has **zero tests**, so it is outside the 18,603-test sweep and all nine strategy rules,
+  It still has **zero tests**, so it is outside the 18,695-test sweep and all nine strategy rules,
   and the login flow is verified by `tsc`, `next build` and a live run.
 
 ## Cross-cutting invariants
@@ -3789,6 +3912,16 @@ Prettier-clean and there is no `format:check`; don't bulk-format.
   question asked in the other direction the value moves, and the write half was the half that had a
   rule. Measured: **305 of 336** reads agree exactly, 7 derive through the same imported
   `DERIVATION_RULES`, 23 are declared, 1 is an alias, **0** unexplained.
+  **And a query that is missing a predicate satisfies all nine** (ADR-0359), which is the blind
+  spot the rules share rather than a seventh reading. Every one of them asks whether a column
+  exists, whether an `INSERT` is complete, whether a live database admits a value, whether a CHECK
+  and a contract enumerate the same members, whether a declaration names the bound symbol, or
+  whether a property names the column it is read from — and a `SELECT` whose `WHERE` is
+  `tenant_id = $1` because the filter was dropped is well-formed SQL naming existing columns with
+  every bound value admitted. What is wrong is which **question** was asked, and no rule over the
+  artifact asks that. A **real** database cannot see it either: both stores answered
+  `?state=draft` with a 200, one with every row and one with none. The only fences that fit are the
+  store refusing before it issues the statement and a boot survey naming the pairs.
   **And a store can opt itself out of all of them by how it names its table** (ADR-0358). The
   scanner resolves `this.x = `${ident}.tbl`` by chasing `ident` back to a literal, and it reads
   `options.schema ?? "meta"` and a `const` but **not a parameter default** — so
@@ -3879,6 +4012,28 @@ Two constraints worth knowing before suggesting a host:
   to a boot refusal naming the entity and field rather than a database that will not start. Both arms
   verified on PG 16: `EXECUTE` inside a `DO` block does create the extension, and an unavailable one
   is caught with `psql` still exiting 0.
+  **Both of those files carried a claim about the applier that was false**, and the correction is
+  what makes the stack build on arm64. They said the applier *"hard-requires the pg_uuidv7
+  EXTENSION (it checks `pg_extension`) — a plain SQL function will not satisfy the precondition"*,
+  while `checkPgUuidv7Extension` asks `pg_extension` **or** `pg_proc` in one statement — which is
+  the whole managed-provider path and what `deploy/README.md`'s own Notes section already said
+  correctly. The unguarded `CREATE EXTENSION` is still right, for a narrower reason: this image is
+  *built* to install it, so a failure there is a broken build rather than a degraded runtime, and a
+  silent fallback would hide it while taking a per-row SQL function on every INSERT.
+  **And `pg_uuidv7` now comes from the PGDG apt repository rather than the project's GitHub
+  release**, because that release ships one prebuilt `.so` and it is **x86_64 only**
+  (fboulnois/pg_uuidv7#24) while `cp` of a file succeeds on every architecture — so an arm64 build
+  produced an image that looked correct and whose `CREATE EXTENSION` failed at initdb with a
+  wrong-ELF-class error, under `ON_ERROR_STOP=1`, so the container never came up and nothing in the
+  output named the architecture. That is every Apple-silicon laptop and the whole of Oracle Cloud's
+  Always Free tier, whose only usefully-sized shape is Ampere A1. PGDG publishes
+  `postgresql-$PG_MAJOR-pg-uuidv7` for amd64, arm64 and ppc64el and the official `postgres` image
+  leaves that repository configured, so apt resolves the right binary and no architecture is named
+  anywhere. `$PG_MAJOR` and not a pinned extension version: the `.so` must match the server's major
+  ABI, which the package name carries, and that is the only axis on which this can be incompatible.
+  `deploy/README.md` gained an **On Oracle Cloud (Always Free)** section with the nine steps, and
+  the one that catches everyone is that Oracle filters twice — the subnet security list *and* the
+  instance's own persistent `iptables` rules — so fixing one half looks like the fix having failed.
   `COLUMN_ENCRYPTION_SECRET` is in the compose `environment:` block and **never** in `command:`,
   because argv is readable via `ps`; the compose file also says what switching `OPERATE_PACK` to
   `erp-healthcare` or `erp-government` requires, since that is where an operator meets the refusal.
@@ -3991,8 +4146,15 @@ opened them.
   `packages/security`'s `AT_REST_ALGORITHMS` offers AES and ChaCha AEADs and the mechanism is OpenPGP
   CFB+MDC, which is none of them, and nothing reads the enum. **(5)** no per-tenant BYOK, which
   `KEY_MANAGEMENT_KINDS`' `customer-managed-byok` models; `ColumnEncryptionKeySource` is the seam.
-  **(6)** an encrypted field is dropped from `?sort` and filters **silently**, which ADR-0091 decided
-  and matters more now that the ciphertext is real.
+  **(6)** ~~an encrypted field is dropped from `?sort` and filters **silently**~~ — **the silence is
+  closed by ADR-0359** and the *capability* gap is not. A filter and a collapsed `?q` are now a 400
+  naming the field, the reason and three remedies, and the boot line names every (entity, field)
+  pair; `?sort` is still served in an order the caller did not ask for, deliberately, on one stated
+  rule — *a surface whose drop changes WHICH rows come back is refused; one whose drop changes only
+  their ORDER is reported*. ADR-0091's decision survives as a limitation rather than as a wrong
+  answer. What would retire it is decrypt-and-compare (`pgp_sym_decrypt(col, key) = $1`), correct
+  and unindexed, so an `eq` on a unique MRN is a sequential scan with a decrypt per row — the cliff
+  ADR-0345 refused, worth it for `eq` on a unique field and not for `contains`.
 - **The column key can be a stored, wrapped data key, and what that is actually worth** (ADR-0347
   closed the entry above's Q1 and **corrected the claim it was asking for**). ADR-0338 and this file
   recorded the envelope's gain as making a tenant's PHI *"unrecoverable including from backups"*;
@@ -5738,7 +5900,7 @@ three make the rest honest, cheap or verifiable.
    repo has built twice, and it converts the tier from silence into a stated limitation.
 3. **No CI, no git hook, no smoke, e2e, load or migration test** — while `strategy/ci.ts` models
    triggers, budgets and a topological sort with no reader. No `.github/workflows`, no
-   `core.hooksPath`, so the nine rules and 18,603 tests run only when a human types `pnpm -r test`,
+   `core.hooksPath`, so the nine rules and 18,695 tests run only when a human types `pnpm -r test`,
    and this file's instruction never to use `--no-verify` describes a guardrail that does not
    exist. `operate-web` has **zero tests** against 15 pages and 34 unfenced `fetch` sites — the
    serialized-body boundary that shipped a broken console button for an hour (ADR-0335).
@@ -5817,13 +5979,16 @@ Genuine defects gated on a store flavour, a flag, a pack or a subsystem that doe
 tenant is harmed today — but closing the gate does not fix them, and the ones under a P1 item must
 land with or before it.
 
-1. **A filter on an encrypted column is dropped from the `WHERE` clause, so the query answers with
-   every row.** `columnExpr` returns null, `filterPredicate` returns null, and the predicate is
-   never pushed — so on `pg-columns` + healthcare, `GET /v1/patients?mrn=MRN-1` returns the first
-   page of **all** patients with a 200, which the caller and the UI read as a search result. This
-   file records it as "dropped from `?sort` and filters silently", which understates it: the drop
-   is in the **widening** direction, so it is a wrong answer and not a missing capability. A 400
-   naming the column is what `withheldAddressing` already does for the row case. Hours.
+1. ~~**A filter on an encrypted column is dropped from the `WHERE` clause**~~ — **closed by
+   ADR-0359**, which also found it was **one of six members of one class** rather than an item, and
+   that the register had missed the sharper one: the same `null` also meant *not a column*, and on
+   `erp-construction` the two Postgres stores answered one request **oppositely** (every row, or
+   none) over a `state` field no entity has. The root cause was a kernel gap — `stateField` was
+   `z.string().min(1)` and nothing checked it against the entity. What is left of it is Q1 of that
+   ADR: **decrypt-and-compare** would restore the capability rather than removing it
+   (`pgp_sym_decrypt(col, key) = $1` is correct and unindexed, so an `eq` on a unique MRN is a
+   sequential scan with a decrypt per row — the cliff ADR-0345 refused), and the partially-narrowed
+   `?q` is still silent at request time, so a clinician searching an MRN gets an empty page.
 2. **No path surveys an activated per-tenant manifest's classified fields**, so ADR-0339's
    write-open/read-closed asymmetry is still live there — `node.ts` admits it in a comment. Rises
    to **P0 for any deployment serving activated manifests**, which is the headline Architect
@@ -5854,12 +6019,21 @@ land with or before it.
    does not have this subsystem* — is false for essentially every production install and is the
    only value that lets a deletion proceed. A fourth disposition (`present_not_erased`, carrying
    its reason and horizon) is hours, where the four erasures are each a subsystem.
-7. **Every encryption-path exception is served as a retryable 504 with up to 480 characters of
-   internal error echoed to the client.** The dispatch stage turns every thrown value into
-   `gatewayTimeout({reason: err.message.slice(0,480)})`, so a `tenant_data_keys_tenant_id_fkey`
-   violation, a refused weak key or `PlaintextFallbackRefused` — all permanent — get a status
-   clients retry by convention, while entity/field names with their classification, tenant ids and
-   schema-application state reach any caller who can trigger the throw. Two defects in one mapping.
+7. ~~**Every encryption-path exception is served as a retryable 504 echoing the internal error**~~ —
+   **closed by ADR-0359**, which corrected this entry **four times**. It is not "every": all four
+   write ops route through `writeTxn`, which returned `json(500, {detail: e.message})` *unsliced*
+   and `String(e)` for a non-Error — so only reads reached the 504 and the write path's disclosure
+   was strictly worse. The **480 slice never bit**: the three real messages measure 190, 391 and
+   438 characters, so each was disclosed in full. **Field names with their classification never
+   reached a client** — those live only in `ColumnEncryptionUnavailable`'s *constructor* message,
+   caught by `TenantGatewayCache`; entity names and tenant UUIDs did. And `ColumnSecretRefused`
+   cannot reach the mapping at all, being boot-only. There were **three** defects, and the unnamed
+   one was the sharpest: the mapping was **inverted**, with the recorded reason a bare constant and
+   the 480 slice sized for `StageResultSchema.reason`'s `max(500)` yet applied to the one string
+   that never reached the record. What is left is Q3 of that ADR: `writeTxn`'s 500 now carries no
+   diagnosis **anywhere**, because the handler layer has no recorder — the seam is a
+   `HandlerContext` field the dispatch stage folds into the stage reason, and it is a contract
+   change that increment did not make.
 8. **The rekey leaves a stale-key window nothing can evict, no row records which key wrote it, and
    nothing enumerates which tenants still need rekeying.** The cache is a bare `Map` with a 30s TTL
    and no exported eviction, so after a rekey commits out of process a replica *reads* with a loud
@@ -5868,13 +6042,21 @@ land with or before it.
    `PostgresDataKeyStore` has no list, scan or provenance query, so an operator switching to
    envelope mode has every tenant seeded and shreddable-in-name-only with no query telling them
    which. Together: the bounded horizon the envelope exists to buy cannot be verified fleet-wide.
-9. **A per-tenant gateway that refuses to build is served the deployment's gateway, not no
-   gateway** — and the permanent refusal is retried every request. `server.ts` claims the
-   fail-closed answer is "no gateway"; `tenant-gateway-cache.ts` catches, reports, returns `null`
-   without caching (reasoning the failure is "usually transient") and falls back to
-   `defaultDispatch`. So the tenant is served the boot manifest's entities, roles and permissions
-   instead of their own — a wrong answer rather than a refusal — logged under an `[ai-design]`
-   prefix an operator hunting an authorization failure would not search.
+9. ~~**A per-tenant gateway that refuses to build is served the deployment's gateway**~~ —
+   **closed by ADR-0359**, which found the contradiction is **three-way** and one side is in the
+   defective file: `tenant-gateway-cache.ts:81` calls the mechanism *"(fail open to the default
+   server)"* while `server.ts:322` calls the same thing *"the fail-closed answer"*. And it
+   understates the damage — on the shipped `--store pg` the fallback store is the **same object**
+   the boot gateway holds, so the tenant got **their own data under someone else's rules**, with
+   their field grants, classification and the obligation that caused the refusal all absent and the
+   entity grant unqualified. The branch had **zero** test coverage. `serverFor` is now
+   three-valued, a refused tenant gets a 503 naming only the tenant and the refusal kind, and only
+   permanent causes are memoised — with the ordering stated at the catch, because memoising before
+   fixing the fallback would have *extended* the wrong-answer window from one request to a whole
+   TTL. What is left is Q4 and Q5: a **source** throw still resolves `none` and falls back (the
+   same class, rarer and uncached — the honest answer is a third disposition), and
+   `ai-design-routes.ts` still returns **200** on activation with no build check, so a tenant can
+   activate a manifest this deployment cannot serve and learn of it from a 503.
 10. **Five workflow stores carry neither tenant context nor a scope predicate**, and the replayer
     that would detect the resulting drift has no caller. Not a cross-tenant HTTP answer today, so
     the live cost is the missing second belt plus the blocked detector — and note **five of six
@@ -6001,7 +6183,7 @@ agreeing about the catalog.
 
 `docs/adr/index.md` is generated from the ADR files by
 `python3 docs/adr/generate-index.py` — run it rather than hand-editing, so a
-title or status change cannot drift. 353 records; 274 Accepted, 79 Proposed (the
+title or status change cannot drift. 354 records; 275 Accepted, 79 Proposed (the
 Proposed ones are largely Phase-1 design ADRs that were never re-statused, and
 include `0000-template.md`, which the count has always included).
 

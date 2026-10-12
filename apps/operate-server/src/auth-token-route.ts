@@ -396,11 +396,15 @@ export function buildAuthTokenInterceptor(
     try {
       outcome = await ctx.verify(parsed);
     } catch (err) {
-      // The dispatch stage maps a thrown value to a 504 carrying up to 480 characters of the
-      // message, which on this route would hand an unauthenticated caller the database error. So
-      // nothing escapes: the operator gets the exception, the caller gets a 503 that says only
+      // Nothing escapes: the operator gets the exception, the caller gets a 503 that says only
       // that login is unavailable -- 503 and not 401, because a store failure is not a statement
       // about the credential and a 401 would send a correct password away for good.
+      //
+      // This used to be argued from the dispatch stage handing the message to the client, and that
+      // premise is gone: a thrown value is now a **500** whose body is a fixed sentence, with the
+      // message in the recorded stage reason. The conclusion survives on its own terms, and in fact
+      // is now the stronger of the two reasons — an unauthenticated caller must be told which of
+      // "wrong password" and "the store is down" happened, and a generic 500 cannot say it.
       ctx.onError?.(err);
       return json(503, {
         type: "https://crossengin.io/errors/login-unavailable",

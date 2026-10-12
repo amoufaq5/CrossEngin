@@ -28,6 +28,8 @@ import {
   parseListQuery,
   withheldAddressing,
   type ListConfig,
+  type UnservedListReason,
+  type UnservedListSurface,
   type WithheldAddressing,
 } from "./list-query.js";
 import { applyLiteralDefaults, type LiteralDefaultPlan } from "./defaults.js";
@@ -37,7 +39,14 @@ import { sequenceSpecResolver, type SettingsStore, type TenantSettings } from ".
 import { runWriteGuards, type WriteGuard } from "./write-guards.js";
 import { runWriteEffects, type WriteEffect } from "./write-effects.js";
 import { validateBody, type EntityValidationPlan } from "./validation.js";
-import { isTransactional, projectRecord, type EntityRecord, type EntityStore } from "./store.js";
+import {
+  isTransactional,
+  ListSurfaceUnserveable,
+  projectRecord,
+  type EntityRecord,
+  type EntityStore,
+  type ListPage,
+} from "./store.js";
 import { maskWrite, type WriteMaskMode, type WriteMaskRefusal } from "./write-mask.js";
 import type { CursorRefusal, CursorSealer } from "./cursor-seal.js";
 import type { RouteAction, RouteSpec } from "./operations.js";
@@ -49,6 +58,10 @@ const FALLBACK_LIST_CONFIG: ListConfig = {
   sortableFields: [],
   filterableFields: [],
   searchableFields: [],
+  // Empty, which makes every `unserved` check vacuous here rather than wrong: with no field list a
+  // filter param cannot be shown to name a field of the entity, and this config is reached only
+  // when a route carries no `listConfig` at all — where there is no declaration to refuse against.
+  fields: [],
 };
 
 export interface HandlerContext {
@@ -133,6 +146,12 @@ function authPrincipal(
 function json(status: number, body: unknown): HandlerOutput {
   return { kind: "json", status, body };
 }
+
+/**
+ * What a failed write unit tells the caller. A constant and not an interpolation, so no future edit
+ * can put the exception back by changing one argument; `writeTxn`'s catch carries the reasoning.
+ */
+const WRITE_FAILED_CLIENT_DETAIL = "the write could not be completed";
 
 /**
  * Which ABAC grant position each route action's entity-level check evaluates in, as a **total map**
@@ -258,7 +277,14 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
       case "list": {
         const config = spec.listConfig ?? FALLBACK_LIST_CONFIG;
         const fields = parseFields(request.query);
-        const asked = { ...parseListQuery(request.query, config), ...(fields !== null ? { fields } : {}) };
+        const parsed = parseListQuery(request.query, config);
+        // First, and before anything is read: a surface this entity does not serve used to be
+        // dropped, and the response was then indistinguishable from one where it had been honoured
+        // — so `?tax_id=X` on an entity that declines to filter `tax_id` returned every vendor
+        // under a 200. The caller is told instead. Ordered ahead of the cursor open and the
+        // addressing guard because this refusal is decidable from the request alone.
+        if (parsed.unserved.length > 0) return unservedRefused(spec.entity, parsed.unserved[0]!);
+        const asked = { ...parsed.query, ...(fields !== null ? { fields } : {}) };
         // The sealer's context is built **once** and used for both the open and the seal below. An
         // open that succeeded against one context and a seal issued under another would hand the
         // caller a cursor their very next request cannot use — a walk that dies on page two — so the
@@ -295,7 +321,19 @@ export function buildSpecHandler(spec: RouteSpec, ctx: HandlerContext): Handler 
           );
           if (addressing !== null) return addressingRefused(spec.entity, addressing);
         }
-        const page = await ctx.store.listPage(tenantId, spec.entity, query);
+        // The store's half of the same refusal. `parsed.unserved` above covers a surface the
+        // *manifest* does not declare, which is decidable from the request; this covers one the
+        // manifest declares and the store cannot express — a filter on a column held as pgcrypto
+        // ciphertext, say — which only the store knows. Caught here rather than left to propagate,
+        // because an uncaught throw is a 500 and this is a 400: the query cannot be answered, and
+        // which query cannot be answered is something the caller needs told.
+        let page: ListPage;
+        try {
+          page = await ctx.store.listPage(tenantId, spec.entity, query);
+        } catch (err) {
+          if (err instanceof ListSurfaceUnserveable) return storeRefused(err);
+          throw err;
+        }
         // Deliberately **not** `resolveObligation`: that helper turns a refusal into a 403, which is
         // right where the act decides about one named record and wrong here — the whole point of
         // this position is that a denial is not an error, it is a row the caller is not shown.
@@ -703,6 +741,77 @@ function addressingRefused(entity: string, addressing: WithheldAddressing): Hand
 }
 
 /**
+ * Why each unserved surface is refused and under which code, a **total map** over
+ * `UnservedListReason` for `WITHHELD_ADDRESSING`'s reason: a fourth reason becomes a compile error
+ * rather than a 400 with no explanation. Each `remedy` names the manifest declaration that would
+ * serve the surface, because the caller cannot fix any of these and the operator can.
+ */
+const UNSERVED_LIST_OUTPUTS: Readonly<
+  Record<UnservedListReason, { readonly error: string; readonly reason: string; readonly remedy: string }>
+> = {
+  not_filterable: {
+    error: "filter_not_served",
+    reason: "this entity does not serve a filter on that field",
+    remedy:
+      "the field is not among the list view's filterable columns, so the filter was previously ignored and the response carried every row; expose it on the view or drop the parameter",
+  },
+  not_searchable: {
+    error: "search_not_served",
+    reason: "this entity has no free-text-searchable field",
+    remedy:
+      "free-text search spans the view's visible text-like columns and this entity declares none, so `?q` previously matched every row; filter on a specific field instead",
+  },
+};
+
+/**
+ * **400 and not 404 or 501.** `addressingRefused`'s reasoning, one axis over: the caller may list
+ * this entity and it is the *query* that cannot be answered, so the act is not forbidden and the
+ * entity is not missing. It is the caller's parameter that has to change — even though what makes
+ * it unanswerable is a declaration only an operator can move — which is why the remedy names the
+ * declaration rather than implying the caller got it wrong.
+ */
+/**
+ * **400, and the body names the field and the reason and nothing else.**
+ *
+ * The same status as `unservedRefused` beside it, for the same reason — the caller may list the
+ * entity and it is the query that cannot be answered — but a different sentence, because the
+ * remedies differ: there the view does not expose the surface, here it does and this store cannot
+ * serve it. A caller told "not filterable" would ask for the column to be exposed and it already
+ * is.
+ *
+ * `err.message` is deliberately not used: it is built for an operator and names every unserveable
+ * surface at once, and the fields it names are the classified ones. The reason strings here are
+ * this module's own.
+ */
+function storeRefused(err: ListSurfaceUnserveable): HandlerOutput {
+  const first = err.surfaces[0];
+  if (first === undefined) {
+    // Unreachable by construction — a store throws this only with at least one surface — and
+    // answered rather than asserted, because a 400 with no field named still beats a 500.
+    return json(400, { error: "query_not_served", detail: "this store cannot answer that query" });
+  }
+  return json(400, {
+    error: `${first.surface}_not_served_by_store`,
+    detail:
+      `'${first.field}' on '${err.entity}': the view declares this column ${first.surface}able but` +
+      ` this deployment's store cannot compare it (${first.reason}). Serving this pack on a store` +
+      ` that holds the value as plaintext, declassifying the field, or dropping the column's` +
+      ` flag on the view are the three remedies; the boot log names every such pair.`,
+    field: first.field,
+  });
+}
+
+function unservedRefused(entity: string, unserved: UnservedListSurface): HandlerOutput {
+  const { error, reason, remedy } = UNSERVED_LIST_OUTPUTS[unserved.reason];
+  const subject = unserved.field === null ? `'?q' on '${entity}'` : `'${unserved.field}' on '${entity}'`;
+  return json(400, {
+    error,
+    detail: `${subject}: ${reason}. ${remedy}`,
+    ...(unserved.field !== null ? { field: unserved.field } : {}),
+  });
+}
+
+/**
  * Why each cursor refusal is answered and under which error code, as a **total map** for
  * `WITHHELD_ADDRESSING`'s reason: a second refusal reason becomes a compile error rather than a 400
  * with no explanation. There is one today, and `CURSOR_REFUSALS` says why that is a property of the
@@ -861,8 +970,23 @@ async function writeTxn(
       return await ctx.store.withTransaction(tenantId, (tx) => body(tx));
     }
     return await body(ctx.store);
-  } catch (e) {
-    return json(500, { error: "write_failed", detail: e instanceof Error ? e.message : String(e) });
+  } catch {
+    // Unbound deliberately: the message is dropped, not moved, and that is the honest description
+    // rather than a tidier one. This layer has no
+    // recorder. A handler returns a `HandlerOutput`, the gateway's dispatch stage sees a 500 and
+    // records `handler_returned_<status>` with the handler's own body passed through, so a detail
+    // put here reaches the client and a detail put nowhere reaches nobody. Dropping it is still
+    // the right half to give up: the exception on this path is a database error naming entities,
+    // columns and tenant ids, and the deployment's own experience of it was a client reading
+    // `tenant_data_keys_tenant_id_fkey` off a 500 body. An operator loses a diagnosis they can
+    // recover from the process log; a caller cannot un-see one.
+    //
+    // Rethrowing is not the alternative it looks like: it would let the gateway's catch record the
+    // message, and it would also change four handlers' semantics, since the rollback is already
+    // complete by here and the throw would travel as if it were not. The fix is a recorder seam on
+    // `HandlerContext` — somewhere for a handler to put an operator-only string that the dispatch
+    // stage folds into the stage reason — which is a contract change this does not make.
+    return json(500, { error: "write_failed", detail: WRITE_FAILED_CLIENT_DETAIL });
   }
 }
 

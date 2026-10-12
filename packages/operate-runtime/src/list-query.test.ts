@@ -94,10 +94,13 @@ describe("parseListQuery", () => {
     sortableFields: ["name", "status"],
     filterableFields: ["name", "status"],
     searchableFields: ["name", "description"],
+    // `secret` is a real field of the entity and is deliberately in none of the surface lists, so
+    // addressing it is refused; `bogus` names nothing and is ignored.
+    fields: ["id", "name", "status", "description", "secret"],
   };
 
   it("uses the default limit + default sort with an empty query", () => {
-    const q = parseListQuery({}, config);
+    const q = parseListQuery({}, config).query;
     expect(q.limit).toBe(25);
     expect(q.sort).toEqual([{ field: "name", direction: "asc" }]);
     expect(q.filters).toEqual([]);
@@ -105,73 +108,137 @@ describe("parseListQuery", () => {
   });
 
   it("clamps an over-max limit and ignores a non-numeric one", () => {
-    expect(parseListQuery({ limit: "1000" }, config).limit).toBe(100);
-    expect(parseListQuery({ limit: "abc" }, config).limit).toBe(25);
-    expect(parseListQuery({ limit: "0" }, config).limit).toBe(25);
+    expect(parseListQuery({ limit: "1000" }, config).query.limit).toBe(100);
+    expect(parseListQuery({ limit: "abc" }, config).query.limit).toBe(25);
+    expect(parseListQuery({ limit: "0" }, config).query.limit).toBe(25);
   });
 
   it("honors a sortable field override with direction", () => {
-    expect(parseListQuery({ sort: "status", order: "desc" }, config).sort).toEqual([
+    expect(parseListQuery({ sort: "status", order: "desc" }, config).query.sort).toEqual([
       { field: "status", direction: "desc" },
     ]);
   });
 
   it("ignores a non-sortable sort field (keeps the default)", () => {
-    expect(parseListQuery({ sort: "secret" }, config).sort).toEqual(config.defaultSort);
+    expect(parseListQuery({ sort: "secret" }, config).query.sort).toEqual(config.defaultSort);
   });
 
   it("builds equality filters only for filterable params", () => {
-    const q = parseListQuery({ status: "active", bogus: "x", cursor: "c1" }, config);
+    const q = parseListQuery({ status: "active", bogus: "x", cursor: "c1" }, config).query;
     expect(q.filters).toEqual([{ field: "status", op: "eq", value: "active" }]);
     expect(q.cursor).toBe("c1");
   });
 
   it("parses typed operators via field[op] syntax", () => {
-    const q = parseListQuery({ "name[gte]": "M", "status[ne]": "archived" }, config);
+    const q = parseListQuery({ "name[gte]": "M", "status[ne]": "archived" }, config).query;
     expect(q.filters).toContainEqual({ field: "name", op: "gte", value: "M" });
     expect(q.filters).toContainEqual({ field: "status", op: "ne", value: "archived" });
   });
 
   it("parses an in filter from a comma-separated value", () => {
-    const q = parseListQuery({ "status[in]": "active, archived ,draft" }, config);
+    const q = parseListQuery({ "status[in]": "active, archived ,draft" }, config).query;
     expect(q.filters).toEqual([{ field: "status", op: "in", value: ["active", "archived", "draft"] }]);
   });
 
   it("parses a contains filter (typeahead search)", () => {
-    const q = parseListQuery({ "name[contains]": "acme" }, config);
+    const q = parseListQuery({ "name[contains]": "acme" }, config).query;
     expect(q.filters).toEqual([{ field: "name", op: "contains", value: "acme" }]);
   });
 
   it("ignores a contains filter on a non-filterable field", () => {
-    expect(parseListQuery({ "secret[contains]": "x" }, config).filters).toEqual([]);
+    expect(parseListQuery({ "secret[contains]": "x" }, config).query.filters).toEqual([]);
   });
 
   it("ignores an operator on a non-filterable field", () => {
-    const q = parseListQuery({ "secret[gt]": "1" }, config);
+    const q = parseListQuery({ "secret[gt]": "1" }, config).query;
     expect(q.filters).toEqual([]);
   });
 
   it("parses ?q into a search over the config's searchable fields", () => {
-    const q = parseListQuery({ q: "milk" }, config);
+    const q = parseListQuery({ q: "milk" }, config).query;
     expect(q.search).toEqual({ term: "milk", fields: ["name", "description"] });
   });
 
   it("ignores ?q when the entity has no searchable fields", () => {
-    const q = parseListQuery({ q: "milk" }, { ...config, searchableFields: [] });
+    const q = parseListQuery({ q: "milk" }, { ...config, searchableFields: [] }).query;
     expect(q.search).toBeUndefined();
   });
 
   it("ignores a blank ?q", () => {
-    expect(parseListQuery({ q: "   " }, config).search).toBeUndefined();
+    expect(parseListQuery({ q: "   " }, config).query.search).toBeUndefined();
   });
 
   it("does not treat ?q as a filter", () => {
-    expect(parseListQuery({ q: "milk" }, config).filters).toEqual([]);
+    expect(parseListQuery({ q: "milk" }, config).query.filters).toEqual([]);
   });
 
   it("does not treat reserved params (incl. fields) as filters", () => {
-    const q = parseListQuery({ fields: "a,b", limit: "5", sort: "name" }, config);
+    const q = parseListQuery({ fields: "a,b", limit: "5", sort: "name" }, config).query;
     expect(q.filters).toEqual([]);
+  });
+
+  // The half this function used to get backwards. Its own comment read "Unknown / non-filterable
+  // params are ignored, so an arbitrary query can't widen the result set", which is true of the
+  // *surface* and false of the *answer*: a dropped filter returns the rows the caller asked to
+  // exclude, under a 200 indistinguishable from one where the filter applied.
+  describe("unserved surfaces", () => {
+    it("reports a filter naming a real field the entity does not filter", () => {
+      const r = parseListQuery({ secret: "x" }, config);
+      expect(r.unserved).toEqual([
+        { surface: "filter", reason: "not_filterable", field: "secret" },
+      ]);
+      expect(r.query.filters).toEqual([]);
+    });
+
+    it("ignores a param naming nothing, which is an ordinary unknown query parameter", () => {
+      // The distinction that makes the refusal safe to ship: `?utm_source=` must not 400, and a
+      // field list is the only thing that can tell it from `?secret=`.
+      const r = parseListQuery({ utm_source: "ad", bogus: "x" }, config);
+      expect(r.unserved).toEqual([]);
+      expect(r.query.filters).toEqual([]);
+    });
+
+    it("reports a typed operator on a real but non-filterable field", () => {
+      expect(parseListQuery({ "secret[gt]": "1" }, config).unserved).toEqual([
+        { surface: "filter", reason: "not_filterable", field: "secret" },
+      ]);
+    });
+
+    it("reports a contains filter on a real but non-filterable field", () => {
+      expect(parseListQuery({ "secret[contains]": "x" }, config).unserved).toEqual([
+        { surface: "filter", reason: "not_filterable", field: "secret" },
+      ]);
+    });
+
+    it("reports ?q at an entity with no searchable field, which used to match every row", () => {
+      const r = parseListQuery({ q: "milk" }, { ...config, searchableFields: [] });
+      expect(r.unserved).toEqual([{ surface: "search", reason: "not_searchable", field: null }]);
+      expect(r.query.search).toBeUndefined();
+    });
+
+    it("does not report a blank ?q, which asks for nothing", () => {
+      expect(parseListQuery({ q: "  " }, { ...config, searchableFields: [] }).unserved).toEqual([]);
+    });
+
+    it("reports nothing for a query the entity serves in full", () => {
+      const r = parseListQuery({ status: "active", q: "milk", sort: "name" }, config);
+      expect(r.unserved).toEqual([]);
+    });
+
+    it("does NOT report an unsortable ?sort, which falls back to the default order", () => {
+      // Deliberate asymmetry, argued in `parseListQuery`: the rows are right and only the order is
+      // not the one asked for, and 243 of 375 entities across the seven packs declare no sortable
+      // field at all — so refusing would 400 two thirds of every pack's collections over an answer
+      // that was never wrong.
+      const r = parseListQuery({ sort: "secret" }, config);
+      expect(r.unserved).toEqual([]);
+      expect(r.query.sort).toEqual(config.defaultSort);
+    });
+
+    it("reports every offending filter, so a report is not a first-hit sample", () => {
+      const r = parseListQuery({ secret: "x", description: "y" }, config);
+      expect(r.unserved.map((u) => u.field)).toEqual(["secret", "description"]);
+    });
   });
 });
 
@@ -292,7 +359,7 @@ describe("withheldAddressing", () => {
       "Patient",
     );
     expect(config.defaultSort).toEqual([{ field: "family_name", direction: "asc" }]);
-    expect(withheldAddressing(parseListQuery({}, config), new Set(["family_name"]))).toEqual({
+    expect(withheldAddressing(parseListQuery({}, config).query, new Set(["family_name"]))).toEqual({
       surface: "sort",
       field: "family_name",
     });

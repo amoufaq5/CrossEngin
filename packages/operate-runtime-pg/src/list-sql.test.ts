@@ -4,16 +4,21 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildListSql,
+  columnUnavailable,
   guardedNumericCast,
   isSqlSafeNumericText,
   MAX_SQL_NUMERIC_TEXT_LENGTH,
+  refusableSurfaces,
   SQL_NUMERIC_TEXT_PATTERN,
+  sqlColumn,
+  UNSERVEABLE_SURFACE_REFUSES,
   type ListSqlAdapter,
 } from "./list-sql.js";
 
 // A JSONB-style adapter: fields read from `document ->> 'field'`, text compares.
 const adapter: ListSqlAdapter = {
-  columnExpr: (field) => (field === "unknown" ? null : `document ->> '${field}'`),
+  columnExpr: (field) =>
+    field === "unknown" ? columnUnavailable("not_a_column") : sqlColumn(`document ->> '${field}'`),
   castSuffix: () => "",
   valueType: () => "text",
   idExpr: "record_id",
@@ -24,9 +29,9 @@ function typedAdapter(types: Readonly<Record<string, ListValueType>>): ListSqlAd
   const of = (field: string): ListValueType => types[field] ?? "text";
   return {
     columnExpr: (field) => {
-      if (field === "unknown") return null;
+      if (field === "unknown") return columnUnavailable("not_a_column");
       const json = `document ->> '${field}'`;
-      return of(field) === "numeric" ? `(${guardedNumericCast(json)})` : json;
+      return sqlColumn(of(field) === "numeric" ? `(${guardedNumericCast(json)})` : json);
     },
     castSuffix: (field) => (of(field) === "numeric" ? "::numeric" : ""),
     valueType: of,
@@ -40,6 +45,118 @@ const AMOUNT = `(${guardedNumericCast("document ->> 'amount'")})`;
 function query(partial: Partial<ListQuery>): ListQuery {
   return { limit: 50, cursor: null, sort: [], filters: [], ...partial };
 }
+
+describe("UNSERVEABLE_SURFACE_REFUSES", () => {
+  it("covers every surface", () => {
+    const r = buildListSql(
+      query({ filters: [{ field: "unknown", value: "x" }], sort: [{ field: "unknown", direction: "asc" }] }),
+      adapter,
+      [],
+      [],
+    );
+    for (const u of r.unserveable) {
+      expect(UNSERVEABLE_SURFACE_REFUSES).toHaveProperty(u.surface);
+    }
+    expect(Object.keys(UNSERVEABLE_SURFACE_REFUSES).sort()).toEqual(["filter", "search", "sort"]);
+  });
+
+  it("refuses exactly the surfaces whose drop changes WHICH rows come back", () => {
+    // The rule the whole increment turns on, pinned rather than described. A dropped filter puts
+    // rows in the page that are not answers to the caller's question; a dropped sort returns the
+    // right rows in an order they did not choose.
+    expect(UNSERVEABLE_SURFACE_REFUSES).toEqual({ filter: true, search: true, sort: false });
+  });
+
+  it("reports a sort gap and does not make it refusable", () => {
+    const r = buildListSql(query({ sort: [{ field: "unknown", direction: "asc" }] }), adapter, [], []);
+    expect(r.unserveable).toEqual([
+      { surface: "sort", field: "unknown", reason: "not_a_column" },
+    ]);
+    expect(refusableSurfaces(r.unserveable)).toEqual([]);
+    expect(r.orderBy).toBe("record_id ASC");
+  });
+
+  it("reports a filter gap and makes it refusable, with no predicate pushed", () => {
+    const params: unknown[] = ["t1"];
+    const r = buildListSql(
+      query({ filters: [{ field: "unknown", value: "x" }] }),
+      adapter,
+      ["tenant_id = $1"],
+      params,
+    );
+    expect(r.unserveable).toEqual([
+      { surface: "filter", field: "unknown", reason: "not_a_column" },
+    ]);
+    expect(refusableSurfaces(r.unserveable)).toHaveLength(1);
+    // The widening, visible: the WHERE is the tenant predicate alone, which is every row.
+    expect(r.where).toBe("tenant_id = $1");
+    expect(params).toEqual(["t1"]);
+  });
+
+  it("reports a collapsed search group, which matched every row", () => {
+    const r = buildListSql(
+      query({ search: { term: "x", fields: ["unknown"] } }),
+      adapter,
+      ["tenant_id = $1"],
+      ["t1"],
+    );
+    expect(r.unserveable).toEqual([
+      { surface: "search", field: "unknown", reason: "not_a_column" },
+    ]);
+    expect(refusableSurfaces(r.unserveable)).toHaveLength(1);
+  });
+
+  it("reports NOTHING for a partially-expressible search, which narrows rather than widens", () => {
+    // Dropping some disjuncts from an OR means every row returned genuinely matches; the cost is a
+    // missed match, which the boot survey names per pair.
+    const r = buildListSql(
+      query({ search: { term: "x", fields: ["unknown", "name"] } }),
+      adapter,
+      ["tenant_id = $1"],
+      ["t1"],
+    );
+    expect(r.unserveable).toEqual([]);
+    expect(r.where).toContain("ILIKE");
+    expect(r.where).not.toContain("unknown");
+  });
+
+  it("reports nothing at all for a query it can express in full", () => {
+    const r = buildListSql(
+      query({ filters: [{ field: "name", value: "x" }], sort: [{ field: "name", direction: "asc" }] }),
+      adapter,
+      ["tenant_id = $1"],
+      ["t1"],
+    );
+    expect(r.unserveable).toEqual([]);
+  });
+});
+
+describe("buildListSql — the seek aligns components to the DECLARED sort index", () => {
+  it("reads a usable key's component from its declared position, not its filtered one", () => {
+    // It used to filter the sort list and then index the filtered list, so every position after a
+    // dropped key read a DIFFERENT key's value — with `?sort=unknown,name` the seek compared the
+    // cursor's `unknown` component against `name`. `keysetOf` renders one component per DECLARED
+    // key, which is what makes the declared index the right one.
+    const params: unknown[] = [];
+    const r = buildListSql(
+      query({
+        sort: [
+          { field: "unknown", direction: "asc" },
+          { field: "name", direction: "asc" },
+        ],
+        cursor: encodeKeyset({ k: ["dropped-value", "acme"], id: "r1" }),
+      }),
+      adapter,
+      [],
+      params,
+    );
+    // `acme` — the component declared at index 1, which is where `name` sits — and never
+    // `dropped-value`.
+    expect(params).toContain("acme");
+    expect(params).not.toContain("dropped-value");
+    expect(r.where).toContain("document ->> 'name'");
+  });
+});
 
 describe("buildListSql — filters", () => {
   it("builds an accent- and case-insensitive ILIKE for a contains filter, binding the value", () => {
