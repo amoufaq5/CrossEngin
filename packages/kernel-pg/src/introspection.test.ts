@@ -1,3 +1,6 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { PgConnection, PgQueryResult } from "./connection.js";
@@ -15,6 +18,7 @@ import {
   parseLiveSchema,
   parseSessionPolicyVisibility,
   probeSessionPolicyVisibility,
+  sessionPolicyVisibilityReason,
   sessionWouldBeConfined,
   type CheckConstraintRow,
   type ColumnRow,
@@ -451,72 +455,212 @@ describe("parseLiveSchema — check constraints", () => {
   });
 });
 
+/**
+ * Ground truth, recorded from a live PG 16.13 cluster rather than reasoned about.
+ *
+ * Two tables (`plainrls` = RLS enabled, `forcedrls` = RLS enabled + FORCE) under the repo's own
+ * NULLIF-guarded isolation policy, four roles, no tenant context set. `rowsSeen` is what an actual
+ * `SELECT count(*)` returned out of two rows present, so `confined` is an observation and not a
+ * prediction. This table exists because the predicate's whole failure mode is that a confined
+ * session's `0 rows` is byte-identical to an empty table, so the only trustworthy oracle is a
+ * session that really is or is not shown the rows.
+ */
+const LIVE_CONFINEMENT_MATRIX: readonly {
+  readonly role: string;
+  readonly table: string;
+  readonly rowsSeen: number;
+  readonly confined: boolean;
+  readonly facts: SessionPolicyVisibility;
+}[] = [
+  // An ordinary owner is exempt until the table is FORCEd, and then it is not.
+  {
+    role: "r_owner",
+    table: "plainrls",
+    rowsSeen: 2,
+    confined: false,
+    facts: { role: "r_owner", policiesActive: false, rlsEnabled: true, rlsForced: false, isOwner: true, bypassesRls: false },
+  },
+  {
+    role: "r_owner",
+    table: "forcedrls",
+    rowsSeen: 0,
+    confined: true,
+    facts: { role: "r_owner", policiesActive: true, rlsEnabled: true, rlsForced: true, isOwner: true, bypassesRls: false },
+  },
+  { role: "r_bypass", table: "plainrls", rowsSeen: 2, confined: false,
+    facts: { role: "r_bypass", policiesActive: false, rlsEnabled: true, rlsForced: false, isOwner: false, bypassesRls: true } },
+  { role: "r_bypass", table: "forcedrls", rowsSeen: 2, confined: false,
+    facts: { role: "r_bypass", policiesActive: false, rlsEnabled: true, rlsForced: true, isOwner: false, bypassesRls: true } },
+  { role: "r_plain", table: "plainrls", rowsSeen: 0, confined: true,
+    facts: { role: "r_plain", policiesActive: true, rlsEnabled: true, rlsForced: false, isOwner: false, bypassesRls: false } },
+  { role: "r_plain", table: "forcedrls", rowsSeen: 0, confined: true,
+    facts: { role: "r_plain", policiesActive: true, rlsEnabled: true, rlsForced: true, isOwner: false, bypassesRls: false } },
+  // The two cells no composition over these four facts can get right: `check_enable_rls` exempts a
+  // superuser, and `rolsuper` is not among them. A repo-wide grep for `rolsuper` / `usesuper` /
+  // `is_superuser` returns zero, so nothing here has ever been able to see it.
+  { role: "r_super_nobypass", table: "plainrls", rowsSeen: 2, confined: false,
+    facts: { role: "r_super_nobypass", policiesActive: false, rlsEnabled: true, rlsForced: false, isOwner: false, bypassesRls: false } },
+  { role: "r_super_nobypass", table: "forcedrls", rowsSeen: 2, confined: false,
+    facts: { role: "r_super_nobypass", policiesActive: false, rlsEnabled: true, rlsForced: true, isOwner: false, bypassesRls: false } },
+];
+
 describe("sessionWouldBeConfined", () => {
-  const facts = (over: Partial<SessionPolicyVisibility> = {}): SessionPolicyVisibility => ({
-    role: "r",
-    rlsEnabled: false,
-    rlsForced: false,
-    isOwner: false,
-    bypassesRls: false,
-    ...over,
-  });
-
-  it("is false whenever row-level security is off, whatever else holds", () => {
-    // RLS off is the only input that settles it on its own: no policy can hide a row.
-    for (const rlsForced of [false, true]) {
-      for (const isOwner of [false, true]) {
-        for (const bypassesRls of [false, true]) {
-          expect(
-            sessionWouldBeConfined(facts({ rlsEnabled: false, rlsForced, isOwner, bypassesRls })),
-          ).toBe(false);
-        }
-      }
+  it("matches live ground truth in every recorded cell", () => {
+    // The assertion the previous version of this suite could not make. It pinned an exhaustive
+    // truth table over the four catalog facts and compared the rule against an `ownershipOnly`
+    // derivation written in the test itself — two spellings of one composition, agreeing — and
+    // called the single disagreement a property. Neither side was ever compared with a database.
+    for (const cell of LIVE_CONFINEMENT_MATRIX) {
+      expect(sessionWouldBeConfined(cell.facts), `${cell.role} on ${cell.table}`).toBe(cell.confined);
+      expect(cell.confined, `${cell.role} on ${cell.table}: rowsSeen must agree with confined`).toBe(
+        cell.rowsSeen === 0,
+      );
     }
   });
 
-  it("pins the whole truth table with RLS on, so the rule cannot drift unnoticed", () => {
-    // Exhaustive rather than sampled, because this rule's failure mode is invisible: a session
-    // wrongly called unconfined counts 0 rows, which is byte-identical to an empty table. Eight
-    // combinations, written out.
-    const table: readonly [boolean, boolean, boolean, boolean][] = [
-      // rlsForced, isOwner, bypassesRls, confined
-      [false, false, false, true],
-      [false, false, true, false],
-      [false, true, false, false],
-      [false, true, true, false],
-      [true, false, false, true],
-      [true, false, true, false],
-      // FORCE ROW LEVEL SECURITY confines the owner too — the one row an ownership-only rule gets
-      // wrong, and it gets it wrong in the permissive direction.
-      [true, true, false, true],
-      [true, true, true, false],
-    ];
-    for (const [rlsForced, isOwner, bypassesRls, confined] of table) {
-      expect(
-        sessionWouldBeConfined(facts({ rlsEnabled: true, rlsForced, isOwner, bypassesRls })),
-        `rlsForced=${rlsForced} isOwner=${isOwner} bypassesRls=${bypassesRls}`,
-      ).toBe(confined);
-    }
+  it("scores the retired composition at 6 of 8, both misses on the superuser", () => {
+    // Kept, and derived rather than restated, so the reason the verdict moved to Postgres stays in
+    // the suite instead of only in an ADR. The misses are in the conservative direction — claiming
+    // confined where the session is free — which is why this was a precision gain and not a hole.
+    const composed = (v: SessionPolicyVisibility): boolean =>
+      v.rlsEnabled && !(v.rlsForced ? v.bypassesRls : v.isOwner || v.bypassesRls);
+    const wrong = LIVE_CONFINEMENT_MATRIX.filter((c) => composed(c.facts) !== c.confined);
+    expect(wrong.map((c) => `${c.role}/${c.table}`)).toEqual([
+      "r_super_nobypass/plainrls",
+      "r_super_nobypass/forcedrls",
+    ]);
+    for (const c of wrong) expect(composed(c.facts), "conservative direction").toBe(true);
   });
 
-  it("differs from an ownership-only rule on exactly one input", () => {
-    // The reason the rule was worth extracting: seven of the eight rows agree with "owner or
-    // bypasser is unconfined", and the eighth is the one every other copy in the workspace gets
-    // wrong. Derived rather than restated, so it cannot pass by agreeing with itself.
-    const ownershipOnly = (v: SessionPolicyVisibility) =>
+  it("scores an ownership-only composition at 5 of 8, and its extra miss is the dangerous one", () => {
+    // What `probeJobQueueVisibility` computed until this increment. Its third miss is an owner of a
+    // FORCEd table reading *unconfined* — the permissive direction, and the silent zero the whole
+    // family exists to catch: live, that owner's `DELETE … WHERE tenant_id IS NOT NULL` removed
+    // nothing, the confirm-absence `count(*)` also reported 0 because it reads through the same
+    // policy, and a BYPASSRLS role then counted both rows still present.
+    const ownershipOnly = (v: SessionPolicyVisibility): boolean =>
       v.rlsEnabled && !(v.isOwner || v.bypassesRls);
-    const disagreements: string[] = [];
-    for (const rlsForced of [false, true]) {
-      for (const isOwner of [false, true]) {
-        for (const bypassesRls of [false, true]) {
-          const v = facts({ rlsEnabled: true, rlsForced, isOwner, bypassesRls });
-          if (sessionWouldBeConfined(v) !== ownershipOnly(v)) {
-            disagreements.push(`forced=${rlsForced} owner=${isOwner} bypass=${bypassesRls}`);
+    const wrong = LIVE_CONFINEMENT_MATRIX.filter((c) => ownershipOnly(c.facts) !== c.confined);
+    expect(wrong.map((c) => `${c.role}/${c.table}`)).toEqual([
+      "r_owner/forcedrls",
+      "r_super_nobypass/plainrls",
+      "r_super_nobypass/forcedrls",
+    ]);
+    const permissive = wrong.filter((c) => c.confined && !ownershipOnly(c.facts));
+    expect(permissive.map((c) => `${c.role}/${c.table}`)).toEqual(["r_owner/forcedrls"]);
+  });
+
+  it("is the verdict column and nothing else, over every combination of the four facts", () => {
+    // One field read, asserted as such: with the composition retired there is nothing left for a
+    // fact to contribute, so a future edit that starts reading `isOwner` again fails here.
+    for (const policiesActive of [false, true]) {
+      for (const rlsEnabled of [false, true]) {
+        for (const rlsForced of [false, true]) {
+          for (const isOwner of [false, true]) {
+            for (const bypassesRls of [false, true]) {
+              expect(
+                sessionWouldBeConfined({ role: "r", policiesActive, rlsEnabled, rlsForced, isOwner, bypassesRls }),
+                `policiesActive=${policiesActive} rlsEnabled=${rlsEnabled} rlsForced=${rlsForced} isOwner=${isOwner} bypassesRls=${bypassesRls}`,
+              ).toBe(policiesActive);
+            }
           }
         }
       }
     }
-    expect(disagreements).toEqual(["forced=true owner=true bypass=false"]);
+  });
+});
+
+describe("sessionPolicyVisibilityReason", () => {
+  it("explains every live cell, and never contradicts the verdict", () => {
+    const confining = new Set(["policies_apply", "forced_on_owner"]);
+    for (const cell of LIVE_CONFINEMENT_MATRIX) {
+      const reason = sessionPolicyVisibilityReason(cell.facts);
+      expect(confining.has(reason), `${cell.role}/${cell.table} -> ${reason}`).toBe(cell.confined);
+    }
+  });
+
+  it("names the owner-under-FORCE case separately, because its remedy is different", () => {
+    // "You do not own the table" and "you own it and FORCE confines the owner too" send an operator
+    // to opposite fixes, which is the whole reason the four facts are still read.
+    const owned = LIVE_CONFINEMENT_MATRIX.find((c) => c.role === "r_owner" && c.table === "forcedrls");
+    expect(sessionPolicyVisibilityReason(owned!.facts)).toBe("forced_on_owner");
+    const plain = LIVE_CONFINEMENT_MATRIX.find((c) => c.role === "r_plain" && c.table === "plainrls");
+    expect(sessionPolicyVisibilityReason(plain!.facts)).toBe("policies_apply");
+  });
+
+  it("admits it cannot explain the superuser exemption, rather than guessing", () => {
+    // `role_is_exempt` is the honest arm: Postgres says this session is free and no fact read here
+    // says why. An explanation that claimed `owner_exempt` or `role_bypasses_rls` here would be a
+    // sentence an operator could act on and that is false.
+    const sup = LIVE_CONFINEMENT_MATRIX.filter((c) => c.role === "r_super_nobypass");
+    expect(sup).toHaveLength(2);
+    for (const c of sup) expect(sessionPolicyVisibilityReason(c.facts)).toBe("role_is_exempt");
+  });
+
+  it("settles on RLS being off before anything else", () => {
+    expect(
+      sessionPolicyVisibilityReason({
+        role: "r", policiesActive: false, rlsEnabled: false, rlsForced: true, isOwner: true, bypassesRls: true,
+      }),
+    ).toBe("rls_disabled");
+  });
+});
+
+describe("the confinement verdict has one spelling in the workspace", () => {
+  // ADR-0357's shape: a test that reads source as text to pin both the call and the absence of the
+  // literal. There were three mechanisms for this one question and the one the repo extracted as
+  // canonical was not the most correct of them, so what is worth fencing is not "call the shared
+  // function" but "do not compose this answer again".
+  const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
+
+  const sources = (): readonly { readonly path: string; readonly text: string }[] => {
+    const out: { path: string; text: string }[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) {
+          if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") continue;
+          walk(full);
+        } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
+          out.push({ path: full.slice(ROOT.length), text: readFileSync(full, "utf8") });
+        }
+      }
+    };
+    for (const member of ["packages", "apps"]) walk(`${ROOT}${member}`);
+    return out;
+  };
+
+  it("has no second composition of ownership and bypass into a confinement answer", () => {
+    // The literal shapes the retired copies used, in SQL and in TypeScript. Matching text rather
+    // than behaviour is the point: a fourth copy would be *correct-looking*, and the only thing
+    // that makes it visible is that it spells the composition at all.
+    //
+    // Comments are deliberately **not** stripped before matching, and that is a decision rather
+    // than laziness. It fired once on a doc comment this increment wrote, quoting the expression it
+    // had just retired — and a comment spelling the old composition is exactly what misled the four
+    // readers this increment found, each of whom described the composed rule accurately and left
+    // the next person to re-derive it. So the rule is that the expression appears nowhere, in code
+    // or in prose, and the remedy for a comment that needs to discuss it is to describe it in
+    // words.
+    const SHAPES = [/isOwner\s*\|\|\s*bypassesRls/, /is_owner\s+OR\s+bypasses_rls/i];
+    const offenders = sources().filter((s) => SHAPES.some((re) => re.test(s.text)));
+    expect(offenders.map((s) => s.path)).toEqual([]);
+  });
+
+  it("reads relforcerowsecurity only beside row_security_active", () => {
+    // The column is still selected — the explanation needs it — but a module that reads it without
+    // asking Postgres for the verdict is composing again, which is the state this increment found.
+    const offenders = sources()
+      .filter((s) => s.text.includes("relforcerowsecurity") && !s.text.includes("row_security_active"))
+      .map((s) => s.path);
+    expect(offenders).toEqual([]);
+  });
+
+  it("finds the file it is asserting about, so the scan cannot pass by reading nothing", () => {
+    const all = sources();
+    expect(all.length).toBeGreaterThan(700);
+    expect(all.some((s) => s.path.endsWith("packages/kernel-pg/src/introspection.ts"))).toBe(true);
+    expect(all.filter((s) => s.text.includes("row_security_active")).length).toBeGreaterThanOrEqual(2);
   });
 });
 
@@ -525,6 +669,7 @@ describe("parseSessionPolicyVisibility", () => {
     expect(
       parseSessionPolicyVisibility({
         role: "serving",
+        policies_active: "t",
         rls_enabled: true,
         rls_forced: "f",
         is_owner: null,
@@ -532,6 +677,7 @@ describe("parseSessionPolicyVisibility", () => {
       }),
     ).toEqual({
       role: "serving",
+      policiesActive: false,
       rlsEnabled: true,
       rlsForced: false,
       isOwner: false,
@@ -539,10 +685,29 @@ describe("parseSessionPolicyVisibility", () => {
     });
   });
 
+  it("reads an absent verdict column as not-confined, which the caller's RLS check catches", () => {
+    // `policies_active` falling to `false` is the permissive direction, so it is worth being
+    // explicit about why it is safe: a row that reaches here at all came from
+    // SESSION_POLICY_VISIBILITY_COLUMNS, which selects the column unconditionally, so an absent
+    // value means the caller substituted its own query and dropped it — and every caller checks
+    // `rlsEnabled` first, which no shape error can make true on its own.
+    const v = parseSessionPolicyVisibility({
+      role: "serving",
+      policies_active: undefined,
+      rls_enabled: true,
+      rls_forced: true,
+      is_owner: true,
+      bypasses_rls: false,
+    });
+    expect(v.policiesActive).toBe(false);
+    expect(sessionPolicyVisibilityReason(v)).toBe("owner_exempt");
+  });
+
   it("stringifies the role rather than asserting it", () => {
     expect(
       parseSessionPolicyVisibility({
         role: 42,
+        policies_active: false,
         rls_enabled: false,
         rls_forced: false,
         is_owner: false,
@@ -553,8 +718,10 @@ describe("parseSessionPolicyVisibility", () => {
 });
 
 describe("SESSION_POLICY_VISIBILITY_QUERY", () => {
-  it("binds the schema and the table, and reads the four catalog flags", () => {
+  it("asks Postgres for the verdict and the catalog for the explanation", () => {
     expect(SESSION_POLICY_VISIBILITY_QUERY).toContain("n.nspname = $1 AND c.relname = $2");
+    // The verdict first, because it is the one column a composition cannot replace.
+    expect(SESSION_POLICY_VISIBILITY_QUERY).toContain("row_security_active(c.oid)");
     for (const column of ["rolbypassrls", "pg_get_userbyid", "relrowsecurity", "relforcerowsecurity"]) {
       expect(SESSION_POLICY_VISIBILITY_QUERY).toContain(column);
     }
@@ -575,7 +742,14 @@ describe("SESSION_POLICY_VISIBILITY_QUERY", () => {
     const conn = fakeConn([
       {
         rows: [
-          { role: "serving", rls_enabled: true, rls_forced: false, is_owner: false, bypasses_rls: false },
+          {
+            role: "serving",
+            policies_active: true,
+            rls_enabled: true,
+            rls_forced: false,
+            is_owner: false,
+            bypasses_rls: false,
+          },
         ],
         rowCount: 1,
       },

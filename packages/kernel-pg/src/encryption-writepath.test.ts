@@ -317,6 +317,19 @@ describe("emitEncryptingViewTriggersSql", () => {
 
 interface VisibilityRow {
   readonly role: string;
+  /**
+   * `row_security_active(oid)` — the verdict (ADR-0362), and **derived** in the builder below
+   * rather than accepted from a caller.
+   *
+   * The argument is the one `rls_forced` already makes, one column on and one notch sharper: a
+   * missing key answers `undefined`, which reads as *not confined* and is the permissive direction,
+   * so every refusal in this suite would stop firing while still passing — which is exactly what
+   * happened when the column landed, in eleven tests at once. And unlike the four facts it cannot
+   * be *declared* either, because a declared verdict can contradict them: `{is_owner: true,
+   * rls_forced: true, policies_active: false}` is a state no database produces, and a fixture in
+   * that shape asserts behaviour on an input that will never arrive.
+   */
+  readonly policies_active: boolean;
   readonly bypasses_rls: boolean;
   readonly is_owner: boolean;
   readonly rls_enabled: boolean;
@@ -374,14 +387,22 @@ function mockConn(
   const owner = opts.owner ?? true;
   const tableExists = opts.tableExists ?? true;
   const updatedRows = opts.updatedRows ?? 7;
+  const bypassesRls = opts.bypassesRls ?? false;
+  const rlsEnabled = opts.rlsEnabled ?? true;
+  const rlsForced = opts.rlsForced ?? false;
+  // Postgres's own semantics over the facts a fake can model. Deliberately not a `MockOpts` field:
+  // the verdict is what the four facts imply, so letting a test state it would let a test state an
+  // impossible database.
+  const policiesActive = rlsEnabled && !(bypassesRls || (owner && !rlsForced));
   const visibility: VisibilityRow[] = tableExists
     ? [
         {
           role: "app_rw",
-          bypasses_rls: opts.bypassesRls ?? false,
+          policies_active: policiesActive,
+          bypasses_rls: bypassesRls,
           is_owner: owner,
-          rls_enabled: opts.rlsEnabled ?? true,
-          rls_forced: opts.rlsForced ?? false,
+          rls_enabled: rlsEnabled,
+          rls_forced: rlsForced,
           has_scope_column: opts.hasScopeColumn ?? true,
         },
       ]
@@ -858,14 +879,21 @@ describe("probeTable — FORCE ROW LEVEL SECURITY", () => {
     return survey.refusals.map((r) => r.reason);
   }
 
-  it("asks the catalog for relforcerowsecurity", async () => {
+  it("asks Postgres for the verdict and the catalog for the explanation", async () => {
     const observed: Recorded[] = [];
     const conn = mockConn([ciphertextRow], observed);
     await new KeyRotationMigrator(conn).surveyTenant(conn, "public", TENANT, OLD_KEY, NEW_KEY);
     const probe = observed.find((r) => r.sql.includes("relrowsecurity"));
     expect(probe).toBeDefined();
-    // Selected, and aliased to the field the decision reads — a probe that fetched the column under
-    // another name would leave `row.rls_forced` undefined and take the ownership branch silently.
+    // The verdict column, which is what the refusal now turns on (ADR-0362). This probe reached it
+    // without this file being edited, because it interpolates SESSION_POLICY_VISIBILITY_COLUMNS
+    // instead of restating the select list — which is what that constant was always for and had no
+    // consumer of.
+    expect(probe?.sql).toContain("row_security_active(c.oid)");
+    expect(probe?.sql).toContain("AS policies_active");
+    // And the four facts, still selected, still aliased to the fields the *message* reads: a probe
+    // fetching one under another name would leave it undefined and the refusal would name the wrong
+    // remedy.
     expect(probe?.sql).toContain("c.relforcerowsecurity");
     expect(probe?.sql).toContain("AS rls_forced");
   });
@@ -918,9 +946,16 @@ describe("probeTable — FORCE ROW LEVEL SECURITY", () => {
   });
 
   it("decides over the whole (enabled, forced, owner, bypass) table", async () => {
-    // Written out rather than computed from the implementation's own expression, so this asserts
-    // the intended rule and not merely agreement with the code. Refusal is
-    // `rls_enabled && !(forced ? bypass : owner || bypass)`.
+    // Written out rather than computed from the implementation's own expression — and that is now
+    // worth stating more carefully than it was. The claim used to be that this "asserts the
+    // intended rule and not merely agreement with the code", and the rule it wrote out,
+    // `rls_enabled && !(forced ? bypass : owner || bypass)`, was a second spelling of the
+    // composition the code held: two derivations of one thing, agreeing, with no database consulted
+    // (ADR-0362). The verdict is Postgres's `row_security_active` now and this table is an
+    // imitation of it *restricted to the four facts a fake can model* — true over exactly these
+    // sixteen rows and silent about the superuser case, which no fixture here can express. What it
+    // still earns: the mock derives `policies_active` from these flags, so this asserts that the
+    // refusal fires for each derived verdict rather than that two expressions match.
     const cases: readonly (readonly [MockOpts, boolean])[] = [
       // RLS off: nothing confines anyone, forced or not.
       [{ rlsEnabled: false, rlsForced: false, owner: false, bypassesRls: false }, false],

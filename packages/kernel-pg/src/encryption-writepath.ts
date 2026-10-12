@@ -9,6 +9,7 @@ import {
 import {
   parseSessionPolicyVisibility,
   sessionWouldBeConfined,
+  SESSION_POLICY_VISIBILITY_COLUMNS,
   type SessionPolicyVisibilityRow,
 } from "./introspection.js";
 
@@ -473,8 +474,9 @@ export class KeyRotationMigrator {
   /**
    * Plans, and asks the catalog whether this session could carry the plan out.
    *
-   * The probe is per table and asks `relrowsecurity` / `rolbypassrls` / ownership rather than
-   * counting rows, for `probeJobQueueVisibility`'s reason: zero rows rewritten and zero rows
+   * The probe is per table and asks Postgres whether it will apply the table's policies to this
+   * session — `row_security_active`, through `sessionWouldBeConfined` — rather than counting rows,
+   * for `probeJobQueueVisibility`'s reason: zero rows rewritten and zero rows
    * present are the same observation. That ambiguity is load-bearing here in a way it is nowhere
    * else in this repo — a rotation that reports success having rewritten nothing is followed by an
    * operator retiring the old key, and at that moment every ciphertext in the schema becomes
@@ -744,11 +746,13 @@ export class KeyRotationMigrator {
     // simply not read for `every_row`, which keeps the two paths asking the catalog one question.
     const scopeColumn = scope.kind === "tenant" ? scope.column : TENANT_SCOPE_COLUMN;
     const result = await conn.query<RotationVisibilityRow>(
-      `SELECT current_user AS role,
-              COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false) AS bypasses_rls,
-              pg_catalog.pg_get_userbyid(c.relowner) = current_user AS is_owner,
-              c.relrowsecurity AS rls_enabled,
-              c.relforcerowsecurity AS rls_forced,
+      // The shared select list is interpolated rather than restated, which is what the constant
+      // exists for and what it had no consumer of: this is the one caller in the workspace with an
+      // extra column, the exact case its doc comment names, and it hand-wrote all five instead. The
+      // cost of that showed up immediately — `policies_active` was added to the constant and
+      // arrived here without this file being edited, where a copy would have gone on composing the
+      // verdict from four facts and missing the superuser case.
+      `SELECT ${SESSION_POLICY_VISIBILITY_COLUMNS},
               EXISTS (SELECT 1 FROM pg_attribute a
                        WHERE a.attrelid = c.oid
                          AND a.attnum > 0

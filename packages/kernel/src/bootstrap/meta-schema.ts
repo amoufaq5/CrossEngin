@@ -6753,6 +6753,21 @@ export const META_ACCESS_REVIEW_DECISIONS: TableDefinition = {
       check:
         "attestation_kind IN ('click_through_acknowledgement', 'typed_attestation_phrase', 'e_signature_digital', 'qualified_e_signature', 'two_person_attestation')",
     },
+    // The only evidence a `typed_attestation_phrase` attestation carries, and until ADR-0362 it had
+    // nowhere to live: `DecisionAttestationSchema` declared it, `canonicalAttestationBytes` hashed
+    // it into the bytes `attestation_signature_sha256` commits to, and the INSERT beside it was
+    // *complete over this table* — which is why no SQL rule reported the gap. All ten workspace
+    // rules compare SQL against the catalog or the catalog against a value set, and none compares a
+    // contract field to a catalog column, so a field with no column is invisible to every one of
+    // them. Measured: an authored phrase round-tripped to `undefined`, and because
+    // `canonicalStringify` skips undefined keys it left the payload a key short rather than null,
+    // so the signature over the authored attestation could never be recomputed from its own row.
+    //
+    // `attested_at` deliberately gets no column beside it, and the asymmetry is the decision: that
+    // one *duplicates* `decided_at`, which the sole live producer, the row mapper and
+    // `EvidenceBundleDecisionRow` all treat as one instant, so storing it would invent a second
+    // fact nothing in the tree distinguishes. This one duplicates nothing.
+    { name: "attestation_phrase", type: "TEXT", check: "attestation_phrase IS NULL OR length(attestation_phrase) <= 500" },
     {
       name: "attestation_signature_sha256",
       type: "CHAR(64)",

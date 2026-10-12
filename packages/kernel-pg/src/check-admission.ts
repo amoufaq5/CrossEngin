@@ -699,10 +699,15 @@ export interface WideningSafety {
  * violating row present, the owner counts 1 and a non-owner with no tenant context counts 0 — and
  * the `ALTER` genuinely raises `check constraint … is violated by some row`. So a survey that made
  * this claim from a confined session would hand an operator SQL that fails. The confinement is asked
- * of the catalog (`relrowsecurity` / `relforcerowsecurity` / ownership / `rolbypassrls`) rather than
- * inferred from the count, for `probeJobQueueVisibility`'s reason: zero rows and no visible rows are
- * the same observation. Third place this class has been found — ADR-0330's erasure and ADR-0349's
- * rekey are the other two.
+ * of Postgres (`row_security_active`, through `sessionWouldBeConfined`) rather than inferred from
+ * the count, for `probeJobQueueVisibility`'s reason: zero rows and no visible rows are the same
+ * observation. Third place this class has been found — ADR-0330's erasure and ADR-0349's rekey are
+ * the other two.
+ *
+ * This sentence used to list the four catalog facts the verdict was composed from, and it was the
+ * fourth comment in the workspace to describe that composition — the text fence in
+ * `introspection.test.ts` found it, not the survey that preceded it, which is the clearest argument
+ * for the fence being about the prose and not only the code.
  */
 export async function proveWideningSafe(
   conn: PgConnection,

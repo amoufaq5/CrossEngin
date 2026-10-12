@@ -170,13 +170,21 @@ function buildMockConnection(state: MockState): PgConnection {
     query: vi.fn(async (sql: string, params?: readonly unknown[]): Promise<PgQueryResult> => {
       void params;
       if (sql.includes("FROM pg_class c")) {
+        // `policies_active` is derived here, not taken from `MockState`, because the probe's
+        // verdict is `row_security_active` since ADR-0362 and an absent column reads as *not
+        // confined* — so every RLS refusal in this suite would stop firing while every other
+        // assertion kept passing. The derivation is Postgres's semantics over the facts this mock
+        // models; it has no FORCE flag, so `rls_forced` is false and an owner is exempt.
+        const exempt = state.isOwner;
         return {
           rows: [
             {
               role: "app",
+              policies_active: state.rlsEnabled && !exempt,
               bypasses_rls: false,
               is_owner: state.isOwner,
               rls_enabled: state.rlsEnabled,
+              rls_forced: false,
             },
           ],
           rowCount: 1,

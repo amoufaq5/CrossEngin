@@ -82,15 +82,28 @@ export interface LiveCheckConstraint {
 }
 
 /**
- * Whether this session's reads of one table are confined by its policies — the five catalog facts
- * that decide it, and the rule over them.
+ * Whether this session's reads of one table are confined by its policies — Postgres's own answer,
+ * and the four catalog facts that explain it.
  *
- * It is extracted because the **rule** had eight spellings in this workspace and the one that got it
- * right was private: `KeyRotationMigrator.commonRefusals` is the only copy that reads
- * `relforcerowsecurity`, which is the single input that overrides ownership, and it reasons the case
- * out in place. Every other copy infers confinement from ownership alone and would let a
- * `FORCE ROW LEVEL SECURITY` owner through. Nothing in the catalog sets that flag today, so the
- * divergence is latent rather than live — which is exactly when it is cheap to converge.
+ * **The verdict is asked for, not composed.** `row_security_active(oid)` is the SQL-exposed face of
+ * `check_enable_rls`, the function Postgres itself consults when it decides whether to apply a
+ * table's policies to a statement — so it is not a better approximation of the rule, it *is* the
+ * rule, and ADR-0330's "ask Postgres rather than imitate its parser" applies to a predicate exactly
+ * as it does to an expression. This file used to compose the answer from `relrowsecurity`,
+ * `relforcerowsecurity`, ownership and `rolbypassrls`, and that composition was measured at 6 of 8
+ * against ground truth on PG 16.13: it misses a `SUPERUSER` role holding `NOBYPASSRLS`, which
+ * `check_enable_rls` exempts and no catalog fact read here can see — a repo-wide grep for
+ * `rolsuper` / `usesuper` / `is_superuser` returns zero. The miss is in the conservative direction
+ * (claiming confined where the session is free), and the one role it reaches is unusual: the
+ * bootstrap `postgres` superuser carries `rolbypassrls` too, so it was never in the divergent set.
+ * What the switch buys is therefore not a closed hole but an unwritable one — there is no
+ * composition left to get wrong, and `shared-table-erasure.ts` was already asking this question
+ * this way, so the three sites now agree on what decides rather than two agreeing and one
+ * differing.
+ *
+ * The four facts stay, and are still read, because a refusal has to say *why*: "RLS is on and you
+ * are not the owner" and "RLS is FORCEd and you own the table" send an operator to different
+ * remedies, and `policiesActive` alone cannot tell them apart.
  *
  * The *query* is deliberately **not** shared, only the rule. Each call site asks the catalog for its
  * own extras in one statement (`commonRefusals` wants the scope column in the same round trip, and
@@ -100,6 +113,11 @@ export interface LiveCheckConstraint {
  */
 export interface SessionPolicyVisibility {
   readonly role: string;
+  /**
+   * `row_security_active(oid)` — whether Postgres will apply this table's policies to this
+   * session's statements. The verdict; everything below it is explanation.
+   */
+  readonly policiesActive: boolean;
   /** `relrowsecurity`. */
   readonly rlsEnabled: boolean;
   /** `relforcerowsecurity`, which confines the table's owner too. */
@@ -109,9 +127,16 @@ export interface SessionPolicyVisibility {
   readonly bypassesRls: boolean;
 }
 
-/** The select list the probe below reads, exposed so a caller wanting extras asks once. */
+/**
+ * The select list the probe below reads, exposed so a caller wanting extras asks once.
+ *
+ * Interpolating this rather than restating it is what makes a sixth column reach every caller:
+ * `policies_active` was added here and `commonRefusals` picked it up without being edited, where a
+ * hand-written copy of the five columns would have gone on composing the old answer from four.
+ */
 export const SESSION_POLICY_VISIBILITY_COLUMNS = `
          current_user AS role,
+         pg_catalog.row_security_active(c.oid) AS policies_active,
          COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false) AS bypasses_rls,
          pg_catalog.pg_get_userbyid(c.relowner) = current_user AS is_owner,
          c.relrowsecurity AS rls_enabled,
@@ -126,6 +151,7 @@ export const SESSION_POLICY_VISIBILITY_QUERY = `
 
 export interface SessionPolicyVisibilityRow {
   readonly role: unknown;
+  readonly policies_active: unknown;
   readonly bypasses_rls: unknown;
   readonly is_owner: unknown;
   readonly rls_enabled: unknown;
@@ -137,6 +163,7 @@ export function parseSessionPolicyVisibility(
 ): SessionPolicyVisibility {
   return {
     role: String(row.role),
+    policiesActive: row.policies_active === true,
     rlsEnabled: row.rls_enabled === true,
     rlsForced: row.rls_forced === true,
     isOwner: row.is_owner === true,
@@ -147,14 +174,31 @@ export function parseSessionPolicyVisibility(
 /**
  * Whether the session's policies would hide rows from it.
  *
- * `rlsForced` is read *instead of* ownership rather than beside it: `FORCE ROW LEVEL SECURITY`
- * confines the owner, so an ownership arm that ignored it would answer "not confined" for precisely
- * the session the flag exists to confine — the permissive direction, and the one a count of zero
- * cannot distinguish from an empty table.
+ * One field read, deliberately. It stays a named function rather than becoming `v.policiesActive`
+ * at each call site for the reason it was extracted in the first place: this is the *question*, and
+ * a call site that reads a field decides for itself what the field means. The body is now the whole
+ * of the rule because the rule is Postgres's — see `SessionPolicyVisibility` above for why the
+ * composed form was retired and what it measured.
  */
 export function sessionWouldBeConfined(v: SessionPolicyVisibility): boolean {
-  const bypassesPolicies = v.rlsForced ? v.bypassesRls : v.isOwner || v.bypassesRls;
-  return v.rlsEnabled && !bypassesPolicies;
+  return v.policiesActive;
+}
+
+/**
+ * Why `sessionWouldBeConfined` answered as it did, for a refusal message.
+ *
+ * Separate from the verdict so the two cannot disagree: the explanation is composed from the four
+ * catalog facts and is allowed to be incomplete — a `SUPERUSER NOBYPASSRLS` session reads
+ * `role_is_exempt` here with no fact naming the exemption — while the verdict never is.
+ */
+export function sessionPolicyVisibilityReason(
+  v: SessionPolicyVisibility,
+): "rls_disabled" | "role_bypasses_rls" | "owner_exempt" | "forced_on_owner" | "policies_apply" | "role_is_exempt" {
+  if (!v.rlsEnabled) return "rls_disabled";
+  if (v.policiesActive) return v.rlsForced && v.isOwner ? "forced_on_owner" : "policies_apply";
+  if (v.bypassesRls) return "role_bypasses_rls";
+  if (v.isOwner) return "owner_exempt";
+  return "role_is_exempt";
 }
 
 export async function probeSessionPolicyVisibility(

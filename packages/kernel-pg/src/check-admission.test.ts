@@ -531,8 +531,41 @@ describe("admissionVerdictIsActionable", () => {
 });
 
 describe("proveWideningSafe", () => {
-  const owner = { role: "postgres", rls_enabled: true, rls_forced: false, is_owner: true, bypasses_rls: false };
-  const nonOwner = { role: "serving", rls_enabled: true, rls_forced: false, is_owner: false, bypasses_rls: false };
+  /**
+   * A visibility row whose `policies_active` is **derived**, not declared.
+   *
+   * The verdict moved to `row_security_active` (ADR-0362), so a hand-written fake row can now
+   * disagree with itself — `{is_owner: true, rls_forced: true, policies_active: false}` is a state
+   * no database produces, and a fixture in that shape would assert this function is safe on an
+   * input it will never see. Deriving it here is the fake-honesty rule this repo already applies to
+   * tenant predicates: a fake that answers a statement it could not really serve is a test
+   * asserting the wrong thing. The derivation is Postgres's own semantics for the facts a fake can
+   * model — a superuser without BYPASSRLS is outside them, and no fixture here claims one.
+   */
+  const facts = (over: {
+    readonly role?: string;
+    readonly rls_enabled?: boolean;
+    readonly rls_forced?: boolean;
+    readonly is_owner?: boolean;
+    readonly bypasses_rls?: boolean;
+  }): {
+    readonly role: string;
+    readonly policies_active: boolean;
+    readonly rls_enabled: boolean;
+    readonly rls_forced: boolean;
+    readonly is_owner: boolean;
+    readonly bypasses_rls: boolean;
+  } => {
+    const role = over.role ?? "serving";
+    const rls_enabled = over.rls_enabled ?? true;
+    const rls_forced = over.rls_forced ?? false;
+    const is_owner = over.is_owner ?? false;
+    const bypasses_rls = over.bypasses_rls ?? false;
+    const exempt = bypasses_rls || (is_owner && !rls_forced);
+    return { role, policies_active: rls_enabled && !exempt, rls_enabled, rls_forced, is_owner, bypasses_rls };
+  };
+  const owner = facts({ role: "postgres", is_owner: true });
+  const nonOwner = facts({ role: "serving" });
 
   it("proves safe when no existing row violates the declared expression", async () => {
     const { conn } = fakeDb({ visibility: owner, violatingRows: 0 });
@@ -579,7 +612,7 @@ describe("proveWideningSafe", () => {
 
   it("treats a FORCE ROW LEVEL SECURITY owner as confined too", async () => {
     const { conn } = fakeDb({
-      visibility: { ...owner, rls_forced: true },
+      visibility: facts({ role: "postgres", is_owner: true, rls_forced: true }),
       violatingRows: 0,
     });
     const r = await proveWideningSafe(conn, {
@@ -594,7 +627,7 @@ describe("proveWideningSafe", () => {
 
   it("counts for a role that bypasses RLS", async () => {
     const { conn } = fakeDb({
-      visibility: { ...nonOwner, bypasses_rls: true },
+      visibility: facts({ role: "serving", bypasses_rls: true }),
       violatingRows: 0,
     });
     const r = await proveWideningSafe(conn, {

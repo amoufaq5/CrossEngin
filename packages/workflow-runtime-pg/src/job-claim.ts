@@ -1,4 +1,11 @@
-import type { PgConnection } from "@crossengin/kernel-pg";
+import {
+  parseSessionPolicyVisibility,
+  sessionPolicyVisibilityReason,
+  sessionWouldBeConfined,
+  SESSION_POLICY_VISIBILITY_QUERY,
+  type PgConnection,
+  type SessionPolicyVisibilityRow,
+} from "@crossengin/kernel-pg";
 
 const SCHEMA_RE = /^[a-z_][a-z0-9_]*$/;
 const DEFAULT_SCHEMA = "meta";
@@ -152,15 +159,24 @@ export async function claimDueJobs(
  * `meta.job_runs`, `meta.dead_letter_jobs` and `meta.job_costs` each carry exactly one `ALL`-scope
  * tenant-isolation policy and **no platform arm**, while the worker fleet is deliberately
  * cross-tenant — one fleet serves every tenant, with `tenant_id` riding back per row. Those two
- * facts only compose when the connection's role bypasses RLS, which for an ordinary deployment means
- * being the table's owner. As a non-owner with no tenant context, `claimDueJobs` returns **0 rows**
+ * facts only compose when Postgres exempts the connection's role from the table's policies, which
+ * for an ordinary deployment means being the table's owner — but *only* while the table does not
+ * carry `FORCE ROW LEVEL SECURITY`, which confines the owner too. As a role Postgres does not
+ * exempt, with no tenant context, `claimDueJobs` returns **0 rows**
  * and `executeJobRun` answers `not_claimable` — verified live — and neither is an error: an empty
  * claim is what an empty queue looks like, and `not_claimable` is what an already-finalized run
  * looks like. So a fleet that will never execute anything reads exactly like a fleet with nothing to
  * do.
  */
 export const JOB_QUEUE_VISIBILITY = [
-  /** The role bypasses RLS on this table (its owner, or `BYPASSRLS`): the claim sees every tenant. */
+  /**
+   * Postgres will not apply this table's policies to this role, so the claim sees every tenant.
+   *
+   * Deliberately *not* spelled "its owner, or `BYPASSRLS`", which is what this comment used to say
+   * and what the code used to compute: ownership is exempt until the table carries
+   * `FORCE ROW LEVEL SECURITY`, and then the owner is confined like anyone else. The exemption is
+   * `row_security_active`'s to decide, not this list's to enumerate.
+   */
   "visible",
   /** RLS confines this role, so an unscoped cross-tenant claim will match nothing, silently. */
   "confined_by_rls",
@@ -183,9 +199,20 @@ export interface JobQueueVisibilityReport {
  * Asks the catalog — rather than counting rows — whether this connection's role can serve the queue.
  *
  * Counting is the wrong question and that is the point: zero visible runs and zero existing runs are
- * the same observation, which is the ambiguity that let this go unnoticed. Ownership, `rolbypassrls`
- * and `relrowsecurity` are facts Postgres will state, so they are *asked for* (ADR-0330's rule) and
- * the answer is deterministic on an empty database and on a full one alike.
+ * the same observation, which is the ambiguity that let this go unnoticed. The answer is *asked for*
+ * (ADR-0330's rule) and is deterministic on an empty database and on a full one alike.
+ *
+ * It used to ask for ownership, `rolbypassrls` and `relrowsecurity` and then compose the verdict
+ * here from the first two — three facts Postgres will state, and the decision imitated, while
+ * citing the ADR that says not to. The composition omitted `relforcerowsecurity`, so an owner
+ * of a `FORCE ROW LEVEL SECURITY` table read `visible` while seeing none of its rows: measured live
+ * on PG 16.13 as the one divergent cell of six, and confirmed destructively — the owner's
+ * `DELETE … WHERE tenant_id IS NOT NULL` removed nothing, the confirm-absence `count(*)` also
+ * reported 0 because it reads through the same policy, and a `BYPASSRLS` role then counted both
+ * rows still present. That silent zero is the single thing this probe exists to catch, and the
+ * prose above described the code accurately while the code described the database wrongly.
+ * It now reads `sessionWouldBeConfined`, whose verdict is `row_security_active` — Postgres's own
+ * answer — so there is no composition here left to omit a column from.
  *
  * Intended for the boot path, beside the supervisor's own refusals: a worker fleet that cannot see
  * its queue should say so once, loudly, instead of polling in silence forever.
@@ -199,21 +226,10 @@ export async function probeJobQueueVisibility(
   const table = options.table ?? "job_runs";
   if (!SCHEMA_RE.test(table)) throw new Error(`invalid table identifier: ${JSON.stringify(table)}`);
 
-  const result = await conn.query<{
-    role: unknown;
-    bypasses_rls: unknown;
-    is_owner: unknown;
-    rls_enabled: unknown;
-  }>(
-    `SELECT current_user AS role,
-            COALESCE((SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user), false) AS bypasses_rls,
-            pg_catalog.pg_get_userbyid(c.relowner) = current_user AS is_owner,
-            c.relrowsecurity AS rls_enabled
-       FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = $1 AND c.relname = $2`,
-    [schema, table],
-  );
+  const result = await conn.query<SessionPolicyVisibilityRow>(SESSION_POLICY_VISIBILITY_QUERY, [
+    schema,
+    table,
+  ]);
   const row = result.rows[0];
   if (row === undefined) {
     return {
@@ -224,10 +240,9 @@ export async function probeJobQueueVisibility(
       detail: `${schema}.${table} does not exist`,
     };
   }
-  const role = str(row.role);
-  const isOwner = row.is_owner === true;
-  const bypassesRls = row.bypasses_rls === true;
-  if (row.rls_enabled !== true) {
+  const v = parseSessionPolicyVisibility(row);
+  const { role, isOwner, bypassesRls } = v;
+  if (!v.rlsEnabled) {
     return {
       visibility: "unguarded",
       role,
@@ -236,15 +251,15 @@ export async function probeJobQueueVisibility(
       detail: `row-level security is disabled on ${schema}.${table}, so nothing confines a tenant's rows`,
     };
   }
-  if (isOwner || bypassesRls) {
+  if (!sessionWouldBeConfined(v)) {
     return {
       visibility: "visible",
       role,
       isOwner,
       bypassesRls,
       detail:
-        `'${role}' ${isOwner ? "owns" : "bypasses RLS on"} ${schema}.${table}, so a cross-tenant ` +
-        "claim sees every tenant's runs",
+        `'${role}' is exempt from ${schema}.${table}'s policies (${sessionPolicyVisibilityReason(v)}), ` +
+        "so a cross-tenant claim sees every tenant's runs",
     };
   }
   return {
@@ -253,10 +268,15 @@ export async function probeJobQueueVisibility(
     isOwner,
     bypassesRls,
     detail:
-      `'${role}' neither owns nor bypasses RLS on ${schema}.${table}, and the table has only a ` +
-      "tenant-isolation policy — so a cross-tenant claim with no app.current_tenant_id set matches " +
-      "nothing and every poll reports an empty queue. Connect as the table's owner, or grant the " +
-      "role BYPASSRLS",
+      `Postgres will apply ${schema}.${table}'s policies to '${role}' ` +
+      `(${sessionPolicyVisibilityReason(v)}), and the table has only a tenant-isolation policy — so ` +
+      "a cross-tenant claim with no app.current_tenant_id set matches nothing and every poll " +
+      `reports an empty queue. ${
+        v.rlsForced && isOwner
+          ? "Owning the table is not enough here: FORCE ROW LEVEL SECURITY confines the owner too, " +
+            "so grant the role BYPASSRLS or clear the flag"
+          : "Connect as the table's owner, or grant the role BYPASSRLS"
+      }`,
   };
 }
 
