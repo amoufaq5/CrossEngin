@@ -190,8 +190,12 @@ type errors.
   unenforceable rather than merely unchecked. What the measurement showed is an asymmetry that is
   total and in the dangerous direction: of **46** sensitive-classified fields in the seven packs,
   **39 were unreadable by every role in every deployment** (the policy had no producer, so an
-  empty policy refused everyone and only an explicit per-field `read` grant came back) and **39
-  were writable by anybody** with entity `update` (the mask had no caller). Neither side had a
+  empty policy refused everyone and only an explicit per-field `read` grant came back) and **all
+  46 were writable by anybody** with entity `update` (the mask had no caller *at all*, so the 7
+  carrying an explicit `update` grant were no better off than the other 39 — which is why the live
+  example below is one of them). 39 is the **read** side alone, 46 minus the 7 with a `read`
+  grant, and this file carried it for the write side too until ADR-0361's increment re-measured
+  it. Neither side had a
   symptom, because total redaction looks exactly like classification working. Live: `case_worker`
   changed `Citizen.national_id` against the pack's own `update: ["gov_admin"]`, and `front_desk`
   **blind-overwrote** `Patient.mrn` — replacing a medical record identifier it cannot read before
@@ -4882,10 +4886,14 @@ opened them.
 - **Field-level write authorization exists now, and what is left of it** (ADR-0339 closed ADR-0338's
   Q7). The asymmetry it found was total and in the dangerous direction: of the **46**
   sensitive-classified fields across the seven packs, **39 were unreadable by every role in every
-  deployment** and **39 were writable by anybody** with entity `update`. The read side was closed by
+  deployment** and **all 46 were writable by anybody** with entity `update`. The read side was closed by
   an empty policy — `policyForEntity` had no producer in `operate-server`, so `privilegedForClass`
   answered false for everyone and only the 7 fields with an explicit per-field `read` grant came
-  back; the write side was open because `validateClassifiedWriteMask` had no caller. Neither had a
+  back; the write side was open because `validateClassifiedWriteMask` had no caller. **39 is the
+  read figure and this entry used to repeat it for the write side**, which understated it by the
+  7 fields carrying an explicit `update` grant: a declaration the mask never consulted bought
+  them nothing, and that is why ADR-0339's own headline example — `case_worker` changing
+  `Citizen.national_id` against `update: ["gov_admin"]` — is a field *outside* the 39. Neither had a
   symptom anybody reported, because total redaction looks exactly like classification working.
   Verified live as a non-owner: `case_worker` changed `Citizen.national_id` against the pack's own
   `update: ["gov_admin"]`, and `front_desk` **blind-overwrote** `Patient.mrn` — replaced a medical
